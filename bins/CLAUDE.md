@@ -7,6 +7,8 @@ composition root.
   (`self-update`, `auth`); the full reference is generated into `docs/cli.md`. Depends on the kernel +
   gitstore + the harness port. **Takes no dependency on `plane-store` / `sqlx`** — it is a thin sync tool,
   never an authority.
-- **`topos-plane/`** — the OSS PLANE. A library (`plane-core`: the composable authority API + a
-  `router(state)` builder) + a thin `axum` bin. A separate private product imports and composes this
-  library; there is **no** extension hook here.
+- **`topos-plane/`** — the OSS VAULT. Pure byte custody: a library (the composable authority API +
+  a `router(state)` builder serving `/healthz` + the bearer-gated `/internal/v1` custody lane) + a
+  thin `axum` bin. Internal-network-only, ONE caller (the product app), every request
+  pre-authorized. A separate private product imports and composes this library; there is **no**
+  extension hook here.

@@ -19,8 +19,8 @@ test-fixtures = []
 # The architectural-layering rule: this binary's graph
 # carries NO plane-store, NO sqlx, NO libsqlite3-sys. Enforced by a `cargo tree -p topos` CI check
 # (see xtask), NOT a global cargo-deny ban (those crates live elsewhere in the workspace).
-# The plane transport (ureq) is wired below; the device-key SIGNER (ed25519-dalek, the client's only
-# private-key edge) is now a normal dependency too; the OpenClaw/Hermes harness adapters land later.
+# The plane transport (ureq) is wired below. The client holds NO key material: a device authenticates
+# with the ONE bearer credential the device-authorization flow mints (nothing signs client-side).
 [dependencies]
 topos-core.workspace = true
 topos-types.workspace = true
@@ -30,27 +30,18 @@ clap = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
-rustix.workspace = true
+# `system` adds `uname` — the host node name the device-authorization start sends as the requested
+# device display name (shown on the approval page; a recognizability aid, never authority).
+rustix = { workspace = true, features = ["system"] }
 # The plane transport: ureq 3, blocking, rustls+ring (the workspace pin, default features). Self-contained
 # (its own TLS stack); it carries NO plane-store/sqlx/libsqlite3-sys/tokio edge — check-arch holds the line.
 ureq.workspace = true
 hex.workspace = true
-# base64: ENCODE-side for the enrollment wire (the device public key, base64url, in the authorize/redeem
-# bodies) + the contribute candidate's `content_base64` (STANDARD). Wire encoding only — it does not cross
-# the architectural line check-arch enforces (no plane-store/sqlx).
+# base64: ENCODE-side for the contribute candidate's `content_base64` (STANDARD alphabet). Wire encoding
+# only — it does not cross the architectural line check-arch enforces (no plane-store/sqlx).
 base64.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
-# The device KEYPAIR — the device's presented identity: the public key registers the device at enroll and
-# derives the `dk_…` id presented on requests. NOTHING signs with the private key (git/GitHub-level trust:
-# the client trusts the plane it enrolled with). Ed25519 over the workspace pin (used for keygen —
-# `SigningKey::from_bytes`), opting into `std` + `zeroize` (zeroize restores SigningKey's zero-on-drop that
-# the no_std default would strip). `getrandom` is the OS CSPRNG for first-run seed generation; `zeroize`
-# wipes the transient raw seed buffer. NONE of these cross check-arch's line (it bans only
-# plane-store/sqlx/libsqlite3-sys/tokio/reqwest/hyper).
-ed25519-dalek = { workspace = true, features = ["std", "zeroize"] }
-getrandom.workspace = true
-zeroize.workspace = true
 # The self-update asset codec (`topos upgrade`): unpack the release tarball in memory. `flate2` keeps its
 # DEFAULT features (the pure-Rust `miniz_oxide` backend — no C zlib edge, honoring the workspace's
 # unsafe-forbid + no-C-deps posture); both stay clear of check-arch's ban list.

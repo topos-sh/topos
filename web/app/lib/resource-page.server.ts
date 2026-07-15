@@ -1,7 +1,7 @@
 import { redirect } from "react-router";
 import { actorFromSession, notFound } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
-import { planeMembershipsFor } from "@/lib/db/queries.server";
+import { membershipsFor } from "@/lib/db/queries.server";
 
 /**
  * The BROWSER face of a resource address (`/{workspace}[...]`), one decision for all three
@@ -26,7 +26,7 @@ export async function resourceTeaser(
   if (!actor) {
     return { face: "teaser" };
   }
-  const memberships = await planeMembershipsFor(actor);
+  const memberships = await membershipsFor(actor);
   const seat = memberships.find((m) => m.address === address && m.navigable);
   if (seat) {
     throw redirect(target(seat.id));

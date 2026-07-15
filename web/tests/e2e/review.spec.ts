@@ -1,161 +1,211 @@
 import { expect, test } from "@playwright/test";
 import {
-  BINARY_MARKER,
-  CANDIDATE_ID,
-  CURRENT_ID,
-  MOVED_ID,
-  NOTOPEN_ID,
-  SKILL,
-  WS,
+  GUIDE_MD,
+  SKILL_MD_V1,
+  SKILL_MD_V2,
+  XSS_CONTENT,
   XSS_PATH,
 } from "../fixtures/plane/data.mjs";
-import { gotoSettled } from "./sign-in";
-
-const PAGE_URL = `/workspaces/${WS}/skills/${SKILL}/proposals/${CANDIDATE_ID}`;
-const APPROVE_CMD = `topos review ${SKILL}@${CANDIDATE_ID} --approve`;
-const DIFF_CMD = `topos diff ${SKILL}@${CANDIDATE_ID}`;
+import { MEMBER_EMAIL } from "./env";
+import {
+  adminQuery,
+  ensureBundle,
+  ensureProposal,
+  ensureSeatedUser,
+  seedCustody,
+  theWorkspace,
+} from "./seed";
+import { gotoSettled, signIn } from "./sign-in";
 
 /**
- * The proposal page's READ states, viewed with the suite's default identity — a confirmed plain
- * MEMBER seat on ws-e2e (never a decider; the write flows live in review-write.spec.ts under the
- * reviewer identity). Every state is fixture-fed: the page REQUIRES the proposal-detail read, so
- * the status banner, the proposer line, and the terminal resolution panel all render the fixture's
- * proposalMeta — and a candidate with NO proposal row is the uniform 404 (the version stays
- * viewable under `…/versions/[versionId]`).
+ * The proposal page's READ states, viewed with a plain MEMBER seat (never a decider; the write
+ * flows live in review-write.spec.ts). Proposals are the app's OWN rows: the status banner and
+ * the resolution panel render the row's record; the diff renders the candidate's custody bytes
+ * against the LIVE current.
  *
- * The fixture applies the vault's keep == read rule to version metas and blobs: a rejected or
- * staled candidate's bytes 404 (reclaimed), so those pages must render the full state surface with
- * the honest DIFF-LESS card — never collapse into an empty "version isn't available" shell that
- * hides the resolution and the comments.
+ * The vault retains a candidate's bytes only while trunk-reachable or under an open proposal —
+ * a rejected candidate's bytes are RECLAIMED (seeded purged here), so its page must render the
+ * full record with the honest DIFF-LESS card, never collapse into an empty shell that hides the
+ * resolution.
  */
 
-test.describe("the rendered review page", () => {
-  test("renders the banner, header, trust panel, and every card kind", async ({ page }) => {
-    await page.goto(PAGE_URL);
+const SKILL_ID = "s_e2e_review";
+const SKILL = "review-runbook";
+const READER = "review-reader@example.com";
+const CANDIDATE_MESSAGE = "Tighten the deploy steps";
 
-    // The open-status banner is the FIRST thing a reviewer must know (fixture-fed detail).
-    await expect(
-      page.getByText("Open — proposed against the team's current version."),
-    ).toBeVisible();
+let currentId: string;
+let candidateId: string;
+let candidateDigest: string;
+let rejectedId: string;
+let pageUrl: string;
 
-    // Header + message (the skill's catalog name; the candidate short id rides beside it) + the
-    // detail's proposer disclosure.
-    await expect(page.getByRole("heading", { name: SKILL })).toBeVisible();
-    await expect(page.getByText("Tighten the deploy steps")).toBeVisible();
-    await expect(page.getByText("proposed by dev-bbbb2222", { exact: false })).toBeVisible();
+test.use({ storageState: { cookies: [], origins: [] } });
 
-    // Trust panel: the vault-recorded value, sourced to the vault. Never an epoch/seq.
-    await expect(page.getByText(`sha-256:${"f4".repeat(6)}…`)).toBeVisible();
-    await expect(page.getByText("recorded by the server", { exact: false })).toBeVisible();
+test.beforeAll(async () => {
+  const ws = await theWorkspace();
+  await ensureSeatedUser(READER, "member");
+  const proposer = (
+    await adminQuery<{ id: string }>(`select id from web."user" where email = $1`, [MEMBER_EMAIL])
+  )[0]?.id as string;
 
-    // File summary anchors.
-    await expect(page.getByRole("navigation", { name: "Changed files" })).toBeVisible();
+  await ensureBundle({ id: SKILL_ID, name: SKILL });
+  const seeded = await seedCustody([
+    {
+      ws: ws.id,
+      bundle: SKILL_ID,
+      versions: [
+        {
+          files: [
+            { path: "SKILL.md", content: SKILL_MD_V1 },
+            { path: "docs/guide.md", content: GUIDE_MD },
+          ],
+          message: "genesis",
+        },
+        {
+          // The OPEN candidate: a modified SKILL.md + an added hostile file.
+          files: [
+            { path: "SKILL.md", content: SKILL_MD_V2 },
+            { path: "docs/guide.md", content: GUIDE_MD },
+            { path: XSS_PATH, content: XSS_CONTENT },
+          ],
+          parent: 0,
+          author: "dev-device",
+          message: CANDIDATE_MESSAGE,
+        },
+        {
+          // The REJECTED candidate, its bytes reclaimed (keep == read).
+          files: [{ path: "SKILL.md", content: `${SKILL_MD_V1}rejected line\n` }],
+          parent: 0,
+          message: "a rejected cut",
+          purged: true,
+        },
+      ],
+      current: 0,
+    },
+  ]);
+  currentId = seeded[0]?.versions[0]?.version_id as string;
+  candidateId = seeded[0]?.versions[1]?.version_id as string;
+  candidateDigest = seeded[0]?.versions[1]?.bundle_digest as string;
+  rejectedId = seeded[0]?.versions[2]?.version_id as string;
+  pageUrl = `/workspaces/${ws.id}/skills/${SKILL}/proposals/${candidateId}`;
 
-    // Modified text file: the new line is IN the rendered diff.
-    await expect(page.getByText("Step three: ship.").first()).toBeVisible();
-
-    // Mode-only card.
-    await expect(page.getByText("mode 100644 → 100755").first()).toBeVisible();
-
-    // Moved card: both paths, no content rendered.
-    await expect(page.getByText("docs/old-name.md → docs/new-name.md")).toBeVisible();
-
-    // Binary card.
-    await expect(page.getByText("Binary file changed")).toBeVisible();
-
-    // Too-large card names the device-side diff command.
-    await expect(page.getByText(DIFF_CMD).first()).toBeVisible();
-
-    // Per-file fetch failure degrades that card only — the page rendered around it.
-    await expect(
-      page.getByText("Couldn't fetch this file's bytes", { exact: false }),
-    ).toBeVisible();
-
-    // Deleted file appears in the summary.
-    await expect(page.getByText("notes/removed.md").first()).toBeVisible();
-
-    // The CLI hand-off is DEMOTED on a pending proposal: a collapsed <details> at the bottom —
-    // the full-hash command appears only after opening it.
-    const cliSummary = page.getByText("Prefer the CLI?");
-    await expect(cliSummary).toBeVisible();
-    const handoffHeading = page.getByRole("heading", { name: "Decide on an enrolled device" });
-    await expect(handoffHeading).not.toBeVisible();
-    await cliSummary.click();
-    await expect(handoffHeading).toBeVisible();
-    await expect(page.getByText(APPROVE_CMD, { exact: true })).toBeVisible();
+  await adminQuery(`delete from web.proposal where bundle_id = $1`, [SKILL_ID]);
+  await ensureProposal({
+    id: "p_e2e_review_open",
+    bundleId: SKILL_ID,
+    candidateVersionId: candidateId,
+    proposedBy: proposer,
+    status: "open",
   });
-
-  test("adversarial contents render inert; binary bytes never ship", async ({ page }) => {
-    let dialogSeen = false;
-    page.on("dialog", (dialog) => {
-      dialogSeen = true;
-      void dialog.dismiss();
-    });
-    await page.goto(PAGE_URL);
-    // The payload file's path renders as text (summary + card header).
-    await expect(page.getByText(XSS_PATH).first()).toBeVisible();
-    // The script payload is VISIBLE as escaped text inside the rendered diff…
-    await expect(page.getByText('<script>alert("xss-e2e")</script>').first()).toBeVisible();
-    // …and never executed.
-    expect(dialogSeen).toBe(false);
-    const html = await page.content();
-    expect(html).not.toContain('<script>alert("xss-e2e")');
-    expect(html).not.toContain(BINARY_MARKER);
+  await ensureProposal({
+    id: "p_e2e_review_rejected",
+    bundleId: SKILL_ID,
+    candidateVersionId: rejectedId,
+    proposedBy: proposer,
+    status: "rejected",
+    resolvedBy: proposer,
+    resolvedReason: "Superseded by a cleaner run of the same change.",
   });
+});
 
-  test("a rejected proposal renders the resolution panel and the diff-less card, no forms", async ({
-    page,
-  }) => {
-    await gotoSettled(page, `/workspaces/${WS}/skills/${SKILL}/proposals/${NOTOPEN_ID}`);
-    await expect(page.getByText("Rejected — the resolution below says why.")).toBeVisible();
-    await expect(
-      page.getByText("This candidate was rejected and never became current."),
-    ).toBeVisible();
-    // The vault's recorded resolution facts, rendered as text: who, and the verbatim reason.
-    await expect(page.getByText("decided by dev-aaaa1111", { exact: false })).toBeVisible();
-    await expect(
-      page.getByText("Superseded by a cleaner run of the same change.", { exact: true }),
-    ).toBeVisible();
-    // The vault reclaims a rejected candidate's bytes (keep == read), so the page renders the
-    // honest diff-less card — never a diff, never the old "version isn't available" dead end.
-    await expect(
-      page.getByText("no longer readable — the server retains only current versions", {
-        exact: false,
-      }),
-    ).toBeVisible();
-    await expect(page.getByText("Step three: ship.")).toHaveCount(0);
-    // Terminal: no decision surface, no CLI hand-off (the decision is done).
-    await expect(page.getByRole("button", { name: "Approve — make this current" })).toHaveCount(0);
-    await expect(page.getByText("Reject with a reason…")).toHaveCount(0);
-    await expect(page.getByText("Prefer the CLI?")).toHaveCount(0);
-  });
+test("renders the banner, header, trust panel, and the diff — read-only for a member seat", async ({
+  page,
+}) => {
+  await signIn(page, READER);
+  await gotoSettled(page, pageUrl);
 
-  test("an open proposal whose base moved renders the stale banner and the diff-less card", async ({
-    page,
-  }) => {
-    await gotoSettled(page, `/workspaces/${WS}/skills/${SKILL}/proposals/${MOVED_ID}`);
-    // The stale banner (its unique clause — the collapsed CLI hand-off repeats the lead-in).
-    await expect(
-      page.getByText("it can no longer be approved as-is", { exact: false }),
-    ).toBeVisible();
-    // A staled candidate is RECLAIMED by the vault (readable only while trunk-reachable or an open
-    // non-stale proposal), so no diff renders — the honest diff-less card does.
-    await expect(
-      page.getByText("no longer readable — the server retains only current versions", {
-        exact: false,
-      }),
-    ).toBeVisible();
-    await expect(page.getByText("Step three: ship.")).toHaveCount(0);
-    // No decision forms on a stale proposal; the CLI hand-off stays, collapsed.
-    await expect(page.getByRole("button", { name: "Approve — make this current" })).toHaveCount(0);
-    await expect(page.getByText("Prefer the CLI?")).toBeVisible();
-  });
+  // The open-status banner is the FIRST thing a reviewer must know.
+  await expect(
+    page.getByText("Open — awaiting a reviewer's decision", { exact: false }),
+  ).toBeVisible();
 
-  test("a never-proposed candidate URL is the uniform 404", async ({ page }) => {
-    // CURRENT_ID is a real, readable version — but no proposal row exists for it, so the proposal
-    // URL misses uniformly (the version stays viewable under …/versions/).
-    await gotoSettled(page, `/workspaces/${WS}/skills/${SKILL}/proposals/${CURRENT_ID}`);
-    await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: SKILL })).toHaveCount(0);
+  // Header: the skill's catalog name, the candidate's message, author + proposer attribution.
+  await expect(page.getByRole("heading", { name: SKILL })).toBeVisible();
+  await expect(page.getByText(CANDIDATE_MESSAGE)).toBeVisible();
+  await expect(page.getByText("authored by dev-device", { exact: false })).toBeVisible();
+  await expect(page.getByText("proposed by reviewer", { exact: false })).toBeVisible();
+
+  // Trust panel: the vault-recorded consent digest, sourced to the server.
+  await expect(page.getByText(`sha-256:${candidateDigest.slice(0, 12)}…`)).toBeVisible();
+  await expect(page.getByText("recorded by the server", { exact: false })).toBeVisible();
+
+  // The rendered diff: the changed-file anchors and the new line inside the unified diff.
+  await expect(page.getByRole("navigation", { name: "Changed files" })).toBeVisible();
+  await expect(page.getByText("Step three: ship.").first()).toBeVisible();
+
+  // A member seat reads and comments, never decides — stated up front, no forms.
+  await expect(
+    page.getByText("An owner or reviewer seat decides this proposal", { exact: false }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Approve — make this current" })).toHaveCount(0);
+  await expect(page.getByText("Reject with a reason…")).toHaveCount(0);
+
+  // The CLI hand-off is DEMOTED on a pending proposal: collapsed, full command only inside.
+  const cliSummary = page.getByText("Prefer the CLI?");
+  await expect(cliSummary).toBeVisible();
+  const handoffHeading = page.getByRole("heading", { name: "Decide on an enrolled device" });
+  await expect(handoffHeading).not.toBeVisible();
+  await cliSummary.click();
+  await expect(handoffHeading).toBeVisible();
+  await expect(
+    page.getByText(`topos review ${SKILL}@${candidateId} --approve`, { exact: true }),
+  ).toBeVisible();
+});
+
+test("adversarial contents render inert in the diff", async ({ page }) => {
+  let dialogSeen = false;
+  page.on("dialog", (dialog) => {
+    dialogSeen = true;
+    void dialog.dismiss();
   });
+  await signIn(page, READER);
+  await gotoSettled(page, pageUrl);
+
+  // The payload file's path renders as text (summary + card header)…
+  await expect(page.getByText(XSS_PATH).first()).toBeVisible();
+  // …the script payload is VISIBLE as escaped text inside the rendered diff…
+  await expect(page.getByText('<script>alert("xss-e2e")</script>').first()).toBeVisible();
+  // …and never executed.
+  expect(dialogSeen).toBe(false);
+  const html = await page.content();
+  expect(html).not.toContain('<script>alert("xss-e2e")');
+});
+
+test("a rejected proposal renders the resolution panel and the diff-less card, no forms", async ({
+  page,
+}) => {
+  const ws = await theWorkspace();
+  await signIn(page, READER);
+  await gotoSettled(page, `/workspaces/${ws.id}/skills/${SKILL}/proposals/${rejectedId}`);
+
+  await expect(page.getByText("Rejected — the resolution below says why.")).toBeVisible();
+  await expect(
+    page.getByText("This candidate was rejected and never became current."),
+  ).toBeVisible();
+  // The row's recorded resolution facts, rendered as text: who, and the verbatim reason.
+  await expect(page.getByText("decided by reviewer", { exact: false })).toBeVisible();
+  await expect(
+    page.getByText("Superseded by a cleaner run of the same change.", { exact: true }),
+  ).toBeVisible();
+  // The vault reclaimed the rejected candidate's bytes (keep == read): the honest diff-less
+  // card — never a diff, never a dead-end shell that hides the record.
+  await expect(
+    page.getByText("no longer readable — the server retains only current versions", {
+      exact: false,
+    }),
+  ).toBeVisible();
+  // Terminal: no decision surface, no CLI hand-off (the decision is done).
+  await expect(page.getByRole("button", { name: "Approve — make this current" })).toHaveCount(0);
+  await expect(page.getByText("Reject with a reason…")).toHaveCount(0);
+  await expect(page.getByText("Prefer the CLI?")).toHaveCount(0);
+});
+
+test("a never-proposed candidate URL is the uniform 404", async ({ page }) => {
+  const ws = await theWorkspace();
+  await signIn(page, READER);
+  // currentId is a real, readable version — but no proposal row exists for it, so the proposal
+  // URL misses uniformly (the version stays viewable under …/versions/).
+  await gotoSettled(page, `/workspaces/${ws.id}/skills/${SKILL}/proposals/${currentId}`);
+  await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
 });

@@ -1,7 +1,6 @@
 import { data, redirect } from "react-router";
 import { bearerToken, uniformNotFound } from "@/lib/api/wire.server";
-import { deviceActorProbe } from "@/lib/db/queries.device.server";
-import { planeMembership } from "@/lib/db/queries.server";
+import { deviceActor, seatOf } from "@/lib/db/identity.server";
 import { getAuth } from "./server";
 
 /**
@@ -12,39 +11,33 @@ import { getAuth } from "./server";
  * Guards MINT ACTORS: branded proof objects the data layer requires on every query. The brand
  * symbol is declared type-only and never exported, so no other module can construct an actor
  * without an explicit cast — a loader or action that skipped its guard cannot call a query,
- * and a wrong-scope actor fails the query's runtime workspace assertion. This is the
- * compile-time leg of the fail-closed design; the build-time gates in
- * scripts/check-boundary.mjs are the other leg.
+ * and a wrong-scope actor fails the query's runtime workspace assertion.
  *
- * Workspace admission derives from the DIRECTORY's own roster (`plane.workspace_member`,
- * read-only) and from NOTHING else — never a web-tier membership table. The roster reads are
- * deliberately per-request: the roster is the authority and every render re-asks it.
+ * ONE identity: a session resolves to `user.id`, and every admission resolves session →
+ * user.id → seat, per request. Email is a login name and a display attribute — NOTHING here
+ * (or anywhere in the data layer) authorizes by email equality, and no email normalization
+ * or lookalike defense exists because no email is ever compared.
  */
 
 declare const actorBrand: unique symbol;
 
-/** Proof of a signed-in identity with a VERIFIED email (every actor email is normalized). */
+/** Proof of a signed-in identity: the user id (THE identity) + a display snapshot. */
 export interface UserActor {
   readonly [actorBrand]: true;
-  readonly email: string;
-}
-
-/** A directory roster seat as the guard reads it (role + status straight off the row). */
-export interface PlaneSeat {
-  role: "owner" | "reviewer" | "member";
-  status: "invited" | "confirmed";
+  readonly userId: string;
+  readonly display: string;
 }
 
 /**
- * Proof of admission to ONE workspace: a CONFIRMED roster seat, carrying the directory's
- * role. The roster is the ONLY admission — there is no other way in.
+ * Proof of admission to ONE workspace: a seat, carrying its role. The seat table is the ONLY
+ * admission — there is no other way in.
  */
 export type MemberActor = UserActor & {
   readonly workspaceId: string;
   readonly role: "owner" | "reviewer" | "member";
 };
 
-/** Proof of a CONFIRMED OWNER seat in ONE workspace — the only management-grade actor. */
+/** Proof of an OWNER seat in ONE workspace — the only management-grade actor. */
 export type OwnerActor = MemberActor & { readonly role: "owner" };
 
 /** Proof of a decision-grade seat (owner or reviewer) — the review-action mint. */
@@ -53,17 +46,12 @@ export type ReviewerActor = MemberActor & { readonly role: "owner" | "reviewer" 
 export type SessionData = NonNullable<Awaited<ReturnType<Auth["api"]["getSession"]>>>;
 type Auth = ReturnType<typeof getAuth>;
 
-/** Every email compare in the app goes through this. */
-export function normalizeEmail(email: string): string {
-  return email.trim().toLowerCase();
-}
-
 /**
  * Only a same-app path may ride a `next` query into a redirect target (an absolute URL or
  * `//host` would be an open redirect). Backslashes and percent-escapes are rejected too:
  * WHATWG URL parsing treats `\` as `/` (so `/\evil.com` normalizes off-origin), and a
  * downstream redirect layer may decode `%5C`/`%2F` first — either turns a "relative" path
- * off-origin. Legit values (e.g. `/verify/<code>`) contain neither. The fallback is the
+ * off-origin. Legit values (e.g. `/verify?code=…`) contain neither. The fallback is the
  * dashboard.
  */
 export function safeNextPath(next: string | undefined): string {
@@ -97,73 +85,59 @@ export async function requireSession(request: Request): Promise<SessionData> {
 }
 
 /**
- * Printable ASCII only, checked on the RAW session email BEFORE normalization: directory
- * principals are ASCII-canonical by CHECK, and JS `toLowerCase()` folds Unicode lookalikes
- * into ASCII (U+212A KELVIN SIGN becomes `k`), so normalizing first would let a verified
- * lookalike address false-match a real roster seat. A non-ASCII email can never legitimately
- * hold a seat, so refusing the actor outright is honest.
- */
-const PRINTABLE_ASCII_RE = /^[\x20-\x7e]+$/;
-
-/**
- * Mint a UserActor from a session — null unless the email is VERIFIED (membership and every
- * data write are keyed on email; an unverified one never becomes an actor). Callers own the
- * unverified UX (error copy in actions, 404 on pages); the mint itself is the one place a
- * plain session becomes data-layer authority.
+ * Mint a UserActor from a session. The id is the identity; the display snapshot (name, else
+ * the email as a readable fallback) rides into audit rows. Verification status does NOT gate
+ * the mint — authority is seats, and how an account was born (claim, invitation, open knob)
+ * already decided its legitimacy.
  */
 export function actorFromSession(session: SessionData | null | undefined): UserActor | null {
-  if (!session?.user.emailVerified) {
+  if (!session?.user.id) {
     return null;
   }
-  if (!PRINTABLE_ASCII_RE.test(session.user.email)) {
-    return null;
-  }
-  return { email: normalizeEmail(session.user.email) } as UserActor;
+  const display =
+    session.user.name.trim().length > 0 ? session.user.name : (session.user.email ?? "unknown");
+  return { userId: session.user.id, display } as UserActor;
 }
 
 /** The pure admission decision, one workspace at a time. */
-export type Admission =
-  | { kind: "roster"; role: "owner" | "reviewer" | "member" }
-  | { kind: "miss" };
+export type Admission = { kind: "seat"; role: "owner" | "reviewer" | "member" } | { kind: "miss" };
 
 /**
- * The admission truth table, pure and DB-free (unit-tested as such):
- *   confirmed seat  → roster (the directory's role rides along);
- *   invited seat    → miss (an invite promises index visibility, never admission —
- *                     the enrollment proof is the real join; an invited OWNER seat
- *                     admits nothing either);
- *   no seat         → miss.
+ * The admission truth table, pure and DB-free: a seat admits with its role; no seat is a
+ * miss. (Invitations are claims on FUTURE users in their own table — holding one admits
+ * nothing; the verified sign-up ceremony converts it into a seat.)
  */
-export function resolveAdmission(seat: PlaneSeat | undefined): Admission {
-  if (seat?.status === "confirmed") {
-    return { kind: "roster", role: seat.role };
+export function resolveAdmission(
+  seat: { role: "owner" | "reviewer" | "member" } | undefined,
+): Admission {
+  if (seat) {
+    return { kind: "seat", role: seat.role };
   }
   return { kind: "miss" };
 }
 
-/**
- * Admission to THIS workspace, derived per-request from the directory roster (confirmed
- * seats only). Misses get the uniform 404 — an invited-but-unconfirmed principal included:
- * their surface is the index row and its join instructions, never an actor.
- */
+/** Admission to THIS workspace, derived per-request from the seat table. Misses 404. */
 export async function requireMember(request: Request, workspaceId: string): Promise<MemberActor> {
   const session = await requireSession(request);
   const actor = actorFromSession(session);
   if (!actor) {
     notFound();
   }
-  const seat = await planeMembership(actor, workspaceId);
-  const admission = resolveAdmission(seat);
+  const admission = resolveAdmission(await seatOf(actor.userId, workspaceId));
   if (admission.kind === "miss") {
     notFound();
   }
-  return { email: actor.email, workspaceId, role: admission.role } as MemberActor;
+  return {
+    userId: actor.userId,
+    display: actor.display,
+    workspaceId,
+    role: admission.role,
+  } as MemberActor;
 }
 
 /**
- * A CONFIRMED OWNER seat in THIS workspace — the management gate (policy toggle, roster
- * mutations). The database's guarded functions re-run their own role gates; this guard is
- * the web tier's matching lock. 404 on anything less.
+ * An OWNER seat in THIS workspace — the management gate (policy toggles, roster mutations,
+ * lifecycle ceremonies). 404 on anything less.
  */
 export async function requireWorkspaceOwner(
   request: Request,
@@ -177,11 +151,9 @@ export async function requireWorkspaceOwner(
 }
 
 /**
- * A CONFIRMED owner-or-reviewer seat in THIS workspace — the decision gate for the review
- * actions (approve/reject a proposal, revert). Used ONLY inside actions: proposal PAGES stay
- * guarded by requireMember (member read-only is a legitimate page state), and the vault's
- * in-transaction role gate stays the authority behind this guard. 404 on anything less — the
- * house miss posture, never a permissions claim.
+ * An owner-or-reviewer seat in THIS workspace — the decision gate for review actions
+ * (approve/reject a proposal, revert). Used ONLY inside actions: proposal PAGES stay guarded
+ * by requireMember (member read-only is a legitimate page state). 404 on anything less.
  */
 export async function requireReviewer(
   request: Request,
@@ -195,25 +167,23 @@ export async function requireReviewer(
 }
 
 /**
- * Proof of an authenticated DEVICE — the `/api/v1` lane's actor: a presented workspace
- * credential resolved (in Postgres — this tier computes no digest) to its non-revoked registry
- * row on a CONFIRMED seat. Person and device ids come from the trusted rows, NEVER a
- * client-asserted field; the role rides along for the guarded functions that band on it.
+ * Proof of an authenticated DEVICE — the `/api/v1` lane's actor: the presented bearer
+ * resolved (hash computed in Postgres — this tier computes no digest) credential → device →
+ * user → seat, fail-closed. Person and device ids come from the trusted rows, NEVER a
+ * client-asserted field.
  */
 export type DeviceActor = UserActor & {
   readonly workspaceId: string;
-  readonly person: string;
-  readonly deviceKeyId: string;
+  readonly deviceId: string;
   readonly role: "owner" | "reviewer" | "member";
 };
 
 /**
  * The device lane's front door. Every miss — no/blank/foreign-scheme Authorization, unknown
- * credential, revoked device, unknown workspace, unseated or unconfirmed principal — throws the
- * ONE uniform wire 404 (an ENVELOPE body, not the HTML miss: the caller is a device, and the
- * vault's own edge answers the identical bytes). This guard authenticates ONLY the ops this
- * tier serves itself; forwarded byte/pointer ops pass through untouched so the vault's
- * in-transaction resolve (and its replay-before-revoked ordering) stays the sole authority.
+ * credential, revoked device, unknown workspace, unseated user — throws the ONE uniform wire
+ * 404 (an ENVELOPE body, not the HTML miss: the caller is a device). Since the identity
+ * unification this guard authenticates EVERY device-lane op; the custody forwarder runs
+ * behind it, app-authorized.
  */
 export async function requireDeviceActor(
   request: Request,
@@ -223,15 +193,15 @@ export async function requireDeviceActor(
   if (credential === null) {
     throw uniformNotFound();
   }
-  const row = await deviceActorProbe(workspaceId, credential);
+  const row = await deviceActor(workspaceId, credential);
   if (row === null) {
     throw uniformNotFound();
   }
   return {
-    email: row.person,
+    userId: row.userId,
+    display: row.userDisplay,
     workspaceId,
-    person: row.person,
-    deviceKeyId: row.deviceKeyId,
+    deviceId: row.deviceId,
     role: row.role,
   } as DeviceActor;
 }

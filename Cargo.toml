@@ -47,18 +47,13 @@ uuid = { version = "1", features = ["v4", "serde"] } # client-minted op_id v4
 thiserror = "2"
 anyhow = "1"
 
-# --- declared for later (NOT yet referenced by any member) ---
 # default-features = false keeps the kernel's sha2 no_std (the default `std` feature would otherwise
-# pull std into topos-core's tree); held at 0.10 to share one sha2 with ed25519-dalek.
+# pull std into topos-core's tree).
 sha2 = { version = "0.10", default-features = false }  # topos-core: byte-exact digest + the content-addressed identity derivations; plane-store: the HMAC-SHA256 backend
-hmac = "0.12"                 # plane-store only: the deterministic opaque-credential derivation (HMAC-SHA256 over the 0600 enrollment secret) — never reaches the client
+hmac = "0.12"                 # plane-store only: HMAC-SHA256 internals — never reaches the client
 unicode-normalization = { version = "0.1", default-features = false } # topos-core: NFC path-collision reject (no_std)
-# The client's device-key generation is the ONLY consumer (the device key is a presented identity —
-# nothing signs or verifies with it; the server stores the public key + serves its fingerprint).
-ed25519-dalek = { version = "2", default-features = false }  # bins/topos: device keypair generation (std + zeroize features added there)
-base64 = "0.22"               # opaque-credential codec (base64url-unpadded): plane-store mints, the client stores/presents
-zeroize = "1"                 # plane-store: wrap the 0600 enrollment-secret seed; bins/topos: wipe the device-key seed buffer
-getrandom = "0.2"             # plane-store: fresh device/user codes + retry jitter; bins/topos: first-run device-key seed
+base64 = "0.22"               # bins/topos: the contribute candidate's content_base64 codec (STANDARD alphabet)
+getrandom = "0.2"             # plane-store: per-ingest op ids + serializable-retry jitter
 gix = { version = "0.85", default-features = false } # topos-gitstore: dumb object mechanics (plumbing-only; members add the lean features they need)
 imara-diff = "0.1"            # topos-gitstore: the diff ENGINE behind the unified-diff renderer (pure-Rust histogram/Myers); we own the unified-diff FORMATTING so the `diff` golden stays byte-stable across its releases
 # topos-gitstore: the per-file three-way (diff3) content merge ENGINE. PINNED EXACT — its conflict-marker

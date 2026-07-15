@@ -5,10 +5,11 @@ import { expect, test } from "@playwright/test";
  * route-middleware placement caused. The router's own `.data` fetches carry the same bare
  * wildcard Accept header curl sends, so a route-level card middleware answered them with the
  * card, the client failed to decode it as a navigation payload, and the miss rendered the root
- * boundary's bogus 500. The card now lives in the server entry (document requests only); the canonical
- * repro — land on `/`, client-navigate to `/login`, press Back — must re-render the landing
- * page. Runs ANONYMOUSLY against the PRODUCTION build (the bug never reproduced under the dev
- * server: only the production hydration path surfaced it).
+ * boundary's bogus 500. The card lives in the server entry (document requests only); the
+ * canonical repro — land on `/`, client-navigate to `/login`, press Back — must re-render the
+ * landing page. Runs ANONYMOUSLY against the PRODUCTION build (the bug never reproduced under
+ * the dev server: only the production hydration path surfaced it). The landing hero is asserted
+ * structurally (an h1), never by its marketing copy.
  */
 
 test.use({
@@ -26,15 +27,12 @@ test.describe("history navigation through the landing page", () => {
     });
 
     await page.goto("/");
-    const hero = page.getByRole("heading", {
-      level: 1,
-      name: /align the behavior/i,
-    });
+    const hero = page.getByRole("heading", { level: 1 });
     await expect(hero).toBeVisible();
 
-    // A CLIENT-SIDE navigation (the nav CTA links to /login) — a goto() would document-load and
+    // A CLIENT-SIDE navigation (the nav links to /login) — a goto() would document-load and
     // sidestep the `.data` lane this spec exists to pin.
-    await page.getByRole("link", { name: "Create a workspace" }).first().click();
+    await page.locator('a[href="/login"]').first().click();
     await expect(page.getByRole("heading", { name: "Sign in to Topos" })).toBeVisible();
 
     // The user's repro: the browser Back button. The pop re-runs the landing loader over the

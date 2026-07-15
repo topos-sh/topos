@@ -425,7 +425,6 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use topos_core::digest::{self, FileMode, ManifestEntry};
     use topos_gitstore::RenderedFile;
-    use topos_types::Generation;
     use topos_types::persisted::LockedFile;
 
     struct Scratch(PathBuf);
@@ -539,7 +538,7 @@ mod tests {
         }
     }
 
-    fn sync_at(applied: Generation, observed: Generation, base: &str, work: &str) -> SyncState {
+    fn sync_at(applied: u64, observed: u64, base: &str, work: &str) -> SyncState {
         SyncState {
             schema_version: 1,
             observed,
@@ -630,7 +629,7 @@ mod tests {
         let placement = parent.0.join("demo"); // absent
         let bundle = rendered(NEW);
         let lock = lock_of("topos_first", NEW, &"1".repeat(64));
-        let g = Generation { epoch: 1, seq: 1 };
+        let g = 1;
         let sync = sync_at(g, g, &"1".repeat(64), &digest_hex(NEW));
         let prior = prior_map(
             &placement.to_string_lossy(),
@@ -680,8 +679,8 @@ mod tests {
         install_old(&placement);
         let bundle = rendered(NEW);
         let lock = lock_of("topos_upd", NEW, &"1".repeat(64));
-        let g0 = Generation { epoch: 1, seq: 1 };
-        let g1 = Generation { epoch: 1, seq: 2 };
+        let g0 = 1;
+        let g1 = 2;
         let sync = sync_at(g1, g1, &"1".repeat(64), &digest_hex(NEW));
         // prior map mimics `add`: pre_existing None, materialized = the adopted (old) bytes.
         let prior = prior_map(
@@ -728,7 +727,7 @@ mod tests {
         std::fs::write(&placement, b"i am a file").unwrap(); // Other, not a dir
         let bundle = rendered(NEW);
         let lock = lock_of("topos_file", NEW, &"1".repeat(64));
-        let g = Generation { epoch: 1, seq: 1 };
+        let g = 1;
         let sync = sync_at(g, g, &"1".repeat(64), &digest_hex(NEW));
         let prior = prior_map(
             &placement.to_string_lossy(),
@@ -769,7 +768,7 @@ mod tests {
         std::os::unix::fs::symlink(&real, &placement).unwrap();
         let bundle = rendered(NEW);
         let lock = lock_of("topos_link", NEW, &"1".repeat(64));
-        let g = Generation { epoch: 1, seq: 2 };
+        let g = 2;
         let sync = sync_at(g, g, &"1".repeat(64), &digest_hex(NEW));
         let prior = prior_map(
             &placement.to_string_lossy(),
@@ -813,8 +812,8 @@ mod tests {
             eprintln!("skipping: temp FS lacks atomic dir exchange");
             return;
         }
-        let g_old = Generation { epoch: 1, seq: 1 };
-        let g_new = Generation { epoch: 1, seq: 2 };
+        let g_old = 1;
+        let g_new = 2;
         let new_digest = digest_hex(NEW);
 
         // Size the sweep from a clean run.
@@ -926,7 +925,7 @@ mod tests {
     /// clean re-run converges.
     #[test]
     fn crash_gate_rename_dance_is_never_mixed() {
-        let g_new = Generation { epoch: 1, seq: 2 };
+        let g_new = 2;
         let new_digest = digest_hex(NEW);
         let n_ops = {
             let parent = Scratch::new("dance-count");
@@ -1000,7 +999,7 @@ mod tests {
     /// written; a clean re-run converges.
     #[test]
     fn crash_gate_first_install_leaves_absent_or_new_complete() {
-        let g_new = Generation { epoch: 1, seq: 1 };
+        let g_new = 1;
         let new_digest = digest_hex(NEW);
         let n_ops = {
             let parent = Scratch::new("fi-count");
@@ -1041,12 +1040,7 @@ mod tests {
             doc::write_doc(
                 &RealFs,
                 &d.sp.sync,
-                &sync_at(
-                    Generation { epoch: 0, seq: 0 },
-                    Generation { epoch: 0, seq: 0 },
-                    &"0".repeat(64),
-                    &"0".repeat(64),
-                ),
+                &sync_at(0, 0, &"0".repeat(64), &"0".repeat(64)),
             )
             .unwrap();
 

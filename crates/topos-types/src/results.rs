@@ -9,7 +9,6 @@
 //! documented mechanics, additive-only, and liable to tighten as each verb is built. The envelope,
 //! receipt, error, outcome, and action-code shapes are all fully pinned (see the crate root).
 
-use crate::Generation;
 use serde::{Deserialize, Serialize};
 
 // =================================================================================================
@@ -65,9 +64,9 @@ pub struct PullSkill {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
     /// The generation the plane most recently served — the sync target.
-    pub observed: Generation,
+    pub observed: u64,
     /// Highest generation actually materialized to disk.
-    pub applied: Generation,
+    pub applied: u64,
     pub action: PullAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offer: Option<Offer>,
@@ -446,9 +445,8 @@ pub enum KeepReason {
 }
 
 /// `follow` (enrollment + first-receive). Each offered skill is a TOFU offer, never auto-landed.
-/// **INFERRED** (additive-only). The enrollment-disclosure fields (`deployment_mode` /
-/// `workspace_display_name` / `verified_domain*`) and the two-call `pending` arm were added as the
-/// enrollment surface landed; all are optional, so an old consumer ignores them.
+/// **INFERRED** (additive-only). All disclosure fields are optional, so an old consumer ignores
+/// them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct FollowData {
@@ -457,20 +455,11 @@ pub struct FollowData {
     /// First-receive offers — empty when the link is membership-only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<FollowOffer>,
-    /// The workspace's deployment posture (disclosed from the bootstrap).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deployment_mode: Option<crate::bootstrap::DeploymentMode>,
-    /// The workspace display name (disclosed from the bootstrap).
+    /// The workspace display name (disclosed at enrollment).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_display_name: Option<String>,
-    /// The workspace's org-domain claim, if any (disclosed from the bootstrap).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verified_domain: Option<String>,
-    /// The workspace's domain-verification state (disclosed from the bootstrap).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verified_domain_status: Option<crate::bootstrap::VerifiedDomainStatus>,
-    /// The plane API base URL this machine enrolls against (disclosed from the bootstrap — a share link
-    /// may ride another host, e.g. a hosted team's web origin; this is where the device actually dials).
+    /// The API base URL this machine enrolled against (disclosed from the protocol card — a share
+    /// address may ride another host; this is where the device actually dials).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plane_base_url: Option<String>,
     /// Present when `follow` returned a pending device-authorization that needs a human verification step
@@ -491,14 +480,15 @@ pub struct FollowData {
 pub struct EnrollmentPending {
     /// The verification URL with the `user_code` embedded — the human opens it to approve the session.
     pub verification_uri_complete: String,
-    /// The opaque session code embedded in `verification_uri_complete` (the human clicks the URL — it is
-    /// not typed).
+    /// The short human-facing code embedded in `verification_uri_complete` (a cross-check against the
+    /// approval page — the human clicks the URL; the code is never typed as a secret).
     pub user_code: String,
-    /// 16-hex fingerprint of this device's public key; a human cross-checks it against the verification page.
-    pub device_fingerprint: String,
     /// The session expiry as an RFC-3339 string, if it expires.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+    /// The minimum poll interval, in seconds — a headless agent re-invokes no faster than this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_secs: Option<u64>,
 }
 
 /// A single skill offered at `follow` — disclosed, awaiting a direct human yes (TOFU). **INFERRED.**
@@ -536,19 +526,9 @@ pub struct LogData {
     pub archived_successor: Option<String>,
 }
 
-/// `publish` (a direct publish that moves `current`). On a GENESIS (first) publish the client also folds in
-/// a shareable `/i/` link pre-offering the skill — **best-effort + owner-gated** (minting it signs a
-/// governance op the plane denies for a non-owner), so `invite_link` is `Some` only on a genesis publish by
-/// an owner, and `None` otherwise. Under `review-required` a direct publish instead returns
-/// `APPROVAL_REQUIRED` (with the `publish --propose` next-action) and carries no `data`. **INFERRED.**
-///
-/// An UN-ENROLLED direct publish on the hosted plane starts a workspace STANDUP instead of failing: the
-/// envelope is still `ok = true`, but `data` carries the [`PublishPending`] block (sign in to approve) and
-/// no version — `version_id` / `current_generation` are `None` at pending because nothing was published yet
-/// (only the computed digest of the bytes being published can be honestly filled). Re-invoking the SAME
-/// publish command (the `ENROLL_RESUME` next-action) resumes: once the sign-in is approved, the same command
-/// completes enrollment AND the publish in one invocation, and the receipt carries the [`StandupReceipt`]
-/// disclosure.
+/// `publish` (a direct publish that moves `current`). Under a `reviewed` bundle a direct publish is
+/// DOWNGRADED to a proposal (see [`ProposeData`]); an un-enrolled publish is refused typed (enroll with
+/// `topos follow <workspace-address>` first). **INFERRED.**
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -556,34 +536,15 @@ pub struct LogData {
 )]
 pub struct PublishData {
     pub skill_id: String,
-    /// The new commit — `None` while the publish is PENDING a workspace-standup sign-in (nothing was
-    /// published yet; the version id is only knowable once the bytes actually ship).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The new commit (the shipped `version_id`).
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
-    pub version_id: Option<String>,
-    /// The byte-exact digest of the shipped (or, at pending, the scanned) bytes — always present: it is
-    /// computed over the draft before any network call, and an optional `<skill>@<digest>` pin gates it.
+    pub version_id: String,
+    /// The byte-exact digest of the shipped bytes — computed over the draft before any network call;
+    /// an optional `<skill>@<digest>` pin gates it.
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: String,
-    /// The pointer's new generation after the move — `None` while the publish is PENDING a standup sign-in
-    /// (no pointer moved yet).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_generation: Option<Generation>,
-    /// The paste-able share line for the shipped skill (`<workspace address>/skills/<name>`) — present
-    /// when the plane disclosed the workspace address. The pointer move is the real outcome; the line is
-    /// what a human pastes in chat.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub share_line: Option<String>,
-    /// Present when this publish is WAITING on the workspace-standup sign-in (the un-enrolled first publish
-    /// on a hosted plane): a human opens `verification_uri_complete` and approves; the agent then re-runs
-    /// the SAME publish command (the `ENROLL_RESUME` next-action carries the argv).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending: Option<PublishPending>,
-    /// Present ONLY when THIS invocation completed a workspace standup before publishing — the disclosure
-    /// that makes a hijacked approval visible ("workspace X — owner Y"): the human who approved the sign-in
-    /// is the seated owner, so a name you don't recognize means someone else owns your workspace.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub standup: Option<StandupReceipt>,
+    /// The pointer's new generation after the move.
+    pub current_generation: u64,
     /// Present ONLY when THIS `publish` invocation ADDED the skill to topos first (the auto-add
     /// convenience: `publish <name>|<name>@<harness>|<dir>` adopts an untracked LOCAL skill, then ships it
     /// in one command). Discloses the one local `add` the publish folded in; `None` when the skill was
@@ -609,58 +570,6 @@ pub struct AddedNote {
     pub harness_slug: Option<String>,
 }
 
-/// The workspace-standup sign-in a pending `publish` waits on. **INFERRED.**
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct PublishPending {
-    /// Always `signin_required` — the one pending state this block discloses.
-    pub status: PublishPendingStatus,
-    /// The sign-in URL with the code already embedded — the ONE link a human opens to approve (served by
-    /// the plane; the client uses it verbatim).
-    pub verification_uri_complete: String,
-    /// The code embedded in the URL, shown for cross-checking on the sign-in page.
-    pub user_code: String,
-    /// 16-hex fingerprint of this device's public key; a human cross-checks it against the sign-in page.
-    pub device_fingerprint: String,
-    /// The sign-in session's expiry as an RFC-3339 string, if it expires.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<String>,
-}
-
-/// A pending publish's status — a CLOSED single-value set (snake_case): the standup sign-in is required.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-#[serde(rename_all = "snake_case")]
-pub enum PublishPendingStatus {
-    /// A human must sign in at `verification_uri_complete` and approve the workspace creation.
-    SigninRequired,
-}
-
-/// The standup disclosure a workspace-creating publish carries: which workspace was stood up and who owns
-/// it. **INFERRED.**
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct StandupReceipt {
-    /// The stood-up workspace's display name (chosen at the sign-in approval).
-    pub workspace_display_name: String,
-    /// The stood-up workspace's ADDRESS (the share link — printed once at genesis, pasted anywhere).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub address: Option<String>,
-    /// The seated owner principal (the approver's confirmed email, or a device-rooted id) — the hijack
-    /// tripwire: a principal you don't recognize means someone else approved (and owns) this workspace.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_principal: Option<String>,
-}
-
 /// `publish --propose` (opens a PR; uploads a full candidate **without moving `current`**). Returns
 /// `NEEDS_REVIEW`. **INFERRED.**
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -683,8 +592,8 @@ pub struct ProposeData {
     pub added: Option<AddedNote>,
 }
 
-/// `revert` (a **forward** git-revert restoring older bytes as a new, higher-`seq` version — never a
-/// pointer rollback, never a delete). `--to` names the GOOD version. **INFERRED.**
+/// `revert` (a **forward** git-revert restoring older bytes as a new, higher-generation version —
+/// never a pointer rollback, never a delete). `--to` names the GOOD version. **INFERRED.**
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -698,7 +607,7 @@ pub struct RevertData {
     /// The new forward-revert commit that carries those bytes.
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub new_version_id: String,
-    pub current_generation: Generation,
+    pub current_generation: u64,
 }
 
 /// `review` (`--approve` / `--reject` a proposal). Approve is a compare-and-set on the base; a stale
@@ -714,7 +623,7 @@ pub struct ReviewData {
     pub decision: ReviewDecision,
     /// The pointer's new generation when an approval moved `current`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_generation: Option<Generation>,
+    pub current_generation: Option<u64>,
 }
 
 /// A review verdict — `approve` promotes, `reject` carries a reason back, `withdraw` is the author
@@ -1002,8 +911,8 @@ mod tests {
             skills: vec![PullSkill {
                 skill: "pr-describe".to_owned(),
                 workspace_id: Some("w_acme".to_owned()),
-                observed: Generation { epoch: 1, seq: 42 },
-                applied: Generation { epoch: 1, seq: 42 },
+                observed: 42,
+                applied: 42,
                 action: PullAction::UpToDate,
                 offer: None,
                 conflict: None,
@@ -1024,63 +933,20 @@ mod tests {
     }
 
     #[test]
-    fn publish_data_pending_shape_is_additive_and_omits_the_absent_fields() {
-        // The PENDING publish (a workspace standup awaiting sign-in): no version, no generation — only the
-        // consent digest and the pending block ride the wire.
-        let pending = PublishData {
-            skill_id: "topos_t00".to_owned(),
-            version_id: None,
-            bundle_digest: "c".repeat(64),
-            current_generation: None,
-            share_line: None,
-            pending: Some(PublishPending {
-                status: PublishPendingStatus::SigninRequired,
-                verification_uri_complete: "https://topos.sh/verify/CODE".to_owned(),
-                user_code: "CODE".to_owned(),
-                device_fingerprint: "e4aaf52f5c391ce9".to_owned(),
-                expires_at: Some("2026-07-03T00:15:00Z".to_owned()),
-            }),
-            standup: None,
-            added: None,
-        };
-        let v = serde_json::to_value(&pending).unwrap();
-        assert!(v.get("version_id").is_none(), "no version at pending");
-        assert!(v.get("current_generation").is_none());
-        assert_eq!(v["pending"]["status"], "signin_required");
-        assert_eq!(v["pending"]["user_code"], "CODE");
-        assert_eq!(v["pending"]["device_fingerprint"], "e4aaf52f5c391ce9");
-        // A COMPLETED standup publish: version + generation present, plus the owner disclosure.
+    fn publish_data_carries_the_move_and_omits_an_absent_added_note() {
         let done = PublishData {
             skill_id: "topos_t00".to_owned(),
-            version_id: Some("a".repeat(64)),
+            version_id: "a".repeat(64),
             bundle_digest: "c".repeat(64),
-            current_generation: Some(Generation { epoch: 1, seq: 1 }),
-            share_line: None,
-            pending: None,
-            standup: Some(StandupReceipt {
-                workspace_display_name: "robert's workspace".to_owned(),
-                address: Some("https://topos.example/roberts-workspace".to_owned()),
-                owner_principal: Some("robert@example.com".to_owned()),
-            }),
+            current_generation: 1,
             added: None,
         };
         let v = serde_json::to_value(&done).unwrap();
-        assert_eq!(v["standup"]["workspace_display_name"], "robert's workspace");
-        assert_eq!(
-            v["standup"]["address"],
-            "https://topos.example/roberts-workspace"
-        );
-        assert_eq!(v["standup"]["owner_principal"], "robert@example.com");
-        assert!(v.get("pending").is_none());
-        // An OLD-shape ordinary publish (no pending/standup fields) still deserializes (additive-compat).
-        let old: PublishData = serde_json::from_value(serde_json::json!({
-            "skill_id": "topos_t00",
-            "version_id": "a".repeat(64),
-            "bundle_digest": "c".repeat(64),
-            "current_generation": { "epoch": 1, "seq": 1 },
-        }))
-        .unwrap();
-        assert!(old.pending.is_none() && old.standup.is_none());
+        assert_eq!(v["version_id"], "a".repeat(64));
+        assert_eq!(v["current_generation"], 1);
+        assert!(v.get("added").is_none(), "an absent added note omits");
+        let back: PublishData = serde_json::from_value(v).unwrap();
+        assert_eq!(back.bundle_digest, "c".repeat(64));
     }
 
     #[test]

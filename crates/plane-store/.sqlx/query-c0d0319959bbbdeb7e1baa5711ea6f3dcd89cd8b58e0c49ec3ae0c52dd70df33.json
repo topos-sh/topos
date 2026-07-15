@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE object_presence SET status = 'deleting', status_updated_at = $3\n            WHERE workspace_id = $1 AND object_id = $2 AND status = 'present'\n              AND NOT EXISTS (\n                  SELECT 1 FROM version_object vo\n                  JOIN version v\n                    ON v.workspace_id = vo.workspace_id AND v.bundle_id = vo.bundle_id\n                   AND v.version_id = vo.version_id\n                  WHERE vo.workspace_id = $1 AND vo.object_id = $2 AND v.purged_at IS NULL)\n              AND NOT EXISTS (\n                  SELECT 1 FROM promotion_lease_object plo\n                  JOIN promotion_lease pl\n                    ON pl.workspace_id = plo.workspace_id AND pl.op_id = plo.op_id\n                  WHERE plo.workspace_id = $1 AND plo.object_id = $2\n                    AND (pl.expires_at IS NULL OR pl.expires_at > $3))\n            RETURNING git_oid AS \"git_oid: Vec<u8>\", location AS \"location!\"\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "git_oid: Vec<u8>",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 1,
+        "name": "location!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "c0d0319959bbbdeb7e1baa5711ea6f3dcd89cd8b58e0c49ec3ae0c52dd70df33"
+}

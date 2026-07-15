@@ -13,14 +13,24 @@ const REPO_ROOT = resolve(HERE, "..", "..", "..");
 
 export const PLANE_PORT = 8791;
 export const APP_PORT = 3100;
+/** The fake SMTP sink (tests/fixtures/smtp-sink.mjs) the suite arms TOPOS_MAIL_SMTP_* toward. */
+export const SMTP_SINK_PORT = 2598;
 // localhost, NOT 127.0.0.1: the vite dev server blocks its own static/HMR resources cross-origin,
 // and a 127.0.0.1 page against a localhost-bound dev server never loads its client chunks.
 export const BASE_URL = `http://localhost:${APP_PORT}`;
 
 export const MEMBER_EMAIL = "reviewer@example.com";
+/** The boot-minted workspace's address slug (appEnv pins TOPOS_WORKSPACE_NAME to it). */
+export const WORKSPACE_ADDRESS = "team";
 /** The one password every e2e account is created with (email+password auth; better-auth min 8). */
 export const E2E_PASSWORD = "e2e-password-1234";
 export const STORAGE_STATE = "tests/e2e/.auth/user.json";
+
+/**
+ * Presets the first-boot setup claim code (`TOPOS_SETUP_CODE`), so the setup project can claim
+ * the boot-minted workspace deterministically — the same stable-code contract CI/IaC rides.
+ */
+export const E2E_SETUP_CODE = "e2e-setup-code-0123456789";
 
 /** The shared internal bearer the app injects on the vault's internal lane; the fixture REQUIRES
  * it (Bearer) and 404s the whole lane without it, mirroring the real vault. */
@@ -52,5 +62,16 @@ export function appEnv(): Record<string, string> {
     PLANE_INTERNAL_TOKEN,
     INSTALL_SH_PATH,
     APP_ENV: "test",
+    TOPOS_SETUP_CODE: E2E_SETUP_CODE,
+    TOPOS_WORKSPACE_NAME: WORKSPACE_ADDRESS,
+    // The suite runs MAIL-ARMED: all five TOPOS_MAIL_SMTP_* point at the local sink
+    // (tests/fixtures/smtp-sink.mjs), so `canSend` is true product-wide — the invite form is
+    // enabled, sign-ups send verification mail, and invited seats bind through the mailbox
+    // round-trip. The assertable copies land in .outbox.jsonl (APP_ENV=test records always).
+    TOPOS_MAIL_SMTP_HOST: "127.0.0.1",
+    TOPOS_MAIL_SMTP_PORT: String(SMTP_SINK_PORT),
+    TOPOS_MAIL_SMTP_USER: "sink",
+    TOPOS_MAIL_SMTP_PASS: "sink",
+    TOPOS_MAIL_SMTP_FROM: "Topos E2E <topos@e2e.test>",
   };
 }

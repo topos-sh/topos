@@ -21,14 +21,8 @@
     "outcome": "CONFLICT",
     "workspace_id": "w_demo",
     "skill_id": "s_prdescribe",
-    "expected_generation": {
-      "epoch": 1,
-      "seq": 42
-    },
-    "current_generation": {
-      "epoch": 1,
-      "seq": 43
-    },
+    "expected_generation": 42,
+    "current_generation": 43,
     "created_at": "2026-06-25T00:00:00Z"
   },
   "error": {
@@ -38,14 +32,8 @@
     "affected": {
       "skill": "pr-describe"
     },
-    "expected_generation": {
-      "epoch": 1,
-      "seq": 42
-    },
-    "current_generation": {
-      "epoch": 1,
-      "seq": 43
-    },
+    "expected_generation": 42,
+    "current_generation": 43,
     "context": {},
     "next_actions": [
       {

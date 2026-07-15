@@ -1,7 +1,7 @@
 # `topos-core` — the pure trust kernel
 
-Deterministic FUNCTIONS over EXPLICIT VALUES, over this crate's OWN validated domain newtypes (`SkillId`,
-`Generation`, `Commit`, the state-transition types). A constructed `topos-core` value is, by construction,
+Deterministic FUNCTIONS over EXPLICIT VALUES, over this crate's OWN validated domain newtypes (`Commit`,
+the state-transition types). A constructed `topos-core` value is, by construction,
 well-formed — the kernel cannot represent an invalid state (parse-don't-validate). The app libs convert
 wire DTOs → these types at the edge, so **`topos-core` does NOT depend on `topos-types`**.
 
@@ -10,11 +10,10 @@ wire DTOs → these types at the edge, so **`topos-core` does NOT depend on `top
 Implemented (each behind a known-answer / truth-table test):
 - ✅ the byte-exact sha256 **bundle digest** + the canonical-manifest **reject rules** (`digest`);
 - ✅ the **consent-satisfier truth-table**, as a pure fn (`consent`);
-- ✅ the frozen **content-addressed identity derivations** (`identity`) — the canonical `commit_id`
-  construction (the user-facing `version_id`, a length-prefixed binary frame), the pubkey-derived
-  `device_key_id`, and `canonical_principal` (the ASCII-lowercase principal fold every email-valued
-  identifier passes, the same fold the plane applies at its parse boundary). No keys, no signatures —
-  written once here so every component that re-derives an id agrees on the bytes by construction.
+- ✅ the frozen **content-addressed identity derivation** (`identity`) — the canonical `commit_id`
+  construction (the human-facing `version_id`, a length-prefixed binary frame). No keys, no
+  signatures — written once here so every component that re-derives an id agrees on the bytes by
+  construction.
 - ✅ the **client sync transition** (`sync`) — the four currency states from `work==base?`×`applied==observed?`,
   and the post-fetch heal that distinguishes a crash-after-swap from a real divergence; all pure, behind
   a truth-table test. No floor, no alarm: the served pointer is the sync target, its integrity the
@@ -26,7 +25,7 @@ Implemented (each behind a known-answer / truth-table test):
   diff3 *execution* is `topos-gitstore`'s. Behind a per-row truth-table test.
 
 Planned (land behind a golden vector as their wire encoding / mechanics freeze):
-- the `(epoch, seq)` compare-and-set *decision*; first-parent + same-skill lineage assertions.
+- the generation compare-and-set *decision*; first-parent + same-bundle lineage assertions.
 
 ## Hard constraints
 

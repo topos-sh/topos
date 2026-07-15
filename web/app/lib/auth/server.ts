@@ -5,30 +5,35 @@ import { magicLink } from "better-auth/plugins/magic-link";
 import { and, eq } from "drizzle-orm";
 import { composition } from "@/composition.server";
 import { serverEnv } from "@/env.server";
+import { bindInvitedSeats } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
 import { account } from "@/lib/db/schema.auth";
+import { sendResetMail, sendVerificationMail } from "@/lib/mail/auth-mail.server";
+import { mailDelivery } from "@/lib/mail/transport.server";
+import { assertRegistrationAllowed } from "./registration.server";
 
 /**
- * The auth construction, parameterized by the composition's AuthProviderConfig (the fourth
- * seam): the OSS default is email+password with zero delivery dependency; magic links and
- * social providers register only when the composition provides them. There is no JWT plugin
- * and no keyset — the app talks to the vault over the internal lane with its own bearer, and
- * a session never becomes a token that leaves this tier.
+ * The auth construction, parameterized by the composition's AuthProviderConfig: the OSS
+ * default is email+password with zero delivery dependency; magic links and social providers
+ * register only when the composition provides them. There is no JWT plugin and no keyset —
+ * the app talks to the vault over the internal lane with its own bearer, and a session never
+ * becomes a token that leaves this tier.
+ *
+ * REGISTRATION IS NEVER OPEN (lib/auth/registration.server.ts): the `user.create.before`
+ * hook demands a proof — the claim ceremony, a pending invitation on an armed-mail
+ * deployment, or the off-by-default `registration = 'open'` knob — under EVERY rung, so a
+ * composition's extra providers cannot reopen sign-up.
+ *
+ * Mail is the identity rung for multi-user servers: with SMTP armed, sign-up sends a
+ * verification mail, and the INVITED SEAT BINDS ONLY AFTER the mailbox round-trip
+ * (afterEmailVerification → bindInvitedSeats). Verification never gates sign-IN itself —
+ * the claim-born first owner is deliberately unverified on a mail-less install, and
+ * authority is seats, not verification flags.
  */
 function buildAuth() {
   const env = serverEnv();
   const providers = composition.auth;
-  // With NO out-of-band identity rung configured (the OSS default), there is nothing to verify
-  // an address against — possession of the password IS the identity claim on a self-hosted
-  // instance (the roster still decides every admission; an uninvited sign-up holds no seat).
-  // Stated honestly rather than left as a permanently-false flag that would brick the actor
-  // mint: accounts born on the password rung are recorded verified-as-claimed. The moment a
-  // composition provides ANY real rung (magic link or a social provider), this hook stays dark
-  // and that rung's own verification decides — otherwise a password sign-up could pre-claim an
-  // address a social sign-in would later prove.
-  const hasSocial =
-    providers.socialProviders !== undefined && Object.keys(providers.socialProviders).length > 0;
-  const selfAssertedEmails = providers.emailAndPassword && !providers.magicLink && !hasSocial;
+  const mailArmed = mailDelivery().canSend;
   return betterAuth({
     database: drizzleAdapter(getDb(), { provider: "pg" }),
     baseURL: env.BETTER_AUTH_URL,
@@ -37,19 +42,58 @@ function buildAuth() {
     // production — key it on the app's OWN env so the credential endpoints stay limited in
     // production and the suites' rapid sign-ins don't trip it.
     rateLimit: { enabled: env.APP_ENV === "production" },
-    ...(providers.emailAndPassword ? { emailAndPassword: { enabled: true } } : {}),
-    ...(selfAssertedEmails
+    ...(providers.emailAndPassword
       ? {
-          databaseHooks: {
-            user: {
-              create: {
-                before: (user: { email: string }) =>
-                  Promise.resolve({ data: { ...user, emailVerified: true } }),
-              },
+          emailAndPassword: {
+            enabled: true,
+            // The reset rung exists exactly when mail is armed; the mail-less solo recovery
+            // hatch is the box-side one-shot code (lib/auth/recovery.server.ts).
+            ...(mailArmed
+              ? {
+                  sendResetPassword: async ({
+                    user,
+                    url,
+                  }: {
+                    user: { email: string };
+                    url: string;
+                  }) => {
+                    await sendResetMail(user.email, url);
+                  },
+                }
+              : {}),
+          },
+        }
+      : {}),
+    ...(mailArmed
+      ? {
+          emailVerification: {
+            sendOnSignUp: true,
+            autoSignInAfterVerification: true,
+            sendVerificationEmail: async ({
+              user,
+              url,
+            }: {
+              user: { email: string };
+              url: string;
+            }) => {
+              await sendVerificationMail(user.email, url);
+            },
+            afterEmailVerification: async (user: { id: string; email: string; name: string }) => {
+              await bindInvitedSeats(user.id, user.email, user.name || user.email);
             },
           },
         }
       : {}),
+    databaseHooks: {
+      user: {
+        create: {
+          before: async (user: { email: string }) => {
+            await assertRegistrationAllowed(user.email);
+            return { data: user };
+          },
+        },
+      },
+    },
     plugins: providers.magicLink
       ? [
           magicLink({

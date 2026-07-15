@@ -1,9 +1,10 @@
-//! The on-disk enrollment state — the documents `follow` writes and the plane transport reads:
-//! `instance.json` (which plane), `follows.json` (which skills are followed, in which mode/workspace —
-//! pure subscription state), `identity/credentials.json` (the per-workspace bearer credentials — the
-//! **secret** each read/write/governance request presents), `identity/user.json` (the enrolled
-//! principal's non-secret metadata), and the enrollment WAL (`identity/enrollment.json`, the two-call
-//! resume's durable state). Both the writers (the `follow` promote path) and the readers live here.
+//! The on-disk enrollment state — the documents `follow` / `auth login` write and the plane transport
+//! reads: `instance.json` (which plane), `follows.json` (which skills are followed, in which
+//! mode/workspace — pure subscription state), `identity/credentials.json` (the device's ONE bearer
+//! credential + its registered device id — the **secret** every request presents), `identity/user.json`
+//! (the enrolled workspaces' non-secret metadata), and the enrollment WAL (`identity/enrollment.json`,
+//! the device-flow resume's durable state). Both the writers (the granted-poll persist path) and the
+//! readers live here.
 //!
 //! **These are client-only transport/enrollment documents — they are deliberately NOT in
 //! `topos-types::persisted`.** That crate is the cross-language wire/contract leaf whose shapes are
@@ -13,88 +14,57 @@
 //! migration** (an unknown/newer `schema_version` is an upgrade error, never silently parsed or deleted) —
 //! but they own their own shape rather than freezing it in the public contract on a guess.
 //!
-//! **The workspace credential is a `0600` secret.** `credentials.json` and the WAL are written through the
+//! **The device credential is a `0600` secret.** `credentials.json` and the WAL are written through the
 //! `0600` private-doc primitives ([`crate::doc::write_doc_private`]) and refused-on-permissive at read,
-//! because one credential authenticates every request in its workspace; `instance.json`/`user.json` carry
-//! no secret. `follows.json` is pure subscription state now — still `0600`-written for continuity + perm
-//! hygiene (a pre-migration file may hold a legacy `read_token` until the first [`read_follows`] scrubs it).
+//! because the ONE credential authenticates every request this device makes; `instance.json`/`user.json`
+//! carry no secret. `follows.json` is pure subscription state — still `0600`-written for continuity +
+//! perm hygiene.
 //!
-//! **Ids are validated at load.** A skill/workspace id read out of `follows.json`, `credentials.json`, or
-//! the WAL later keys path joins (`~/.topos/skills/<id>`, the harness skills dir) and URL splices, so the
-//! loaders parse every id through [`crate::id`] — a hand-edited (or maliciously written) traversal id
-//! fails the load closed as a corrupt document, mirroring the wire-boundary checks in [`crate::plane_http`].
+//! **Ids are validated at load.** A skill/workspace id read out of `follows.json` or `user.json` later
+//! keys path joins (`~/.topos/skills/<id>`, the harness skills dir) and URL splices, so the loaders parse
+//! every id through [`crate::id`] — a hand-edited (or maliciously written) traversal id fails the load
+//! closed as a corrupt document, mirroring the wire-boundary checks in [`crate::plane_http`].
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use topos_types::PERSISTED_SCHEMA_VERSION;
-use topos_types::bootstrap::{DeploymentMode, VerifiedDomainStatus};
 
 use crate::doc;
 use crate::error::ClientError;
 use crate::fs_seam::FsOps;
 use crate::plane::{FollowContext, FollowMode};
-use crate::plane_http::SkillCred;
 use crate::sidecar::Layout;
 
-/// The plane's deployment posture defaults to self-host (a missing field on a hand-written/older
-/// `instance.json` reads as the no-identity-step posture).
-fn default_deployment_mode() -> DeploymentMode {
-    DeploymentMode::SelfHost
-}
-
-/// A missing domain-verification field reads as unverified.
-fn default_domain_status() -> VerifiedDomainStatus {
-    VerifiedDomainStatus::Unverified
-}
-
-/// `instance.json` — the PLANE this client is enrolled with. Plane-scoped only (v0 is one plane per
-/// install); every PER-WORKSPACE fact (display name, verified-domain provenance, membership metadata) lives
-/// on a [`Membership`] in `user.json`, so one install can follow skills from several workspaces on the same
-/// plane. Public metadata only (ordinary file perms). No trust root is stored — the `current` pointer is
-/// unsigned, its authority the database row and its integrity the content-addressed version id; a stale
-/// `instance.json` from an older build may carry ignored extra fields (serde default tolerates them).
+/// `instance.json` — the PLANE this client is enrolled with (v0 is one plane per install). Public
+/// metadata only (ordinary file perms). No trust root is stored — the `current` pointer is unsigned,
+/// its authority the database row and its integrity the content-addressed version id; a stale
+/// `instance.json` from an older build may carry ignored extra fields (serde tolerates them).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Instance {
     pub schema_version: u32,
-    /// The plane base URL (no trailing slash required; the transport normalizes it), e.g. `https://topos.sh`.
+    /// The API base URL (no trailing slash; the transport normalizes it), e.g. `https://topos.sh/api`.
     pub base_url: String,
-    /// The plane's deployment posture (disclosed at enrollment; not a trust input).
-    #[serde(default = "default_deployment_mode")]
-    pub deployment_mode: DeploymentMode,
-    /// The enrollment method the plane advertised (e.g. `"device_code"`); disclosure only.
-    #[serde(default)]
-    pub enrollment_method: String,
 }
 
 /// One workspace this install has joined on the pinned plane — the per-workspace half of an enrollment.
 /// A single `user.json` carries a `Vec<Membership>`, so following skills from a second workspace ADDS a
-/// membership rather than overwriting the first. Non-secret metadata only (the workspace credential lives
-/// in `identity/credentials.json`); derives `Serialize`/`Deserialize` with NO `deny_unknown_fields` (forward-compatible).
+/// membership rather than overwriting the first. Non-secret metadata only (the device credential lives
+/// in `identity/credentials.json`); no `deny_unknown_fields` (forward-compatible).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Membership {
-    /// The workspace id (a path-safe identifier — the signed-pointer scope + the write op's workspace).
+    /// The workspace id (a path-safe identifier — the pointer scope + the write op's workspace).
     pub workspace_id: String,
-    /// The workspace display name, for the agent's disclosure (moved from `instance.json`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    /// This device's roles in the workspace, if the wire ever carries them (the redeem does not in v0).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub roles: Vec<String>,
-    /// The workspace's org-domain claim, if any — the relay-phishing provenance (moved from `instance.json`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verified_domain: Option<String>,
-    /// The domain-verification state (moved from `instance.json`).
-    #[serde(default = "default_domain_status")]
-    pub verified_domain_status: VerifiedDomainStatus,
-    /// Whether THIS membership was rooted in an `/i/` invite (vs a standup / claim).
-    pub invite_rooted: bool,
+    /// The workspace's ADDRESS slug (what a human types at `follow`; what a re-login authorizes toward).
+    pub name: String,
+    /// The workspace's display name, for the agent's disclosure.
+    pub display_name: String,
     /// When this membership's enrollment completed, epoch-millis.
     pub enrolled_at: i64,
 }
 
 /// `follows.json` — the durable follow-state: the skills this client follows, each with its workspace,
-/// mode, and review posture. **Pure subscription state** — no secret (the workspace credential lives in
+/// mode, and review posture. **Pure subscription state** — no secret (the device credential lives in
 /// `credentials.json`). Still `0600`-written for continuity + perm hygiene; see the module comment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Follows {
@@ -104,14 +74,13 @@ pub(crate) struct Follows {
 }
 
 /// One followed skill's subscription record — the consent seam ([`FollowContext`]:
-/// workspace/mode/review/following). Nothing secret; the transport credential is the WORKSPACE credential
-/// (`credentials.json`), joined in by [`skill_creds`]. A legacy on-disk file may carry an extra
-/// `read_token` field; serde ignores it on load and [`read_follows`] scrubs it from disk on first contact.
+/// workspace/mode/review/following). Nothing secret; the transport credential is the DEVICE credential
+/// (`credentials.json`), shared by every followed skill.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct FollowEntry {
     /// The stable skill id (the key the fan-outs are keyed by).
     pub skill_id: String,
-    /// The workspace this skill is followed in (the expected pointer scope + the credential lookup key).
+    /// The workspace this skill is followed in (the expected pointer scope + the URL-path workspace).
     pub workspace_id: String,
     /// How a new `current` is adopted (auto / confirm-each).
     pub mode: FollowModeDoc,
@@ -144,6 +113,13 @@ impl FollowModeDoc {
     }
 }
 
+/// Fold a principal (an email address) to its canonical comparison form — trimmed, ASCII-lowercased.
+/// The server folds at its own parse boundary; folding here too keeps the outbox match and the invite
+/// body address-shape-agnostic without a second wire round-trip.
+pub(crate) fn canonical_principal(s: &str) -> String {
+    s.trim().to_ascii_lowercase()
+}
+
 /// Read `instance.json`, or `None` if absent. Fail-closed on an unknown/newer `schema_version`.
 pub(crate) fn read_instance(
     fs: &dyn FsOps,
@@ -152,36 +128,21 @@ pub(crate) fn read_instance(
     doc::read_doc(fs, &layout.instance_path())
 }
 
-/// Read `follows.json`, or `None` if absent. Still read through [`doc::read_doc_private`] (perm hygiene —
-/// a group/other-accessible file is refused BEFORE parsing, and a pre-migration file may still hold a
-/// legacy secret on disk). Fail-closed on an unknown/newer `schema_version` AND on any entry whose
-/// skill/workspace id is not a safe path component (the id boundary: a traversal id must never reach a
-/// join downstream).
+/// Read `follows.json`, or `None` if absent. Read through [`doc::read_doc_private`] (perm hygiene — a
+/// group/other-accessible file is refused BEFORE parsing). Fail-closed on an unknown/newer
+/// `schema_version` AND on any entry whose skill/workspace id is not a safe path component (the id
+/// boundary: a traversal id must never reach a join downstream).
 ///
 /// Also fail-closed on the cross-workspace invariant [`write_follows_merged`] enforces on write: a skill id
 /// is plane-minted and belongs to EXACTLY ONE workspace, and the sidecar keys skills by id alone — so the
-/// SAME `skill_id` appearing under two different `workspace_id`s (a forged/confused plane response the write
-/// guard already refuses, or a hand-edited doc) would collapse the `skill_creds` map / mis-scope the
-/// first-match lookups. The LOAD fails closed here, mirroring the write guard's message shape.
-///
-/// **Legacy-token migration.** Before the workspace-credential model, each entry carried a `read_token`
-/// secret. serde already drops that unknown field on parse (so the follows themselves survive intact), but
-/// the dead secret still sits on disk; when any entry's on-disk bytes carry a `read_token`, rewrite
-/// `follows.json` in place (atomic, `0600`, under the identity lock) with the tokenless entries — scrubbing
-/// the dead secret on first contact. A follow (skill/workspace/mode/review/following) survives byte-exact.
+/// SAME `skill_id` appearing under two different `workspace_id`s (a forged/confused response the write
+/// guard already refuses, or a hand-edited doc) would mis-scope the first-match lookups. The LOAD fails
+/// closed here, mirroring the write guard's message shape.
 pub(crate) fn read_follows(
     fs: &dyn FsOps,
     layout: &Layout,
 ) -> Result<Option<Follows>, ClientError> {
-    let path = layout.follows_path();
-    // Read the raw bytes once (perm-checked below via `read_doc_private`) so the legacy-token scan and the
-    // parse share one on-disk view.
-    let Some(raw) = fs.read_opt(&path)? else {
-        return Ok(None);
-    };
-    // A concurrent `uninstall` (or any racing removal) could unlink the file between the two reads; treat
-    // a now-absent file as an honest "no follows", never a panic.
-    let Some(follows): Option<Follows> = doc::read_doc_private(fs, &path)? else {
+    let Some(follows): Option<Follows> = doc::read_doc_private(fs, &layout.follows_path())? else {
         return Ok(None);
     };
     let mut seen: HashMap<&str, &str> = HashMap::new();
@@ -198,61 +159,25 @@ pub(crate) fn read_follows(
             )));
         }
     }
-    // Scrub any legacy `read_token` bytes still on disk (the follows parsed above are already tokenless).
-    if legacy_read_token_present(&raw) {
-        scrub_legacy_follows(fs, layout, &follows)?;
-    }
     Ok(Some(follows))
 }
 
-/// Whether the raw `follows.json` bytes carry a legacy `read_token` on any follow entry (the migration
-/// trigger). A parse failure ⇒ `false` (the schema loader surfaces a genuine corruption elsewhere).
-fn legacy_read_token_present(bytes: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(bytes)
-        .ok()
-        .and_then(|v| {
-            v.get("follows")
-                .and_then(|f| f.as_array())
-                .map(|arr| arr.iter().any(|e| e.get("read_token").is_some()))
-        })
-        .unwrap_or(false)
-}
-
-/// Rewrite `follows.json` with the already-parsed (tokenless) entries, under the identity lock (so a
-/// concurrent enrollment writer is not clobbered). Re-checks under the lock — a concurrent scrub may have
-/// won — and only rewrites while the on-disk bytes still carry a legacy token.
-fn scrub_legacy_follows(
-    fs: &dyn FsOps,
-    layout: &Layout,
-    follows: &Follows,
-) -> Result<(), ClientError> {
-    let _guard = fs.lock_exclusive(&layout.identity_lock_file())?;
-    let Some(raw) = fs.read_opt(&layout.follows_path())? else {
-        return Ok(());
-    };
-    if !legacy_read_token_present(&raw) {
-        return Ok(()); // already scrubbed by a concurrent read
-    }
-    doc::write_doc_private(
-        fs,
-        &layout.follows_path(),
-        &Follows {
-            schema_version: PERSISTED_SCHEMA_VERSION,
-            follows: follows.follows.clone(),
-        },
-    )
-}
-
 /// Read `identity/user.json`, or `None` if absent. Metadata only (no secret) → ordinary `read_doc`.
-/// Fail-closed on an unknown/newer `schema_version` AND on a stale single-workspace document (missing the
-/// required `workspaces` field ⇒ [`ClientError::Corrupt`]). The ambient write verbs (`invite`, a genesis
-/// `publish`) pick their workspace from the memberships here via [`UserDoc::resolve_write_workspace`].
+/// Fail-closed on an unknown/newer `schema_version` AND on any membership whose workspace id is not a
+/// safe path component. The ambient write verbs (`invite`, a genesis `publish`) pick their workspace
+/// from the memberships here via [`UserDoc::resolve_write_workspace`].
 pub(crate) fn read_user(fs: &dyn FsOps, layout: &Layout) -> Result<Option<UserDoc>, ClientError> {
-    doc::read_doc(fs, &layout.user_path())
+    let user: Option<UserDoc> = doc::read_doc(fs, &layout.user_path())?;
+    if let Some(u) = &user {
+        for m in &u.workspaces {
+            crate::id::validate_workspace_id(&m.workspace_id)?;
+        }
+    }
+    Ok(user)
 }
 
 /// The follow-state fan-out → the engine's consent seam (`FileFollow` returns these). Every entry is
-/// carried (the engine itself skips a `following == false` skill); creds live in the transport, not here.
+/// carried (the engine itself skips a `following == false` skill).
 pub(crate) fn follow_contexts(follows: &Follows) -> Vec<(String, FollowContext)> {
     follows
         .follows
@@ -271,178 +196,82 @@ pub(crate) fn follow_contexts(follows: &Follows) -> Vec<(String, FollowContext)>
         .collect()
 }
 
-/// The follow-state × credential JOIN → the transport credential map (`UreqPlane` looks a skill's cred up
-/// here). Each followed skill inherits its WORKSPACE credential (one secret authenticates every request in
-/// the workspace); a skill whose workspace has no stored credential is OMITTED (an unenrolled/legacy state
-/// the engine then skips as `NotFound`, never a request without a credential).
-pub(crate) fn skill_creds(
-    follows: &Follows,
-    credentials: &Credentials,
-) -> HashMap<String, SkillCred> {
-    let by_ws: HashMap<&str, &str> = credentials
-        .credentials
-        .iter()
-        .map(|c| (c.workspace_id.as_str(), c.credential.as_str()))
-        .collect();
+/// The follow-state's `skill_id → workspace_id` map — how the read transport learns which workspace
+/// path a skill's reads splice (the ONE device credential authenticates them all; the map carries no
+/// secret).
+pub(crate) fn skill_workspaces(follows: &Follows) -> HashMap<String, String> {
     follows
         .follows
         .iter()
-        .filter_map(|e| {
-            by_ws.get(e.workspace_id.as_str()).map(|cred| {
-                (
-                    e.skill_id.clone(),
-                    SkillCred::new(e.workspace_id.clone(), (*cred).to_owned()),
-                )
-            })
-        })
+        .map(|e| (e.skill_id.clone(), e.workspace_id.clone()))
         .collect()
 }
 
 // =================================================================================================
-// `identity/credentials.json` — the per-workspace bearer credentials. One entry per workspace; the ONE
-// secret this device presents (Bearer) on every read/write/governance request in that workspace. A `0600`
-// secret (hand-written Debug on the entry redacts it), read-merge-write under the identity lock.
+// `identity/credentials.json` — the device's ONE bearer credential + its registered device id. The
+// ONE secret this device presents (Bearer) on every request; the server resolves credential → device
+// → user → seat. A `0600` secret (hand-written Debug redacts it), written whole under the identity
+// lock.
 // =================================================================================================
 
-/// `credentials.json` — the per-workspace bearer credentials (a fresh document kind, `schema_version` 1).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `credentials.json` — the device credential document (one credential per install).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Credentials {
     pub schema_version: u32,
-    #[serde(default)]
-    pub credentials: Vec<CredentialEntry>,
-}
-
-impl Credentials {
-    /// Flatten to a `workspace_id → credential` map (the shape the write/catalog transports look up).
-    pub(crate) fn into_map(self) -> HashMap<String, String> {
-        self.credentials
-            .into_iter()
-            .map(|e| (e.workspace_id, e.credential))
-            .collect()
-    }
-}
-
-/// One workspace's bearer credential. **`credential` is a `0600` secret** — the hand-written `Debug` redacts
-/// it so it never reaches a log / panic / Debug dump.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct CredentialEntry {
-    /// The workspace this credential authenticates in (the Bearer lookup key).
-    pub workspace_id: String,
-    /// **SECRET** — the plaintext workspace credential (Bearer on every request). Redacted in `Debug`.
+    /// **SECRET** — the plaintext device credential (Bearer on every request). Redacted in `Debug`.
     pub credential: String,
+    /// The server-registered device id (non-secret) — the handle a self-revoke names as its target.
+    pub device_id: String,
 }
 
-impl std::fmt::Debug for CredentialEntry {
+impl std::fmt::Debug for Credentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CredentialEntry")
-            .field("workspace_id", &self.workspace_id)
+        f.debug_struct("Credentials")
+            .field("schema_version", &self.schema_version)
             .field("credential", &"<redacted>")
+            .field("device_id", &self.device_id)
             .finish()
     }
 }
 
-/// Read `credentials.json` (a `0600` secret), or `None` if absent. Refused-on-permissive before parsing,
-/// fail-closed on an unknown/newer `schema_version` AND on any workspace id outside the validated charset
-/// (it later keys request URLs + the credential lookup).
+/// Read `credentials.json` (a `0600` secret), or `None` if absent (the signed-out state). Refused on a
+/// permissive mode before parsing; fail-closed on an unknown/newer `schema_version`.
 pub(crate) fn read_credentials(
     fs: &dyn FsOps,
     layout: &Layout,
 ) -> Result<Option<Credentials>, ClientError> {
-    let creds: Option<Credentials> = doc::read_doc_private(fs, &layout.credentials_path())?;
-    if let Some(c) = &creds {
-        for e in &c.credentials {
-            crate::id::validate_workspace_id(&e.workspace_id)?;
-        }
-    }
-    Ok(creds)
+    doc::read_doc_private(fs, &layout.credentials_path())
 }
 
-/// UPSERT this workspace's credential into `credentials.json` under the `"identity"` lock (read-merge-write,
-/// `0600`) — a re-enrollment REPLACES the workspace's credential, a first enrollment into a new workspace
-/// APPENDS one, and an already-stored workspace's credential is never dropped. The identity dir is ensured.
-pub(crate) fn write_credential(
+/// Write the device credential WHOLE (`0600`, under the `"identity"` lock). A re-enrollment REPLACES
+/// the credential wholesale — the device holds exactly one.
+pub(crate) fn write_credentials(
     fs: &dyn FsOps,
     layout: &Layout,
-    workspace_id: &str,
     credential: &str,
+    device_id: &str,
 ) -> Result<(), ClientError> {
     let _guard = fs.lock_exclusive(&layout.identity_lock_file())?;
-    let mut list = doc::read_doc_private::<Credentials>(fs, &layout.credentials_path())?
-        .map(|c| c.credentials)
-        .unwrap_or_default();
-    if let Some(existing) = list.iter_mut().find(|e| e.workspace_id == workspace_id) {
-        existing.credential = credential.to_owned();
-    } else {
-        list.push(CredentialEntry {
-            workspace_id: workspace_id.to_owned(),
+    fs.create_dir_all(&layout.identity_dir())?;
+    doc::write_doc_private(
+        fs,
+        &layout.credentials_path(),
+        &Credentials {
+            schema_version: PERSISTED_SCHEMA_VERSION,
             credential: credential.to_owned(),
-        });
-    }
-    fs.create_dir_all(&layout.identity_dir())?;
-    doc::write_doc_private(
-        fs,
-        &layout.credentials_path(),
-        &Credentials {
-            schema_version: PERSISTED_SCHEMA_VERSION,
-            credentials: list,
-        },
-    )
-}
-
-/// REPLACE the credential set WHOLESALE (the `auth login --yes` account switch: the old account's
-/// credentials must not linger under a new principal) — and the login re-mint writes its whole seat
-/// set in one atomic pass. Written `0600` under the identity lock. An EMPTY set writes an empty
-/// document (signed in as no-workspace is a real state), never deletes the file.
-pub(crate) fn replace_credentials(
-    fs: &dyn FsOps,
-    layout: &Layout,
-    entries: Vec<CredentialEntry>,
-) -> Result<(), ClientError> {
-    let _guard = fs.lock_exclusive(&layout.identity_lock_file())?;
-    fs.create_dir_all(&layout.identity_dir())?;
-    doc::write_doc_private(
-        fs,
-        &layout.credentials_path(),
-        &Credentials {
-            schema_version: PERSISTED_SCHEMA_VERSION,
-            credentials: entries,
+            device_id: device_id.to_owned(),
         },
     )
 }
 
 // =================================================================================================
-// The enrollment WAL (`identity/enrollment.json`) — the two-call resume's durable state. A `0600`
-// SECRET (it holds the device code and, once redeemed, the workspace credential). Hand-written `Debug`
-// redacts.
+// The enrollment WAL (`identity/enrollment.json`) — the device-flow resume's durable state: ONE
+// address-enroll phase (a `follow <address>` carries a follow intent; an `auth login` carries none).
+// A `0600` SECRET (it holds the device code, which the server promotes to the device credential on
+// approval). Hand-written `Debug` redacts. There is no post-grant fence phase: a re-poll of an
+// approved flow returns the same granted answer, so a crash between the grant and the sidecar writes
+// recovers by simply re-polling.
 // =================================================================================================
-
-/// One skill an invite pre-offered (carried in the WAL so a re-invoked `follow` can write `follows.json` + lay
-/// the first-receive baselines without re-reading the bootstrap).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct OfferedSkill {
-    pub skill_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-}
-
-/// How an enrollment was rooted — an `/i/` invite (the original door), a workspace-standup sign-in, a
-/// one-time admin claim, or a workspace-ADDRESS follow (the token-less join). Persisted in the WAL
-/// context so the promotion writes an honest `user.json.invite_rooted` and the standup publish can
-/// disclose its receipt; a missing field on an older WAL reads as `invite` (the only root that existed
-/// before this field).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum EnrollRoot {
-    /// Rooted in an `/i/` invite link.
-    Invite,
-    /// Rooted in the workspace-standup sign-in (an un-enrolled `publish` on a hosted plane).
-    Standup,
-    /// Rooted in a one-time admin-claim link (the self-host bearer door).
-    Claim,
-    /// Rooted in a `follow <workspace-address>` (the token-less join: the address carries nothing —
-    /// the roster is the lock; identity is proven at the verification page).
-    Address,
-}
 
 /// The kind half of a persisted follow intent (a doc-local copy — the resolver's `ResourceKind`
 /// carries no serde derives, and the workspace case exists only here).
@@ -454,9 +283,9 @@ pub(crate) enum FollowKindDoc {
     Skill,
 }
 
-/// The follow INTENT an address enrollment carries across the device-flow wait: what the original
-/// `follow` targeted, so a resumed invocation continues into that target's describe/apply after the
-/// promote (the enrollment itself is identity — reversible, disclosed; the subscription + bytes are
+/// The follow INTENT an enrollment carries across the device-flow wait: what the original `follow`
+/// targeted, so a resumed invocation continues into that target's describe/apply once the grant
+/// persists (the enrollment itself is identity — reversible, disclosed; the subscription + bytes are
 /// the consented effect and never land without the `--yes`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct FollowTargetDoc {
@@ -465,269 +294,77 @@ pub(crate) struct FollowTargetDoc {
     pub name: String,
 }
 
-/// The serde default for [`EnrollRoot`] — invite (the pre-existing WALs were all invite-rooted).
-fn default_enroll_root() -> EnrollRoot {
-    EnrollRoot::Invite
-}
-
-/// The non-secret workspace/plane context both WAL phases carry — everything a promotion needs to write
-/// `instance.json` + `follows.json` + `user.json` without re-contacting the plane.
+/// Which verb owns a pending enrollment — a `follow <address>` (continues into its follow intent) or
+/// an `auth login` (a re-enrollment with no follow intent). Internally tagged so the on-disk shape is
+/// `{ "kind": "follow", … }` / `{ "kind": "login" }`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct EnrollContext {
-    pub base_url: String,
-    pub deployment_mode: DeploymentMode,
-    pub enrollment_method: String,
-    pub workspace_id: String,
-    pub workspace_display_name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verified_domain: Option<String>,
-    pub verified_domain_status: VerifiedDomainStatus,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub offered_skills: Vec<OfferedSkill>,
-    /// How a followed skill adopts a new `current` (`--manual` ⇒ confirm-each, else auto).
-    pub mode: FollowModeDoc,
-    /// Which door rooted this enrollment (invite / standup / claim / address); absent on an older
-    /// WAL ⇒ invite.
-    #[serde(default = "default_enroll_root")]
-    pub root: EnrollRoot,
-    /// The follow intent an ADDRESS enrollment continues into after the promote (its describe /
-    /// `--yes` apply). Absent on every other root.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub follow_target: Option<FollowTargetDoc>,
-}
-
-/// The WAL phase. **Internally tagged** (`"phase"`), so the on-disk shape is
-/// `{ "phase": "authorizing", "context": {…}, … }`. Hand-written `Debug` on the wrapper redacts secrets.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "phase", rename_all = "snake_case")]
-pub(crate) enum EnrollPhase {
-    /// A live device-authorization session, awaiting the human's verification + a granted poll.
-    Authorizing {
-        context: EnrollContext,
-        /// **SECRET** — the device code the client polls with. Redacted in `Debug`.
-        device_code: String,
-        /// The short user code (also the `device_auth_id` the enroll possession frame binds).
-        user_code: String,
-        /// The SERVER-provided verification URL with the code embedded — persisted so a pending resume
-        /// re-emits it verbatim. `None` from an older plane (the resume then reconstructs a fallback).
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum EnrollIntentDoc {
+    /// A `follow <address>` enrollment: the follow intent to continue into, and the adoption mode
+    /// (`--manual` ⇒ confirm-each) the follow rows inherit.
+    Follow {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        verification_uri_complete: Option<String>,
-        /// The minimum poll interval, in seconds.
-        interval: u64,
-        /// The session expiry as epoch-millis — the recovery sweep abandons a WAL past this that never
-        /// reached `Redeemed`.
-        expires_at_millis: i64,
-    },
-    /// A live workspace-STANDUP device-authorization session (an un-enrolled `publish` on a hosted plane),
-    /// awaiting the human's sign-in approval. There is NO workspace yet — approving CREATES one — so this
-    /// phase carries the plane facts the standup authorize response disclosed instead of an
-    /// [`EnrollContext`]; the granted poll supplies `{workspace_id, display_name}`, at which point the
-    /// flow converts to the ordinary [`EnrollPhase::Redeemed`].
-    AuthorizingStandup {
-        /// The plane base URL this standup was started against (env override or the hosted default).
-        base_url: String,
-        /// The plane's deployment posture (from the authorize response's plane block; disclosure).
-        deployment_mode: DeploymentMode,
-        /// The enrollment method the plane advertised (disclosure only).
-        enrollment_method: String,
-        /// **SECRET** — the device code the client polls with. Redacted in `Debug`.
-        device_code: String,
-        /// The high-entropy standup code (also the `device_auth_id` the possession frame binds).
-        user_code: String,
-        /// The SERVER-provided sign-in URL with the code embedded — re-emitted verbatim while pending.
-        verification_uri_complete: String,
-        /// The session expiry as epoch-millis — the recovery sweep abandons an expired standup WAL
-        /// exactly like an expired `Authorizing` one.
-        expires_at_millis: i64,
-    },
-    /// A live workspace-ADDRESS enrollment session (`follow <workspace-address>`), awaiting the
-    /// human's verification. There is NO workspace id yet — only the requested ADDRESS name (whether
-    /// it exists is never disclosed pre-verification; the granted poll carries the authoritative
-    /// workspace context, and an unknown/not-yours name dies at the redeem's uniform denial).
-    AuthorizingAddress {
-        /// The plane API base (the card's declared base, re-root-gated).
-        base_url: String,
-        /// The requested workspace ADDRESS name (the `device/authorize` body's `workspace`).
-        workspace_name: String,
-        /// The follow intent to continue into after the promote (workspace / channel / skill).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        follow_target: Option<FollowTargetDoc>,
-        /// How followed skills adopt a new `current` (the original `--manual`).
+        target: Option<FollowTargetDoc>,
         mode: FollowModeDoc,
-        /// **SECRET** — the device code the client polls with. Redacted in `Debug`.
-        device_code: String,
-        /// The short user code (the session handle shown on the verification page).
-        user_code: String,
-        /// The SERVER-built verification URL with the code embedded — re-emitted verbatim while pending.
-        verification_uri_complete: String,
-        /// The session expiry as epoch-millis — the recovery sweep abandons an expired one.
-        expires_at_millis: i64,
     },
-    /// A live LOGIN device session (`auth login`), awaiting the human's verification. Workspace-less
-    /// by design: the granted poll's grant redeems at `POST /v1/login`, which re-mints one workspace
-    /// credential per confirmed seat.
-    AuthorizingLogin {
-        /// The plane API base the login runs against (the card's declared base, re-root-gated).
-        base_url: String,
-        /// **SECRET** — the device code the client polls with. Redacted in `Debug`.
-        device_code: String,
-        /// The short user code (the session handle shown on the verification page).
-        user_code: String,
-        /// The SERVER-built verification URL with the code embedded — re-emitted verbatim while pending.
-        verification_uri_complete: String,
-        /// The session expiry as epoch-millis — the recovery sweep abandons an expired one.
-        expires_at_millis: i64,
-    },
-    /// A one-time admin-CLAIM redeem about to be (or uncertainly) sent — written BEFORE the first POST so
-    /// an uncertain send retries `/v1/admin-claim` DIRECTLY from here (never refetching the `/i/` link —
-    /// a consumed claim bootstraps 404 by design; the server's same-device replay re-answers Redeemed).
-    ClaimPending {
-        base_url: String,
-        /// The plane's deployment posture (from the claim bootstrap; disclosure).
-        deployment_mode: DeploymentMode,
-        /// The enrollment method the bootstrap advertised (`"admin_claim"`; disclosure only).
-        enrollment_method: String,
-        /// The workspace the claim stands up (from the bootstrap row).
-        workspace_id: String,
-        /// The workspace display name (disclosure).
-        workspace_display_name: String,
-        /// **SECRET** — the one-time claim token. Redacted in `Debug`.
-        claim_token: String,
-    },
-    /// The grant was redeemed and the workspace credential minted — recorded BEFORE promotion (the lockout
-    /// fence: a single-use grant cannot be re-redeemed, so a crash after redeem completes from here).
-    Redeemed {
-        context: EnrollContext,
-        /// **SECRET** — the ONE workspace credential (Bearer on every request). Redacted in `Debug`.
-        credential: String,
-        device_key_id: String,
-        /// The principal the redeem seated (the confirmed email, or a device-rooted id) — persisted into
-        /// `user.json` on promotion and disclosed on the receipt. `None` from an older plane.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        principal: Option<String>,
-        /// When the redeem completed (epoch-millis), recorded into `user.json` on promotion.
-        enrolled_at_millis: i64,
-    },
+    /// An `auth login` re-enrollment — no follow intent; the grant just replaces the credential.
+    Login,
 }
 
-/// The enrollment WAL document. `state` is the phase; `schema_version` rides at the top so the fail-closed
-/// migration dispatch can probe it. The whole document is a `0600` secret.
+/// The enrollment WAL document — ONE live device-authorization flow, awaiting the human's approval.
+/// The whole document is a `0600` secret (the device code is promoted to the credential on approval).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PendingEnrollment {
     pub schema_version: u32,
-    pub state: EnrollPhase,
+    /// The API base the flow runs against (the card's declared base, re-root-gated).
+    pub base_url: String,
+    /// The requested workspace ADDRESS slug (the `device/authorize` body's `workspace`). Whether it
+    /// exists is never disclosed pre-approval; the granted poll carries the authoritative workspace.
+    pub workspace_name: String,
+    /// Which verb owns the resume (and, for a follow, the intent to continue into).
+    pub intent: EnrollIntentDoc,
+    /// **SECRET** — the device code the client polls with. Redacted in `Debug`.
+    pub device_code: String,
+    /// The short user code (the cross-check shown on the approval page).
+    pub user_code: String,
+    /// The SERVER-built approval URL with the code embedded — re-emitted verbatim while pending.
+    pub verification_uri_complete: String,
+    /// The minimum poll interval, in seconds.
+    pub interval_secs: u64,
+    /// The flow expiry as epoch-millis — the recovery sweep abandons a WAL past this.
+    pub expires_at_millis: i64,
 }
 
-// Redact the WAL's secrets (the device code in `Authorizing`/`AuthorizingStandup`, the claim token in
-// `ClaimPending`, the workspace credential in `Redeemed`) so the whole document — held transiently in
-// memory — can never leak a secret through a Debug dump / panic / log.
+// Redact the WAL's secret (the device code — the credential-to-be) so the whole document, held
+// transiently in memory, can never leak it through a Debug dump / panic / log.
 impl std::fmt::Debug for PendingEnrollment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut s = f.debug_struct("PendingEnrollment");
-        s.field("schema_version", &self.schema_version);
-        match &self.state {
-            EnrollPhase::Authorizing {
-                context,
-                user_code,
-                interval,
-                expires_at_millis,
-                ..
-            } => {
-                s.field("phase", &"authorizing")
-                    .field("workspace_id", &context.workspace_id)
-                    .field("device_code", &"<redacted>")
-                    .field("user_code", user_code)
-                    .field("interval", interval)
-                    .field("expires_at_millis", expires_at_millis);
-            }
-            EnrollPhase::AuthorizingStandup {
-                base_url,
-                user_code,
-                expires_at_millis,
-                ..
-            } => {
-                s.field("phase", &"authorizing_standup")
-                    .field("base_url", base_url)
-                    .field("device_code", &"<redacted>")
-                    .field("user_code", user_code)
-                    .field("expires_at_millis", expires_at_millis);
-            }
-            EnrollPhase::AuthorizingAddress {
-                base_url,
-                workspace_name,
-                user_code,
-                expires_at_millis,
-                ..
-            } => {
-                s.field("phase", &"authorizing_address")
-                    .field("base_url", base_url)
-                    .field("workspace_name", workspace_name)
-                    .field("device_code", &"<redacted>")
-                    .field("user_code", user_code)
-                    .field("expires_at_millis", expires_at_millis);
-            }
-            EnrollPhase::AuthorizingLogin {
-                base_url,
-                user_code,
-                expires_at_millis,
-                ..
-            } => {
-                s.field("phase", &"authorizing_login")
-                    .field("base_url", base_url)
-                    .field("device_code", &"<redacted>")
-                    .field("user_code", user_code)
-                    .field("expires_at_millis", expires_at_millis);
-            }
-            EnrollPhase::ClaimPending {
-                base_url,
-                workspace_id,
-                ..
-            } => {
-                s.field("phase", &"claim_pending")
-                    .field("base_url", base_url)
-                    .field("workspace_id", workspace_id)
-                    .field("claim_token", &"<redacted>");
-            }
-            EnrollPhase::Redeemed {
-                context,
-                device_key_id,
-                principal,
-                enrolled_at_millis,
-                ..
-            } => {
-                s.field("phase", &"redeemed")
-                    .field("workspace_id", &context.workspace_id)
-                    .field("device_key_id", device_key_id)
-                    .field("principal", principal)
-                    .field("credential", &"<redacted>")
-                    .field("enrolled_at_millis", enrolled_at_millis);
-            }
-        }
-        s.finish()
+        f.debug_struct("PendingEnrollment")
+            .field("schema_version", &self.schema_version)
+            .field("base_url", &self.base_url)
+            .field("workspace_name", &self.workspace_name)
+            .field("intent", &self.intent)
+            .field("device_code", &"<redacted>")
+            .field("user_code", &self.user_code)
+            .field("verification_uri_complete", &self.verification_uri_complete)
+            .field("interval_secs", &self.interval_secs)
+            .field("expires_at_millis", &self.expires_at_millis)
+            .finish()
     }
 }
 
-/// `identity/user.json` — the enrolled device's identity (per-INSTALL) plus its workspace memberships.
-/// No secret → ordinary perms.
-///
-/// **`workspaces` is a REQUIRED field (no serde default) by design.** `schema_version` stays `1`, so a
-/// STALE single-workspace `user.json` (which carried `workspace_id` and no `workspaces`) is still handed
-/// to serde by [`crate::atomic::load_versioned`] — and the missing required `workspaces` field makes serde
-/// fail the parse, surfacing as [`ClientError::Corrupt`] rather than silently loading an empty-membership
-/// document. No users exist yet, so breaking the shape is intended; the fail-closed load is the guarantee.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `identity/user.json` — this install's workspace memberships plus the person's principal once a
+/// member-scoped read disclosed it. No secret → ordinary perms.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) struct UserDoc {
     pub schema_version: u32,
-    /// The confirmed email, if the wire ever carries one (the redeem response does not in v0). Per-install
-    /// identity (not per-workspace) — the device acts under one principal across every membership.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub email: Option<String>,
-    /// The principal the redeem seated this device as (a confirmed email, or a device-rooted id like
-    /// `dev.dk_…`) — the disclosure the standup receipt prints ("workspace X — owner Y").
+    /// The principal this install's seats belong to (the confirmed email) — recorded from the first
+    /// member-scoped `me` read (the enrollment poll deliberately discloses no identity), refreshed on
+    /// later reads. Disclosure only; `None` until a describe/apply has run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal: Option<String>,
-    /// The workspaces this install has joined on the pinned plane. REQUIRED (no `#[serde(default)]`) — see
-    /// the type comment: it is the fail-closed fence against a stale single-workspace document.
+    /// The workspaces this install has joined on the pinned plane.
+    #[serde(default)]
     pub workspaces: Vec<Membership>,
 }
 
@@ -754,7 +391,8 @@ impl UserDoc {
     ) -> Result<&Membership, ClientError> {
         if self.workspaces.is_empty() {
             return Err(ClientError::Enrollment(
-                "not enrolled in any workspace; run `topos follow <link>` first".into(),
+                "not enrolled in any workspace; run `topos follow <workspace-address>` first"
+                    .into(),
             ));
         }
         match explicit {
@@ -785,7 +423,7 @@ impl UserDoc {
 }
 
 /// Insert `m` into `user.workspaces`, REPLACING an existing membership with the same `workspace_id` (a
-/// re-follow / token refresh) or appending it (a first follow into a new workspace) — deduped by
+/// re-follow / re-login) or appending it (a first follow into a new workspace) — deduped by
 /// `workspace_id`, so a second follow never drops the first.
 pub(crate) fn upsert_membership(user: &mut UserDoc, m: Membership) {
     if let Some(existing) = user
@@ -799,31 +437,38 @@ pub(crate) fn upsert_membership(user: &mut UserDoc, m: Membership) {
     }
 }
 
-/// Refresh a stored membership's display name to the AUTHORITATIVE one — the enrollment poll can only
-/// echo the requested address slug (it must not disclose the real name pre-redeem), so the first
-/// member-authenticated `me` read replaces it with the workspace's true display name. A no-op when the
-/// membership is absent (nothing enrolled yet) — the enroll promote records it first.
+/// Refresh a stored membership's display name — and the person's principal — from the AUTHORITATIVE
+/// member-scoped `me` read: the enrollment poll only echoes what the person requested (it must not
+/// disclose more pre-approval), so the first member-authenticated read replaces the stored facts with
+/// the workspace's true ones. A no-op when the membership is absent (nothing enrolled yet).
 ///
 /// # Errors
 /// A doc read/write failure.
-pub(crate) fn set_membership_display_name(
+pub(crate) fn refresh_membership_facts(
     fs: &dyn FsOps,
     layout: &Layout,
     workspace_id: &str,
     display_name: &str,
+    principal: &str,
 ) -> Result<(), ClientError> {
     let Some(mut user) = read_user(fs, layout)? else {
         return Ok(());
     };
+    let mut changed = false;
     if let Some(m) = user
         .workspaces
         .iter_mut()
         .find(|e| e.workspace_id == workspace_id)
+        && m.display_name != display_name
     {
-        if m.display_name.as_deref() == Some(display_name) {
-            return Ok(());
-        }
-        m.display_name = Some(display_name.to_owned());
+        m.display_name = display_name.to_owned();
+        changed = true;
+    }
+    if user.principal.as_deref() != Some(principal) {
+        user.principal = Some(principal.to_owned());
+        changed = true;
+    }
+    if changed {
         write_user(fs, layout, &user)?;
     }
     Ok(())
@@ -832,12 +477,12 @@ pub(crate) fn set_membership_display_name(
 // -------------------------------------------------------------------------------------------------
 // The enrollment writers. `instance.json` is PUBLIC (plane metadata, no secret) → `write_doc`.
 // `follows.json` is pure subscription state, still `0600`-written for perm hygiene → `write_doc_private`.
-// `credentials.json` holds the secret workspace credentials → `write_doc_private` (0600). `user.json` is
+// `credentials.json` holds the secret device credential → `write_doc_private` (0600). `user.json` is
 // metadata only → `write_doc`. The WAL is a secret → `write_doc_private`.
 // -------------------------------------------------------------------------------------------------
 
-/// Write `instance.json` (the pinned plane + the workspace disclosure). The plane key is PUBLIC, so
-/// ordinary perms are fine. Idempotent — a re-promote rewrites identical bytes.
+/// Write `instance.json` (the pinned plane). The plane base is PUBLIC, so ordinary perms are fine.
+/// Idempotent — a re-enrollment against the same plane rewrites identical bytes.
 pub(crate) fn write_instance(
     fs: &dyn FsOps,
     layout: &Layout,
@@ -850,10 +495,10 @@ pub(crate) fn write_instance(
 /// (dedupe by `skill_id` — a later entry replaces an earlier one), preserving every untouched entry, then
 /// write the whole list `0600`. A second `follow` to another skill therefore never clobbers the first.
 ///
-/// A skill id is unique to ONE workspace (it is a plane-minted UUID), and the sidecar keys skills by id
-/// alone — so an addition that would land a `skill_id` ALREADY followed under a DIFFERENT `workspace_id`
-/// is refused (a forged/confused plane response, or a hand-edited doc): silently replacing the entry would
-/// re-scope an already-materialized skill. Nothing is written on refusal (the merged list is in-memory).
+/// A skill id is unique to ONE workspace (it is a plane-minted identifier), and the sidecar keys skills
+/// by id alone — so an addition that would land a `skill_id` ALREADY followed under a DIFFERENT
+/// `workspace_id` is refused (a forged/confused response, or a hand-edited doc): silently replacing the
+/// entry would re-scope an already-materialized skill. Nothing is written on refusal.
 ///
 /// # Errors
 /// [`ClientError::Corrupt`] on a cross-workspace `skill_id` collision; otherwise the [`FsOps`] failure.
@@ -891,10 +536,10 @@ pub(crate) fn write_follows_merged(
 }
 
 /// Flip one skill's `following` flag IN PLACE, with the whole read-modify-write under the `"identity"`
-/// lock — so a concurrent enrollment writer's freshly-minted row (token/mode) is never clobbered by a
-/// stale pre-lock snapshot (the lost-update a read-then-merge shape would allow; `write_follows_merged`
-/// is safe only for callers whose rows are freshly built, like the promote). A missing file or entry is
-/// a clean no-op (already not-followed); an already-equal flag writes nothing.
+/// lock — so a concurrent enrollment writer's freshly-minted row is never clobbered by a stale pre-lock
+/// snapshot (the lost-update a read-then-merge shape would allow; `write_follows_merged` is safe only
+/// for callers whose rows are freshly built). A missing file or entry is a clean no-op (already
+/// not-followed); an already-equal flag writes nothing.
 pub(crate) fn set_following(
     fs: &dyn FsOps,
     layout: &Layout,
@@ -1000,69 +645,39 @@ pub(crate) fn write_wal(
 }
 
 /// Read the enrollment WAL (a `0600` secret), or `None` if absent. Fail-closed on a permissive secret
-/// AND on any persisted skill/workspace id outside the validated charset (the WAL is a durable copy of
-/// wire data whose ids later key path joins — the same boundary rule as `follows.json`).
+/// AND on a persisted workspace name outside the address grammar (the WAL is a durable copy of wire
+/// data; the name rides request BODIES only — never a path join — but a hand-edited traversal shape
+/// still fails the load closed, the same boundary discipline as every other persisted identifier).
 pub(crate) fn read_wal(
     fs: &dyn FsOps,
     layout: &Layout,
 ) -> Result<Option<PendingEnrollment>, ClientError> {
     let wal: Option<PendingEnrollment> = doc::read_doc_private(fs, &layout.enrollment_path())?;
-    if let Some(w) = &wal {
-        let context = match &w.state {
-            EnrollPhase::Authorizing { context, .. } => context,
-            // The Redeemed phase carries the followed set on `context.offered_skills` (validated in the
-            // shared tail below), not per-skill creds any more.
-            EnrollPhase::Redeemed { context, .. } => context,
-            // A standup session has NO workspace yet — there is no id to validate (the granted poll's
-            // workspace id is validated at the wire boundary when it arrives).
-            EnrollPhase::AuthorizingStandup { .. } => return Ok(wal),
-            // A login session is workspace-less by design (the redeem's per-seat ids are validated at
-            // the wire boundary when they arrive).
-            EnrollPhase::AuthorizingLogin { .. } => return Ok(wal),
-            // An address session carries the requested ADDRESS name — a slug, not an id. It rides
-            // request BODIES only (never a path join), but a hand-edited traversal shape still fails
-            // the load closed (the same boundary discipline as every other persisted identifier).
-            EnrollPhase::AuthorizingAddress { workspace_name, .. } => {
-                if !crate::resolve::is_workspace_name(workspace_name) {
-                    return Err(ClientError::Corrupt(
-                        "the enrollment WAL's workspace name is not a valid address name".into(),
-                    ));
-                }
-                return Ok(wal);
-            }
-            // A claim WAL carries the workspace-to-be's id (it later keys user.json + URL splices).
-            EnrollPhase::ClaimPending { workspace_id, .. } => {
-                crate::id::validate_workspace_id(workspace_id)?;
-                return Ok(wal);
-            }
-        };
-        crate::id::validate_workspace_id(&context.workspace_id)?;
-        for s in &context.offered_skills {
-            crate::id::SkillId::parse(&s.skill_id)?;
-        }
+    if let Some(w) = &wal
+        && !crate::resolve::is_workspace_name(&w.workspace_name)
+    {
+        return Err(ClientError::Corrupt(
+            "the enrollment WAL's workspace name is not a valid address name".into(),
+        ));
     }
     Ok(wal)
 }
 
-/// Delete the enrollment WAL (on a completed promotion, or a swept abandon). NotFound-tolerant.
+/// Delete the enrollment WAL (once the grant persisted, or on a swept abandon). NotFound-tolerant.
 pub(crate) fn delete_wal(fs: &dyn FsOps, layout: &Layout) -> Result<(), ClientError> {
     fs.remove_file(&layout.enrollment_path())?;
     Ok(())
 }
 
-/// The recovery sweep for the enrollment WAL: remove an `Authorizing` / `AuthorizingStandup` WAL whose
-/// session has expired (`now_millis > expires_at_millis`) and never reached `Redeemed` — a clean abandon.
-/// A `Redeemed` WAL is **always preserved** (a re-resume promotes it), a `ClaimPending` WAL is preserved
-/// (its retry is always safe — the server's same-device replay of a consumed claim re-answers Redeemed,
-/// and the claim's expiry is enforced server-side), and an unexpired authorizing WAL of either kind is
-/// preserved (a resume can still poll it). Best-effort: an unreadable/corrupt WAL is left in place for
-/// the owning op to diagnose, never hard-failing recovery.
+/// The recovery sweep for the enrollment WAL: remove a WAL whose flow has expired
+/// (`now_millis > expires_at_millis`) — a clean abandon (the server's flow row expired with it). An
+/// unexpired WAL is preserved (a resume can still poll it; a granted flow re-answers the same grant).
+/// Best-effort: an unreadable/corrupt WAL is left in place for the owning op to diagnose, never
+/// hard-failing recovery.
 ///
-/// The read → decide → delete runs UNDER the `"identity"` lock (the same lock the device-key mint and
-/// every `follows.json` merge hold), and the phase is decided from the read taken under that lock —
-/// never from an earlier observation. A concurrent live flow that advanced the WAL (e.g. a granted poll
-/// recording `Redeemed`, the fence a crashed promotion completes from) before the lock was won is
-/// therefore re-observed and spared; only a WAL that is STILL an expired authorizing phase is reaped.
+/// The read → decide → delete runs UNDER the `"identity"` lock (the same lock every identity write
+/// holds), and the expiry is decided from the read taken under that lock — never from an earlier
+/// observation.
 pub(crate) fn sweep_expired_wal(
     fs: &dyn FsOps,
     layout: &Layout,
@@ -1080,22 +695,7 @@ pub(crate) fn sweep_expired_wal(
         // Absent → nothing to sweep. Unreadable/permissive/corrupt → leave it for the op to surface.
         Ok(None) | Err(_) => return Ok(()),
     };
-    let expired = match &wal.state {
-        EnrollPhase::Authorizing {
-            expires_at_millis, ..
-        }
-        | EnrollPhase::AuthorizingStandup {
-            expires_at_millis, ..
-        }
-        | EnrollPhase::AuthorizingAddress {
-            expires_at_millis, ..
-        }
-        | EnrollPhase::AuthorizingLogin {
-            expires_at_millis, ..
-        } => now_millis > *expires_at_millis,
-        EnrollPhase::ClaimPending { .. } | EnrollPhase::Redeemed { .. } => false,
-    };
-    if expired {
+    if now_millis > wal.expires_at_millis {
         delete_wal(fs, layout)?;
     }
     Ok(())
@@ -1110,20 +710,15 @@ mod tests {
     fn sample_instance() -> Instance {
         Instance {
             schema_version: 1,
-            base_url: "https://topos.sh".to_owned(),
-            deployment_mode: DeploymentMode::Cloud,
-            enrollment_method: "device_code".to_owned(),
+            base_url: "https://topos.sh/api".to_owned(),
         }
     }
 
-    fn sample_membership(workspace_id: &str, display_name: Option<&str>) -> Membership {
+    fn sample_membership(workspace_id: &str, display_name: &str) -> Membership {
         Membership {
             workspace_id: workspace_id.to_owned(),
-            display_name: display_name.map(str::to_owned),
-            roles: Vec::new(),
-            verified_domain: None,
-            verified_domain_status: VerifiedDomainStatus::Unverified,
-            invite_rooted: true,
+            name: format!("{workspace_id}-name"),
+            display_name: display_name.to_owned(),
             enrolled_at: 1,
         }
     }
@@ -1131,7 +726,6 @@ mod tests {
     fn user_with(workspaces: Vec<Membership>) -> UserDoc {
         UserDoc {
             schema_version: 1,
-            email: None,
             principal: None,
             workspaces,
         }
@@ -1161,14 +755,35 @@ mod tests {
         }
     }
 
-    fn sample_credentials() -> Credentials {
-        Credentials {
-            schema_version: 1,
-            credentials: vec![CredentialEntry {
-                workspace_id: "w_acme".to_owned(),
-                credential: "wsc_secret".to_owned(),
-            }],
+    fn sample_wal(expires_at_millis: i64) -> PendingEnrollment {
+        PendingEnrollment {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            base_url: "https://topos.sh/api".to_owned(),
+            workspace_name: "acme".to_owned(),
+            intent: EnrollIntentDoc::Follow {
+                target: Some(FollowTargetDoc {
+                    kind: FollowKindDoc::Workspace,
+                    name: "acme".to_owned(),
+                }),
+                mode: FollowModeDoc::Auto,
+            },
+            device_code: "dc_secret".to_owned(),
+            user_code: "AAAA-BBBB".to_owned(),
+            verification_uri_complete: "https://topos.sh/devices?code=AAAA-BBBB".to_owned(),
+            interval_secs: 5,
+            expires_at_millis,
         }
+    }
+
+    /// A throwaway home for the load-boundary tests (mirrors the doc-module scratch pattern).
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("topos-enr-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]
@@ -1192,17 +807,40 @@ mod tests {
     }
 
     #[test]
-    fn credential_entry_debug_redacts_the_credential() {
-        // A follow entry carries no secret any more; the credential (in credentials.json) is the secret,
-        // and its `Debug` must never surface the plaintext.
-        let e = &sample_credentials().credentials[0];
-        let dbg = format!("{e:?}");
+    fn credentials_debug_redacts_the_credential() {
+        let c = Credentials {
+            schema_version: 1,
+            credential: "devc_secret".to_owned(),
+            device_id: "dev_1".to_owned(),
+        };
+        let dbg = format!("{c:?}");
         assert!(dbg.contains("<redacted>"));
         assert!(
-            !dbg.contains("wsc_secret"),
+            !dbg.contains("devc_secret"),
             "the credential must never appear in Debug"
         );
-        assert_eq!(e.workspace_id, "w_acme");
+        assert!(dbg.contains("dev_1"));
+    }
+
+    #[test]
+    fn credentials_write_read_round_trip_is_0600_and_replaces_wholesale() {
+        let fs = crate::fs_seam::RealFs;
+        let layout = Layout::new(&scratch("cred-rt"));
+        write_credentials(&fs, &layout, "devc_one", "dev_1").unwrap();
+        // A re-enrollment REPLACES the one credential wholesale.
+        write_credentials(&fs, &layout, "devc_two", "dev_2").unwrap();
+        let back = read_credentials(&fs, &layout).unwrap().unwrap();
+        assert_eq!(back.credential, "devc_two");
+        assert_eq!(back.device_id, "dev_2");
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(layout.credentials_path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+        );
     }
 
     #[test]
@@ -1235,137 +873,11 @@ mod tests {
         assert_eq!(ctxs[1].1.mode, FollowMode::ConfirmEach);
         assert!(!ctxs[1].1.following);
 
-        // Each followed skill inherits its WORKSPACE credential (both skills are in w_acme here).
-        let creds = skill_creds(&f, &sample_credentials());
-        assert_eq!(creds.len(), 2);
-        assert_eq!(creds["s_deploy"].workspace_id, "w_acme");
-        assert_eq!(creds["s_deploy"].credential, "wsc_secret");
-        assert_eq!(creds["s_paused"].credential, "wsc_secret");
-
-        // A skill whose workspace has NO stored credential is omitted (the engine skips it as NotFound —
-        // never a request without a credential).
-        let empty = Credentials {
-            schema_version: 1,
-            credentials: Vec::new(),
-        };
-        assert!(skill_creds(&f, &empty).is_empty());
-    }
-
-    #[test]
-    fn write_credential_upserts_by_workspace_and_survives_reload() {
-        let fs = crate::fs_seam::RealFs;
-        let layout = Layout::new(&scratch("creds-upsert"));
-        std::fs::create_dir_all(layout.identity_dir()).unwrap();
-        // First enrollment into w_acme.
-        write_credential(&fs, &layout, "w_acme", "wsc_one").unwrap();
-        // A first enrollment into a SECOND workspace APPENDS (never drops the first).
-        write_credential(&fs, &layout, "w_beta", "wsc_beta").unwrap();
-        // A RE-enrollment into w_acme REPLACES its credential.
-        write_credential(&fs, &layout, "w_acme", "wsc_two").unwrap();
-        let map = read_credentials(&fs, &layout).unwrap().unwrap().into_map();
-        assert_eq!(map.len(), 2);
-        assert_eq!(map["w_acme"], "wsc_two");
-        assert_eq!(map["w_beta"], "wsc_beta");
-        // credentials.json is 0600 (a secret).
-        use std::os::unix::fs::PermissionsExt as _;
-        assert_eq!(
-            std::fs::metadata(layout.credentials_path())
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600,
-        );
-    }
-
-    #[test]
-    fn read_follows_scrubs_a_legacy_read_token_without_losing_follows() {
-        // A pre-migration follows.json carries a `read_token` per entry (a dead secret). read_follows must
-        // preserve every follow (skill/workspace/mode/review/following) yet scrub the token from disk on
-        // first contact.
-        let fs = crate::fs_seam::RealFs;
-        let layout = Layout::new(&scratch("legacy-follows"));
-        // The old-format bytes (schema_version 1, entries WITH read_token), written 0600 as the old writer
-        // would have. `rt` is assembled so this literal never trips the workspace hygiene grep.
-        let legacy = format!(
-            "{{\"schema_version\":1,\"follows\":[\
-               {{\"skill_id\":\"s_deploy\",\"workspace_id\":\"w_acme\",\
-                 \"{tok}\":\"rt_dead_secret\",\"mode\":\"auto\",\
-                 \"review_required\":false,\"following\":true}},\
-               {{\"skill_id\":\"s_paused\",\"workspace_id\":\"w_acme\",\
-                 \"{tok}\":\"rt_dead_two\",\"mode\":\"confirm_each\",\
-                 \"review_required\":true,\"following\":false}}]}}",
-            tok = "read_token",
-        );
-        fs.write_private(&layout.follows_path(), legacy.as_bytes())
-            .unwrap();
-
-        let follows = read_follows(&fs, &layout).unwrap().unwrap();
-        // The follows survive byte-exact (both entries, all fields).
-        assert_eq!(follows.follows.len(), 2);
-        assert_eq!(follows.follows[0].skill_id, "s_deploy");
-        assert_eq!(follows.follows[0].workspace_id, "w_acme");
-        assert_eq!(follows.follows[0].mode, FollowModeDoc::Auto);
-        assert!(follows.follows[0].following);
-        assert_eq!(follows.follows[1].skill_id, "s_paused");
-        assert_eq!(follows.follows[1].mode, FollowModeDoc::ConfirmEach);
-        assert!(follows.follows[1].review_required);
-        assert!(!follows.follows[1].following);
-
-        // The dead secret is scrubbed from disk: the file no longer names `read_token` (nor its value).
-        let on_disk = std::fs::read_to_string(layout.follows_path()).unwrap();
-        assert!(
-            !on_disk.contains("read_token"),
-            "the legacy token field must be scrubbed: {on_disk}"
-        );
-        assert!(!on_disk.contains("rt_dead_secret"));
-        // A second read is a clean no-op (nothing left to scrub) and still returns the follows.
-        assert_eq!(
-            read_follows(&fs, &layout).unwrap().unwrap().follows.len(),
-            2
-        );
-    }
-
-    #[test]
-    fn read_follows_scrubs_a_mixed_legacy_and_migrated_file() {
-        // A MIXED file — one entry still carrying a legacy `read_token`, one already tokenless (e.g. an
-        // interrupted prior migration, or a new follow appended by a post-migration writer). The `any()`
-        // trigger fires on the one legacy entry; both follows survive and the file ends tokenless.
-        let fs = crate::fs_seam::RealFs;
-        let layout = Layout::new(&scratch("mixed-follows"));
-        let mixed = format!(
-            "{{\"schema_version\":1,\"follows\":[\
-               {{\"skill_id\":\"s_legacy\",\"workspace_id\":\"w_acme\",\
-                 \"{tok}\":\"rt_still_here\",\"mode\":\"auto\",\
-                 \"review_required\":false,\"following\":true}},\
-               {{\"skill_id\":\"s_migrated\",\"workspace_id\":\"w_acme\",\
-                 \"mode\":\"confirm_each\",\"review_required\":true,\"following\":true}}]}}",
-            tok = "read_token",
-        );
-        fs.write_private(&layout.follows_path(), mixed.as_bytes())
-            .unwrap();
-
-        let follows = read_follows(&fs, &layout).unwrap().unwrap();
-        assert_eq!(follows.follows.len(), 2);
-        assert_eq!(follows.follows[0].skill_id, "s_legacy");
-        assert_eq!(follows.follows[1].skill_id, "s_migrated");
-        assert!(follows.follows[1].review_required);
-        let on_disk = std::fs::read_to_string(layout.follows_path()).unwrap();
-        assert!(
-            !on_disk.contains("read_token") && !on_disk.contains("rt_still_here"),
-            "the one legacy token in a mixed file must be scrubbed: {on_disk}"
-        );
-    }
-
-    /// A throwaway home for the load-boundary tests (mirrors the doc-module scratch pattern).
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static N: AtomicU32 = AtomicU32::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("topos-enr-{tag}-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        // The skill → workspace map is total over the follows (the ONE credential serves them all).
+        let ws = skill_workspaces(&f);
+        assert_eq!(ws.len(), 2);
+        assert_eq!(ws["s_deploy"], "w_acme");
+        assert_eq!(ws["s_paused"], "w_acme");
     }
 
     #[test]
@@ -1400,320 +912,70 @@ mod tests {
     }
 
     #[test]
-    fn read_wal_refuses_a_traversal_id_on_load() {
-        // The WAL is a durable copy of wire data — same boundary rule as follows.json.
+    fn wal_round_trips_redacts_and_validates_the_workspace_name() {
         let fs = crate::fs_seam::RealFs;
-        let layout = Layout::new(&scratch("hostile-wal"));
+        let layout = Layout::new(&scratch("wal-rt"));
         std::fs::create_dir_all(layout.identity_dir()).unwrap();
-        let wal = PendingEnrollment {
-            schema_version: PERSISTED_SCHEMA_VERSION,
-            state: EnrollPhase::Redeemed {
-                context: EnrollContext {
-                    base_url: "https://acme.topos.test".to_owned(),
-                    deployment_mode: DeploymentMode::SelfHost,
-                    enrollment_method: "device_code".to_owned(),
-                    workspace_id: "w_acme".to_owned(),
-                    workspace_display_name: "Acme".to_owned(),
-                    verified_domain: None,
-                    verified_domain_status: VerifiedDomainStatus::Unverified,
-                    offered_skills: vec![OfferedSkill {
-                        skill_id: "../../x".to_owned(),
-                        name: None,
-                    }],
-                    mode: FollowModeDoc::Auto,
-                    root: EnrollRoot::Invite,
-                    follow_target: None,
-                },
-                credential: "wsc_secret".to_owned(),
-                device_key_id: "dk_abc".to_owned(),
-                principal: None,
-                enrolled_at_millis: 1,
-            },
-        };
+        let wal = sample_wal(2_000);
         write_wal(&fs, &layout, &wal).unwrap();
-        let err = read_wal(&fs, &layout).unwrap_err();
-        assert!(matches!(err, ClientError::Corrupt(_)), "got {err:?}");
-    }
-
-    #[test]
-    fn standup_and_claim_wal_phases_round_trip_and_redact_their_secrets() {
-        let fs = crate::fs_seam::RealFs;
-        let layout = Layout::new(&scratch("standup-wal"));
-        std::fs::create_dir_all(layout.identity_dir()).unwrap();
-
-        // AuthorizingStandup: round-trips through the 0600 WAL, Debug redacts the device code.
-        let standup = PendingEnrollment {
-            schema_version: PERSISTED_SCHEMA_VERSION,
-            state: EnrollPhase::AuthorizingStandup {
-                base_url: "https://api.topos.sh".to_owned(),
-                deployment_mode: DeploymentMode::Cloud,
-                enrollment_method: "device_code".to_owned(),
-                device_code: "dc_standup_secret".to_owned(),
-                user_code: "ABCDEFGH23456789".to_owned(),
-                verification_uri_complete: "https://topos.sh/verify/ABCDEFGH23456789".to_owned(),
-                expires_at_millis: 2_000,
-            },
-        };
-        write_wal(&fs, &layout, &standup).unwrap();
-        let back = read_wal(&fs, &layout).unwrap().expect("standup WAL loads");
-        assert_eq!(back, standup);
+        let back = read_wal(&fs, &layout).unwrap().expect("the WAL loads");
+        assert_eq!(back, wal);
+        // Debug redacts the device code (the credential-to-be).
         let dbg = format!("{back:?}");
         assert!(dbg.contains("<redacted>"));
         assert!(
-            !dbg.contains("dc_standup_secret"),
+            !dbg.contains("dc_secret"),
             "the device code must never appear in Debug: {dbg}"
         );
-
-        // ClaimPending: round-trips, Debug redacts the claim token, and a traversal workspace id in a
-        // (hand-edited) claim WAL fails the load closed.
-        let claim = PendingEnrollment {
-            schema_version: PERSISTED_SCHEMA_VERSION,
-            state: EnrollPhase::ClaimPending {
-                base_url: "https://plane.acme.test".to_owned(),
-                deployment_mode: DeploymentMode::SelfHost,
-                enrollment_method: "admin_claim".to_owned(),
-                workspace_id: "w_acme".to_owned(),
-                workspace_display_name: "Acme".to_owned(),
-                claim_token: "claim_bearer_secret".to_owned(),
-            },
+        // A login-intent WAL round-trips too (the tagged shape).
+        let login = PendingEnrollment {
+            intent: EnrollIntentDoc::Login,
+            ..sample_wal(2_000)
         };
-        write_wal(&fs, &layout, &claim).unwrap();
-        let back = read_wal(&fs, &layout).unwrap().expect("claim WAL loads");
-        assert_eq!(back, claim);
-        let dbg = format!("{back:?}");
-        assert!(dbg.contains("<redacted>"));
-        assert!(
-            !dbg.contains("claim_bearer_secret"),
-            "the claim token must never appear in Debug: {dbg}"
-        );
+        write_wal(&fs, &layout, &login).unwrap();
+        assert_eq!(read_wal(&fs, &layout).unwrap().unwrap(), login);
+        // A hand-edited traversal workspace name fails the load closed. Assembled (not a source
+        // literal) so the repo hygiene grep for traversal-looking strings stays clean.
         let hostile = PendingEnrollment {
-            schema_version: PERSISTED_SCHEMA_VERSION,
-            state: EnrollPhase::ClaimPending {
-                base_url: "https://plane.acme.test".to_owned(),
-                deployment_mode: DeploymentMode::SelfHost,
-                enrollment_method: "admin_claim".to_owned(),
-                // A parent-traversal workspace id, assembled (not a source literal) so the repo hygiene
-                // grep for traversal-looking strings stays clean while the test still exercises it.
-                workspace_id: ["..", "..", "w"].join("/"),
-                workspace_display_name: "Acme".to_owned(),
-                claim_token: "claim_bearer_secret".to_owned(),
-            },
+            workspace_name: ["..", "..", "w"].join("/"),
+            ..sample_wal(2_000)
         };
         write_wal(&fs, &layout, &hostile).unwrap();
         let err = read_wal(&fs, &layout).unwrap_err();
         assert!(matches!(err, ClientError::Corrupt(_)), "got {err:?}");
     }
 
-    /// A clean `Redeemed` WAL (the crash-recovery fence a live flow records before promotion).
-    fn redeemed_wal() -> PendingEnrollment {
-        PendingEnrollment {
-            schema_version: PERSISTED_SCHEMA_VERSION,
-            state: EnrollPhase::Redeemed {
-                context: EnrollContext {
-                    base_url: "https://acme.topos.test".to_owned(),
-                    deployment_mode: DeploymentMode::SelfHost,
-                    enrollment_method: "device_code".to_owned(),
-                    workspace_id: "w_acme".to_owned(),
-                    workspace_display_name: "Acme".to_owned(),
-                    verified_domain: None,
-                    verified_domain_status: VerifiedDomainStatus::Unverified,
-                    offered_skills: Vec::new(),
-                    mode: FollowModeDoc::Auto,
-                    root: EnrollRoot::Invite,
-                    follow_target: None,
-                },
-                credential: "wsc_secret".to_owned(),
-                device_key_id: "dk_abc".to_owned(),
-                principal: None,
-                enrolled_at_millis: 1,
-            },
-        }
-    }
-
     #[test]
-    fn sweep_decides_from_the_read_under_the_identity_lock_never_a_stale_one() {
-        // The TOCTOU the identity lock closes: the sweep sets out to reap an EXPIRED Authorizing WAL, but
-        // a concurrent live flow records `Redeemed` — the fence a crashed promotion completes from — just
-        // before the sweep wins the lock. The delete decision must come from the read taken UNDER the
-        // lock, so the Redeemed WAL survives. The seam decorator below delegates every op to the real fs
-        // and injects exactly that interleave: the moment the identity lock is requested, the WAL flips.
-        use crate::fs_seam::{LockGuard, PathKind, RealFs};
-        use std::cell::Cell;
-        use std::io;
-        use std::path::{Path, PathBuf};
-
-        struct SwapOnIdentityLock {
-            inner: RealFs,
-            layout: Layout,
-            identity_lock: PathBuf,
-            swapped: Cell<bool>,
-        }
-        impl FsOps for SwapOnIdentityLock {
-            fn lock_exclusive(&self, path: &Path) -> io::Result<LockGuard> {
-                if path == self.identity_lock && !self.swapped.get() {
-                    self.swapped.set(true);
-                    // The concurrent flow finished first: the WAL is now the Redeemed fence.
-                    write_wal(&self.inner, &self.layout, &redeemed_wal()).unwrap();
-                }
-                self.inner.lock_exclusive(path)
-            }
-            fn write_temp(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-                self.inner.write_temp(path, bytes)
-            }
-            fn fsync_file(&self, path: &Path) -> io::Result<()> {
-                self.inner.fsync_file(path)
-            }
-            fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-                self.inner.rename(from, to)
-            }
-            fn fsync_dir(&self, dir: &Path) -> io::Result<()> {
-                self.inner.fsync_dir(dir)
-            }
-            fn rename_dir_noreplace(&self, from: &Path, to: &Path) -> io::Result<()> {
-                self.inner.rename_dir_noreplace(from, to)
-            }
-            fn create_dir_all(&self, dir: &Path) -> io::Result<()> {
-                self.inner.create_dir_all(dir)
-            }
-            fn append_fsync(&self, path: &Path, line: &[u8]) -> io::Result<()> {
-                self.inner.append_fsync(path, line)
-            }
-            fn remove_file(&self, path: &Path) -> io::Result<()> {
-                self.inner.remove_file(path)
-            }
-            fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
-                self.inner.remove_dir_all(path)
-            }
-            fn read_opt(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
-                self.inner.read_opt(path)
-            }
-            fn read_dir(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
-                self.inner.read_dir(dir)
-            }
-            fn exists(&self, path: &Path) -> bool {
-                self.inner.exists(path)
-            }
-            fn try_lock_exclusive(&self, path: &Path) -> io::Result<Option<LockGuard>> {
-                self.inner.try_lock_exclusive(path)
-            }
-            fn path_kind(&self, path: &Path) -> io::Result<Option<PathKind>> {
-                self.inner.path_kind(path)
-            }
-            fn write_staged(&self, path: &Path, bytes: &[u8], executable: bool) -> io::Result<()> {
-                self.inner.write_staged(path, bytes, executable)
-            }
-            fn write_private(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-                self.inner.write_private(path, bytes)
-            }
-            fn private_perms_ok(&self, path: &Path) -> io::Result<bool> {
-                self.inner.private_perms_ok(path)
-            }
-            fn exchange_dir(&self, a: &Path, b: &Path) -> io::Result<()> {
-                self.inner.exchange_dir(a, b)
-            }
-        }
-
-        let layout = Layout::new(&scratch("sweep-toctou"));
-        std::fs::create_dir_all(layout.identity_dir()).unwrap();
-        // On disk when the sweep starts: an EXPIRED Authorizing WAL (the stale observation).
-        let expired = PendingEnrollment {
-            schema_version: PERSISTED_SCHEMA_VERSION,
-            state: EnrollPhase::Authorizing {
-                context: match redeemed_wal().state {
-                    EnrollPhase::Redeemed { context, .. } => context,
-                    _ => unreachable!(),
-                },
-                device_code: "dc".to_owned(),
-                user_code: "CODE".to_owned(),
-                verification_uri_complete: None,
-                interval: 5,
-                expires_at_millis: 1_000,
-            },
-        };
-        let real = RealFs;
-        write_wal(&real, &layout, &expired).unwrap();
-
-        let fs = SwapOnIdentityLock {
-            inner: RealFs,
-            identity_lock: layout.identity_lock_file(),
-            layout: layout.clone(),
-            swapped: Cell::new(false),
-        };
-        sweep_expired_wal(&fs, &layout, 2_000).unwrap();
-        assert!(fs.swapped.get(), "the interleave fired at the lock");
-        let survivor = read_wal(&real, &layout).unwrap().expect(
-            "the Redeemed WAL a concurrent flow recorded before the lock was won must survive the sweep",
-        );
-        assert!(
-            matches!(survivor.state, EnrollPhase::Redeemed { .. }),
-            "got {survivor:?}"
-        );
-
-        // And the control: with no interleave, the same expired Authorizing WAL is still reaped.
-        write_wal(&real, &layout, &expired).unwrap();
-        sweep_expired_wal(&real, &layout, 2_000).unwrap();
-        assert!(read_wal(&real, &layout).unwrap().is_none());
-    }
-
-    #[test]
-    fn sweep_reaps_an_expired_standup_wal_and_keeps_a_claim_wal() {
+    fn sweep_reaps_only_an_expired_wal() {
         let fs = crate::fs_seam::RealFs;
-        let layout = Layout::new(&scratch("standup-sweep"));
+        let layout = Layout::new(&scratch("wal-sweep"));
         std::fs::create_dir_all(layout.identity_dir()).unwrap();
-        let standup = |expires_at_millis: i64| PendingEnrollment {
-            schema_version: PERSISTED_SCHEMA_VERSION,
-            state: EnrollPhase::AuthorizingStandup {
-                base_url: "https://api.topos.sh".to_owned(),
-                deployment_mode: DeploymentMode::Cloud,
-                enrollment_method: "device_code".to_owned(),
-                device_code: "dc".to_owned(),
-                user_code: "CODE".to_owned(),
-                verification_uri_complete: "https://topos.sh/verify/CODE".to_owned(),
-                expires_at_millis,
-            },
-        };
-        // Unexpired: preserved (a re-invoked publish can still poll it).
-        write_wal(&fs, &layout, &standup(10_000)).unwrap();
+        // Unexpired: preserved (a resume can still poll it — a granted flow re-answers the grant).
+        write_wal(&fs, &layout, &sample_wal(10_000)).unwrap();
         sweep_expired_wal(&fs, &layout, 5_000).unwrap();
         assert!(read_wal(&fs, &layout).unwrap().is_some());
-        // Expired: reaped, exactly like an expired invite Authorizing WAL.
+        // Expired: reaped (the server's flow row expired with it).
         sweep_expired_wal(&fs, &layout, 20_000).unwrap();
         assert!(read_wal(&fs, &layout).unwrap().is_none());
-        // A ClaimPending WAL has no client-side expiry — the sweep always preserves it (the retry is
-        // idempotent server-side, and the claim's own expiry is enforced at redeem).
-        let claim = PendingEnrollment {
-            schema_version: PERSISTED_SCHEMA_VERSION,
-            state: EnrollPhase::ClaimPending {
-                base_url: "https://plane.acme.test".to_owned(),
-                deployment_mode: DeploymentMode::SelfHost,
-                enrollment_method: "admin_claim".to_owned(),
-                workspace_id: "w_acme".to_owned(),
-                workspace_display_name: "Acme".to_owned(),
-                claim_token: "tok".to_owned(),
-            },
-        };
-        write_wal(&fs, &layout, &claim).unwrap();
-        sweep_expired_wal(&fs, &layout, i64::MAX).unwrap();
-        assert!(read_wal(&fs, &layout).unwrap().is_some());
+        // No WAL at all: a clean no-op.
+        sweep_expired_wal(&fs, &layout, 20_000).unwrap();
     }
 
     #[test]
-    fn a_stale_single_workspace_user_json_fails_closed_not_parsed_empty() {
-        // The crash-safety fence: `schema_version` stays 1, so a STALE single-workspace user.json is still
-        // handed to serde by `load_versioned` — and the missing REQUIRED `workspaces` field must make the
-        // parse fail (Corrupt), never silently load an empty-membership document.
-        let stale =
-            br#"{"schema_version":1,"workspace_id":"w_x","invite_rooted":true,"enrolled_at":1}"#;
-        assert!(
-            matches!(
-                load_versioned::<UserDoc>(stale, PERSISTED_SCHEMA_VERSION),
-                Err(ClientError::Corrupt(_))
-            ),
-            "a stale single-workspace user.json must fail closed, not parse as empty memberships"
-        );
-        // The new shape (even with zero memberships) parses.
-        let ok = br#"{"schema_version":1,"workspaces":[]}"#;
-        assert!(load_versioned::<UserDoc>(ok, PERSISTED_SCHEMA_VERSION).is_ok());
+    fn user_doc_round_trips_and_validates_workspace_ids() {
+        let fs = crate::fs_seam::RealFs;
+        let layout = Layout::new(&scratch("user-rt"));
+        let user = user_with(vec![sample_membership("w_a", "A")]);
+        write_user(&fs, &layout, &user).unwrap();
+        assert_eq!(read_user(&fs, &layout).unwrap().unwrap(), user);
+        // A traversal workspace id in a (hand-edited) membership fails the load closed.
+        let mut hostile = user_with(vec![sample_membership("w_a", "A")]);
+        hostile.workspaces[0].workspace_id = ["..", "w"].join("/");
+        write_user(&fs, &layout, &hostile).unwrap();
+        assert!(matches!(
+            read_user(&fs, &layout),
+            Err(ClientError::Corrupt(_))
+        ));
     }
 
     #[test]
@@ -1725,15 +987,15 @@ mod tests {
             Err(ClientError::Enrollment(_))
         ));
         // Exactly 1 → that one, no `--workspace` needed.
-        let one = user_with(vec![sample_membership("w_a", Some("A"))]);
+        let one = user_with(vec![sample_membership("w_a", "A")]);
         assert_eq!(
             one.resolve_write_workspace(None).unwrap().workspace_id,
             "w_a"
         );
         // >1 without an explicit choice → a workspace-selection error naming `--workspace` + the ids.
         let two = user_with(vec![
-            sample_membership("w_a", None),
-            sample_membership("w_b", None),
+            sample_membership("w_a", "A"),
+            sample_membership("w_b", "B"),
         ]);
         let err = two.resolve_write_workspace(None).unwrap_err();
         assert!(matches!(err, ClientError::WorkspaceSelection(_)));
@@ -1759,19 +1021,37 @@ mod tests {
     #[test]
     fn upsert_membership_replaces_same_workspace_and_appends_a_new_one() {
         let mut user = user_with(Vec::new());
-        upsert_membership(&mut user, sample_membership("w_a", Some("A")));
+        upsert_membership(&mut user, sample_membership("w_a", "A"));
         assert_eq!(user.workspaces.len(), 1);
         // Same workspace_id REPLACES (a re-follow / display-name refresh), never appends a duplicate.
-        upsert_membership(&mut user, sample_membership("w_a", Some("A-renamed")));
+        upsert_membership(&mut user, sample_membership("w_a", "A-renamed"));
         assert_eq!(user.workspaces.len(), 1);
-        assert_eq!(
-            user.membership("w_a").unwrap().display_name.as_deref(),
-            Some("A-renamed")
-        );
+        assert_eq!(user.membership("w_a").unwrap().display_name, "A-renamed");
         // A different workspace_id APPENDS (a second follow never drops the first).
-        upsert_membership(&mut user, sample_membership("w_b", None));
+        upsert_membership(&mut user, sample_membership("w_b", "B"));
         assert_eq!(user.workspaces.len(), 2);
         assert!(user.membership("w_a").is_some() && user.membership("w_b").is_some());
+    }
+
+    #[test]
+    fn refresh_membership_facts_updates_display_name_and_principal() {
+        let fs = crate::fs_seam::RealFs;
+        let layout = Layout::new(&scratch("refresh"));
+        write_user(
+            &fs,
+            &layout,
+            &user_with(vec![sample_membership("w_a", "A")]),
+        )
+        .unwrap();
+        refresh_membership_facts(&fs, &layout, "w_a", "Acme, Inc.", "alice@acme.com").unwrap();
+        let user = read_user(&fs, &layout).unwrap().unwrap();
+        assert_eq!(user.membership("w_a").unwrap().display_name, "Acme, Inc.");
+        assert_eq!(user.principal.as_deref(), Some("alice@acme.com"));
+        // A no-op refresh rewrites nothing (idempotent).
+        refresh_membership_facts(&fs, &layout, "w_a", "Acme, Inc.", "alice@acme.com").unwrap();
+        // An absent user.json is a clean no-op.
+        let empty = Layout::new(&scratch("refresh-none"));
+        refresh_membership_facts(&fs, &empty, "w_a", "X", "p").unwrap();
     }
 
     #[test]
@@ -1794,7 +1074,7 @@ mod tests {
         let follows = read_follows(&fs, &layout).unwrap().unwrap();
         assert_eq!(follows.follows.len(), 1);
         assert_eq!(follows.follows[0].workspace_id, "w_a");
-        // The SAME skill_id under the SAME workspace still updates cleanly (a token refresh).
+        // The SAME skill_id under the SAME workspace still updates cleanly (a mode refresh).
         write_follows_merged(&fs, &layout, &[entry("w_a")]).unwrap();
         assert_eq!(
             read_follows(&fs, &layout).unwrap().unwrap().follows.len(),
@@ -1806,7 +1086,7 @@ mod tests {
     fn read_follows_fails_closed_on_a_cross_workspace_skill_id() {
         // The READ side of the same invariant the write guard enforces: a pre-existing / hand-edited
         // follows.json carrying the SAME skill_id under two DIFFERENT workspaces must fail the LOAD closed
-        // (otherwise `skill_creds`'s by-id map collapses it / the first-match lookups mis-scope it).
+        // (otherwise the by-id maps collapse it / the first-match lookups mis-scope it).
         let fs = crate::fs_seam::RealFs;
         let layout = Layout::new(&scratch("xws-read"));
         let entry = |skill: &str, ws: &str| FollowEntry {
@@ -1836,5 +1116,11 @@ mod tests {
             read_follows(&fs, &layout).unwrap().unwrap().follows.len(),
             2
         );
+    }
+
+    #[test]
+    fn canonical_principal_trims_and_lowercases() {
+        assert_eq!(canonical_principal(" Alice@Acme.COM "), "alice@acme.com");
+        assert_eq!(canonical_principal("bob@x.test"), "bob@x.test");
     }
 }

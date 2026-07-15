@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "command": "follow",
+  "ok": true,
+  "data": {
+    "enrolled": false,
+    "pending": {
+      "expires_at": "2026-06-25T00:15:00Z",
+      "interval_secs": 5,
+      "user_code": "WXYZ-1234",
+      "verification_uri_complete": "https://topos.sh/devices?code=WXYZ-1234"
+    },
+    "plane_base_url": "https://topos.sh/api",
+    "workspace_id": "acme"
+  },
+  "warnings": [],
+  "next_actions": [
+    {
+      "code": "ENROLL_RESUME",
+      "argv": [
+        "topos",
+        "follow",
+        "--json"
+      ]
+    }
+  ]
+}

@@ -3,32 +3,96 @@
  * Regenerate with: bun run gen:plane
  */
 export interface paths {
-    "/v1/enroll/verify/{user_code}": {
+    "/v1/device/authorize": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get: operations["read_verification_context"];
+        get?: never;
         put?: never;
-        post?: never;
+        post: operations["device_auth_start"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/v1/workspaces/{ws}/me": {
+    "/v1/device/token": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get: operations["get_me"];
+        get?: never;
         put?: never;
-        post?: never;
+        post: operations["device_auth_poll"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/proposals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["propose"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["publish"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/reverts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["revert"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/reviews": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["review"];
         delete?: never;
         options?: never;
         head?: never;
@@ -51,14 +115,142 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/workspaces/{ws}/skills/{skill}/reach": {
+    "/v1/workspaces/{ws}/channels/{ch}/membership": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get: operations["get_reach"];
+        get?: never;
+        put: operations["channel_join"];
+        post?: never;
+        delete: operations["channel_leave"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/channels/{ch}/protection": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["set_channel_protection"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/channels/{ch}/skills/{skill}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["channel_place"];
+        post?: never;
+        delete: operations["channel_unplace"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/delivery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_delivery"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/devices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["revoke_device"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/exclusions/{skill}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["exclude_device"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/follows/{skill}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["follow_skill"];
+        post?: never;
+        delete: operations["unfollow_skill"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/invitations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["invite"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_me"];
         put?: never;
         post?: never;
         delete?: never;
@@ -83,47 +275,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/workspaces/{ws}/invitations": {
+    "/v1/workspaces/{ws}/proposals": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        get: operations["get_proposals"];
         put?: never;
-        post: operations["invite"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/workspaces/{ws}/follows/{skill}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put: operations["follow_skill"];
-        post?: never;
-        delete: operations["unfollow_skill"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/workspaces/{ws}/exclusions/{skill}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put: operations["exclude_device"];
         post?: never;
         delete?: never;
         options?: never;
@@ -131,7 +291,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/workspaces/{ws}/channels/{ch}/membership": {
+    "/v1/workspaces/{ws}/report": {
         parameters: {
             query?: never;
             header?: never;
@@ -139,25 +299,89 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        put: operations["channel_join"];
+        put: operations["put_report"];
         post?: never;
-        delete: operations["channel_leave"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/v1/workspaces/{ws}/channels/{ch}/skills/{skill}": {
+    "/v1/workspaces/{ws}/skills": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
-        put: operations["channel_place"];
+        get: operations["list_skills"];
+        put?: never;
         post?: never;
-        delete: operations["channel_unplace"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/skills/{skill}/bundles/{object_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_object"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/skills/{skill}/current": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_current"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/skills/{skill}/log": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_log"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/skills/{skill}/proposals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_proposals"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -179,15 +403,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/workspaces/{ws}/channels/{ch}/protection": {
+    "/v1/workspaces/{ws}/skills/{skill}/reach": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
-        put: operations["set_channel_protection"];
+        get: operations["get_reach"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/workspaces/{ws}/skills/{skill}/versions/{version_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_version"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -226,18 +466,6 @@ export interface components {
             /** @description The name the skill was adopted under (what `list` / `diff` / `publish` now resolve it by). */
             name: string;
         };
-        /**
-         * @description `POST /v1/admin-claim` body — consume a one-time self-host claim token to stand up a workspace + seat its
-         *     first owner. The server re-derives the device key id from `device_public_key`.
-         */
-        AdminClaimRequest: {
-            /** @description The one-time admin-claim token. */
-            claim_token: string;
-            /** @description The claiming device's raw 32-byte public key, base64url-unpadded. */
-            device_public_key: string;
-            /** @description The display name for the standing-up workspace. */
-            display_name: string;
-        };
         /** @description What an outcome refers to (every field optional — a policy flip has no skill/version). */
         Affected: {
             proposal?: string | null;
@@ -246,154 +474,98 @@ export interface components {
             version?: string | null;
             workspace?: string | null;
         };
-        /**
-         * @description The payload an `/i/<token>` invite link resolves to — read once, before enrollment, to learn the
-         *     workspace + the plane API base to dial. No bytes, no role.
-         */
-        BootstrapData: {
-            /** @description The invite's non-secret descriptor (consent posture, expiry). */
-            invite: components["schemas"]["BootstrapInvite"];
-            /**
-             * @description The skills the invite pre-offers (a name may be absent → the client shows the id). Empty for a
-             *     membership-only door.
-             */
-            offered_skills?: components["schemas"]["BootstrapSkill"][];
-            /** @description The plane the workspace lives on — its API base and enrollment method. */
-            plane: components["schemas"]["BootstrapPlane"];
-            /**
-             * Format: int32
-             * @description Always `1` for this contract version (the schema pins it `const`).
-             */
-            schema_version: number;
-            /** @description The workspace the invite is for. */
-            workspace: components["schemas"]["BootstrapWorkspace"];
-        };
-        /** @description The invite's non-secret descriptor — the consent posture a redeemer agrees to, never a role. */
-        BootstrapInvite: {
-            /** @description The consent posture every first-receive follows. */
-            consent: components["schemas"]["ConsentMode"];
-            /** @description The invite's expiry as an RFC-3339 string, if it expires (`None` = never). */
-            expires_at?: string | null;
-            /**
-             * @description Whether a first-received skill auto-lands. **ALWAYS false** — a received skill is offered, never
-             *     silently applied (a direct human yes is required).
-             */
-            first_receive_auto_land: boolean;
-            /**
-             * @description A stable, non-secret reference for this invite (the link token the client used to reach the
-             *     payload). Empty for an admin-claim bootstrap — a claim token is a live one-time bearer capability
-             *     the server never echoes into a body; the claim client uses the token it parsed from the link.
-             */
-            token_id: string;
-        };
-        /** @description The plane a workspace lives on — its public base URL, deployment posture, and offered enrollment method. */
-        BootstrapPlane: {
-            /**
-             * @description The plane's public API base URL — the root the client dials for enrollment and sync after this
-             *     bootstrap read. Always the plane itself, never a web front: a share link may ride another host,
-             *     but the client re-roots onto this value the moment the bootstrap is fetched.
-             */
-            base_url: string;
-            /** @description This plane's deployment posture. */
-            deployment_mode: components["schemas"]["DeploymentMode"];
-            /** @description The enrollment method advertised to a bootstrapping device (e.g. `"device_code"` / `"passcode"`). */
-            enrollment_method: string;
-        };
-        /**
-         * @description One skill an invite pre-offers — its id, plus an optional display name (names ride the invite; a missing
-         *     name means the client shows the id).
-         */
-        BootstrapSkill: {
-            /** @description The skill's display name, if the invite carried one (else the client shows the id). */
-            name?: string | null;
-            /** @description The offered skill id. */
-            skill_id: string;
-        };
-        /**
-         * @description The workspace an invite is for — its id, display name, and domain-verification state. No role (the role
-         *     lives server-side on the pre-seeded member rows).
-         */
-        BootstrapWorkspace: {
-            /** @description The workspace display name (shown on the verification page + in the agent's disclosure). */
-            display_name: string;
-            /** @description The org-domain claim, if any. */
-            verified_domain?: string | null;
-            /** @description The domain-verification state. */
-            verified_domain_status: components["schemas"]["VerifiedDomainStatus"];
-            /** @description The workspace id. */
-            workspace_id: string;
-        };
-        /**
-         * @description The consent posture of an invite — a CLOSED set. v0 is a single mode: a received skill is disclosed and
-         *     awaits a direct human yes on first receive (never auto-landed).
-         * @enum {string}
-         */
-        ConsentMode: "direct_human_first_receive";
         CurrentRecord: {
-            generation: components["schemas"]["Generation"];
+            /** Format: int64 */
+            generation: number;
             /**
              * @description The full commit SHA-256 (lowercase hex) — the `version_id`. NOT the `bundle_digest`: the
              *     pointer names the version, and the commit transitively pins the bytes.
              */
             version_id: string;
         };
+        /** @description `POST /v1/device/token` body — poll a device-authorization flow for its outcome. */
+        DeviceAuthPollRequest: {
+            /** @description The SECRET device code from `device/authorize`. */
+            device_code: string;
+        };
         /**
-         * @description A plane's deployment posture — a CLOSED set. `cloud` requires a confirmed identity step at enrollment;
-         *     `self_host` grants membership straight from a valid grant.
+         * @description `POST /v1/device/token` response — the poll `status`; a `granted` poll carries the device's ONE
+         *     bearer credential (the promoted device code — returned here and stored from this ONE field),
+         *     its device id, and the joined workspace. A re-poll of an approved flow returns the same answer.
+         */
+        DeviceAuthPollResponse: {
+            /**
+             * @description The device's plaintext bearer credential — present ONLY when `status` is `granted`. Returned
+             *     once per poll; the server stores only its sha256.
+             */
+            credential?: string | null;
+            /** @description The registered device's id — present ONLY when `status` is `granted`. */
+            device_id?: string | null;
+            /** @description The poll status. */
+            status: components["schemas"]["DeviceAuthPollStatus"];
+            workspace?: null | components["schemas"]["DeviceAuthWorkspace"];
+        };
+        /**
+         * @description A device-authorization poll status (snake_case). `granted` carries the credential + the joined
+         *     workspace; every other status carries only itself.
          * @enum {string}
          */
-        DeploymentMode: "cloud" | "self_host";
+        DeviceAuthPollStatus: "pending" | "denied" | "expired" | "granted";
         /**
-         * @description `POST /v1/device/authorize` body — begin an RFC-8628 device-authorization flow. With a `workspace`
-         *     (the address name; the default `enroll` intent) the device enrolls toward that workspace; with
-         *     `intent = "standup"` — or neither field — it starts a STANDUP session (no workspace yet; hosted
-         *     planes only); with `intent = "login"` it starts a workspace-less LOGIN session whose grant redeems
-         *     at `POST /v1/login`. The server SERVER-derives the device key id from `device_public_key` (a
-         *     client-asserted id is never trusted).
+         * @description `POST /v1/device/authorize` body — begin a device-authorization flow toward a workspace named by
+         *     its address slug. Whether the name exists is never disclosed on this route: an unknown name runs
+         *     the same flow to the same uniform denial.
          */
-        DeviceAuthorizeRequest: {
+        DeviceAuthStartRequest: {
             /**
-             * @description The device's raw 32-byte public key, base64url-unpadded. The server derives the device key id from
-             *     it (never a client-asserted id) and binds it to the enrollment session.
+             * @description A human-readable device name shown on the approval page (a confused-deputy guard, not
+             *     authority) and kept as the device's display name once approved.
              */
-            device_public_key: string;
-            intent?: null | components["schemas"]["SessionIntent"];
-            /** @description A human-readable machine name shown on the verification page (a confused-deputy guard, not authority). */
-            machine_name: string;
-            /**
-             * @description The workspace ADDRESS name an enroll session targets (`topos.sh/<name>` minus the origin).
-             *     Whether the name exists is never disclosed on this route: an unknown name runs the same flow to
-             *     the same uniform denial a not-yours workspace gets.
-             */
-            workspace?: string | null;
+            requested_name: string;
+            /** @description The workspace ADDRESS slug the device asks to join (`topos.sh/<name>` minus the origin). */
+            workspace: string;
         };
-        /** @description `POST /v1/device/authorize` response — the RFC-8628 device-authorization grant (the names mirror the RFC). */
-        DeviceAuthorizeResponse: {
-            /** @description The SECRET device code the client polls `device/token` with. */
+        /** @description `POST /v1/device/authorize` response — the device-authorization grant (RFC-8628-shaped names). */
+        DeviceAuthStartResponse: {
+            /**
+             * @description The SECRET device code the client polls `device/token` with. On approval this same secret is
+             *     promoted to the device's bearer credential (see the module note), so it is stored like one.
+             */
             device_code: string;
             /**
              * Format: int64
-             * @description The session lifetime, in seconds (RFC-8628 `expires_in`).
+             * @description The flow lifetime, in seconds.
              */
-            expires_in: number;
+            expires_in_secs: number;
             /**
              * Format: int64
-             * @description The minimum poll interval, in seconds (RFC-8628 `interval`).
+             * @description The minimum poll interval, in seconds.
              */
-            interval: number;
-            plane?: null | components["schemas"]["BootstrapPlane"];
+            interval_secs: number;
             /**
-             * @description The opaque code identifying this device-auth session; it rides inside `verification_uri_complete`
-             *     (the human clicks the URL — it is not typed).
+             * @description The short human-facing code the approval page displays (a cross-check, never typed as a
+             *     secret).
              */
             user_code: string;
-            /** @description The verification URL a human visits to approve the session. */
+            /** @description The approval URL a signed-in human visits. */
             verification_uri: string;
             /**
-             * @description The verification URL with the user code already embedded (RFC-8628 `verification_uri_complete`) —
-             *     the one link to open; a client uses it VERBATIM when present.
+             * @description The approval URL with the user code already embedded — the one link to open; a client uses
+             *     it VERBATIM when present.
              */
-            verification_uri_complete?: string | null;
+            verification_uri_complete: string;
+        };
+        /**
+         * @description The workspace context a `granted` poll carries — everything the CLI needs to record what it
+         *     enrolled into (the id it scopes requests by, the address slug it joined at, and a display name).
+         */
+        DeviceAuthWorkspace: {
+            /** @description The workspace's display name. */
+            display_name: string;
+            /** @description The workspace's ADDRESS slug (what the human typed at `follow`). */
+            name: string;
+            /** @description The workspace id (the `{ws}` path segment of every subsequent request). */
+            workspace_id: string;
         };
         /**
          * @description `DELETE /v1/workspaces/{ws}/devices` body — revoke a registered device key (owner, or the device's own
@@ -410,53 +582,6 @@ export interface components {
             target_device_key_id: string;
             /** @description The target workspace id (scopes the op to one workspace). */
             workspace_id: string;
-        };
-        /** @description `POST /v1/device/token` body — poll a device-authorization session for its grant. */
-        DeviceTokenRequest: {
-            /** @description The SECRET device code from `device/authorize`. */
-            device_code: string;
-        };
-        /**
-         * @description `POST /v1/device/token` response — the poll `status`, plus the opaque single-use enrollment `grant` ONLY
-         *     when `status` is `granted`. A re-poll of a confirmed session re-derives the SAME grant (idempotent issue).
-         */
-        DeviceTokenResponse: {
-            /** @description The opaque single-use enrollment grant — present ONLY when `status` is `granted` (the redeem credential). */
-            grant?: string | null;
-            /** @description The poll status. */
-            status: components["schemas"]["DeviceTokenStatus"];
-            workspace?: null | components["schemas"]["DeviceTokenWorkspace"];
-        };
-        /**
-         * @description A device-authorization poll status — the RFC-8628 outcomes (snake_case). `granted` carries the opaque
-         *     grant; every other status carries only itself (no grant).
-         * @enum {string}
-         */
-        DeviceTokenStatus: "pending" | "slow_down" | "denied" | "expired" | "granted";
-        /**
-         * @description The workspace context a `granted` poll carries — the id + display name a STANDUP client (which never
-         *     read an `/i/` bootstrap) needs to build its redeem possession frame and disclose what it joined.
-         */
-        DeviceTokenWorkspace: {
-            /**
-             * @description The workspace's full ADDRESS (server-built on the public link base) — the share line's root;
-             *     absent when the plane predates addresses or the grant is workspace-less.
-             */
-            address?: string | null;
-            /** @description The workspace display name (a disclosure aid; `""` if the plane no longer has one). */
-            display_name: string;
-            /** @description The workspace the grant is scoped to. */
-            workspace_id: string;
-        };
-        /**
-         * @description The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the
-         *     agent consumes `expected`/`current` on a CONFLICT.
-         */
-        Generation: {
-            /** Format: int64 */
-            epoch: number;
-            /** Format: int64 */
-            seq: number;
         };
         /**
          * @description `POST /v1/workspaces/{ws}/invitations` success `data` — what the inviter pastes onward: the workspace
@@ -507,44 +632,6 @@ export interface components {
             schema_version: number;
             warnings?: string[];
         };
-        /** @description `POST /v1/login` success `data` — the proven identity + one entry per confirmed seat. */
-        LoginData: {
-            /** @description One entry per workspace where the principal holds a confirmed seat (possibly empty). */
-            memberships: components["schemas"]["LoginMembership"][];
-            /** @description The proven principal (canonical form). */
-            principal: string;
-        };
-        /** @description One workspace a login re-minted (or could not re-mint) a credential for. */
-        LoginMembership: {
-            /** @description Why no credential was minted (e.g. this device is revoked in that workspace); absent on success. */
-            blocked?: string | null;
-            /**
-             * @description The freshly minted plaintext workspace credential — absent when the mint was refused (see
-             *     `blocked`). Returned ONCE; the server stores only its hash.
-             */
-            credential?: string | null;
-            /** @description The device's non-secret key id in this workspace (server-derived). */
-            device_key_id: string;
-            /** @description The workspace's display name. */
-            display_name: string;
-            /** @description The workspace's ADDRESS name. */
-            name: string;
-            /** @description The person's role on the seat (`owner` / `reviewer` / `member`). */
-            role: string;
-            /** @description The workspace id. */
-            workspace_id: string;
-        };
-        /**
-         * @description `POST /v1/login` body — redeem a LOGIN grant: prove the device key the grant is bound to and
-         *     receive one workspace credential per confirmed seat. The grant is the bearer credential; the
-         *     device public key is a binding check (nothing signs).
-         */
-        LoginRedeemRequest: {
-            /** @description The device's raw 32-byte public key, base64url-unpadded — must equal the grant's bound key. */
-            device_public_key: string;
-            /** @description The opaque grant from the login device flow (the bearer credential for this one exchange). */
-            grant: string;
-        };
         /**
          * @description A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent
          *     branch on the known set and still pass through unknowns.
@@ -562,60 +649,9 @@ export interface components {
             /** @description The notice ids to mark read (only the caller's own unacked rows move; unknown ids are ignored). */
             ids: string[];
         };
-        /**
-         * @description `POST /v1/enroll/passcode` response — a CONSTANT-shaped ack (always `sent`); the send is fire-and-forget,
-         *     so neither the body nor its latency reveals whether the address was rostered.
-         */
-        PasscodeAck: {
-            /** @description Always `sent`. */
-            status: components["schemas"]["PasscodeAckStatus"];
-        };
-        /**
-         * @description The constant-shaped status of a started passcode challenge — always `sent`, so a non-rostered address is
-         *     no enumeration oracle (the cloud roster gate is enforced at redeem, never here).
-         * @enum {string}
-         */
-        PasscodeAckStatus: "sent";
-        /** @description `POST /v1/enroll/passcode/confirm` body — submit a passcode to confirm the session's identity. */
-        PasscodeConfirmRequest: {
-            /** @description The 6-digit passcode the human entered. */
-            code: string;
-            /** @description The email the passcode was sent to. */
-            email: string;
-            /** @description The user code naming the live device-auth session. */
-            user_code: string;
-        };
-        /** @description `POST /v1/enroll/passcode/confirm` response — the confirmation status. */
-        PasscodeConfirmResponse: {
-            /** @description The confirmation status. */
-            status: components["schemas"]["PasscodeConfirmStatus"];
-        };
-        /**
-         * @description The outcome of a passcode confirmation (snake_case). A wrong code carries only the status — never the
-         *     attempts remaining (no brute-force timing/count oracle on the wire).
-         * @enum {string}
-         */
-        PasscodeConfirmStatus: "confirmed" | "wrong_code" | "expired" | "too_many_attempts";
-        /** @description `POST /v1/enroll/passcode` body — start a passcode challenge for an email on a live device-auth session. */
-        PasscodeRequest: {
-            /** @description The email the passcode proves control of. */
-            email: string;
-            /** @description The user code naming the live device-auth session. */
-            user_code: string;
-        };
         PointerScope: {
             skill_id: string;
             workspace_id: string;
-        };
-        /**
-         * @description `PUT /v1/workspaces/{ws}/policy/review-required` body — the self-host operator toggle for the
-         *     `review-required` workspace policy (an idempotent set; JSON so the body stays extensible without a
-         *     path-shape change). Authenticated by the plane's admin token, not a device credential; the route is
-         *     invisible (404) on a plane with no admin token configured.
-         */
-        PolicyReviewRequiredRequest: {
-            /** @description The desired policy value: `true` gates any direct publish behind a reviewer's approval. */
-            review_required: boolean;
         };
         /**
          * @description `publish --propose` (opens a PR; uploads a full candidate **without moving `current`**). Returns
@@ -650,8 +686,11 @@ export interface components {
              *     candidate; the plane records a name only when the pointer actually moves (a later approve/publish).
              */
             display_name?: string | null;
-            /** @description The `(epoch, seq)` the proposal is born against (its base); a stale base later makes it non-current. */
-            expected: components["schemas"]["Generation"];
+            /**
+             * Format: int64
+             * @description The generation the proposal is born against (its base); a stale base later makes it non-current.
+             */
+            expected: number;
             /** @description The client-minted UUIDv4 idempotency key (replays the stored receipt on retry). */
             op_id: string;
             /** @description The target skill id within the workspace. */
@@ -670,64 +709,26 @@ export interface components {
             level: string;
         };
         /**
-         * @description `publish` (a direct publish that moves `current`). On a GENESIS (first) publish the client also folds in
-         *     a shareable `/i/` link pre-offering the skill — **best-effort + owner-gated** (minting it signs a
-         *     governance op the plane denies for a non-owner), so `invite_link` is `Some` only on a genesis publish by
-         *     an owner, and `None` otherwise. Under `review-required` a direct publish instead returns
-         *     `APPROVAL_REQUIRED` (with the `publish --propose` next-action) and carries no `data`. **INFERRED.**
-         *
-         *     An UN-ENROLLED direct publish on the hosted plane starts a workspace STANDUP instead of failing: the
-         *     envelope is still `ok = true`, but `data` carries the [`PublishPending`] block (sign in to approve) and
-         *     no version — `version_id` / `current_generation` are `None` at pending because nothing was published yet
-         *     (only the computed digest of the bytes being published can be honestly filled). Re-invoking the SAME
-         *     publish command (the `ENROLL_RESUME` next-action) resumes: once the sign-in is approved, the same command
-         *     completes enrollment AND the publish in one invocation, and the receipt carries the [`StandupReceipt`]
-         *     disclosure.
+         * @description `publish` (a direct publish that moves `current`). Under a `reviewed` bundle a direct publish is
+         *     DOWNGRADED to a proposal (see [`ProposeData`]); an un-enrolled publish is refused typed (enroll with
+         *     `topos follow <workspace-address>` first). **INFERRED.**
          */
         PublishData: {
             added?: null | components["schemas"]["AddedNote"];
             /**
-             * @description The byte-exact digest of the shipped (or, at pending, the scanned) bytes — always present: it is
-             *     computed over the draft before any network call, and an optional `<skill>@<digest>` pin gates it.
+             * @description The byte-exact digest of the shipped bytes — computed over the draft before any network call;
+             *     an optional `<skill>@<digest>` pin gates it.
              */
             bundle_digest: string;
-            current_generation?: null | components["schemas"]["Generation"];
-            pending?: null | components["schemas"]["PublishPending"];
             /**
-             * @description The paste-able share line for the shipped skill (`<workspace address>/skills/<name>`) — present
-             *     when the plane disclosed the workspace address. The pointer move is the real outcome; the line is
-             *     what a human pastes in chat.
+             * Format: int64
+             * @description The pointer's new generation after the move.
              */
-            share_line?: string | null;
+            current_generation: number;
             skill_id: string;
-            standup?: null | components["schemas"]["StandupReceipt"];
-            /**
-             * @description The new commit — `None` while the publish is PENDING a workspace-standup sign-in (nothing was
-             *     published yet; the version id is only knowable once the bytes actually ship).
-             */
-            version_id?: string | null;
+            /** @description The new commit (the shipped `version_id`). */
+            version_id: string;
         };
-        /** @description The workspace-standup sign-in a pending `publish` waits on. **INFERRED.** */
-        PublishPending: {
-            /** @description 16-hex fingerprint of this device's public key; a human cross-checks it against the sign-in page. */
-            device_fingerprint: string;
-            /** @description The sign-in session's expiry as an RFC-3339 string, if it expires. */
-            expires_at?: string | null;
-            /** @description Always `signin_required` — the one pending state this block discloses. */
-            status: components["schemas"]["PublishPendingStatus"];
-            /** @description The code embedded in the URL, shown for cross-checking on the sign-in page. */
-            user_code: string;
-            /**
-             * @description The sign-in URL with the code already embedded — the ONE link a human opens to approve (served by
-             *     the plane; the client uses it verbatim).
-             */
-            verification_uri_complete: string;
-        };
-        /**
-         * @description A pending publish's status — a CLOSED single-value set (snake_case): the standup sign-in is required.
-         * @enum {string}
-         */
-        PublishPendingStatus: "signin_required";
         /**
          * @description `POST /v1/publish` body — a direct publish that moves `current`. The acting device rides the
          *     `Authorization: Bearer` workspace credential (resolved in-transaction to its registry row + the
@@ -752,8 +753,11 @@ export interface components {
              *     (never clobbered to NULL).
              */
             display_name?: string | null;
-            /** @description The `(epoch, seq)` this publish's compare-and-set targets; a stale pair yields `CONFLICT`. */
-            expected: components["schemas"]["Generation"];
+            /**
+             * Format: int64
+             * @description The generation this publish's compare-and-set targets; a stale value yields `CONFLICT`.
+             */
+            expected: number;
             /** @description The client-minted UUIDv4 idempotency key — the same `op_id` replays the stored receipt byte-for-byte. */
             op_id: string;
             /** @description The target skill id within the workspace. */
@@ -771,10 +775,12 @@ export interface components {
             command: string;
             /** @description RFC 3339 timestamp (the plane stamps it; never an ambient clock in `topos-core`). */
             created_at: string;
-            current_generation?: null | components["schemas"]["Generation"];
+            /** Format: int64 */
+            current_generation?: number | null;
             /** @description Outcome-specific extra detail. */
             details?: unknown;
-            expected_generation?: null | components["schemas"]["Generation"];
+            /** Format: int64 */
+            expected_generation?: number | null;
             /** @description Client-minted UUIDv4, persisted before the first send. */
             op_id: string;
             outcome: components["schemas"]["TerminalOutcome"];
@@ -789,49 +795,12 @@ export interface components {
             workspace_id: string;
         };
         /**
-         * @description `POST /v1/workspaces/{ws}/devices` body — redeem an enrollment grant into a registered device + its
-         *     ONE minted workspace credential. The server checks `device_public_key` equals the grant's bound key
-         *     (a binding check) and re-derives the device key id from it.
-         */
-        RedeemRequest: {
-            /** @description The device's raw 32-byte public key, base64url-unpadded (must equal the grant's bound key). */
-            device_public_key: string;
-            /** @description The opaque single-use enrollment grant (from a `granted` device-token poll). */
-            grant: string;
-            /** @description The workspace the device enrolls into (authoritatively the grant's; echoed for the client's clarity). */
-            workspace_id: string;
-        };
-        /**
-         * @description `POST /v1/workspaces/{ws}/devices` success payload — the confirmed enrollment: the registered device
-         *     and its ONE workspace credential (the `0600` at-rest secret this device presents on every read and
-         *     write in this workspace). **NO user token, ever; no per-skill token, ever.** Rides in the all-outcome
-         *     envelope's `data`.
-         */
-        RedeemResponse: {
-            /**
-             * @description The plaintext workspace credential (returned ONCE; only its sha256 is stored server-side, on the
-             *     device's registry row). No expiry — revocation is a directory row-write, re-enrollment the rotation.
-             */
-            credential: string;
-            /**
-             * @description The server-derived device key id now registered (the device's stable, non-secret name — the
-             *     receipts/audit actor; never an authenticator).
-             */
-            device_key_id: string;
-            /**
-             * @description The principal the device now acts as (the confirmed email, or a device-rooted id) — a disclosure the
-             *     client persists and prints so a hijacked standup is visible ("workspace X — owner Y").
-             */
-            principal?: string | null;
-            /** @description The workspace the device enrolled into. */
-            workspace_id: string;
-        };
-        /**
-         * @description `revert` (a **forward** git-revert restoring older bytes as a new, higher-`seq` version — never a
-         *     pointer rollback, never a delete). `--to` names the GOOD version. **INFERRED.**
+         * @description `revert` (a **forward** git-revert restoring older bytes as a new, higher-generation version —
+         *     never a pointer rollback, never a delete). `--to` names the GOOD version. **INFERRED.**
          */
         RevertData: {
-            current_generation: components["schemas"]["Generation"];
+            /** Format: int64 */
+            current_generation: number;
             /** @description The new forward-revert commit that carries those bytes. */
             new_version_id: string;
             /** @description The good version named by `--to` (the bytes being restored). */
@@ -846,8 +815,11 @@ export interface components {
         RevertRequest: {
             /** @description The author device id recorded in the forward-revert commit frame. */
             author: string;
-            /** @description The `(epoch, seq)` this revert's compare-and-set targets; a stale pair yields `CONFLICT`. */
-            expected: components["schemas"]["Generation"];
+            /**
+             * Format: int64
+             * @description The generation this revert's compare-and-set targets; a stale value yields `CONFLICT`.
+             */
+            expected: number;
             /** @description The GOOD version (the `version_id` whose bytes are restored) as 64-char lowercase hex. */
             good: string;
             /** @description The forward-revert commit message. */
@@ -864,7 +836,11 @@ export interface components {
          *     base returns `CONFLICT`. **INFERRED.**
          */
         ReviewData: {
-            current_generation?: null | components["schemas"]["Generation"];
+            /**
+             * Format: int64
+             * @description The pointer's new generation when an approval moved `current`.
+             */
+            current_generation?: number | null;
             decision: components["schemas"]["ReviewDecision"];
             /** @description `<skill>@<version_id>` of the reviewed proposal. */
             proposal: string;
@@ -877,7 +853,7 @@ export interface components {
         ReviewDecision: "approve" | "reject" | "withdraw";
         /**
          * @description `POST /v1/reviews` body — a governance decision on an open proposal. `approve` runs the shared
-         *     `(epoch, seq)` compare-and-set on the proposal's base (a stale base ⇒ `CONFLICT`) and, under
+         *     generation compare-and-set on the proposal's base (a stale base ⇒ `CONFLICT`) and, under
          *     `review_required`, enforces four-eyes (the proposer may not self-approve) before promoting; `reject`
          *     is a standalone status flip (no pointer move).
          */
@@ -888,10 +864,11 @@ export interface components {
              */
             decision: components["schemas"]["ReviewDecision"];
             /**
-             * @description The `(epoch, seq)` the approval's compare-and-set targets (the proposal's base); a stale pair on an
-             *     `approve` yields `CONFLICT`.
+             * Format: int64
+             * @description The generation the approval's compare-and-set targets (the proposal's base); a stale value on
+             *     an `approve` yields `CONFLICT`.
              */
-            expected: components["schemas"]["Generation"];
+            expected: number;
             /** @description The client-minted UUIDv4 idempotency key (replays the stored receipt on retry). */
             op_id: string;
             /** @description The proposal being reviewed, named by its candidate commit id (64-char lowercase hex). */
@@ -904,82 +881,10 @@ export interface components {
             workspace_id: string;
         };
         /**
-         * @description `DELETE /v1/workspaces/{ws}/roster/{email}` body — remove a principal from the workspace roster
-         *     (owner-only). The target principal is the `{email}` path segment; the body carries only the op identity.
-         */
-        RosterRemoveRequest: {
-            /** @description The client-minted UUIDv4 idempotency key. */
-            op_id: string;
-            /** @description The target workspace id (scopes the op to one workspace). */
-            workspace_id: string;
-        };
-        /**
-         * @description `PUT /v1/workspaces/{ws}/roster/{email}` body — set a principal's workspace role (owner-only). The target
-         *     principal is the `{email}` path segment; the role rides the body.
-         */
-        RosterSetRequest: {
-            /** @description The client-minted UUIDv4 idempotency key. */
-            op_id: string;
-            /** @description The role to set on the `{email}` target. */
-            role: components["schemas"]["WorkspaceRole"];
-            /** @description The target workspace id (scopes the op to one workspace). */
-            workspace_id: string;
-        };
-        /**
-         * @description A device-auth session's intent — a CLOSED set (snake_case). `enroll` joins an existing workspace named
-         *     by its ADDRESS; `standup` starts with NO workspace (a signed-in human's approval creates one and seats
-         *     the approver as its first owner); `login` proves the person's identity and re-mints this device's
-         *     workspace credentials.
-         * @enum {string}
-         */
-        SessionIntent: "enroll" | "standup" | "login";
-        /**
-         * @description The standup disclosure a workspace-creating publish carries: which workspace was stood up and who owns
-         *     it. **INFERRED.**
-         */
-        StandupReceipt: {
-            /** @description The stood-up workspace's ADDRESS (the share link — printed once at genesis, pasted anywhere). */
-            address?: string | null;
-            /**
-             * @description The seated owner principal (the approver's confirmed email, or a device-rooted id) — the hijack
-             *     tripwire: a principal you don't recognize means someone else approved (and owns) this workspace.
-             */
-            owner_principal?: string | null;
-            /** @description The stood-up workspace's display name (chosen at the sign-in approval). */
-            workspace_display_name: string;
-        };
-        /**
          * @description The closed set of terminal outcomes the agent branches on. SCREAMING_SNAKE on the wire.
          * @enum {string}
          */
         TerminalOutcome: "OK" | "NEEDS_REVIEW" | "CONFLICT" | "DIVERGED" | "DENIED" | "UNAVAILABLE" | "AMBIGUOUS_NAME" | "RETRYABLE_FAILURE" | "PERMANENT_FAILURE";
-        /**
-         * @description `GET /v1/enroll/verify/{user_code}` response — the verification-page disclosure a human reviews before
-         *     confirming an identity (the RFC-8628 confused-deputy guard). Carries no secret.
-         */
-        VerificationContextResponse: {
-            /**
-             * @description A short hex fingerprint of the device's public key — a human cross-checks it against the device. A
-             *     display aid only, never an authority input.
-             */
-            device_fingerprint: string;
-            intent?: null | components["schemas"]["SessionIntent"];
-            /** @description The human-readable machine name the device offered at start. */
-            machine_name: string;
-            /** @description The skills the invite pre-offers (each with an optional display name). */
-            offered_skills?: components["schemas"]["BootstrapSkill"][];
-            /** @description The org-domain claim, if any. */
-            verified_domain?: string | null;
-            /** @description The domain-verification state. */
-            verified_domain_status: components["schemas"]["VerifiedDomainStatus"];
-            /** @description The workspace display name the device would join. */
-            workspace_display_name: string;
-        };
-        /**
-         * @description A workspace's domain-verification state — snake_case on the wire.
-         * @enum {string}
-         */
-        VerifiedDomainStatus: "unverified" | "pending" | "verified";
         /**
          * @description `PUT /v1/workspaces/{ws}/report` body — the fleet's applied-state report: this device's
          *     `(skill, applied version)` snapshot after a reconcile. The plane upserts the snapshot, drops the
@@ -1060,10 +965,10 @@ export interface components {
             skill_id: string;
         };
         /**
-         * @description The `current` pointer's wire body — the UNSIGNED document the plane serves at the pointer read,
-         *     embeds in OK receipts, and stores. It is unsigned: authority is the database row behind the pointer,
-         *     and integrity is the content-addressed `version_id` re-verified byte-for-byte on apply. A versioned
-         *     envelope; `ETag = "<epoch>.<seq>"`.
+         * @description The `current` pointer's wire body — the UNSIGNED document the pointer read serves and OK
+         *     receipts embed. It is unsigned: authority is the database row behind the pointer, and integrity
+         *     is the content-addressed `version_id` re-verified byte-for-byte on apply. A versioned envelope;
+         *     `ETag = "<generation>"`.
          */
         WireCurrentRecord: {
             record: components["schemas"]["CurrentRecord"];
@@ -1130,8 +1035,11 @@ export interface components {
             bundle_digest: string;
             /** @description The unsigned, advisory display name (the author's folder name); absent ⇒ show `name`. */
             display_name?: string | null;
-            /** @description The `current` pointer's `(epoch, seq)`. */
-            generation: components["schemas"]["Generation"];
+            /**
+             * Format: int64
+             * @description The `current` pointer's generation.
+             */
+            generation: number;
             /**
              * @description The catalog's bundle kind — `"skill"` for everything that exists today. Display metadata
              *     only: clients render it and never branch on it (an OPEN vocabulary, like `protection`).
@@ -1172,8 +1080,10 @@ export interface components {
             code: string;
             /** @description Structured context (no TTY prose to parse). */
             context?: unknown;
-            current_generation?: null | components["schemas"]["Generation"];
-            expected_generation?: null | components["schemas"]["Generation"];
+            /** Format: int64 */
+            current_generation?: number | null;
+            /** Format: int64 */
+            expected_generation?: number | null;
             next_actions?: components["schemas"]["NextAction"][];
             outcome: components["schemas"]["TerminalOutcome"];
             retryable: boolean;
@@ -1300,10 +1210,11 @@ export interface components {
          */
         WireOpenProposal: {
             /**
-             * @description The `(epoch, seq)` the proposal was opened against (its base); when `current` advances past it the
-             *     proposal stales and drops out of this list.
+             * Format: int64
+             * @description The generation the proposal was opened against (its base); when `current` advances past it
+             *     the proposal stales and drops out of this list.
              */
-            base_generation: components["schemas"]["Generation"];
+            base_generation: number;
             /** @description When the proposal was opened (the server-stamped RFC-3339 string). */
             created_at: string;
             /** @description The proposal's candidate commit id (64-char lowercase hex) — the `<skill>@<version_id>` handle. */
@@ -1399,8 +1310,11 @@ export interface components {
             bundle_digest: string;
             /** @description The unsigned, advisory folder display name (may be absent). */
             display_name?: string | null;
-            /** @description The `current` pointer's `(epoch, seq)`. */
-            generation: components["schemas"]["Generation"];
+            /**
+             * Format: int64
+             * @description The `current` pointer's generation.
+             */
+            generation: number;
             /**
              * @description The catalog's bundle kind — `"skill"` for everything that exists today. Display metadata
              *     only: clients render it and never branch on it (an OPEN vocabulary, like `status`).
@@ -1504,11 +1418,6 @@ export interface components {
             /** @description Whether the person also follows the skill directly (independent of any channel). */
             direct: boolean;
         };
-        /**
-         * @description A workspace-level governance role (the RBAC roster — DISTINCT from the per-skill read roster). snake_case.
-         * @enum {string}
-         */
-        WorkspaceRole: "owner" | "reviewer" | "member";
     };
     responses: never;
     parameters: never;
@@ -1518,29 +1427,30 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    read_verification_context: {
+    device_auth_start: {
         parameters: {
             query?: never;
             header?: never;
-            path: {
-                /** @description The user code shown by `device/authorize`. */
-                user_code: string;
-            };
+            path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeviceAuthStartRequest"];
+            };
+        };
         responses: {
-            /** @description The verification-page disclosure (machine name, fingerprint, workspace, offered skills). */
+            /** @description The device-authorization grant: the secret device_code to poll with (promoted to the device's ONE bearer credential on approval), the human-facing user_code, and the approval URLs. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["VerificationContextResponse"];
+                    "application/json": components["schemas"]["DeviceAuthStartResponse"];
                 };
             };
-            /** @description No live session for that user code. */
-            404: {
+            /** @description Malformed body. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1548,7 +1458,7 @@ export interface operations {
                     "application/json": components["schemas"]["JsonEnvelope"];
                 };
             };
-            /** @description Rate limited. */
+            /** @description Rate limited (Retry-After header). */
             429: {
                 headers: {
                     [name: string]: unknown;
@@ -1557,7 +1467,7 @@ export interface operations {
                     "application/json": components["schemas"]["JsonEnvelope"];
                 };
             };
-            /** @description Internal store fault. */
+            /** @description Internal fault. */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -1568,28 +1478,278 @@ export interface operations {
             };
         };
     };
-    get_me: {
+    device_auth_poll: {
         parameters: {
             query?: never;
-            header: {
-                /** @description `Bearer <workspace credential>`. */
-                Authorization: string;
-            };
-            path: {
-                /** @description Workspace id. */
-                ws: string;
-            };
+            header?: never;
+            path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeviceAuthPollRequest"];
+            };
+        };
         responses: {
-            /** @description The caller's own membership (identity + address + role + inviter + invite policy). */
+            /** @description The poll status; `granted` carries the ONE bearer credential (the promoted device code), the device id, and the joined workspace. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WireMe"];
+                    "application/json": components["schemas"]["DeviceAuthPollResponse"];
+                };
+            };
+            /** @description Malformed body. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Internal fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    propose: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <device credential>`. */
+                Authorization: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProposeRequest"];
+            };
+        };
+        responses: {
+            /** @description The all-outcome envelope + receipt (NEEDS_REVIEW on success — the candidate is committed without moving `current`). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Malformed body / id / candidate. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    publish: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <device credential>`. */
+                Authorization: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublishRequest"];
+            };
+        };
+        responses: {
+            /** @description The all-outcome envelope + receipt (OK / NEEDS_REVIEW / CONFLICT / DENIED …). An op_id retry replays byte-identically. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Malformed body / id / candidate. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    revert: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <device credential>`. */
+                Authorization: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RevertRequest"];
+            };
+        };
+        responses: {
+            /** @description The all-outcome envelope + receipt — a revert is a FORWARD commit restoring the good version's bytes (the pointer never moves backward). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Malformed body / id. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    review: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <device credential>`. */
+                Authorization: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReviewRequest"];
+            };
+        };
+        responses: {
+            /** @description The all-outcome envelope + receipt (approve promotes; reject requires its reason; withdraw is author-only). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Malformed body / id. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
                 };
             };
             /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
@@ -1643,358 +1803,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WireChannelIndex"];
-                };
-            };
-            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Rate limited (Retry-After header). */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Integrity / internal store fault. */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-        };
-    };
-    get_reach: {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description `Bearer <workspace credential>`. */
-                Authorization: string;
-            };
-            path: {
-                /** @description Workspace id. */
-                ws: string;
-                /** @description The skill's immutable id. */
-                skill: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The skill's audience (entitled members + their non-revoked devices). */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WireReach"];
-                };
-            };
-            /** @description Missing/blank credential, non-member, or unknown skill (indistinguishable). */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Rate limited (Retry-After header). */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Integrity / internal store fault. */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-        };
-    };
-    ack_notices: {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description `Bearer <workspace credential>`. */
-                Authorization: string;
-            };
-            path: {
-                /** @description Workspace id. */
-                ws: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["NoticeAckRequest"];
-            };
-        };
-        responses: {
-            /** @description The notices were acked (idempotent — only the caller's own unacked rows move). */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Malformed body. */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Rate limited (Retry-After header). */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Integrity / internal store fault. */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-        };
-    };
-    invite: {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description `Bearer <workspace credential>`. */
-                Authorization: string;
-            };
-            path: {
-                /** @description Workspace id. */
-                ws: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["InvitationRequest"];
-            };
-        };
-        responses: {
-            /** @description The invitation receipt — OK carries the InvitationData (address + invited + the honest mailed flag); a policy refusal is a 200 DENIED OWNER_ROLE_REQUIRED, an unknown channel a 200 DENIED UNKNOWN_CHANNEL. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Malformed body or a malformed invitee email. */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Rate limited (Retry-After header). */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Integrity / internal store fault. */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-        };
-    };
-    follow_skill: {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description `Bearer <workspace credential>`. */
-                Authorization: string;
-            };
-            path: {
-                /** @description Workspace id. */
-                ws: string;
-                /** @description The skill's immutable id to direct-follow (the client resolves the address to it). */
-                skill: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The subscription outcome (followed, or a 200 DENIED SKILL_NOT_ACTIVE). */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Rate limited (Retry-After header). */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Integrity / internal store fault. */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-        };
-    };
-    unfollow_skill: {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description `Bearer <workspace credential>`. */
-                Authorization: string;
-            };
-            path: {
-                /** @description Workspace id. */
-                ws: string;
-                /** @description The skill's immutable id to unfollow (person-scoped negative mask). */
-                skill: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The subscription outcome (unfollowed, or a 200 DENIED SKILL_NOT_ACTIVE). */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Rate limited (Retry-After header). */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Integrity / internal store fault. */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-        };
-    };
-    exclude_device: {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description `Bearer <workspace credential>`. */
-                Authorization: string;
-            };
-            path: {
-                /** @description Workspace id. */
-                ws: string;
-                /** @description The followed skill's immutable id to exclude from THIS device. */
-                skill: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The subscription outcome (excluded, or a 200 DENIED SKILL_NOT_ACTIVE). */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
                 };
             };
             /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
@@ -2100,6 +1908,74 @@ export interface operations {
         responses: {
             /** @description The membership outcome (left / not_member, or a 200 DENIED CHANNEL_BUILTIN for `everyone`). */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    set_channel_protection: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+                /** @description The channel name. */
+                ch: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProtectionSetRequest"];
+            };
+        };
+        responses: {
+            /** @description The protect outcome (set, or a 200 DENIED REVIEWER_ROLE_REQUIRED / OWNER_ROLE_REQUIRED). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description A level not valid for a channel (must be `curated` or `open`). */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2250,6 +2126,865 @@ export interface operations {
             };
         };
     };
+    get_delivery: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description This device's delivery answer (entitled skills, detached, notices, open-proposal count). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WireDelivery"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    revoke_device: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <device credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeviceRevokeRequest"];
+            };
+        };
+        responses: {
+            /** @description The revoke receipt (instant: the target credential stops authorizing fresh work the moment it commits). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Malformed body. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    exclude_device: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+                /** @description The followed skill's immutable id to exclude from THIS device. */
+                skill: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The subscription outcome (excluded, or a 200 DENIED SKILL_NOT_ACTIVE). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    follow_skill: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+                /** @description The skill's immutable id to direct-follow (the client resolves the address to it). */
+                skill: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The subscription outcome (followed, or a 200 DENIED SKILL_NOT_ACTIVE). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    unfollow_skill: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+                /** @description The skill's immutable id to unfollow (person-scoped negative mask). */
+                skill: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The subscription outcome (unfollowed, or a 200 DENIED SKILL_NOT_ACTIVE). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    invite: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InvitationRequest"];
+            };
+        };
+        responses: {
+            /** @description The invitation receipt — OK carries the InvitationData (address + invited + the honest mailed flag); a policy refusal is a 200 DENIED OWNER_ROLE_REQUIRED, an unknown channel a 200 DENIED UNKNOWN_CHANNEL. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Malformed body or a malformed invitee email. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    get_me: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The caller's own membership (identity + address + role + inviter + invite policy). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WireMe"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    ack_notices: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NoticeAckRequest"];
+            };
+        };
+        responses: {
+            /** @description The notices were acked (idempotent — only the caller's own unacked rows move). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Malformed body. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    get_proposals: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <device credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The review inbox: every OPEN proposal in the workspace, author message first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WireProposalIndex"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    put_report: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <workspace credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WireAppliedReport"];
+            };
+        };
+        responses: {
+            /** @description The applied-state report was recorded (no body). */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Malformed body or a bad skill / version id. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    list_skills: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <device credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The workspace catalog (metadata only, no bytes; catalog visibility == membership). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WireSkillIndex"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    get_object: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <device credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+                /** @description The skill's immutable id. */
+                skill: string;
+                /** @description The object's content id (64-char lowercase hex sha256). */
+                object_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The object's verified bytes (application/octet-stream). Served only through a skill that reaches it — never by bare hash. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing/blank credential, non-member, unreachable/unknown object, or a malformed id (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    get_current: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <device credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+                /** @description The skill's immutable id. */
+                skill: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The `current` pointer record (`ETag = "<generation>"`; a conditional GET answers 304). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WireCurrentRecord"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, non-member, or no pointer (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    get_log: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <device credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+                /** @description The skill's immutable id (an archived skill stays addressable). */
+                skill: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The skill's version history (purge tombstones included) + its proposal events. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WireSkillLog"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    list_proposals: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <device credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+                /** @description The skill's immutable id. */
+                skill: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The skill's OPEN proposals — handles only (version id, base generation, opened-at); no bytes, no proposer. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WireProposalList"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
     set_skill_protection: {
         parameters: {
             query?: never;
@@ -2318,7 +3053,7 @@ export interface operations {
             };
         };
     };
-    set_channel_protection: {
+    get_reach: {
         parameters: {
             query?: never;
             header: {
@@ -2328,28 +3063,24 @@ export interface operations {
             path: {
                 /** @description Workspace id. */
                 ws: string;
-                /** @description The channel name. */
-                ch: string;
+                /** @description The skill's immutable id. */
+                skill: string;
             };
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ProtectionSetRequest"];
-            };
-        };
+        requestBody?: never;
         responses: {
-            /** @description The protect outcome (set, or a 200 DENIED REVIEWER_ROLE_REQUIRED / OWNER_ROLE_REQUIRED). */
+            /** @description The skill's audience (entitled members + their non-revoked devices). */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
+                    "application/json": components["schemas"]["WireReach"];
                 };
             };
-            /** @description A level not valid for a channel (must be `curated` or `open`). */
-            400: {
+            /** @description Missing/blank credential, non-member, or unknown skill (indistinguishable). */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2357,7 +3088,55 @@ export interface operations {
                     "application/json": components["schemas"]["JsonEnvelope"];
                 };
             };
-            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    get_version: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <device credential>`. */
+                Authorization: string;
+            };
+            path: {
+                /** @description Workspace id. */
+                ws: string;
+                /** @description The skill's immutable id. */
+                skill: string;
+                /** @description The version's commit id (64-char lowercase hex). */
+                version_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The version's metadata + file listing (no blob bytes; the per-object read serves those). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WireVersionMeta"];
+                };
+            };
+            /** @description Missing/blank credential, non-member, or an unknown/purged version (indistinguishable). */
             404: {
                 headers: {
                     [name: string]: unknown;

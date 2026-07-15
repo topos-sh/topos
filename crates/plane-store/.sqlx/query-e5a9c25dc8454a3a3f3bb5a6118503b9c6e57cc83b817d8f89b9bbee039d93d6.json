@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM current_pointer WHERE workspace_id = $1 AND bundle_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e5a9c25dc8454a3a3f3bb5a6118503b9c6e57cc83b817d8f89b9bbee039d93d6"
+}

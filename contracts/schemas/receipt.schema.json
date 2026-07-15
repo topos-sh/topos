@@ -21,27 +21,23 @@
       "format": "date-time"
     },
     "current_generation": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/Generation"
-        },
-        {
-          "type": "null"
-        }
-      ]
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
     },
     "details": {
       "description": "Outcome-specific extra detail."
     },
     "expected_generation": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/Generation"
-        },
-        {
-          "type": "null"
-        }
-      ]
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
     },
     "op_id": {
       "description": "Client-minted UUIDv4, persisted before the first send.",
@@ -85,26 +81,6 @@
     "created_at"
   ],
   "$defs": {
-    "Generation": {
-      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
-      "type": "object",
-      "properties": {
-        "epoch": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "epoch",
-        "seq"
-      ]
-    },
     "TerminalOutcome": {
       "description": "The closed set of terminal outcomes the agent branches on. SCREAMING_SNAKE on the wire.",
       "oneOf": [

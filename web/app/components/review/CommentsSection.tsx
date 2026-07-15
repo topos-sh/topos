@@ -48,7 +48,7 @@ export function CommentsSection({
           {comments.map((comment) => (
             <li key={comment.id} className="rounded-lg border border-line-soft bg-panel px-4 py-3">
               <p className="text-faint text-xs">
-                <span className="text-dim">{comment.authorEmail}</span>
+                <span className="text-dim">{comment.authorDisplay}</span>
                 {" · "}
                 {relativeTime(comment.createdAt)}
               </p>

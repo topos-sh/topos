@@ -1,8 +1,8 @@
 import { FileListing } from "@/components/browse/file-listing";
 import { BrowseEmpty } from "@/components/browse/shell";
-import { firstLine, shortDevice } from "@/components/format";
+import { firstLine } from "@/components/format";
 import { Card, Chip, SectionHeading } from "@/components/ui";
-import type { WireVersionMeta } from "@/lib/plane/wire";
+import type { CustodyVersionMeta } from "@/lib/plane/wire";
 import type { ListingEntry } from "@/lib/view/tree";
 
 /**
@@ -35,7 +35,7 @@ export function VersionFiles({
   skill: string;
   versionId: string;
   /** The version's immutable metadata; null when the server had no readable version for this id. */
-  version: WireVersionMeta | null;
+  version: CustodyVersionMeta | null;
   /** `buildListing(version.files)`, computed by the loader. */
   entries: readonly ListingEntry[];
   currentChip?: boolean;
@@ -57,7 +57,7 @@ export function VersionFiles({
     <div className="space-y-6">
       <div className="space-y-3">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <span className="font-mono text-faint text-xs">device {shortDevice(version.author)}</span>
+          <span className="font-mono text-faint text-xs">{version.author}</span>
           {currentChip && <Chip tone="accent">current</Chip>}
           <span className="min-w-0 flex-1 truncate text-dim text-sm">
             {firstLine(version.message)}

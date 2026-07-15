@@ -19,17 +19,8 @@ pub mod results;
 /// On-disk persisted client documents under `~/.topos/` (sync / lock / map / op records).
 pub mod persisted;
 
-/// Wire request/response DTOs for the plane's HTTP write + version-metadata routes (the OpenAPI bodies).
+/// Wire request/response DTOs for the product's HTTP write + version-metadata routes (the OpenAPI bodies).
 pub mod requests;
-
-/// The unauthenticated invite-bootstrap payload (`GET /i/{token}`) — read BEFORE enrollment (TOFU).
-pub mod bootstrap;
-
-#[doc(inline)]
-pub use bootstrap::{
-    BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapSkill, BootstrapWorkspace,
-    ConsentMode, DeploymentMode, VerifiedDomainStatus,
-};
 
 /// Bumped on any breaking change to a WIRE shape (the `--json` envelope, the `current`
 /// pointer, the HTTP request/response bodies); every wire document carries it.
@@ -272,20 +263,12 @@ impl utoipa::ToSchema for ActionCode {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Generation, Affected, Receipt, WireError (one canonical receipt + flat error).
+// Affected, Receipt, WireError (one canonical receipt + flat error).
+//
+// Generation is a bare `u64` on the wire: the pointer's single monotonically advancing CAS
+// counter (every move compares the caller's expected generation and advances it by one). NEVER
+// rendered to a user; the agent consumes `expected`/`current` on a CONFLICT.
 // ---------------------------------------------------------------------------------------------
-
-/// The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the
-/// agent consumes `expected`/`current` on a CONFLICT.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct Generation {
-    pub epoch: u64,
-    pub seq: u64,
-}
 
 /// What an outcome refers to (every field optional — a policy flip has no skill/version).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -334,9 +317,9 @@ pub struct Receipt {
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_generation: Option<Generation>,
+    pub expected_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_generation: Option<Generation>,
+    pub current_generation: Option<u64>,
     /// RFC 3339 timestamp (the plane stamps it; never an ambient clock in `topos-core`).
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "date-time")))]
     pub created_at: String,
@@ -362,9 +345,9 @@ pub struct WireError {
     #[serde(default)]
     pub affected: Affected,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_generation: Option<Generation>,
+    pub expected_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_generation: Option<Generation>,
+    pub current_generation: Option<u64>,
     /// Structured context (no TTY prose to parse).
     #[serde(default)]
     pub context: serde_json::Value,
@@ -398,13 +381,13 @@ pub struct CurrentRecord {
     /// pointer names the version, and the commit transitively pins the bytes.
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub version_id: String,
-    pub generation: Generation,
+    pub generation: u64,
 }
 
-/// The `current` pointer's wire body — the UNSIGNED document the plane serves at the pointer read,
-/// embeds in OK receipts, and stores. It is unsigned: authority is the database row behind the pointer,
-/// and integrity is the content-addressed `version_id` re-verified byte-for-byte on apply. A versioned
-/// envelope; `ETag = "<epoch>.<seq>"`.
+/// The `current` pointer's wire body — the UNSIGNED document the pointer read serves and OK
+/// receipts embed. It is unsigned: authority is the database row behind the pointer, and integrity
+/// is the content-addressed `version_id` re-verified byte-for-byte on apply. A versioned envelope;
+/// `ETag = "<generation>"`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",

@@ -5,12 +5,8 @@ import { relativeTime } from "@/components/format";
 import { AddressBlock } from "@/components/members/address-block";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading, ShortId } from "@/components/ui";
 import { notFound, requireMember } from "@/lib/auth/guards.server";
-import {
-  planeWorkspaceById,
-  rosterOf,
-  type SkillIndexRow,
-  skillIndexOf,
-} from "@/lib/db/queries.server";
+import { rosterOf } from "@/lib/db/queries.roster.server";
+import { type SkillIndexRow, skillIndexOf, workspaceById } from "@/lib/db/queries.server";
 import { followBase } from "@/lib/plane/follow-base.server";
 
 export function meta({ params }: { params: { ws?: string } }) {
@@ -29,16 +25,16 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   }
   const actor = await requireMember(request, ws);
   const [workspace, index, roster] = await Promise.all([
-    // The directory's own workspace row — `?? ws` is the honest fallback when it has none.
-    planeWorkspaceById(actor, ws),
+    // The app's own workspace row — `?? ws` is the honest fallback when it has none.
+    workspaceById(actor, ws),
     skillIndexOf(actor, ws),
-    // Direct roster rows (no HTTP call): the confirmed-seat count is a display number.
+    // Direct seat rows: a seat IS membership, so the count is the roster's length.
     rosterOf(actor),
   ]);
   const name = workspace?.displayName ?? ws;
   // The address slug — what joining and sharing speak (`topos follow <origin>/<address>`).
   const address = workspace?.name ?? ws;
-  const memberCount = roster.filter((s) => s.status === "confirmed").length;
+  const memberCount = roster.length;
   return {
     ws,
     name,

@@ -1,12 +1,11 @@
 /**
- * The FIRST thing a reviewer must know: where this proposal stands against the team's current
- * version. Keyed to the page state machine (lib/review/state.ts) — the STORED resolution plus
- * derived staleness. `unknown` covers a read that couldn't anchor a real state — stated plainly,
- * never dressed up as one of the real states.
+ * The FIRST thing a reviewer must know: where this proposal stands. Keyed to the page state
+ * machine (lib/review/state.ts) — the stored resolution, with an approval refined against the
+ * live current pointer. `unknown` covers a stored status this build doesn't recognize — stated
+ * plainly, never dressed up as one of the real states.
  */
 export type ReviewStatus =
   | "pending"
-  | "stale"
   | "accepted-live"
   | "superseded"
   | "rejected"
@@ -17,7 +16,6 @@ export type ReviewStatus =
 // trust signal in the product never competes with a status banner.
 const STYLES: Record<ReviewStatus, string> = {
   pending: "border-line-soft bg-ground text-dim",
-  stale: "border-line bg-panel2 font-medium text-ink",
   "accepted-live": "border-line-soft bg-ground text-dim",
   superseded: "border-line-soft bg-ground text-dim",
   rejected: "border-line-soft bg-ground text-dim",
@@ -26,15 +24,14 @@ const STYLES: Record<ReviewStatus, string> = {
 };
 
 const COPY: Record<ReviewStatus, string> = {
-  pending: "Open — proposed against the team's current version.",
-  stale:
-    "current moved since this was proposed — it can no longer be approved as-is (a fresh propose is the path). The diff below compares against today's current.",
+  pending:
+    "Open — awaiting a reviewer's decision. The diff below compares against today's current.",
   "accepted-live": "Accepted — this candidate is the team's current version.",
   superseded:
     "Accepted earlier — current has since moved on. The diff below compares against today's current.",
   rejected: "Rejected — the resolution below says why.",
   closed:
-    "Closed without a decision — superseded by a newer proposal, withdrawn, or retired with its skill.",
+    "Closed without a decision — withdrawn by its proposer, or retired with its skill. The reason below says which.",
   unknown:
     "This proposal's status couldn't be confirmed. The change below is the immutable candidate version.",
 };

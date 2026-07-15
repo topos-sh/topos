@@ -113,26 +113,6 @@
         "kind"
       ]
     },
-    "Generation": {
-      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
-      "type": "object",
-      "properties": {
-        "epoch": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "epoch",
-        "seq"
-      ]
-    },
     "MergeReport": {
       "description": "The author-merge disclosure (the `merged` / `conflicted` outcomes of a diverged draft). **INFERRED\nfields** — the spec pins the merge semantics (deterministic, author-only, conflict-blocks-publish),\nnot this exact shape.",
       "type": "object",
@@ -266,7 +246,9 @@
         },
         "applied": {
           "description": "Highest generation actually materialized to disk.",
-          "$ref": "#/$defs/Generation"
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
         },
         "conflict": {
           "anyOf": [
@@ -291,7 +273,9 @@
         },
         "observed": {
           "description": "The generation the plane most recently served — the sync target.",
-          "$ref": "#/$defs/Generation"
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
         },
         "offer": {
           "anyOf": [

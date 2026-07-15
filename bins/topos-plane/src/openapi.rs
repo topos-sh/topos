@@ -1,73 +1,57 @@
-//! The `utoipa`-generated OpenAPI document for the plane's HTTP surface.
+//! The `utoipa`-generated OpenAPI document for the product's PUBLIC device lane.
 //!
-//! `xtask` serializes [`openapi()`] into `contracts/openapi/openapi.json` and a drift gate keeps it in sync
-//! with the annotated routes + the `topos-types` wire DTOs — so the committed contract can never silently
-//! diverge from the code (the same discipline the JSON-Schema artifacts use).
-//!
-//! The OIDC routes (behind the default-off `enroll-oidc` feature) are deliberately NOT registered here: the
-//! drift gate generates this contract from the DEFAULT build, so the committed contract stays stable whether
-//! or not the feature is enabled. The OIDC surface is an optional, feature-local extension.
+//! `xtask` serializes [`openapi()`] into `contracts/openapi/openapi.json` and a drift gate keeps it
+//! in sync with the `routes::door` contract stubs + the `topos-types` wire DTOs — so the committed
+//! contract can never silently diverge from the types. Every path here is SERVED BY THE COMPOSING
+//! PRODUCT APP (the door-stub precedent): the vault's own internal custody lane stays deliberately
+//! OUT of the committed contract (composition-internal, one caller).
 
 use utoipa::OpenApi;
 
-use topos_types::bootstrap::{
-    BootstrapData, BootstrapInvite, BootstrapPlane, BootstrapSkill, BootstrapWorkspace,
-    ConsentMode, DeploymentMode, VerifiedDomainStatus,
-};
 use topos_types::requests::{
-    AdminClaimRequest, DeviceAuthorizeRequest, DeviceAuthorizeResponse, DeviceRevokeRequest,
-    DeviceTokenRequest, DeviceTokenResponse, DeviceTokenStatus, DeviceTokenWorkspace,
-    InvitationData, InvitationRequest, LoginData, LoginMembership, LoginRedeemRequest,
-    NoticeAckRequest, PasscodeAck, PasscodeAckStatus, PasscodeConfirmRequest,
-    PasscodeConfirmResponse, PasscodeConfirmStatus, PasscodeRequest, PolicyReviewRequiredRequest,
-    ProposeRequest, ProtectionSetRequest, PublishRequest, RedeemRequest, RedeemResponse,
-    RevertRequest, ReviewRequest, RosterRemoveRequest, RosterSetRequest, SessionIntent,
-    VerificationContextResponse, WireAppliedReport, WireAppliedSkill, WireCandidate,
+    DeviceAuthPollRequest, DeviceAuthPollResponse, DeviceAuthPollStatus, DeviceAuthStartRequest,
+    DeviceAuthStartResponse, DeviceAuthWorkspace, DeviceRevokeRequest, InvitationData,
+    InvitationRequest, NoticeAckRequest, ProposeRequest, ProtectionSetRequest, PublishRequest,
+    RevertRequest, ReviewRequest, WireAppliedReport, WireAppliedSkill, WireCandidate,
     WireChannelEntry, WireChannelIndex, WireChannelSkill, WireDelivery, WireDeliverySkill,
     WireFile, WireFileMode, WireLogProposal, WireLogVersion, WireMe, WireNotice, WireOpenProposal,
     WireProposalEntry, WireProposalIndex, WireProposalList, WireProtocolCard, WireReach,
     WireSkillIndex, WireSkillIndexEntry, WireSkillLog, WireVersionFile, WireVersionMeta, WireVia,
-    WorkspaceRole,
 };
 use topos_types::results::{ProposeData, PublishData, RevertData, ReviewData, ReviewDecision};
 use topos_types::{
-    ActionCode, Affected, CurrentRecord, Generation, JsonEnvelope, NextAction, PointerScope,
-    Receipt, TerminalOutcome, WireCurrentRecord, WireError,
+    ActionCode, Affected, CurrentRecord, JsonEnvelope, NextAction, PointerScope, Receipt,
+    TerminalOutcome, WireCurrentRecord, WireError,
 };
 
 #[derive(OpenApi)]
 #[openapi(
     info(
-        title = "Topos OSS plane",
-        description = "The self-hostable Topos plane — workspace-credential writes AND reads (one Bearer credential per enrolled device; membership is the authorization), plus the enrollment + governance surface. Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
+        title = "Topos product API (device lane)",
+        description = "The device lane the product app serves: the gh-style device-auth enrollment (start/poll — approval promotes the device code to the device's ONE bearer credential), the publish/propose/revert/review writes, the current/version/object/catalog/proposals reads, the delivery + applied-state report, the describe reads, the row ops, and the device revoke. Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
         version = "0.0.0",
         license(name = "Apache-2.0"),
     ),
     paths(
-        crate::routes::publish::publish,
-        crate::routes::proposals::propose,
-        crate::routes::reverts::revert,
-        crate::routes::reviews::review,
-        crate::routes::current::get_current,
-        crate::routes::bundles::get_bundle,
-        crate::routes::versions::get_version,
-        crate::routes::proposals::list_proposals,
-        // The device-credential workspace catalog read (catalog visibility == membership).
-        crate::routes::skills_index::list_skills,
-        // The per-device currency lane + the member-lane row ops — SERVED BY THE COMPOSING WEB APP
-        // since the door cutover (the guarded `topos_*` SQL functions under its scoped role are the
-        // implementation); the vault does not mount these paths. The `routes::door` contract stubs
-        // keep the ONE committed OpenAPI describing the whole product wire, in the original entry
-        // order (the generated JSON is byte-compared). The two exceptions staying live on the vault
-        // — `describe::get_proposals` and `describe::get_log` — are byte-decorated reads (git
-        // commit messages ride both bodies), which the composing app deliberately cannot serve.
+        // Writes.
+        crate::routes::door::publish,
+        crate::routes::door::propose,
+        crate::routes::door::revert,
+        crate::routes::door::review,
+        // Reads.
+        crate::routes::door::get_current,
+        crate::routes::door::get_object,
+        crate::routes::door::get_version,
+        crate::routes::door::list_proposals,
+        crate::routes::door::list_skills,
         crate::routes::door::get_delivery,
         crate::routes::door::put_report,
         crate::routes::door::get_me,
         crate::routes::door::get_channels,
-        crate::routes::describe::get_proposals,
-        crate::routes::describe::get_log,
+        crate::routes::door::get_proposals,
+        crate::routes::door::get_log,
         crate::routes::door::get_reach,
+        // Row ops.
         crate::routes::door::follow_skill,
         crate::routes::door::unfollow_skill,
         crate::routes::door::exclude_device,
@@ -79,25 +63,11 @@ use topos_types::{
         crate::routes::door::set_channel_protection,
         crate::routes::door::ack_notices,
         crate::routes::door::invite,
-        // The unauthenticated claim bootstrap.
-        crate::routes::bootstrap::read_bootstrap,
-        // Enrollment flow (+ the login redeem). The passcode START is served by the composing web app
-        // since the mail unification (it mints over the internal lane and mails through its own seam) —
-        // its wire stays pinned by the `routes::door` stub; the confirm stays live on the vault.
-        crate::routes::enroll::start_device_auth,
-        crate::routes::enroll::poll_device_auth,
-        crate::routes::enroll::read_verification_context,
-        crate::routes::door::start_passcode,
-        crate::routes::enroll::complete_passcode,
-        crate::routes::enroll::redeem,
-        crate::routes::enroll::admin_claim,
-        crate::routes::login::login,
-        // Governance mutations.
-        crate::routes::governance::roster_set,
-        crate::routes::governance::roster_remove,
-        crate::routes::governance::revoke_device,
-        // The self-host operator policy toggle (admin bearer token).
-        crate::routes::policy::set_review_required,
+        // Enrollment: the device-auth flow.
+        crate::routes::door::device_auth_start,
+        crate::routes::door::device_auth_poll,
+        // Governance: the device revoke (the CLI logout wire).
+        crate::routes::door::revoke_device,
     ),
     components(schemas(
         // Request DTOs (writes).
@@ -108,8 +78,6 @@ use topos_types::{
         WireCandidate,
         WireFile,
         WireFileMode,
-        // The self-host operator policy toggle.
-        PolicyReviewRequiredRequest,
         // Response / envelope DTOs.
         JsonEnvelope,
         Receipt,
@@ -117,7 +85,6 @@ use topos_types::{
         NextAction,
         ActionCode,
         TerminalOutcome,
-        Generation,
         Affected,
         // The `current` pointer envelope.
         WireCurrentRecord,
@@ -129,7 +96,7 @@ use topos_types::{
         // The proposals-listing read.
         WireProposalList,
         WireOpenProposal,
-        // The device-credential workspace catalog read.
+        // The workspace catalog read.
         WireSkillIndex,
         WireSkillIndexEntry,
         // The per-device delivery read + the applied-state report.
@@ -155,10 +122,6 @@ use topos_types::{
         NoticeAckRequest,
         InvitationRequest,
         InvitationData,
-        // The login redeem.
-        LoginRedeemRequest,
-        LoginData,
-        LoginMembership,
         // The constant protocol card (the unmatched-path fallback's machine face).
         WireProtocolCard,
         // Per-verb `data` shapes (the agent's typed payloads).
@@ -167,44 +130,21 @@ use topos_types::{
         RevertData,
         ReviewData,
         ReviewDecision,
-        // The invite bootstrap payload.
-        BootstrapData,
-        BootstrapInvite,
-        ConsentMode,
-        BootstrapPlane,
-        DeploymentMode,
-        BootstrapWorkspace,
-        VerifiedDomainStatus,
-        BootstrapSkill,
-        // Enrollment request/response DTOs.
-        DeviceAuthorizeRequest,
-        DeviceAuthorizeResponse,
-        DeviceTokenRequest,
-        DeviceTokenResponse,
-        DeviceTokenStatus,
-        DeviceTokenWorkspace,
-        SessionIntent,
-        VerificationContextResponse,
-        PasscodeRequest,
-        PasscodeAck,
-        PasscodeAckStatus,
-        PasscodeConfirmRequest,
-        PasscodeConfirmResponse,
-        PasscodeConfirmStatus,
-        RedeemRequest,
-        RedeemResponse,
-        AdminClaimRequest,
+        // The device-auth flow.
+        DeviceAuthStartRequest,
+        DeviceAuthStartResponse,
+        DeviceAuthPollRequest,
+        DeviceAuthPollResponse,
+        DeviceAuthPollStatus,
+        DeviceAuthWorkspace,
         // Governance request DTOs.
-        RosterSetRequest,
-        RosterRemoveRequest,
         DeviceRevokeRequest,
-        WorkspaceRole,
     )),
     tags(
         (name = "writes", description = "Device-credential writes (publish / propose / revert / review) and the member-lane row ops (follows / channels / exclusions / protection / notices)."),
-        (name = "reads", description = "Workspace-credential device reads (current / bundles / versions / proposals / catalog / delivery / me / channels / proposals / log / reach) plus the body-light applied-state report."),
-        (name = "enrollment", description = "Claim bootstrap + the device-auth / passcode / redeem / admin-claim / login enrollment flow."),
-        (name = "governance", description = "Owner/admin device-credential mutations (roster / revoke) and the member-lane invitation (a roster write)."),
+        (name = "reads", description = "Device-credential reads (current / bundles / versions / proposals / catalog / delivery / me / channels / log / reach) plus the body-light applied-state report."),
+        (name = "enrollment", description = "The gh-style device-auth flow (start / poll; approval promotes the device code to the ONE bearer credential)."),
+        (name = "governance", description = "The device revoke and the member-lane invitation (a roster write)."),
     ),
 )]
 struct ApiDoc;

@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE object_presence SET status_updated_at = $4\n               WHERE workspace_id = $1 AND object_id = $2 AND status = 'deleting' AND status_updated_at < $3\n                 AND NOT EXISTS (\n                     SELECT 1 FROM version_object vo\n                     JOIN version v\n                       ON v.workspace_id = vo.workspace_id AND v.bundle_id = vo.bundle_id\n                      AND v.version_id = vo.version_id\n                     WHERE vo.workspace_id = $1 AND vo.object_id = $2 AND v.purged_at IS NULL)\n               RETURNING git_oid AS \"git_oid: Vec<u8>\", location AS \"location!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "git_oid: Vec<u8>",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 1,
+        "name": "location!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "eb61c88f380df9c07d1593eaaeb707b9d6b7642f4a1cdd5d4242ae240977b2d3"
+}

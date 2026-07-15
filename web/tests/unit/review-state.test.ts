@@ -1,58 +1,46 @@
 import { describe, expect, it } from "vitest";
-import {
-  deriveDiffAvailability,
-  deriveProposalPageState,
-  type LiveCurrentLike,
-  type ProposalDetailLike,
-} from "@/lib/review/state";
+import { deriveDiffAvailability, deriveProposalPageState } from "@/lib/review/state";
 
 /**
- * The page state machine as a truth table: STORED status × (base vs live generation) ×
- * (candidate vs live current id). Pure — the derivation the proposal page renders from.
+ * The proposal page's ONE state derivation as a truth table: the STORED status × (candidate vs
+ * live current id). Pure — the derivation the proposal page renders from. There is no staleness
+ * state anymore: a proposal stays decidable until someone decides it, and the approve action's
+ * CAS binding refuses a moved pointer as a fresh OUTCOME, never a page state.
  */
 
 const CANDIDATE = "c".repeat(64);
 const OTHER = "d".repeat(64);
 
-function detail(status: string, epoch = 3, seq = 7): ProposalDetailLike {
-  return { version_id: CANDIDATE, status, base_generation: { epoch, seq } };
-}
-
-function live(versionId: string, epoch = 3, seq = 7): LiveCurrentLike {
-  return { versionId, generation: { epoch, seq } };
-}
-
 describe("deriveProposalPageState", () => {
-  it("open on the live base is pending", () => {
-    expect(deriveProposalPageState(detail("open"), live(OTHER))).toBe("pending");
+  it("open is pending — decidable whatever the pointer says", () => {
+    expect(deriveProposalPageState("open", CANDIDATE, OTHER)).toBe("pending");
+    expect(deriveProposalPageState("open", CANDIDATE, CANDIDATE)).toBe("pending");
+    expect(deriveProposalPageState("open", CANDIDATE, null)).toBe("pending");
   });
 
-  it("open off the live base is stale — either half of the generation moving counts", () => {
-    expect(deriveProposalPageState(detail("open", 3, 8), live(OTHER))).toBe("stale");
-    expect(deriveProposalPageState(detail("open", 4, 7), live(OTHER))).toBe("stale");
+  it("approved with the candidate AS current is accepted-live", () => {
+    expect(deriveProposalPageState("approved", CANDIDATE, CANDIDATE)).toBe("accepted-live");
   });
 
-  it("accepted with the candidate AS current is accepted-live", () => {
-    expect(deriveProposalPageState(detail("accepted"), live(CANDIDATE, 3, 8))).toBe(
-      "accepted-live",
-    );
-  });
-
-  it("accepted with current moved on is superseded — the base comparison is irrelevant", () => {
-    expect(deriveProposalPageState(detail("accepted"), live(OTHER, 9, 9))).toBe("superseded");
-    // Even a generation equal to the base cannot make an accepted row pending again.
-    expect(deriveProposalPageState(detail("accepted"), live(OTHER))).toBe("superseded");
+  it("approved with current moved on is superseded — a missing pointer counts as moved", () => {
+    expect(deriveProposalPageState("approved", CANDIDATE, OTHER)).toBe("superseded");
+    expect(deriveProposalPageState("approved", CANDIDATE, null)).toBe("superseded");
   });
 
   it("rejected is rejected regardless of the pointer", () => {
-    expect(deriveProposalPageState(detail("rejected"), live(OTHER))).toBe("rejected");
-    expect(deriveProposalPageState(detail("rejected"), live(CANDIDATE))).toBe("rejected");
+    expect(deriveProposalPageState("rejected", CANDIDATE, OTHER)).toBe("rejected");
+    expect(deriveProposalPageState("rejected", CANDIDATE, CANDIDATE)).toBe("rejected");
   });
 
-  it("a missing live pointer or an unrecognized status folds to unknown — never dressed up", () => {
-    expect(deriveProposalPageState(detail("open"), undefined)).toBe("unknown");
-    expect(deriveProposalPageState(detail("withdrawn"), live(OTHER))).toBe("unknown");
-    expect(deriveProposalPageState(detail(""), live(OTHER))).toBe("unknown");
+  it("withdrawn is closed — a real terminal state, not an anchoring failure", () => {
+    expect(deriveProposalPageState("withdrawn", CANDIDATE, OTHER)).toBe("closed");
+    expect(deriveProposalPageState("withdrawn", CANDIDATE, null)).toBe("closed");
+  });
+
+  it("an unrecognized stored status folds to unknown — never dressed up", () => {
+    expect(deriveProposalPageState("", CANDIDATE, OTHER)).toBe("unknown");
+    expect(deriveProposalPageState("accepted", CANDIDATE, CANDIDATE)).toBe("unknown");
+    expect(deriveProposalPageState("surprise", CANDIDATE, null)).toBe("unknown");
   });
 });
 
@@ -62,7 +50,7 @@ describe("deriveDiffAvailability", () => {
   });
 
   it("a 404 is the vault's RECLAMATION — the diff-less state surface, not a page error", () => {
-    // keep == read: a rejected or staled candidate's bytes 404 by design.
+    // keep == read: a rejected or withdrawn candidate's bytes 404 by design.
     expect(deriveDiffAvailability({ ok: false, kind: "not_found" })).toBe("reclaimed");
   });
 

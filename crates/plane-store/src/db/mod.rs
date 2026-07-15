@@ -4,13 +4,13 @@
 //! in any signature crossing the module boundary. Every operation takes the validated id newtypes plus
 //! the data it needs and returns plain domain values (`CommitId`, small enums, `bool`) — so a caller
 //! outside this module can never run an unbound query, hold a transaction, or read a bare object. That
-//! privacy boundary is the access-rule enforcement mechanism.
+//! privacy boundary is the misuse-prevention mechanism.
 //!
-//! **The write-transaction discipline is the trust spine.** SQLite's `BEGIN IMMEDIATE` took a global
-//! writer lock, so every read-then-write inside a write transaction was automatically safe against a
-//! concurrent writer. Postgres does not serialize writers, so the `run_serializable!` macro re-establishes it
-//! with `SERIALIZABLE` isolation + a bounded retry on a serialization failure — the one and only write
-//! entrypoint (there is no `begin`-returns-a-`Transaction` form to misuse).
+//! **The write-transaction discipline is the trust spine.** Postgres does not serialize writers, so the
+//! `run_serializable!` macro establishes it with `SERIALIZABLE` isolation + a bounded retry on a
+//! serialization failure — the one and only write entrypoint (there is no `begin`-returns-a-
+//! `Transaction` form to misuse). Every read-then-write invariant (the generation CAS, the
+//! object-presence fence, the purge's uniqueness scan) is re-proven by SSI + retry.
 
 use std::time::Duration;
 
@@ -21,17 +21,16 @@ use crate::authority::PoolConfig;
 use crate::error::{AuthorityError, Result};
 
 /// The bounded number of times the `run_serializable!` macro re-runs a write closure that hit a
-/// serialization failure (SQLSTATE `40001`) or deadlock (`40P01`). Contention on one team's skill is
-/// low, so a small cap suffices; exceeding it is a transient-infra fault (a 500), never a receipted
-/// terminal (which would poison replay).
+/// serialization failure (SQLSTATE `40001`) or deadlock (`40P01`). Contention on one bundle is low,
+/// so a small cap suffices; exceeding it is a transient-infra fault (a 500).
 pub(in crate::db) const MAX_TXN_RETRIES: u32 = 10;
 
 /// Full-jitter backoff bounds for those retries: attempt `n` sleeps a uniform-random duration in
 /// `[0, min(BASE << (n-1), CAP)]`. Immediate re-runs retry in lockstep — two writers that collided
-/// once keep colliding on every synchronized attempt and can burn the whole budget in milliseconds
-/// (observed as `standup` racing-test flakes under full-suite load); a randomized pause desynchronizes
-/// them so one commits while the other waits. Full jitter maximizes spread, the happy path never
-/// sleeps, and the worst single pause (250ms) stays far below any client timeout.
+/// once keep colliding on every synchronized attempt and can burn the whole budget in milliseconds;
+/// a randomized pause desynchronizes them so one commits while the other waits. Full jitter
+/// maximizes spread, the happy path never sleeps, and the worst single pause (250ms) stays far
+/// below any client timeout.
 pub(in crate::db) const RETRY_BACKOFF_BASE_MS: u64 = 10;
 pub(in crate::db) const RETRY_BACKOFF_CAP_MS: u64 = 250;
 
@@ -54,26 +53,12 @@ pub(in crate::db) async fn retry_backoff(attempt: u32) {
     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
 }
 
-/// Convert a stored 32-byte BLOB to a fixed array, or an integrity fault when the width is wrong (the
-/// schema's `CHECK (octet_length(…) = 32)` forbids it; a violation is store corruption). The ONE shared
-/// definition — every `mod db` sibling imports this one.
-pub(in crate::db) fn blob32(bytes: &[u8]) -> Result<[u8; 32]> {
-    bytes
-        .try_into()
-        .map_err(|_| AuthorityError::integrity(BadBlobWidth))
-}
-
-/// The Postgres-backed authority database: one connection pool. Reads run autocommit at the pool's
-/// default `READ COMMITTED`; every write goes through [`run_serializable`](Self::run_serializable),
-/// which opens `SERIALIZABLE` per-transaction (it reverts on commit — no connection-global default).
+/// The Postgres-backed custody database: one connection pool. Reads run autocommit at the pool's
+/// default `READ COMMITTED`; every write goes through the `run_serializable!` macro, which opens
+/// `SERIALIZABLE` per-transaction.
 #[derive(Debug)]
 pub(crate) struct Db {
     pool: PgPool,
-    /// Test-observable count of serialization-failure retries the runner has performed — lets a
-    /// concurrency test PROVE the MVCC re-proof actually fired (an outcome assertion alone passes even a
-    /// fully-serialized schedule that never raised `40001`). Never read in production.
-    #[cfg(test)]
-    retry_count: std::sync::atomic::AtomicU64,
 }
 
 /// The one write-transaction entrypoint — run `$body` (which uses the bound `$tx`, e.g.
@@ -82,10 +67,6 @@ pub(crate) struct Db {
 /// checks can fire only at commit) — up to [`MAX_TXN_RETRIES`], with a [full-jitter pause](retry_backoff)
 /// before each re-run so concurrent writers desynchronize instead of colliding in lockstep.
 ///
-/// This replaces SQLite's global-writer-lock `BEGIN IMMEDIATE`: Postgres does not serialize writers, so
-/// every read-then-write invariant SQLite got for free — the whole-`(epoch,seq)` CAS, the last-owner
-/// write-skew guard, the object-presence fence, op-id idempotency — is re-proven here by SSI + retry.
-///
 /// It is a **macro, not a generic `fn`**, so the retry loop inlines into each method and that method's
 /// future stays a concrete `async fn` future whose `Send` is auto-derived: a generic `run_serializable<F:
 /// AsyncFnMut…>` cannot bound the closure future `Send` on stable (the `CallRefFuture` GAT is unstable),
@@ -93,15 +74,15 @@ pub(crate) struct Db {
 ///
 /// `$body` MUST be re-runnable: it borrows its inputs and performs no non-DB side effect (all filesystem
 /// work — ingest, migrate, the deleting-wait, the GC unlink — stays OUTSIDE), so an aborted attempt rolls
-/// back with no durable trace and the retry re-runs against fresh committed state (`now`/`created_at` are
-/// captured by the caller before the loop, so a retried receipt is byte-stable — signing/HMAC are
-/// deterministic). Cap-exceeded is [`AuthorityError::Internal`] (a 500), never a receipted terminal (which
-/// would replay forever); the caller's `op_id` retry re-drives under lower contention.
+/// back with no durable trace and the retry re-runs against fresh committed state. Cap-exceeded is
+/// [`AuthorityError::Internal`] (a 500). A typed refusal returned as `Err` from `$body` (a
+/// [`AuthorityError::Conflict`], a [`AuthorityError::PointedAt`]) rolls the transaction back — that
+/// rollback IS the contract: a refused write leaves no durable trace.
 ///
-/// `$body` must **return** its `Result` (every call site is the `.await` of an extracted `_txn`/`_run` fn,
-/// so a `?` inside that fn returns at the fn boundary into an `Err` value the macro's `Err` arm can classify
-/// and roll back). A bare `?` written directly in `$body` would instead return from the *enclosing* `async
-/// fn`, bypassing the rollback + retry arms — so the body hands the macro a `Result`, never `?`-propagates.
+/// `$body` must **return** its `Result` (every call site is the `.await` of an extracted `_txn` fn,
+/// so a `?` inside that fn returns at the fn boundary into an `Err` value the macro's `Err` arm can
+/// classify and roll back). A bare `?` written directly in `$body` would instead return from the
+/// *enclosing* `async fn`, bypassing the rollback + retry arms.
 macro_rules! run_serializable {
     ($self:expr, $tx:ident, $body:expr) => {{
         let mut __attempt: u32 = 0;
@@ -149,7 +130,7 @@ macro_rules! run_serializable {
 impl Db {
     /// Open a pool for `database_url` and apply the embedded migrations. sqlx's `Migrator` takes a
     /// `pg_advisory_lock` for the duration of the run, so this is multi-replica-safe with no hand-rolled
-    /// lock (session-level, so a session-mode pool is required — a plain pooled connection is one).
+    /// lock.
     pub(crate) async fn connect(database_url: &str, pool_config: &PoolConfig) -> Result<Self> {
         let mut opts = PgPoolOptions::new();
         if let Some(max) = pool_config.max_connections {
@@ -158,7 +139,7 @@ impl Db {
         if let Some(acquire) = pool_config.acquire_timeout {
             opts = opts.acquire_timeout(acquire);
         }
-        // Opt-in session GUCs, applied on every pooled connection. Only a `Some` timeout emits a `SET`, so an
+        // Opt-in connection GUCs, applied on every pooled connection. Only a `Some` timeout emits a `SET`, so an
         // unset one inherits the server default (a long legitimate whole-bundle render is never capped unless
         // the operator opts in). The values are plane-controlled integers formatted into the statement — never
         // client input — so the string build carries no injection surface.
@@ -207,117 +188,36 @@ impl Db {
     }
 
     fn wrap(pool: PgPool) -> Self {
-        Self {
-            pool,
-            #[cfg(test)]
-            retry_count: std::sync::atomic::AtomicU64::new(0),
-        }
+        Self { pool }
     }
 
-    /// The connection pool — PRIVATE to `mod db`, so the child `lifecycle`/`seed` submodules reach it
-    /// for their autocommit pool reads while it stays unreachable elsewhere in the crate (no `sqlx`
-    /// handle ever crosses the module boundary).
+    /// The connection pool — PRIVATE to `mod db`, so the child submodules reach it for their
+    /// autocommit pool reads while it stays unreachable elsewhere in the crate (no `sqlx` handle
+    /// ever crosses the module boundary).
     fn pool(&self) -> &PgPool {
         &self.pool
     }
 
-    /// Bump the test-visible retry counter (a no-op in production). Called by the
-    /// [`run_serializable!`](crate::db::run_serializable) macro on each retry.
+    /// The retry hook the `run_serializable!` macro calls on each re-run — a tracing breadcrumb, so
+    /// a contended deployment can see the MVCC re-proof firing.
     #[inline]
     fn note_retry(&self) {
-        #[cfg(test)]
-        self.retry_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// The number of serialization-failure retries the runner has performed since open — the concurrency
-    /// tests read it to prove a `40001` actually occurred and was retried (not merely that the outcome
-    /// matched). Test / `test-fixtures` only.
-    #[cfg(test)]
-    pub(crate) fn retry_count(&self) -> u64 {
-        self.retry_count.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Test-only: DETERMINISTICALLY force the `run_serializable!` macro to retry exactly one Postgres
-    /// serialization failure, so a test can assert [`retry_count`](Self::retry_count) advanced by one
-    /// (a live-concurrency assertion is scheduler-dependent — an accidentally-serialized schedule reaches
-    /// the same outcome without ever raising `40001`). On the FIRST attempt the body commits a conflicting
-    /// bump to the same `current` row via a SEPARATE autocommit connection, so this transaction's own
-    /// UPDATE serialization-fails (SQLSTATE `40001`); the macro rolls back and re-runs with the injector
-    /// cleared, and the second attempt commits. Requires a `current` row for `(ws, skill)`.
-    #[cfg(test)]
-    pub(crate) async fn test_force_one_serialization_retry(
-        &self,
-        ws: &crate::id::WorkspaceId,
-        skill: &crate::id::BundleId,
-    ) -> Result<()> {
-        let inject = std::sync::atomic::AtomicBool::new(true);
-        let ws_s = ws.as_str();
-        let skill_s = skill.as_str();
-        run_serializable!(
-            self,
-            tx,
-            async {
-                // Read the row inside the serializable snapshot.
-                sqlx::query!(
-                    "SELECT seq FROM current WHERE workspace_id = $1 AND skill_id = $2",
-                    ws_s,
-                    skill_s
-                )
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(AuthorityError::internal)?;
-                if inject.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                    // A concurrent COMMITTED writer bumps the SAME row on another connection, so our
-                    // pending write below serialization-fails.
-                    sqlx::query!(
-                        "UPDATE current SET updated_at = updated_at + 1 \
-                         WHERE workspace_id = $1 AND skill_id = $2",
-                        ws_s,
-                        skill_s
-                    )
-                    .execute(self.pool())
-                    .await
-                    .map_err(AuthorityError::internal)?;
-                }
-                // Our own write to the same row — conflicts with the injected bump on the first attempt.
-                sqlx::query!(
-                    "UPDATE current SET updated_at = updated_at + 1 \
-                     WHERE workspace_id = $1 AND skill_id = $2",
-                    ws_s,
-                    skill_s
-                )
-                .execute(&mut *tx)
-                .await
-                .map_err(AuthorityError::internal)?;
-                Ok(())
-            }
-            .await
-        )
+        tracing::debug!("serializable write retried after a serialization failure");
     }
 }
 
 /// True if `e` (a raw `sqlx::Error`, e.g. from `tx.commit()`) is a transient class the SERIALIZABLE runner
 /// retries: a serialization failure (`40001`) or deadlock (`40P01`), OR a unique-violation (`23505`) on one
-/// of the CONVERGENT constraints — the two idempotency-key PKs, the one-open-proposal index, the catalog's
-/// registration keys, and the create-workspace request ledger (`genesis_requests_pkey`: two racing creates of the SAME request both
-/// pass the replay probe; the loser's ledger INSERT aborts here, and its retry's probe replays the winner's
-/// workspace — the same shape as the `workspace_events` idempotency slot).
+/// of the CONVERGENT constraints:
 ///
-/// All three restore what SQLite's global writer lock gave for free: a losing racer of an idempotent write
-/// converges to the winner's outcome instead of a spurious `Internal`/500. Two same-`op_id` writes can BOTH
-/// pass their replay-miss before either commits, and the loser's receipt/event INSERT then hits
-/// `op_receipts_pkey`/`workspace_events_pkey`; retrying makes the re-run's replay find the now-committed
-/// receipt and return it byte-identically. The `proposals_one_open` case is the same shape: two proposers of
-/// the SAME candidate on the SAME base (the index key is `(workspace_id, skill_id, commit_id, base_epoch,
-/// base_seq) WHERE status='open'`, and `commit_id` is content-derived, so a violation ONLY ever means
-/// "identical candidate, identical base, already open") both pass `propose_arm`'s `read_open_proposal`
-/// is-none guard, and the loser's `INSERT INTO proposals` hits the partial-unique index; retrying re-runs the
-/// arm against the winner's now-committed row, so `read_open_proposal` finds it, the duplicate insert is
-/// skipped, and the loser returns the SAME idempotent `NEEDS_REVIEW` the sequential re-propose guard produces
-/// (the retry always resolves, since the index key pins the exact row the re-read then finds). Scoped to
-/// exactly these three so an ordinary unique violation (a `roster_pkey`, a real integrity duplicate) still
-/// surfaces, never a silent retry.
+/// - `version_pkey` — two racing commits of the IDENTICAL candidate both pass the exists-probe
+///   before either lands; the id is content-derived, so the collision only ever means "the same
+///   version"; the loser's retry finds the winner's row and converges to the idempotent success.
+/// - `current_pointer_pkey` — two racing genesis publishes both observe "no pointer"; the loser's
+///   retry re-reads the winner's row and answers the typed CONFLICT (or the idempotent replay).
+///
+/// Scoped to exactly these so an ordinary unique violation (a genuine bug) still surfaces, never a
+/// silent retry.
 pub(in crate::db) fn is_serialization_failure_sqlx(e: &sqlx::Error) -> bool {
     let Some(db) = e.as_database_error() else {
         return false;
@@ -326,26 +226,7 @@ pub(in crate::db) fn is_serialization_failure_sqlx(e: &sqlx::Error) -> bool {
         Some("40001" | "40P01") => true,
         Some("23505") => matches!(
             db.constraint(),
-            Some(
-                "op_receipts_pkey"
-                    | "workspace_events_pkey"
-                    | "proposals_one_open"
-                    | "genesis_requests_pkey"
-                    // The catalog registration two concurrent GENESIS publishes both attempt: both
-                    // probe the catalog before either commits, so the loser's INSERT aborts on the
-                    // skill-id PK (same skill) or the name index (two skills minting one name).
-                    // Retrying re-runs `register_publish`'s probe against the winner's committed row
-                    // and takes the already-registered arm (or answers the typed NameTaken) — the
-                    // same convergence the idempotency slots get, instead of a spurious 500.
-                    | "catalog_pkey"
-                    | "catalog_by_name"
-                    // The workspace ADDRESS-name index two concurrent geneses can race: both derive
-                    // (or ask for) one name, both probe it free, and the loser's workspace INSERT
-                    // aborts here. Retrying re-runs the name resolution against the winner's
-                    // committed row — a derived name dedupes to `-2`, an explicit one answers the
-                    // typed "already taken" — the same convergence the catalog registration gets.
-                    | "workspace_by_name"
-            )
+            Some("version_pkey" | "current_pointer_pkey")
         ),
         _ => false,
     }
@@ -369,26 +250,10 @@ fn duration_millis(d: Option<Duration>) -> Option<u64> {
     d.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
-/// A stored commit-id BLOB was not exactly 32 bytes (the schema CHECK should forbid this).
-#[derive(Debug, thiserror::Error)]
-#[error("stored content id is not 32 bytes")]
-struct BadBlobWidth;
-
-// The custody raw-SQL twins (the pointer-move transaction, the object-lifecycle fence, the contribute-table
-// SQL, the receipt machinery, and the restore epoch bump) — grouped under `db/custody/`.
+// The custody raw-SQL: the object-lifecycle fence, the version/pointer transaction, and the reads.
 pub(crate) mod custody;
 
-// The directory raw-SQL twins (enrollment issuance, governance + admin-claim, and the two web-session
-// directory legs' SQL) — grouped under `db/directory/`.
-pub(crate) mod directory;
-
-pub(crate) use custody::lifecycle::{ClaimOutcome, InstallOutcome, Location, ObjectStatus};
-
-// Gated under `test` OR the `test-fixtures` feature: `--tests` still compiles its `query!`s (so the sqlx
-// `prepare --check -- --tests` drift gate keeps covering them), and `--features test-fixtures` exposes them
-// to the feature-gated `Authority` shims a downstream test crate drives.
-#[cfg(any(test, feature = "test-fixtures"))]
-mod seed;
+pub(crate) use custody::lifecycle::{AcquireOutcome, InstallOutcome, Location, ObjectStatus};
 
 #[cfg(test)]
 mod retry_backoff_tests {
@@ -417,127 +282,46 @@ mod retry_classification_tests {
 
     use super::is_serialization_failure_sqlx;
 
-    /// The SERIALIZABLE runner retries a `23505` on a CONVERGENT constraint — the two idempotency-key PKs
-    /// (`op_receipts` / `workspace_events`) and the one-open-proposal partial-unique (`proposals_one_open`) —
-    /// plus the catalog's registration keys (two racing GENESIS publishes both probe the catalog before
-    /// either commits) — so a concurrent same-`op_id` receipt sibling, same-candidate proposer, or
-    /// co-genesis publisher converges to the winner's outcome rather than surfacing a 500 — but NEVER on an
-    /// ordinary unique violation (e.g. `skill_follows_pkey`), a real business/integrity duplicate that must
-    /// not be silently retried. Proven against real Postgres duplicate-key errors. Raw `sqlx::query` (not
-    /// `query!`), so it adds nothing to the `.sqlx` drift surface.
+    /// The SERIALIZABLE runner retries a `23505` ONLY on the convergent constraints (`version_pkey`,
+    /// `current_pointer_pkey`) — an ordinary unique violation must surface, never silently retry.
+    /// Proven against real Postgres duplicate-key errors. Raw `sqlx::query` (not `query!`), so it
+    /// adds nothing to the `.sqlx` drift surface.
     #[sqlx::test]
     async fn only_convergent_unique_violations_are_retryable(pool: PgPool) {
-        // op_receipts_pkey → a unique violation the runner treats as retryable.
-        let receipt = "INSERT INTO op_receipts \
-            (workspace_id, actor, op_id, command, skill_id, expected_epoch, expected_seq, \
-             outcome, created_at) \
-            VALUES ('w_a', 'dk', 'op1', 'publish', 's_a', 1, 1, 'OK', '2026-06-30T00:00:00Z')";
-        sqlx::query(receipt)
+        // version_pkey → retryable (a racing identical commit converges).
+        let version = "INSERT INTO version (workspace_id, bundle_id, version_id, commit_id, author_display) \
+            VALUES ('w1', 'b1', 'v1', 'v1', 'alice')";
+        sqlx::query(version).execute(&pool).await.expect("insert");
+        let dup = sqlx::query(version)
             .execute(&pool)
             .await
-            .expect("first receipt insert");
-        let dup = sqlx::query(receipt)
-            .execute(&pool)
-            .await
-            .expect_err("a duplicate op_id receipt must raise a unique violation");
+            .expect_err("duplicate version must raise a unique violation");
         assert!(
             is_serialization_failure_sqlx(&dup),
-            "a 23505 on op_receipts_pkey must be retryable"
+            "a 23505 on version_pkey must be retryable"
         );
 
-        // proposals_one_open → the one-open-proposal partial-unique. A concurrent same-candidate/same-base
-        // propose races past `propose_arm`'s `read_open_proposal` is-none guard; the loser's INSERT hits this
-        // index and, on retry, converges to the winner's NEEDS_REVIEW — so it is retryable, like the receipt
-        // PKs. (The FK targets `skill_commit`, so seed the provenance row first.)
-        let provenance = "INSERT INTO skill_commit (workspace_id, commit_id, skill_id, bundle_digest) \
-            VALUES ('w_a', decode(repeat('ab', 32), 'hex'), 's_a', decode(repeat('cd', 32), 'hex'))";
-        sqlx::query(provenance)
+        // current_pointer_pkey → retryable (a racing genesis converges to the typed conflict).
+        let pointer = "INSERT INTO current_pointer (workspace_id, bundle_id, version_id, moved_by_display) \
+            VALUES ('w1', 'b1', 'v1', 'alice')";
+        sqlx::query(pointer).execute(&pool).await.expect("insert");
+        let dup = sqlx::query(pointer)
             .execute(&pool)
             .await
-            .expect("skill_commit provenance insert");
-        let open_proposal_op1 = "INSERT INTO proposals \
-            (workspace_id, id, skill_id, commit_id, base_commit_id, base_epoch, base_seq, status, \
-             proposer, created_at) \
-            VALUES ('w_a', 'op1', 's_a', decode(repeat('ab', 32), 'hex'), decode(repeat('ef', 32), 'hex'), \
-             1, 1, 'open', 'p_a', '2026-06-30T00:00:00Z')";
-        let open_proposal_op2 = "INSERT INTO proposals \
-            (workspace_id, id, skill_id, commit_id, base_commit_id, base_epoch, base_seq, status, \
-             proposer, created_at) \
-            VALUES ('w_a', 'op2', 's_a', decode(repeat('ab', 32), 'hex'), decode(repeat('ef', 32), 'hex'), \
-             1, 1, 'open', 'p_a', '2026-06-30T00:00:00Z')";
-        sqlx::query(open_proposal_op1)
-            .execute(&pool)
-            .await
-            .expect("first open proposal insert");
-        let dup = sqlx::query(open_proposal_op2)
-            .execute(&pool)
-            .await
-            .expect_err(
-                "a second open proposal of the same candidate+base must violate proposals_one_open",
-            );
+            .expect_err("duplicate pointer must raise a unique violation");
         assert!(
             is_serialization_failure_sqlx(&dup),
-            "a 23505 on proposals_one_open must be retryable (it converges to the winner's NEEDS_REVIEW)"
+            "a 23505 on current_pointer_pkey must be retryable"
         );
 
-        // genesis_requests_pkey → the create-workspace request ledger: a racing same-request loser converges
-        // to the winner's workspace on retry, so it is retryable.
-        let genesis = "INSERT INTO genesis_requests (request_sha256, owner_principal, workspace_id, created_at) \
-            VALUES (decode(repeat('aa', 32), 'hex'), 'o@x.com', 'w_a', '2026-07-03T00:00:00Z')";
-        sqlx::query(genesis)
+        // An ordinary constraint (tombstones_pkey) is NOT retryable.
+        let tomb = "INSERT INTO tombstones (workspace_id, blob_id, reason, at) \
+            VALUES ('w1', decode(repeat('ab', 32), 'hex'), 'purge', 1)";
+        sqlx::query(tomb).execute(&pool).await.expect("insert");
+        let dup = sqlx::query(tomb)
             .execute(&pool)
             .await
-            .expect("first genesis request insert");
-        let dup = sqlx::query(genesis)
-            .execute(&pool)
-            .await
-            .expect_err("a duplicate genesis request must raise a unique violation");
-        assert!(
-            is_serialization_failure_sqlx(&dup),
-            "a 23505 on genesis_requests_pkey must be retryable"
-        );
-
-        // workspace_by_name → the ADDRESS-name index: two racing geneses deriving one name both probe
-        // it free; the loser's retry re-resolves (a derived name dedupes, an explicit one answers the
-        // typed refusal), so it is retryable.
-        let named = "INSERT INTO workspace (workspace_id, name, display_name, verified_domain_status, deployment_mode, created_at) \
-            VALUES ('w_n1', 'acme', 'Acme', 'unverified', 'cloud', 'seed')";
-        sqlx::query(named)
-            .execute(&pool)
-            .await
-            .expect("first named workspace insert");
-        let dup = sqlx::query(
-            "INSERT INTO workspace (workspace_id, name, display_name, verified_domain_status, deployment_mode, created_at) \
-             VALUES ('w_n2', 'acme', 'Acme Too', 'unverified', 'cloud', 'seed')",
-        )
-        .execute(&pool)
-        .await
-        .expect_err("a duplicate workspace name must raise a unique violation");
-        assert!(
-            is_serialization_failure_sqlx(&dup),
-            "a 23505 on workspace_by_name must be retryable (the retry re-resolves the name)"
-        );
-
-        // skill_follows_pkey → an ordinary unique violation the runner must NOT retry (a person's own
-        // subscription row: a real duplicate, never a convergent idempotency key). The catalog keys, by
-        // contrast, ARE convergent now — two racing genesis publishes both probe the catalog before either
-        // commits, and the loser must converge on the winner's registration rather than 500.
-        let catalog = "INSERT INTO catalog (workspace_id, skill_id, name, status, created_at) \
-            VALUES ('w_a', 's_a', 's-a', 'active', 'seed')";
-        sqlx::query(catalog)
-            .execute(&pool)
-            .await
-            .expect("catalog row for the follow FK");
-        let follow = "INSERT INTO skill_follows (workspace_id, principal, skill_id, created_at) \
-            VALUES ('w_a', 'bob@x.io', 's_a', 'seed')";
-        sqlx::query(follow)
-            .execute(&pool)
-            .await
-            .expect("first follow insert");
-        let dup = sqlx::query(follow)
-            .execute(&pool)
-            .await
-            .expect_err("a duplicate follow row must raise a unique violation");
+            .expect_err("duplicate tombstone must raise a unique violation");
         assert!(
             !is_serialization_failure_sqlx(&dup),
             "a 23505 on an ordinary constraint must NOT be retried"

@@ -20,17 +20,13 @@ use topos_types::requests::{
     WireFileMode,
 };
 use topos_types::results::ReviewDecision;
-use topos_types::{Generation, TerminalOutcome, WireCurrentRecord};
-
-use core::cmp::Ordering;
+use topos_types::{TerminalOutcome, WireCurrentRecord};
 
 use super::parse_hex32;
 use super::sync_engine;
 use crate::ctx::Ctx;
 use crate::error::ClientError;
-use crate::plane::{
-    ContributeSource, FetchedVersion, PlaneError, PointerFetch, WriteReceipt, gen_cmp,
-};
+use crate::plane::{ContributeSource, FetchedVersion, PlaneError, PointerFetch, WriteReceipt};
 use crate::sidecar::SkillPaths;
 use crate::{doc, materialize, op_wal, scan};
 
@@ -101,7 +97,7 @@ pub(crate) fn fresh_current(
     ctx: &Ctx<'_>,
     skill_id: &str,
     workspace_id: &str,
-) -> Result<([u8; 32], Generation), ClientError> {
+) -> Result<([u8; 32], u64), ClientError> {
     match ctx.plane.get_current(skill_id, None) {
         Ok(PointerFetch::Record(rec)) => {
             let vid =
@@ -349,7 +345,7 @@ fn render_candidate(
 fn verified_new_generation(
     rec: &OpRecord,
     wire_record: &WireCurrentRecord,
-) -> Result<Generation, ClientError> {
+) -> Result<u64, ClientError> {
     let moved_to = parse_hex32(&rec.candidate_commit)?;
     let vid = sync_engine::scoped_version_id(wire_record, &rec.skill_id, &rec.workspace_id)
         .ok_or_else(|| {
@@ -382,7 +378,7 @@ pub(crate) fn apply_publish_ok(
     map: &PlacementMap,
     rec: &OpRecord,
     wire_record: &WireCurrentRecord,
-) -> Result<Generation, ClientError> {
+) -> Result<u64, ClientError> {
     let new_gen = verified_new_generation(rec, wire_record)?;
     let commit_id = parse_hex32(&rec.candidate_commit)?;
     let published_digest = parse_hex32(&rec.bundle_digest)?;
@@ -394,7 +390,7 @@ pub(crate) fn apply_publish_ok(
     // advanced `observed` while this op's ack was lost) already carried the target past this publish, a
     // replay of the settled receipt is a no-op locally — never regress `observed`/`applied` (the next pull
     // reconciles the actual served current).
-    if gen_cmp(new_gen, sync.observed) != Ordering::Greater {
+    if new_gen <= sync.observed {
         return Ok(new_gen);
     }
 
@@ -459,7 +455,7 @@ pub(crate) fn apply_light_advance(
     sp: &SkillPaths,
     rec: &OpRecord,
     wire_record: &WireCurrentRecord,
-) -> Result<Generation, ClientError> {
+) -> Result<u64, ClientError> {
     let new_gen = verified_new_generation(rec, wire_record)?;
     // A reviewer who does NOT hold a local copy of the skill (a `review --approve` resolved through the
     // workspace catalog over the wire, never followed here) has no sync state to fast-forward — the approve
@@ -470,7 +466,7 @@ pub(crate) fn apply_light_advance(
     };
     // Read-your-writes only advances FORWARD — a replay of a move already superseded locally is a no-op (see
     // [`apply_publish_ok`]).
-    if gen_cmp(new_gen, sync.observed) != Ordering::Greater {
+    if new_gen <= sync.observed {
         return Ok(new_gen);
     }
     let next_sync = SyncState {
@@ -496,7 +492,7 @@ mod tests {
     use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
     use topos_types::requests::{ProposeRequest, PublishRequest, RevertRequest, ReviewRequest};
     use topos_types::{
-        CurrencyKind, Generation, HarnessId, Receipt, TerminalOutcome, TriggerReport, TriggerState,
+        CurrencyKind, HarnessId, Receipt, TerminalOutcome, TriggerReport, TriggerState,
     };
 
     use crate::fs_seam::RealFs;
@@ -581,7 +577,7 @@ mod tests {
                 version_id: Some("a".repeat(64)),
                 bundle_digest: Some("b".repeat(64)),
                 expected_generation: None,
-                current_generation: Some(Generation { epoch: 1, seq: 2 }),
+                current_generation: Some(2),
                 created_at: "2026-06-30T00:00:00Z".to_owned(),
                 details: None,
             },
@@ -646,7 +642,7 @@ mod tests {
             op: OpKind::ReviewApprove,
             candidate_commit: "a".repeat(64),
             bundle_digest: "b".repeat(64),
-            expected_generation: Generation { epoch: 1, seq: 1 },
+            expected_generation: 1,
             good: None,
             display_name: None,
             channel: None,

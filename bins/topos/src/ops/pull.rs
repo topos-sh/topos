@@ -41,7 +41,7 @@ use super::sync_engine::{self, Invocation, WorkState};
 
 /// The never-received sentinel the first-receive baseline carries (and an upstream withdrawal
 /// restores, so a later re-delivery installs afresh instead of reading as already-current).
-const ZERO_GEN: topos_types::Generation = topos_types::Generation { epoch: 0, seq: 0 };
+const ZERO_GEN: u64 = 0;
 const ZERO_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// What a `pull` invocation targets.
@@ -1094,13 +1094,7 @@ pub(crate) fn reset_to_never_received(
 /// withdrawn row's `topos add <name>` "keep it as yours" salvage command must resolve, so this can
 /// never be the raw id.
 fn undelivered_row(name: &str, sync: Option<&SyncState>, action: PullAction) -> PullSkill {
-    let (observed, applied) = sync.map_or(
-        (
-            topos_types::Generation { epoch: 0, seq: 0 },
-            topos_types::Generation { epoch: 0, seq: 0 },
-        ),
-        |s| (s.observed, s.applied),
-    );
+    let (observed, applied) = sync.map_or((0, 0), |s| (s.observed, s.applied));
     PullSkill {
         skill: name.to_owned(),
         workspace_id: None,
@@ -1244,7 +1238,7 @@ pub(crate) fn quiet_soft_failure(e: &ClientError) -> bool {
             | ClientError::PlaneRejected(_)
             | ClientError::PlaneTerminal { .. }
             | ClientError::Denied(_)
-            | ClientError::RedeemDenied { .. }
+            | ClientError::EnrollDenied
             | ClientError::TargetNotFound { .. }
     )
 }

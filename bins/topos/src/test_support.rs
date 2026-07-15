@@ -23,7 +23,6 @@ use topos_core::digest::to_hex;
 use topos_harness::{
     ClaudeCode, DiscoveredPlacement, HarnessAdapter, Hermes, OpenClaw, PlacementTarget,
 };
-use topos_types::bootstrap::{DeploymentMode, VerifiedDomainStatus};
 use topos_types::persisted::{PlacementMap, SyncState};
 use topos_types::requests::WireSkillIndex;
 use topos_types::results::{
@@ -32,18 +31,14 @@ use topos_types::results::{
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
 use crate::ctx::Ctx;
-use crate::device_signer::DeviceSigner;
-use crate::enroll::{
-    self, CredentialEntry, Credentials, FollowEntry, FollowModeDoc, Follows, Instance, Membership,
-    UserDoc,
-};
+use crate::enroll::{self, FollowEntry, FollowModeDoc, Follows, Instance, Membership, UserDoc};
 use crate::fs_seam::RealFs;
 use crate::ids::{IdSource, RealClock, RealIds};
 use crate::plane::{
     CatalogSource, ContributeSource, DirectorySource, EnrollSource, FollowContext, FollowMode,
     FollowSource, GovernanceSource, InertFollow, InertPlane, PlaneSource,
 };
-use crate::plane_http::{FileFollow, SkillCred, UreqDeviceClient, UreqPlane};
+use crate::plane_http::{FileFollow, UreqDeviceClient, UreqPlane};
 use crate::sidecar::Layout;
 use crate::{doc, ops, scan};
 
@@ -140,8 +135,8 @@ pub struct FollowAppliedView {
     pub warnings: Vec<String>,
 }
 
-/// One followed skill's enrollment, as the harness holds it. The workspace credential is a secret
-/// (redacted in `Debug`, mirroring `SkillCred`).
+/// One followed skill's enrollment, as the harness holds it. The device credential is a secret
+/// (redacted in `Debug`).
 #[derive(Clone)]
 struct FollowSpec {
     skill_id: String,
@@ -351,16 +346,13 @@ impl PullHarness {
     /// `GoBack` hex id is malformed.
     #[must_use]
     pub fn run_pull(&self, base_url: &str, scope: Scope) -> PullData {
-        let creds: HashMap<String, SkillCred> = self
+        let skill_workspaces: HashMap<String, String> = self
             .follows
             .iter()
-            .map(|s| {
-                (
-                    s.skill_id.clone(),
-                    SkillCred::new(s.workspace_id.clone(), s.credential.clone()),
-                )
-            })
+            .map(|s| (s.skill_id.clone(), s.workspace_id.clone()))
             .collect();
+        // The ONE device credential (the last enrolled spec's — every spec of one rig carries it).
+        let credential = self.follows.last().map(|s| s.credential.clone());
         let follow_entries: Vec<(String, FollowContext)> = self
             .follows
             .iter()
@@ -377,7 +369,7 @@ impl PullHarness {
             })
             .collect();
 
-        let plane = UreqPlane::new(base_url.to_owned(), creds);
+        let plane = UreqPlane::new(base_url.to_owned(), credential, skill_workspaces);
         let follow = FileFollow::new(follow_entries);
         let ctx = Ctx {
             fs: &self.fs,
@@ -607,21 +599,17 @@ impl FollowHarness {
         opts: ops::FollowOpts,
     ) -> Result<ops::FollowOutcome, crate::error::ClientError> {
         let enroll_connect = |base_url: &str| -> Box<dyn EnrollSource> {
-            Box::new(UreqDeviceClient::new(base_url.to_owned(), HashMap::new()))
+            Box::new(UreqDeviceClient::new(base_url.to_owned(), None))
         };
-        let plane_connect =
-            |base_url: &str, creds: HashMap<String, SkillCred>| -> Box<dyn PlaneSource> {
-                Box::new(UreqPlane::new(base_url.to_owned(), creds))
-            };
         // The directory/reconcile connectors, built exactly as the composition root builds them
         // (fresh credential reads per build) — the classic e2e flows here never exercise them, but
-        // the address-follow continuation would.
+        // the address-follow continuation does.
         let fs = &self.fs;
         let layout = self.layout();
         let directory_connect = move |base_url: &str| -> Box<dyn crate::plane::DirectorySource> {
             Box::new(UreqDeviceClient::new(
                 base_url.to_owned(),
-                creds_map(fs, &layout),
+                device_credential(fs, &layout),
             ))
         };
         let layout2 = self.layout();
@@ -633,21 +621,23 @@ impl FollowHarness {
                     schema_version: 1,
                     follows: Vec::new(),
                 });
-            let creds = creds_doc(fs, &layout2);
             Box::new(
-                UreqPlane::new(base_url.to_owned(), enroll::skill_creds(&follows, &creds))
-                    .with_workspace_credentials(creds_map(fs, &layout2)),
+                UreqPlane::new(
+                    base_url.to_owned(),
+                    device_credential(fs, &layout2),
+                    enroll::skill_workspaces(&follows),
+                )
+                .with_workspaces(enrolled_workspaces(fs, &layout2)),
             )
         };
         let connectors = ops::FollowConnectors {
             enroll: &enroll_connect,
-            plane: &plane_connect,
             directory: &directory_connect,
             delivery: &delivery_connect,
             web_origin: "https://topos.sh".to_owned(),
         };
-        // Production's `Command::Follow` mints the host device id (writing `host.json`) before the op, so the
-        // enrollment writer can record the device key into it; mirror that here.
+        // Production's `Command::Follow` mints the host device id (writing `host.json`) before the op;
+        // mirror that here.
         let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())?;
         self.with_adapter(|harness| {
             let ctx = Ctx {
@@ -868,9 +858,12 @@ impl FollowHarness {
         let follows = crate::enroll::read_follows(&self.fs, &self.layout())
             .expect("read follows.json")
             .expect("follows.json exists after resume");
-        let creds = crate::enroll::skill_creds(&follows, &creds_doc(&self.fs, &self.layout()));
         let contexts = crate::enroll::follow_contexts(&follows);
-        let plane = UreqPlane::new(base_url.to_owned(), creds);
+        let plane = UreqPlane::new(
+            base_url.to_owned(),
+            device_credential(&self.fs, &self.layout()),
+            crate::enroll::skill_workspaces(&follows),
+        );
         let follow = FileFollow::new(contexts);
         let opts = ops::FollowOpts {
             manual: false,
@@ -904,10 +897,10 @@ impl FollowHarness {
             .map_or(0, |f| f.follows.len())
     }
 
-    /// The unix permission bits of the `0600` device-key seed file (`None` if absent).
+    /// The unix permission bits of the `0600` device-credential doc (`None` if absent).
     #[must_use]
-    pub fn device_key_mode(&self) -> Option<u32> {
-        std::fs::metadata(self.layout().device_key_path())
+    pub fn credentials_mode(&self) -> Option<u32> {
+        std::fs::metadata(self.layout().credentials_path())
             .ok()
             .map(|m| m.permissions().mode() & 0o777)
     }
@@ -1024,14 +1017,14 @@ impl FollowHarness {
     // REAL op. Ops whose payload types are client-internal (`unfollow`, the auth group) return the
     // `--json`-equivalent `serde_json::Value`; ops with public `topos-types` payloads return them typed.
 
-    /// This rig's derived `device_key_id` (the non-secret device NAME receipts/audit carry) — for
-    /// row-level witnesses on per-device tables (exclusions, fleet state).
+    /// This rig's REGISTERED device id (the non-secret handle a self-revoke names; `None` before an
+    /// enrollment granted) — for row-level witnesses on per-device tables (exclusions, fleet state).
     #[must_use]
-    pub fn device_key_id(&self) -> String {
-        DeviceSigner::load_or_generate(&self.fs, &self.layout())
-            .expect("load-or-generate device key")
-            .device_key_id()
-            .to_owned()
+    pub fn device_id(&self) -> Option<String> {
+        enroll::read_credentials(&self.fs, &self.layout())
+            .ok()
+            .flatten()
+            .map(|c| c.device_id)
     }
 
     /// The enrolled plane base (`instance.json` — present after a completed enroll/login).
@@ -1058,7 +1051,7 @@ impl FollowHarness {
         move |b: &str| -> Box<dyn DirectorySource> {
             Box::new(UreqDeviceClient::new(
                 b.to_owned(),
-                creds_map(&self.fs, &self.layout()),
+                device_credential(&self.fs, &self.layout()),
             ))
         }
     }
@@ -1068,7 +1061,7 @@ impl FollowHarness {
         move |b: &str| -> Box<dyn ContributeSource> {
             Box::new(UreqDeviceClient::new(
                 b.to_owned(),
-                creds_map(&self.fs, &self.layout()),
+                device_credential(&self.fs, &self.layout()),
             ))
         }
     }
@@ -1082,9 +1075,12 @@ impl FollowHarness {
                 schema_version: 1,
                 follows: Vec::new(),
             });
-        let creds = creds_doc(&self.fs, &self.layout());
-        let plane = UreqPlane::new(self.instance_base(), enroll::skill_creds(&follows, &creds))
-            .with_workspace_credentials(creds_map(&self.fs, &self.layout()));
+        let plane = UreqPlane::new(
+            self.instance_base(),
+            device_credential(&self.fs, &self.layout()),
+            enroll::skill_workspaces(&follows),
+        )
+        .with_workspaces(enrolled_workspaces(&self.fs, &self.layout()));
         let follow = FileFollow::new(enroll::follow_contexts(&follows));
         (plane, follow)
     }
@@ -1240,10 +1236,13 @@ impl FollowHarness {
                     schema_version: 1,
                     follows: Vec::new(),
                 });
-            let creds = creds_doc(fs, &layout);
             Box::new(
-                UreqPlane::new(b.to_owned(), enroll::skill_creds(&follows, &creds))
-                    .with_workspace_credentials(creds_map(fs, &layout)),
+                UreqPlane::new(
+                    b.to_owned(),
+                    device_credential(fs, &layout),
+                    enroll::skill_workspaces(&follows),
+                )
+                .with_workspaces(enrolled_workspaces(fs, &layout)),
             )
         };
         let connectors = ops::UnfollowConnectors {
@@ -1350,8 +1349,10 @@ impl FollowHarness {
         workspace_id: &str,
         skill_id: &str,
     ) -> Result<topos_types::requests::WireSkillLog, String> {
-        let client =
-            UreqDeviceClient::new(self.instance_base(), creds_map(&self.fs, &self.layout()));
+        let client = UreqDeviceClient::new(
+            self.instance_base(),
+            device_credential(&self.fs, &self.layout()),
+        );
         DirectorySource::skill_log(&client, workspace_id, skill_id).map_err(|e| e.to_string())
     }
 
@@ -1459,7 +1460,7 @@ impl FollowHarness {
         let governance = |b: &str| -> Box<dyn GovernanceSource> {
             Box::new(UreqDeviceClient::new(
                 b.to_owned(),
-                creds_map(&self.fs, &self.layout()),
+                device_credential(&self.fs, &self.layout()),
             ))
         };
         let directory = self.dir_connect();
@@ -1493,13 +1494,13 @@ impl FollowHarness {
     /// The verb's typed error rendered to a string.
     pub fn auth_login(&self, server: Option<&str>) -> Result<serde_json::Value, String> {
         let enroll_c = |b: &str| -> Box<dyn EnrollSource> {
-            Box::new(UreqDeviceClient::new(b.to_owned(), HashMap::new()))
+            Box::new(UreqDeviceClient::new(b.to_owned(), None))
         };
         let directory = self.dir_connect();
         let governance = |b: &str| -> Box<dyn GovernanceSource> {
             Box::new(UreqDeviceClient::new(
                 b.to_owned(),
-                creds_map(&self.fs, &self.layout()),
+                device_credential(&self.fs, &self.layout()),
             ))
         };
         let connectors = ops::AuthConnectors {
@@ -1510,7 +1511,7 @@ impl FollowHarness {
                 .map(str::to_owned)
                 .unwrap_or_else(|| "https://topos.sh".to_owned()),
         };
-        self.with_inert_ctx(|ctx| match ops::login(ctx, &connectors, server, false)? {
+        self.with_inert_ctx(|ctx| match ops::login(ctx, &connectors, server, None)? {
             ops::AuthLoginOutcome::Pending(p) => Ok(serde_json::json!({
                 "pending": { "user_code": p.user_code, "server": p.server },
             })),
@@ -1528,13 +1529,13 @@ impl FollowHarness {
     /// The verb's typed error rendered to a string.
     pub fn auth_logout(&self) -> Result<serde_json::Value, String> {
         let enroll_c = |b: &str| -> Box<dyn EnrollSource> {
-            Box::new(UreqDeviceClient::new(b.to_owned(), HashMap::new()))
+            Box::new(UreqDeviceClient::new(b.to_owned(), None))
         };
         let directory = self.dir_connect();
         let governance = |b: &str| -> Box<dyn GovernanceSource> {
             Box::new(UreqDeviceClient::new(
                 b.to_owned(),
-                creds_map(&self.fs, &self.layout()),
+                device_credential(&self.fs, &self.layout()),
             ))
         };
         let connectors = ops::AuthConnectors {
@@ -1563,13 +1564,13 @@ impl FollowHarness {
     /// The verb's typed error rendered to a string.
     pub fn auth_status(&self) -> Result<serde_json::Value, String> {
         let enroll_c = |b: &str| -> Box<dyn EnrollSource> {
-            Box::new(UreqDeviceClient::new(b.to_owned(), HashMap::new()))
+            Box::new(UreqDeviceClient::new(b.to_owned(), None))
         };
         let directory = self.dir_connect();
         let governance = |b: &str| -> Box<dyn GovernanceSource> {
             Box::new(UreqDeviceClient::new(
                 b.to_owned(),
-                creds_map(&self.fs, &self.layout()),
+                device_credential(&self.fs, &self.layout()),
             ))
         };
         let connectors = ops::AuthConnectors {
@@ -1651,7 +1652,8 @@ impl FollowHarness {
             .expect("follows.json exists after resume");
         let plane = UreqPlane::new(
             instance.base_url,
-            enroll::skill_creds(&follows, &creds_doc(&self.fs, &self.layout())),
+            device_credential(&self.fs, &self.layout()),
+            enroll::skill_workspaces(&follows),
         );
         let follow = FileFollow::new(enroll::follow_contexts(&follows));
         let internal = match scope {
@@ -1749,11 +1751,10 @@ impl FollowHarness {
         to_hex(&scanned.bundle_digest)
     }
 
-    /// Drive a DIRECT `publish <skill>@<digest>` over the REAL transports — including the
-    /// workspace-standup branch: on an un-enrolled rig the publish starts the standup device flow against
-    /// `standup_base_url` (the explicit loopback base — the compiled-in hosted default is never consulted)
-    /// and returns [`PublishResult::Pending`]; re-invoking the SAME call resumes (poll → redeem → promote →
-    /// the publish continues in that same invocation). On an enrolled rig this is the ordinary publish.
+    /// Drive a DIRECT `publish <skill>@<digest>` over the REAL transports. An un-enrolled rig is
+    /// refused typed ("not enrolled — run `topos follow <workspace-address>` first"); the
+    /// `_standup_base_url` parameter is retained for call-site compatibility and IGNORED (the
+    /// workspace-creating publish is retired — workspaces are born server-side).
     ///
     /// # Errors
     /// The verb's typed error rendered to a string.
@@ -1800,27 +1801,19 @@ impl FollowHarness {
     ) -> Result<PublishResult, String> {
         let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
             .map_err(|e| e.to_string())?;
-        // The write connectors present the workspace Bearer credential, re-read FRESH from disk (a standup
-        // publish writes credentials.json mid-invocation, during promotion). Enrollment is unauthenticated.
+        let _ = standup_base_url;
+        // The write connector presents the ONE device credential, re-read FRESH from disk.
         let contribute = |b: &str| -> Box<dyn ContributeSource> {
             Box::new(UreqDeviceClient::new(
                 b.to_owned(),
-                creds_map(&self.fs, &self.layout()),
+                device_credential(&self.fs, &self.layout()),
             ))
-        };
-        let standup_enroll = |b: &str| -> Box<dyn EnrollSource> {
-            Box::new(UreqDeviceClient::new(b.to_owned(), HashMap::new()))
-        };
-        let standup = ops::StandupConnectors {
-            enroll: &standup_enroll,
-            base_url: standup_base_url.to_owned(),
         };
         // `publish` never reads ctx.plane (the enrolled write transport is built per-base inside the op),
         // so THAT read seam stays inert; the OK receipt's pointer is scope-checked, not verified against a
         // key. The FOLLOW seam must be REAL, though: an enrolled publish infers a followed skill's OWN
         // workspace from its follow entry (the pointer scope — never an ambient guess), the only correct
-        // op scope once this install follows skills across several workspaces. Absent `follows.json`
-        // (the un-enrolled standup branch) yields an empty seam that branch never consults.
+        // op scope once this install follows skills across several workspaces.
         let inert_plane = InertPlane;
         let follows = crate::enroll::read_follows(&self.fs, &self.layout())
             .ok()
@@ -1845,7 +1838,6 @@ impl FollowHarness {
             match ops::publish(
                 &ctx,
                 &contribute,
-                &standup,
                 None, // roots — the harness adopts the skill before publishing (no auto-add)
                 approve,
                 false,
@@ -1857,9 +1849,6 @@ impl FollowHarness {
             {
                 ops::PublishOutcome::Published(d) => Ok(PublishResult::Published(d)),
                 ops::PublishOutcome::Proposed(d) => Ok(PublishResult::Proposed(d)),
-                ops::PublishOutcome::Pending { data, resume_argv } => {
-                    Ok(PublishResult::Pending { data, resume_argv })
-                }
             }
         })
     }
@@ -1902,13 +1891,13 @@ impl FollowHarness {
         let governance = |b: &str| -> Box<dyn GovernanceSource> {
             Box::new(UreqDeviceClient::new(
                 b.to_owned(),
-                creds_map(&self.fs, &self.layout()),
+                device_credential(&self.fs, &self.layout()),
             ))
         };
         let directory = |b: &str| -> Box<dyn DirectorySource> {
             Box::new(UreqDeviceClient::new(
                 b.to_owned(),
-                creds_map(&self.fs, &self.layout()),
+                device_credential(&self.fs, &self.layout()),
             ))
         };
         let connectors = ops::InviteConnectors {
@@ -1981,7 +1970,7 @@ impl FollowHarness {
     /// The workspace memberships `user.json` holds, as `(workspace_id, display_name)` in stored order — so
     /// an e2e asserts a second same-plane follow ADDED a membership rather than overwriting the first.
     #[must_use]
-    pub fn memberships(&self) -> Vec<(String, Option<String>)> {
+    pub fn memberships(&self) -> Vec<(String, String)> {
         enroll::read_user(&self.fs, &self.layout())
             .ok()
             .flatten()
@@ -2011,15 +2000,6 @@ impl FollowHarness {
             .unwrap_or_default()
     }
 
-    /// The device public key this rig's signer mints (load-or-generate is idempotent) — for the
-    /// server-side same-device / different-device claim-replay witnesses.
-    #[must_use]
-    pub fn device_pubkey(&self) -> [u8; 32] {
-        DeviceSigner::load_or_generate(&self.fs, &self.layout())
-            .expect("load-or-generate device key")
-            .public_key()
-    }
-
     /// The principal the enrollment seated this device as (from `user.json`; `None` before promote).
     #[must_use]
     pub fn user_principal(&self) -> Option<String> {
@@ -2039,51 +2019,17 @@ impl FollowHarness {
             .and_then(|u| u.workspaces.into_iter().next())
             .map(|m| m.workspace_id)
     }
-
-    /// POST a token to `/v1/admin-claim` over the REAL transport (this rig's device key) — the
-    /// cross-species witness surface. `Ok` carries the redeemed workspace id.
-    ///
-    /// # Errors
-    /// The transport's typed error rendered to a string (a non-claim / dead token is refused uniformly).
-    pub fn admin_claim_attempt(&self, base_url: &str, token: &str) -> Result<String, String> {
-        let signer =
-            DeviceSigner::load_or_generate(&self.fs, &self.layout()).map_err(|e| e.to_string())?;
-        let client = UreqDeviceClient::new(base_url.to_owned(), HashMap::new());
-        EnrollSource::admin_claim(&client, token, signer.public_key(), "e2e")
-            .map(|r| r.workspace_id)
-            .map_err(|e| e.to_string())
-    }
-
-    /// POST a token as the `invite_token` of a `/v1/device/authorize` start over the REAL transport —
-    /// the other cross-species direction. `Ok` carries the session's user code.
-    ///
-    /// # Errors
-    /// The transport's typed error rendered to a string (a non-invite / dead token is refused uniformly).
-    pub fn device_authorize_attempt(&self, base_url: &str, token: &str) -> Result<String, String> {
-        let signer =
-            DeviceSigner::load_or_generate(&self.fs, &self.layout()).map_err(|e| e.to_string())?;
-        let client = UreqDeviceClient::new(base_url.to_owned(), HashMap::new());
-        EnrollSource::device_authorize(&client, token, signer.public_key(), "e2e")
-            .map(|a| a.user_code)
-            .map_err(|e| e.to_string())
-    }
 }
 
 /// The result of a [`ContributeHarness::publish`] / [`FollowHarness::publish`]: `current` moved (a direct
-/// publish), a proposal opened (`--propose`), or the un-enrolled workspace-standup branch is PENDING a
-/// human sign-in. The public face of the client's internal `PublishOutcome`.
+/// publish), or a proposal opened (`--propose`, or the protection gate's downgrade). The public face of
+/// the client's internal `PublishOutcome`.
 #[derive(Debug, Clone)]
 pub enum PublishResult {
     /// A direct publish moved `current`.
     Published(PublishData),
     /// `--propose` opened a proposal (NEEDS_REVIEW); `current` did NOT move.
     Proposed(ProposeData),
-    /// The un-enrolled standup branch is waiting on a human sign-in: nothing was published, `data.pending`
-    /// carries the sign-in envelope, and re-invoking `resume_argv` (the SAME publish command) resumes.
-    Pending {
-        data: PublishData,
-        resume_argv: Vec<String>,
-    },
 }
 
 /// A follow step's DENIAL, surfaced exactly as the production `--json` envelope would carry it: the wire
@@ -2141,29 +2087,23 @@ impl ContributeHarness {
         Layout::new(&self.home.0)
     }
 
-    /// The device public key this client's signer mints (load-or-generate is idempotent) — so the e2e can
-    /// register it on the plane (`seed_device`) before driving a write.
+    /// The REGISTERED device id this rig enrolled under (from `credentials.json`).
+    ///
+    /// # Panics
+    /// If [`enroll`](Self::enroll) has not run yet.
     #[must_use]
-    pub fn device_pubkey(&self) -> [u8; 32] {
-        DeviceSigner::load_or_generate(&self.fs, &self.layout())
-            .expect("load-or-generate device key")
-            .public_key()
+    pub fn device_id(&self) -> String {
+        enroll::read_credentials(&self.fs, &self.layout())
+            .expect("read credentials.json")
+            .expect("credentials.json exists after enroll")
+            .device_id
     }
 
-    /// The device key id the plane re-derives + selects to authenticate this client's write (the presented
-    /// credential — the op kind rides the route, nothing is signed).
-    #[must_use]
-    pub fn device_key_id(&self) -> String {
-        DeviceSigner::load_or_generate(&self.fs, &self.layout())
-            .expect("load-or-generate device key")
-            .device_key_id()
-            .to_owned()
-    }
-
-    /// Enroll this client EXACTLY as `follow` would: write `instance.json` (the plane base), `user.json`
-    /// (the workspace), `credentials.json` (the workspace Bearer credential), and `follows.json` (one
-    /// followed skill — pure subscription state), then adopt the skill under its exact id with
-    /// `placeholder_files`. A subsequent [`pull`](Self::pull) fast-forwards onto the plane's current.
+    /// Enroll this client EXACTLY as a granted `follow <address>` would: write `instance.json` (the
+    /// plane base), `user.json` (the workspace membership), `credentials.json` (the ONE device Bearer
+    /// credential + the registered device id), and `follows.json` (one followed skill — pure
+    /// subscription state), then adopt the skill under its exact id with `placeholder_files`. A
+    /// subsequent [`pull`](Self::pull) fast-forwards onto the plane's current.
     ///
     /// # Panics
     /// If a write or the adopt fails (a test-precondition error).
@@ -2183,8 +2123,6 @@ impl ContributeHarness {
             &Instance {
                 schema_version: 1,
                 base_url: base_url.to_owned(),
-                deployment_mode: DeploymentMode::Cloud,
-                enrollment_method: "device_code".to_owned(),
             },
         )
         .expect("write instance.json");
@@ -2193,33 +2131,18 @@ impl ContributeHarness {
             &layout,
             &UserDoc {
                 schema_version: 1,
-                email: None,
                 principal: None,
                 workspaces: vec![Membership {
                     workspace_id: workspace_id.to_owned(),
-                    display_name: Some("Test".to_owned()),
-                    roles: Vec::new(),
-                    verified_domain: None,
-                    verified_domain_status: VerifiedDomainStatus::Unverified,
-                    invite_rooted: true,
+                    name: "test".to_owned(),
+                    display_name: "Test".to_owned(),
                     enrolled_at: 1,
                 }],
             },
         )
         .expect("write user.json");
-        std::fs::create_dir_all(layout.identity_dir()).expect("create identity dir");
-        doc::write_doc_private(
-            &self.fs,
-            &layout.credentials_path(),
-            &Credentials {
-                schema_version: 1,
-                credentials: vec![CredentialEntry {
-                    workspace_id: workspace_id.to_owned(),
-                    credential: credential.to_owned(),
-                }],
-            },
-        )
-        .expect("write credentials.json");
+        enroll::write_credentials(&self.fs, &layout, credential, "dev_e2e")
+            .expect("write credentials.json");
         doc::write_doc_private(
             &self.fs,
             &layout.follows_path(),
@@ -2280,7 +2203,8 @@ impl ContributeHarness {
         (
             UreqPlane::new(
                 self.base_url(),
-                enroll::skill_creds(&follows, &creds_doc(&self.fs, &self.layout())),
+                device_credential(&self.fs, &self.layout()),
+                enroll::skill_workspaces(&follows),
             ),
             FileFollow::new(enroll::follow_contexts(&follows)),
         )
@@ -2352,13 +2276,13 @@ impl ContributeHarness {
         let contribute = |b: &str| -> Box<dyn ContributeSource> {
             Box::new(UreqDeviceClient::new(
                 b.to_owned(),
-                creds_map(&self.fs, &self.layout()),
+                device_credential(&self.fs, &self.layout()),
             ))
         };
         let governance = |b: &str| -> Box<dyn GovernanceSource> {
             Box::new(UreqDeviceClient::new(
                 b.to_owned(),
-                creds_map(&self.fs, &self.layout()),
+                device_credential(&self.fs, &self.layout()),
             ))
         };
         op(&ctx, &contribute, &governance)
@@ -2370,27 +2294,12 @@ impl ContributeHarness {
     /// The verb's typed error rendered to a string.
     pub fn publish(&self, propose: bool, approve: &str) -> Result<PublishResult, String> {
         self.with_write_ctx(|ctx, contribute, governance| {
-            // The harness is ALWAYS enrolled, so the standup branch never fires; the connector panics
-            // if a regression ever routes an enrolled publish into it, and the base is explicit (the
-            // compiled-in hosted default is never consulted from tests).
-            let standup_enroll = |_b: &str| -> Box<dyn crate::plane::EnrollSource> {
-                panic!("an enrolled publish must never build a standup transport")
-            };
-            let standup = ops::StandupConnectors {
-                enroll: &standup_enroll,
-                base_url: "http://127.0.0.1:0".to_owned(),
-            };
             let _ = governance;
-            match ops::publish(
-                ctx, contribute, &standup, None, approve, propose, None, None, None,
-            )
-            .map_err(|e| e.to_string())?
+            match ops::publish(ctx, contribute, None, approve, propose, None, None, None)
+                .map_err(|e| e.to_string())?
             {
                 ops::PublishOutcome::Published(d) => Ok(PublishResult::Published(d)),
                 ops::PublishOutcome::Proposed(d) => Ok(PublishResult::Proposed(d)),
-                ops::PublishOutcome::Pending { .. } => {
-                    Err("unexpected standup-pending publish from an enrolled harness".to_owned())
-                }
             }
         })
     }
@@ -2418,13 +2327,13 @@ impl ContributeHarness {
         let contribute = |b: &str| -> Box<dyn ContributeSource> {
             Box::new(UreqDeviceClient::new(
                 b.to_owned(),
-                creds_map(&self.fs, &self.layout()),
+                device_credential(&self.fs, &self.layout()),
             ))
         };
         let directory = |b: &str| -> Box<dyn DirectorySource> {
             Box::new(UreqDeviceClient::new(
                 b.to_owned(),
-                creds_map(&self.fs, &self.layout()),
+                device_credential(&self.fs, &self.layout()),
             ))
         };
         let connectors = ops::ReviewConnectors {
@@ -2535,8 +2444,10 @@ impl ContributeHarness {
         base_url: &str,
         workspace_id: &str,
     ) -> Result<WireSkillIndex, String> {
-        let client =
-            UreqDeviceClient::new(base_url.to_owned(), creds_map(&self.fs, &self.layout()));
+        let client = UreqDeviceClient::new(
+            base_url.to_owned(),
+            device_credential(&self.fs, &self.layout()),
+        );
         CatalogSource::fetch_catalog(&client, workspace_id).map_err(|e| format!("{e:?}"))
     }
 
@@ -2556,8 +2467,10 @@ impl ContributeHarness {
         memberships: Vec<(String, String)>,
         only: Option<String>,
     ) -> (ListData, Vec<String>) {
-        let catalog =
-            UreqDeviceClient::new(base_url.to_owned(), creds_map(&self.fs, &self.layout()));
+        let catalog = UreqDeviceClient::new(
+            base_url.to_owned(),
+            device_credential(&self.fs, &self.layout()),
+        );
         let device_id = crate::identity::load_or_create_device_id(&self.fs, &self.layout())
             .expect("load-or-create device id");
         let inert_plane = InertPlane;
@@ -2635,8 +2548,6 @@ impl ReconcileHarness {
             &Instance {
                 schema_version: 1,
                 base_url: base_url.to_owned(),
-                deployment_mode: DeploymentMode::Cloud,
-                enrollment_method: "device_code".to_owned(),
             },
         )
         .expect("write instance.json");
@@ -2645,33 +2556,18 @@ impl ReconcileHarness {
             &layout,
             &UserDoc {
                 schema_version: 1,
-                email: None,
                 principal: None,
                 workspaces: vec![Membership {
                     workspace_id: workspace_id.to_owned(),
-                    display_name: Some("Test".to_owned()),
-                    roles: Vec::new(),
-                    verified_domain: None,
-                    verified_domain_status: VerifiedDomainStatus::Unverified,
-                    invite_rooted: true,
+                    name: "test".to_owned(),
+                    display_name: "Test".to_owned(),
                     enrolled_at: 1,
                 }],
             },
         )
         .expect("write user.json");
-        std::fs::create_dir_all(layout.identity_dir()).expect("create identity dir");
-        doc::write_doc_private(
-            &self.fs,
-            &layout.credentials_path(),
-            &Credentials {
-                schema_version: 1,
-                credentials: vec![CredentialEntry {
-                    workspace_id: workspace_id.to_owned(),
-                    credential: credential.to_owned(),
-                }],
-            },
-        )
-        .expect("write credentials.json");
+        enroll::write_credentials(&self.fs, &layout, credential, "dev_e2e")
+            .expect("write credentials.json");
         doc::write_doc_private(
             &self.fs,
             &layout.follows_path(),
@@ -2681,11 +2577,6 @@ impl ReconcileHarness {
             },
         )
         .expect("write empty follows.json");
-    }
-
-    /// The workspace credential map (`workspace_id → credential`) from `credentials.json`.
-    fn ws_creds(&self) -> HashMap<String, String> {
-        creds_map(&self.fs, &self.layout())
     }
 
     fn base_url(&self) -> String {
@@ -2704,9 +2595,12 @@ impl ReconcileHarness {
                 schema_version: 1,
                 follows: Vec::new(),
             });
-        let creds = creds_doc(&self.fs, &self.layout());
-        let plane = UreqPlane::new(self.base_url(), enroll::skill_creds(&follows, &creds))
-            .with_workspace_credentials(self.ws_creds());
+        let plane = UreqPlane::new(
+            self.base_url(),
+            device_credential(&self.fs, &self.layout()),
+            enroll::skill_workspaces(&follows),
+        )
+        .with_workspaces(enrolled_workspaces(&self.fs, &self.layout()));
         let follow = FileFollow::new(enroll::follow_contexts(&follows));
         (plane, follow)
     }
@@ -2948,20 +2842,22 @@ fn applied_view(a: &crate::ops::FollowApplied) -> FollowAppliedView {
     }
 }
 
-/// Read a rig's `credentials.json` (empty if absent) — the per-workspace credentials `skill_creds` joins.
-fn creds_doc(fs: &RealFs, layout: &Layout) -> Credentials {
+/// Read a rig's ONE device Bearer credential (`None` = signed out) — what every credentialed
+/// transport presents.
+fn device_credential(fs: &RealFs, layout: &Layout) -> Option<String> {
     enroll::read_credentials(fs, layout)
         .ok()
         .flatten()
-        .unwrap_or(Credentials {
-            schema_version: 1,
-            credentials: Vec::new(),
-        })
+        .map(|c| c.credential)
 }
 
-/// The per-workspace credential map (`workspace_id → credential`) the write/catalog transports present.
-fn creds_map(fs: &RealFs, layout: &Layout) -> HashMap<String, String> {
-    creds_doc(fs, layout).into_map()
+/// The enrolled workspace ids from `user.json` — the delivery lane's fan-out set.
+fn enrolled_workspaces(fs: &RealFs, layout: &Layout) -> Vec<String> {
+    enroll::read_user(fs, layout)
+        .ok()
+        .flatten()
+        .map(|u| u.workspaces.into_iter().map(|m| m.workspace_id).collect())
+        .unwrap_or_default()
 }
 
 /// Write `files` (`(path, is_executable, bytes)`) into a fresh `dir`, honoring the executable bit — the

@@ -1,7 +1,7 @@
 //! The real plane transport: a blocking `ureq` (3, rustls+ring) [`PlaneSource`] that feeds the already-built
 //! pull engine, plus the on-disk [`FollowSource`].
 //!
-//! [`UreqPlane`] is a **dumb transport** — it speaks the wire under the workspace **Bearer credential**
+//! [`UreqPlane`] is a **dumb transport** — it speaks the wire under the device's ONE **Bearer credential**
 //! (`GET /v1/workspaces/{ws}/skills/{skill}/current` with the commit-sensitive conditional-GET headers;
 //! `GET …/versions/{id}` + per-blob `GET …/bundles/{id}`) and verifies each blob's `sha256 == object_id`.
 //! The `current` pointer is unsigned; the engine scope-checks it and re-verifies the fetched bytes against
@@ -10,10 +10,9 @@
 //! wire logic is unit-tested without a live server; the full loopback round-trips live in the `tests/`
 //! member.
 //!
-//! **Ids are validated at this boundary.** Every skill/workspace id a response carries (the redeem's
-//! workspace id, the bootstrap's offered skills) is parsed through [`crate::id`] before it is returned —
-//! a plane-chosen `"../../x"` fails here as a malformed response, never reaching a path join or a URL
-//! splice.
+//! **Ids are validated at this boundary.** Every skill/workspace id a response carries (the granted
+//! poll's workspace id) is parsed through [`crate::id`] before it is returned — a server-chosen
+//! `"../../x"` fails here as a malformed response, never reaching a path join or a URL splice.
 //!
 //! The client stays **sync + tokio-free**: `ureq` brings its own blocking TLS stack, so this adds no
 //! `plane-store`/`sqlx`/`tokio` edge (`check-arch` holds the line).
@@ -22,24 +21,22 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use base64::Engine as _;
 use topos_core::digest::{self, FileMode, to_hex};
 use topos_types::requests::{
-    AdminClaimRequest, DeviceAuthorizeRequest, DeviceAuthorizeResponse, DeviceTokenRequest,
-    DeviceTokenResponse, DeviceTokenStatus, InvitationData, InvitationRequest, LoginData,
-    LoginRedeemRequest, NoticeAckRequest, ProposeRequest, ProtectionSetRequest, PublishRequest,
-    RedeemRequest, RedeemResponse, RevertRequest, ReviewRequest, SessionIntent, WireChannelIndex,
+    DeviceAuthPollRequest, DeviceAuthPollResponse, DeviceAuthPollStatus, DeviceAuthStartRequest,
+    DeviceAuthStartResponse, InvitationData, InvitationRequest, NoticeAckRequest, ProposeRequest,
+    ProtectionSetRequest, PublishRequest, RevertRequest, ReviewRequest, WireChannelIndex,
     WireFileMode, WireMe, WireProposalIndex, WireProposalList, WireProtocolCard, WireReach,
     WireSkillIndex, WireSkillLog, WireVersionMeta,
 };
-use topos_types::{BootstrapData, JsonEnvelope, TerminalOutcome, WireCurrentRecord};
+use topos_types::{JsonEnvelope, TerminalOutcome, WireCurrentRecord};
 
 use crate::error::ClientError;
 use crate::plane::{
-    Card, CatalogSource, ContributeSource, DeviceAuthorize, DirectorySource, EnrollSource,
-    FetchedFile, FetchedVersion, FollowContext, FollowSource, GovernanceSource, Grant,
-    GrantedToken, GrantedWorkspace, KnownCurrent, LoginRedeem, LoginSeat, PlaneError, PlaneSource,
-    PointerFetch, Redeem, StandupAuthorize, TokenPoll, WriteReceipt,
+    CatalogSource, ContributeSource, DeviceAuthPoll, DeviceAuthStart, DirectorySource,
+    EnrollSource, EnrolledGrant, EnrolledWorkspace, FetchedFile, FetchedVersion, FollowContext,
+    FollowSource, GovernanceSource, KnownCurrent, PlaneError, PlaneSource, PointerFetch,
+    WriteReceipt,
 };
 
 /// Fail fast establishing a connection (a dead plane must not hang the session-start sweep).
@@ -53,56 +50,32 @@ const RECV_BODY_TIMEOUT_SECS: u64 = 300;
 /// with headroom for the metadata/record JSON. `ureq`'s default `read_to_vec` caps at 10 MiB, too small.
 const MAX_FETCH_BYTES: u64 = 128 * 1024 * 1024;
 
-/// One skill's transport credential — its workspace + the **secret** WORKSPACE credential (the Bearer that
-/// authenticates every read in that workspace). Keyed by skill id in [`UreqPlane`]'s map; distinct from the
-/// engine's [`FollowContext`] consent state (creds live in the transport, consent in the follow seam).
-#[derive(Clone)]
-pub(crate) struct SkillCred {
-    pub(crate) workspace_id: String,
-    /// The workspace Bearer credential (shared by every skill in the workspace). **SECRET.**
-    pub(crate) credential: String,
-}
-
-impl SkillCred {
-    pub(crate) fn new(workspace_id: String, credential: String) -> Self {
-        Self {
-            workspace_id,
-            credential,
-        }
-    }
-}
-
-// Redact the secret credential — it must never reach a log / panic message / Debug dump.
-impl std::fmt::Debug for SkillCred {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SkillCred")
-            .field("workspace_id", &self.workspace_id)
-            .field("credential", &"<redacted>")
-            .finish()
-    }
-}
-
-/// The blocking `ureq` plane transport. Holds the base URL, a per-skill credential map, and one configured
-/// agent (connection-pooled, reused across requests).
+/// The blocking `ureq` plane transport. Holds the base URL, the device's ONE Bearer credential, a
+/// non-secret `skill_id → workspace_id` map (the URL-path scope each skill's reads splice), the
+/// enrolled workspaces (the delivery lane's fan-out), and one configured agent (connection-pooled,
+/// reused across requests).
 pub(crate) struct UreqPlane {
     base_url: String,
-    /// skill_id → the credential + workspace its reads present. Interior-mutable because the
+    /// **SECRET** — the device's ONE Bearer credential (`None` = signed out; every read answers
+    /// "not served"). Redacted from `Debug`.
+    credential: Option<String>,
+    /// skill_id → workspace_id (the URL-path scope; NO secret). Interior-mutable because the
     /// delivery-driven reconcile LEARNS a brand-new arrival's skill mid-sweep (`bind_skill`): the
     /// map is seeded from `follows.json`, which cannot name a skill this device has never held.
     /// Single-threaded by construction (a blocking CLI transport).
-    creds: RefCell<HashMap<String, SkillCred>>,
-    /// workspace_id → the workspace Bearer credential (the delivery/report lane's key — one call
-    /// per WORKSPACE, unlike the per-skill read creds above). **SECRET values.**
-    ws_creds: HashMap<String, String>,
+    skill_workspaces: RefCell<HashMap<String, String>>,
+    /// The enrolled workspace ids (from `user.json`) — the delivery/report lane's fan-out set.
+    workspaces: Vec<String>,
     agent: ureq::Agent,
 }
 
 impl std::fmt::Debug for UreqPlane {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // The agent is not Debug, and the creds carry secrets — print only the safe shape.
+        // The agent is not Debug, and the credential is secret — print only the safe shape.
         f.debug_struct("UreqPlane")
             .field("base_url", &self.base_url)
-            .field("skills", &self.creds.borrow().len())
+            .field("skills", &self.skill_workspaces.borrow().len())
+            .field("workspaces", &self.workspaces)
             .finish_non_exhaustive()
     }
 }
@@ -110,41 +83,47 @@ impl std::fmt::Debug for UreqPlane {
 impl UreqPlane {
     /// Build the transport: one blocking agent (rustls+ring, sane connect/recv/body timeouts,
     /// status-as-error OFF so a 304/404/5xx comes back as an inspectable status rather than an error
-    /// variant) + the cred map. `base_url`'s trailing slash is trimmed so URL joins never double up.
-    pub(crate) fn new(base_url: String, creds: HashMap<String, SkillCred>) -> Self {
+    /// variant) + the device credential and the skill → workspace map. `base_url`'s trailing slash is
+    /// trimmed so URL joins never double up.
+    pub(crate) fn new(
+        base_url: String,
+        credential: Option<String>,
+        skill_workspaces: HashMap<String, String>,
+    ) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
-            creds: RefCell::new(creds),
-            ws_creds: HashMap::new(),
+            credential,
+            skill_workspaces: RefCell::new(skill_workspaces),
+            workspaces: Vec::new(),
             agent: ureq::Agent::new_with_config(agent_config()),
         }
     }
 
-    /// The credential a skill's reads present, if this transport knows the skill.
-    fn skill_cred(&self, skill_id: &str) -> Option<SkillCred> {
-        self.creds.borrow().get(skill_id).cloned()
+    /// The `(workspace_id, credential)` a skill's reads use, if this transport knows the skill AND a
+    /// credential is stored (a signed-out install reads nothing — never a request without a credential).
+    fn skill_scope(&self, skill_id: &str) -> Option<(String, String)> {
+        let ws = self.skill_workspaces.borrow().get(skill_id).cloned()?;
+        let cred = self.credential.clone()?;
+        Some((ws, cred))
     }
 
-    /// Teach the read transport a skill's workspace credential (the shared body behind BOTH the
-    /// [`PlaneSource`] and [`crate::plane::DeliverySource`] `bind_skill` — the read lane and the delivery
-    /// lane on one object). A no-op when the workspace has no stored credential (the read then answers the
-    /// same "not served" it would have) and idempotent (`or_insert_with` never overwrites a follows-derived
-    /// cred). The workspace credential authenticates every skill in its workspace, so this is a lookup.
+    /// Teach the read transport a skill's workspace (the shared body behind BOTH the [`PlaneSource`]
+    /// and [`crate::plane::DeliverySource`] `bind_skill` — the read lane and the delivery lane on one
+    /// object). Idempotent (`or_insert_with` never overwrites a follows-derived entry); the ONE device
+    /// credential already authenticates every workspace the person's seats reach, so this is a pure
+    /// scope lookup, never a new secret.
     fn bind(&self, workspace_id: &str, skill_id: &str) {
-        let Some(credential) = self.ws_creds.get(workspace_id) else {
-            return;
-        };
-        self.creds
+        self.skill_workspaces
             .borrow_mut()
             .entry(skill_id.to_owned())
-            .or_insert_with(|| SkillCred::new(workspace_id.to_owned(), credential.clone()));
+            .or_insert_with(|| workspace_id.to_owned());
     }
 
-    /// Attach the per-WORKSPACE credential map (`credentials.json`) — what arms the delivery-driven
-    /// reconcile ([`crate::plane::DeliverySource`]). Without it the transport still serves the
+    /// Attach the enrolled workspace ids (`user.json`'s memberships) — what arms the delivery-driven
+    /// reconcile ([`crate::plane::DeliverySource`]). Without them the transport still serves the
     /// per-skill reads; the sweep just has no delivery lane to drive.
-    pub(crate) fn with_workspace_credentials(mut self, ws_creds: HashMap<String, String>) -> Self {
-        self.ws_creds = ws_creds;
+    pub(crate) fn with_workspaces(mut self, workspaces: Vec<String>) -> Self {
+        self.workspaces = workspaces;
         self
     }
 
@@ -179,25 +158,22 @@ impl PlaneSource for UreqPlane {
         skill_id: &str,
         known: Option<KnownCurrent>,
     ) -> Result<PointerFetch, PlaneError> {
-        let cred = self.skill_cred(skill_id).ok_or(PlaneError::NotFound)?;
+        let (workspace_id, credential) = self.skill_scope(skill_id).ok_or(PlaneError::NotFound)?;
         // The workspace + skill ids are spliced into the URL path; the credential rides the Bearer header,
         // so the URL carries no secret (safe in an error message). Refuse a non-URL-safe id defensively.
-        ensure_url_safe_ids(skill_id, &cred.workspace_id)?;
+        ensure_url_safe_ids(skill_id, &workspace_id)?;
         let url = format!(
             "{}/v1/workspaces/{}/skills/{}/current",
-            self.base_url, cred.workspace_id, skill_id
+            self.base_url, workspace_id, skill_id
         );
         let mut req = self
             .agent
             .get(&url)
-            .header("authorization", format!("Bearer {}", cred.credential));
+            .header("authorization", format!("Bearer {credential}"));
         if let Some(k) = known {
             // Commit-sensitive conditional GET: the quoted ETag for the generation AND the known commit id.
             req = req
-                .header(
-                    "if-none-match",
-                    format!("\"{}.{}\"", k.generation.epoch, k.generation.seq),
-                )
+                .header("if-none-match", format!("\"{}\"", k.generation))
                 .header("topos-known-version-id", to_hex(&k.version_id));
         }
         let resp = req
@@ -227,38 +203,39 @@ impl PlaneSource for UreqPlane {
         skill_id: &str,
         version_id: [u8; 32],
     ) -> Result<FetchedVersion, PlaneError> {
-        let cred = self.skill_cred(skill_id).ok_or(PlaneError::NotFound)?;
+        let (workspace_id, credential) = self.skill_scope(skill_id).ok_or(PlaneError::NotFound)?;
         // Both ids are spliced into the URL path — refuse anything outside the validated id charset
         // (defense in depth; the enrollment loaders already validated what they persisted).
-        ensure_url_safe_ids(skill_id, &cred.workspace_id)?;
+        ensure_url_safe_ids(skill_id, &workspace_id)?;
         let vid_hex = to_hex(&version_id);
         let meta_url = format!(
             "{}/v1/workspaces/{}/skills/{}/versions/{}",
-            self.base_url, cred.workspace_id, skill_id, vid_hex
+            self.base_url, workspace_id, skill_id, vid_hex
         );
-        let meta_bytes = self.bearer_get(&meta_url, &cred.credential)?;
+        let meta_bytes = self.bearer_get(&meta_url, &credential)?;
         let meta: WireVersionMeta = serde_json::from_slice(&meta_bytes)
             .map_err(|e| PlaneError::Malformed(format!("version metadata for {skill_id}: {e}")))?;
         build_fetched_version(&meta, |object_id_hex| {
             let url = format!(
                 "{}/v1/workspaces/{}/skills/{}/bundles/{}",
-                self.base_url, cred.workspace_id, skill_id, object_id_hex
+                self.base_url, workspace_id, skill_id, object_id_hex
             );
-            self.bearer_get(&url, &cred.credential)
+            self.bearer_get(&url, &credential)
         })
     }
 
     fn list_open_proposals(&self, skill_id: &str) -> Result<Vec<[u8; 32]>, PlaneError> {
-        // No credential for this skill ⇒ none visible (best-effort; the count never errors out a pull).
-        let Some(cred) = self.skill_cred(skill_id) else {
+        // No known scope / no credential for this skill ⇒ none visible (best-effort; the count never
+        // errors out a pull).
+        let Some((workspace_id, credential)) = self.skill_scope(skill_id) else {
             return Ok(Vec::new());
         };
-        ensure_url_safe_ids(skill_id, &cred.workspace_id)?;
+        ensure_url_safe_ids(skill_id, &workspace_id)?;
         let url = format!(
             "{}/v1/workspaces/{}/skills/{}/proposals",
-            self.base_url, cred.workspace_id, skill_id
+            self.base_url, workspace_id, skill_id
         );
-        match self.bearer_get(&url, &cred.credential) {
+        match self.bearer_get(&url, &credential) {
             Ok(bytes) => {
                 let list: WireProposalList = serde_json::from_slice(&bytes).map_err(|e| {
                     PlaneError::Malformed(format!("proposals list for {skill_id}: {e}"))
@@ -283,14 +260,14 @@ impl PlaneSource for UreqPlane {
 
 impl crate::plane::DeliverySource for UreqPlane {
     fn bind_skill(&self, workspace_id: &str, skill_id: &str) {
-        // A brand-new arrival is absent from the `follows.json`-derived per-skill map; its
-        // workspace credential already authenticates it (membership IS the authorization), so
-        // teach the read transport the pairing before its first version fetch.
+        // A brand-new arrival is absent from the `follows.json`-derived per-skill map; the device
+        // credential already authenticates it (membership IS the authorization), so teach the read
+        // transport the workspace scope before its first version fetch.
         self.bind(workspace_id, skill_id);
     }
 
     fn workspaces(&self) -> Vec<String> {
-        let mut ws: Vec<String> = self.ws_creds.keys().cloned().collect();
+        let mut ws = self.workspaces.clone();
         ws.sort();
         ws
     }
@@ -299,13 +276,10 @@ impl crate::plane::DeliverySource for UreqPlane {
         &self,
         workspace_id: &str,
     ) -> Result<crate::plane::DeliverySnapshot, PlaneError> {
-        let cred = self
-            .ws_creds
-            .get(workspace_id)
-            .ok_or(PlaneError::NotFound)?;
+        let cred = self.credential.clone().ok_or(PlaneError::NotFound)?;
         ensure_url_safe_ids("delivery", workspace_id)?;
         let url = format!("{}/v1/workspaces/{}/delivery", self.base_url, workspace_id);
-        let body = self.bearer_get(&url, cred)?;
+        let body = self.bearer_get(&url, &cred)?;
         let wire: topos_types::requests::WireDelivery = serde_json::from_slice(&body)
             .map_err(|e| PlaneError::Malformed(format!("delivery body: {e}")))?;
         let mut skills = Vec::with_capacity(wire.skills.len());
@@ -332,10 +306,7 @@ impl crate::plane::DeliverySource for UreqPlane {
     }
 
     fn ack_notices(&self, workspace_id: &str, ids: &[String]) -> Result<(), PlaneError> {
-        let cred = self
-            .ws_creds
-            .get(workspace_id)
-            .ok_or(PlaneError::NotFound)?;
+        let cred = self.credential.clone().ok_or(PlaneError::NotFound)?;
         ensure_url_safe_ids("ack", workspace_id)?;
         let url = format!(
             "{}/v1/workspaces/{}/notices/ack",
@@ -366,10 +337,7 @@ impl crate::plane::DeliverySource for UreqPlane {
         workspace_id: &str,
         applied: &[(String, [u8; 32])],
     ) -> Result<(), PlaneError> {
-        let cred = self
-            .ws_creds
-            .get(workspace_id)
-            .ok_or(PlaneError::NotFound)?;
+        let cred = self.credential.clone().ok_or(PlaneError::NotFound)?;
         ensure_url_safe_ids("report", workspace_id)?;
         let url = format!("{}/v1/workspaces/{}/report", self.base_url, workspace_id);
         let report = topos_types::requests::WireAppliedReport {
@@ -539,62 +507,60 @@ impl FollowSource for FileFollow {
 }
 
 // =================================================================================================
-// UreqDeviceClient — the real DEVICE transport (sibling of the read-credentialed `UreqPlane`). One client
-// speaks every route a device drives: the UNAUTHENTICATED enrollment flow (`GET /i/{token}`,
-// `POST /v1/device/authorize`, `POST /v1/device/token`, the redeem `POST /v1/workspaces/{ws}/devices`,
-// `POST /v1/admin-claim`), and the WORKSPACE-CREDENTIAL routes — the governance Invite POST, the four
-// contribute writes (publish / propose / revert / review), and the workspace-catalog GET (`list --remote`)
-// — each of which rides `Authorization: Bearer <workspace credential>` looked up by the request's
-// `workspace_id` in the client's credential map; every terminal protocol outcome of a write comes back as
-// the all-outcome **200 envelope**. The `/i/{token}` URL, the device code, the grant, and the credentials
-// are sensitive — never logged or put in an error.
+// UreqDeviceClient — the real DEVICE transport (sibling of the read-lane `UreqPlane`). One client
+// speaks every route a device drives: the UNAUTHENTICATED device-authorization flow
+// (`POST /v1/device/authorize` + `POST /v1/device/token`) and the CREDENTIALED routes — the
+// governance invitation POST + device revoke, the four contribute writes (publish / propose /
+// revert / review), the workspace-catalog GET (`list --remote`), and the member-scoped directory
+// reads/row-ops — each riding `Authorization: Bearer <device credential>` (the ONE credential; the
+// server resolves credential → device → user → seat). Every terminal protocol outcome of a write
+// comes back as the all-outcome **200 envelope**. The device code and the credential are
+// sensitive — never logged or put in an error.
 // =================================================================================================
 
 /// The blocking `ureq` device transport (`EnrollSource` + `GovernanceSource` + `ContributeSource` +
-/// `CatalogSource`). Holds the base URL, one configured agent, and a per-workspace credential map
-/// (`workspace_id → credential`) the write/governance/catalog routes present as Bearer. Enrollment starts
-/// unauthenticated (its routes never touch the map); the redeem mints the credential the caller then stores.
+/// `CatalogSource` + `DirectorySource`). Holds the base URL, one configured agent, and the device's
+/// ONE Bearer credential. The enrollment routes are unauthenticated (they mint the credential the
+/// caller then stores); enrollment-only callers pass `None`.
 pub(crate) struct UreqDeviceClient {
     base_url: String,
-    /// `workspace_id → workspace credential` — the Bearer the write/governance/catalog routes present.
-    /// **Each value is a SECRET** (redacted in `Debug`); empty for an enrollment-only client.
-    creds: HashMap<String, String>,
+    /// **SECRET** — the device's ONE Bearer credential (`None` = signed out / enrollment-only).
+    credential: Option<String>,
     agent: ureq::Agent,
 }
 
 impl std::fmt::Debug for UreqDeviceClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // The agent is not Debug; the credentials are secret — print only the safe shape (count, not keys).
+        // The agent is not Debug; the credential is secret — print only the safe shape.
         f.debug_struct("UreqDeviceClient")
             .field("base_url", &self.base_url)
-            .field("workspaces", &self.creds.len())
+            .field("credentialed", &self.credential.is_some())
             .finish_non_exhaustive()
     }
 }
 
 impl UreqDeviceClient {
-    /// Build the transport against `base_url` (trailing slash trimmed) with a per-workspace credential map,
+    /// Build the transport against `base_url` (trailing slash trimmed) with the device credential,
     /// over the same agent configuration as [`UreqPlane`] (status-as-error OFF + the connect/recv/body
-    /// timeouts). Enrollment-only callers pass an empty map (those routes are unauthenticated).
-    pub(crate) fn new(base_url: String, creds: HashMap<String, String>) -> Self {
+    /// timeouts). Enrollment-only callers pass `None` (those routes are unauthenticated).
+    pub(crate) fn new(base_url: String, credential: Option<String>) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
-            creds,
+            credential,
             agent: ureq::Agent::new_with_config(agent_config()),
         }
     }
 
-    /// The workspace's Bearer credential, or a typed "not enrolled in this workspace" error (mirroring the
-    /// un-enrolled write refusal — a request without a credential must never reach the plane).
-    fn credential_for(&self, workspace_id: &str) -> Result<&str, ClientError> {
-        self.creds
-            .get(workspace_id)
-            .map(String::as_str)
-            .ok_or_else(|| {
-                ClientError::Enrollment(
-                    "not enrolled in this workspace; run `topos follow <link>` first".into(),
-                )
-            })
+    /// The device's Bearer credential, or a typed "not enrolled" error (mirroring the un-enrolled
+    /// write refusal — a request without a credential must never reach the plane). `_workspace_id`
+    /// documents the call site's scope; the ONE credential serves every workspace the person's seats
+    /// reach (the server authorizes per request).
+    fn credential_for(&self, _workspace_id: &str) -> Result<&str, ClientError> {
+        self.credential.as_deref().ok_or_else(|| {
+            ClientError::Enrollment(
+                "not enrolled; run `topos follow <workspace-address>` first".into(),
+            )
+        })
     }
 
     /// POST a JSON body UNAUTHENTICATED (the enrollment routes). See [`Self::post_json_auth`] for the
@@ -649,28 +615,10 @@ impl UreqDeviceClient {
         Ok((status, bytes))
     }
 
-    /// POST `/v1/device/authorize` (enroll or standup — the body decides) and parse the typed response.
-    /// `what` names the step for the transport-fault message.
-    fn post_device_authorize(
-        &self,
-        req: DeviceAuthorizeRequest,
-        what: &str,
-    ) -> Result<DeviceAuthorizeResponse, ClientError> {
-        let body = serde_json::to_value(req)
-            .map_err(|e| ClientError::Corrupt(format!("authorize body: {e}")))?;
-        let url = format!("{}/v1/device/authorize", self.base_url);
-        let (status, bytes) = self.post_json(&url, &body, what)?;
-        if classify(status) != HttpClass::Ok {
-            return Err(ClientError::Plane(format!("{what}: HTTP {status}")));
-        }
-        serde_json::from_slice(&bytes)
-            .map_err(|e| ClientError::WireInvalid(format!("authorize response is malformed: {e}")))
-    }
-
-    /// POST a contribute write under the workspace's Bearer credential and map the all-outcome **200
+    /// POST a contribute write under the device's Bearer credential and map the all-outcome **200
     /// envelope** to a [`WriteReceipt`]. The four verbs differ only by `path` + body type; the op kind is
     /// derived from the route server-side, and the acting device is the credential's registry row (never a
-    /// body field). A missing credential for `workspace_id` is refused BEFORE any send.
+    /// body field). A missing credential is refused BEFORE any send.
     fn post_write<T: serde::Serialize>(
         &self,
         path: &str,
@@ -688,79 +636,9 @@ impl UreqDeviceClient {
 }
 
 impl EnrollSource for UreqDeviceClient {
-    fn fetch_bootstrap(&self, token: &str) -> Result<BootstrapData, ClientError> {
-        // The `/i/{token}` URL is SECRET (the token grants the bootstrap read) — error text names no URL.
-        let url = format!("{}/i/{}", self.base_url, token);
-        // Ask for the machine contract EXPLICITLY: the route content-negotiates, and anything not asking
-        // for JSON is served the agent-instruction markdown instead (ureq's default Accept is `*/*`).
-        let resp = self
-            .agent
-            .get(&url)
-            .header("Accept", "application/json")
-            .call()
-            .map_err(|e| ClientError::Plane(format!("fetch invite bootstrap: {e}")))?;
-        let status = resp.status().as_u16();
-        match classify(status) {
-            HttpClass::Ok => {
-                let bytes = read_body(resp).map_err(plane_err)?;
-                parse_bootstrap(&bytes)
-            }
-            HttpClass::NotFound => Err(ClientError::Plane(
-                "the invite link is invalid or has expired".into(),
-            )),
-            HttpClass::NotModified | HttpClass::Other => Err(ClientError::Plane(format!(
-                "fetch invite bootstrap: HTTP {status}"
-            ))),
-        }
-    }
-
-    fn device_authorize(
-        &self,
-        workspace: &str,
-        device_public_key: [u8; 32],
-        machine_name: &str,
-    ) -> Result<DeviceAuthorize, ClientError> {
-        // The enroll-intent start names the workspace by its ADDRESS; the address-follow dispatch is a
-        // marked seam in `ops::follow`, so this reshaped body compiles ahead of that leg wiring it.
-        let resp = self.post_device_authorize(
-            DeviceAuthorizeRequest {
-                workspace: Some(workspace.to_owned()),
-                intent: Some(SessionIntent::Enroll),
-                device_public_key: b64(&device_public_key),
-                machine_name: machine_name.to_owned(),
-            },
-            "device authorize",
-        )?;
-        Ok(device_authorize_from_wire(resp))
-    }
-
-    fn device_authorize_standup(
-        &self,
-        device_public_key: [u8; 32],
-        machine_name: &str,
-    ) -> Result<StandupAuthorize, ClientError> {
-        let resp = self.post_device_authorize(
-            DeviceAuthorizeRequest {
-                workspace: None,
-                intent: Some(SessionIntent::Standup),
-                device_public_key: b64(&device_public_key),
-                machine_name: machine_name.to_owned(),
-            },
-            "standup authorize",
-        )?;
-        // The plane block declares the API base a standup device dials; a response without it is unusable.
-        let plane = resp.plane.clone().ok_or_else(|| {
-            ClientError::WireInvalid("a standup authorize carried no plane block".into())
-        })?;
-        Ok(StandupAuthorize {
-            auth: device_authorize_from_wire(resp),
-            plane,
-        })
-    }
-
-    fn fetch_card(&self, url: &str) -> Result<Card, ClientError> {
-        // The URL is a pasted address, but it MAY be an `/i/` claim link (whose token is a bearer
-        // secret) — so no error on this path ever echoes the URL.
+    fn fetch_card(&self, url: &str) -> Result<WireProtocolCard, ClientError> {
+        // Ask for the machine contract EXPLICITLY: the route content-negotiates, and anything not
+        // asking for JSON is served the human page instead (ureq's default Accept is `*/*`).
         let resp = self
             .agent
             .get(url)
@@ -778,207 +656,88 @@ impl EnrollSource for UreqDeviceClient {
         parse_card(&bytes)
     }
 
-    fn device_authorize_login(
+    fn device_auth_start(
         &self,
-        device_public_key: [u8; 32],
-        machine_name: &str,
-    ) -> Result<DeviceAuthorize, ClientError> {
-        let resp = self.post_device_authorize(
-            DeviceAuthorizeRequest {
-                workspace: None,
-                intent: Some(SessionIntent::Login),
-                device_public_key: b64(&device_public_key),
-                machine_name: machine_name.to_owned(),
-            },
-            "login authorize",
-        )?;
-        Ok(device_authorize_from_wire(resp))
-    }
-
-    fn login_redeem(
-        &self,
-        grant: &str,
-        device_public_key: [u8; 32],
-    ) -> Result<LoginRedeem, ClientError> {
-        let body = serde_json::to_value(LoginRedeemRequest {
-            grant: grant.to_owned(),
-            device_public_key: b64(&device_public_key),
+        workspace: &str,
+        requested_name: &str,
+    ) -> Result<DeviceAuthStart, ClientError> {
+        let body = serde_json::to_value(DeviceAuthStartRequest {
+            requested_name: requested_name.to_owned(),
+            workspace: workspace.to_owned(),
         })
-        .map_err(|_| ClientError::Corrupt("login body: could not serialize".to_owned()))?;
-        let url = format!("{}/v1/login", self.base_url);
-        let (status, bytes) = self.post_json(&url, &body, "login")?;
-        map_login_envelope(status, &bytes)
-    }
-
-    fn poll_token(&self, device_code: &str) -> Result<TokenPoll, ClientError> {
-        let body = serde_json::to_value(DeviceTokenRequest {
-            device_code: device_code.to_owned(),
-        })
-        .map_err(|e| ClientError::Corrupt(format!("token body: {e}")))?;
-        let url = format!("{}/v1/device/token", self.base_url);
-        let (status, bytes) = self.post_json(&url, &body, "device token poll")?;
+        .map_err(|e| ClientError::Corrupt(format!("authorize body: {e}")))?;
+        let url = format!("{}/v1/device/authorize", self.base_url);
+        let (status, bytes) = self.post_json(&url, &body, "device authorize")?;
         if classify(status) != HttpClass::Ok {
             return Err(ClientError::Plane(format!(
-                "device token poll: HTTP {status}"
+                "device authorize: HTTP {status}"
             )));
         }
-        let resp: DeviceTokenResponse = serde_json::from_slice(&bytes)
-            .map_err(|e| ClientError::WireInvalid(format!("token response is malformed: {e}")))?;
-        Ok(match resp.status {
-            DeviceTokenStatus::Pending => TokenPoll::Pending,
-            DeviceTokenStatus::SlowDown => TokenPoll::SlowDown,
-            DeviceTokenStatus::Denied => TokenPoll::Denied,
-            DeviceTokenStatus::Expired => TokenPoll::Expired,
-            DeviceTokenStatus::Granted => match resp.grant {
-                Some(g) => {
-                    // The workspace context (a standup grant's disclosure) rides alongside; its id later
-                    // keys the redeem URL + user.json, so it is validated at this wire boundary.
-                    let workspace = match resp.workspace {
-                        Some(w) => {
-                            crate::id::validate_workspace_id(&w.workspace_id)
-                                .map_err(crate::id::wire_flavor)?;
-                            Some(GrantedWorkspace {
-                                workspace_id: w.workspace_id,
-                                display_name: w.display_name,
-                                address: w.address,
-                            })
-                        }
-                        None => None,
-                    };
-                    TokenPoll::Granted(GrantedToken {
-                        grant: Grant::new(g),
-                        workspace,
-                    })
-                }
-                // `granted` without a grant is a malformed response, not a silent re-poll.
-                None => {
-                    return Err(ClientError::WireInvalid(
-                        "a granted device-token poll carried no grant".into(),
-                    ));
-                }
-            },
+        let resp: DeviceAuthStartResponse = serde_json::from_slice(&bytes).map_err(|e| {
+            ClientError::WireInvalid(format!("authorize response is malformed: {e}"))
+        })?;
+        Ok(DeviceAuthStart {
+            device_code: resp.device_code,
+            user_code: resp.user_code,
+            verification_uri_complete: resp.verification_uri_complete,
+            expires_in_secs: resp.expires_in_secs,
+            interval_secs: resp.interval_secs,
         })
     }
 
-    fn redeem(
-        &self,
-        workspace_id: &str,
-        grant: &str,
-        device_public_key: [u8; 32],
-    ) -> Result<Redeem, ClientError> {
-        // The workspace id is spliced into the URL path below — validate before building the request
-        // (it entered via the bootstrap, which already validated; this is the last-line guard).
-        crate::id::validate_workspace_id(workspace_id).map_err(crate::id::wire_flavor)?;
-        let body = serde_json::to_value(RedeemRequest {
-            workspace_id: workspace_id.to_owned(),
-            grant: grant.to_owned(),
-            device_public_key: b64(&device_public_key),
+    fn device_auth_poll(&self, device_code: &str) -> Result<DeviceAuthPoll, ClientError> {
+        // The body carries the SECRET device code — a serialize failure never echoes it, and the
+        // response mapping is the pure `map_poll_response` (unit-tested without a socket).
+        let body = serde_json::to_value(DeviceAuthPollRequest {
+            device_code: device_code.to_owned(),
         })
-        .map_err(|e| ClientError::Corrupt(format!("redeem body: {e}")))?;
-        let url = format!("{}/v1/workspaces/{}/devices", self.base_url, workspace_id);
-        let (status, bytes) = self.post_json(&url, &body, "redeem")?;
-        map_redeem_envelope(RedeemKind::Grant, status, &bytes)
-    }
-
-    fn admin_claim(
-        &self,
-        claim_token: &str,
-        device_public_key: [u8; 32],
-        display_name: &str,
-    ) -> Result<Redeem, ClientError> {
-        // The claim token is the bearer capability; the display name is disclosure-only (the seated name
-        // comes from the mint-time claim row). The token is a SECRET — it rides the body, never a URL or an
-        // error message.
-        let body = serde_json::to_value(AdminClaimRequest {
-            claim_token: claim_token.to_owned(),
-            device_public_key: b64(&device_public_key),
-            display_name: display_name.to_owned(),
-        })
-        .map_err(|_| ClientError::Corrupt("claim body: could not serialize".to_owned()))?;
-        let url = format!("{}/v1/admin-claim", self.base_url);
-        let (status, bytes) = self.post_json(&url, &body, "admin claim")?;
-        map_redeem_envelope(RedeemKind::Claim, status, &bytes)
+        .map_err(|_| ClientError::Corrupt("poll body: could not serialize".to_owned()))?;
+        let url = format!("{}/v1/device/token", self.base_url);
+        let (status, bytes) = self.post_json(&url, &body, "device token poll")?;
+        map_poll_response(status, &bytes)
     }
 }
 
-/// Which redeem-shaped envelope is being mapped — the two doors carry the SAME wire shape but deserve
-/// different typed denials: a grant redeem's DENIED is authenticated-but-uninvited (ask an owner), a claim
-/// redeem's DENIED means the one-time claim is dead (consumed elsewhere / expired / workspace exists).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RedeemKind {
-    Grant,
-    Claim,
-}
-
-/// Map a redeem / admin-claim response — the all-outcome **200 envelope** — to the typed [`Redeem`],
-/// validating the workspace id the plane echoed (it becomes a URL segment) — a traversal-shaped id fails
-/// the whole redeem as malformed. The plaintext workspace `credential` rides in `data`. **Pure** (status +
-/// bytes in), so the ok / denied / hostile-id arms are unit-tested without a socket (mirrors
-/// [`map_invite_envelope`]).
-fn map_redeem_envelope(kind: RedeemKind, status: u16, bytes: &[u8]) -> Result<Redeem, ClientError> {
-    // The redeem is an all-outcome 200 envelope; a non-2xx is a transport/auth/integrity fault.
+/// Map a `POST /v1/device/token` response to the typed [`DeviceAuthPoll`]. A `granted` poll must carry
+/// the credential + device id + workspace (the promoted device code IS the credential — there is no
+/// second mint round-trip); the workspace id is validated at this wire boundary (it later keys URL
+/// splices + `user.json`). **Pure** (status + bytes in), so every arm is unit-tested without a socket.
+fn map_poll_response(status: u16, bytes: &[u8]) -> Result<DeviceAuthPoll, ClientError> {
     if classify(status) != HttpClass::Ok {
-        return Err(ClientError::Plane(format!("redeem: HTTP {status}")));
+        return Err(ClientError::Plane(format!(
+            "device token poll: HTTP {status}"
+        )));
     }
-    let env: JsonEnvelope = serde_json::from_slice(bytes)
-        .map_err(|e| ClientError::WireInvalid(format!("redeem envelope is malformed: {e}")))?;
-    if !env.ok {
-        // A DENIED redeem — surface a typed error, never any secret. The plane's denial is deliberately
-        // uniform, so the guidance comes from WHICH door was knocked on, not from the (static) code.
-        let code = env
-            .error
-            .map(|e| e.code)
-            .unwrap_or_else(|| "DENIED".to_owned());
-        return Err(match kind {
-            // Authenticated-but-uninvited on a hosted plane: the ask-an-owner guidance + REQUEST_ACCESS.
-            RedeemKind::Grant => ClientError::RedeemDenied { code },
-            // A dead one-time claim: consumed by ANOTHER device (a same-device retry replays Redeemed),
-            // expired, or the workspace already exists — ask the operator for a fresh claim link.
-            RedeemKind::Claim => ClientError::Enrollment(
-                "the claim link was refused — it may be consumed, expired, or the workspace may \
-                 already exist; ask the plane operator for a fresh claim link"
-                    .into(),
-            ),
-        });
-    }
-    let resp: RedeemResponse = serde_json::from_value(env.data)
-        .map_err(|e| ClientError::WireInvalid(format!("redeem data is malformed: {e}")))?;
-    // The wire boundary: the echoed workspace id becomes a URL segment + the credential lookup key, so it
-    // must be a safe path component (a traversal id is the corrupt family's WIRE flavor).
-    crate::id::validate_workspace_id(&resp.workspace_id).map_err(crate::id::wire_flavor)?;
-    Ok(Redeem {
-        workspace_id: resp.workspace_id,
-        device_key_id: resp.device_key_id,
-        principal: resp.principal,
-        credential: resp.credential,
+    let resp: DeviceAuthPollResponse = serde_json::from_slice(bytes)
+        .map_err(|e| ClientError::WireInvalid(format!("poll response is malformed: {e}")))?;
+    Ok(match resp.status {
+        DeviceAuthPollStatus::Pending => DeviceAuthPoll::Pending,
+        DeviceAuthPollStatus::Denied => DeviceAuthPoll::Denied,
+        DeviceAuthPollStatus::Expired => DeviceAuthPoll::Expired,
+        DeviceAuthPollStatus::Granted => {
+            let (Some(credential), Some(device_id), Some(workspace)) =
+                (resp.credential, resp.device_id, resp.workspace)
+            else {
+                // `granted` without its grant halves is a malformed response, not a silent re-poll.
+                return Err(ClientError::WireInvalid(
+                    "a granted device-token poll carried no credential/device/workspace".into(),
+                ));
+            };
+            // The wire boundary: the workspace id becomes a URL segment + a user.json key, so it must
+            // be a safe path component (a traversal id is the corrupt family's WIRE flavor).
+            crate::id::validate_workspace_id(&workspace.workspace_id)
+                .map_err(crate::id::wire_flavor)?;
+            DeviceAuthPoll::Granted(EnrolledGrant {
+                credential,
+                device_id,
+                workspace: EnrolledWorkspace {
+                    workspace_id: workspace.workspace_id,
+                    name: workspace.name,
+                    display_name: workspace.display_name,
+                },
+            })
+        }
     })
-}
-
-/// Map the wire [`DeviceAuthorizeResponse`] to the transport-level [`DeviceAuthorize`] (drops the standup
-/// plane block, which [`UreqDeviceClient::device_authorize_standup`] extracts separately).
-fn device_authorize_from_wire(resp: DeviceAuthorizeResponse) -> DeviceAuthorize {
-    DeviceAuthorize {
-        device_code: resp.device_code,
-        user_code: resp.user_code,
-        verification_uri: resp.verification_uri,
-        verification_uri_complete: resp.verification_uri_complete,
-        expires_in: resp.expires_in,
-        interval: resp.interval,
-    }
-}
-
-/// Parse + validate the `/i/` bootstrap body: the serde decode, then the id boundary — the workspace id
-/// and every offered skill id must be safe path/URL segments (they persist into the WAL and later key path
-/// joins). **Pure**, unit-tested with canned JSON.
-fn parse_bootstrap(bytes: &[u8]) -> Result<BootstrapData, ClientError> {
-    let bootstrap: BootstrapData = serde_json::from_slice(bytes)
-        .map_err(|e| ClientError::WireInvalid(format!("invite bootstrap is malformed: {e}")))?;
-    crate::id::validate_workspace_id(&bootstrap.workspace.workspace_id)
-        .map_err(crate::id::wire_flavor)?;
-    for s in &bootstrap.offered_skills {
-        crate::id::SkillId::parse(&s.skill_id).map_err(crate::id::wire_flavor)?;
-    }
-    Ok(bootstrap)
 }
 
 // =================================================================================================
@@ -1111,11 +870,11 @@ impl CatalogSource for UreqDeviceClient {
                 "a workspace id is not a safe path segment".into(),
             ));
         }
-        // No stored credential for this workspace ⇒ Unavailable (the caller degrades it to a warning), never
-        // a request without a credential.
-        let Some(credential) = self.creds.get(workspace_id) else {
+        // No stored device credential ⇒ Unavailable (the caller degrades it to a warning), never a
+        // request without a credential.
+        let Some(credential) = self.credential.as_deref() else {
             return Err(PlaneError::Unavailable(format!(
-                "not enrolled in workspace {workspace_id}"
+                "not enrolled; no credential to read workspace {workspace_id}"
             )));
         };
         let url = format!("{}/v1/workspaces/{}/skills", self.base_url, workspace_id);
@@ -1529,9 +1288,9 @@ impl DirectorySource for UreqDeviceClient {
     }
 }
 
-/// Dispatch an unauthenticated card-read body: the constant protocol card (its `card` discriminant
-/// decides), else an `/i/` claim link's bootstrap. **Pure**, unit-tested with canned bytes.
-fn parse_card(bytes: &[u8]) -> Result<Card, ClientError> {
+/// Parse an unauthenticated card-read body: the constant protocol card (its `card` discriminant is
+/// checked, and the declared API base must be non-empty). **Pure**, unit-tested with canned bytes.
+fn parse_card(bytes: &[u8]) -> Result<WireProtocolCard, ClientError> {
     if let Ok(card) = serde_json::from_slice::<WireProtocolCard>(bytes)
         && card.card == "topos-protocol-card"
     {
@@ -1540,62 +1299,11 @@ fn parse_card(bytes: &[u8]) -> Result<Card, ClientError> {
                 "the protocol card declares no API base URL".into(),
             ));
         }
-        return Ok(Card::Protocol(card));
+        return Ok(card);
     }
-    parse_bootstrap(bytes)
-        .map(|b| Card::Claim(Box::new(b)))
-        .map_err(|_| {
-            ClientError::WireInvalid(
-                "the address answered neither a protocol card nor a claim bootstrap — is it a \
-                 topos plane?"
-                    .into(),
-            )
-        })
-}
-
-/// Map a `POST /v1/login` response to the typed [`LoginRedeem`]: the all-outcome **200 envelope**
-/// (mirroring the redeem), parsed leniently — a bare `LoginData` body also lands. Every seat's
-/// workspace id is validated at this wire boundary (it later keys credential lookups + URL splices).
-/// **Pure** (status + bytes in), unit-tested without a socket.
-fn map_login_envelope(status: u16, bytes: &[u8]) -> Result<LoginRedeem, ClientError> {
-    if classify(status) != HttpClass::Ok {
-        return Err(ClientError::Plane(format!("login: HTTP {status}")));
-    }
-    let data: LoginData = match serde_json::from_slice::<JsonEnvelope>(bytes) {
-        Ok(env) => {
-            if !env.ok {
-                let code = env
-                    .error
-                    .map(|e| e.code)
-                    .unwrap_or_else(|| "DENIED".to_owned());
-                return Err(ClientError::Enrollment(format!(
-                    "the login was refused ({code}) — complete the sign-in at the verification \
-                     page, then re-run `topos auth login`"
-                )));
-            }
-            serde_json::from_value(env.data)
-                .map_err(|e| ClientError::WireInvalid(format!("login data is malformed: {e}")))?
-        }
-        Err(_) => serde_json::from_slice(bytes)
-            .map_err(|e| ClientError::WireInvalid(format!("login response is malformed: {e}")))?,
-    };
-    let mut seats = Vec::with_capacity(data.memberships.len());
-    for m in data.memberships {
-        crate::id::validate_workspace_id(&m.workspace_id).map_err(crate::id::wire_flavor)?;
-        seats.push(LoginSeat {
-            workspace_id: m.workspace_id,
-            name: m.name,
-            display_name: m.display_name,
-            role: m.role,
-            device_key_id: m.device_key_id,
-            credential: m.credential,
-            blocked: m.blocked,
-        });
-    }
-    Ok(LoginRedeem {
-        principal: data.principal,
-        seats,
-    })
+    Err(ClientError::WireInvalid(
+        "the address did not answer the topos protocol card — is it a topos server?".into(),
+    ))
 }
 
 /// Map a contribute-write response — the all-outcome **200 envelope** — to a typed [`WriteReceipt`]. EVERY
@@ -1790,11 +1498,6 @@ fn sanitize_ref(r: &str) -> Option<String> {
         .then(|| r.to_owned())
 }
 
-/// base64url-unpadded encode raw bytes (the device public key on the wire; the enroll signature header).
-fn b64(bytes: &[u8]) -> String {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-}
-
 /// Map a transport-level [`PlaneError`] from a shared body read into the client error family.
 fn plane_err(e: PlaneError) -> ClientError {
     match e {
@@ -1982,8 +1685,8 @@ mod tests {
             skill_id: Some("s_demo".to_owned()),
             version_id: Some("a".repeat(64)),
             bundle_digest: Some("b".repeat(64)),
-            expected_generation: Some(topos_types::Generation { epoch: 1, seq: 1 }),
-            current_generation: Some(topos_types::Generation { epoch: 1, seq: 2 }),
+            expected_generation: Some(1),
+            current_generation: Some(2),
             created_at: "2026-06-30T00:00:00Z".to_owned(),
             details: None,
         }
@@ -1998,7 +1701,7 @@ mod tests {
             },
             record: topos_types::CurrentRecord {
                 version_id: "a".repeat(64),
-                generation: topos_types::Generation { epoch: 1, seq: 2 },
+                generation: 2,
             },
         })
         .unwrap()
@@ -2082,8 +1785,8 @@ mod tests {
             outcome: TerminalOutcome::Conflict,
             retryable: true,
             affected: topos_types::Affected::default(),
-            expected_generation: Some(topos_types::Generation { epoch: 1, seq: 1 }),
-            current_generation: Some(topos_types::Generation { epoch: 1, seq: 5 }),
+            expected_generation: Some(1),
+            current_generation: Some(5),
             context: serde_json::json!({}),
             next_actions: Vec::new(),
         };
@@ -2097,7 +1800,7 @@ mod tests {
         assert_eq!(wr.outcome(), TerminalOutcome::Conflict);
         assert_eq!(
             wr.error.and_then(|e| e.current_generation),
-            Some(topos_types::Generation { epoch: 1, seq: 5 }),
+            Some(5),
             "the live generation (rebase target) survives the mapping"
         );
     }
@@ -2129,33 +1832,62 @@ mod tests {
         );
     }
 
-    // ---- The id boundary: hostile plane-supplied ids are refused at the wire parse. ----
+    // ---- The device-auth poll mapping + the id boundary at the wire parse. ----
 
-    fn redeem_env(workspace_id: &str) -> Vec<u8> {
-        envelope_bytes(&JsonEnvelope {
-            schema_version: 1,
-            command: "redeem".to_owned(),
-            ok: true,
-            data: serde_json::json!({
-                "workspace_id": workspace_id,
-                "device_key_id": "dk_abc",
-                "principal": "alice@acme.com",
-                "credential": "wsc_secret"
-            }),
-            warnings: Vec::new(),
-            next_actions: Vec::new(),
-            receipt: None,
-            error: None,
-        })
+    fn poll_json(status: &str, workspace_id: Option<&str>) -> Vec<u8> {
+        let mut body = serde_json::json!({ "status": status });
+        if let Some(ws) = workspace_id {
+            body["credential"] = serde_json::json!("devc_secret");
+            body["device_id"] = serde_json::json!("dev_1");
+            body["workspace"] = serde_json::json!({
+                "workspace_id": ws,
+                "name": "acme",
+                "display_name": "Acme",
+            });
+        }
+        serde_json::to_vec(&body).expect("serialize poll body")
     }
 
     #[test]
-    fn map_redeem_envelope_refuses_a_hostile_workspace_id() {
-        // The workspace id is the only id the redeem carries now, and it becomes a URL path segment + the
-        // credential lookup key — every traversal/separator/case shape must fail the WHOLE redeem, as the
+    fn map_poll_response_maps_every_arm() {
+        assert!(matches!(
+            map_poll_response(200, &poll_json("pending", None)).unwrap(),
+            DeviceAuthPoll::Pending
+        ));
+        assert!(matches!(
+            map_poll_response(200, &poll_json("denied", None)).unwrap(),
+            DeviceAuthPoll::Denied
+        ));
+        assert!(matches!(
+            map_poll_response(200, &poll_json("expired", None)).unwrap(),
+            DeviceAuthPoll::Expired
+        ));
+        let granted = map_poll_response(200, &poll_json("granted", Some("w_acme"))).unwrap();
+        let DeviceAuthPoll::Granted(grant) = granted else {
+            panic!("expected a granted poll");
+        };
+        assert_eq!(grant.credential, "devc_secret");
+        assert_eq!(grant.device_id, "dev_1");
+        assert_eq!(grant.workspace.workspace_id, "w_acme");
+        assert_eq!(grant.workspace.name, "acme");
+        // The credential never surfaces in Debug.
+        assert!(!format!("{grant:?}").contains("devc_secret"));
+        // A non-200 is a transport-shaped error, never a silent pending.
+        assert!(matches!(
+            map_poll_response(500, b"{}").unwrap_err(),
+            ClientError::Plane(_)
+        ));
+    }
+
+    #[test]
+    fn map_poll_response_refuses_a_bare_or_hostile_grant() {
+        // `granted` without its credential/device/workspace halves is malformed, not a re-poll.
+        let err = map_poll_response(200, &poll_json("granted", None)).unwrap_err();
+        assert!(matches!(err, ClientError::WireInvalid(_)), "got {err:?}");
+        // A hostile workspace id (it later keys URL splices + user.json) fails the WHOLE poll, as the
         // WIRE flavor of the corrupt family (same CORRUPT_STATE code; the safe message names the plane).
         for bad in ["../../x", "a/b", "A", "", ".", ".."] {
-            let err = map_redeem_envelope(RedeemKind::Grant, 200, &redeem_env(bad)).unwrap_err();
+            let err = map_poll_response(200, &poll_json("granted", Some(bad))).unwrap_err();
             assert!(
                 matches!(err, ClientError::WireInvalid(_)),
                 "workspace id {bad:?} must be refused as WireInvalid, got {err:?}"
@@ -2166,95 +1898,28 @@ mod tests {
                 "the plane's response failed validation"
             );
         }
-        // A clean redeem still parses (and carries the workspace credential + the seated principal).
-        let ok = map_redeem_envelope(RedeemKind::Grant, 200, &redeem_env("w_acme")).unwrap();
-        assert_eq!(ok.credential, "wsc_secret");
-        assert_eq!(ok.principal.as_deref(), Some("alice@acme.com"));
-        // The credential never surfaces in Debug.
-        assert!(!format!("{ok:?}").contains("wsc_secret"));
     }
 
     #[test]
-    fn a_denied_redeem_is_typed_by_its_door() {
-        // The plane's DENIED envelope is uniform — the guidance comes from which door was knocked on.
-        let denied = envelope_bytes(&JsonEnvelope {
-            schema_version: 1,
-            command: "redeem".to_owned(),
-            ok: false,
-            data: serde_json::json!({}),
-            warnings: Vec::new(),
-            next_actions: Vec::new(),
-            receipt: None,
-            error: Some(WireError {
-                code: "DENIED".to_owned(),
-                outcome: TerminalOutcome::Denied,
-                retryable: false,
-                affected: topos_types::Affected::default(),
-                expected_generation: None,
-                current_generation: None,
-                context: serde_json::json!({}),
-                next_actions: Vec::new(),
-            }),
-        });
-        // A grant redeem's denial → the ask-an-owner guidance (REQUEST_ACCESS rides the envelope).
-        let grant = map_redeem_envelope(RedeemKind::Grant, 200, &denied).unwrap_err();
-        assert!(
-            matches!(&grant, ClientError::RedeemDenied { code } if code == "DENIED"),
-            "got {grant:?}"
-        );
-        assert_eq!(grant.code(), "DENIED");
-        assert_eq!(grant.outcome(), TerminalOutcome::Denied);
-        assert!(
-            crate::render::safe_message(&grant).contains("topos invite <your-email>"),
-            "the ask-an-owner guidance names the exact command: {grant}"
-        );
-        // A claim redeem's denial → the dead-claim guidance (ask the operator for a fresh link).
-        let claim = map_redeem_envelope(RedeemKind::Claim, 200, &denied).unwrap_err();
-        assert!(matches!(claim, ClientError::Enrollment(_)), "got {claim:?}");
-        assert!(claim.to_string().contains("fresh claim link"), "{claim}");
-    }
-
-    fn bootstrap_json(skill_id: &str, workspace_id: &str) -> Vec<u8> {
-        serde_json::to_vec(&serde_json::json!({
-            "schema_version": 1,
-            "invite": {
-                "token_id": "tok_1",
-                "consent": "direct_human_first_receive",
-                "first_receive_auto_land": false
-            },
-            "plane": {
-                "base_url": "https://acme.topos.test",
-                "deployment_mode": "self_host",
-                "enrollment_method": "device_code"
-            },
-            "workspace": {
-                "workspace_id": workspace_id,
-                "display_name": "Acme",
-                "verified_domain_status": "unverified"
-            },
-            "offered_skills": [ { "skill_id": skill_id } ]
-        }))
-        .expect("serialize bootstrap")
-    }
-
-    #[test]
-    fn parse_bootstrap_refuses_hostile_ids_but_accepts_clean_ones() {
-        // The bootstrap's ids persist into the enrollment WAL and later key path joins / URL splices.
-        for bad in ["../../x", "a/b", "A", "", ".", ".."] {
-            let err = parse_bootstrap(&bootstrap_json(bad, "w_acme")).unwrap_err();
-            assert!(
-                matches!(err, ClientError::WireInvalid(_)),
-                "offered skill id {bad:?} must be refused, got {err:?}"
-            );
-            let err = parse_bootstrap(&bootstrap_json("s_deploy", bad)).unwrap_err();
-            assert!(
-                matches!(err, ClientError::WireInvalid(_)),
-                "workspace id {bad:?} must be refused, got {err:?}"
-            );
+    fn parse_card_accepts_the_protocol_card_and_refuses_anything_else() {
+        let ok = parse_card(
+            br#"{"schema_version":1,"card":"topos-protocol-card","api_base_url":"https://topos.sh/api"}"#,
+        )
+        .expect("a clean card parses");
+        assert_eq!(ok.api_base_url, "https://topos.sh/api");
+        // A card with an empty base, a wrong discriminant, or a non-card body is refused typed.
+        for bad in [
+            br#"{"schema_version":1,"card":"topos-protocol-card","api_base_url":"  "}"#.as_slice(),
+            br#"{"schema_version":1,"card":"something-else","api_base_url":"https://x"}"#
+                .as_slice(),
+            br#"{"hello":"world"}"#.as_slice(),
+            b"not json".as_slice(),
+        ] {
+            assert!(matches!(
+                parse_card(bad),
+                Err(ClientError::WireInvalid(_)) | Err(ClientError::Plane(_))
+            ));
         }
-        let ok = parse_bootstrap(&bootstrap_json("s_deploy", "w_acme")).expect("clean bootstrap");
-        assert_eq!(ok.workspace.workspace_id, "w_acme");
-        assert_eq!(ok.offered_skills[0].skill_id, "s_deploy");
     }
 
     #[test]

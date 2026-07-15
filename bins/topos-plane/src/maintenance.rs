@@ -13,14 +13,14 @@
 //! A pass NEVER crashes the loop or the server: every authority error is `tracing::error!`-logged with its
 //! full source chain (the same server-side diagnostics discipline as the wire error mapper) and the pass
 //! moves on to the next step / workspace. `now` for every op is the SAME wall clock the wire layer stamps
-//! onto writes — epoch **milliseconds** (`wire::now_utc`), re-read per step so a long pass never back-dates
+//! onto writes — epoch **milliseconds** (`wire::now_ms`), re-read per step so a long pass never back-dates
 //! a late one.
 
 use std::time::Duration;
 
 use crate::state::PlaneState;
 use crate::wire;
-use crate::wire::error::error_chain;
+use crate::wire::error_chain;
 
 /// One maintenance pass's tallies — what [`run_maintenance_pass`] did (errors are logged + counted, never
 /// raised). The spawned scheduler logs a nonzero pass at `info`; a composition driving the pass itself can
@@ -55,7 +55,7 @@ pub async fn run_maintenance_pass(state: &PlaneState) -> MaintenancePass {
     let mut pass = MaintenancePass::default();
     let authority = state.authority();
 
-    let (_, now) = wire::now_utc();
+    let now = wire::now_ms();
     match authority.run_recovery(now).await {
         Ok(recovered) => pass.recovered = recovered,
         Err(error) => {
@@ -64,7 +64,7 @@ pub async fn run_maintenance_pass(state: &PlaneState) -> MaintenancePass {
         }
     }
 
-    let (_, now) = wire::now_utc();
+    let now = wire::now_ms();
     match authority.run_janitor(now).await {
         Ok(swept) => pass.quarantines_swept = swept,
         Err(error) => {
@@ -76,7 +76,7 @@ pub async fn run_maintenance_pass(state: &PlaneState) -> MaintenancePass {
     match authority.workspaces().await {
         Ok(workspaces) => {
             for ws in workspaces {
-                let (_, now) = wire::now_utc();
+                let now = wire::now_ms();
                 match authority.run_gc(&ws, now).await {
                     Ok(reclaimed) => pass.objects_reclaimed += reclaimed,
                     Err(error) => {

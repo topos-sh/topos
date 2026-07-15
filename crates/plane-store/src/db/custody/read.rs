@@ -1,205 +1,204 @@
-//! Custody's read authorizations — the REACH half of the gate/reach split, composed with the
-//! directory's principal gate through the access-witness seam.
-//!
-//! Each authorization runs the witness's [`read_gate`](AccessWitness::read_gate) (WHO may ask — the
-//! ONE membership predicate: a CONFIRMED `workspace_member` row, shared by the device and session
-//! lanes) and then ONE principal-free reachability statement over custody's own tables (what
-//! the skill makes readable — the `skill_in_workspace` half: every statement binds `(workspace_id,
-//! skill_id)`, so a skill outside the workspace reaches nothing).
-//! The gate and the reach are two statements — a principal removed between them completes one in-flight
-//! read, the same accepted window as the authorize-then-fetch TOCTOU
-//! [`crate::custody::read::read_object`] already re-guards (and re-runs on a miss).
+//! The custody pool reads — the pointer record, version rows, reachability probes, and the log
+//! joins. Autocommit reads at the pool's default isolation; nothing here writes.
 
-use crate::db::custody::witness::AccessWitness;
-use crate::db::{Db, blob32};
+use std::collections::HashMap;
+
+use crate::db::Db;
+use crate::db::custody::pointer::{PointerRow, parse_stored_version};
 use crate::error::{AuthorityError, Result};
-use crate::id::{BundleId, CommitId, ObjectId, Principal, WorkspaceId};
+use crate::id::{BundleId, CommitId, ObjectId, WorkspaceId};
+
+/// One version row's display facts (the log/read joins).
+#[derive(Debug, Clone)]
+pub(crate) struct VersionRow {
+    pub author_display: String,
+    pub created_at_ms: i64,
+    pub purged_at_ms: Option<i64>,
+}
 
 impl Db {
-    /// The object-read authorization: the membership gate, then the principal-free reachability
-    /// witness ([`Self::object_witness`]). Returns the **witness** commit id iff the gate admits the
-    /// principal AND the skill makes the object readable. An empty result is the single
-    /// not-entitled/not-found signal (gate-denied, skill-doesn't-reach, and object-nonexistent are
-    /// indistinguishable).
-    pub(crate) async fn authorize_object_read(
+    /// The bundle's `current` pointer row (a pool read). `None` until a pointer exists.
+    pub(crate) async fn read_pointer(
         &self,
         ws: &WorkspaceId,
-        skill: &BundleId,
-        principal: &Principal,
-        object_id: ObjectId,
-    ) -> Result<Option<CommitId>> {
-        if !self.read_gate(ws, principal).await? {
-            return Ok(None);
-        }
-        self.object_witness(ws, skill, object_id).await
-    }
-
-    /// The principal-free object-reachability witness — the reach half of the split (the lane gate has
-    /// already admitted the caller). Two disjoint arms over the SAME (workspace-bound, skill-scoped)
-    /// envelope:
-    /// - **trunk**: `∃ c: skill_commit(w,s,c) ∧ commit_object(w,c,object_id)` — any accepted version of
-    ///   the skill reaches the object.
-    /// - **proposal**: `∃ p: proposal_object(w,p,object_id) ∧ p.skill=s ∧ p.status='open' ∧ p.base ==
-    ///   current(w,s)` — an OPEN, NON-STALE proposal of the skill roots the object. This arm shares its
-    ///   `open ∧ non-stale` predicate **verbatim** with the two GC keep-checks
-    ///   ([`claim_for_delete`](Self::claim_for_delete) / [`claim_stale_for_recovery`](Self::claim_stale_for_recovery)),
-    ///   so a reclaimed object is never still readable and a readable object is never reclaimed — the
-    ///   keep-set == read-authorization invariant holds for pending proposals exactly as it does for the
-    ///   trunk. The predicate is duplicated, not shared as one SQL string (`query!` cannot compose a literal,
-    ///   and the bind-parameter numbering differs per call site); there are **SIX** verbatim copies of
-    ///   `open ∧ base == current` — this witness's proposal arm, [`Self::version_readable`]'s proposal arm,
-    ///   the two GC keep-checks ([`Self::claim_for_delete`] /
-    ///   [`Self::claim_stale_for_recovery`]), the proposals listing
-    ///   ([`Self::open_proposal_rows`]), and the delivery read's workspace-wide aggregate count
-    ///   (`db/directory/delivery.rs::count_open_proposals`) — and a dedicated equivalence test pins the
-    ///   three object-keyed copies (this arm + the two GC keep-checks) together against drift, while
-    ///   behavioral tests pin the version-read, the listing, and the aggregate copies to the same
-    ///   staleness semantics. A reclaimed object
-    ///   that briefly outlives this check on a concurrent read is handled by
-    ///   [`crate::custody::read::read_object`]'s re-authorize-on-miss guard (404, never Integrity).
-    ///
-    /// Every table is bound on `workspace_id`, so no fact can cross a tenant.
-    async fn object_witness(
-        &self,
-        ws: &WorkspaceId,
-        skill: &BundleId,
-        object_id: ObjectId,
-    ) -> Result<Option<CommitId>> {
-        let ws = ws.as_str();
-        let skill = skill.as_str();
-        let object = object_id.0.as_slice();
-        let row = sqlx::query!(
-            r#"
-            SELECT w.commit_id AS "commit_id!: Vec<u8>" FROM (
-                SELECT sc.commit_id AS commit_id
-                FROM skill_commit  sc
-                JOIN commit_object co ON co.workspace_id = sc.workspace_id AND co.commit_id = sc.commit_id
-                WHERE sc.workspace_id = $1 AND sc.skill_id = $2 AND co.object_id = $3
-              UNION ALL
-                SELECT p.commit_id AS commit_id
-                FROM proposal_object po
-                JOIN proposals p  ON p.workspace_id = po.workspace_id AND p.id = po.proposal_id
-                JOIN current    c  ON c.workspace_id = p.workspace_id  AND c.skill_id = p.skill_id
-                WHERE po.workspace_id = $1 AND po.object_id = $3 AND p.skill_id = $2
-                  AND p.status = 'open' AND c.epoch = p.base_epoch AND c.seq = p.base_seq
-            ) w
-            LIMIT 1
-            "#,
-            ws,
-            skill,
-            object,
-        )
-        .fetch_optional(self.pool())
-        .await
-        .map_err(AuthorityError::internal)?;
-        row.map(|r| commit_id_from_row(&r.commit_id)).transpose()
-    }
-
-    /// Gather the owning skill of each given commit id that has provenance in this workspace (absent
-    /// ids — no provenance in any skill — are simply not returned). The cross-skill lineage predicate
-    /// turns this into its membership facts; keeping the read here keeps `sqlx` out of that pure logic.
-    pub(crate) async fn commit_owners(
-        &self,
-        ws: &WorkspaceId,
-        commit_ids: &[CommitId],
-    ) -> Result<Vec<(CommitId, BundleId)>> {
+        bundle: &BundleId,
+    ) -> Result<Option<PointerRow>> {
         let ws_s = ws.as_str();
-        let mut out = Vec::new();
-        // One bound lookup per id (the candidate-and-parents set is tiny). A per-id `query!` keeps
-        // compile-time checking and the offline metadata; a dynamic `IN (..)` list would forfeit both.
-        for &id in commit_ids {
-            let cid = id.0.as_slice();
-            let row = sqlx::query!(
-                r#"SELECT skill_id AS "skill_id!" FROM skill_commit WHERE workspace_id = $1 AND commit_id = $2"#,
-                ws_s,
-                cid,
-            )
-            .fetch_optional(self.pool())
-            .await
-            .map_err(AuthorityError::internal)?;
-            if let Some(row) = row {
-                // A stored skill_id is always pre-validated on the way in, so a re-parse failure here is
-                // store corruption — map it to an integrity fault, not the boundary `InvalidId` (mirroring
-                // `commit_id_from_row`'s handling of a bad-width BLOB).
-                let skill = BundleId::parse(&row.skill_id).map_err(AuthorityError::integrity)?;
-                out.push((id, skill));
-            }
-        }
-        Ok(out)
-    }
-
-    /// The version-read authorization — the R1 gate the version-metadata route runs, mirroring
-    /// [`Self::authorize_object_read`]'s gate/reach split but anchored on a VERSION (`commit_id`) rather
-    /// than an object: the membership gate, then the principal-free
-    /// [`Self::version_readable`]. `false` collapses gate-denied and not-reachable into the caller's one
-    /// indistinguishable not-found.
-    pub(crate) async fn authorize_version_read(
-        &self,
-        ws: &WorkspaceId,
-        skill: &BundleId,
-        principal: &Principal,
-        version_id: CommitId,
-    ) -> Result<bool> {
-        if !self.read_gate(ws, principal).await? {
-            return Ok(false);
-        }
-        self.version_readable(ws, skill, version_id).await
-    }
-
-    /// The principal-free version-reachability test — the reach half of the version read (the lane gate
-    /// has already admitted the caller). `true` iff the version is readable through EITHER:
-    /// - **trunk**: the version is owned by the skill (`skill_commit`) AND has ≥1 `commit_object` edge — the
-    ///   accepted-trunk test (every accepted version roots ≥1 object, so a non-empty edge set is exact), OR
-    /// - **proposal**: an OPEN, NON-STALE proposal of the skill whose `commit_id` is this version. This arm
-    ///   reuses the SAME `status='open' ∧ (base_epoch, base_seq) == current.(epoch, seq)` staleness predicate
-    ///   the object-reach arm ([`Self::object_witness`]) and the two GC keep-checks
-    ///   ([`Self::claim_for_delete`] / [`Self::claim_stale_for_recovery`]) use — here anchored on
-    ///   `proposals.commit_id`, not `proposal_object.object_id` (the bind shape differs, so it is the 4th copy
-    ///   of the literal — the proposals listing [`Self::open_proposal_rows`] is the 5th — not a shared
-    ///   string; the behavioral proposal-version tests pin it to the same
-    ///   staleness semantics). It deliberately does NOT authorize on bare `skill_commit`, which also names
-    ///   unaccepted/rejected proposal candidates — that would leak a never-accepted version's metadata (the
-    ///   `commit_object` ≥1-edge join is load-bearing; a rejected-candidate-404 test pins it).
-    ///
-    /// Every table is bound on `workspace_id`, so no fact can cross a tenant.
-    async fn version_readable(
-        &self,
-        ws: &WorkspaceId,
-        skill: &BundleId,
-        version_id: CommitId,
-    ) -> Result<bool> {
-        let ws = ws.as_str();
-        let skill = skill.as_str();
-        let cid = version_id.0.as_slice();
+        let b_s = bundle.as_str();
         let row = sqlx::query!(
-            r#"
-            SELECT 1::int8 AS "ok!: i64" FROM (
-                SELECT 1 AS ok
-                FROM skill_commit  sc
-                JOIN commit_object co ON co.workspace_id = sc.workspace_id AND co.commit_id = sc.commit_id
-                WHERE sc.workspace_id = $1 AND sc.skill_id = $2 AND sc.commit_id = $3
-              UNION ALL
-                SELECT 1 AS ok
-                FROM proposals p
-                JOIN current   c ON c.workspace_id = p.workspace_id  AND c.skill_id = p.skill_id
-                WHERE p.workspace_id = $1 AND p.skill_id = $2
-                  AND p.commit_id = $3 AND p.status = 'open'
-                  AND c.epoch = p.base_epoch AND c.seq = p.base_seq
-            ) w
-            LIMIT 1
-            "#,
-            ws,
-            skill,
-            cid,
+            r#"SELECT version_id AS "version_id!", generation AS "generation!",
+                      moved_by_display AS "moved_by!",
+                      (extract(epoch FROM moved_at) * 1000.0)::bigint AS "moved_at_ms!"
+               FROM current_pointer WHERE workspace_id = $1 AND bundle_id = $2"#,
+            ws_s,
+            b_s,
         )
         .fetch_optional(self.pool())
         .await
         .map_err(AuthorityError::internal)?;
-        Ok(row.is_some())
+        row.map(|r| {
+            Ok(PointerRow {
+                version_id: parse_stored_version(&r.version_id)?,
+                generation: u64::try_from(r.generation).map_err(AuthorityError::integrity)?,
+                moved_at_ms: r.moved_at_ms,
+                moved_by: r.moved_by,
+            })
+        })
+        .transpose()
+    }
+
+    /// One version row's display facts. `None` when the version does not exist in this bundle.
+    pub(crate) async fn read_version_row(
+        &self,
+        ws: &WorkspaceId,
+        bundle: &BundleId,
+        version: CommitId,
+    ) -> Result<Option<VersionRow>> {
+        let ws_s = ws.as_str();
+        let b_s = bundle.as_str();
+        let v_s = version.to_hex();
+        let row = sqlx::query!(
+            r#"SELECT author_display AS "author_display!",
+                      (extract(epoch FROM created_at) * 1000.0)::bigint AS "created_at_ms!",
+                      (extract(epoch FROM purged_at) * 1000.0)::bigint AS "purged_at_ms"
+               FROM version WHERE workspace_id = $1 AND bundle_id = $2 AND version_id = $3"#,
+            ws_s,
+            b_s,
+            v_s,
+        )
+        .fetch_optional(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        Ok(row.map(|r| VersionRow {
+            author_display: r.author_display,
+            created_at_ms: r.created_at_ms,
+            purged_at_ms: r.purged_at_ms,
+        }))
+    }
+
+    /// The display facts of MANY versions of one bundle at once (the log's one batched join),
+    /// keyed by version id.
+    pub(crate) async fn read_version_rows(
+        &self,
+        ws: &WorkspaceId,
+        bundle: &BundleId,
+        versions: &[CommitId],
+    ) -> Result<HashMap<CommitId, VersionRow>> {
+        let ws_s = ws.as_str();
+        let b_s = bundle.as_str();
+        let ids: Vec<String> = versions.iter().map(CommitId::to_hex).collect();
+        let rows = sqlx::query!(
+            r#"SELECT version_id AS "version_id!", author_display AS "author_display!",
+                      (extract(epoch FROM created_at) * 1000.0)::bigint AS "created_at_ms!",
+                      (extract(epoch FROM purged_at) * 1000.0)::bigint AS "purged_at_ms"
+               FROM version
+               WHERE workspace_id = $1 AND bundle_id = $2 AND version_id = ANY($3)"#,
+            ws_s,
+            b_s,
+            &ids,
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        let mut map = HashMap::with_capacity(rows.len());
+        for r in rows {
+            map.insert(
+                parse_stored_version(&r.version_id)?,
+                VersionRow {
+                    author_display: r.author_display,
+                    created_at_ms: r.created_at_ms,
+                    purged_at_ms: r.purged_at_ms,
+                },
+            );
+        }
+        Ok(map)
+    }
+
+    /// The consent digest recorded for a version. `None` when the version has no digest row (an
+    /// authorized read maps that to an integrity fault — every committed version records one).
+    pub(crate) async fn read_bundle_digest(
+        &self,
+        ws: &WorkspaceId,
+        bundle: &BundleId,
+        version: CommitId,
+    ) -> Result<Option<[u8; 32]>> {
+        let ws_s = ws.as_str();
+        let b_s = bundle.as_str();
+        let v_s = version.to_hex();
+        let row = sqlx::query!(
+            r#"SELECT bundle_digest AS "bundle_digest!" FROM version_digest
+               WHERE workspace_id = $1 AND bundle_id = $2 AND version_id = $3"#,
+            ws_s,
+            b_s,
+            v_s,
+        )
+        .fetch_optional(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        row.map(|r| {
+            crate::id::parse_hex32(&r.bundle_digest)
+                .ok_or_else(|| AuthorityError::integrity(BadStoredDigest))
+        })
+        .transpose()
+    }
+
+    /// The distinct objects one version reaches (its `version_object` edges) — the revert's
+    /// availability + edge set for the forward commit it constructs.
+    pub(crate) async fn version_objects(
+        &self,
+        ws: &WorkspaceId,
+        bundle: &BundleId,
+        version: CommitId,
+    ) -> Result<Vec<ObjectId>> {
+        let ws_s = ws.as_str();
+        let b_s = bundle.as_str();
+        let v_s = version.to_hex();
+        let rows = sqlx::query!(
+            r#"SELECT object_id AS "object_id!: Vec<u8>" FROM version_object
+               WHERE workspace_id = $1 AND bundle_id = $2 AND version_id = $3"#,
+            ws_s,
+            b_s,
+            v_s,
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        rows.into_iter()
+            .map(|r| super::lifecycle::object_id_from_row(r.object_id))
+            .collect()
+    }
+
+    /// The reachability witness: some NON-PURGED version of THIS bundle reaches `object_id`.
+    /// Returns one such version id (the tree-walk fallback's anchor), or `None` — the read maps
+    /// `None` to the uniform not-found. **No object is ever served by bare hash.**
+    pub(crate) async fn object_witness(
+        &self,
+        ws: &WorkspaceId,
+        bundle: &BundleId,
+        object_id: ObjectId,
+    ) -> Result<Option<CommitId>> {
+        let ws_s = ws.as_str();
+        let b_s = bundle.as_str();
+        let oid = object_id.0.as_slice();
+        let row = sqlx::query!(
+            r#"SELECT vo.version_id AS "version_id!" FROM version_object vo
+               JOIN version v
+                 ON v.workspace_id = vo.workspace_id AND v.bundle_id = vo.bundle_id
+                AND v.version_id = vo.version_id
+               WHERE vo.workspace_id = $1 AND vo.bundle_id = $2 AND vo.object_id = $3
+                 AND v.purged_at IS NULL
+               LIMIT 1"#,
+            ws_s,
+            b_s,
+            oid,
+        )
+        .fetch_optional(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        row.map(|r| parse_stored_version(&r.version_id)).transpose()
     }
 }
 
-/// Convert a stored 32-byte BLOB into a [`CommitId`] via the shared [`blob32`].
-pub(in crate::db) fn commit_id_from_row(bytes: &[u8]) -> Result<CommitId> {
-    Ok(CommitId(blob32(bytes)?))
-}
+#[derive(Debug, thiserror::Error)]
+#[error("stored bundle digest is not 64 lowercase hex characters")]
+struct BadStoredDigest;

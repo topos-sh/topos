@@ -3,12 +3,12 @@ import { ShortId } from "@/components/ui";
 import { ProposalStatusBanner, type ReviewStatus } from "./ProposalStatusBanner";
 
 /**
- * The review page header: what change, by which device (and, when the session lane discloses
- * it, which teammate), against which skill — with the status banner integrated at the top (the
- * first thing a reviewer must know). Author, proposer, and message are server-recorded values
- * and render as TEXT NODES only. Author and message come from the candidate's version meta —
- * ABSENT when the server has reclaimed that candidate (the diff-less render), so the header
- * degrades to the proposal facts alone. `skillName` is the catalog display name (or name).
+ * The review page header: what change, authored and proposed by whom, against which skill —
+ * with the status banner integrated at the top (the first thing a reviewer must know). Author,
+ * proposer, and message are server-recorded values and render as TEXT NODES only. Author and
+ * message come from the candidate's version meta — ABSENT when the server has reclaimed that
+ * candidate (the diff-less render), so the header degrades to the proposal row's facts alone.
+ * `skillName` is the catalog display name (or name).
  */
 export function ReviewHeader({
   skillName,
@@ -21,11 +21,11 @@ export function ReviewHeader({
 }: {
   skillName: string;
   versionId: string;
-  /** The authoring device id — absent when the candidate's meta is no longer readable. */
+  /** The recorded author display — absent when the candidate's meta is no longer readable. */
   author?: string;
   message?: string;
   createdAt?: string;
-  /** The proposer's canonical email — session-lane disclosure; absent on a degraded read. */
+  /** The proposer's display name — attribution only; absent when the account is gone. */
   proposer?: string;
   status: ReviewStatus;
 }) {
@@ -49,11 +49,7 @@ export function ReviewHeader({
       {title !== "" ? <p className="text-base text-dim">{title}</p> : null}
       {author !== undefined || proposedLine !== "" ? (
         <p className="text-sm text-faint">
-          {author !== undefined ? (
-            <>
-              authored by device <ShortId value={author} />
-            </>
-          ) : null}
+          {author !== undefined ? <>authored by {author}</> : null}
           {author !== undefined && proposedLine !== "" ? " · " : null}
           {proposedLine !== "" ? proposedLine : null}
         </p>

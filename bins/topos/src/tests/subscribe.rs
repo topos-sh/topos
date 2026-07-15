@@ -18,19 +18,18 @@ use topos_types::requests::{
     WireReach, WireSkillIndex, WireSkillIndexEntry, WireSkillLog,
 };
 use topos_types::results::PullAction;
-use topos_types::{CurrencyKind, Generation, HarnessId, TriggerReport, TriggerState};
+use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::fs_seam::RealFs;
 use crate::ids::test_sources::{FixedClock, SeqIds};
 use crate::plane::{
-    Card, DeliverySkill, DeliverySnapshot, DeliverySource, DeviceAuthorize, DirectorySource,
-    EnrollSource, FetchedFile, FetchedVersion, FollowSource, Grant, GrantedToken, GrantedWorkspace,
-    InertFollow, InertPlane, KnownCurrent, PlaneError, PlaneSource, PointerFetch,
-    ReconcileTransport, Redeem, StandupAuthorize, TokenPoll,
+    DeliverySkill, DeliverySnapshot, DeliverySource, DeviceAuthPoll, DeviceAuthStart,
+    DirectorySource, EnrollSource, EnrolledGrant, EnrolledWorkspace, FetchedFile, FetchedVersion,
+    FollowSource, InertFollow, InertPlane, KnownCurrent, PlaneError, PlaneSource, PointerFetch,
+    ReconcileTransport,
 };
-use crate::plane_http::SkillCred;
 use crate::sidecar::Layout;
 use crate::{enroll, ops, sync_status};
 
@@ -151,14 +150,11 @@ impl Rig {
             &enroll::Instance {
                 schema_version: 1,
                 base_url: API.to_owned(),
-                deployment_mode: topos_types::bootstrap::DeploymentMode::Cloud,
-                enrollment_method: "device_code".to_owned(),
             },
         )
         .unwrap();
         let mut user = enroll::UserDoc {
             schema_version: 1,
-            email: Some("alice@acme.com".to_owned()),
             principal: Some("alice@acme.com".to_owned()),
             workspaces: Vec::new(),
         };
@@ -166,16 +162,13 @@ impl Rig {
             &mut user,
             enroll::Membership {
                 workspace_id: WS.to_owned(),
-                display_name: Some("Acme Inc".to_owned()),
-                roles: Vec::new(),
-                verified_domain: None,
-                verified_domain_status: topos_types::bootstrap::VerifiedDomainStatus::Unverified,
-                invite_rooted: false,
+                name: "acme".to_owned(),
+                display_name: "Acme Inc".to_owned(),
                 enrolled_at: 1,
             },
         );
         enroll::write_user(&self.fs, &self.layout(), &user).unwrap();
-        enroll::write_credential(&self.fs, &self.layout(), WS, "wsc_secret").unwrap();
+        enroll::write_credentials(&self.fs, &self.layout(), "wsc_secret", "dev_1").unwrap();
     }
 }
 
@@ -257,7 +250,7 @@ fn skill_entry(id: &str, name: &str) -> WireSkillIndexEntry {
         status: "active".to_owned(),
         version_id: "a".repeat(64),
         bundle_digest: "b".repeat(64),
-        generation: Generation { epoch: 1, seq: 1 },
+        generation: 1,
         display_name: None,
         updated_at: 0,
         open_proposals: 0,
@@ -444,8 +437,8 @@ impl DeliverySource for FakeTransport {
     }
 }
 
-/// The address-flow enroll fake: the protocol card, the enroll-intent device flow (recording the
-/// requested workspace NAME), and the redeem.
+/// The address-flow enroll fake: the protocol card + the device-authorization flow (recording the
+/// requested workspace NAME); the poll answers granted with the ONE device credential.
 #[derive(Clone)]
 struct FakeAddressEnroll {
     api_base: String,
@@ -453,72 +446,45 @@ struct FakeAddressEnroll {
 }
 
 impl EnrollSource for FakeAddressEnroll {
-    fn fetch_bootstrap(&self, _t: &str) -> Result<topos_types::BootstrapData, ClientError> {
-        unreachable!("the address flow reads the card, never an /i/ bootstrap")
-    }
-    fn fetch_card(&self, url: &str) -> Result<Card, ClientError> {
+    fn fetch_card(
+        &self,
+        url: &str,
+    ) -> Result<topos_types::requests::WireProtocolCard, ClientError> {
         self.log.lock().unwrap().push(format!("card {url}"));
-        Ok(Card::Protocol(topos_types::requests::WireProtocolCard {
+        Ok(topos_types::requests::WireProtocolCard {
             schema_version: 1,
             card: "topos-protocol-card".to_owned(),
             api_base_url: self.api_base.clone(),
-        }))
+        })
     }
-    fn device_authorize(
+    fn device_auth_start(
         &self,
         workspace: &str,
-        _pk: [u8; 32],
-        _machine: &str,
-    ) -> Result<DeviceAuthorize, ClientError> {
+        _requested_name: &str,
+    ) -> Result<DeviceAuthStart, ClientError> {
         self.log
             .lock()
             .unwrap()
             .push(format!("authorize {workspace}"));
-        Ok(DeviceAuthorize {
+        Ok(DeviceAuthStart {
             device_code: "dc_secret".into(),
             user_code: "CODE".into(),
-            verification_uri: format!("{}/verify", self.api_base),
-            verification_uri_complete: Some(format!("{}/verify/CODE", self.api_base)),
-            expires_in: 900,
-            interval: 5,
+            verification_uri_complete: format!("{}/verify/CODE", self.api_base),
+            expires_in_secs: 900,
+            interval_secs: 5,
         })
     }
-    fn device_authorize_standup(
-        &self,
-        _pk: [u8; 32],
-        _machine: &str,
-    ) -> Result<StandupAuthorize, ClientError> {
-        unreachable!("no standup in the address flow")
-    }
-    fn poll_token(&self, _dc: &str) -> Result<TokenPoll, ClientError> {
-        Ok(TokenPoll::Granted(GrantedToken {
-            grant: Grant::new("grant_secret".into()),
-            workspace: Some(GrantedWorkspace {
+    fn device_auth_poll(&self, _dc: &str) -> Result<DeviceAuthPoll, ClientError> {
+        self.log.lock().unwrap().push("poll".to_owned());
+        Ok(DeviceAuthPoll::Granted(EnrolledGrant {
+            credential: "devc_secret".into(),
+            device_id: "dev_1".into(),
+            workspace: EnrolledWorkspace {
                 workspace_id: WS.into(),
+                name: "acme".into(),
                 display_name: "Acme Inc".into(),
-                address: Some("https://topos.sh/acme".into()),
-            }),
+            },
         }))
-    }
-    fn redeem(
-        &self,
-        workspace_id: &str,
-        _grant: &str,
-        _pk: [u8; 32],
-    ) -> Result<Redeem, ClientError> {
-        self.log
-            .lock()
-            .unwrap()
-            .push(format!("redeem {workspace_id}"));
-        Ok(Redeem {
-            workspace_id: workspace_id.to_owned(),
-            device_key_id: "dk_test".into(),
-            principal: Some("alice@acme.com".into()),
-            credential: "wsc_secret".into(),
-        })
-    }
-    fn admin_claim(&self, _t: &str, _pk: [u8; 32], _d: &str) -> Result<Redeem, ClientError> {
-        unreachable!("no claim in the address flow")
     }
 }
 
@@ -537,14 +503,10 @@ fn run_follow(
     let inert_f = InertFollow;
     let ctx = rig.ctx(&inert_p, &inert_f);
     let enroll_connect = |_b: &str| -> Box<dyn EnrollSource> { Box::new(enroll_fake.clone()) };
-    let plane_connect = |_b: &str, _c: HashMap<String, SkillCred>| -> Box<dyn PlaneSource> {
-        panic!("the subscribe flows never build the offer-disclosure transport")
-    };
     let dir_connect = |_b: &str| -> Box<dyn DirectorySource> { Box::new(directory.clone()) };
     let del_connect = |_b: &str| -> Box<dyn ReconcileTransport> { Box::new(transport.clone()) };
     let connectors = ops::FollowConnectors {
         enroll: &enroll_connect,
-        plane: &plane_connect,
         directory: &dir_connect,
         delivery: &del_connect,
         web_origin: "https://topos.sh".to_owned(),
@@ -638,15 +600,15 @@ fn an_address_follow_enrolls_then_lands_on_the_describe_never_the_apply() {
             .map(str::to_owned)
             .collect::<Vec<_>>()
     );
-    // The redeem rode the workspace the GRANT named (never the unverified address string).
-    assert!(log.lock().unwrap().iter().any(|e| e == "redeem w_acme"));
+    // The grant was polled for (the credential rides the granted poll — no redeem round-trip).
+    assert!(log.lock().unwrap().iter().any(|e| e == "poll"));
     // The enrollment itself promoted (identity, reversible): the credential + membership are on
     // disk, the WAL is gone — but NOTHING was subscribed and nothing installed.
     let creds = enroll::read_credentials(&rig.fs, &rig.layout())
         .unwrap()
-        .unwrap()
-        .into_map();
-    assert_eq!(creds.get(WS).map(String::as_str), Some("wsc_secret"));
+        .unwrap();
+    assert_eq!(creds.credential, "devc_secret");
+    assert_eq!(creds.device_id, "dev_1");
     assert!(enroll::read_wal(&rig.fs, &rig.layout()).unwrap().is_none());
     assert!(
         !log.lock()
@@ -771,7 +733,7 @@ fn a_direct_skill_follow_on_a_channel_delivered_skill_explains_why_it_is_not_red
         name: "deploy".into(),
         review_required: false,
         version_id: v.id,
-        generation: Generation { epoch: 1, seq: 1 },
+        generation: 1,
         bundle_digest: v.digest,
         via_channels: vec!["eng".into()],
         via_direct: false,
@@ -816,7 +778,7 @@ fn the_yes_apply_joins_then_lands_the_delivered_set_and_reports() {
         name: "deploy".into(),
         review_required: false,
         version_id: v.id,
-        generation: Generation { epoch: 1, seq: 1 },
+        generation: 1,
         bundle_digest: v.digest,
         via_channels: vec!["eng".into()],
         via_direct: false,
@@ -1174,7 +1136,7 @@ fn deploy_transport(log: CallLog) -> FakeTransport {
         name: "deploy".into(),
         review_required: false,
         version_id: v.id,
-        generation: Generation { epoch: 1, seq: 1 },
+        generation: 1,
         bundle_digest: v.digest,
         via_channels: vec!["eng".into()],
         via_direct: false,
@@ -1480,7 +1442,7 @@ fn a_yes_reattach_installs_only_its_subject_never_a_teammates_new_skill() {
         name: "newthing".into(),
         review_required: false,
         version_id: znew.id,
-        generation: Generation { epoch: 1, seq: 1 },
+        generation: 1,
         bundle_digest: znew.digest,
         via_channels: vec!["everyone".into()],
         via_direct: false,
@@ -1602,7 +1564,7 @@ fn a_multi_target_subscribe_clears_a_swept_in_excluded_skills_marker() {
         name: "docs".into(),
         review_required: false,
         version_id: vdocs.id,
-        generation: Generation { epoch: 1, seq: 1 },
+        generation: 1,
         bundle_digest: vdocs.digest,
         via_channels: vec!["everyone".into()],
         via_direct: false,

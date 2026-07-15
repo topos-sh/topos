@@ -1,4 +1,6 @@
-# The self-hostable Topos plane — a STATELESS image: just the `topos-plane` binary + CA roots.
+# The Topos vault — a STATELESS image: just the `topos-plane` binary + CA roots. PURE BYTE
+# CUSTODY: run it internal-network-only (never publish its port); the product app is its one
+# caller, authenticated by TOPOS_PLANE_INTERNAL_TOKEN.
 #
 # Postgres is deliberately NOT in this image (one concern per container). Point the plane at a database with
 # `DATABASE_URL`; the bundled `docker-compose.yml` runs a pinned Postgres beside it, or bring your own
@@ -17,8 +19,8 @@ WORKDIR /build
 # needs no live database.
 ENV SQLX_OFFLINE=true
 COPY . .
-# Optional cargo features for the plane build (e.g. --build-arg FEATURES=acme). Empty (the default,
-# and what the published image is built with) compiles exactly the standard plane.
+# Optional cargo features for the vault build. Empty (the default, and what the published image is
+# built with) compiles exactly the standard vault; no optional features exist today.
 ARG FEATURES=""
 RUN cargo build --release --locked -p topos-plane ${FEATURES:+--features "$FEATURES"}
 
@@ -30,22 +32,17 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/topos-plane /usr/local/bin/topos-plane
 
-# The plane's own state lives under /data (mount a volume): the per-workspace git + large object stores and
-# the `0600` enrollment secret (generated on first boot if absent). The metadata lives in Postgres
-# (DATABASE_URL), NOT here.
-# The secret path sits directly under the mounted /data (the plane's `create_dir_all` makes the git +
-# large roots, but the secret is written with O_EXCL and does not create a parent directory — and a
-# VOLUME shadows any directory the image created at /data). /data itself is the volume mount, so it exists.
+# The vault's own state lives under /data (mount a volume): the per-workspace git + large object
+# stores. The metadata lives in Postgres (DATABASE_URL), NOT here.
 ENV TOPOS_PLANE_BIND=0.0.0.0:8787 \
     TOPOS_PLANE_GIT_ROOT=/data/git \
-    TOPOS_PLANE_LARGE_ROOT=/data/large \
-    TOPOS_PLANE_ENROLL_SECRET=/data/enroll.key \
-    TOPOS_PLANE_MODE=self_host
-# DATABASE_URL is intentionally unset — it is BYO (the compose file or the operator supplies it).
+    TOPOS_PLANE_LARGE_ROOT=/data/large
+# DATABASE_URL and TOPOS_PLANE_INTERNAL_TOKEN are intentionally unset — the compose file or the
+# operator supplies them (the custody lane answers 404 until a token is set).
 
 # Run as an unprivileged user. /data is created + owned here so the named volume (compose) inherits that
-# ownership on first mount; the plane writes its 0600 secret directly under /data on first boot. This
-# RUN must precede VOLUME — a directory modified after its VOLUME declaration would be discarded.
+# ownership on first mount. This RUN must precede VOLUME — a directory modified after its VOLUME
+# declaration would be discarded.
 RUN useradd --system --uid 10001 topos \
     && mkdir -p /data && chown topos:topos /data
 USER topos

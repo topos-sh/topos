@@ -1,29 +1,35 @@
-//! The `auth` group over fakes (no HTTP): login writes + the different-account confirm gate,
-//! logout keeping every byte, and the status causes (healthy / gone / unreachable / no credential).
+//! The `auth` group over fakes (no HTTP): `login` re-runs the device-authorization flow toward an
+//! enrolled membership's ADDRESS and REPLACES the ONE device credential wholesale; `logout` is
+//! two-phase and keeps every byte (best-effort self-revoke naming the STORED device id); `status`
+//! probes access per workspace (healthy / gone / unreachable / no credential).
 
-use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::requests::{
-    WireChannelIndex, WireMe, WireProposalIndex, WireReach, WireSkillIndex, WireSkillLog,
+    InvitationData, InvitationRequest, WireChannelIndex, WireMe, WireProposalIndex, WireReach,
+    WireSkillIndex, WireSkillLog,
 };
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
 use crate::ctx::Ctx;
+use crate::enroll;
 use crate::error::ClientError;
 use crate::fs_seam::RealFs;
 use crate::ids::test_sources::{FixedClock, SeqIds};
 use crate::plane::{
-    Card, DeviceAuthorize, DirectorySource, EnrollSource, GovernanceSource, Grant, GrantedToken,
-    InertFollow, InertPlane, LoginRedeem, LoginSeat, Redeem, StandupAuthorize, TokenPoll,
+    DeviceAuthPoll, DeviceAuthStart, DirectorySource, EnrollSource, EnrolledGrant,
+    EnrolledWorkspace, GovernanceSource, InertFollow, InertPlane,
 };
 use crate::sidecar::Layout;
-use crate::{enroll, ops};
+use crate::{ops, sidecar};
 
+const WS: &str = "w_acme";
 const API: &str = "https://api.acme.test";
+const FIXED_MILLIS: u64 = 1_700_000_000_000;
 
 struct Scratch(PathBuf);
 impl Scratch {
@@ -57,27 +63,29 @@ impl HarnessAdapter for NullHarness {
         _d: Option<&DiscoveredPlacement>,
     ) -> PlacementTarget {
         PlacementTarget {
-            dir: std::env::temp_dir().join(skill_id),
+            dir: PathBuf::from("/nonexistent").join(skill_id),
         }
     }
     fn currency_kind(&self) -> CurrencyKind {
         CurrencyKind::ExplicitPullOnly
     }
     fn install_currency_trigger(&self) -> TriggerReport {
-        TriggerReport {
-            harness: HarnessId::ClaudeCode,
-            currency_kind: CurrencyKind::ExplicitPullOnly,
-            touched_path: None,
-            marker_id: "test".into(),
-            state: TriggerState::Inactive,
-        }
+        no_trigger()
     }
     fn remove_currency_trigger(&self) -> TriggerReport {
-        self.install_currency_trigger()
+        no_trigger()
     }
     fn uninstall_footprint(&self) -> Vec<PathBuf> {
-        // "Armed": auth status reads the hook state off this probe.
-        vec![PathBuf::from("/tmp/settings.json")]
+        Vec::new()
+    }
+}
+fn no_trigger() -> TriggerReport {
+    TriggerReport {
+        harness: HarnessId::ClaudeCode,
+        currency_kind: CurrencyKind::ExplicitPullOnly,
+        touched_path: None,
+        marker_id: "test".into(),
+        state: TriggerState::Inactive,
     }
 }
 
@@ -93,19 +101,15 @@ impl Rig {
         Self {
             home: Scratch::new(tag),
             fs: RealFs,
-            ids: SeqIds::new("s"),
-            clock: FixedClock(1_700_000_000_000),
+            ids: SeqIds::new("a"),
+            clock: FixedClock(FIXED_MILLIS),
             harness: NullHarness,
         }
     }
     fn layout(&self) -> Layout {
         Layout::new(&self.home.0)
     }
-    fn ctx<'a>(
-        &'a self,
-        plane: &'a dyn crate::plane::PlaneSource,
-        follow: &'a dyn crate::plane::FollowSource,
-    ) -> Ctx<'a> {
+    fn ctx<'a>(&'a self, plane: &'a InertPlane, follow: &'a InertFollow) -> Ctx<'a> {
         Ctx {
             fs: &self.fs,
             ids: &self.ids,
@@ -117,127 +121,141 @@ impl Rig {
             follow,
         }
     }
+    /// Seed the enrolled state a completed `follow <address>` leaves: the pinned plane, one
+    /// membership (with its ADDRESS name), and the ONE device credential.
+    fn seed_enrolled(&self) {
+        enroll::write_instance(
+            &self.fs,
+            &self.layout(),
+            &enroll::Instance {
+                schema_version: 1,
+                base_url: API.to_owned(),
+            },
+        )
+        .unwrap();
+        let mut user = enroll::UserDoc {
+            schema_version: 1,
+            principal: Some("alice@acme.com".to_owned()),
+            workspaces: Vec::new(),
+        };
+        enroll::upsert_membership(
+            &mut user,
+            enroll::Membership {
+                workspace_id: WS.to_owned(),
+                name: "acme".to_owned(),
+                display_name: "Acme Inc".to_owned(),
+                enrolled_at: 1,
+            },
+        );
+        enroll::write_user(&self.fs, &self.layout(), &user).unwrap();
+        enroll::write_credentials(&self.fs, &self.layout(), "devc_old", "dev_old").unwrap();
+    }
 }
 
 type CallLog = Arc<Mutex<Vec<String>>>;
 
-/// The login-flow enroll fake: the card, the login device flow, and the login redeem's seats.
+/// A scriptable enroll fake (the same shape as the follow suite's).
 #[derive(Clone)]
-struct FakeLogin {
-    api_base: String,
-    principal: String,
-    seats: Vec<LoginSeat>,
+struct FakeEnroll {
     log: CallLog,
+    polls: Arc<Mutex<VecDeque<DeviceAuthPoll>>>,
 }
-
-impl EnrollSource for FakeLogin {
-    fn fetch_bootstrap(&self, _t: &str) -> Result<topos_types::BootstrapData, ClientError> {
-        unreachable!("login reads the card, never an /i/ bootstrap")
-    }
-    fn fetch_card(&self, url: &str) -> Result<Card, ClientError> {
-        self.log.lock().unwrap().push(format!("card {url}"));
-        Ok(Card::Protocol(topos_types::requests::WireProtocolCard {
-            schema_version: 1,
-            card: "topos-protocol-card".to_owned(),
-            api_base_url: self.api_base.clone(),
-        }))
-    }
-    fn device_authorize(
-        &self,
-        _ws: &str,
-        _pk: [u8; 32],
-        _m: &str,
-    ) -> Result<DeviceAuthorize, ClientError> {
-        unreachable!("login never starts an enroll session")
-    }
-    fn device_authorize_login(
-        &self,
-        _pk: [u8; 32],
-        _machine: &str,
-    ) -> Result<DeviceAuthorize, ClientError> {
-        self.log.lock().unwrap().push("authorize login".to_owned());
-        Ok(DeviceAuthorize {
-            device_code: "dc_login".into(),
-            user_code: "LOGIN-CODE".into(),
-            verification_uri: format!("{}/verify", self.api_base),
-            verification_uri_complete: Some(format!("{}/verify/LOGIN-CODE", self.api_base)),
-            expires_in: 900,
-            interval: 5,
-        })
-    }
-    fn device_authorize_standup(
-        &self,
-        _pk: [u8; 32],
-        _m: &str,
-    ) -> Result<StandupAuthorize, ClientError> {
-        unreachable!("login never starts a standup")
-    }
-    fn poll_token(&self, _dc: &str) -> Result<TokenPoll, ClientError> {
-        Ok(TokenPoll::Granted(GrantedToken {
-            grant: Grant::new("grant_login".into()),
-            workspace: None,
-        }))
-    }
-    fn login_redeem(&self, _grant: &str, _pk: [u8; 32]) -> Result<LoginRedeem, ClientError> {
-        self.log.lock().unwrap().push("login redeem".to_owned());
-        Ok(LoginRedeem {
-            principal: self.principal.clone(),
-            seats: self.seats.clone(),
-        })
-    }
-    fn redeem(&self, _ws: &str, _g: &str, _pk: [u8; 32]) -> Result<Redeem, ClientError> {
-        unreachable!("login redeems at /v1/login, never the enroll redeem")
-    }
-    fn admin_claim(&self, _t: &str, _pk: [u8; 32], _d: &str) -> Result<Redeem, ClientError> {
-        unreachable!("no claim in the login flow")
-    }
-}
-
-fn seat(ws: &str, name: &str, credential: Option<&str>, blocked: Option<&str>) -> LoginSeat {
-    LoginSeat {
-        workspace_id: ws.to_owned(),
-        name: name.to_owned(),
-        display_name: name.to_owned(),
-        role: "member".to_owned(),
-        device_key_id: "dk_test".to_owned(),
-        credential: credential.map(str::to_owned),
-        blocked: blocked.map(str::to_owned),
-    }
-}
-
-/// A directory whose `me` answers a fixed verdict per workspace (the status probe's causes).
-#[derive(Clone)]
-struct VerdictDirectory {
-    verdicts: HashMap<String, &'static str>,
-}
-
-impl DirectorySource for VerdictDirectory {
-    fn me(&self, workspace_id: &str) -> Result<WireMe, ClientError> {
-        match self.verdicts.get(workspace_id).copied() {
-            Some("healthy") => Ok(WireMe {
-                workspace_id: workspace_id.to_owned(),
-                name: "acme".into(),
-                display_name: "Acme".into(),
-                address: "https://topos.sh/acme".into(),
-                principal: "alice@acme.com".into(),
-                role: "reviewer".into(),
-                invited_by: None,
-                invite_policy: "members".into(),
-            }),
-            Some("gone") => Err(ClientError::TargetNotFound {
-                target: workspace_id.to_owned(),
-            }),
-            _ => Err(ClientError::Plane("dial: connection refused".into())),
+impl FakeEnroll {
+    fn new(log: CallLog, polls: Vec<DeviceAuthPoll>) -> Self {
+        Self {
+            log,
+            polls: Arc::new(Mutex::new(polls.into())),
         }
     }
+    fn granted() -> DeviceAuthPoll {
+        DeviceAuthPoll::Granted(EnrolledGrant {
+            credential: "devc_new".into(),
+            device_id: "dev_new".into(),
+            workspace: EnrolledWorkspace {
+                workspace_id: WS.into(),
+                name: "acme".into(),
+                display_name: "Acme Inc".into(),
+            },
+        })
+    }
+}
+impl EnrollSource for FakeEnroll {
+    fn fetch_card(
+        &self,
+        url: &str,
+    ) -> Result<topos_types::requests::WireProtocolCard, ClientError> {
+        self.log.lock().unwrap().push(format!("card {url}"));
+        Ok(topos_types::requests::WireProtocolCard {
+            schema_version: 1,
+            card: "topos-protocol-card".to_owned(),
+            api_base_url: API.to_owned(),
+        })
+    }
+    fn device_auth_start(
+        &self,
+        workspace: &str,
+        _requested_name: &str,
+    ) -> Result<DeviceAuthStart, ClientError> {
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("authorize {workspace}"));
+        Ok(DeviceAuthStart {
+            device_code: "dc_login".into(),
+            user_code: "LOGN-1234".into(),
+            verification_uri_complete: format!("{API}/devices?code=LOGN-1234"),
+            expires_in_secs: 900,
+            interval_secs: 7,
+        })
+    }
+    fn device_auth_poll(&self, device_code: &str) -> Result<DeviceAuthPoll, ClientError> {
+        assert_eq!(device_code, "dc_login");
+        self.log.lock().unwrap().push("poll".to_owned());
+        let mut polls = self.polls.lock().unwrap();
+        if polls.len() > 1 {
+            Ok(polls.pop_front().expect("scripted"))
+        } else {
+            Ok(polls.front().expect("scripted").clone())
+        }
+    }
+}
+
+/// A directory whose `me` answers are scripted per workspace: `Ok(role)`, the uniform 404, or a
+/// transport fault — the `auth status` probe matrix.
+#[derive(Clone, Default)]
+struct FakeDirectory {
+    gone: bool,
+    unreachable: bool,
+}
+impl DirectorySource for FakeDirectory {
+    fn me(&self, ws: &str) -> Result<WireMe, ClientError> {
+        if self.gone {
+            return Err(ClientError::TargetNotFound {
+                target: ws.to_owned(),
+            });
+        }
+        if self.unreachable {
+            return Err(ClientError::Plane("connect refused".into()));
+        }
+        Ok(WireMe {
+            workspace_id: ws.to_owned(),
+            name: "acme".into(),
+            display_name: "Acme Inc".into(),
+            address: "https://topos.sh/acme".into(),
+            principal: "alice@acme.com".into(),
+            role: "owner".into(),
+            invited_by: None,
+            invite_policy: "members".into(),
+        })
+    }
     fn channels_index(&self, _ws: &str) -> Result<WireChannelIndex, ClientError> {
-        unreachable!("status probes only /me")
+        unreachable!()
     }
     fn skills_index(&self, _ws: &str) -> Result<WireSkillIndex, ClientError> {
-        unreachable!("status probes only /me")
+        unreachable!()
     }
     fn proposals_index(&self, _ws: &str) -> Result<WireProposalIndex, ClientError> {
-        unreachable!("status probes only /me")
+        unreachable!()
     }
     fn skill_log(&self, _ws: &str, _s: &str) -> Result<WireSkillLog, ClientError> {
         unreachable!()
@@ -277,447 +295,313 @@ impl DirectorySource for VerdictDirectory {
     }
 }
 
-/// A governance fake recording the self-revokes.
+/// A governance fake recording the self-revokes (`revoke <ws> <device_id>`); `fail` makes every
+/// revoke a transport fault (logout stays best-effort).
 #[derive(Clone)]
 struct FakeGovernance {
     log: CallLog,
-    fail_ws: Option<String>,
+    fail: bool,
 }
 impl GovernanceSource for FakeGovernance {
-    fn invite(
-        &self,
-        _ws: &str,
-        _body: topos_types::requests::InvitationRequest,
-    ) -> Result<topos_types::requests::InvitationData, ClientError> {
-        unreachable!("logout never invites")
+    fn invite(&self, _ws: &str, _body: InvitationRequest) -> Result<InvitationData, ClientError> {
+        unreachable!("auth never invites")
     }
-    fn revoke_device(&self, ws: &str, target: &str, _op_id: &str) -> Result<(), ClientError> {
-        if self.fail_ws.as_deref() == Some(ws) {
-            return Err(ClientError::Plane("dial: refused".into()));
-        }
+    fn revoke_device(
+        &self,
+        workspace_id: &str,
+        target_device_key_id: &str,
+        _op_id: &str,
+    ) -> Result<(), ClientError> {
         self.log
             .lock()
             .unwrap()
-            .push(format!("revoke {ws} {target}"));
-        Ok(())
-    }
-}
-
-fn login_connectors<'a>(
-    enroll_fake: &'a FakeLogin,
-    directory: &'a VerdictDirectory,
-    governance: &'a FakeGovernance,
-    enroll_connect: &'a dyn Fn(&str) -> Box<dyn EnrollSource>,
-    dir_connect: &'a dyn Fn(&str) -> Box<dyn DirectorySource>,
-    gov_connect: &'a dyn Fn(&str) -> Box<dyn GovernanceSource>,
-) -> ops::AuthConnectors<'a> {
-    let _ = (enroll_fake, directory, governance);
-    ops::AuthConnectors {
-        enroll: enroll_connect,
-        directory: dir_connect,
-        governance: gov_connect,
-        web_origin: "https://topos.sh".to_owned(),
-    }
-}
-
-/// Run login end to end over the fakes: call 1 (pending) then the resume (granted → redeem).
-fn run_login(rig: &Rig, fake: &FakeLogin, yes: bool) -> Result<ops::AuthLoginOutcome, ClientError> {
-    let inert_p = InertPlane;
-    let inert_f = InertFollow;
-    let ctx = rig.ctx(&inert_p, &inert_f);
-    let enroll_connect = |_b: &str| -> Box<dyn EnrollSource> { Box::new(fake.clone()) };
-    let dir_connect = |_b: &str| -> Box<dyn DirectorySource> {
-        panic!("login never builds a directory transport")
-    };
-    let gov_connect = |_b: &str| -> Box<dyn GovernanceSource> {
-        panic!("login never builds a governance transport")
-    };
-    let directory = VerdictDirectory {
-        verdicts: HashMap::new(),
-    };
-    let governance = FakeGovernance {
-        log: Arc::default(),
-        fail_ws: None,
-    };
-    let connectors = login_connectors(
-        fake,
-        &directory,
-        &governance,
-        &enroll_connect,
-        &dir_connect,
-        &gov_connect,
-    );
-    let first = ops::login(&ctx, &connectors, None, yes)?;
-    match first {
-        // The BIN's re-invoke loop resumes the pending session; drive one resume here.
-        ops::AuthLoginOutcome::Pending(p) => {
-            assert!(p.verification_uri_complete.contains("LOGIN-CODE"));
-            ops::login(&ctx, &connectors, None, yes)
+            .push(format!("revoke {workspace_id} {target_device_key_id}"));
+        if self.fail {
+            Err(ClientError::Plane("connect refused".into()))
+        } else {
+            Ok(())
         }
-        done => Ok(done),
     }
 }
 
-#[test]
-fn login_mints_per_seat_credentials_and_reports_blocked_ones() {
-    let rig = Rig::new("login");
-    crate::identity::load_or_create_device_id(&rig.fs, &rig.layout()).unwrap();
-    let fake = FakeLogin {
-        api_base: API.to_owned(),
-        principal: "alice@acme.com".to_owned(),
-        seats: vec![
-            seat("w_acme", "acme", Some("wsc_a"), None),
-            seat("w_beta", "beta", None, Some("device revoked")),
-        ],
-        log: Arc::default(),
-    };
-    let out = run_login(&rig, &fake, false).unwrap();
-    let ops::AuthLoginOutcome::Done(data) = out else {
-        panic!("the resumed login settles");
-    };
-    assert_eq!(data.principal, "alice@acme.com");
-    assert_eq!(data.server, API);
-    assert!(data.replaced_principal.is_none());
-    assert_eq!(data.memberships.len(), 2);
-    assert!(data.memberships[0].minted);
-    assert!(!data.memberships[1].minted);
-    assert_eq!(
-        data.memberships[1].blocked.as_deref(),
-        Some("device revoked")
-    );
-
-    // The writes: instance pinned, the MINTED seat's credential stored (the blocked one absent),
-    // user.json carrying the principal + both memberships, the WAL gone.
-    let layout = rig.layout();
-    assert_eq!(
-        enroll::read_instance(&rig.fs, &layout)
-            .unwrap()
-            .unwrap()
-            .base_url,
-        API
-    );
-    let creds = enroll::read_credentials(&rig.fs, &layout)
-        .unwrap()
-        .unwrap()
-        .into_map();
-    assert_eq!(creds.get("w_acme").map(String::as_str), Some("wsc_a"));
-    assert!(!creds.contains_key("w_beta"));
-    let user = enroll::read_user(&rig.fs, &layout).unwrap().unwrap();
-    assert_eq!(user.principal.as_deref(), Some("alice@acme.com"));
-    assert_eq!(user.email.as_deref(), Some("alice@acme.com"));
-    assert_eq!(user.workspaces.len(), 2);
-    assert!(enroll::read_wal(&rig.fs, &layout).unwrap().is_none());
-
-    // A SAME-account re-login is an idempotent re-mint (no confirm gate).
-    let out = run_login(&rig, &fake, false).unwrap();
-    assert!(matches!(out, ops::AuthLoginOutcome::Done(d) if d.replaced_principal.is_none()));
+struct AuthFakes {
+    enroll: FakeEnroll,
+    directory: FakeDirectory,
+    governance: FakeGovernance,
 }
 
-#[test]
-fn a_different_account_login_needs_yes_and_then_replaces_wholesale() {
-    let rig = Rig::new("login-switch");
-    crate::identity::load_or_create_device_id(&rig.fs, &rig.layout()).unwrap();
-    // Sign in as alice with a seat in w_acme…
-    let alice = FakeLogin {
-        api_base: API.to_owned(),
-        principal: "alice@acme.com".to_owned(),
-        seats: vec![seat("w_acme", "acme", Some("wsc_alice"), None)],
-        log: Arc::default(),
-    };
-    run_login(&rig, &alice, false).unwrap();
-
-    // …then bob WITHOUT --yes: a typed CONFIRM_REQUIRED naming both accounts; nothing replaced.
-    let bob = FakeLogin {
-        api_base: API.to_owned(),
-        principal: "bob@acme.com".to_owned(),
-        seats: vec![seat("w_beta", "beta", Some("wsc_bob"), None)],
-        log: Arc::default(),
-    };
-    let err = run_login(&rig, &bob, false).unwrap_err();
-    assert_eq!(err.code(), "CONFIRM_REQUIRED");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("alice@acme.com") && msg.contains("bob@acme.com"),
-        "{msg}"
-    );
-    assert!(msg.contains("--yes"), "{msg}");
-    let creds = enroll::read_credentials(&rig.fs, &rig.layout())
-        .unwrap()
-        .unwrap()
-        .into_map();
-    assert_eq!(creds.get("w_acme").map(String::as_str), Some("wsc_alice"));
-    assert!(
-        !creds.contains_key("w_beta"),
-        "nothing written without --yes"
-    );
-    // The refused login cleared its spent WAL (the re-run starts a fresh sign-in).
-    assert!(enroll::read_wal(&rig.fs, &rig.layout()).unwrap().is_none());
-
-    // With --yes the credentials are replaced WHOLESALE — alice's are gone.
-    let out = run_login(&rig, &bob, true).unwrap();
-    let ops::AuthLoginOutcome::Done(data) = out else {
-        panic!("settles");
-    };
-    assert_eq!(data.replaced_principal.as_deref(), Some("alice@acme.com"));
-    let creds = enroll::read_credentials(&rig.fs, &rig.layout())
-        .unwrap()
-        .unwrap()
-        .into_map();
-    assert!(
-        !creds.contains_key("w_acme"),
-        "the old account's credential is gone"
-    );
-    assert_eq!(creds.get("w_beta").map(String::as_str), Some("wsc_bob"));
-    let user = enroll::read_user(&rig.fs, &rig.layout()).unwrap().unwrap();
-    assert_eq!(user.principal.as_deref(), Some("bob@acme.com"));
-    assert_eq!(
-        user.workspaces.len(),
-        1,
-        "the membership list was replaced too"
-    );
-}
-
-#[test]
-fn logout_revokes_best_effort_deletes_credentials_and_keeps_every_byte() {
-    let rig = Rig::new("logout");
-    crate::identity::load_or_create_device_id(&rig.fs, &rig.layout()).unwrap();
-    let layout = rig.layout();
-    // A signed-in install with two workspaces + a skill's sidecar bytes on disk.
-    enroll::write_instance(
-        &rig.fs,
-        &layout,
-        &enroll::Instance {
-            schema_version: 1,
-            base_url: API.to_owned(),
-            deployment_mode: topos_types::bootstrap::DeploymentMode::Cloud,
-            enrollment_method: "device_code".to_owned(),
-        },
-    )
-    .unwrap();
-    enroll::write_credential(&rig.fs, &layout, "w_acme", "wsc_a").unwrap();
-    enroll::write_credential(&rig.fs, &layout, "w_beta", "wsc_b").unwrap();
-    enroll::write_user(
-        &rig.fs,
-        &layout,
-        &enroll::UserDoc {
-            schema_version: 1,
-            email: Some("alice@acme.com".into()),
-            principal: Some("alice@acme.com".into()),
-            workspaces: Vec::new(),
-        },
-    )
-    .unwrap();
-    enroll::write_follows_merged(
-        &rig.fs,
-        &layout,
-        &[enroll::FollowEntry {
-            skill_id: "s_docs".to_owned(),
-            workspace_id: "w_acme".to_owned(),
-            mode: enroll::FollowModeDoc::Auto,
-            review_required: false,
-            following: true,
-            excluded_here: false,
-        }],
-    )
-    .unwrap();
-    let skill_bytes = rig.home.0.join("skills-probe");
-    std::fs::create_dir_all(&skill_bytes).unwrap();
-    std::fs::write(skill_bytes.join("SKILL.md"), b"# kept\n").unwrap();
-
-    let log: CallLog = Arc::default();
-    let governance = FakeGovernance {
-        log: log.clone(),
-        // One revoke fails (the plane is down for w_beta) — best-effort, never a blocker.
-        fail_ws: Some("w_beta".to_owned()),
-    };
+fn with_connectors<R>(
+    rig: &Rig,
+    fakes: &AuthFakes,
+    f: impl FnOnce(&Ctx<'_>, &ops::AuthConnectors<'_>) -> R,
+) -> R {
+    sidecar::recover(&rig.fs, &rig.layout(), FIXED_MILLIS as i64).unwrap();
     let inert_p = InertPlane;
     let inert_f = InertFollow;
     let ctx = rig.ctx(&inert_p, &inert_f);
-    let enroll_connect = |_b: &str| -> Box<dyn EnrollSource> { panic!("logout never enrolls") };
-    let dir_connect = |_b: &str| -> Box<dyn DirectorySource> {
-        panic!("logout never builds a directory transport")
-    };
-    let gov_connect = |_b: &str| -> Box<dyn GovernanceSource> { Box::new(governance.clone()) };
+    let enroll_fake = fakes.enroll.clone();
+    let dir_fake = fakes.directory.clone();
+    let gov_fake = fakes.governance.clone();
+    let enroll_connect = move |_b: &str| -> Box<dyn EnrollSource> { Box::new(enroll_fake.clone()) };
+    let dir_connect = move |_b: &str| -> Box<dyn DirectorySource> { Box::new(dir_fake.clone()) };
+    let gov_connect = move |_b: &str| -> Box<dyn GovernanceSource> { Box::new(gov_fake.clone()) };
     let connectors = ops::AuthConnectors {
         enroll: &enroll_connect,
         directory: &dir_connect,
         governance: &gov_connect,
         web_origin: "https://topos.sh".to_owned(),
     };
+    f(&ctx, &connectors)
+}
 
-    // Bare = describe; nothing changes.
-    let out = ops::logout(&ctx, &connectors, false).unwrap();
+fn fakes(log: &CallLog, polls: Vec<DeviceAuthPoll>) -> AuthFakes {
+    AuthFakes {
+        enroll: FakeEnroll::new(log.clone(), polls),
+        directory: FakeDirectory::default(),
+        governance: FakeGovernance {
+            log: log.clone(),
+            fail: false,
+        },
+    }
+}
+
+// =================================================================================================
+// login
+// =================================================================================================
+
+#[test]
+fn login_needs_an_enrolled_membership() {
+    let rig = Rig::new("login-fresh");
+    let log: CallLog = Arc::default();
+    let fk = fakes(&log, vec![FakeEnroll::granted()]);
+    let err = with_connectors(&rig, &fk, |ctx, c| ops::login(ctx, c, None, None)).unwrap_err();
+    assert!(matches!(err, ClientError::Enrollment(_)), "{err:?}");
+    assert!(err.to_string().contains("topos follow"), "{err}");
+    assert!(log.lock().unwrap().is_empty(), "nothing dialed");
+}
+
+#[test]
+fn login_begins_toward_the_membership_address_and_owns_a_login_wal() {
+    let rig = Rig::new("login-begin");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let fk = fakes(&log, vec![DeviceAuthPoll::Pending]);
+    let out = with_connectors(&rig, &fk, |ctx, c| ops::login(ctx, c, None, None)).unwrap();
+    let ops::AuthLoginOutcome::Pending(p) = out else {
+        panic!("call 1 is pending");
+    };
+    assert_eq!(p.server, API);
+    assert_eq!(p.user_code, "LOGN-1234");
+    assert_eq!(p.interval_secs, 7);
+    // The flow authorized toward the MEMBERSHIP's address name.
+    assert!(log.lock().unwrap().iter().any(|e| e == "authorize acme"));
+    // The WAL is LOGIN-owned (a `follow` refuses it; `auth login` resumes it).
+    let wal = enroll::read_wal(&rig.fs, &rig.layout()).unwrap().unwrap();
+    assert!(matches!(wal.intent, enroll::EnrollIntentDoc::Login));
+}
+
+#[test]
+fn login_granted_replaces_the_one_credential_wholesale() {
+    let rig = Rig::new("login-granted");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let fk = fakes(&log, vec![FakeEnroll::granted()]);
+    with_connectors(&rig, &fk, |ctx, c| ops::login(ctx, c, None, None)).unwrap();
+
+    // Re-invoking `auth login` IS the resume: poll → granted → the credential replaces wholesale.
+    let out = with_connectors(&rig, &fk, |ctx, c| ops::login(ctx, c, None, None)).unwrap();
+    let ops::AuthLoginOutcome::Done(done) = out else {
+        panic!("the resume settles");
+    };
+    assert_eq!(done.workspace_id, WS);
+    assert_eq!(done.device_id, "dev_new");
+    let creds = enroll::read_credentials(&rig.fs, &rig.layout())
+        .unwrap()
+        .unwrap();
+    assert_eq!(creds.credential, "devc_new", "replaced wholesale");
+    assert_eq!(creds.device_id, "dev_new");
+    assert!(enroll::read_wal(&rig.fs, &rig.layout()).unwrap().is_none());
+}
+
+#[test]
+fn login_denied_and_expired_clear_the_wal_typed() {
+    for (poll, needle) in [
+        (DeviceAuthPoll::Denied, "denied"),
+        (DeviceAuthPoll::Expired, "expired"),
+    ] {
+        let rig = Rig::new("login-terminal");
+        rig.seed_enrolled();
+        let log: CallLog = Arc::default();
+        let fk = fakes(&log, vec![poll]);
+        with_connectors(&rig, &fk, |ctx, c| ops::login(ctx, c, None, None)).unwrap();
+        let err = with_connectors(&rig, &fk, |ctx, c| ops::login(ctx, c, None, None)).unwrap_err();
+        assert!(matches!(err, ClientError::Enrollment(_)), "{err:?}");
+        assert!(err.to_string().contains(needle), "{err}");
+        assert!(enroll::read_wal(&rig.fs, &rig.layout()).unwrap().is_none());
+        // The OLD credential survives a failed re-login (nothing was replaced).
+        let creds = enroll::read_credentials(&rig.fs, &rig.layout())
+            .unwrap()
+            .unwrap();
+        assert_eq!(creds.credential, "devc_old");
+    }
+}
+
+#[test]
+fn a_follow_owned_wal_refuses_toward_follow() {
+    let rig = Rig::new("login-follow-owned");
+    rig.seed_enrolled();
+    enroll::write_wal(
+        &rig.fs,
+        &rig.layout(),
+        &enroll::PendingEnrollment {
+            schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+            base_url: API.to_owned(),
+            workspace_name: "acme".to_owned(),
+            intent: enroll::EnrollIntentDoc::Follow {
+                target: None,
+                mode: enroll::FollowModeDoc::Auto,
+            },
+            device_code: "dc_follow".to_owned(),
+            user_code: "CODE".to_owned(),
+            verification_uri_complete: format!("{API}/devices?code=CODE"),
+            interval_secs: 5,
+            expires_at_millis: i64::MAX,
+        },
+    )
+    .unwrap();
+    let log: CallLog = Arc::default();
+    let fk = fakes(&log, vec![FakeEnroll::granted()]);
+    let err = with_connectors(&rig, &fk, |ctx, c| ops::login(ctx, c, None, None)).unwrap_err();
+    assert!(err.to_string().contains("topos follow"), "{err}");
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "the follow flow's secret was never touched"
+    );
+}
+
+// =================================================================================================
+// logout
+// =================================================================================================
+
+#[test]
+fn logout_is_two_phase_and_revokes_with_the_stored_device_id() {
+    let rig = Rig::new("logout");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let fk = fakes(&log, vec![DeviceAuthPoll::Pending]);
+
+    // Bare = DESCRIBE (nothing changes).
+    let out = with_connectors(&rig, &fk, |ctx, c| ops::logout(ctx, c, false)).unwrap();
     let ops::AuthLogoutOutcome::Described { describe, yes_argv } = out else {
-        panic!("bare = describe");
+        panic!("bare logout describes");
     };
     assert_eq!(describe.principal.as_deref(), Some("alice@acme.com"));
-    assert_eq!(describe.workspaces.len(), 2);
-    assert!(yes_argv.contains(&"--yes".to_owned()));
+    assert_eq!(describe.workspaces, vec![WS.to_owned()]);
+    assert_eq!(yes_argv.last().map(String::as_str), Some("--yes"));
     assert!(
-        enroll::read_credentials(&rig.fs, &layout)
+        enroll::read_credentials(&rig.fs, &rig.layout())
             .unwrap()
             .is_some(),
-        "the describe deleted nothing"
+        "nothing changed on the describe"
     );
 
-    // --yes: revoke best-effort, delete the credentials, keep everything else.
-    let out = ops::logout(&ctx, &connectors, true).unwrap();
-    let ops::AuthLogoutOutcome::Applied(data) = out else {
-        panic!("--yes = apply");
+    // `--yes` = the best-effort self-revoke (naming the STORED device id) + the credential delete.
+    let out = with_connectors(&rig, &fk, |ctx, c| ops::logout(ctx, c, true)).unwrap();
+    let ops::AuthLogoutOutcome::Applied(applied) = out else {
+        panic!("--yes applies");
     };
-    assert!(data.credentials_deleted);
-    assert_eq!(data.revoked, vec!["w_acme".to_owned()]);
-    assert_eq!(data.revoke_failed, vec!["w_beta".to_owned()]);
-    // The self-revoke targeted THIS device's own key id.
-    let l = log.lock().unwrap();
+    assert!(applied.credentials_deleted);
+    assert_eq!(applied.revoked, vec![WS.to_owned()]);
     assert!(
-        l.iter().any(|e| e.starts_with("revoke w_acme dk_")),
-        "{l:?}"
+        log.lock()
+            .unwrap()
+            .iter()
+            .any(|e| e == "revoke w_acme dev_old"),
+        "the revoke targets the STORED device id: {:?}",
+        log.lock().unwrap()
     );
-    drop(l);
-    // Credentials gone; skills, follows, and the principal stay.
+    // Signed out = no credential; the memberships stay for the re-login UX.
     assert!(
-        enroll::read_credentials(&rig.fs, &layout)
+        enroll::read_credentials(&rig.fs, &rig.layout())
             .unwrap()
             .is_none()
     );
-    assert_eq!(
-        std::fs::read(skill_bytes.join("SKILL.md")).unwrap(),
-        b"# kept\n"
-    );
-    assert!(enroll::read_follows(&rig.fs, &layout).unwrap().is_some());
-    assert_eq!(
-        enroll::read_user(&rig.fs, &layout)
+    assert!(
+        enroll::read_user(&rig.fs, &rig.layout())
             .unwrap()
             .unwrap()
-            .principal
-            .as_deref(),
-        Some("alice@acme.com")
+            .membership(WS)
+            .is_some()
     );
 
-    // Idempotent: a second logout --yes is a clean "already signed out".
-    let out = ops::logout(&ctx, &connectors, true).unwrap();
-    assert!(
-        matches!(out, ops::AuthLogoutOutcome::Applied(d) if !d.credentials_deleted && d.revoked.is_empty())
-    );
+    // A second logout is idempotent (already signed out — nothing to revoke or delete).
+    let out = with_connectors(&rig, &fk, |ctx, c| ops::logout(ctx, c, true)).unwrap();
+    let ops::AuthLogoutOutcome::Applied(applied) = out else {
+        panic!("--yes applies");
+    };
+    assert!(!applied.credentials_deleted);
+    assert!(applied.revoked.is_empty());
 }
 
 #[test]
-fn status_reports_the_probe_causes_and_the_reporting_posture() {
-    let rig = Rig::new("status");
-    let layout = rig.layout();
-    enroll::write_instance(
-        &rig.fs,
-        &layout,
-        &enroll::Instance {
-            schema_version: 1,
-            base_url: API.to_owned(),
-            deployment_mode: topos_types::bootstrap::DeploymentMode::Cloud,
-            enrollment_method: "device_code".to_owned(),
-        },
-    )
-    .unwrap();
-    let mut user = enroll::UserDoc {
-        schema_version: 1,
-        email: Some("alice@acme.com".into()),
-        principal: Some("alice@acme.com".into()),
-        workspaces: Vec::new(),
+fn logout_deletes_the_credential_even_when_the_revoke_fails() {
+    let rig = Rig::new("logout-besteffort");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let mut fk = fakes(&log, vec![DeviceAuthPoll::Pending]);
+    fk.governance.fail = true;
+    let out = with_connectors(&rig, &fk, |ctx, c| ops::logout(ctx, c, true)).unwrap();
+    let ops::AuthLogoutOutcome::Applied(applied) = out else {
+        panic!("--yes applies");
     };
-    for ws in ["w_ok", "w_gone", "w_down", "w_nocred"] {
-        enroll::upsert_membership(
-            &mut user,
-            enroll::Membership {
-                workspace_id: ws.to_owned(),
-                display_name: None,
-                roles: Vec::new(),
-                verified_domain: None,
-                verified_domain_status: topos_types::bootstrap::VerifiedDomainStatus::Unverified,
-                invite_rooted: false,
-                enrolled_at: 1,
-            },
-        );
-    }
-    enroll::write_user(&rig.fs, &layout, &user).unwrap();
-    for ws in ["w_ok", "w_gone", "w_down"] {
-        enroll::write_credential(&rig.fs, &layout, ws, "wsc").unwrap();
-    }
-    // The reporting posture: one fresh, one stale.
-    crate::sync_status::record(
-        &rig.fs,
-        &layout,
-        &[
-            (
-                "w_ok".to_owned(),
-                crate::sync_status::WorkspaceSync {
-                    last_delivery_at: Some(1_700_000_000_000 - 1_000),
-                    last_report_at: Some(1_700_000_000_000 - 1_000),
-                    staleness_window_ms: 604_800_000,
-                    ..Default::default()
-                },
-            ),
-            (
-                "w_gone".to_owned(),
-                crate::sync_status::WorkspaceSync {
-                    last_delivery_at: Some(1_000),
-                    last_report_at: Some(1_000),
-                    staleness_window_ms: 10_000,
-                    ..Default::default()
-                },
-            ),
-        ],
-    )
-    .unwrap();
-
-    let directory = VerdictDirectory {
-        verdicts: HashMap::from([
-            ("w_ok".to_owned(), "healthy"),
-            ("w_gone".to_owned(), "gone"),
-            ("w_down".to_owned(), "down"),
-        ]),
-    };
-    let inert_p = InertPlane;
-    let inert_f = InertFollow;
-    let ctx = rig.ctx(&inert_p, &inert_f);
-    let enroll_connect = |_b: &str| -> Box<dyn EnrollSource> { panic!("status never enrolls") };
-    let dir_connect = |_b: &str| -> Box<dyn DirectorySource> { Box::new(directory.clone()) };
-    let gov_connect = |_b: &str| -> Box<dyn GovernanceSource> { panic!("status never governs") };
-    let connectors = ops::AuthConnectors {
-        enroll: &enroll_connect,
-        directory: &dir_connect,
-        governance: &gov_connect,
-        web_origin: "https://topos.sh".to_owned(),
-    };
-
-    let data = ops::status(&ctx, &connectors).unwrap();
-    assert_eq!(data.server.as_deref(), Some(API));
-    assert_eq!(data.principal.as_deref(), Some("alice@acme.com"));
-    assert!(data.signed_in);
-    assert!(data.hook_armed, "the adapter probe reads armed");
-    let by_ws: HashMap<&str, &str> = data
-        .workspaces
-        .iter()
-        .map(|w| (w.workspace_id.as_str(), w.health.as_str()))
-        .collect();
-    assert_eq!(by_ws["w_ok"], "healthy");
-    assert_eq!(by_ws["w_gone"], "no access — revoked or removed");
-    assert_eq!(by_ws["w_down"], "unreachable");
-    assert_eq!(by_ws["w_nocred"], "no credential");
-    // The healthy probe carries the role.
-    assert_eq!(
-        data.workspaces
-            .iter()
-            .find(|w| w.workspace_id == "w_ok")
-            .unwrap()
-            .role
-            .as_deref(),
-        Some("reviewer")
+    assert!(
+        applied.credentials_deleted,
+        "the local sign-out never blocks on the network"
     );
-    // The reporting posture: the stale workspace reads stale, the fresh one does not.
-    let stale: HashMap<&str, bool> = data
-        .reporting
-        .iter()
-        .map(|r| (r.workspace_id.as_str(), r.stale))
-        .collect();
-    assert!(!stale["w_ok"]);
-    assert!(stale["w_gone"]);
+    assert_eq!(applied.revoke_failed, vec![WS.to_owned()]);
+    assert!(
+        enroll::read_credentials(&rig.fs, &rig.layout())
+            .unwrap()
+            .is_none()
+    );
+}
+
+// =================================================================================================
+// status
+// =================================================================================================
+
+#[test]
+fn status_probes_me_and_reports_the_access_causes() {
+    // Healthy: the probe answers the role AND refreshes the principal disclosure.
+    let rig = Rig::new("status-healthy");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let fk = fakes(&log, vec![DeviceAuthPoll::Pending]);
+    let s = with_connectors(&rig, &fk, ops::status).unwrap();
+    assert!(s.signed_in);
+    assert_eq!(s.server.as_deref(), Some(API));
+    assert_eq!(s.principal.as_deref(), Some("alice@acme.com"));
+    assert_eq!(s.device_id.as_deref(), Some("dev_old"));
+    assert_eq!(s.workspaces.len(), 1);
+    assert_eq!(s.workspaces[0].health, "healthy");
+    assert_eq!(s.workspaces[0].role.as_deref(), Some("owner"));
+
+    // The uniform 404: this device (or the person) lost the workspace.
+    let mut fk_gone = fakes(&log, vec![DeviceAuthPoll::Pending]);
+    fk_gone.directory.gone = true;
+    let s = with_connectors(&rig, &fk_gone, ops::status).unwrap();
+    assert_eq!(s.workspaces[0].health, "no access — revoked or removed");
+
+    // A transport fault: unreachable, never a false "revoked".
+    let mut fk_down = fakes(&log, vec![DeviceAuthPoll::Pending]);
+    fk_down.directory.unreachable = true;
+    let s = with_connectors(&rig, &fk_down, ops::status).unwrap();
+    assert_eq!(s.workspaces[0].health, "unreachable");
+
+    // Signed out: no credential — the probe never dials.
+    std::fs::remove_file(rig.layout().credentials_path()).unwrap();
+    let s = with_connectors(&rig, &fk, ops::status).unwrap();
+    assert!(!s.signed_in);
+    assert_eq!(s.workspaces[0].health, "no credential");
+    assert!(s.device_id.is_none());
 }

@@ -1,18 +1,12 @@
-//! The content-addressed identity derivations — the one shared implementation of each.
+//! The content-addressed identity derivation — the one shared implementation.
 //!
-//! `topos-core` builds the canonical bytes for each identified object and hashes them. These are
-//! **identity / content-addressing** constructions — there are no keys and no crypto here. Because a
+//! `topos-core` builds the canonical bytes for the identified object and hashes them. This is an
+//! **identity / content-addressing** construction — there are no keys and no crypto here. Because a
 //! single encoder is the one implementation, every component that re-derives an id agrees on the bytes
 //! by construction (a divergent second derivation could silently fork the value).
 //!
-//! Three derivations:
-//!
-//! - the **commit** identity: `commit_id = sha256(frame)` — the user-facing `version_id`. A
-//!   length-prefixed binary frame. ([`commit_id`])
-//! - the **device key id** [`device_key_id`] — `dk_` + the first 32 hex chars of `sha256(pubkey)`,
-//!   the server-derived id a registered device public key is known by.
-//! - the **canonical principal** fold [`canonical_principal`] — the ASCII-lowercase fold every
-//!   email-valued identifier passes so one human's `Alice@x` / `alice@x` are one identity everywhere.
+//! One derivation: the **commit** identity — `commit_id = sha256(frame)`, the user-facing
+//! `version_id`. A length-prefixed binary frame. ([`commit_id`])
 //!
 //! ## Why a hand-specified binary frame, not a serialization crate
 //!
@@ -23,8 +17,7 @@
 //! transcripts, SSH wire format) is an explicit, length-prefixed, domain-separated frame. The one
 //! library this leans on is the primitive `sha2`.
 
-use crate::digest::{sha256, to_hex};
-use alloc::string::String;
+use crate::digest::sha256;
 use alloc::vec::Vec;
 
 /// The ASCII context tag for the commit-id frame (15 chars + NUL = 16 bytes).
@@ -39,43 +32,6 @@ pub enum PreimageError {
     TooManyParents,
     /// A length-prefixed string field exceeded `u32::MAX` bytes and cannot be framed.
     FieldTooLong,
-}
-
-// ---------------------------------------------------------------------------------------------
-// Cross-component identity: the device key id and the principal fold.
-// ---------------------------------------------------------------------------------------------
-
-/// The `dk_`-prefixed hex length of a [`device_key_id`] (the first 32 hex chars of the sha256).
-const DEVICE_KEY_ID_HEX_LEN: usize = 32;
-
-/// The device key id derived from a raw 32-byte device public key: `dk_` + the first
-/// 32 hex chars of `sha256(public_key)`.
-///
-/// A **cross-component identity**: the plane derives this id server-side from the registered public key
-/// — a client-asserted id is never trusted — and it is written once here so every component that maps a
-/// key to its id agrees. Stable across restarts (derived from the persisted key, never random) and
-/// public (it does not reveal the key).
-#[must_use]
-pub fn device_key_id(public_key: &[u8; 32]) -> String {
-    let hex = to_hex(&sha256(public_key));
-    let mut id = String::with_capacity(3 + DEVICE_KEY_ID_HEX_LEN);
-    id.push_str("dk_");
-    id.push_str(&hex[..DEVICE_KEY_ID_HEX_LEN]);
-    id
-}
-
-/// The canonical form of a principal identifier (an email, or a device-rooted `dev.dk_…` id):
-/// the ASCII-lowercase fold of the input.
-///
-/// A **cross-component identity rule**, like [`device_key_id`]: every email-valued identifier — the
-/// governance Invite email set, the RosterSet/RosterRemove targets — folds through this function so one
-/// human's `Alice@x` / `alice@x` are one rostered identity everywhere (storage, roster gates,
-/// idempotency hashes), and the plane folds at its parse boundary. Principals are ASCII-only by charset
-/// (the plane's parse rejects non-ASCII), so the ASCII fold is total; device key ids are lowercase hex,
-/// so folding a `dev.dk_…` principal is a no-op.
-#[must_use]
-pub fn canonical_principal(s: &str) -> String {
-    s.to_ascii_lowercase()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -150,21 +106,11 @@ mod tests {
 
     // ---- The frozen known-answer vectors (computed once from these encoders, then pinned). A change
     // ---- to any encoding breaks one of these loudly; update only if the change is INTENTIONAL. ----
-    //
-    // Vector key (a test seed, NOT a real key): device key seed = bytes 00..1f.
-    const DEVICE_PK: &str = "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8";
     const COMMIT_PREIMAGE: &str = "544f504f535f434f4d4d49545f563100011111111111111111111111111111111111111111111111111111111111111111222222222222222222222222222222222222222222222222222222222222222200000007645f616c69636500000029496d70726f76652050522074656d706c6174650a0a55736520696d7065726174697665206d6f6f642e";
     const COMMIT_ID: &str = "a10ee836cc1b8290caa8f55ce70c7ff2a281922adf9a94315cbf6c07edfa9225";
 
     const FIX_PARENTS: [[u8; 32]; 1] = [[0x11u8; 32]];
     const FIX_TREE: [u8; 32] = [0x22u8; 32];
-
-    fn unhex(s: &str) -> Vec<u8> {
-        hex::decode(s).expect("valid hex vector")
-    }
-    fn arr32(s: &str) -> [u8; 32] {
-        unhex(s).try_into().expect("32-byte vector")
-    }
 
     fn fixture_commit() -> Commit<'static> {
         Commit {
@@ -244,37 +190,6 @@ mod tests {
         assert_ne!(base, other_author);
         assert_ne!(base, other_msg);
         assert_ne!(base, other_parent);
-    }
-
-    // ---- Cross-component identity derivations (the shared impls every component calls) ----
-
-    #[test]
-    fn device_key_id_known_answer() {
-        // The frozen device key (seed 00..1f → DEVICE_PK) derives this exact id — the SAME value the
-        // plane re-derives from the registered key.
-        assert_eq!(
-            device_key_id(&arr32(DEVICE_PK)),
-            "dk_56475aa75463474c0285df5dbf2bcab7"
-        );
-        // Shape: the `dk_` prefix + exactly the first 32 hex chars of sha256(pubkey).
-        let full = to_hex(&sha256(&arr32(DEVICE_PK)));
-        assert_eq!(
-            device_key_id(&arr32(DEVICE_PK)),
-            alloc::format!("dk_{}", &full[..32])
-        );
-    }
-
-    #[test]
-    fn canonical_principal_is_the_total_ascii_fold() {
-        // The one identity fold every component binds: emails fold to lowercase, already-canonical
-        // strings (every lowercase email, every `dev.dk_…` device-rooted principal — key ids are
-        // lowercase hex) are fixpoints.
-        assert_eq!(canonical_principal("Alice@Acme.COM"), "alice@acme.com");
-        assert_eq!(canonical_principal("alice@acme.com"), "alice@acme.com");
-        assert_eq!(
-            canonical_principal("dev.dk_56475aa75463474c0285df5dbf2bcab7"),
-            "dev.dk_56475aa75463474c0285df5dbf2bcab7"
-        );
     }
 
     #[test]

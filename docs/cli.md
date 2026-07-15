@@ -21,7 +21,7 @@ These work before or after any verb.
 topos follow [OPTIONS] [TARGETS]...
 ```
 
-Follow a workspace, channel, or skill — enroll if needed, then subscribe two-phase (a bare invocation DESCRIBES what would land; `--yes` applies). Targets: a workspace address (`https://topos.sh/acme`, or a bare workspace name), a qualified path (`acme/channels/eng`, `acme/skills/deploy`), a bare channel/skill name, or an `/i/` admin CLAIM link. `follow <skill>` on a KNOWN followed skill places its disclosed first-receive offer (or resumes a skill `unfollow` paused). While a device-flow enrollment is pending, re-invoking `follow` RESUMES it
+Follow a workspace, channel, or skill — enroll if needed, then subscribe two-phase (a bare invocation DESCRIBES what would land; `--yes` applies). Targets: a workspace address (`https://topos.sh/acme`, or a bare workspace name), a qualified path (`acme/channels/eng`, `acme/skills/deploy`), or a bare channel/skill name. A first follow enrolls this device: open the printed approval URL in a browser, check the code matches, and approve — the device then holds ONE credential for everything your seats reach. `follow <skill>` on a KNOWN followed skill places its disclosed first-receive offer (or resumes a skill `unfollow` paused). While an enrollment is pending, re-invoking `follow` RESUMES it
 
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
@@ -152,7 +152,7 @@ Show a skill's local action log + embedded-git history
 topos publish [OPTIONS] <TARGET>
 ```
 
-Ship a draft to the team, ADDING the skill to topos first if it isn't tracked yet. `publish` moves `current` to your draft (or genesis-creates a never-published skill); `--propose` opens a PR without moving `current`. Pin the bytes with an optional `@<digest>` suffix. Un-enrolled, a direct publish STANDS UP a workspace on the hosted plane (a human signs in to approve). Roster-gated
+Ship a draft to the team, ADDING the skill to topos first if it isn't tracked yet. `publish` moves `current` to your draft (or genesis-creates a never-published skill); `--propose` opens a PR without moving `current`. Pin the bytes with an optional `@<digest>` suffix. Needs enrollment — un-enrolled, it refuses with "run `topos follow <workspace-address>` first". Roster-gated
 
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
@@ -161,7 +161,6 @@ Ship a draft to the team, ADDING the skill to topos first if it isn't tracked ye
 | `--propose` |  |  | Open a proposal (a PR) instead of moving `current` |
 | `-m, --message` | `<MSG>` |  | The commit message for this version (threaded into the candidate commit id) |
 | `--yes` |  |  | Apply without the describe step. Parses today; the two-phase describe lands later |
-| `--wait` | `<SECONDS>` |  | Block until the browser sign-in settles, then auto-create the workspace and publish in ONE command (the un-enrolled standup path). Put `--wait` AFTER the positional target |
 
 
 ### `topos review`
@@ -271,13 +270,12 @@ Manage this install's sign-in: `auth login [<server>]`, `auth logout`, `auth sta
 topos auth login [OPTIONS] [SERVER_URL]
 ```
 
-Sign in to a plane (device flow): prove who you are in the browser, and every workspace where you hold a confirmed seat re-mints this device's credential. An optional `<server>` names the server (default https://topos.sh; TOPOS_PLANE_URL overrides)
+Re-enroll this machine (the same browser-approval device flow `follow` runs, minus a follow target): approve in the browser and this device's ONE credential is re-minted — it covers every workspace your seats reach. On an already-enrolled install the new credential REPLACES the stored one. An optional `<server>` names the server (default https://topos.sh; TOPOS_PLANE_URL overrides). A never-enrolled install joins with `topos follow <workspace-address>` instead
 
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
 | `[SERVER_URL]` |  |  | The server URL to sign in to (optional; the enrolled plane, else the hosted default) |
-| `--yes` |  |  | Replace a DIFFERENT signed-in account's credentials wholesale (refused without it) |
-| `--wait` | `<SECONDS>` |  | Block until the browser sign-in settles in ONE command. Bare `--wait` waits until the code expires; `--wait <seconds>` caps the wait |
+| `--wait` | `<SECONDS>` |  | Block until the browser approval settles in ONE command. Bare `--wait` waits until the code expires; `--wait <seconds>` caps the wait |
 
 
 #### `topos auth logout`
@@ -286,7 +284,7 @@ Sign in to a plane (device flow): prove who you are in the browser, and every wo
 topos auth logout [OPTIONS]
 ```
 
-Sign out of this install: revoke this device in each workspace (best-effort), delete the stored credentials — skills, follows, and drafts stay. Two-phase (bare describes; `--yes` applies)
+Sign out of this install: revoke this device in each workspace (best-effort), delete the stored credential — skills, follows, and drafts stay. Two-phase (bare describes; `--yes` applies)
 
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
@@ -299,7 +297,7 @@ Sign out of this install: revoke this device in each workspace (best-effort), de
 topos auth status
 ```
 
-Show who you are, per-workspace credential health, hook health, and reporting posture. Side-effect-free
+Show who you are, per-workspace access health, hook health, and reporting posture. Side-effect-free
 
 
 ## Renamed verbs

@@ -1,16 +1,22 @@
 //! The validated identifier newtypes — the parse-don't-validate boundary.
 //!
 //! Every authority operation takes these *already-parsed* types, never raw strings, so a malformed
-//! id can never reach an SQL bind or a filesystem path. [`WorkspaceId`] is the strictest: it is used
-//! as a directory component for the per-workspace git store, so it admits only a path-safe charset
-//! (no separators, no `..`, no dots, no control bytes) — isolation is the database binding, but the
-//! store path must still never escape its confined root.
+//! id can never reach an SQL bind or a filesystem path. The vault treats every id as an OPAQUE
+//! string minted by its one caller (the app): validation is **shape only** — charset and length,
+//! matching the schema's CHECK constraints — never meaning. [`WorkspaceId`] and [`OpId`] double as
+//! filesystem **directory components** (the per-workspace git store, the per-op quarantine), so
+//! their shape rule additionally forbids anything that could escape or collide with a reserved
+//! sibling (a leading dot).
 
 use core::fmt;
 
-/// The maximum length of a textual id, in bytes. Far beyond any real `w_…`/`s_…`/principal id; a
-/// bound at all keeps a pathological input from becoming an unbounded key or path component.
+/// The maximum length of a textual id, in bytes — the schema CHECKs pin the same bound. A bound at
+/// all keeps a pathological input from becoming an unbounded key or path component.
 const MAX_ID_LEN: usize = 128;
+
+/// The maximum length of an attribution display string, in characters — the schema CHECKs on
+/// `author_display` / `moved_by_display` pin the same bound.
+const MAX_ATTRIBUTION_CHARS: usize = 200;
 
 /// A rejected identifier — produced only at the parse boundary, never inside authority logic.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -25,98 +31,68 @@ pub enum IdError {
     /// The id contained a byte outside the type's permitted set.
     #[error("identifier contains a disallowed character")]
     DisallowedChar,
+    /// The id began with a dot — reserved (and a path hazard for the ids that become directories).
+    #[error("identifier starts with a reserved character")]
+    LeadingDot,
 }
 
 /// A workspace identifier — the hard tenant scope and a per-workspace git-store **path component**.
 ///
-/// Admits only `[a-z0-9_-]` (the `w_…` id shape), which by construction excludes `/`, `\`, `.`, `..`,
-/// NUL, and every other path metacharacter — so [`Self::as_str`] is always safe to join onto the confined
-/// store root. The **lowercase** restriction is load-bearing: the per-workspace store + quarantine dirs are
-/// `git_root/<id>`, so on a case-insensitive filesystem two case-only-distinct ids would fold to one
-/// physical directory and a per-workspace GC unlink could destroy another tenant's bytes. Isolation itself
-/// is the `workspace_id` database binding (every row and query carries it); the path-safety here only keeps
-/// the physical store from escaping its root and one tenant's store from colliding with another's.
+/// Shape: `[A-Za-z0-9._-]`, 1–128 bytes, no leading dot — the schema CHECK's charset with the two
+/// path hazards carved out (`.`/`..` and the reserved `.quarantine` sibling both need a leading
+/// dot; `/`, `\`, NUL and every other separator are outside the charset), so [`Self::as_str`] is
+/// always safe to join onto the confined store root. The id is app-minted and opaque; isolation is
+/// the `workspace_id` database binding (every row and query carries it) — the path rule only keeps
+/// the physical store inside its root. Residual: on a case-INSENSITIVE filesystem two ids differing
+/// only by case would share a physical store directory; app-minted random ids never collide this
+/// way in practice, and the database rows stay distinct regardless.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WorkspaceId(String);
 
-/// A bundle identifier (the `s_…` id shape) — custody's key: a database key, never a path component
-/// on the plane. The directory maps a user-facing catalog name (and `kind`) onto this id; custody
-/// itself never learns what kind of bundle it holds.
-///
-/// Lowercase `[a-z0-9_-]` only, matching the CLIENT's rule: there the id IS a directory component
-/// (`~/.topos/skills/<id>`, the harness placement), and on a case-insensitive filesystem two
-/// case-only-distinct ids would fold to one physical directory. Every real id is lowercase
-/// (client-minted `topos_<hex>`, plane-minted `s_…` — the prefix is a frozen wire fact, like `w_`),
-/// so one charset at both ends means an id the plane accepts is an id every client can hold — no id
-/// can be mintable server-side yet unrepresentable client-side.
+/// A bundle identifier — custody's key: a database key, never a path component on the plane. The
+/// app maps names and kinds onto this id; the vault never learns what kind of bundle it holds.
+/// Same shape rule as [`WorkspaceId`] (one rule for every opaque id).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BundleId(String);
 
-/// A principal identifier — the rostered reader/uploader identity (device id, account, …).
-///
-/// Parsing **canonicalizes**: the accepted charset is mixed-case (humans type `Alice@Acme.com`),
-/// but the stored form is the kernel's ASCII-lowercase fold ([`topos_core::identity::canonical_principal`]) —
-/// so one mailbox is ONE identity at every roster gate, seat write, and idempotency hash, however it
-/// was cased at the edge. Every durable principal column holds this canonical form: values fold at
-/// their parse edge before storage (ephemeral flow rows copied between tables inherit it), and
-/// migration `0010` pins the invariant with `lower()` CHECKs on the roster tables.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Principal(String);
-
-/// An operation identifier — the client-minted id of one in-flight write (quarantine + promotion lease).
-///
-/// Admits only the lowercase path-safe charset (`[a-z0-9_-]`, which excludes `.`, `..`, and every
-/// separator), because it is used as a **directory component** of the per-op quarantine objdir the janitor
-/// `rm -rf`s — a `..` or `/` would let the destructive sweep escape its root, and (like [`WorkspaceId`]) a
-/// case-only-distinct id would fold to one directory on a case-insensitive filesystem. A v4-UUID op id
-/// (lowercase hex + `-`) fits.
+/// An operation identifier — the vault-minted id of one in-flight write (quarantine + promotion
+/// lease + the `upload` audit row). Minted fresh per ingest (never client-supplied), and used as a
+/// **directory component** of the per-op quarantine objdir the janitor `rm -rf`s — hence the same
+/// no-leading-dot path-safe shape as [`WorkspaceId`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OpId(String);
 
-/// `[A-Za-z0-9_-]` — the mixed-case path-safe base charset. Only [`is_principal_char`] builds on it now
-/// (principals legitimately ARRIVE mixed-case — humans type emails — and are folded to lowercase at
-/// parse); the id newtypes all use the lowercase rule below.
-fn is_path_safe(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+/// `[A-Za-z0-9._-]` — the opaque-id charset, matching the schema CHECKs. ASCII-only: any non-ASCII
+/// byte has the high bit set and fails this test, so no separate check is needed.
+fn is_id_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')
 }
 
-/// `[a-z0-9_-]` — the LOWERCASE path-safe charset for ids that become **filesystem directory components**
-/// (`WorkspaceId`, `OpId`). Forbidding uppercase makes the id→path mapping injective on a case-INSENSITIVE
-/// filesystem (macOS/Windows default): without it, two database-distinct ids differing only by case would
-/// fold to one physical directory, and a per-workspace GC unlink could then destroy another tenant's bytes.
-/// Real ids (the `w_…` shape, lowercase-hex op ids) are already lowercase, so this rejects nothing real.
-fn is_lower_path_safe(b: u8) -> bool {
-    b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-'
-}
-
-/// `is_path_safe` plus the characters real principal ids carry (email-like + device ids): `.@+`.
-fn is_principal_char(b: u8) -> bool {
-    is_path_safe(b) || matches!(b, b'.' | b'@' | b'+')
-}
-
-fn validate(s: &str, allowed: fn(u8) -> bool) -> Result<(), IdError> {
+fn validate(s: &str) -> Result<(), IdError> {
     if s.is_empty() {
         return Err(IdError::Empty);
     }
     if s.len() > MAX_ID_LEN {
         return Err(IdError::TooLong);
     }
-    // Byte-wise over UTF-8: every allowed byte is ASCII, so any multi-byte (non-ASCII) byte has the
-    // high bit set and fails `allowed`, rejecting all non-ASCII without a separate check.
-    if s.bytes().all(allowed) {
-        Ok(())
-    } else {
-        Err(IdError::DisallowedChar)
+    if !s.bytes().all(is_id_char) {
+        return Err(IdError::DisallowedChar);
     }
+    // A leading dot is reserved: it excludes `.`/`..` (path traversal) and keeps the
+    // `git_root/.quarantine/` sibling collision-free against any workspace id.
+    if s.starts_with('.') {
+        return Err(IdError::LeadingDot);
+    }
+    Ok(())
 }
 
 impl WorkspaceId {
-    /// Parse a workspace id, rejecting anything outside the lowercase path-safe charset.
+    /// Parse a workspace id, rejecting anything outside the opaque-id shape.
     ///
     /// # Errors
-    /// [`IdError`] if the id is empty, too long, or contains a disallowed character (including uppercase).
+    /// [`IdError`] if the id is empty, too long, carries a disallowed character, or starts with a dot.
     pub fn parse(s: &str) -> Result<Self, IdError> {
-        validate(s, is_lower_path_safe)?;
+        validate(s)?;
         Ok(Self(s.to_owned()))
     }
 
@@ -128,34 +104,13 @@ impl WorkspaceId {
 }
 
 impl BundleId {
-    /// Parse a skill id, rejecting anything outside the lowercase path-safe charset (including
-    /// uppercase — the client's directory-component rule, held at both ends).
+    /// Parse a bundle id, rejecting anything outside the opaque-id shape.
     ///
     /// # Errors
-    /// [`IdError`] if the id is empty, too long, or contains a disallowed character.
+    /// [`IdError`] if the id is empty, too long, carries a disallowed character, or starts with a dot.
     pub fn parse(s: &str) -> Result<Self, IdError> {
-        validate(s, is_lower_path_safe)?;
+        validate(s)?;
         Ok(Self(s.to_owned()))
-    }
-
-    /// The id as a string slice.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Principal {
-    /// Parse a principal id, admitting the id-plus-email charset `[A-Za-z0-9_-.@+]` and
-    /// **canonicalizing to the kernel's ASCII-lowercase fold** (`Alice@Acme.com` parses as
-    /// `alice@acme.com`; an already-lowercase principal — every device-rooted `dev.dk_…` id — is a
-    /// fixpoint). The charset is ASCII-only, so the fold is total.
-    ///
-    /// # Errors
-    /// [`IdError`] if the id is empty, too long, or contains a disallowed character.
-    pub fn parse(s: &str) -> Result<Self, IdError> {
-        validate(s, is_principal_char)?;
-        Ok(Self(topos_core::identity::canonical_principal(s)))
     }
 
     /// The id as a string slice.
@@ -166,13 +121,13 @@ impl Principal {
 }
 
 impl OpId {
-    /// Parse an operation id, rejecting anything outside the lowercase path-safe charset (so it is always
-    /// safe as a single quarantine directory component, on a case-insensitive filesystem too).
+    /// Parse an operation id (vault-minted; re-parsed when read back from a stored row before any
+    /// destructive path is built from it).
     ///
     /// # Errors
-    /// [`IdError`] if the id is empty, too long, or contains a disallowed character (including uppercase).
+    /// [`IdError`] if the id is empty, too long, carries a disallowed character, or starts with a dot.
     pub fn parse(s: &str) -> Result<Self, IdError> {
-        validate(s, is_lower_path_safe)?;
+        validate(s)?;
         Ok(Self(s.to_owned()))
     }
 
@@ -181,6 +136,25 @@ impl OpId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Validate an attribution display string (the app's pass-through `author_display` /
+/// `moved_by_display`): non-empty, at most 200 characters (the schema CHECK's bound), and free of
+/// control characters. The CONTENT is never interpreted — the vault stores it verbatim.
+///
+/// # Errors
+/// [`IdError::Empty`] / [`IdError::TooLong`] / [`IdError::DisallowedChar`] on a shape violation.
+pub fn validate_attribution(s: &str) -> Result<(), IdError> {
+    if s.is_empty() {
+        return Err(IdError::Empty);
+    }
+    if s.chars().count() > MAX_ATTRIBUTION_CHARS {
+        return Err(IdError::TooLong);
+    }
+    if s.chars().any(char::is_control) {
+        return Err(IdError::DisallowedChar);
+    }
+    Ok(())
 }
 
 impl fmt::Display for WorkspaceId {
@@ -193,23 +167,19 @@ impl fmt::Display for BundleId {
         f.write_str(&self.0)
     }
 }
-impl fmt::Display for Principal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
 impl fmt::Display for OpId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-/// A commit id (= `version_id`) — the kernel `commit_id`, a byte-exact sha256. Stored as a 32-byte
-/// BLOB; rendered to hex only at a display edge.
+/// A commit id (= `version_id`) — the kernel `commit_id`, a byte-exact sha256. Stored as lowercase
+/// hex in the app-facing tables; rendered/parsed at the boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CommitId(pub [u8; 32]);
 
-/// An object id — the `blob_id = sha256(raw bytes)` of one stored file. Stored as a 32-byte BLOB.
+/// An object id — the `blob_id = sha256(raw bytes)` of one stored file. Stored as a 32-byte BYTEA
+/// in the custody-internal tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ObjectId(pub [u8; 32]);
 
@@ -219,6 +189,19 @@ impl CommitId {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    /// The 64-char lowercase-hex spelling (the app-facing column value + the wire form).
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        hex32(&self.0)
+    }
+
+    /// Parse EXACTLY 64 lowercase-hex characters. `None` on any other shape — callers map that to
+    /// the uniform not-found (a non-canonical spelling is simply not a known id).
+    #[must_use]
+    pub fn parse_hex(s: &str) -> Option<Self> {
+        parse_hex32(s).map(Self)
+    }
 }
 
 impl ObjectId {
@@ -227,6 +210,52 @@ impl ObjectId {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    /// The 64-char lowercase-hex spelling.
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        hex32(&self.0)
+    }
+
+    /// Parse EXACTLY 64 lowercase-hex characters (`None` otherwise, mapped to the uniform not-found).
+    #[must_use]
+    pub fn parse_hex(s: &str) -> Option<Self> {
+        parse_hex32(s).map(Self)
+    }
+}
+
+/// Lowercase-hex encode 32 bytes (the one spelling every app-facing id column carries).
+pub(crate) fn hex32(bytes: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        use core::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+/// Parse EXACTLY 64 lowercase-hex characters into 32 bytes. `None` on any other length or a
+/// non-lowercase-hex byte.
+pub(crate) fn parse_hex32(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let mut out = [0u8; 32];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let hi = hex_nibble(bytes[2 * i])?;
+        let lo = hex_nibble(bytes[2 * i + 1])?;
+        *slot = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -234,28 +263,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workspace_id_rejects_path_traversal_separators_and_uppercase() {
+    fn ids_reject_path_traversal_and_reserved_shapes() {
         for bad in [
-            // Uppercase is rejected: it would fold to a colliding directory on a case-insensitive
-            // filesystem, where a per-workspace GC unlink could destroy another tenant's bytes.
-            "", "..", ".", "a/b", "a\\b", "a.b", "a b", "a\0b", "wörk", "a\nb", "A_B-9", "Work",
-            "wA",
+            "", ".", "..", ".hidden", "a/b", "a\\b", "a b", "a\0b", "wörk",
         ] {
-            assert!(
-                WorkspaceId::parse(bad).is_err(),
-                "should reject workspace id {bad:?}"
-            );
+            assert!(WorkspaceId::parse(bad).is_err(), "should reject {bad:?}");
+            assert!(BundleId::parse(bad).is_err(), "should reject {bad:?}");
+            assert!(OpId::parse(bad).is_err(), "should reject {bad:?}");
         }
-        for ok in ["w", "w_abc123", "ws-01", "a_b-9"] {
-            assert!(
-                WorkspaceId::parse(ok).is_ok(),
-                "should accept workspace id {ok:?}"
-            );
+        // The schema charset is accepted verbatim, mixed case and inner dots included (opaque,
+        // app-minted ids — shape, never meaning).
+        for ok in ["w", "w_abc123", "ws-01", "a.b", "A_B-9", "Xy7"] {
+            assert!(WorkspaceId::parse(ok).is_ok(), "should accept {ok:?}");
+            assert!(BundleId::parse(ok).is_ok(), "should accept {ok:?}");
+            assert!(OpId::parse(ok).is_ok(), "should accept {ok:?}");
         }
     }
 
     #[test]
-    fn workspace_id_rejects_overlong() {
+    fn ids_reject_overlong() {
         let long = "w".repeat(MAX_ID_LEN + 1);
         assert_eq!(WorkspaceId::parse(&long), Err(IdError::TooLong));
         let max = "w".repeat(MAX_ID_LEN);
@@ -263,92 +289,23 @@ mod tests {
     }
 
     #[test]
-    fn principal_admits_email_shape_but_skill_does_not() {
-        assert!(Principal::parse("dev@example.com").is_ok());
-        assert!(Principal::parse("device+1_abc").is_ok());
-        // The path-safe charset (skill/workspace) rejects the email metacharacters.
-        assert!(BundleId::parse("dev@example.com").is_err());
-        assert!(WorkspaceId::parse("a.b").is_err());
+    fn attribution_is_shape_checked_never_interpreted() {
+        assert!(validate_attribution("Alice Chen (alice)").is_ok());
+        assert!(validate_attribution("日本語の名前").is_ok()); // any printable UTF-8
+        assert!(validate_attribution("").is_err());
+        assert!(validate_attribution("a\nb").is_err());
+        assert!(validate_attribution(&"x".repeat(201)).is_err());
+        assert!(validate_attribution(&"x".repeat(200)).is_ok());
     }
 
     #[test]
-    fn skill_id_rejects_uppercase_and_accepts_every_real_shape() {
-        // The lowercase rule, held at both ends: the client stores a skill id as a directory component,
-        // so a mixed-case id the plane accepted would be unrepresentable (or case-fold-colliding) there.
-        for bad in ["S_deploy", "sD", "TOPOS_ABC", "Topos_X", "s.d", "s/d", ""] {
-            assert!(
-                BundleId::parse(bad).is_err(),
-                "should reject skill id {bad:?}"
-            );
-        }
-        for ok in [
-            "s_deploy",
-            "topos_0af3c9d2b1e845f7a6c0d9e8b7a61234",
-            "a_b-9",
-        ] {
-            assert!(BundleId::parse(ok).is_ok(), "should accept skill id {ok:?}");
-        }
-    }
-
-    #[test]
-    fn op_id_rejects_path_traversal_separators_and_uppercase() {
-        // op_id is an rm -rf'd directory component, so it must reject `.`/`..`/separators (a `..` would let
-        // the quarantine janitor escape its root) and uppercase (a case-fold collision on a
-        // case-insensitive filesystem) exactly as the workspace id does.
-        for bad in [
-            "", "..", ".", "a/b", "a\\b", "a.b", "a b", "a\0b", "a\nb", "A_B-9", "Op",
-        ] {
-            assert!(OpId::parse(bad).is_err(), "should reject op id {bad:?}");
-        }
-        for ok in [
-            "op",
-            "op_1",
-            "a1b2c3d4-e5f6-7890-ab12-cd34ef567890",
-            "a_b-9",
-        ] {
-            assert!(OpId::parse(ok).is_ok(), "should accept op id {ok:?}");
-        }
-    }
-
-    #[test]
-    fn principal_still_rejects_separators_and_control() {
-        // A principal is a database key (never a path component), so dots are fine (email shape);
-        // only separators, control bytes, whitespace, and the empty string are rejected.
-        for bad in ["", "a/b", "a\\b", "a\0b", "a b", "a\tb"] {
-            assert!(
-                Principal::parse(bad).is_err(),
-                "should reject principal {bad:?}"
-            );
-        }
-        for ok in ["a.b", "..", "dev@x.io"] {
-            assert!(
-                Principal::parse(ok).is_ok(),
-                "should accept principal {ok:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn principal_parse_folds_to_the_canonical_lowercase_form() {
-        // One mailbox, one identity: mixed-case input is ACCEPTED and stored folded, so every SQL
-        // bind and every == against a stored row compares canonical bytes. Already-canonical
-        // strings (all-lowercase emails, `dev.dk_…` device-rooted ids) are fixpoints.
-        assert_eq!(
-            Principal::parse("Alice@Acme.COM").unwrap().as_str(),
-            "alice@acme.com"
-        );
-        assert_eq!(
-            Principal::parse("alice@acme.com").unwrap().as_str(),
-            "alice@acme.com"
-        );
-        assert_eq!(
-            Principal::parse("Dev+Second@X.io").unwrap().as_str(),
-            "dev+second@x.io"
-        );
-        // Case-variant inputs parse EQUAL — the dedup/idempotency property every set-build relies on.
-        assert_eq!(
-            Principal::parse("Alice@Acme.COM").unwrap(),
-            Principal::parse("alice@acme.com").unwrap()
-        );
+    fn hex_round_trip_and_rejects() {
+        let id = CommitId([0xab; 32]);
+        let hex = id.to_hex();
+        assert_eq!(hex.len(), 64);
+        assert_eq!(CommitId::parse_hex(&hex), Some(id));
+        assert_eq!(CommitId::parse_hex(&hex.to_uppercase()), None);
+        assert_eq!(CommitId::parse_hex("ab"), None);
+        assert_eq!(CommitId::parse_hex(&"g".repeat(64)), None);
     }
 }

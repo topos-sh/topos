@@ -1,49 +1,115 @@
-//! The bundle-scoped object read — the one auditable access surface.
-//!
-//! Authorization is one database join that yields a *witness* commit (or nothing); only then is the
-//! per-workspace git store touched, to fetch the bytes by content id. There is no read-by-bare-hash
-//! path anywhere, and the two outcomes are kept textually separate so the distinction cannot rot: an
-//! empty join is the single not-found; a store failure on an already-authorized object is a corruption
-//! alarm, never a not-found.
+//! The read surface — the pointer record, one object's bytes, a version's metadata + file listing,
+//! and the first-parent log. Every byte read is **verified against the id that named it** before it
+//! is served (verify-on-read); corruption is an [`AuthorityError::Integrity`] alarm, never a
+//! not-found. There is no read-by-bare-hash path anywhere: an object is served only through a
+//! bundle whose live (non-purged) version reaches it.
 
 use std::collections::HashMap;
 
 use topos_core::digest::{self, FileMode, ManifestEntry, RejectReason};
 use topos_gitstore::{LargeObjectStore, RenderedBundle, RenderedFile, Store};
-use topos_types::{Generation, WireCurrentRecord};
 
 use crate::authority::{Authority, run_blocking};
 use crate::db::Location;
 use crate::error::{AuthorityError, Result};
-use crate::id::{BundleId, CommitId, ObjectId, Principal, WorkspaceId};
+use crate::id::{BundleId, CommitId, ObjectId, WorkspaceId};
 
+/// A bundle's `current` pointer, ready to serve: the pointed version, the CAS generation, the move
+/// attribution + time, and the pointed version's consent digest.
+#[derive(Debug, Clone)]
+pub struct CurrentInfo {
+    pub version_id: CommitId,
+    pub generation: u64,
+    pub moved_at_ms: i64,
+    pub moved_by: String,
+    pub bundle_digest: [u8; 32],
+}
+
+/// One file of a version's metadata — its bundle-relative path, mode, and content id (`object_id`).
+/// The bytes are NOT here: a caller fetches each by id through the object read.
+#[derive(Debug, Clone)]
+pub struct VersionFile {
+    pub path: String,
+    pub mode: FileMode,
+    pub object_id: [u8; 32],
+}
+
+/// A version's metadata — its id, the COMPLETE parent set, display attribution + message, the
+/// consent `bundle_digest`, and the per-file `(path, mode, object_id)` leaves. Assembled WITHOUT
+/// reading any blob bytes; the digest is the pin the byte fetches + the client's re-hash must
+/// reproduce.
+#[derive(Debug, Clone)]
+pub struct VersionMeta {
+    pub version_id: [u8; 32],
+    pub parents: Vec<[u8; 32]>,
+    pub author: String,
+    pub message: String,
+    pub bundle_digest: [u8; 32],
+    pub created_at_ms: i64,
+    pub files: Vec<VersionFile>,
+}
+
+/// One hop of the first-parent log.
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    pub version_id: CommitId,
+    /// The commit message (from the git commit frame).
+    pub message: String,
+    /// The attribution recorded on the version row (`author_display`).
+    pub author_display: String,
+    /// When the version row was created (epoch milliseconds).
+    pub created_at_ms: i64,
+    /// When the version's bytes were purged (epoch milliseconds), if they were.
+    pub purged_at_ms: Option<i64>,
+}
+
+/// Read a bundle's `current` pointer. `None` until the pointer has first been created. The pointed
+/// version's digest rides along (it is what a follower re-verifies after the fetch); a pointer over
+/// a version with no digest row is corruption, never a not-found.
+pub(crate) async fn read_current(
+    authority: &Authority,
+    ws: &WorkspaceId,
+    bundle: &BundleId,
+) -> Result<Option<CurrentInfo>> {
+    let Some(pointer) = authority.db().read_pointer(ws, bundle).await? else {
+        return Ok(None);
+    };
+    let bundle_digest = authority
+        .db()
+        .read_bundle_digest(ws, bundle, pointer.version_id)
+        .await?
+        .ok_or_else(|| AuthorityError::integrity(MissingPointedDigest))?;
+    Ok(Some(CurrentInfo {
+        version_id: pointer.version_id,
+        generation: pointer.generation,
+        moved_at_ms: pointer.moved_at_ms,
+        moved_by: pointer.moved_by,
+        bundle_digest,
+    }))
+}
+
+/// Read one object's bytes through the bundle-scoped reachability rule.
+///
+/// The bytes are returned only if some live (non-purged) version of `bundle` reaches `object_id`.
+/// Every miss — unknown bundle, unreachable object, purged-away version — is the single typed
+/// [`AuthorityError::NotFound`]. Every returned byte is re-verified against the content id that
+/// named it; a post-reachability store failure is re-checked once (a concurrent purge/GC that
+/// legitimately reclaimed the bytes reads NotFound, genuine corruption stays Integrity).
 pub(crate) async fn read_object(
     authority: &Authority,
-    principal: &Principal,
     ws: &WorkspaceId,
     bundle: &BundleId,
     object_id: ObjectId,
 ) -> Result<Vec<u8>> {
-    // Step one (async DB): authorize. The witness commit proves BOTH facts at once — the principal is
-    // a confirmed workspace member, and the bundle reaches the object. The borrow on the database is
-    // released before the store read below (no git borrow ever crosses an await).
-    let witness = match authority
-        .db()
-        .authorize_object_read(ws, bundle, principal, object_id)
-        .await?
-    {
-        Some(witness) => witness,
-        // Not a member, the bundle does not reach the object, or the object does not exist — all one
-        // indistinguishable not-found.
-        None => return Err(AuthorityError::NotFound),
+    // Step one (async DB): the reachability witness — some live version of THIS bundle reaches the
+    // object. The borrow on the database is released before the store read below.
+    let Some(witness) = authority.db().object_witness(ws, bundle, object_id).await? else {
+        return Err(AuthorityError::NotFound);
     };
 
-    // Step two: fetch + verify the bytes from the store the database records, dispatching on `location`. The
-    // witness already proved reachability, so a clean run has no benign miss: a post-authz failure is a
-    // provenance/store divergence (corruption) → an Integrity fault, kept distinct from the not-found path
-    // (so the indistinguishable 404 holds across the large-object surface), never by bare hash. The
-    // verify-on-read byte fetch (up to the reject cap) runs on the blocking pool; the non-`Send` gix `Store`
-    // opens + drops inside the closure.
+    // Step two: fetch + verify the bytes from the store the database records, dispatching on
+    // `location`. The verify-on-read byte fetch runs on the blocking pool; the non-`Send` gix
+    // `Store` opens + drops inside the closure.
     let dispatch = authority.db().object_dispatch(ws, object_id).await?;
     let git_dir = authority.workspace_git_dir(ws);
     let large = authority.large_store(ws);
@@ -66,9 +132,9 @@ pub(crate) async fn read_object(
                     Err(AuthorityError::integrity(GitLocatorMismatch))
                 }
             }),
-        // No live presence row: a legacy straight-to-git object — its version is all-git, so the tree walk is
-        // safe — read by content id from the witness version. (A reclaimed object also lands here, because
-        // `object_dispatch` filters `status = 'present'`; the re-authorize guard below catches that case.)
+        // No live presence row: fall back to the witness version's tree walk (safe: an all-git
+        // version). A reclaimed object also lands here, because `object_dispatch` filters
+        // `status = 'present'`; the re-check below catches that case.
         None => Store::open(&git_dir)
             .map_err(AuthorityError::integrity)?
             .read_object_in_version(witness.0, object_id.0)
@@ -76,17 +142,15 @@ pub(crate) async fn read_object(
     })
     .await;
 
-    // Re-authorize-on-miss (the read-time TOCTOU guard). The authorization above and this fetch are two
-    // steps; between them a proposal can go stale (an eventless derived transition — a concurrent publish
-    // advances `current`) or be rejected, and a GC can then reclaim the proposal's now-unrooted unique bytes.
-    // Any of the fetch arms would then fault Integrity over bytes that are gone BY DESIGN, not corrupt. So on
-    // a post-authz failure, re-run the authorization: if the object is no longer authorized, it was legitimately
-    // reclaimed → the indistinguishable `NotFound` (404), preserving "reclaimed ⇒ 404, never Integrity" across
-    // the window. A still-authorized object that fails to load IS genuine corruption → the Integrity fault stands.
+    // Re-check-on-miss (the read-time TOCTOU guard). The witness above and this fetch are two steps;
+    // between them a purge can tombstone the version (and a GC reclaim its unique bytes). On a
+    // post-witness failure, re-run the reachability probe: if the object is no longer reachable, it
+    // was legitimately reclaimed → NotFound. A still-reachable object that fails to load IS genuine
+    // corruption → the Integrity fault stands.
     if let Err(AuthorityError::Integrity(_)) = &fetched
         && authority
             .db()
-            .authorize_object_read(ws, bundle, principal, object_id)
+            .object_witness(ws, bundle, object_id)
             .await?
             .is_none()
     {
@@ -95,239 +159,51 @@ pub(crate) async fn read_object(
     fetched
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("a present object's git locator does not resolve to its content id")]
-struct GitLocatorMismatch;
-
-// ── the authenticated read surface (resolve a read token → an opaque scope → the bound reads) ───────────
-
-/// An **opaque read capability** — the (workspace, bundle, principal) an authenticated read resolves to.
-///
-/// The fields are private on purpose: a consumer (the HTTP layer) holds this as a token and passes it back to
-/// the bound reads (`serve_object` / `read_current` / `read_version_metadata`); it never inspects the
-/// principal (no public accessor exposes it), so the capability cannot be re-used to forge a different scope.
-/// Built ONLY by the one trusted constructor — `ReadScope::for_member`, called by the directory's two
-/// authenticated entries (`resolve_read_scope`, the device lane's credential resolution, and
-/// `session_read`'s member gate), each strictly AFTER its confirmed-member probe — never by parsing a
-/// client value. Both lanes share the ONE membership gate; the scope's reads re-gate per statement.
-#[derive(Debug, Clone)]
-pub struct ReadScope {
-    ws: WorkspaceId,
-    bundle: BundleId,
-    principal: Principal,
-}
-
-impl ReadScope {
-    /// The resolved workspace (`pub(crate)` — internal reads bind it; no public accessor).
-    pub(crate) fn ws(&self) -> &WorkspaceId {
-        &self.ws
-    }
-    /// The resolved bundle (`pub(crate)`).
-    pub(crate) fn bundle(&self) -> &BundleId {
-        &self.bundle
-    }
-    /// The resolved principal (`pub(crate)` — never public: the scope stays an opaque capability).
-    pub(crate) fn principal(&self) -> &Principal {
-        &self.principal
-    }
-    /// The one trusted constructor — called strictly AFTER a confirmed-member probe admitted
-    /// `principal` (this fn does no checking of its own).
-    pub(crate) fn for_member(ws: WorkspaceId, bundle: BundleId, principal: Principal) -> Self {
-        Self {
-            ws,
-            bundle,
-            principal,
-        }
-    }
-}
-
-/// A bundle's `current` pointer, ready to serve: the raw `WireCurrentRecord` bytes a follower applies,
-/// plus the `(epoch, seq)` AND the `version_id` extracted from them (so the caller can build a
-/// **commit-sensitive** ETag / `304` — a clean field comparison against the client's known commit — without
-/// re-parsing the blob in the handler).
-#[derive(Debug, Clone)]
-pub struct CurrentPointer {
-    pub generation: Generation,
-    /// The commit id `current` names — pulled from the deserialized `record.record.version_id` so the
-    /// current handler can compare it to the client's `Topos-Known-Version-Id` for the commit-sensitive 304.
-    pub version_id: [u8; 32],
-    pub record: Vec<u8>,
-}
-
-/// One file of a version's metadata — its bundle-relative path, mode, and content id (`object_id`). The
-/// bytes are NOT here: a client fetches each by id through `serve_object`.
-#[derive(Debug, Clone)]
-pub struct VersionFile {
-    pub path: String,
-    pub mode: FileMode,
-    pub object_id: [u8; 32],
-}
-
-/// A version's authenticated metadata — its id, the COMPLETE parent set, display author + message, the
-/// consent `bundle_digest`, and the per-file `(path, mode, object_id)` leaves. Assembled WITHOUT reading any
-/// blob bytes (a client walks the files via `serve_object`); the digest is the pin those byte fetches +
-/// the client's own re-hash must reproduce.
-#[derive(Debug, Clone)]
-pub struct VersionMeta {
-    pub version_id: [u8; 32],
-    pub parents: Vec<[u8; 32]>,
-    pub author: String,
-    pub message: String,
-    pub bundle_digest: [u8; 32],
-    pub files: Vec<VersionFile>,
-}
-
-/// One OPEN, non-stale proposal as the proposals-listing read exposes it — the candidate's `version_id` (the
-/// `@hash`), the `base` generation it was opened against, and when. NO bytes, NO proposer, NO roles, NO
-/// rendered view: a proposals listing is a thin, low-disclosure read (a client turns each handle into a
-/// `diff` / `review` follow-up). Mirrors the SQL `OpenProposalRow` with the commit id widened to `[u8; 32]`.
-#[derive(Debug, Clone)]
-pub struct OpenProposalSummary {
-    pub version_id: [u8; 32],
-    pub base: Generation,
-    pub created_at: String,
-}
-
-/// Read a bundle's `current` pointer for an authenticated scope. `None` until the pointer has first been
-/// moved. Reads the stored record bytes, then extracts the generation + version id from the deserialized
-/// record.
-///
-/// # Errors
-/// [`AuthorityError::Integrity`] if the stored record blob is unparseable — corruption, NEVER a not-found
-/// (the record exists; it is the STORE that is wrong); [`AuthorityError::Internal`] on a database fault.
-pub(crate) async fn read_current(
+/// Read a version's metadata + file listing (no blob bytes). A purged version reads NotFound — its
+/// bytes are gone by decision; the log still lists the row.
+pub(crate) async fn read_version(
     authority: &Authority,
-    scope: &ReadScope,
-) -> Result<Option<CurrentPointer>> {
-    let Some(record_bytes) = authority
-        .db()
-        .read_current_record(scope.ws(), scope.bundle())
-        .await?
-    else {
-        return Ok(None);
-    };
-    let record: WireCurrentRecord =
-        serde_json::from_slice(&record_bytes).map_err(AuthorityError::integrity)?;
-    // Pull the version_id (hex64 → [u8;32]) alongside the generation: the record exists, so a malformed
-    // version_id field is store corruption (an Integrity fault), never a not-found.
-    let version_id = parse_hex32(&record.record.version_id)
-        .ok_or_else(|| AuthorityError::integrity(BadVersionIdHex))?;
-    Ok(Some(CurrentPointer {
-        generation: record.record.generation,
-        version_id,
-        record: record_bytes,
-    }))
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("a stored current record carries a malformed version_id")]
-struct BadVersionIdHex;
-
-/// Serve one object's bytes for an authenticated scope, asserting the scope's `(ws, bundle)` matches the
-/// request path's. A scope/path mismatch — or a malformed object id — is the single indistinguishable
-/// [`AuthorityError::NotFound`] (the capability is bound to exactly one bundle; a bad hex id is never a `400`
-/// from here, so a caller cannot probe). Then the read goes through the bundle-scoped [`read_object`].
-///
-/// # Errors
-/// [`AuthorityError::NotFound`] on a scope/path mismatch, a malformed id, or a not-reachable object;
-/// [`AuthorityError::Integrity`]/[`AuthorityError::Internal`] as [`read_object`].
-pub(crate) async fn serve_object(
-    authority: &Authority,
-    scope: &ReadScope,
-    req_ws: &str,
-    req_bundle: &str,
-    object_id_hex: &str,
-) -> Result<Vec<u8>> {
-    if scope.ws().as_str() != req_ws || scope.bundle().as_str() != req_bundle {
-        return Err(AuthorityError::NotFound);
-    }
-    let Some(object_id) = parse_hex32(object_id_hex) else {
-        return Err(AuthorityError::NotFound);
-    };
-    read_object(
-        authority,
-        scope.principal(),
-        scope.ws(),
-        scope.bundle(),
-        ObjectId(object_id),
-    )
-    .await
-}
-
-/// Read a version's authenticated metadata for a scope (the version-metadata route's core). Asserts the
-/// scope/path match, parses the version id (a bad hex is the uniform not-found), R1-authorizes the version
-/// read, then assembles the metadata WITHOUT reading any blob bytes.
-///
-/// Authorization is [`crate::db::Db::authorize_version_read`] (confirmed member ∧ accepted-trunk-or-open-non-
-/// stale-proposal); an empty/unauthorized result is the single indistinguishable [`AuthorityError::NotFound`]
-/// (never a `403`, never a probe). Every fault in the assembly below is reachable ONLY after authz, so an
-/// [`AuthorityError::Integrity`] there discloses nothing about existence (mirroring [`read_object`]).
-///
-/// # Errors
-/// [`AuthorityError::NotFound`] on scope/path mismatch, a bad id, or an unauthorized/unreachable version;
-/// [`AuthorityError::Integrity`] on a provenance/store divergence (a missing digest, an unmapped parent, a
-/// tree leaf with no recorded object); [`AuthorityError::Internal`] on a database fault.
-pub(crate) async fn read_version_metadata(
-    authority: &Authority,
-    scope: &ReadScope,
-    req_ws: &str,
-    req_bundle: &str,
-    version_id_hex: &str,
+    ws: &WorkspaceId,
+    bundle: &BundleId,
+    version: CommitId,
 ) -> Result<VersionMeta> {
-    if scope.ws().as_str() != req_ws || scope.bundle().as_str() != req_bundle {
-        return Err(AuthorityError::NotFound);
-    }
-    let Some(version_id) = parse_hex32(version_id_hex) else {
-        return Err(AuthorityError::NotFound);
+    let row = match authority.db().read_version_row(ws, bundle, version).await? {
+        None => return Err(AuthorityError::NotFound),
+        Some(row) if row.purged_at_ms.is_some() => return Err(AuthorityError::NotFound),
+        Some(row) => row,
     };
-    let commit = CommitId(version_id);
-    // R1: member ∧ (accepted-trunk OR open-non-stale proposal). Unauthorized/unreachable → the one not-found.
-    if !authority
-        .db()
-        .authorize_version_read(scope.ws(), scope.bundle(), scope.principal(), commit)
-        .await?
-    {
-        return Err(AuthorityError::NotFound);
-    }
-
-    // Authorized — assemble. An authorized version always carries a recorded digest; its absence is a
-    // provenance divergence (corruption), never a not-found.
+    // A committed version always carries a recorded digest; its absence is a divergence
+    // (corruption), never a not-found.
     let bundle_digest = authority
         .db()
-        .commit_bundle_digest(scope.ws(), scope.bundle(), commit)
+        .read_bundle_digest(ws, bundle, version)
         .await?
-        .ok_or_else(|| AuthorityError::integrity(MissingProvenanceDigest))?;
+        .ok_or_else(|| AuthorityError::integrity(MissingVersionDigest))?;
 
-    // The version's structure comes FIRST, from a blocking-pool store section (the non-`Send` gix `Store`
-    // opens + drops inside the closure — never across an await); THEN the presence rows are queried for
-    // exactly those tree leaves, so the DB read scales with the requested version, never the workspace's
+    // The version's structure comes FIRST, from a blocking-pool store section (the non-`Send` gix
+    // `Store` opens + drops inside the closure); THEN the presence rows are queried for exactly
+    // those tree leaves, so the DB read scales with the requested version, never the workspace's
     // lifetime object count.
-    let git_dir = authority.workspace_git_dir(scope.ws());
+    let git_dir = authority.workspace_git_dir(ws);
+    let version_bytes = version.0;
     let (node, leaves) = run_blocking(move || {
         let store = Store::open(&git_dir).map_err(AuthorityError::integrity)?;
-        // Follow-up: `read_commit_meta` recovers this ONE commit's parents by enumerating every version
-        // ref in the bundle's repo (the reverse map) — per-request cost that grows with the bundle's version
-        // count. The DB provenance table records no parent edges today, so it cannot source the
-        // parent set; a provenance parents column (or a cached reverse map) is the named follow-up.
         let node = store
-            .read_commit_meta(version_id)
+            .read_commit_meta(version_bytes)
             .map_err(AuthorityError::integrity)?;
         let leaves = store
-            .read_tree_structure(version_id)
+            .read_tree_structure(version_bytes)
             .map_err(AuthorityError::integrity)?;
         Ok((node, leaves))
     })
     .await?;
     let leaf_oids: Vec<[u8; 20]> = leaves.iter().map(|l| l.git_oid).collect();
-    let by_git_oid = authority
-        .db()
-        .objects_by_git_oids(scope.ws(), &leaf_oids)
-        .await?;
+    let by_git_oid = authority.db().objects_by_git_oids(ws, &leaf_oids).await?;
 
     let mut files = Vec::with_capacity(leaves.len());
     for leaf in leaves {
         // Each tree-entry git OID joins to its content id over the workspace's PRESENT rows. A leaf with no
-        // present row is a provenance/store divergence — reachable only after authz, so it discloses nothing.
+        // present row is a bookkeeping/store divergence.
         let object_id = by_git_oid
             .get(&leaf.git_oid)
             .copied()
@@ -344,97 +220,81 @@ pub(crate) async fn read_version_metadata(
         author: node.author,
         message: node.message,
         bundle_digest,
+        created_at_ms: row.created_at_ms,
         files,
     })
 }
 
-/// List a bundle's OPEN, non-stale proposals for an authenticated scope (the proposals-listing route's core).
-/// Asserts the scope/path match (the cross-bundle/workspace leak guard — the **FIRST** thing it does, copied
-/// verbatim from [`serve_object`] / [`read_version_metadata`]), then enumerates the member-gated ∧
-/// `open ∧ base == current` rows. Returns only `(version_id, base, created_at)` per proposal — NO bytes, NO
-/// proposer.
-///
-/// The membership gate inside the query **is** the authorization, so a NON-member (a valid credential whose
-/// principal has no confirmed seat) yields `Ok(empty)`, NOT a not-found — there is no per-row authorize
-/// call to probe.
-/// A staled proposal vanishes from the list on the SAME `open ∧ base == current` predicate the object/version
-/// reads use, so keep == read == list.
-///
-/// # Errors
-/// [`AuthorityError::NotFound`] on a scope/path mismatch; [`AuthorityError::Integrity`] if a stored row is
-/// corrupt (a bad-width commit id / an out-of-range generation); [`AuthorityError::Internal`] on a database
-/// fault.
-pub(crate) async fn list_open_proposals(
+/// The first-parent commit chain from `current`, capped — version ids + messages + attributions +
+/// timestamps (what a log/review surface renders). The chain walks the git commit frames (which
+/// hold the parent links + messages) and joins each hop to its version row for the display facts;
+/// a purged version stays listed with its purge stamp.
+pub(crate) async fn log(
     authority: &Authority,
-    scope: &ReadScope,
-    req_ws: &str,
-    req_bundle: &str,
-) -> Result<Vec<OpenProposalSummary>> {
-    if scope.ws().as_str() != req_ws || scope.bundle().as_str() != req_bundle {
+    ws: &WorkspaceId,
+    bundle: &BundleId,
+    limit: usize,
+) -> Result<Vec<LogEntry>> {
+    let Some(pointer) = authority.db().read_pointer(ws, bundle).await? else {
         return Err(AuthorityError::NotFound);
-    }
-    let rows = authority
-        .db()
-        .list_open_proposals(scope.ws(), scope.bundle(), scope.principal())
-        .await?;
-    Ok(rows
-        .into_iter()
-        .map(|r| OpenProposalSummary {
-            version_id: r.commit.0,
-            base: r.base,
-            created_at: r.created_at,
+    };
+
+    // Walk the first-parent chain in ONE blocking-pool section (each hop is a small commit-frame
+    // read; the non-`Send` gix `Store` never crosses an await).
+    let git_dir = authority.workspace_git_dir(ws);
+    let head = pointer.version_id.0;
+    let hops: Vec<([u8; 32], String)> = run_blocking(move || {
+        let store = Store::open(&git_dir).map_err(AuthorityError::integrity)?;
+        let mut hops = Vec::new();
+        let mut cursor = Some(head);
+        while let Some(id) = cursor {
+            if hops.len() >= limit {
+                break;
+            }
+            let node = store
+                .read_commit_meta(id)
+                .map_err(AuthorityError::integrity)?;
+            cursor = node.parents.first().copied();
+            hops.push((id, node.message));
+        }
+        Ok(hops)
+    })
+    .await?;
+
+    // One batched join to the version rows for the display facts. A hop with no row is a
+    // cross-bundle stray (the shared per-workspace repo can hold another bundle's commits) — that
+    // would be a lineage corruption for a first-parent chain, so surface it.
+    let ids: Vec<CommitId> = hops.iter().map(|(id, _)| CommitId(*id)).collect();
+    let rows = authority.db().read_version_rows(ws, bundle, &ids).await?;
+    hops.into_iter()
+        .map(|(id, message)| {
+            let row = rows
+                .get(&CommitId(id))
+                .ok_or_else(|| AuthorityError::integrity(LogHopWithoutRow))?;
+            Ok(LogEntry {
+                version_id: CommitId(id),
+                message,
+                author_display: row.author_display.clone(),
+                created_at_ms: row.created_at_ms,
+                purged_at_ms: row.purged_at_ms,
+            })
         })
-        .collect())
+        .collect()
 }
 
-/// Parse EXACTLY 64 lowercase-hex characters into a 32-byte content id. `None` on any other length or a
-/// non-lowercase-hex byte — the read routes map this to the uniform not-found (a malformed id is never a
-/// distinguishable error, and a non-canonical spelling is simply not a known id).
-pub(crate) fn parse_hex32(s: &str) -> Option<[u8; 32]> {
-    if s.len() != 64 {
-        return None;
-    }
-    let bytes = s.as_bytes();
-    let mut out = [0u8; 32];
-    for (i, slot) in out.iter_mut().enumerate() {
-        let hi = hex_nibble(bytes[2 * i])?;
-        let lo = hex_nibble(bytes[2 * i + 1])?;
-        *slot = (hi << 4) | lo;
-    }
-    Some(out)
-}
-
-fn hex_nibble(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        _ => None,
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("an authorized version has no recorded bundle digest")]
-struct MissingProvenanceDigest;
-
-#[derive(Debug, thiserror::Error)]
-#[error("a version's tree leaf has no present object row")]
-struct VersionObjectMissing;
-
-/// Assemble + verify a whole bundle for a version, dispatching each file to the store the database records.
+/// Assemble + verify a whole bundle for a version, dispatching each file to the store the database
+/// records — the whole-bundle assembly primitive (tests + any composing verification drive it).
 ///
-/// **Tree-driven** — the fenced migrate writes no `commit_object` edges, so render anchors on the version's
-/// git **tree structure** (`(path, mode, git_oid)` per file), not reachability. The offloaded subset is the
-/// workspace's present `large-local` rows, joined in memory by `git_oid → object_id`; each file's bytes come
-/// from the large store (offloaded) or git (git-resident / legacy), re-verified to its content id; the
-/// recomputed `bundle_digest` must then equal the pin. Offload never forks identity (the digest is over real
-/// bytes) and never adds a pointer object. **Authorization is the caller's job** (mirrors [`read_object`]:
-/// authorize first, then assemble) — this is the assembly primitive the future read-bundle / review-diff op
-/// builds on — the whole-bundle assembly primitive the composing read surfaces drive.
+/// **Tree-driven** — render anchors on the version's git **tree structure** (`(path, mode,
+/// git_oid)` per file). The offloaded subset is the workspace's present `large-local` rows, joined
+/// in memory by `git_oid → object_id`; each file's bytes come from the large store (offloaded) or
+/// git (git-resident), re-verified to its content id; the recomputed `bundle_digest` must then
+/// equal the pin.
 ///
 /// # Errors
-/// [`AuthorityError::Integrity`] if a file's bytes are missing/corrupt in either store, a stored path is
-/// illegal, or the recomputed digest does not match `expected_bundle_digest`; [`AuthorityError::Internal`]
-/// on a database fault.
+/// [`AuthorityError::Integrity`] if a file's bytes are missing/corrupt in either store, a stored
+/// path is illegal, or the recomputed digest does not match `expected_bundle_digest`;
+/// [`AuthorityError::Internal`] on a database fault.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn render_version(
     authority: &Authority,
@@ -443,9 +303,7 @@ pub(crate) async fn render_version(
     expected_bundle_digest: [u8; 32],
 ) -> Result<RenderedBundle> {
     // The offloaded set for this workspace: git_oid -> object_id (small — big blobs are rare). A git-resident
-    // leaf is absent from this map and recovers its id by rehashing the git blob, with no DB dependency. Read
-    // it FIRST (the only `.await` before the blocking section) so the whole assembly below can move onto the
-    // blocking pool with owned inputs.
+    // leaf is absent from this map and recovers its id by rehashing the git blob, with no DB dependency.
     let offloaded: HashMap<[u8; 20], [u8; 32]> = authority
         .db()
         .large_local_objects(ws)
@@ -454,9 +312,8 @@ pub(crate) async fn render_version(
         .map(|(git_oid, object_id)| (git_oid, object_id.0))
         .collect();
 
-    // The whole-bundle assembly (every blob read + re-hashed, up to the reject cap each) runs on the
-    // blocking pool — inline it would pin an async worker for the full render. The non-`Send` gix `Store`
-    // opens + drops inside the closure, so every authority future that renders stays `Send`.
+    // The whole-bundle assembly (every blob read + re-hashed) runs on the blocking pool; the
+    // non-`Send` gix `Store` opens + drops inside the closure.
     let git_dir = authority.workspace_git_dir(ws);
     let large = authority.large_store(ws);
     run_blocking(move || {
@@ -507,6 +364,26 @@ pub(crate) async fn render_version(
     })
     .await
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("a present object's git locator does not resolve to its content id")]
+struct GitLocatorMismatch;
+
+#[derive(Debug, thiserror::Error)]
+#[error("the pointed version has no recorded bundle digest")]
+struct MissingPointedDigest;
+
+#[derive(Debug, thiserror::Error)]
+#[error("a committed version has no recorded bundle digest")]
+struct MissingVersionDigest;
+
+#[derive(Debug, thiserror::Error)]
+#[error("a version's tree leaf has no present object row")]
+struct VersionObjectMissing;
+
+#[derive(Debug, thiserror::Error)]
+#[error("a first-parent log hop has no version row in this bundle")]
+struct LogHopWithoutRow;
 
 #[derive(Debug, thiserror::Error)]
 #[error("recomputed bundle digest does not match the pinned digest")]

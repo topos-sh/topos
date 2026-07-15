@@ -4,17 +4,17 @@ import { serverEnv } from "@/env.server";
 
 /**
  * The ONE outbound-mail transport — every mail the product sends (the invite notice, the
- * enrollment passcode, a composition's magic link) goes through [`sendMail`]; no other module may
- * hold an SMTP client. BRING YOUR OWN SMTP: the five `TOPOS_MAIL_SMTP_*` variables arm it
- * all-or-nothing (the vault's old five-flag rule, moved app-side with the mail unification —
- * the vault holds no mail transport at all now); unarmed, [`mailDelivery`]`().canSend` is false
- * and every calling flow keeps its honest no-send behavior.
+ * verification + reset mails, a composition's magic link) goes through [`sendMail`]; no other
+ * module may hold an SMTP client. BRING YOUR OWN SMTP: the five `TOPOS_MAIL_SMTP_*` variables
+ * arm it all-or-nothing; unarmed, [`mailDelivery`]`().canSend` is false and every calling flow
+ * keeps its honest no-send behavior (and for a MULTI-USER install, armed mail is the identity
+ * rung — inviting requires it, since the invited sign-up proves itself through the mailbox).
  *
- * Redaction: a mail body may carry a live credential (a passcode, a sign-in link), so a send
- * failure NEVER echoes the message, the recipient, or the relay's response — callers get one
- * coarse error, and each flow's own contract says what a lost mail means (an invite's seat +
- * address stand, a passcode ack stays constant-shaped, a magic-link request surfaces the
- * provider's failure to the login form).
+ * Redaction: a mail body may carry a live credential (a verification link, a sign-in link), so
+ * a send failure NEVER echoes the message, the recipient, or the relay's response — callers
+ * get one coarse error, and each flow's own contract says what a lost mail means (an invite's
+ * rows + the address stand, a magic-link request surfaces the provider's failure to the login
+ * form).
  */
 
 export interface MailMessage {

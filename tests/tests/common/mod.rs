@@ -1,52 +1,69 @@
-//! Shared harness for the loopback e2e tests: a fresh, migrated per-test Postgres database
-//! ([`provision_pg`]) plus the loopback-plane scaffold ([`Scratch`] / [`Plane`] / [`start_plane`]) every
-//! suite stands its scenario on. Only the scenario-specific SEEDING stays per-file — each suite hands
-//! [`start_plane`] a seed closure and gets a served plane back.
+//! Shared harness for the composed-stack e2e tests: a fresh per-test Postgres database provisioned by
+//! the PRODUCTION recipe (two roles, two schemas, two migration lineages), an in-process vault (the
+//! `topos_plane::router` custody lane, internal-token-armed, loopback-only), and the REAL web app
+//! spawned from its production build in front of it. The app is the ONE public surface: the harness
+//! drives every ceremony over HTTP exactly as a person (cookie sessions: claim, sign-in, the /verify
+//! device approval) or a device (the Bearer lane under `/api/v1`) would.
 //!
-//! Each e2e (HERO / follow / contribute) runs a **blocking `ureq` client** on the test thread alongside a
-//! live `axum` server on a self-owned **multi-thread** runtime, so it cannot use `#[sqlx::test]` — that
-//! macro drives the test on a **current-thread** runtime, where the blocking client would starve the
-//! server and deadlock. Instead each test calls [`provision_pg`] inside its own runtime to get a `PgPool`
-//! over a fresh database, then builds `Authority::from_pool(pool, git_root, large_root)`.
+//! Each e2e runs a **blocking `ureq` client** on the test thread alongside the vault server on a
+//! self-owned **multi-thread** runtime, so it cannot use `#[sqlx::test]` — that macro drives the test
+//! on a current-thread runtime, where the blocking client would starve the server and deadlock.
 //!
 //! The provisioned databases are left behind on the target Postgres — the CI / local build Postgres is
 //! disposable (a container), and dropping a database while its pool still holds connections is racy.
+//!
+//! Write-path discipline: everything the product has a surface for goes THROUGH that surface (claim,
+//! sign-in, /verify, the device lane, the admin pages). The superuser pool is for row-level witnesses,
+//! plus the few arrangement steps the OSS product deliberately has no mail-less surface for (seating an
+//! extra account, flipping the registration knob) — each such helper says so.
 
-// Each e2e binary compiles this module independently and drives a SUBSET of the harness — what one binary
-// leaves unused is exercised by a sibling, so the module-level allow is deliberate, not a loophole.
+// Each e2e binary compiles this module independently and drives a SUBSET of the harness — what one
+// binary leaves unused is exercised by a sibling, so the module-level allow is deliberate.
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
+use std::io::Read as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use plane_store::{
-    Authority, BundleId, CommitId, ConfirmOutcome, DeploymentMode, EnrollmentConfig, FileMode,
-    InviteOutcome, OpId, Principal, UploadedFile, WorkspaceId,
-};
+use plane_store::Authority;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Connection, Executor, PgConnection, PgPool};
+use sqlx::{Connection, Executor, PgConnection, PgPool, Row};
 use topos::test_support::FollowHarness;
 use topos_plane::{PlaneState, router};
-use topos_types::{Generation, TerminalOutcome};
 
 // ── the shared scenario constants ───────────────────────────────────────────────────────────────────
 
-/// The one workspace every e2e scenario plays in.
-pub(crate) const WS: &str = "w_acme";
-/// The one skill every e2e scenario distributes.
-pub(crate) const SKILL: &str = "s_deploy";
-/// The fixed wall-clock the seedings stamp.
-pub(crate) const NOW: i64 = 1_000_000;
+/// The boot-minted workspace's ADDRESS slug (`TOPOS_WORKSPACE_NAME`) — what a `follow` targets.
+pub(crate) const WS_NAME: &str = "acme";
+/// The one skill most scenarios distribute.
+pub(crate) const SKILL: &str = "s-deploy";
+/// The preset first-boot claim code (`TOPOS_SETUP_CODE` — stable across boots, like CI/IaC).
+pub(crate) const SETUP_CODE: &str = "e2e-setup-code-0123456789abcdef";
+/// The one password every harness account uses (better-auth minimum is 8).
+pub(crate) const PASSWORD: &str = "e2e-password-1234";
+/// The first owner (the claimant).
+pub(crate) const OWNER_EMAIL: &str = "owner@acme.test";
+/// The shared internal-lane bearer the composed stack arms on both sides (test-only value).
+pub(crate) const INTERNAL_TOKEN: &str = "e2e-internal-token";
 
-// ── per-test Postgres provisioning ──────────────────────────────────────────────────────────────────
+// ── per-test Postgres provisioning (the production recipe) ──────────────────────────────────────────
 
-/// Create a uniquely-named database on the `$DATABASE_URL` server, run the production migrations
-/// ([`plane_store::MIGRATOR`]) on it, and return a pool over it. Panics with a clear message if
-/// `DATABASE_URL` is unset or the server is unreachable (the e2e suite requires a Postgres, exactly like
-/// the in-crate `#[sqlx::test]` suite).
-pub(crate) async fn provision_pg() -> PgPool {
+/// The two application roles' test passwords (mirroring the compose defaults).
+const PLANE_PW: &str = "plane";
+const WEB_PW: &str = "web";
+
+/// Create a uniquely-named database on the `$DATABASE_URL` server and provision it by the PRODUCTION
+/// first-boot recipe (two LOGIN roles, two schemas each owned by its role, role-level search_paths,
+/// the ALTER DEFAULT PRIVILEGES chain that keeps the app's read-only custody mirror current), then run
+/// both migration lineages: the vault's sqlx migrations AS `topos_plane`, the app's drizzle lineage AS
+/// `topos_web` via the app's own `scripts/migrate.mjs`. Returns the superuser witness pool, the
+/// vault-facing pool (connected as `topos_plane`, search_path pinned to `plane`), and the web-role URL
+/// the spawned app dials.
+async fn provision_pg() -> (PgPool, PgPool, String) {
     static N: AtomicU32 = AtomicU32::new(0);
     let base = std::env::var("DATABASE_URL")
         .expect("the e2e suite requires DATABASE_URL to point at a Postgres");
@@ -59,126 +76,107 @@ pub(crate) async fn provision_pg() -> PgPool {
         N.fetch_add(1, Ordering::Relaxed)
     );
 
-    // CREATE the fresh database on the base connection (identifier-quoted; the name is ASCII-safe anyway).
     let mut admin = PgConnection::connect_with(&opts)
         .await
         .expect("connect to the base Postgres database");
+    // The roles are cluster-wide and race-shared across parallel test binaries. Create-if-absent,
+    // then ENFORCE the password unconditionally (a stale role from an earlier run may hold another
+    // password, and the spawned app's login would 503 until the harness times out). A cluster-wide
+    // advisory lock serializes the role mutation — two binaries ALTERing the same pg_authid tuple
+    // at once raise "tuple concurrently updated"; all writers target the same end state.
     admin
-        .execute(format!(r#"CREATE DATABASE "{name}""#).as_str())
-        .await
-        .expect("create the per-test database");
-    admin.close().await.ok();
-
-    // Connect to the fresh database and apply the SAME migrations production runs.
-    let pool = PgPoolOptions::new()
-        .connect_with(opts.database(&name))
-        .await
-        .expect("connect to the per-test database");
-    plane_store::MIGRATOR
-        .run(&pool)
-        .await
-        .expect("migrate the per-test database");
-    pool
-}
-
-// ── the composed-stack provisioning (the door-cutover shape) ────────────────────────────────────────
-
-/// The shared internal-lane bearer the composed stack arms on both sides (test-only value).
-pub(crate) const INTERNAL_TOKEN: &str = "e2e-internal-token";
-
-/// [`provision_pg`], but in the DOOR-CUTOVER shape the web app requires: the plane schema is a real
-/// `plane` schema (the app's Drizzle mirror reads `plane.*` schema-qualified), the `topos_web` role
-/// exists BEFORE the migrations run (0019's role-guarded grant block must execute, not skip), and
-/// the role gets the same database-level shape the e2e bootstrap provisions (CONNECT is PUBLIC's
-/// default; CREATE for the app's own `web` schema; the `web, plane` search_path). Returns the
-/// authority-facing pool (search_path pinned to `plane`) plus the web-role URL the app dials.
-pub(crate) async fn provision_pg_composed() -> (PgPool, String) {
-    static N: AtomicU32 = AtomicU32::new(0);
-    let base = std::env::var("DATABASE_URL")
-        .expect("the e2e suite requires DATABASE_URL to point at a Postgres");
-    let opts: PgConnectOptions = base
-        .parse()
-        .expect("DATABASE_URL must be a valid Postgres connection string");
-    let name = format!(
-        "topos_e2e_web_{}_{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    );
-
-    let mut admin = PgConnection::connect_with(&opts)
-        .await
-        .expect("connect to the base Postgres database");
-    // The role is cluster-wide and race-shared across parallel test binaries. Create it if
-    // absent, then ENFORCE the password unconditionally: on a shared dev cluster the role may
-    // already exist from an earlier run (or another suite) with a different password, and a bare
-    // `IF NOT EXISTS ... CREATE` would leave that stale password in place — the spawned app then
-    // can't authenticate and its `/healthz` 503s until the harness times out. Setting the
-    // password every time makes the app's login deterministic regardless of prior cluster state.
-    //
-    // A cluster-wide advisory lock serializes the role mutation: two binaries ALTERing the same
-    // `pg_authid` tuple at once raise "tuple concurrently updated" (Postgres won't concurrently
-    // update one catalog row). All writers target the SAME password, so serializing yields the
-    // same end state without the race. The lock is session-scoped and released on `admin.close()`.
-    admin
-        .execute("SELECT pg_advisory_lock(hashtext('topos_web_role_setup'))")
+        .execute("SELECT pg_advisory_lock(hashtext('topos_e2e_role_setup'))")
         .await
         .expect("acquire role-setup advisory lock");
+    for (role, pw) in [("topos_plane", PLANE_PW), ("topos_web", WEB_PW)] {
+        admin
+            .execute(
+                format!(
+                    r#"DO $$
+                    BEGIN
+                        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') THEN
+                            CREATE ROLE {role} LOGIN PASSWORD '{pw}';
+                        ELSE
+                            ALTER ROLE {role} LOGIN PASSWORD '{pw}';
+                        END IF;
+                    END $$"#
+                )
+                .as_str(),
+            )
+            .await
+            .expect("ensure app role");
+    }
     admin
-        .execute(
-            r#"DO $$
-            BEGIN
-                IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'topos_web') THEN
-                    CREATE ROLE topos_web LOGIN PASSWORD 'web';
-                ELSE
-                    ALTER ROLE topos_web LOGIN PASSWORD 'web';
-                END IF;
-            END $$"#,
-        )
-        .await
-        .expect("ensure topos_web role");
-    admin
-        .execute("SELECT pg_advisory_unlock(hashtext('topos_web_role_setup'))")
+        .execute("SELECT pg_advisory_unlock(hashtext('topos_e2e_role_setup'))")
         .await
         .expect("release role-setup advisory lock");
     admin
         .execute(format!(r#"CREATE DATABASE "{name}""#).as_str())
         .await
         .expect("create the per-test database");
-    admin
-        .execute(format!(r#"GRANT CREATE ON DATABASE "{name}" TO topos_web"#).as_str())
-        .await
-        .expect("grant create to topos_web");
-    admin
-        .execute(
-            format!(r#"ALTER ROLE topos_web IN DATABASE "{name}" SET search_path = web, plane"#)
-                .as_str(),
-        )
-        .await
-        .expect("set topos_web search_path");
     admin.close().await.ok();
 
-    // Migrate INTO schema `plane` (production's layout — the app's read-only mirror is
-    // schema-qualified), on a pool whose search_path stays pinned there so the authority's
-    // unqualified SQL keeps resolving.
+    // Per-database provisioning, superuser-side — the same statements compose-init-db.sh runs.
     let host = opts.get_host().to_owned();
     let port = opts.get_port();
-    let pool = PgPoolOptions::new()
-        .connect_with(opts.database(&name).options([("search_path", "plane")]))
+    let admin_pool = PgPoolOptions::new()
+        .connect_with(opts.database(&name))
         .await
         .expect("connect to the per-test database");
-    pool.execute("CREATE SCHEMA IF NOT EXISTS plane")
-        .await
-        .expect("create the plane schema");
-    plane_store::MIGRATOR
-        .run(&pool)
-        .await
-        .expect("migrate the per-test database");
+    for stmt in [
+        format!(r#"REVOKE ALL ON DATABASE "{name}" FROM PUBLIC"#),
+        format!(r#"GRANT CONNECT ON DATABASE "{name}" TO topos_plane"#),
+        format!(r#"GRANT CONNECT ON DATABASE "{name}" TO topos_web"#),
+        // The app's migrator issues CREATE SCHEMA IF NOT EXISTS, and Postgres checks the CREATE
+        // privilege before the existence short-circuit.
+        format!(r#"GRANT CREATE ON DATABASE "{name}" TO topos_web"#),
+        format!(r#"ALTER ROLE topos_web IN DATABASE "{name}" SET search_path = web, plane"#),
+        format!(r#"ALTER ROLE topos_plane IN DATABASE "{name}" SET search_path = plane"#),
+        "CREATE SCHEMA IF NOT EXISTS web AUTHORIZATION topos_web".to_owned(),
+        "CREATE SCHEMA IF NOT EXISTS plane AUTHORIZATION topos_plane".to_owned(),
+        "GRANT USAGE ON SCHEMA plane TO topos_web".to_owned(),
+        // The app's read-only custody mirror: every table a plane migration adds arrives already
+        // SELECT-granted — set BEFORE the plane lineage runs, exactly like first boot.
+        "ALTER DEFAULT PRIVILEGES FOR ROLE topos_plane IN SCHEMA plane GRANT SELECT ON TABLES TO topos_web"
+            .to_owned(),
+    ] {
+        admin_pool
+            .execute(stmt.as_str())
+            .await
+            .expect("provision the per-test database");
+    }
 
-    let web_url = format!("postgres://topos_web:web@{host}:{port}/{name}");
-    (pool, web_url)
+    // The vault lineage, AS topos_plane (ownership + the default-privileges chain match production).
+    let plane_opts: PgConnectOptions =
+        format!("postgres://topos_plane:{PLANE_PW}@{host}:{port}/{name}")
+            .parse()
+            .expect("compose the plane role URL");
+    let plane_pool = PgPoolOptions::new()
+        .connect_with(plane_opts.options([("search_path", "plane")]))
+        .await
+        .expect("connect as topos_plane");
+    plane_store::MIGRATOR
+        .run(&plane_pool)
+        .await
+        .expect("migrate the vault schema");
+
+    // The app lineage, AS topos_web, through the app's OWN migrator (records the drizzle ledger the
+    // running app's first-request migration then finds and no-ops on).
+    let web_url = format!("postgres://topos_web:{WEB_PW}@{host}:{port}/{name}");
+    let status = std::process::Command::new("node")
+        .arg(repo_root().join("web").join("scripts").join("migrate.mjs"))
+        .current_dir(repo_root().join("web"))
+        .env("DATABASE_URL", &web_url)
+        .status()
+        .expect("run the app's drizzle migrator (is `node` on PATH?)");
+    assert!(status.success(), "the drizzle migrator failed");
+
+    (admin_pool, plane_pool, web_url)
 }
 
-/// The spawned web app (the door) — `bun run start` over the production build, killed on drop.
+// ── the spawned web app ─────────────────────────────────────────────────────────────────────────────
+
+/// The spawned web app (the door) — node over the production build, killed on drop.
 pub(crate) struct AppServer {
     child: std::process::Child,
     /// The app's public origin (`http://127.0.0.1:<port>`).
@@ -210,11 +208,16 @@ fn free_port() -> u16 {
         .port()
 }
 
-/// Spawn the web app over its PRODUCTION build (`web/build/server/index.js` must exist — CI builds
-/// it before `cargo test`; locally run `cd web && bun install && bun run build` once) and wait for
+/// Spawn the web app over its PRODUCTION build (`web/build/server/index.js` must exist — CI builds it
+/// before `cargo test`; locally run `cd web && bun install && bun run build` once) and wait for
 /// `/healthz`. The app connects to the composed database as `topos_web` and reaches the loopback
-/// plane over the armed internal lane.
-pub(crate) fn spawn_app(web_db_url: &str, plane_base: &str, app_port: u16) -> AppServer {
+/// vault over the armed internal lane. `link_file` receives the printed first-boot claim line.
+fn spawn_app(
+    web_db_url: &str,
+    plane_base: &str,
+    app_port: u16,
+    link_file: &std::path::Path,
+) -> AppServer {
     let web_dir = repo_root().join("web");
     let build = web_dir.join("build").join("server").join("index.js");
     assert!(
@@ -224,11 +227,8 @@ pub(crate) fn spawn_app(web_db_url: &str, plane_base: &str, app_port: u16) -> Ap
     let origin = format!("http://127.0.0.1:{app_port}");
     // Spawn NODE directly (not `bun run start`): `bun run start` delegates to a node grandchild via
     // the `react-router-serve` shebang, and `child.kill()` on the bun wrapper would leave that node
-    // process serving — the app would never actually die (leaking the listener, and defeating the
-    // "unreachable plane" e2e that drops the stack to prove the freeze). Running node itself makes
-    // the spawned child the real server, so Drop reaps it. `react-router-serve`'s entry is Node-native
-    // (`@react-router/node` + `renderToPipeableStream`); bun's runtime cannot serve it, so node is
-    // also the correct runtime — the same command the production image's CMD runs.
+    // process serving — the app would never actually die. `react-router-serve`'s entry is Node-native
+    // (`@react-router/node` + `renderToPipeableStream`), the same command the production image runs.
     let serve_bin = web_dir
         .join("node_modules")
         .join("@react-router")
@@ -250,25 +250,29 @@ pub(crate) fn spawn_app(web_db_url: &str, plane_base: &str, app_port: u16) -> Ap
         .env("BETTER_AUTH_URL", &origin)
         .env("APP_ENV", "test")
         .env("TOPOS_WEB_RATELIMIT", "off")
+        .env("TOPOS_WORKSPACE_NAME", WS_NAME)
+        .env("TOPOS_SETUP_CODE", SETUP_CODE)
+        .env("TOPOS_SETUP_LINK_FILE", link_file)
+        // SMTP stays UNSET throughout: the whole enrolled loop must work with zero mail delivery.
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
         .spawn()
-        .expect("spawn the web app (is `bun` on PATH?)");
+        .expect("spawn the web app (is `node` on PATH?)");
     let mut app = AppServer { child, origin };
     let health = format!("{}/healthz", app.origin);
-    for _ in 0..120 {
+    for _ in 0..240 {
         if let Some(status) = app.child.try_wait().expect("poll the web app process") {
             panic!("the web app exited during startup: {status}");
         }
         if ureq::get(&health).call().is_ok() {
             return app;
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(500));
     }
     panic!("the web app never answered /healthz at {health}");
 }
 
-// ── the loopback plane scaffold ─────────────────────────────────────────────────────────────────────
+// ── scratch dirs ────────────────────────────────────────────────────────────────────────────────────
 
 /// A self-cleaning temp dir (RAII).
 pub(crate) struct Scratch(pub(crate) PathBuf);
@@ -279,7 +283,7 @@ impl Scratch {
         let n = N.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("{prefix}-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create plane scratch dir");
+        std::fs::create_dir_all(&dir).expect("create stack scratch dir");
         Self(dir)
     }
 }
@@ -290,178 +294,208 @@ impl Drop for Scratch {
     }
 }
 
-/// What a scenario's seed closure stood up (beyond the authority's own state).
-#[derive(Default)]
-pub(crate) struct Seeded {
-    /// The genesis version id, when the seeding published one.
-    pub(crate) genesis: Option<CommitId>,
-    /// The `/i/` invite links minted at standup, in mint order.
-    pub(crate) invites: Vec<String>,
+// ── the blocking HTTP session (a browser stand-in: cookie jar + form posts) ─────────────────────────
+
+/// One signed-in browser session against the app: a `ureq` agent with redirects OFF (a 302 is an
+/// asserted outcome, not something to chase) and a manual cookie jar (set-cookie absorbed from every
+/// response, sent back on every request). Every POST carries the app's own `Origin` (better-auth's
+/// CSRF check refuses a credential POST without one).
+pub(crate) struct Session {
+    agent: ureq::Agent,
+    origin: String,
+    cookies: Mutex<BTreeMap<String, String>>,
 }
 
-/// A running loopback plane — and, for the composed variants ([`start_stack`]), the web app in
-/// front of it (the door): `base_url` is then the APP's `/api` base the CLI dials, and the plane
-/// itself has no public face at all. Holds the runtime + authority handle alive for the test's
-/// duration; `app` drops first (the door dies before the vault), `_dir` LAST so the served store
-/// outlives the runtime/authority.
-pub(crate) struct Plane {
-    /// The spawned web app, when this is a composed stack (None for a bare loopback plane).
-    app: Option<AppServer>,
+/// A response the session hands back: the status + the body text (empty when unreadable).
+pub(crate) struct HttpAnswer {
+    pub(crate) status: u16,
+    pub(crate) body: String,
+}
+
+fn blocking_agent() -> ureq::Agent {
+    ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .timeout_connect(Some(Duration::from_secs(10)))
+            .timeout_recv_response(Some(Duration::from_secs(30)))
+            .timeout_recv_body(Some(Duration::from_secs(30)))
+            .build(),
+    )
+}
+
+/// Percent-encode one `application/x-www-form-urlencoded` value (everything but the unreserved set).
+fn form_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+impl Session {
+    pub(crate) fn new(origin: &str) -> Self {
+        Self {
+            agent: blocking_agent(),
+            origin: origin.to_owned(),
+            cookies: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn cookie_header(&self) -> Option<String> {
+        let jar = self.cookies.lock().expect("cookie jar");
+        if jar.is_empty() {
+            return None;
+        }
+        Some(
+            jar.iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    }
+
+    fn absorb_cookies(&self, resp: &ureq::http::Response<ureq::Body>) {
+        let mut jar = self.cookies.lock().expect("cookie jar");
+        for value in resp.headers().get_all(ureq::http::header::SET_COOKIE) {
+            let Ok(raw) = value.to_str() else { continue };
+            let pair = raw.split(';').next().unwrap_or("");
+            if let Some((name, val)) = pair.split_once('=') {
+                jar.insert(name.trim().to_owned(), val.trim().to_owned());
+            }
+        }
+    }
+
+    fn read(&self, mut resp: ureq::http::Response<ureq::Body>) -> HttpAnswer {
+        self.absorb_cookies(&resp);
+        let status = resp.status().as_u16();
+        let mut body = String::new();
+        let _ = resp
+            .body_mut()
+            .as_reader()
+            .take(4 * 1024 * 1024)
+            .read_to_string(&mut body);
+        HttpAnswer { status, body }
+    }
+
+    /// GET a path (an in-app path like `/login`, or `?`-suffixed) with the browser `Accept`.
+    pub(crate) fn get(&self, path: &str) -> HttpAnswer {
+        let mut req = self
+            .agent
+            .get(format!("{}{path}", self.origin))
+            .header("Accept", "text/html,application/xhtml+xml");
+        if let Some(cookie) = self.cookie_header() {
+            req = req.header("Cookie", cookie);
+        }
+        self.read(req.call().expect("GET over loopback"))
+    }
+
+    /// POST an HTML form (`application/x-www-form-urlencoded`) — how every page ceremony submits.
+    pub(crate) fn post_form(&self, path: &str, fields: &[(&str, &str)]) -> HttpAnswer {
+        let body = fields
+            .iter()
+            .map(|(k, v)| format!("{}={}", form_escape(k), form_escape(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+        let mut req = self
+            .agent
+            .post(format!("{}{path}", self.origin))
+            .header("Origin", &self.origin)
+            // The browser Accept: a document POST without it would be answered by the constant
+            // protocol card (the non-browser face) instead of the page this session emulates.
+            .header("Accept", "text/html,application/xhtml+xml")
+            .header("Content-Type", "application/x-www-form-urlencoded");
+        if let Some(cookie) = self.cookie_header() {
+            req = req.header("Cookie", cookie);
+        }
+        self.read(req.send(body.as_bytes()).expect("POST form over loopback"))
+    }
+
+    /// POST a JSON body (the better-auth REST rungs).
+    pub(crate) fn post_json(&self, path: &str, body: &serde_json::Value) -> HttpAnswer {
+        let payload = serde_json::to_vec(body).expect("serialize JSON body");
+        let mut req = self
+            .agent
+            .post(format!("{}{path}", self.origin))
+            .header("Origin", &self.origin)
+            .header("Content-Type", "application/json");
+        if let Some(cookie) = self.cookie_header() {
+            req = req.header("Cookie", cookie);
+        }
+        self.read(
+            req.send(payload.as_slice())
+                .expect("POST json over loopback"),
+        )
+    }
+
+    /// Whether the jar holds a session cookie (a claim/sign-in landed one).
+    pub(crate) fn signed_in(&self) -> bool {
+        self.cookies
+            .lock()
+            .expect("cookie jar")
+            .keys()
+            .any(|k| k.contains("session_token"))
+    }
+}
+
+// ── the composed stack ──────────────────────────────────────────────────────────────────────────────
+
+/// A device-lane grant the harness minted for itself over the REAL device flow — a probe device for
+/// wire-level assertions the CLI has no verb for (channel curation, the uniform-404 probes).
+pub(crate) struct DeviceGrant {
+    /// The one bearer credential (the promoted device code).
+    pub(crate) credential: String,
+    /// The registered device id (`dk_…` — the non-secret handle).
+    pub(crate) device_id: String,
+}
+
+/// The whole composed stack, one per test: the per-test database, the in-process vault, the spawned
+/// web app, and the boot-minted (unclaimed) workspace.
+pub(crate) struct Stack {
+    /// The spawned web app; dropped FIRST (the door dies before the vault).
+    app: AppServer,
     pub(crate) rt: tokio::runtime::Runtime,
-    pub(crate) authority: Arc<Authority>,
-    /// The provisioned per-test database — for direct row-level witnesses only (e.g. the standup chain's
-    /// "the admin_claim table stayed empty"), never a second write path.
+    /// The superuser witness pool over the per-test database (row-level witnesses + the named
+    /// mail-less arrangement helpers — never a general write path).
     pub(crate) pool: PgPool,
-    pub(crate) base_url: String,
-    /// The base the minted `/i/` links ride — `base_url` unless the plane was started split
-    /// ([`start_plane_split`]) or composed ([`start_stack`]: the app ORIGIN, address-shaped —
-    /// resource addresses carry no `/api`).
-    pub(crate) link_base_url: String,
-    seeded: Seeded,
+    /// The app's public origin (`http://127.0.0.1:<port>`).
+    pub(crate) origin: String,
+    /// The device-lane base the protocol card declares (`<origin>/api`).
+    pub(crate) api_base: String,
+    /// The boot-minted workspace's row id (`w_…`).
+    pub(crate) workspace_id: String,
+    /// Where the printed claim link also lands (`TOPOS_SETUP_LINK_FILE`).
+    pub(crate) setup_link_file: PathBuf,
     _dir: Scratch,
 }
 
-impl Plane {
-    pub(crate) fn ws(&self) -> WorkspaceId {
-        WorkspaceId::parse(WS).unwrap()
-    }
-
-    pub(crate) fn skill(&self) -> BundleId {
-        BundleId::parse(SKILL).unwrap()
-    }
-
-    /// The genesis version id the seeding published (panics if the scenario stood none up).
-    pub(crate) fn genesis(&self) -> CommitId {
-        self.seeded
-            .genesis
-            .expect("the seeding published a genesis")
-    }
-
-    /// The `i`-th `/i/` invite link the seeding minted.
-    pub(crate) fn invite(&self, i: usize) -> &str {
-        &self.seeded.invites[i]
-    }
-}
-
-/// Stand a loopback plane up: bind the socket FIRST (an enrollment-configured plane's bootstrap echoes
-/// the real `base_url`, and an early client connect queues in the backlog with no race), open the
-/// authority over a fresh migrated database (+ the plane key, + the device-code enrollment config when
-/// `enrollment`), run the scenario's `seed`, then serve `router(state)` on a background multi-thread
-/// runtime. Returns the live [`Plane`]. The plane runs at `Cloud` mode; the standup e2e's self-host
-/// chain uses [`start_plane_mode`].
-pub(crate) fn start_plane(
-    scratch_prefix: &str,
-    tag: &str,
-    enrollment: bool,
-    seed: impl AsyncFnOnce(&Authority) -> Seeded,
-) -> Plane {
-    start_plane_mode(scratch_prefix, tag, enrollment, DeploymentMode::Cloud, seed)
-}
-
-/// [`start_plane`] with an explicit deployment posture — a self-host plane's standup door is the uniform
-/// miss and its redeem gate admits a bearer, so the standup e2e needs both modes.
-pub(crate) fn start_plane_mode(
-    scratch_prefix: &str,
-    tag: &str,
-    enrollment: bool,
-    mode: DeploymentMode,
-    seed: impl AsyncFnOnce(&Authority) -> Seeded,
-) -> Plane {
-    start_plane_impl(scratch_prefix, tag, enrollment, mode, false, seed)
-}
-
-/// [`start_plane`] with the SPLIT link base: the same listener answers two host strings — the API
-/// `base_url` is `http://127.0.0.1:<port>` and the minted `/i/` links ride `http://localhost:<port>`
-/// (the hosted user-visible-links-on-the-web-origin shape, without a second server). What only this
-/// split can prove: the client re-roots off the link host onto the bootstrap-declared API base.
-#[allow(dead_code)] // each e2e binary compiles the shared harness; only follow_e2e drives the split.
-pub(crate) fn start_plane_split(
-    scratch_prefix: &str,
-    tag: &str,
-    seed: impl AsyncFnOnce(&Authority) -> Seeded,
-) -> Plane {
-    start_plane_impl(scratch_prefix, tag, true, DeploymentMode::Cloud, true, seed)
-}
-
-/// Stand the COMPOSED stack up — the door-cutover shape every CLI flow now runs: the loopback
-/// plane serves only the vault surface (byte/pointer + enrollment + the internal lane, its
-/// internal token armed), the web app is spawned in FRONT of it, and the returned
-/// [`Plane::base_url`] is the APP's `/api` base — exactly what the protocol card teaches a real
-/// client to dial. Suites keep their seed closures and harness calls; only the door moved.
-pub(crate) fn start_stack(
-    scratch_prefix: &str,
-    tag: &str,
-    enrollment: bool,
-    seed: impl AsyncFnOnce(&Authority) -> Seeded,
-) -> Plane {
-    start_stack_mode(scratch_prefix, tag, enrollment, DeploymentMode::Cloud, seed)
-}
-
-/// [`start_stack`] with an explicit deployment posture (the standup chain needs self-host).
-pub(crate) fn start_stack_mode(
-    scratch_prefix: &str,
-    tag: &str,
-    enrollment: bool,
-    mode: DeploymentMode,
-    seed: impl AsyncFnOnce(&Authority) -> Seeded,
-) -> Plane {
-    start_stack_impl(scratch_prefix, tag, enrollment, mode, seed)
-}
-
-fn start_stack_impl(
-    scratch_prefix: &str,
-    tag: &str,
-    enrollment: bool,
-    mode: DeploymentMode,
-    seed: impl AsyncFnOnce(&Authority) -> Seeded,
-) -> Plane {
-    let dir = Scratch::new(scratch_prefix, tag);
+/// Stand the composed stack up: provision the database by the production recipe, serve the vault
+/// in-process (internal token armed, loopback-only, no public face), spawn the real web app in front
+/// of it, and poke ONE document request so first-boot setup mints the workspace (with the preset
+/// claim code). The workspace is returned UNCLAIMED — `claim_owner` is the first ceremony.
+pub(crate) fn start_stack(tag: &str) -> Stack {
+    let dir = Scratch::new("topos-e2e", tag);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("build tokio runtime");
 
-    // The APP's port is chosen FIRST: the vault's enrollment disclosure (the bootstrap plane
-    // block, the card, every minted link) must name the DOOR, never the vault's own loopback
-    // address — a client that re-rooted onto the vault would prove the wrong topology.
-    let app_port = free_port();
-    let app_origin = format!("http://127.0.0.1:{app_port}");
-    let app_api_base = format!("{app_origin}/api");
-    // Resource addresses (and the card + `/i/` + `/verify` links) live at the app ORIGIN root; the
-    // device API the card declares is that origin's `/api` mount. The app derives `api_base_url`
-    // from the request origin, so the two share a host by construction — there is no separate plane
-    // host to point at (the app is the door, not a proxy to one).
-    let link_origin = app_origin.clone();
+    let (admin_pool, plane_pool, web_url) = rt.block_on(provision_pg());
 
+    // The in-process vault: the custody authority over the plane-role pool, served loopback-only.
     let listener = rt
-        .block_on(async { tokio::net::TcpListener::bind("127.0.0.1:0").await })
-        .expect("bind loopback listener");
-    let plane_addr = listener.local_addr().expect("local addr");
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .expect("bind the vault listener");
+    let plane_addr = listener.local_addr().expect("vault local addr");
     let plane_base = format!("http://{plane_addr}");
-
-    let (authority, seeded, pool, web_db_url) = rt.block_on(async {
-        let (pool, web_db_url) = provision_pg_composed().await;
-        let mut authority =
-            Authority::from_pool(pool.clone(), &dir.0.join("git"), &dir.0.join("large"))
-                .expect("open authority");
-        if enrollment {
-            authority = authority
-                .with_enrollment_config(EnrollmentConfig {
-                    secret_path: dir.0.join("enroll.key"),
-                    base_url: app_api_base.clone(),
-                    verify_base_url: Some(link_origin.clone()),
-                    link_base_url: Some(link_origin.clone()),
-                    deployment_mode: mode,
-                    enrollment_method: "device_code".to_owned(),
-                })
-                .expect("load enrollment secret");
-        }
-        let seeded = seed(&authority).await;
-        (authority, seeded, pool, web_db_url)
-    });
-
-    let authority = Arc::new(authority);
-    let state = PlaneState::new(authority.clone()).with_internal_token(INTERNAL_TOKEN);
+    let authority = Authority::from_pool(plane_pool, &dir.0.join("git"), &dir.0.join("large"))
+        .expect("open the custody authority");
+    let state = PlaneState::new(Arc::new(authority)).with_internal_token(INTERNAL_TOKEN);
     rt.spawn(async move {
         let _ = axum::serve(
             listener,
@@ -470,278 +504,377 @@ fn start_stack_impl(
         .await;
     });
 
-    let app = spawn_app(&web_db_url, &plane_base, app_port);
+    let app_port = free_port();
+    let setup_link_file = dir.0.join("setup-link.txt");
+    let app = spawn_app(&web_url, &plane_base, app_port, &setup_link_file);
+    let origin = app.origin.clone();
+    let api_base = format!("{origin}/api");
 
-    Plane {
-        app: Some(app),
-        rt,
-        authority,
-        pool,
-        base_url: app_api_base,
-        link_base_url: link_origin,
-        seeded,
-        _dir: dir,
-    }
-}
+    // ONE document request boots the app tier: the (no-op) migration pass + first-boot setup, which
+    // mints the workspace and prints the claim link. /healthz is a resource route and skips both.
+    let probe = Session::new(&origin);
+    let boot = probe.get("/login");
+    assert_eq!(
+        boot.status, 200,
+        "the login page boots the app: {}",
+        boot.body
+    );
 
-fn start_plane_impl(
-    scratch_prefix: &str,
-    tag: &str,
-    enrollment: bool,
-    mode: DeploymentMode,
-    split_link_base: bool,
-    seed: impl AsyncFnOnce(&Authority) -> Seeded,
-) -> Plane {
-    let dir = Scratch::new(scratch_prefix, tag);
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("build tokio runtime");
-
-    let listener = rt
-        .block_on(async { tokio::net::TcpListener::bind("127.0.0.1:0").await })
-        .expect("bind loopback listener");
-    let addr = listener.local_addr().expect("local addr");
-    let base_url = format!("http://{addr}");
-    let link_base_url = if split_link_base {
-        format!("http://localhost:{}", addr.port())
-    } else {
-        base_url.clone()
-    };
-
-    let (authority, seeded, pool) = rt.block_on(async {
-        let pool = provision_pg().await;
-        let mut authority =
-            Authority::from_pool(pool.clone(), &dir.0.join("git"), &dir.0.join("large"))
-                .expect("open authority");
-        if enrollment {
-            authority = authority
-                .with_enrollment_config(EnrollmentConfig {
-                    secret_path: dir.0.join("enroll.key"),
-                    base_url: base_url.clone(),
-                    verify_base_url: None,
-                    link_base_url: split_link_base.then(|| link_base_url.clone()),
-                    deployment_mode: mode,
-                    enrollment_method: "device_code".to_owned(),
-                })
-                .expect("load enrollment secret");
-        }
-        let seeded = seed(&authority).await;
-        (authority, seeded, pool)
-    });
-
-    let authority = Arc::new(authority);
-    let state = PlaneState::new(authority.clone());
-    rt.spawn(async move {
-        let _ = axum::serve(
-            listener,
-            router(state).into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await;
-    });
-
-    Plane {
-        app: None,
-        rt,
-        authority,
-        pool,
-        base_url,
-        link_base_url,
-        seeded,
-        _dir: dir,
-    }
-}
-
-// ── shared seeding helpers ──────────────────────────────────────────────────────────────────────────
-
-/// Register a device holding `credential` (bound to `principal`, non-revoked) AND seat that principal as a
-/// CONFIRMED `workspace_member` at `role` — the ONE call that authorizes a device to read AND write in `ws`
-/// under the workspace-credential model. Per-skill `roster` grants nothing now; the presented credential
-/// (resolved by its sha256 to this registry row) plus the confirmed membership seat are the whole
-/// authorization, on every lane. `role` ∈ {`owner`,`reviewer`,`member`}. Both seed shims UPSERT, so a
-/// principal already seated (e.g. by a genesis seed) is simply refreshed.
-pub(crate) async fn seed_member(
-    authority: &Authority,
-    ws: &WorkspaceId,
-    dkid: &str,
-    pubkey: &[u8; 32],
-    principal: &str,
-    role: &str,
-    credential: &str,
-) {
-    let p = Principal::parse(principal).unwrap();
-    authority
-        .seed_device(ws, dkid, pubkey, &p, false, credential)
-        .await
-        .expect("seed member device");
-    authority
-        .seed_workspace_member(ws, &p, role, "confirmed")
-        .await
-        .expect("seat confirmed member");
-}
-
-/// The distribute-plane standup (what the HERO + contribute scenarios share): register the publishing
-/// device WITH its workspace credential, seat its principal as a confirmed member, and publish a genesis at
-/// `(1,1)`. The one `credential` authenticates BOTH the genesis WRITE and the follower's later READ (a
-/// confirmed member reads every skill in the workspace — the follower presents this same credential).
-pub(crate) struct GenesisSpec<'a> {
-    pub(crate) dkid: &'a str,
-    /// The device's registered 32-byte public key — a stable non-secret NAME; nothing verifies against it
-    /// (git/GitHub-level trust). Authorization is the presented credential's registry-row lookup.
-    pub(crate) device_pubkey: &'a [u8; 32],
-    pub(crate) op_id: &'a str,
-    pub(crate) files: Vec<UploadedFile>,
-    pub(crate) principal: &'a str,
-    pub(crate) author: &'a str,
-    pub(crate) message: &'a str,
-    pub(crate) created_at: &'a str,
-    /// The workspace Bearer credential the publisher device holds — and the one a follower presents to read
-    /// (it replaced the per-skill read token, which is gone).
-    pub(crate) credential: &'a str,
-}
-
-/// Run a [`GenesisSpec`] against a fresh authority; returns the genesis version id.
-pub(crate) async fn seed_genesis_plane(authority: &Authority, spec: GenesisSpec<'_>) -> CommitId {
-    let ws = WorkspaceId::parse(WS).unwrap();
-    let skill = BundleId::parse(SKILL).unwrap();
-
-    // The publisher device + its credential + a confirmed-member seat — the whole authorization for the
-    // genesis write and every subsequent read under this credential (per-skill roster grants nothing).
-    seed_member(
-        authority,
-        &ws,
-        spec.dkid,
-        spec.device_pubkey,
-        spec.principal,
-        "member",
-        spec.credential,
-    )
-    .await;
-    let receipt = authority
-        .seed_published_genesis(
-            &ws,
-            &skill,
-            spec.credential,
-            &OpId::parse(spec.op_id).unwrap(),
-            spec.files,
-            spec.author,
-            spec.message,
-            None,
-            spec.created_at,
-            NOW,
-        )
-        .await
-        .expect("seed genesis");
-    assert_eq!(receipt.outcome, TerminalOutcome::Ok);
-    assert_eq!(receipt.current, Some(Generation { epoch: 1, seq: 1 }));
-    receipt.version_id.expect("genesis version id")
-}
-
-/// The ADDRESS name `seed_workspace` derives for the shared [`WS`] id (`w_acme` slugifies to `w-acme`) —
-/// the workspace slug a member joins by. A member's join target is `<base_url>/<WS_NAME>` ([`ws_address`]).
-pub(crate) const WS_NAME: &str = "w-acme";
-
-/// The full workspace ADDRESS a `follow` targets against a loopback plane: `<base_url>/<name>`. The real
-/// client fetches the constant protocol card here (`Accept: application/json` → `WireProtocolCard`),
-/// re-roots onto the card's `api_base_url`, and device-authorizes toward the ADDRESS name (intent enroll).
-pub(crate) fn ws_address(base_url: &str) -> String {
-    format!("{base_url}/{WS_NAME}")
-}
-
-/// Seat `emails` as INVITED members through the REAL invitation op ([`Authority::invite`]) — the
-/// member-lane roster write the reshaped `invite` verb (and `POST …/invitations`) drive; the tokened
-/// `/i/` invite link is gone, an invitation is a roster row and nothing more. The acting
-/// `owner_credential` is the presented workspace Bearer credential the plane resolves to its registry row
-/// → principal → role gate (nothing is signed — authority is the directory rows). `channels` pre-places
-/// the invitees (resolve-all-or-apply-none). Returns the invited principals in their canonical folded
-/// form; panics on any denial (a test-precondition error).
-pub(crate) async fn invite_member(
-    authority: &Authority,
-    ws: &WorkspaceId,
-    owner_credential: &str,
-    emails: &[&str],
-    channels: &[&str],
-    at: &str,
-) -> Vec<String> {
-    let emails: Vec<String> = emails.iter().map(|e| (*e).to_owned()).collect();
-    let channels: Vec<String> = channels.iter().map(|c| (*c).to_owned()).collect();
-    match authority
-        .invite(ws, owner_credential, &emails, &channels, at)
-        .await
-        .expect("the invite op runs")
-    {
-        InviteOutcome::Invited { invited } => invited,
-        other => panic!("invite denied: {other:?}"),
-    }
-}
-
-/// Drive the REAL client `follow <address>` **call 1** (fetch the protocol card over the real socket →
-/// re-root → device-authorize toward the ADDRESS name → the pending WAL) and complete the human identity
-/// leg IN-PROCESS via the authority's external-confirm op (the same lever a web verification page calls,
-/// so the flow is headless — the agent only ever polls). `email` is the identity proven on the
-/// verification page (the principal the redeem seats). Leaves the caller to resume
-/// (`resume_describe` / `resume_apply`), which polls (granted) → redeems → promotes → continues into the
-/// follow intent.
-pub(crate) fn begin_address_enroll(
-    plane: &Plane,
-    client: &FollowHarness,
-    address: &str,
-    email: &str,
-) {
-    let pending = client.follow(address).expect("follow call 1 (address)");
-    assert!(!pending.enrolled, "call 1 only begins enrollment");
-    let user_code = pending
-        .pending
-        .expect("the pending arm carries the verification handle")
-        .user_code;
-    let confirm = plane
-        .rt
+    // The boot-minted workspace row (the single-tenant read the app itself makes).
+    let workspace_id: String = rt
         .block_on(
-            plane
-                .authority
-                .confirm_external_identity(&user_code, email, NOW),
+            sqlx::query_scalar::<_, String>("SELECT id FROM web.workspace").fetch_one(&admin_pool),
         )
-        .expect("confirm the session identity");
-    assert!(matches!(confirm, ConfirmOutcome::Confirmed));
+        .expect("the boot-minted workspace row exists");
+
+    Stack {
+        app,
+        rt,
+        pool: admin_pool,
+        origin,
+        api_base,
+        workspace_id,
+        setup_link_file,
+        _dir: dir,
+    }
+}
+
+impl Stack {
+    /// The workspace ADDRESS a `follow` targets (`<origin>/<slug>` — the shareable resource address).
+    pub(crate) fn address(&self) -> String {
+        format!("{}/{WS_NAME}", self.origin)
+    }
+
+    // ── ceremonies over HTTP ────────────────────────────────────────────────────────────────────
+
+    /// The first-boot CLAIM: create the first account + seat it as the workspace's first owner,
+    /// through the real `/claim` ceremony with the preset code. Returns the signed-in owner session
+    /// (the claim lands the session cookies).
+    pub(crate) fn claim_owner(&self, email: &str) -> Session {
+        let session = Session::new(&self.origin);
+        let page = session.get(&format!("/claim?code={SETUP_CODE}"));
+        assert_eq!(
+            page.status, 200,
+            "the live claim link renders: {}",
+            page.body
+        );
+        let name = email.split('@').next().unwrap_or("owner");
+        let claimed = session.post_form(
+            &format!("/claim?code={SETUP_CODE}"),
+            &[
+                ("code", SETUP_CODE),
+                ("name", name),
+                ("email", email),
+                ("password", PASSWORD),
+            ],
+        );
+        assert_eq!(
+            claimed.status, 302,
+            "the claim consumes the code and redirects signed-in: {}",
+            claimed.body
+        );
+        assert!(session.signed_in(), "the claimant lands with a session");
+        session
+    }
+
+    /// Sign an EXISTING account in through better-auth's email+password rung.
+    pub(crate) fn sign_in(&self, email: &str) -> Session {
+        let session = Session::new(&self.origin);
+        let answer = session.post_json(
+            "/api/auth/sign-in/email",
+            &serde_json::json!({ "email": email, "password": PASSWORD }),
+        );
+        assert_eq!(answer.status, 200, "sign-in for {email}: {}", answer.body);
+        assert!(session.signed_in(), "sign-in lands a session cookie");
+        session
+    }
+
+    /// Sign a NEW account up through the normal flow (requires the registration knob open — see
+    /// [`open_registration`](Self::open_registration)). An account is NOT a seat.
+    pub(crate) fn sign_up(&self, email: &str) -> Session {
+        let session = Session::new(&self.origin);
+        let name = email.split('@').next().unwrap_or("user");
+        let answer = session.post_json(
+            "/api/auth/sign-up/email",
+            &serde_json::json!({ "email": email, "password": PASSWORD, "name": name }),
+        );
+        assert_eq!(answer.status, 200, "sign-up for {email}: {}", answer.body);
+        assert!(session.signed_in(), "sign-up lands a session cookie");
+        session
+    }
+
+    /// A sign-up that must be REFUSED (registration closed, no invitation): returns the answer so
+    /// the caller asserts the one constant, non-enumerating refusal.
+    pub(crate) fn sign_up_expect_refused(&self, email: &str) -> HttpAnswer {
+        let session = Session::new(&self.origin);
+        let name = email.split('@').next().unwrap_or("user");
+        session.post_json(
+            "/api/auth/sign-up/email",
+            &serde_json::json!({ "email": email, "password": PASSWORD, "name": name }),
+        )
+    }
+
+    /// Approve a pending device flow AS the sessioned person: the `/verify` ceremony's approve arm,
+    /// step-up gated (the password re-entry seconds before the mint).
+    pub(crate) fn approve_device(&self, session: &Session, user_code: &str) {
+        let answer = session.post_form(
+            "/verify",
+            &[
+                ("intent", "approve"),
+                ("code", user_code),
+                ("stepup_password", PASSWORD),
+            ],
+        );
+        assert_eq!(answer.status, 200, "the approve lands: {}", answer.body);
+        assert!(
+            answer.body.contains("connected"),
+            "the approve confirmation renders: {}",
+            answer.body
+        );
+    }
+
+    /// Deny a pending device flow (no step-up — denying mints nothing).
+    pub(crate) fn deny_device(&self, session: &Session, user_code: &str) {
+        let answer = session.post_form("/verify", &[("intent", "deny"), ("code", user_code)]);
+        assert_eq!(answer.status, 200, "the deny lands: {}", answer.body);
+        assert!(
+            answer.body.contains("denied"),
+            "the deny confirmation renders: {}",
+            answer.body
+        );
+    }
+
+    /// Begin a CLI enrollment (`topos follow <address>` call 1 — pends with the user code) and
+    /// approve it as `approver`. The caller resumes (`resume_describe` / `resume_apply` /
+    /// `resume_expect_denied` never — this arm approved).
+    pub(crate) fn enroll_begin_and_approve(&self, client: &FollowHarness, approver: &Session) {
+        let pending = client.follow(&self.address()).expect("follow call 1");
+        assert!(!pending.enrolled, "call 1 only begins enrollment");
+        let user_code = pending
+            .pending
+            .expect("the pending arm carries the verification handle")
+            .user_code;
+        self.approve_device(approver, &user_code);
+    }
+
+    /// Mint a PROBE device grant for the harness itself over the real device flow — for wire-level
+    /// lane calls the CLI has no verb for (curation, membership, the uniform-404 probes).
+    pub(crate) fn mint_device(&self, approver: &Session, requested_name: &str) -> DeviceGrant {
+        let start = self.device_post_json(
+            None,
+            "/v1/device/authorize",
+            &serde_json::json!({ "requested_name": requested_name, "workspace": WS_NAME }),
+        );
+        assert_eq!(start.status, 200, "device authorize: {}", start.body);
+        let start: serde_json::Value =
+            serde_json::from_str(&start.body).expect("device authorize JSON");
+        let device_code = start["device_code"]
+            .as_str()
+            .expect("device_code")
+            .to_owned();
+        let user_code = start["user_code"].as_str().expect("user_code").to_owned();
+        self.approve_device(approver, &user_code);
+        let poll = self.device_post_json(
+            None,
+            "/v1/device/token",
+            &serde_json::json!({ "device_code": device_code }),
+        );
+        assert_eq!(poll.status, 200, "device token: {}", poll.body);
+        let poll: serde_json::Value = serde_json::from_str(&poll.body).expect("device token JSON");
+        assert_eq!(
+            poll["status"], "granted",
+            "the approved flow grants: {poll}"
+        );
+        DeviceGrant {
+            credential: poll["credential"].as_str().expect("credential").to_owned(),
+            device_id: poll["device_id"].as_str().expect("device_id").to_owned(),
+        }
+    }
+
+    // ── the raw device lane (Bearer requests against `<origin>/api`) ────────────────────────────
+
+    fn device_request(
+        &self,
+        method: &str,
+        credential: Option<&str>,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> HttpAnswer {
+        let agent = blocking_agent();
+        let url = format!("{}{path}", self.api_base);
+        // Every method rides the with-body builder shape (a bodyless op sends zero bytes) so one
+        // arm type serves GET/PUT/POST/DELETE alike.
+        let mut req = match method {
+            "GET" => agent.get(&url).force_send_body(),
+            "PUT" => agent.put(&url),
+            "POST" => agent.post(&url),
+            "DELETE" => agent.delete(&url).force_send_body(),
+            other => panic!("unsupported method {other}"),
+        }
+        .header("Accept", "application/json");
+        if let Some(cred) = credential {
+            req = req.header("Authorization", format!("Bearer {cred}"));
+        }
+        let resp = match body {
+            Some(value) => {
+                let payload = serde_json::to_vec(value).expect("serialize lane body");
+                req.header("Content-Type", "application/json")
+                    .send(payload.as_slice())
+            }
+            None => req.send(&[][..]),
+        }
+        .expect("device-lane request over loopback");
+        let mut resp = resp;
+        let status = resp.status().as_u16();
+        let mut text = String::new();
+        let _ = resp
+            .body_mut()
+            .as_reader()
+            .take(4 * 1024 * 1024)
+            .read_to_string(&mut text);
+        HttpAnswer { status, body: text }
+    }
+
+    /// GET a device-lane path (e.g. `/v1/workspaces/{ws}/delivery`) under `credential`.
+    pub(crate) fn device_get(&self, credential: &str, path: &str) -> HttpAnswer {
+        self.device_request("GET", Some(credential), path, None)
+    }
+
+    /// PUT a bodyless device-lane row op.
+    pub(crate) fn device_put(&self, credential: &str, path: &str) -> HttpAnswer {
+        self.device_request("PUT", Some(credential), path, None)
+    }
+
+    /// DELETE a device-lane row op (bodyless unless `body`).
+    pub(crate) fn device_delete(
+        &self,
+        credential: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> HttpAnswer {
+        self.device_request("DELETE", Some(credential), path, body)
+    }
+
+    /// POST a JSON body on the device lane (`credential` optional — the device-auth start is bare).
+    pub(crate) fn device_post_json(
+        &self,
+        credential: Option<&str>,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> HttpAnswer {
+        self.device_request("POST", credential, path, Some(body))
+    }
+
+    // ── the named mail-less arrangement helpers (superuser; the OSS surface for these is the
+    //    invitation mailbox rung, which the SMTP-unset suites deliberately run without) ───────────
+
+    /// Flip the registration knob open, with an audit note — the direct-row arrangement twin of the
+    /// settings page's `set-registration` ceremony (which claim_e2e exercises for real).
+    pub(crate) fn open_registration(&self, note: &str) {
+        self.rt
+            .block_on(async {
+                sqlx::query("UPDATE web.workspace SET registration = 'open' WHERE id = $1")
+                    .bind(&self.workspace_id)
+                    .execute(&self.pool)
+                    .await?;
+                sqlx::query(
+                    "INSERT INTO web.audit_event (workspace_id, actor_display, kind, outcome, details)
+                     VALUES ($1, 'e2e-harness', 'policy_registration', 'ok', jsonb_build_object('note', $2::text))",
+                )
+                .bind(&self.workspace_id)
+                .bind(note)
+                .execute(&self.pool)
+                .await
+            })
+            .expect("open the registration knob");
+    }
+
+    /// Seat an existing account (by email) at `role` — the arrangement step the invitation mailbox
+    /// rung performs in a mail-armed deployment (the Playwright mail-sink spec drives that rung for
+    /// real; these suites run SMTP-unset by design). Also marks the address verified.
+    pub(crate) fn seat(&self, email: &str, role: &str) {
+        self.rt
+            .block_on(async {
+                sqlx::query("UPDATE web.\"user\" SET email_verified = true WHERE email = $1")
+                    .bind(email)
+                    .execute(&self.pool)
+                    .await?;
+                sqlx::query(
+                    "INSERT INTO web.seat (workspace_id, user_id, role)
+                     SELECT $1, id, $2 FROM web.\"user\" WHERE email = $3
+                     ON CONFLICT (workspace_id, user_id) DO UPDATE SET role = EXCLUDED.role",
+                )
+                .bind(&self.workspace_id)
+                .bind(role)
+                .bind(email)
+                .execute(&self.pool)
+                .await?;
+                sqlx::query(
+                    "INSERT INTO web.audit_event (workspace_id, actor_display, kind, subject, outcome)
+                     VALUES ($1, 'e2e-harness', 'seat_arranged', $2, 'ok')",
+                )
+                .bind(&self.workspace_id)
+                .bind(email)
+                .execute(&self.pool)
+                .await
+            })
+            .expect("seat the account");
+    }
+
+    /// Sign a fresh member up AND seat them: the one-call arrangement most suites want.
+    pub(crate) fn add_member(&self, email: &str, role: &str) -> Session {
+        self.open_registration("harness arrangement: mint an extra identity");
+        let session = self.sign_up(email);
+        self.seat(email, role);
+        session
+    }
+
+    // ── row-level witnesses ─────────────────────────────────────────────────────────────────────
+
+    /// The `user.id` behind an email (panics if absent — a test-precondition error).
+    pub(crate) fn user_id(&self, email: &str) -> String {
+        self.rt
+            .block_on(
+                sqlx::query_scalar::<_, String>("SELECT id FROM web.\"user\" WHERE email = $1")
+                    .bind(email)
+                    .fetch_one(&self.pool),
+            )
+            .expect("the account row exists")
+    }
+
+    /// One COUNT(*) witness over an arbitrary condition (superuser; read-only).
+    pub(crate) fn count(&self, sql: &str) -> i64 {
+        self.rt
+            .block_on(sqlx::query_scalar::<_, i64>(sql).fetch_one(&self.pool))
+            .expect("count witness")
+    }
+
+    /// A single-row single-column optional TEXT witness.
+    pub(crate) fn text_witness(&self, sql: &str) -> Option<String> {
+        self.rt
+            .block_on(sqlx::query(sql).fetch_optional(&self.pool))
+            .expect("text witness")
+            .map(|row| row.get::<String, _>(0))
+    }
 }
 
 // ── shared bundle expectations ──────────────────────────────────────────────────────────────────────
 
-/// The standard genesis bundle the HERO + follow scenarios publish: a regular doc + an EXECUTABLE script
+/// The standard genesis bundle the distribute scenarios publish: a regular doc + an EXECUTABLE script
 /// (the exec bit must survive end to end).
-pub(crate) fn genesis_files() -> Vec<UploadedFile> {
+pub(crate) fn genesis_files() -> Vec<(&'static str, bool, &'static [u8])> {
     vec![
-        UploadedFile {
-            path: "SKILL.md".to_owned(),
-            mode: FileMode::Regular,
-            bytes: b"# deploy\nDeploy the service.\n".to_vec(),
-        },
-        UploadedFile {
-            path: "run.sh".to_owned(),
-            mode: FileMode::Executable,
-            bytes: b"#!/bin/sh\necho deploying\n".to_vec(),
-        },
+        (
+            "SKILL.md",
+            false,
+            b"# deploy\nDeploy the service.\n" as &[u8],
+        ),
+        ("run.sh", true, b"#!/bin/sh\necho deploying\n" as &[u8]),
     ]
 }
 
-/// The placement-snapshot shape (`(path, mode & 0o777, bytes)`, sorted) a plane bundle must materialize
-/// to: regular files at 0o644, executable files at 0o755.
-pub(crate) fn expected_placement(files: &[UploadedFile]) -> Vec<(String, u32, Vec<u8>)> {
-    let mut out: Vec<(String, u32, Vec<u8>)> = files
-        .iter()
-        .map(|f| {
-            let mode = match f.mode {
-                FileMode::Executable => 0o755,
-                FileMode::Regular => 0o644,
-            };
-            (f.path.clone(), mode, f.bytes.clone())
-        })
-        .collect();
-    out.sort();
-    out
-}
-
-/// The same expectation for a `(path, is_executable, bytes)` literal bundle.
+/// The placement-snapshot shape (`(path, mode & 0o777, bytes)`, sorted) a bundle must materialize to:
+/// regular files at 0o644, executable files at 0o755.
 pub(crate) fn expected(files: &[(&str, bool, &[u8])]) -> Vec<(String, u32, Vec<u8>)> {
     let mut out: Vec<(String, u32, Vec<u8>)> = files
         .iter()

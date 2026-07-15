@@ -1,7 +1,6 @@
 //! Two presentations of one typed outcome: the `--json` envelope (the agent surface) and a thin TTY
 //! renderer. Error messages are summarized so a raw git/io string never reaches a user surface.
 
-use topos_types::bootstrap::VerifiedDomainStatus;
 use topos_types::persisted::ConflictPathKind;
 use topos_types::requests::InvitationData;
 use topos_types::results::{
@@ -121,7 +120,7 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
         ],
         // A denied enrollment redeem (authenticated-but-uninvited): the ask-an-owner guidance rides the
         // message; the action code is the existing REQUEST_ACCESS (no argv — the fix is another human's).
-        ClientError::RedeemDenied { .. } => vec![NextAction {
+        ClientError::EnrollDenied => vec![NextAction {
             code: ActionCode::RequestAccess,
             argv: Vec::new(),
         }],
@@ -732,32 +731,23 @@ pub(crate) fn self_update_tty(o: &crate::ops::SelfUpdateOutcome) -> String {
 }
 
 pub(crate) fn follow_tty(data: &FollowData, resumed: &[String]) -> String {
-    // A pending enrollment: surface the verification URL WITH the workspace + verified-domain provenance
-    // (the relay-phishing guard — the human checks the domain before approving).
+    // A pending enrollment: surface the approval URL with the workspace + server it points at (the
+    // human checks the address before approving).
     if let Some(pending) = &data.pending {
         let workspace = data
             .workspace_display_name
             .clone()
             .unwrap_or_else(|| data.workspace_id.clone());
         let mut s = format!("Enrolling with {workspace}");
-        if let Some(domain) = &data.verified_domain {
-            let status = match data.verified_domain_status {
-                Some(VerifiedDomainStatus::Verified) => "verified",
-                Some(VerifiedDomainStatus::Pending) => "pending verification",
-                _ => "unverified",
-            };
-            s.push_str(&format!(" ({domain}, {status})"));
-        }
         if let Some(plane) = &data.plane_base_url {
-            s.push_str(&format!("\nplane: {plane}"));
+            s.push_str(&format!("\nserver: {plane}"));
         }
-        // The code rides inside the URL (RFC-8628 `verification_uri_complete`) — the human clicks it, never
-        // types it — so only the URL + the anti-phishing fingerprint are surfaced (no separate code line).
+        // The code rides inside the URL (`verification_uri_complete`) — the human clicks it and
+        // cross-checks the SAME code on the approval page before approving.
         s.push_str(&format!(
             "\nOpen this URL to approve, then re-run `topos follow`:\n  {}\n  \
-             fingerprint: {} (confirm it matches the page before approving)",
-            pending.verification_uri_complete,
-            group_fingerprint(&pending.device_fingerprint),
+             code: {} (confirm it matches the page before approving)",
+            pending.verification_uri_complete, pending.user_code,
         ));
         return s;
     }
@@ -1025,42 +1015,22 @@ pub(crate) fn unfollow_applied_tty(a: &crate::ops::UnfollowApplied) -> String {
     s
 }
 
-/// The pending login's TTY (the device-flow wait — same shape as the follow/publish waits).
+/// The pending login's TTY (the device-flow wait — the same shape as the follow wait).
 pub(crate) fn login_pending_tty(p: &crate::ops::AuthLoginPending) -> String {
     format!(
         "Signing in to {}\nOpen this URL to approve, then re-run `topos auth login`:\n  {}\n  \
-         fingerprint: {} (confirm it matches the page before approving)",
-        p.server,
-        p.verification_uri_complete,
-        group_fingerprint(&p.device_fingerprint),
+         code: {} (confirm it matches the page before approving)",
+        p.server, p.verification_uri_complete, p.user_code,
     )
 }
 
-/// The completed login's TTY: the per-workspace minted/blocked report.
+/// The completed login's TTY: the ONE re-minted device credential + the workspace it ran through.
 pub(crate) fn login_done_tty(d: &crate::ops::AuthLoginData) -> String {
-    let mut s = format!("Signed in to {} as {}.", d.server, d.principal);
-    if let Some(old) = &d.replaced_principal {
-        s.push_str(&format!("\nReplaced the previous account {old}."));
-    }
-    if d.memberships.is_empty() {
-        s.push_str("\nNo workspace seats yet — follow a workspace address to join one.");
-    }
-    for m in &d.memberships {
-        if m.minted {
-            s.push_str(&format!(
-                "\n  {} ({}) — credential minted ({})",
-                m.display_name, m.name, m.role
-            ));
-        } else {
-            s.push_str(&format!(
-                "\n  {} ({}) — blocked: {}",
-                m.display_name,
-                m.name,
-                m.blocked.as_deref().unwrap_or("no credential minted")
-            ));
-        }
-    }
-    s
+    format!(
+        "Signed in to {} — this device's credential was re-minted (device {}).\nApproved through \
+         {} ({}); the one credential covers every workspace your seats reach.",
+        d.server, d.device_id, d.workspace_display_name, d.workspace_name,
+    )
 }
 
 /// The pending login's next action — re-invoke `auth login` (re-invoking IS the resume).
@@ -1371,7 +1341,7 @@ pub(crate) fn invite_tty(data: &InvitationData) -> String {
 
 /// The one-line disclosure that a `publish` ADDED the skill to topos first (the auto-add convenience) —
 /// honest plumbing ("it also adopted this skill"), naming the harness it was attributed to when known. It
-/// states only the adoption; the line that FOLLOWS conveys whether the publish then shipped or is pending.
+/// states only the adoption; the line that FOLLOWS conveys what the publish then did.
 fn added_line(added: &AddedNote) -> String {
     match &added.harness_slug {
         Some(slug) => format!("Added '{}' from {slug} to topos.", added.name),
@@ -1434,69 +1404,14 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
         out.push_str(&added_line(added));
         out.push('\n');
     }
-    // A workspace-creating publish discloses what it stood up and who owns it FIRST (hijack visibility:
-    // an owner you don't recognize means someone else approved the sign-in).
-    if let Some(standup) = &data.standup {
-        out.push_str(&format!(
-            "Stood up workspace {} — owner {}.\n",
-            standup.workspace_display_name,
-            standup.owner_principal.as_deref().unwrap_or("(unknown)"),
-        ));
-    }
-    let version = data.version_id.as_deref().map(short).unwrap_or("?");
-    let gen_text = data
-        .current_generation
-        .map(|g| format!("({},{})", g.epoch, g.seq))
-        .unwrap_or_else(|| "(?)".to_owned());
     out.push_str(&format!(
-        "Published {}@{} (digest {}) — current is now {}.",
+        "Published {}@{} (digest {}) — current is now generation {}.",
         data.skill_id,
-        version,
+        short(&data.version_id),
         short(&data.bundle_digest),
-        gen_text,
+        data.current_generation,
     ));
-    // When the plane disclosed the workspace address (a genesis standup), surface the paste-able share line.
-    if let Some(line) = &data.share_line {
-        out.push_str(&format!(
-            "\nShare this skill: {line}\nTeammates just paste that address to their agent and ask it \
-             to follow — the address walks the agent through install, sign-in, and landing the skill.",
-        ));
-    }
     out
-}
-
-/// The PENDING standup publish: the human opens the sign-in URL and approves; the agent then re-runs the
-/// SAME publish command (nothing was published yet — honest about that).
-pub(crate) fn publish_pending_tty(data: &PublishData, resume_argv: &[String]) -> String {
-    let Some(pending) = &data.pending else {
-        // Unreachable by construction (the Pending outcome always carries the block) — stay honest anyway.
-        return "Publish is pending a workspace sign-in.".to_owned();
-    };
-    // If this invocation ADDED the skill first (an un-enrolled `publish <untracked>`), disclose it before
-    // the sign-in prompt — the skill is now tracked locally even while the workspace standup is pending.
-    let prefix = match &data.added {
-        Some(added) => format!("{}\n", added_line(added)),
-        None => String::new(),
-    };
-    // The code rides inside the URL (RFC-8628 `verification_uri_complete`) — clicked, never typed — so only
-    // the URL + the anti-phishing fingerprint are surfaced (no separate code line).
-    format!(
-        "{prefix}No workspace yet — publishing this first skill creates one.\nOpen this URL, sign in, and \
-         approve (you become the workspace owner):\n  {}\n  fingerprint: {} (confirm it \
-         matches the page before approving)\nNothing is published yet; then re-run:\n  {}",
-        pending.verification_uri_complete,
-        group_fingerprint(&pending.device_fingerprint),
-        resume_argv.join(" "),
-    )
-}
-
-/// The pending publish's one next action: re-invoke THE SAME publish command (`ENROLL_RESUME` — the
-/// resume IS the original command; the optional `@<digest>` pin re-derives from it on every invocation).
-pub(crate) fn publish_pending_next_actions(resume_argv: Vec<String>) -> Vec<NextAction> {
-    vec![NextAction {
-        code: ActionCode::from("ENROLL_RESUME".to_owned()),
-        argv: resume_argv,
-    }]
 }
 
 pub(crate) fn propose_tty(data: &ProposeData) -> String {
@@ -1516,13 +1431,12 @@ pub(crate) fn propose_tty(data: &ProposeData) -> String {
 
 pub(crate) fn revert_tty(data: &RevertData) -> String {
     format!(
-        "Reverted {} to {} as forward commit {} — current is now ({},{}). Nothing was deleted; move \
-         current forward again to redo.",
+        "Reverted {} to {} as forward commit {} — current is now generation {}. Nothing was \
+         deleted; move current forward again to redo.",
         data.skill_id,
         short(&data.reverted_to),
         short(&data.new_version_id),
-        data.current_generation.epoch,
-        data.current_generation.seq,
+        data.current_generation,
     )
 }
 
@@ -1605,7 +1519,7 @@ pub(crate) fn review_tty(data: &ReviewData) -> String {
         ReviewDecision::Approve => {
             let moved_to = data
                 .current_generation
-                .map(|g| format!("({},{})", g.epoch, g.seq))
+                .map(|g| format!("generation {g}"))
                 .unwrap_or_else(|| "the new version".to_owned());
             format!(
                 "Approved {} — current moved to {moved_to}. Every follower picks it up on their next update.",
@@ -1736,10 +1650,7 @@ fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
         // Handled by the caller's compact summary.
         PullAction::UpToDate => (String::from("up to date"), Vec::new()),
         PullAction::FastForwarded => (
-            format!(
-                "fast-forwarded — now at ({},{})",
-                s.applied.epoch, s.applied.seq
-            ),
+            format!("fast-forwarded — now at generation {}", s.applied),
             Vec::new(),
         ),
         PullAction::Offered => {
@@ -1861,21 +1772,8 @@ fn short(hex: &str) -> &str {
     hex.get(..12).unwrap_or(hex)
 }
 
-/// Group a device fingerprint into space-separated 4-char chunks for eyeball comparison against the
-/// verification page (e.g. `e4aaf52f5c391ce9` → `e4aa f52f 5c39 1ce9`). `pub(crate)` — the bin's
-/// interactive blocking `follow` prints the same grouped form to stderr while it polls.
-pub(crate) fn group_fingerprint(fp: &str) -> String {
-    fp.chars()
-        .collect::<Vec<_>>()
-        .chunks(4)
-        .map(|c| c.iter().collect::<String>())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 #[cfg(test)]
 mod tests {
-    use topos_types::Generation;
     use topos_types::persisted::ConflictPathKind;
     use topos_types::results::{
         Conflict, ConflictPathReport, ListData, LogData, MergeReport, Offer, PullAction, PullData,
@@ -1884,18 +1782,14 @@ mod tests {
 
     use crate::ops::{FollowNote, ListEnrollment, ListOutcome};
 
-    use super::{follow_tty, group_fingerprint, list_tty, log_tty, pull_tty};
-
-    fn g(epoch: u64, seq: u64) -> Generation {
-        Generation { epoch, seq }
-    }
+    use super::{follow_tty, list_tty, log_tty, pull_tty};
 
     fn row(name: &str, action: PullAction) -> PullSkill {
         PullSkill {
             skill: name.to_owned(),
             workspace_id: None,
-            observed: g(1, 2),
-            applied: g(1, 2),
+            observed: 2,
+            applied: 2,
             action,
             offer: None,
             conflict: None,
@@ -1968,7 +1862,10 @@ mod tests {
             "{out}"
         );
         // Fast-forwarded names the new generation.
-        assert!(out.contains("fast-forwarded — now at (1,2)"), "{out}");
+        assert!(
+            out.contains("fast-forwarded — now at generation 2"),
+            "{out}"
+        );
         // Diverged: both the merge command and the disclosed escape.
         assert!(out.contains("`topos update deploy`"), "{out}");
         assert!(
@@ -2326,44 +2223,30 @@ mod tests {
     }
 
     #[test]
-    fn group_fingerprint_chunks_hex_into_fours() {
-        assert_eq!(group_fingerprint("e4aaf52f5c391ce9"), "e4aa f52f 5c39 1ce9");
-        assert_eq!(group_fingerprint(""), "");
-        // A non-multiple-of-four length keeps the trailing short chunk (never panics).
-        assert_eq!(group_fingerprint("abcdef"), "abcd ef");
-    }
-
-    #[test]
-    fn follow_tty_pending_discloses_the_grouped_fingerprint() {
+    fn follow_tty_pending_discloses_the_url_and_the_cross_check_code() {
         use topos_types::results::{EnrollmentPending, FollowData};
 
         let data = FollowData {
             workspace_id: "w_acme".to_owned(),
             enrolled: false,
             skills: Vec::new(),
-            deployment_mode: None,
             workspace_display_name: Some("Acme Inc".to_owned()),
-            verified_domain: None,
-            verified_domain_status: None,
             plane_base_url: Some("https://api.topos.sh".to_owned()),
             pending: Some(EnrollmentPending {
-                verification_uri_complete: "https://topos.sh/verify/WXYZ-1234".to_owned(),
+                verification_uri_complete: "https://topos.sh/devices?code=WXYZ-1234".to_owned(),
                 user_code: "WXYZ-1234".to_owned(),
-                device_fingerprint: "e4aaf52f5c391ce9".to_owned(),
                 expires_at: None,
+                interval_secs: Some(5),
             }),
             currency: None,
         };
         let text = follow_tty(&data, &[]);
-        // The fingerprint prints GROUPED in fours for eyeball comparison against the verification page.
-        assert!(text.contains("e4aa f52f 5c39 1ce9"), "{text}");
-        assert!(text.contains("confirm it matches the page"), "{text}");
-        // The clickable URL is surfaced; the bare user_code is NOT shown on its own line (it rides inside
-        // the URL — clicked, never typed).
-        assert!(text.contains("https://topos.sh/verify/WXYZ-1234"), "{text}");
+        // The clickable URL is surfaced, plus the SHORT code to cross-check against the approval page.
         assert!(
-            !text.contains("\n  code:"),
-            "code line should be gone: {text}"
+            text.contains("https://topos.sh/devices?code=WXYZ-1234"),
+            "{text}"
         );
+        assert!(text.contains("code: WXYZ-1234"), "{text}");
+        assert!(text.contains("confirm it matches the page"), "{text}");
     }
 }

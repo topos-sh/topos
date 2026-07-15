@@ -19,7 +19,15 @@ import { TrustPanel } from "@/components/review/TrustPanel";
 import { Card } from "@/components/ui";
 import { notFound, requireMember, requireReviewer } from "@/lib/auth/guards.server";
 import {
+  inFinalTx,
+  lockOpenProposalInTx,
+  resolveProposalInTx,
+} from "@/lib/db/queries.custody.server";
+import { workspacePolicyOf } from "@/lib/db/queries.policy.server";
+import {
+  bundleById,
   insertProposalComment,
+  proposalByCandidate,
   proposalCommentsFor,
   proposalExists,
   skillIndexRow,
@@ -28,16 +36,13 @@ import { loadDiffContents } from "@/lib/diff/load.server";
 import { type DiffFileMode, type FileDiffModel, MAX_HIGHLIGHT_BYTES } from "@/lib/diff/model";
 import { computeDiffPlan, type PlanFile } from "@/lib/diff/plan";
 import { diffChromeAssets, renderFileDiffHTML } from "@/lib/diff/render/pierre.server";
-import { vaultFetch } from "@/lib/plane/client.server";
-import { REVIEW_DENIED_REASONS } from "@/lib/plane/errors";
+import { movePointer, purgeVersionBytes } from "@/lib/plane/custody.server";
 import {
-  sessionBundleCapped,
-  sessionCurrent,
-  sessionProposalDetail,
-  sessionVersionMeta,
-  sessionVersionMetaFresh,
+  custodyCurrent,
+  custodyObjectCapped,
+  custodyVersionMeta,
+  custodyVersionMetaFresh,
 } from "@/lib/plane/reads.server";
-import type { ReviewDecisionOutcome } from "@/lib/plane/wire";
 import { allowCommentWrite } from "@/lib/rate-limit.server";
 import { deriveDiffAvailability, deriveProposalPageState } from "@/lib/review/state";
 
@@ -62,13 +67,6 @@ export function meta({ params }: { params: { skill?: string; versionId?: string 
 
 // ── The loader ────────────────────────────────────────────────────────────────────────────────
 
-/** One resolution row the terminal panel renders (older rows may carry partial facts). */
-interface ResolutionFacts {
-  resolved_by: string;
-  reason: string | null;
-  resolved_at: string | null;
-}
-
 /** One rendered diff card: the lean model (raw file text stripped) plus its pre-sanitized HTML. */
 interface RenderedDiffFile {
   model: FileDiffModel;
@@ -78,22 +76,21 @@ interface RenderedDiffFile {
 }
 
 /**
- * The rendered review: what would change if this proposal became the team's current version — and,
- * for an owner|reviewer seat, the decision itself. Every vault read carries the actor's verified
- * email for the internal lane (no token is opened anywhere) and keys on the immutable `skillId`;
- * the decision is a vault-authorized write (seat, four-eyes, the bound generation), so this page
- * stays a member page — read-only is a legitimate state, not a miss. The page ALWAYS diffs against
- * the LIVE current pointer and mints the approve binding from the same render, so a conflict's
- * re-show costs nothing.
+ * The rendered review: what would change if this proposal became the team's current version —
+ * and, for an owner|reviewer seat, the decision itself. The proposal is the app's OWN row
+ * (proposalByCandidate — a never-proposed candidate is the uniform 404); the candidate's bytes
+ * are the vault's, read on the internal custody lane keyed by the immutable `skillId`. The
+ * decision is app-authorized orchestration (seat + four-eyes here, the CAS in the vault), so
+ * this page stays a member page — read-only is a legitimate state, not a miss.
  *
- * Ordering is load-bearing: the proposal DETAIL + the live pointer come first and derive the page
- * state; only then is the candidate's meta consulted. A never-proposed candidate is the uniform 404
- * (the version itself stays viewable under `…/versions/[versionId]`) — but once a proposal row
- * exists, NO later read failure is fatal: the vault retains a candidate's bytes only while
- * trunk-reachable or an open proposal on the live base, so a rejected or staled candidate's meta
- * 404 is normal reclamation and the page renders the full state surface (banner, resolution,
- * comments) with an honest diff-less card in place of the files. The async diff render runs HERE so
- * every review component stays a plain synchronous component.
+ * The candidate's meta read BYPASSES the in-process LRU (`custodyVersionMetaFresh`): the vault
+ * retains a candidate's bytes only while trunk-reachable or under an open proposal, so
+ * readability itself is the fact being asked — a rejected candidate's 404 is normal
+ * reclamation, and the page renders the full record (banner, resolution, comments) with an
+ * honest diff-less card in place of the files. The page ALWAYS diffs against the LIVE current
+ * pointer (the catalog row's DB mirror) and binds the approve to the same render, so a
+ * conflict's re-show costs nothing. The async diff render runs HERE so every review component
+ * stays a plain synchronous component.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const ws = params.ws as string;
@@ -104,69 +101,52 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     notFound();
   }
 
-  // The existence probe is the DB catalog: an unknown skill NAME is the uniform 404. (A known name
-  // with no current pointer still resolves — the diff derivation below handles a bare candidate.)
+  // The existence probe is the DB catalog: an unknown skill NAME is the uniform 404.
   const row = await skillIndexRow(actor, skill);
   if (row === undefined) {
     notFound();
   }
   const skillId = row.skillId;
 
-  const detailPromise = sessionProposalDetail(actor.email, ws, skillId, versionId);
-  const candidateMetaPromise = sessionVersionMeta(actor.email, ws, skillId, versionId);
-  const detail = await detailPromise;
-  if (!detail.ok && detail.kind === "not_found") {
+  const proposal = await proposalByCandidate(actor, skillId, versionId);
+  if (proposal === undefined) {
     // No proposal row for this candidate — never proposed here, or not this workspace's to see.
     notFound();
   }
-  const current = await sessionCurrent(actor.email, ws, skillId);
-  if (!current.ok) {
-    return {
-      view: "empty" as const,
-      heading: "The server couldn't be read",
-      message: `Fetching this skill's current pointer failed: ${current.message}. Nothing below is known — reload to retry.`,
-    };
-  }
-  const currentId = current.data.record.version_id;
-  const currentGeneration = current.data.record.generation;
-  const currentMetaPromise = sessionVersionMeta(actor.email, ws, skillId, currentId);
 
-  // A degraded (non-404) detail read still renders the page — the state is honestly unknown.
-  const state = detail.ok
-    ? deriveProposalPageState(
-        {
-          version_id: detail.data.version_id,
-          status: detail.data.status,
-          base_generation: { epoch: detail.data.base_epoch, seq: detail.data.base_seq },
-        },
-        { versionId: currentId, generation: currentGeneration },
-      )
-    : "unknown";
+  // The live current pointer, from the same catalog read (the plane mirror the row joined).
+  const liveCurrentId = row.versionId;
+  const state = deriveProposalPageState(proposal.status, versionId, liveCurrentId);
+
+  // Four-eyes is display-computed here and RE-CHECKED in the action: the proposer may not
+  // approve their own proposal when the bundle's EFFECTIVE protection is 'reviewed'.
+  const [bundleRow, policy] = await Promise.all([
+    bundleById(actor, skillId),
+    workspacePolicyOf(actor),
+  ]);
+  const effectiveProtection = bundleRow?.protection ?? policy.protectionDefault;
   const isSelfProposal =
-    detail.ok && detail.data.proposer === actor.email && detail.data.review_required;
+    proposal.proposedBy !== null &&
+    proposal.proposedBy === actor.userId &&
+    effectiveProtection === "reviewed";
   const canDecide = actor.role !== "member";
 
-  // A stale or rejected candidate is one the vault RECLAIMS — readability is the fact being asked,
-  // so those states bypass the in-process meta LRU (a warm cache must not dress a reclaimed
-  // candidate up as a readable diff). Every other state uses the prefetch above.
-  const candidateMeta =
-    state === "stale" || state === "rejected"
-      ? await sessionVersionMetaFresh(actor.email, ws, skillId, versionId)
-      : await candidateMetaPromise;
-
-  // Shared surface — the header facts, the terminal resolution, the comment thread, and the CLI /
-  // member-note flags — computed the same way whether or not the diff renders.
+  const candidateMeta = await custodyVersionMetaFresh(ws, skillId, versionId);
   const { comments, truncated } = await proposalCommentsFor(actor, skillId, versionId);
+
   const resolvedState =
-    detail.ok && (state === "accepted-live" || state === "superseded" || state === "rejected")
+    state === "accepted-live" ||
+    state === "superseded" ||
+    state === "rejected" ||
+    state === "closed"
       ? state
       : null;
-  const resolutionFacts: ResolutionFacts | null =
-    detail.ok && detail.data.resolved_by !== null
+  const resolutionFacts =
+    proposal.resolvedAt !== null
       ? {
-          resolved_by: detail.data.resolved_by,
-          reason: detail.data.resolved_reason,
-          resolved_at: detail.data.resolved_at,
+          resolved_by: proposal.resolvedByDisplay ?? "a former member",
+          reason: proposal.resolvedReason,
+          resolved_at: proposal.resolvedAt.toISOString(),
         }
       : null;
 
@@ -178,17 +158,16 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     state,
     resolution: { state: resolvedState, facts: resolutionFacts },
     comments: { commentId: crypto.randomUUID(), comments, truncated },
-    showCliDetails: state === "pending" || state === "stale",
-    showUnknownHandoff: state === "unknown",
+    showCliDetails: state === "pending",
     memberNote: state === "pending" && !canDecide,
-    createdAt: detail.ok ? detail.data.created_at : undefined,
-    proposer: detail.ok ? detail.data.proposer : undefined,
+    createdAt: proposal.createdAt.toISOString(),
+    proposer: proposal.proposedByDisplay ?? undefined,
   };
 
   if (!candidateMeta.ok) {
-    // The proposal EXISTS (the detail read said so) but its candidate bytes don't — the full state
-    // surface renders with a diff-less card. No decision forms here, deliberately: the approve
-    // binding IS the rendered diff, and there is none.
+    // The proposal EXISTS (the row said so) but its candidate bytes don't — the full record
+    // renders with a diff-less card. No decision forms here, deliberately: the approve binding
+    // IS the rendered diff, and there is none.
     const availability = deriveDiffAvailability(candidateMeta);
     return {
       ...shared,
@@ -207,13 +186,19 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     };
   }
 
-  const currentMeta = await currentMetaPromise;
-  if (!currentMeta.ok) {
-    return {
-      view: "empty" as const,
-      heading: "The current version couldn't be read",
-      message: `The candidate exists, but the team's current version couldn't be fetched to diff against (${currentMeta.message}). Reload to retry.`,
-    };
+  // The base of the diff: the live current version's files — or the empty tree when nothing is
+  // published (a proposal can outlive a withdrawn pointer; everything reads as added).
+  let currentFiles: readonly { path: string; mode: string; object_id: string }[] = [];
+  if (liveCurrentId !== null) {
+    const currentMeta = await custodyVersionMeta(ws, skillId, liveCurrentId);
+    if (!currentMeta.ok) {
+      return {
+        view: "empty" as const,
+        heading: "The current version couldn't be read",
+        message: `The candidate exists, but the team's current version couldn't be fetched to diff against (${currentMeta.message}). Reload to retry.`,
+      };
+    }
+    currentFiles = currentMeta.data.files;
   }
 
   // The wire carries `mode` as a plain string; the plan needs the two git regular-file modes. The
@@ -222,20 +207,17 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     files: readonly { path: string; mode: string; object_id: string }[],
   ): PlanFile[] =>
     files.map((f) => ({ path: f.path, mode: f.mode as DiffFileMode, object_id: f.object_id }));
-  const plan = computeDiffPlan(
-    toPlanFiles(currentMeta.data.files),
-    toPlanFiles(candidateMeta.data.files),
-  );
+  const plan = computeDiffPlan(toPlanFiles(currentFiles), toPlanFiles(candidateMeta.data.files));
   const changed = plan.filter((e) => e.kind !== "unchanged");
   const unchangedCount = plan.length - changed.length;
   // Blob fetches are budget-capped (file count + page bytes); the blob fetcher closes over the
-  // actor's email + skillId so the loader names no read scope itself. The chrome assets are
+  // workspace + skillId so the loader names no read scope itself. The chrome assets are
   // independent. Each text card's unified diff is pre-rendered + sanitized HERE, so DiffFileCard
   // renders it as a plain component; the raw file text is then stripped from the client payload.
   const [models, chrome] = await Promise.all([
     loadDiffContents(plan, {
       getBundleCapped: (objectId: string, maxBytes: number) =>
-        sessionBundleCapped(actor.email, ws, skillId, objectId, maxBytes),
+        custodyObjectCapped(ws, skillId, objectId, maxBytes),
     }),
     diffChromeAssets(),
   ]);
@@ -261,15 +243,12 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     }),
   );
 
+  // The decision binds THIS render's current generation: the approve action re-reads the live
+  // pointer and refuses when it no longer matches what the diff above was computed against.
   const decision =
-    state === "pending" && canDecide
+    state === "pending" && canDecide && row.generation !== null
       ? {
-          approveRequestId: crypto.randomUUID(),
-          rejectRequestId: crypto.randomUUID(),
-          expectedEpoch: String(currentGeneration.epoch),
-          expectedSeq: String(currentGeneration.seq),
-          baseEpoch: detail.ok ? String(detail.data.base_epoch) : "0",
-          baseSeq: detail.ok ? String(detail.data.base_seq) : "0",
+          expectedGeneration: String(row.generation),
           withholdApprove: isSelfProposal,
         }
       : null;
@@ -300,10 +279,10 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 // ── The action (intent-dispatched) ──────────────────────────────────────────────────────────────
 
 /**
- * One typed outcome per honest render: `conflict` = current moved (the revalidated page shows the
- * fresh diff); `self_approve` = four-eyes; `not_open` = the proposal is no longer open under this
- * base; `denied` = the seat gate or an unrecognized static reason; `reason_required` = a reject
- * without a usable reason. `submittedReason` echoes on a non-success so the dialog keeps the text.
+ * One typed outcome per honest render: `conflict` = current moved (the revalidated page shows
+ * the fresh diff); `self_approve` = four-eyes; `not_open` = the proposal is no longer open;
+ * `denied` = a typed refusal with its copy; `reason_required` = a reject without a usable
+ * reason. `submittedReason` echoes on a non-success so the dialog keeps the text.
  */
 export interface ReviewFormState {
   status:
@@ -329,50 +308,14 @@ export interface CommentFormState {
   submittedBody?: string;
 }
 
-/** Map a typed denied reason to its state (unknown reasons degrade to generic denied). */
-function stateForDeniedReason(reason: string | undefined): ReviewFormState["status"] {
-  if (reason === REVIEW_DENIED_REASONS.fourEyes) {
-    return "self_approve";
-  }
-  if (
-    reason === REVIEW_DENIED_REASONS.notOpen ||
-    reason === REVIEW_DENIED_REASONS.alreadyAccepted
-  ) {
-    return "not_open";
-  }
-  return "denied";
-}
-
-/** POST an approve/reject decision on the internal lane (200-for-all-outcomes) and parse the body. */
-async function postDecision(
-  ws: string,
-  skillId: string,
-  versionId: string,
-  actingEmail: string,
-  verb: "approve" | "reject",
-  body: Record<string, unknown>,
-): Promise<ReviewDecisionOutcome | null> {
-  try {
-    const res = await vaultFetch({
-      method: "POST",
-      template: `/internal/v1/workspaces/{ws}/skills/{skill}/proposals/{version_id}/${verb}`,
-      params: { ws, skill: skillId, version_id: versionId },
-      actingEmail,
-      body,
-    });
-    return res.ok ? ((await res.json()) as ReviewDecisionOutcome) : null;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * The review decisions + the comment write, dispatched on the hidden `intent`. Every branch
- * RE-GUARDS itself (a page-level check never extends to its actions): approve/reject/withdraw need
- * a confirmed owner|reviewer seat (withdraw is the proposer's own reject — the same write, the same
- * gate: four-eyes withholds APPROVE alone), comment needs any confirmed member. The vault's
- * in-transaction gate re-checks all of it; the web only relays. React Router revalidates the loader
- * after the action, so the fresh diff / thread simply re-renders — no explicit path invalidation.
+ * RE-GUARDS itself (a page-level check never extends to its actions): approve/reject/withdraw
+ * need an owner|reviewer seat (withdraw is the proposer retracting their own — the same
+ * resolve, verdict `withdrawn`), comment needs any member. The ORCHESTRATION is inline and
+ * app-authorized: the seat gate and four-eyes run here against the app's own rows; the vault
+ * only CAS-moves the pointer. React Router revalidates the loader after the action, so the
+ * fresh diff / thread simply re-renders.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
   const ws = params.ws as string;
@@ -388,11 +331,19 @@ export async function action({ request, params }: ActionFunctionArgs) {
     return approveAction(request, ws, skill, versionId, form);
   }
   if (intent === "reject" || intent === "withdraw") {
-    return rejectAction(request, ws, skill, versionId, form);
+    return rejectAction(request, ws, skill, versionId, form, intent);
   }
   return data<ReviewFormState>({ status: "error" }, { status: 400 });
 }
 
+/**
+ * APPROVE — the promote: gate, then CAS, then the row. The four-eyes check runs against the
+ * bundle's EFFECTIVE protection (its pin, else the workspace default); the CAS binds the
+ * generation the REVIEWER's render diffed against — a fresh pointer read that disagrees means
+ * the diff they approved is stale, and the honest answer is a conflict, never a silent approve
+ * of something unseen. On a landed move the proposal row resolves (FOR UPDATE-locked) in one
+ * final transaction; a concurrently-resolved row changes nothing the pointer already says.
+ */
 async function approveAction(
   request: Request,
   ws: string,
@@ -401,93 +352,123 @@ async function approveAction(
   form: FormData,
 ) {
   const actor = await requireReviewer(request, ws);
-  const requestId = String(form.get("request_id") ?? "").trim();
-  const expectedEpoch = parseGeneration(String(form.get("expected_epoch") ?? "").trim());
-  const expectedSeq = parseGeneration(String(form.get("expected_seq") ?? "").trim());
-  if (
-    !UUID_RE.test(requestId) ||
-    !VERSION_ID.test(versionId) ||
-    expectedEpoch === undefined ||
-    expectedSeq === undefined
-  ) {
+  const expected = parseGeneration(String(form.get("expected_generation") ?? "").trim());
+  if (!VERSION_ID.test(versionId) || expected === undefined) {
     return data<ReviewFormState>({ status: "error" });
   }
   const row = await skillIndexRow(actor, skill);
   if (row === undefined) {
     return data<ReviewFormState>({ status: "error" });
   }
-  const outcome = await postDecision(ws, row.skillId, versionId, actor.email, "approve", {
-    request_id: requestId,
-    expected_epoch: expectedEpoch,
-    expected_seq: expectedSeq,
-  });
-  if (outcome === null) {
+  const proposal = await proposalByCandidate(actor, row.skillId, versionId);
+  if (proposal === undefined || proposal.status !== "open") {
+    return data<ReviewFormState>({ status: "not_open" });
+  }
+  const [bundleRow, policy] = await Promise.all([
+    bundleById(actor, row.skillId),
+    workspacePolicyOf(actor),
+  ]);
+  const effectiveProtection = bundleRow?.protection ?? policy.protectionDefault;
+  if (effectiveProtection === "reviewed" && proposal.proposedBy === actor.userId) {
+    return data<ReviewFormState>({ status: "self_approve" });
+  }
+
+  const current = await custodyCurrent(ws, row.skillId);
+  if (!current.ok) {
     return data<ReviewFormState>({ status: "error" });
   }
-  if (outcome.outcome === "approved") {
-    return data<ReviewFormState>({ status: "approved" });
-  }
-  if (outcome.outcome === "conflict") {
+  if (current.data.generation !== expected) {
+    // The pointer moved since the reviewer's render — their diff no longer shows the change.
     return data<ReviewFormState>({ status: "conflict" });
   }
-  if (outcome.outcome === "denied") {
-    return data<ReviewFormState>({ status: stateForDeniedReason(outcome.reason) });
+  const moved = await movePointer(ws, row.skillId, {
+    version_id: versionId,
+    expected_generation: current.data.generation,
+    attribution: actor.display,
+  });
+  if (moved.kind === "fault" || moved.kind === "rejected") {
+    return data<ReviewFormState>({ status: "error" });
   }
-  return data<ReviewFormState>({ status: "error" });
+  if (moved.kind === "conflict") {
+    return data<ReviewFormState>({ status: "conflict" });
+  }
+  if (moved.kind !== "ok") {
+    // not_found / target_purged — the candidate's bytes are gone from custody (a purge or
+    // reclamation raced the decision); nothing moved.
+    return data<ReviewFormState>({ status: "denied" });
+  }
+  await inFinalTx(async (tx) => {
+    const locked = await lockOpenProposalInTx(tx, ws, row.skillId, versionId);
+    if (locked !== undefined) {
+      await resolveProposalInTx(
+        tx,
+        { userId: actor.userId, display: actor.display, workspaceId: ws },
+        locked,
+        "approved",
+        null,
+      );
+    }
+  });
+  return data<ReviewFormState>({ status: "approved" });
 }
 
+/**
+ * REJECT / WITHDRAW — a status flip, no pointer move: lock the open row, resolve it with the
+ * verdict, notify the author (a reject only — withdrawing is the author telling themselves).
+ * Withdraw is the PROPOSER's own retraction and refuses anyone else, four-eyes or not. A
+ * rejected candidate's bytes are reclaimed best-effort after the row commits — the record (the
+ * row + the notice) already stands; a custody fault changes nothing the reviewer decided.
+ */
 async function rejectAction(
   request: Request,
   ws: string,
   skill: string,
   versionId: string,
   form: FormData,
+  intent: "reject" | "withdraw",
 ) {
   const actor = await requireReviewer(request, ws);
-  const requestId = String(form.get("request_id") ?? "").trim();
-  const expectedEpoch = parseGeneration(String(form.get("expected_epoch") ?? "").trim());
-  const expectedSeq = parseGeneration(String(form.get("expected_seq") ?? "").trim());
   const reason = String(form.get("reason") ?? "").trim();
-  if (
-    !UUID_RE.test(requestId) ||
-    !VERSION_ID.test(versionId) ||
-    expectedEpoch === undefined ||
-    expectedSeq === undefined
-  ) {
+  if (!VERSION_ID.test(versionId)) {
     return data<ReviewFormState>({ status: "error", submittedReason: reason });
   }
   if (reason.length === 0 || reason.length > MAX_REASON_CHARS) {
-    // The first belt — the vault's edge and the OSS op hold the same 1..=2000 line.
     return data<ReviewFormState>({ status: "reason_required", submittedReason: reason });
   }
   const row = await skillIndexRow(actor, skill);
   if (row === undefined) {
     return data<ReviewFormState>({ status: "error", submittedReason: reason });
   }
-  const outcome = await postDecision(ws, row.skillId, versionId, actor.email, "reject", {
-    request_id: requestId,
-    expected_epoch: expectedEpoch,
-    expected_seq: expectedSeq,
-    reason,
+
+  const outcome = await inFinalTx(async (tx) => {
+    const locked = await lockOpenProposalInTx(tx, ws, row.skillId, versionId);
+    if (locked === undefined) {
+      return "not_open" as const;
+    }
+    if (intent === "withdraw" && locked.proposedBy !== actor.userId) {
+      return "denied" as const;
+    }
+    await resolveProposalInTx(
+      tx,
+      { userId: actor.userId, display: actor.display, workspaceId: ws },
+      locked,
+      intent === "withdraw" ? "withdrawn" : "rejected",
+      reason,
+    );
+    return "resolved" as const;
   });
-  if (outcome === null) {
-    return data<ReviewFormState>({ status: "error", submittedReason: reason });
-  }
-  if (outcome.outcome === "rejected") {
-    return data<ReviewFormState>({ status: "rejected", submittedReason: reason });
-  }
-  if (outcome.outcome === "denied") {
-    return data<ReviewFormState>({
-      status: stateForDeniedReason(outcome.reason),
-      submittedReason: reason,
-    });
-  }
-  if (outcome.outcome === "conflict") {
-    // A reject binds the proposal's base, so a moved current surfaces as no-longer-open, not a
-    // pointer conflict — treat it as the same honest not-open state.
+  if (outcome === "not_open") {
     return data<ReviewFormState>({ status: "not_open", submittedReason: reason });
   }
-  return data<ReviewFormState>({ status: "error", submittedReason: reason });
+  if (outcome === "denied") {
+    return data<ReviewFormState>({ status: "denied", submittedReason: reason });
+  }
+  if (intent === "reject") {
+    // Best-effort byte reclaim of the rejected candidate — the record (the row + the notice)
+    // already stands; a custody refusal or fault changes nothing the reviewer decided.
+    void purgeVersionBytes(ws, row.skillId, versionId, actor.display);
+  }
+  return data<ReviewFormState>({ status: "rejected", submittedReason: reason });
 }
 
 async function commentAction(
@@ -509,9 +490,9 @@ async function commentAction(
   if (body.length > MAX_COMMENT_CHARS) {
     return data<CommentFormState>({ status: "too_long", submittedBody: body });
   }
-  // The bucket runs AFTER the shape belts (a mangled form burns no token) and BEFORE any DB write,
-  // keyed by the guard-minted actor's email.
-  if (!allowCommentWrite(actor.email)) {
+  // The bucket runs AFTER the shape belts (a mangled form burns no token) and BEFORE any DB
+  // write, keyed by the guard-minted actor's user id.
+  if (!allowCommentWrite(actor.userId)) {
     return data<CommentFormState>({ status: "slow_down", submittedBody: body });
   }
   const row = await skillIndexRow(actor, skill);
@@ -526,7 +507,7 @@ async function commentAction(
   try {
     const outcome = await insertProposalComment(actor, {
       id: id.toLowerCase(),
-      skillId: row.skillId,
+      bundleId: row.skillId,
       versionId,
       body,
     });
@@ -572,7 +553,6 @@ export default function ProposalReviewPage() {
     resolution,
     comments,
     showCliDetails,
-    showUnknownHandoff,
     memberNote,
     header,
     body,
@@ -588,12 +568,9 @@ export default function ProposalReviewPage() {
         Prefer the CLI?
       </summary>
       <div className="mt-2">
-        <ApproveHandoff skill={skill} versionId={versionId} status={state as "pending" | "stale"} />
+        <ApproveHandoff skill={skill} versionId={versionId} />
       </div>
     </details>
-  ) : null;
-  const unknownHandoff = showUnknownHandoff ? (
-    <ApproveHandoff skill={skill} versionId={versionId} status="unknown" />
   ) : null;
   const commentsSection = (
     <CommentsSection
@@ -626,7 +603,6 @@ export default function ProposalReviewPage() {
         {resolutionPanel}
         {memberNote ? <MemberReadOnlyNote /> : null}
         {cliDetails}
-        {unknownHandoff}
         {commentsSection}
       </Shell>
     );
@@ -679,15 +655,8 @@ export default function ProposalReviewPage() {
       {state === "pending" ? (
         body.decision !== null ? (
           <ReviewDecisionPanel
-            ws={ws}
-            skill={skill}
             versionId={versionId}
-            approveRequestId={body.decision.approveRequestId}
-            rejectRequestId={body.decision.rejectRequestId}
-            expectedEpoch={body.decision.expectedEpoch}
-            expectedSeq={body.decision.expectedSeq}
-            baseEpoch={body.decision.baseEpoch}
-            baseSeq={body.decision.baseSeq}
+            expectedGeneration={body.decision.expectedGeneration}
             withholdApprove={body.decision.withholdApprove}
           />
         ) : (
@@ -696,7 +665,6 @@ export default function ProposalReviewPage() {
       ) : null}
       {resolutionPanel}
       {cliDetails}
-      {unknownHandoff}
       {commentsSection}
     </Shell>
   );
@@ -704,9 +672,9 @@ export default function ProposalReviewPage() {
 
 /**
  * Honest failure state for the review route (RR renders it for any error thrown by the loader,
- * action, or render). A route-error RESPONSE is the uniform miss — stated plainly, no access claim.
- * Anything else is a build fault: no detail leaks (an error message can carry internal values), just
- * the plain fact and a retry that re-runs the loader.
+ * action, or render). A route-error RESPONSE is the uniform miss — stated plainly, no access
+ * claim. Anything else is a build fault: no detail leaks (an error message can carry internal
+ * values), just the plain fact and a retry that re-runs the loader.
  */
 export function ErrorBoundary() {
   const error = useRouteError();

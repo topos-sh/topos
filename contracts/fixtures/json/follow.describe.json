@@ -3,9 +3,8 @@
   "command": "follow",
   "ok": true,
   "data": {
-    "deployment_mode": "cloud",
     "enrolled": true,
-    "plane_base_url": "https://api.topos.sh",
+    "plane_base_url": "https://topos.sh",
     "skills": [
       {
         "name": "deploy",
@@ -16,8 +15,6 @@
         "skill_id": "s_deploy"
       }
     ],
-    "verified_domain": "acme.com",
-    "verified_domain_status": "verified",
     "workspace_display_name": "Acme",
     "workspace_id": "w_acme"
   },

@@ -1,96 +1,71 @@
 import { describe, expect, it } from "vitest";
 import {
   actorFromSession,
-  normalizeEmail,
   resolveAdmission,
   type SessionData,
   safeNextPath,
 } from "@/lib/auth/guards.server";
 
 // Pure parts only — DB-free by design. The session-dependent paths (requireSession redirect,
-// requireMember/requireWorkspaceOwner/requireReviewer 404s) exercise a live Better Auth instance
-// and the request headers, and are covered by the e2e suite; the admission DECISION they all feed
-// into is the exported pure resolveAdmission, truth-tabled below.
+// requireMember/requireWorkspaceOwner/requireReviewer 404s, the device lane's requireDeviceActor)
+// exercise a live Better Auth instance / a real credential resolve and are covered by the DB-backed
+// suites; the admission DECISION they all feed into is the exported pure resolveAdmission,
+// truth-tabled below. There is no email gate here anymore: one identity is `user.id`, email is a
+// login name and a display attribute — nothing authorizes by email equality, so no normalization
+// or lookalike defense exists to test.
 
-function session(email: string, emailVerified = true): SessionData {
-  return { user: { email, emailVerified } } as unknown as SessionData;
+function session(user: { id: string; name: string; email?: string }): SessionData {
+  return { user } as unknown as SessionData;
 }
 
-describe("normalizeEmail", () => {
-  it("lowercases and trims", () => {
-    expect(normalizeEmail("  Alice@Example.COM ")).toBe("alice@example.com");
-  });
-
-  it("is a no-op on an already-normal email", () => {
-    expect(normalizeEmail("bob@example.com")).toBe("bob@example.com");
-  });
-});
-
 describe("actorFromSession", () => {
-  it("mints a normalized actor from a verified session", () => {
-    expect(actorFromSession(session("  Alice@Example.COM "))).toEqual({
-      email: "alice@example.com",
+  it("mints an actor from the session's user id, with the name as the display snapshot", () => {
+    expect(actorFromSession(session({ id: "u_1", name: "Ada", email: "ada@example.com" }))).toEqual(
+      { userId: "u_1", display: "Ada" },
+    );
+  });
+
+  it("falls back to the email as a readable display when the name is blank", () => {
+    expect(actorFromSession(session({ id: "u_2", name: "", email: "bo@example.com" }))).toEqual({
+      userId: "u_2",
+      display: "bo@example.com",
+    });
+    // Whitespace-only is blank too.
+    expect(actorFromSession(session({ id: "u_2", name: "   ", email: "bo@example.com" }))).toEqual({
+      userId: "u_2",
+      display: "bo@example.com",
     });
   });
 
-  it("refuses an unverified email and an absent session", () => {
-    expect(actorFromSession(session("alice@example.com", false))).toBeNull();
+  it("degrades to 'unknown' when neither name nor email exists — never a null display", () => {
+    expect(actorFromSession(session({ id: "u_3", name: "" }))).toEqual({
+      userId: "u_3",
+      display: "unknown",
+    });
+  });
+
+  it("returns null on no session and on a session without a user id", () => {
     expect(actorFromSession(null)).toBeNull();
     expect(actorFromSession(undefined)).toBeNull();
-  });
-
-  it("rejects the U+212A Kelvin lookalike on the RAW email — before normalize would fold it", () => {
-    // JS toLowerCase() folds KELVIN SIGN to ASCII 'k': normalizing first would let a verified
-    // Unicode-lookalike address false-match a real ASCII directory seat. The gate must run on the
-    // raw bytes, so the lookalike never becomes an actor at all.
-    const kelvin = "\u212AK@example.com"; // U+212A KELVIN SIGN + ASCII K
-    expect(kelvin.toLowerCase()).toBe("kk@example.com");
-    expect(actorFromSession(session(kelvin))).toBeNull();
-  });
-
-  it("rejects any non-printable-ASCII email (directory principals are ASCII-canonical by CHECK)", () => {
-    expect(actorFromSession(session("café@example.com"))).toBeNull();
-    expect(actorFromSession(session("замо́к@example.com"))).toBeNull();
-    // Control characters sit outside the printable range too.
-    expect(actorFromSession(session("a\tb@example.com"))).toBeNull();
-    expect(actorFromSession(session(""))).toBeNull();
+    expect(actorFromSession(session({ id: "", name: "Ghost" }))).toBeNull();
   });
 });
 
 describe("resolveAdmission (the full truth table)", () => {
-  it("confirmed seat → roster with the directory's role", () => {
-    expect(resolveAdmission({ role: "owner", status: "confirmed" })).toEqual({
-      kind: "roster",
-      role: "owner",
-    });
-    expect(resolveAdmission({ role: "reviewer", status: "confirmed" })).toEqual({
-      kind: "roster",
-      role: "reviewer",
-    });
-    expect(resolveAdmission({ role: "member", status: "confirmed" })).toEqual({
-      kind: "roster",
-      role: "member",
-    });
+  it("a seat admits with the seat's role", () => {
+    expect(resolveAdmission({ role: "owner" })).toEqual({ kind: "seat", role: "owner" });
+    expect(resolveAdmission({ role: "reviewer" })).toEqual({ kind: "seat", role: "reviewer" });
+    expect(resolveAdmission({ role: "member" })).toEqual({ kind: "seat", role: "member" });
   });
 
-  it("invited seat → miss (an invite promises index visibility, never admission)", () => {
-    expect(resolveAdmission({ role: "member", status: "invited" })).toEqual({
-      kind: "miss",
-    });
-    // Even an invited OWNER seat admits nothing before the enrollment redeem gate ran.
-    expect(resolveAdmission({ role: "owner", status: "invited" })).toEqual({
-      kind: "miss",
-    });
-  });
-
-  it("no seat → miss", () => {
+  it("no seat → miss (invitations are claims on FUTURE users in their own table — holding one admits nothing)", () => {
     expect(resolveAdmission(undefined)).toEqual({ kind: "miss" });
   });
 });
 
 describe("safeNextPath", () => {
   it("accepts a legit same-app relative path", () => {
-    expect(safeNextPath("/verify/ABC")).toBe("/verify/ABC");
+    expect(safeNextPath("/verify?code=ABCD-EFGH")).toBe("/verify?code=ABCD-EFGH");
     expect(safeNextPath("/")).toBe("/");
   });
 
@@ -116,6 +91,7 @@ describe("safeNextPath", () => {
     expect(safeNextPath("/%5Cevil")).toBe("/workspaces");
     expect(safeNextPath("/%2F%5Cevil.com")).toBe("/workspaces");
   });
+
   it("rejects ASCII control characters (WHATWG URL parsing strips them before parsing)", () => {
     expect(safeNextPath("/\t//evil.com")).toBe("/workspaces");
     expect(safeNextPath("/\n//evil.com")).toBe("/workspaces");

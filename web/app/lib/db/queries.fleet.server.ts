@@ -1,268 +1,280 @@
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { MemberActor } from "@/lib/auth/guards.server";
-import { getDb, getPool } from "@/lib/db/index.server";
+import { getDb } from "@/lib/db/index.server";
 import {
-  planeCatalog,
-  planeCurrent,
-  planeDeviceRegistry,
-  planeDeviceSkillState,
-  planeWorkspaceMember,
-} from "@/lib/db/schema.plane";
+  bundle,
+  bundleDetachment,
+  device,
+  deviceBundleState,
+  deviceExclusion,
+  seat,
+  workspace,
+} from "@/lib/db/schema.app";
+import { user } from "@/lib/db/schema.auth";
+import { planeCurrentPointer } from "@/lib/db/schema.custody";
 
 /**
- * The FLEET data access layer — the enrolled devices of a workspace and the version each one last
- * reported, read straight from the directory's own tables (SELECT-only by grant), plus the ONE
- * guarded revoke write. Every function is actor-first and derives its workspace scope FROM the
- * actor, the same rule the rest of the DAL follows.
+ * The FLEET data access layer — the enrolled devices of the workspace and the version each one
+ * last reported, joined against the custody pointer for staleness. Actor-first like the rest
+ * of the DAL.
  *
  * The fleet page is a visibility surface, not a cryptographic one: after an owner publishes a
- * scrubbed version they watch this page until every non-stale device is clean, and the copies that
- * are past the window, detached, or on a removed member's device are ENUMERATED for a human to
- * chase — never silently omitted. So this layer deliberately keeps its blind spots as data: a
- * detached copy carries its last-known applied version, and a device whose principal no longer
- * holds a confirmed seat is marked `removedUpstream` rather than dropped.
+ * scrubbed version they watch this page until every non-stale device is clean, and the copies
+ * that are past the window, detached, excluded, or on a removed member's device are ENUMERATED
+ * for a human to chase — never silently omitted. The reconcile only UPSERTS state rows, so a
+ * row whose bundle left the device's install set is the frozen "last known" record; this layer
+ * DERIVES the blind-spot label by joining the person's detach records and the device's
+ * exclusions over it. Revocation is SELF-ONLY now (a device is a possession) — this page
+ * carries NO revoke arm; your-devices is the one place a device signs out.
  */
 
-/** How this device's copy of one skill sits against the workspace's current pointer. */
-export type FleetSkillStatus = "current" | "behind" | "detached";
+/** How this device's copy of one bundle sits against the workspace's current pointer. */
+export type FleetSkillStatus = "current" | "behind" | "detached" | "excluded" | "removed_upstream";
 
-/** One (device × skill) applied-state row, joined to the catalog name and the current pointer. */
+/** One (device × bundle) applied-state row, joined to the catalog and the current pointer. */
 export interface FleetSkillState {
-  /** The immutable custody key the report is written against. */
   skillId: string;
-  /** The catalog name, or null when the skill_id is no longer cataloged (deleted identity). */
+  /** The catalog name, or null when the id is no longer cataloged (a purged tombstone). */
   skillName: string | null;
   skillStatus: "active" | "archived" | "deleted" | null;
-  /** The version this device last applied (hex64), or null (it holds nothing for this skill). */
-  appliedCommit: string | null;
-  /** The workspace's current version for this skill (hex64), or null when nothing is published. */
-  currentCommit: string | null;
-  /**
-   * `current` (applied == the current pointer), `behind` (applied != current), or `detached` (a
-   * FINAL detach record — the copy is frozen as the person unfollowed or left, `detached=1`).
-   */
+  /** The version this device last applied. */
+  appliedVersionId: string;
+  /** The workspace's current version, or null when nothing is published (or withdrawn). */
+  currentVersionId: string | null;
   status: FleetSkillStatus;
   /** When this row was last reported (epoch-ms). */
-  reportedAt: number;
-  /** When the copy detached (epoch-ms), for a detached row — null otherwise. */
-  detachedAt: number | null;
+  reportedAtMs: number;
+  /** The person's detach record's cause, when one names this copy. */
+  detachCause: string | null;
 }
 
 /** How fresh a device's last report is against the workspace staleness window. */
 export type FleetFreshness = "fresh" | "stale" | "never";
 
-/** One enrolled device: its principal, its liveness, and its per-skill applied state. */
+/** One enrolled device: its owner, its liveness, and its per-bundle applied state. */
 export interface FleetDevice {
-  deviceKeyId: string;
-  principal: string;
-  /** The credential is revoked — the device is signed out; re-enrolling is the recovery. */
+  deviceId: string;
+  displayName: string;
+  /** The owning person (display + login address — attribution, never an authority key). */
+  ownerDisplay: string;
+  ownerEmail: string;
+  ownerUserId: string;
   revoked: boolean;
-  /** The device's last report time (epoch-ms), or null when it has never reported. */
-  lastReportAt: number | null;
-  /** `fresh` (reported within the window), `stale` (older), or `never` (no report yet). */
+  /** The device's last-seen time (epoch-ms), or null when it has never phoned home. */
+  lastSeenAtMs: number | null;
   freshness: FleetFreshness;
   /**
-   * The device's principal holds NO confirmed workspace seat — a removed (or departed) member's
-   * device. Removal deletes the seat but keeps the device + its applied state by design: these are
-   * the copies still out there on a machine nobody administers anymore.
+   * The device's owner holds NO seat — a removed (or departed) member's device. Removal
+   * deletes the seat but keeps the device + its applied state by design: these are the copies
+   * still out there on a machine nobody administers anymore.
    */
   removedUpstream: boolean;
-  /** Whether THIS actor may revoke this device — owner, or the device's own principal (self). */
-  canRevoke: boolean;
-  /** The skills this device last reported, catalog-name order. */
+  /** The bundles this device last reported, catalog-name order. */
   skills: FleetSkillState[];
 }
 
 export interface Fleet {
-  /** Devices in the actor's view — grouped/ordered by principal, then device id. */
   devices: FleetDevice[];
-  /** The workspace's staleness window (epoch-ms) — the ONE clock, never re-derived here. */
+  /** The workspace's staleness window (ms) — the ONE clock, never re-derived here. */
   stalenessWindowMs: number;
-  /** Whether the actor sees the WHOLE fleet (reviewer/owner) or only their own devices (member). */
+  /** Whether the actor sees the WHOLE fleet (reviewer/owner) or only their own devices. */
   wholeFleet: boolean;
 }
 
-/** The confirmed-seat roster read stays the authority; a wrong-scope actor never gets here. */
-function deriveStatus(
-  detached: boolean,
-  appliedCommit: string | null,
-  currentCommit: string | null,
-): FleetSkillStatus {
-  if (detached) {
-    return "detached";
-  }
-  if (appliedCommit !== null && appliedCommit === currentCommit) {
-    return "current";
-  }
-  return "behind";
-}
-
-function freshnessOf(
-  lastReportAt: number | null,
-  stalenessWindowMs: number,
-  now: number,
-): FleetFreshness {
-  if (lastReportAt === null) {
+function freshnessOf(lastSeenAtMs: number | null, windowMs: number, now: number): FleetFreshness {
+  if (lastSeenAtMs === null) {
     return "never";
   }
-  return now - lastReportAt <= stalenessWindowMs ? "fresh" : "stale";
+  return now - lastSeenAtMs <= windowMs ? "fresh" : "stale";
 }
 
 /**
- * The workspace's fleet for THIS actor. Role scoping lives here: a plain member sees only their
- * own devices; a reviewer or owner sees the whole fleet (the role rides on the actor). The
- * staleness window is read through the ONE accessor (`topos_staleness_window`) so a missing policy
- * row cannot fork the default between this surface and the client hook. Devices whose principal
- * holds no confirmed seat are INCLUDED and marked `removedUpstream` — that IS the blind-spot data.
+ * The workspace's fleet for THIS actor. Role scoping lives here: a plain member sees only
+ * their own devices; a reviewer or owner sees the whole fleet. Devices whose owner holds no
+ * seat are INCLUDED and marked `removedUpstream` — that IS the blind-spot data.
  */
 export async function fleetOf(actor: MemberActor): Promise<Fleet> {
   const ws = actor.workspaceId;
   const wholeFleet = actor.role !== "member";
   const now = Date.now();
+  const db = getDb();
 
-  // The ONE clock home. `topos_staleness_window` COALESCEs a missing policy row to the default;
-  // never re-derive that default here (BIGINT comes back as a string over the wire).
-  const windowResult = await getPool().query<{ window: string }>(
-    "select topos_staleness_window($1) as window",
-    [ws],
-  );
-  const stalenessWindowMs = Number(windowResult.rows[0]?.window ?? 0);
+  const wsRows = await db
+    .select({ stalenessWindowMs: workspace.stalenessWindowMs })
+    .from(workspace)
+    .where(eq(workspace.id, ws))
+    .limit(1);
+  const stalenessWindowMs = wsRows[0]?.stalenessWindowMs ?? 604800000;
 
-  // The confirmed roster — the set that decides `removedUpstream` (a device off this set is a
-  // removed member's, retained on purpose).
-  const confirmedRows = await getDb()
-    .select({ principal: planeWorkspaceMember.principal })
-    .from(planeWorkspaceMember)
-    .where(
-      and(eq(planeWorkspaceMember.workspaceId, ws), eq(planeWorkspaceMember.status, "confirmed")),
-    );
-  const confirmed = new Set(confirmedRows.map((r) => r.principal));
-
-  const deviceRows = await getDb()
-    .select({
-      deviceKeyId: planeDeviceRegistry.deviceKeyId,
-      principal: planeDeviceRegistry.principal,
-      revoked: planeDeviceRegistry.revoked,
-      lastReportAt: planeDeviceRegistry.lastReportAt,
-    })
-    .from(planeDeviceRegistry)
-    .where(
-      and(
-        eq(planeDeviceRegistry.workspaceId, ws),
-        // Member scope: own devices only. Reviewer/owner: the whole fleet.
-        ...(wholeFleet ? [] : [eq(planeDeviceRegistry.principal, actor.email)]),
-      ),
-    )
-    .orderBy(asc(planeDeviceRegistry.principal), asc(planeDeviceRegistry.deviceKeyId));
-
-  if (deviceRows.length === 0) {
+  // Every device that TOUCHES this workspace: its owner holds a seat, OR it has reported
+  // state against one of this workspace's bundles (the removed-member blind spot).
+  const deviceRows = await db.execute(sql`
+    SELECT DISTINCT d.id, d.display_name, d.user_id, d.revoked_at,
+           (extract(epoch from d.last_seen_at) * 1000)::bigint AS last_seen_ms,
+           u.name AS owner_display, u.email AS owner_email,
+           (s.user_id IS NOT NULL) AS seated
+    FROM web.device d
+    JOIN web."user" u ON u.id = d.user_id
+    LEFT JOIN web.seat s ON s.workspace_id = ${ws} AND s.user_id = d.user_id
+    WHERE (s.user_id IS NOT NULL
+           OR EXISTS (SELECT 1 FROM web.device_bundle_state st
+                      JOIN web.bundle b ON b.id = st.bundle_id
+                      WHERE st.device_id = d.id AND b.workspace_id = ${ws}))
+      AND (${wholeFleet} OR d.user_id = ${actor.userId})
+    ORDER BY u.email, d.id
+  `);
+  const devices = deviceRows.rows as {
+    id: string;
+    display_name: string;
+    user_id: string;
+    revoked_at: string | null;
+    last_seen_ms: string | null;
+    owner_display: string;
+    owner_email: string;
+    seated: boolean;
+  }[];
+  if (devices.length === 0) {
     return { devices: [], stalenessWindowMs, wholeFleet };
   }
 
-  const deviceKeyIds = deviceRows.map((d) => d.deviceKeyId);
-  const stateRows = await getDb()
+  const deviceIds = devices.map((d) => d.id);
+  const ownerByDevice = new Map(devices.map((d) => [d.id, d.user_id]));
+  const stateRows = await db
     .select({
-      deviceKeyId: planeDeviceSkillState.deviceKeyId,
-      skillId: planeDeviceSkillState.skillId,
-      appliedCommit: planeDeviceSkillState.appliedCommit,
-      reportedAt: planeDeviceSkillState.reportedAt,
-      detached: planeDeviceSkillState.detached,
-      detachedAt: planeDeviceSkillState.detachedAt,
-      skillName: planeCatalog.name,
-      skillStatus: planeCatalog.status,
-      currentCommit: planeCurrent.commitId,
+      deviceId: deviceBundleState.deviceId,
+      skillId: deviceBundleState.bundleId,
+      appliedVersionId: deviceBundleState.appliedVersionId,
+      reportedAtMs: sql<string>`(extract(epoch from ${deviceBundleState.reportedAt}) * 1000)::bigint`,
+      skillName: bundle.name,
+      skillStatus: bundle.status,
+      currentVersionId: planeCurrentPointer.versionId,
+      excluded: sql<boolean>`EXISTS (
+        SELECT 1 FROM ${deviceExclusion} dx
+        WHERE dx.device_id = ${deviceBundleState.deviceId} AND dx.bundle_id = ${deviceBundleState.bundleId}
+      )`,
+      detachCause: bundleDetachment.cause,
     })
-    .from(planeDeviceSkillState)
+    .from(deviceBundleState)
+    .innerJoin(bundle, and(eq(bundle.id, deviceBundleState.bundleId), eq(bundle.workspaceId, ws)))
+    // The device join must PRECEDE the detachment join: the latter's ON clause correlates on
+    // the owning user, and SQL join order is the FROM clause's order.
+    .innerJoin(device, eq(device.id, deviceBundleState.deviceId))
     .leftJoin(
-      planeCatalog,
+      planeCurrentPointer,
       and(
-        eq(planeCatalog.workspaceId, planeDeviceSkillState.workspaceId),
-        eq(planeCatalog.skillId, planeDeviceSkillState.skillId),
+        eq(planeCurrentPointer.workspaceId, ws),
+        eq(planeCurrentPointer.bundleId, deviceBundleState.bundleId),
       ),
     )
     .leftJoin(
-      planeCurrent,
+      bundleDetachment,
       and(
-        eq(planeCurrent.workspaceId, planeDeviceSkillState.workspaceId),
-        eq(planeCurrent.skillId, planeDeviceSkillState.skillId),
+        eq(bundleDetachment.workspaceId, ws),
+        eq(bundleDetachment.bundleId, deviceBundleState.bundleId),
+        eq(bundleDetachment.userId, device.userId),
       ),
     )
-    .where(
-      and(
-        eq(planeDeviceSkillState.workspaceId, ws),
-        inArray(planeDeviceSkillState.deviceKeyId, deviceKeyIds),
-      ),
-    )
-    .orderBy(asc(planeDeviceSkillState.deviceKeyId), asc(planeDeviceSkillState.skillId));
+    .where(inArray(deviceBundleState.deviceId, deviceIds))
+    .orderBy(asc(deviceBundleState.deviceId), asc(bundle.name));
 
+  const seatedOwners = new Set(devices.filter((d) => d.seated).map((d) => d.user_id));
   const statesByDevice = new Map<string, FleetSkillState[]>();
   for (const row of stateRows) {
-    const status = deriveStatus(row.detached === 1, row.appliedCommit, row.currentCommit);
+    const ownerSeated = seatedOwners.has(ownerByDevice.get(row.deviceId) ?? "");
+    let status: FleetSkillStatus;
+    if (!ownerSeated) {
+      status = "removed_upstream";
+    } else if (row.detachCause !== null) {
+      status = "detached";
+    } else if (row.excluded) {
+      status = "excluded";
+    } else if (row.currentVersionId !== null && row.appliedVersionId === row.currentVersionId) {
+      status = "current";
+    } else {
+      status = "behind";
+    }
     const state: FleetSkillState = {
       skillId: row.skillId,
       skillName: row.skillName,
-      skillStatus: row.skillStatus,
-      appliedCommit: row.appliedCommit,
-      currentCommit: row.currentCommit,
+      skillStatus: row.skillStatus as FleetSkillState["skillStatus"],
+      appliedVersionId: row.appliedVersionId,
+      currentVersionId: row.currentVersionId,
       status,
-      reportedAt: row.reportedAt,
-      detachedAt: row.detachedAt,
+      reportedAtMs: Number(row.reportedAtMs),
+      detachCause: row.detachCause,
     };
-    const list = statesByDevice.get(row.deviceKeyId);
+    const list = statesByDevice.get(row.deviceId);
     if (list === undefined) {
-      statesByDevice.set(row.deviceKeyId, [state]);
+      statesByDevice.set(row.deviceId, [state]);
     } else {
       list.push(state);
     }
   }
-  // Present each device's skills in catalog-NAME order (uncataloged rows last, by id).
-  for (const list of statesByDevice.values()) {
-    list.sort((a, b) => {
-      const an = a.skillName ?? `￿${a.skillId}`;
-      const bn = b.skillName ?? `￿${b.skillId}`;
-      return an < bn ? -1 : an > bn ? 1 : 0;
-    });
-  }
 
-  const devices: FleetDevice[] = deviceRows.map((d) => ({
-    deviceKeyId: d.deviceKeyId,
-    principal: d.principal,
-    revoked: d.revoked === 1,
-    lastReportAt: d.lastReportAt,
-    freshness: freshnessOf(d.lastReportAt, stalenessWindowMs, now),
-    removedUpstream: !confirmed.has(d.principal),
-    // The fn's own matrix is owner-or-self; the control mirrors it, the fn stays the authority.
-    canRevoke: actor.role === "owner" || d.principal === actor.email,
-    skills: statesByDevice.get(d.deviceKeyId) ?? [],
-  }));
-
-  return { devices, stalenessWindowMs, wholeFleet };
+  return {
+    devices: devices.map((d) => ({
+      deviceId: d.id,
+      displayName: d.display_name,
+      ownerDisplay: d.owner_display,
+      ownerEmail: d.owner_email,
+      ownerUserId: d.user_id,
+      revoked: d.revoked_at !== null,
+      lastSeenAtMs: d.last_seen_ms === null ? null : Number(d.last_seen_ms),
+      freshness: freshnessOf(
+        d.last_seen_ms === null ? null : Number(d.last_seen_ms),
+        stalenessWindowMs,
+        now,
+      ),
+      removedUpstream: !d.seated,
+      skills: statesByDevice.get(d.id) ?? [],
+    })),
+    stalenessWindowMs,
+    wholeFleet,
+  };
 }
 
-/** The outcome codes `topos_revoke_device` speaks (relayed verbatim). */
-export type RevokeDeviceOutcome =
-  | "revoked"
-  | "unknown_device"
-  | "owner_or_self_required"
-  | "member_required";
+/** The people whose seats are gone but whose detach records still name copies — a named blind
+ * spot even when the device rows themselves are revoked or quiet. */
+export interface DetachedCopyRow {
+  userId: string;
+  display: string;
+  bundleId: string;
+  bundleName: string | null;
+  cause: string;
+  createdAt: Date;
+}
 
-/**
- * Revoke ONE device's workspace credential — a guarded write: `topos_revoke_device` re-runs the
- * owner-or-self matrix itself (the web guard on the action is defense-in-depth, never the lock).
- * The flip is instant — the device's credential stops working immediately; the registry row and
- * its audit stay, and re-enrolling is the recovery. Idempotent: re-revoking answers `revoked`.
- */
-export async function revokeDevice(
-  actor: MemberActor,
-  deviceKeyId: string,
-): Promise<RevokeDeviceOutcome> {
-  const result = await getPool().query<{ outcome: RevokeDeviceOutcome }>(
-    "select topos_revoke_device($1, $2, $3) as outcome",
-    [actor.workspaceId, actor.email, deviceKeyId],
-  );
-  const outcome = result.rows[0]?.outcome;
-  if (outcome === undefined) {
-    throw new Error("topos_revoke_device returned no outcome");
-  }
-  return outcome;
+/** Every standing detach record in the workspace, person-joined — the fleet's chase list. */
+export async function detachedCopiesOf(actor: MemberActor): Promise<DetachedCopyRow[]> {
+  const rows = await getDb()
+    .select({
+      userId: bundleDetachment.userId,
+      display: user.name,
+      bundleId: bundleDetachment.bundleId,
+      bundleName: bundle.name,
+      cause: bundleDetachment.cause,
+      createdAt: bundleDetachment.createdAt,
+    })
+    .from(bundleDetachment)
+    .leftJoin(user, eq(user.id, bundleDetachment.userId))
+    .leftJoin(
+      bundle,
+      and(
+        eq(bundle.workspaceId, bundleDetachment.workspaceId),
+        eq(bundle.id, bundleDetachment.bundleId),
+      ),
+    )
+    .where(eq(bundleDetachment.workspaceId, actor.workspaceId))
+    .orderBy(asc(bundleDetachment.createdAt));
+  return rows.map((r) => ({ ...r, display: r.display ?? "former member" }));
+}
+
+/** Whether the actor holds any seat rows at all — the fleet page's empty-state probe. */
+export async function workspaceHasDevices(actor: MemberActor): Promise<boolean> {
+  const rows = await getDb()
+    .select({ id: device.id })
+    .from(device)
+    .innerJoin(seat, and(eq(seat.workspaceId, actor.workspaceId), eq(seat.userId, device.userId)))
+    .limit(1);
+  return rows.length > 0;
 }

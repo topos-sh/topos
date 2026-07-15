@@ -1,14 +1,15 @@
 import type { ActionFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
-import { nowUtc, rowOpResponse } from "@/lib/api/row-envelopes.server";
+import { rowOpResponse } from "@/lib/api/row-envelopes.server";
 import { uniformNotFound } from "@/lib/api/wire.server";
 import { requireDeviceActor } from "@/lib/auth/guards.server";
-import { deviceExcludeDevice } from "@/lib/db/queries.device.server";
+import { excludeOnDevice } from "@/lib/db/queries.lane.server";
 
 /**
- * `PUT /api/v1/workspaces/{ws}/exclusions/{skill}` — exclude a followed skill from THIS device (the
- * `remove` verb's row; `follow` lifts it). Bodyless, naturally idempotent. Command is `remove`; the
- * only outcomes are `excluded` (OK) or the uniform 404 — the guarded function has no denial arm.
+ * `PUT /api/v1/workspaces/{ws}/exclusions/{skill}` — exclude a followed bundle from THIS
+ * device (the `remove` verb's row; `follow` lifts it). The device fence is construction: the
+ * only device the op can name is the actor's own credential-resolved one. Bodyless, naturally
+ * idempotent.
  */
 export async function action({ request, params }: ActionFunctionArgs): Promise<Response> {
   const belted = checkBelt(request);
@@ -19,8 +20,7 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
     return uniformNotFound();
   }
   const actor = await requireDeviceActor(request, params.ws ?? "");
-  const { createdAt } = nowUtc();
-  const status = await deviceExcludeDevice(actor, params.skill ?? "", createdAt);
+  const status = await excludeOnDevice(actor, params.skill ?? "");
   return rowOpResponse("remove", status, { excluded: "excluded" }, {});
 }
 

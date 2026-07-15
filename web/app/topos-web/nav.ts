@@ -7,7 +7,10 @@
 export interface NavContext {
   /** The active workspace id, when the current page is workspace-scoped. */
   workspaceId: string | null;
-  /** The signed-in actor's normalized email (sessionless pages render no nav). */
+  /**
+   * The signed-in actor's display identity (sessionless pages render no nav). The field keeps
+   * its historical name — it is a seam a downstream composition already reads.
+   */
   email: string;
 }
 

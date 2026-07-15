@@ -1,75 +1,53 @@
-import type { GenerationLike } from "@/lib/diff/staleness";
-
 /**
- * The proposal page's ONE state derivation — pure, over the detail read + the live current
- * pointer (two reads the page already holds; nothing here fetches). The detail's `status` is
- * the STORED resolution ("open" | "accepted" | "rejected" | "closed"); staleness stays a derived view, computed the same way the server's
- * own listing predicate works (`open AND base == current`). Generations feed only the equality
- * comparison — nothing downstream renders an epoch or a seq.
+ * The proposal page's ONE state derivation — pure, over the web proposal row's stored status
+ * plus the live current pointer (two reads the page already holds; nothing here fetches). The
+ * row's status is the STORED resolution ("open" | "approved" | "rejected" | "withdrawn"); the
+ * live pointer only refines an approval into accepted-live vs superseded. There is no staleness
+ * state: a proposal stays open until someone decides it, and the approve action's CAS binding
+ * is what refuses a moved pointer — as a fresh outcome, not a page state.
  */
 
 export type ProposalPageState =
-  /** Open on the live current base — the decidable state. */
+  /** Open — the decidable state. */
   | "pending"
-  /** Open, but current moved off the proposal's base — undecidable as-is (a fresh propose is the path). */
-  | "stale"
-  /** Accepted, and the candidate IS the live current version. */
+  /** Approved, and the candidate IS the live current version. */
   | "accepted-live"
-  /** Accepted earlier — current has since moved on. */
+  /** Approved earlier — current has since moved on. */
   | "superseded"
   | "rejected"
-  /** Closed without a decision — superseded by a newer proposal, withdrawn upstream, or retired
-   * with its skill. A real terminal state, not an anchoring failure. */
+  /** Withdrawn — closed without a verdict (the author retracted it, or a lifecycle ceremony
+   * auto-closed it). A real terminal state, not an anchoring failure. */
   | "closed"
-  /** The detail or the pointer couldn't anchor a real state — stated plainly, never dressed up. */
+  /** An unrecognized stored status — stated plainly, never dressed up. */
   | "unknown";
 
-export interface ProposalDetailLike {
-  /** The candidate version id (hex64). */
-  version_id: string;
-  /** The stored status: "open" | "accepted" | "rejected" | "closed" (anything else folds to unknown). */
-  status: string;
-  base_generation: GenerationLike;
-}
-
-export interface LiveCurrentLike {
-  /** The live current version id (hex64). */
-  versionId: string;
-  generation: GenerationLike;
-}
-
 export function deriveProposalPageState(
-  detail: ProposalDetailLike,
-  live: LiveCurrentLike | undefined,
+  status: string,
+  candidateVersionId: string,
+  liveCurrentVersionId: string | null,
 ): ProposalPageState {
-  if (live === undefined) {
-    return "unknown";
+  if (status === "open") {
+    return "pending";
   }
-  if (detail.status === "open") {
-    const base = detail.base_generation;
-    return base.epoch === live.generation.epoch && base.seq === live.generation.seq
-      ? "pending"
-      : "stale";
+  if (status === "approved") {
+    return liveCurrentVersionId === candidateVersionId ? "accepted-live" : "superseded";
   }
-  if (detail.status === "accepted") {
-    return live.versionId === detail.version_id ? "accepted-live" : "superseded";
-  }
-  if (detail.status === "rejected") {
+  if (status === "rejected") {
     return "rejected";
   }
-  if (detail.status === "closed") {
+  if (status === "withdrawn") {
     return "closed";
   }
   return "unknown";
 }
 
 /**
- * Whether the file diff can render, derived from the CANDIDATE's version-meta read. The server
- * retains a candidate's bytes only while the version is trunk-reachable or an OPEN proposal on
- * the live base — so a rejected or staled candidate's meta 404 is `reclaimed`: that retention
- * rule doing its job, not a page error. The page keeps the proposal's RECORD (banner,
- * resolution, comments) and renders an honest diff-less card in place of the files. Any other
- * failure is `unreadable` — transient, worth a reload.
+ * Whether the file diff can render, derived from the CANDIDATE's version-meta read. The vault
+ * retains a candidate's bytes only while the version is trunk-reachable or an OPEN proposal —
+ * so a rejected or withdrawn candidate's meta 404 is `reclaimed`: that retention rule doing its
+ * job, not a page error. The page keeps the proposal's RECORD (banner, resolution, comments)
+ * and renders an honest diff-less card in place of the files. Any other failure is
+ * `unreadable` — transient, worth a reload.
  */
 export type DiffAvailability = "full" | "reclaimed" | "unreadable";
 

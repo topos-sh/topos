@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT vo.version_id AS \"version_id!\" FROM version_object vo\n               JOIN version v\n                 ON v.workspace_id = vo.workspace_id AND v.bundle_id = vo.bundle_id\n                AND v.version_id = vo.version_id\n               WHERE vo.workspace_id = $1 AND vo.bundle_id = $2 AND vo.object_id = $3\n                 AND v.purged_at IS NULL\n               LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "version_id!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "40484c802ec8c0d459765d00eb5349dcfaf687140886c65ac9103823d8c16aea"
+}

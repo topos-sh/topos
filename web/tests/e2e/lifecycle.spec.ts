@@ -1,240 +1,247 @@
-import { expect, type Page, test } from "@playwright/test";
-import { Client } from "pg";
-import {
-  HINT_OLD_NAME,
-  JOINER_EMAIL,
-  L_CUR,
-  L_GOOD,
-  LIFECYCLE_ADDRESS,
-  LIFECYCLE_ARCHIVED_AT_MS,
-  LIFECYCLE_ARCHIVED_BASE,
-  LIFECYCLE_ARCHIVED_NAME,
-  LIFECYCLE_ARCHIVED_SKILL_ID,
-  LIFECYCLE_GENERATION,
-  LIFECYCLE_OWNER_EMAIL,
-  LIFECYCLE_OWNER2_EMAIL,
-  LIFECYCLE_RENAME_TO,
-  LIFECYCLE_SKILL,
-  LIFECYCLE_WS,
-  SKILL,
-  WS,
-} from "../fixtures/plane/data.mjs";
-import { E2E_ADMIN_URL, E2E_PASSWORD, PLANE_PORT } from "./env";
-import { gotoSettled, signIn } from "./sign-in";
+import { expect, test } from "@playwright/test";
+import { SKILL_MD_V1, SKILL_MD_V2 } from "../fixtures/plane/data.mjs";
+import { E2E_PASSWORD } from "./env";
+import { adminQuery, custodyCalls, ensureBundle, seedCustody, theWorkspace } from "./seed";
+import { gotoSettled } from "./sign-in";
 
 /**
- * The SKILL LIFECYCLE ceremonies on the web surface: rename + archive (skill settings), unarchive +
- * delete (the archive page), and per-version purge (the history tab) — every one a step-up ceremony,
- * the destructive ones also gated by typing a name. Two backends, harness discipline: the vault
- * WRITES are internal-lane calls (the proof is the recorded wire call keyed on the immutable
- * skill_id), and the vault mock never edits the seeded directory rows, so a redirect target that
- * reads the DB may 404 — the tests assert the RECORDED CALL and the redirect URL, never a mid-suite
- * DB reflection of a vault move. The rename REDIRECT rides a real catalog_name_hints row.
- *
- * The directory rows for the lifecycle workspace (its two owners, an active 2-version skill, a
- * pre-archived skill) + the ws-e2e rename hint are seeded HERE against E2E_ADMIN_URL (never the
- * SELECT-only app URL), after the setup project's one-time base seed — additive, in a workspace no
- * other spec touches. The vault scope (fixtures/plane/data.mjs initialScopes) serves the reads and
- * records the writes. Serial so the per-process step-up belt spends predictably.
+ * The SKILL LIFECYCLE ceremonies: rename + protection pin + archive (skill settings), unarchive
+ * + delete (the archive page), and per-version purge (the history tab) — every one an OWNER
+ * step-up ceremony, the destructive ones also gated by typing a name. All app-tier row
+ * transactions over `web.bundle` now, keyed on the immutable skill id; only the byte halves
+ * (delete's bundle drop, the purge) reach the vault, and the recorded custody calls prove
+ * exactly those. The suite's default identity is the claimed OWNER. Serial — one identity's
+ * ceremonies in a deterministic order.
  */
 
+const SKILL = { id: "s_e2e_lc", name: "lifecycle-notes" };
+const RENAMED = "lifecycle-notes-next";
+const PURGE_SKILL = { id: "s_e2e_purge", name: "purge-notes" };
+
+let goodId: string; // the purge subject — PURGE_SKILL's non-current ancestor
+
 test.describe.configure({ mode: "serial" });
-test.use({ storageState: { cookies: [], origins: [] } });
-
-const B = (hex: string) => Buffer.from(hex, "hex");
-
-async function seedLifecycle(): Promise<void> {
-  const db = new Client({ connectionString: E2E_ADMIN_URL });
-  await db.connect();
-  try {
-    await db.query(
-      `insert into plane.workspace
-         (workspace_id, display_name, verified_domain, verified_domain_status, deployment_mode, created_at, name)
-       values ($1, 'Lifecycle Workspace', null, 'unverified', 'cloud', '2026-07-05T09:00:00Z', $2)
-       on conflict (workspace_id) do nothing`,
-      [LIFECYCLE_WS, LIFECYCLE_ADDRESS],
-    );
-    await db.query(
-      `insert into plane.workspace_policy (workspace_id, review_required) values ($1, 0)
-       on conflict (workspace_id) do nothing`,
-      [LIFECYCLE_WS],
-    );
-    for (const email of [LIFECYCLE_OWNER_EMAIL, LIFECYCLE_OWNER2_EMAIL]) {
-      await db.query(
-        `insert into plane.workspace_member (workspace_id, principal, role, status, invited_by, added_at)
-         values ($1, $2, 'owner', 'confirmed', null, '2026-07-05T09:05:00Z')
-         on conflict do nothing`,
-        [LIFECYCLE_WS, email],
-      );
-    }
-    // The ACTIVE skill (settings + history surfaces) and the pre-ARCHIVED skill (the archive page).
-    await db.query(
-      `insert into plane.catalog (workspace_id, skill_id, name, display_name, status, created_at)
-       values ($1, $2, $2, null, 'active', '2026-07-05T09:00:00Z')
-       on conflict do nothing`,
-      [LIFECYCLE_WS, LIFECYCLE_SKILL],
-    );
-    await db.query(
-      `insert into plane.catalog
-         (workspace_id, skill_id, name, display_name, status, base_name, archived_at, created_at)
-       values ($1, $2, $3, null, 'archived', $4, $5, '2026-07-05T09:00:00Z')
-       on conflict do nothing`,
-      [
-        LIFECYCLE_WS,
-        LIFECYCLE_ARCHIVED_SKILL_ID,
-        LIFECYCLE_ARCHIVED_NAME,
-        LIFECYCLE_ARCHIVED_BASE,
-        LIFECYCLE_ARCHIVED_AT_MS,
-      ],
-    );
-    // Provenance first (current FKs onto it), then the pointer at L_CUR with a readable L_GOOD parent.
-    for (const commitId of [L_CUR, L_GOOD]) {
-      await db.query(
-        `insert into plane.skill_commit (workspace_id, commit_id, skill_id, bundle_digest)
-         values ($1, $2, $3, $2) on conflict do nothing`,
-        [LIFECYCLE_WS, B(commitId), LIFECYCLE_SKILL],
-      );
-    }
-    await db.query(
-      `insert into plane.current (workspace_id, skill_id, commit_id, epoch, seq, record, updated_at)
-       values ($1, $2, $3, $4, $5, null, $6) on conflict do nothing`,
-      [
-        LIFECYCLE_WS,
-        LIFECYCLE_SKILL,
-        B(L_CUR),
-        LIFECYCLE_GENERATION.epoch,
-        LIFECYCLE_GENERATION.seq,
-        Date.parse("2026-07-05T09:00:00Z"),
-      ],
-    );
-    // The rename REDIRECT fixture: an old name on ws-e2e resolving to SKILL (the catalog row the
-    // base seed already planted). GET …/skills/<old> follows the hint to <SKILL>.
-    await db.query(
-      `insert into plane.catalog_name_hints (workspace_id, name, skill_id, renamed_by, created_at)
-       values ($1, $2, $3, $4, '2026-07-05T09:00:00Z')
-       on conflict (workspace_id, name) do nothing`,
-      [WS, HINT_OLD_NAME, SKILL, LIFECYCLE_OWNER_EMAIL],
-    );
-  } finally {
-    await db.end();
-  }
-}
-
-interface RecordedCall {
-  route: string;
-  ws: string;
-  skill: string;
-  acting: string;
-  body: Record<string, unknown>;
-}
-
-async function recorded(page: Page, route: string): Promise<RecordedCall[]> {
-  const response = await page.request.get(`http://127.0.0.1:${PLANE_PORT}/__test/calls`);
-  const calls: RecordedCall[] = await response.json();
-  return calls.filter((c) => c.route === route && c.ws === LIFECYCLE_WS);
-}
 
 test.beforeAll(async () => {
-  await seedLifecycle();
+  const ws = await theWorkspace();
+  // A clean slate on a reused database: drop this file's rows whatever state a previous run
+  // left them in (tombstones and archived names included; hints cascade with the bundle).
+  await adminQuery(`delete from web.bundle where id = any($1::text[])`, [
+    [SKILL.id, PURGE_SKILL.id],
+  ]);
+  await ensureBundle(SKILL);
+  await ensureBundle(PURGE_SKILL);
+  const seeded = await seedCustody([
+    {
+      ws: ws.id,
+      bundle: SKILL.id,
+      versions: [
+        { files: [{ path: "SKILL.md", content: SKILL_MD_V1 }], message: "v1" },
+        { files: [{ path: "SKILL.md", content: SKILL_MD_V2 }], parent: 0, message: "v2" },
+      ],
+      current: 1,
+    },
+    {
+      ws: ws.id,
+      bundle: PURGE_SKILL.id,
+      versions: [
+        {
+          files: [{ path: "SKILL.md", content: "# Purge target\n\nleaked-secret\n" }],
+          message: "leaky",
+        },
+        {
+          files: [{ path: "SKILL.md", content: "# Purge target\n\nscrubbed\n" }],
+          parent: 0,
+          message: "scrubbed",
+        },
+      ],
+      current: 1,
+    },
+  ]);
+  goodId = seeded[1]?.versions[0]?.version_id as string;
 });
 
-test("archive: a wrong step-up password records no call; the right one archives and redirects", async ({
+test("rename: a wrong step-up password writes nothing; the right one renames and the old name redirects", async ({
   page,
 }) => {
-  await signIn(page, LIFECYCLE_OWNER_EMAIL);
-  await gotoSettled(page, `/workspaces/${LIFECYCLE_WS}/skills/${LIFECYCLE_SKILL}/settings`);
+  const ws = await theWorkspace();
+  await gotoSettled(page, `/workspaces/${ws.id}/skills/${SKILL.name}/settings`);
 
-  // A WRONG password: the ceremony refuses at step-up — no vault call is made.
-  await page.locator("#archive-password").fill("not-the-password");
-  await page.getByRole("button", { name: `Archive ${LIFECYCLE_SKILL}` }).click();
-  await expect(page.getByText(/Password check failed/i)).toBeVisible();
-  expect(await recorded(page, "archive")).toHaveLength(0);
+  // A WRONG password: the ceremony refuses at step-up — nothing is written.
+  await page.locator("#rename-new-name").fill(RENAMED);
+  await page.locator("#rename-password").fill("not-the-password");
+  await page.getByRole("button", { name: "Rename skill" }).click();
+  await expect(page.getByRole("alert")).toContainText("Password check failed");
+  expect(
+    (await adminQuery<{ name: string }>(`select name from web.bundle where id = $1`, [SKILL.id]))[0]
+      ?.name,
+  ).toBe(SKILL.name);
 
-  // The RIGHT password: the internal-lane archive call lands (keyed on the immutable skill_id) and
-  // the page redirects to the archive list.
-  await page.locator("#archive-password").fill(E2E_PASSWORD);
-  await page.getByRole("button", { name: `Archive ${LIFECYCLE_SKILL}` }).click();
-  await page.waitForURL(`**/workspaces/${LIFECYCLE_WS}/archive`);
-
-  await expect.poll(async () => (await recorded(page, "archive")).length).toBeGreaterThan(0);
-  const call = (await recorded(page, "archive")).at(-1);
-  expect(call?.skill).toBe(LIFECYCLE_SKILL);
-  expect(call?.acting).toBe(LIFECYCLE_OWNER_EMAIL);
-});
-
-test("rename: a valid new name renames and redirects to the new name's settings", async ({
-  page,
-}) => {
-  await signIn(page, LIFECYCLE_OWNER_EMAIL);
-  await gotoSettled(page, `/workspaces/${LIFECYCLE_WS}/skills/${LIFECYCLE_SKILL}/settings`);
-
-  await page.locator("#rename-new-name").fill(LIFECYCLE_RENAME_TO);
+  // The RIGHT password renames (id-keyed) and redirects to the new name's settings.
+  await page.locator("#rename-new-name").fill(RENAMED);
   await page.locator("#rename-password").fill(E2E_PASSWORD);
   await page.getByRole("button", { name: "Rename skill" }).click();
+  await page.waitForURL(`**/workspaces/${ws.id}/skills/${RENAMED}/settings`);
+  const row = await adminQuery<{ name: string }>(`select name from web.bundle where id = $1`, [
+    SKILL.id,
+  ]);
+  expect(row[0]?.name).toBe(RENAMED);
 
-  // The redirect is the assertion (the DB catalog still holds the old name — harness discipline —
-  // so the target may render the house 404; the URL is what we pin).
-  await page.waitForURL(`**/workspaces/${LIFECYCLE_WS}/skills/${LIFECYCLE_RENAME_TO}/settings`);
-  const call = (await recorded(page, "rename")).at(-1);
-  expect(call?.skill).toBe(LIFECYCLE_SKILL);
-  expect(call?.body.new_name).toBe(LIFECYCLE_RENAME_TO);
-  expect(call?.acting).toBe(LIFECYCLE_OWNER_EMAIL);
+  // The old name became a resolving hint: a bookmark keeps working through the redirect.
+  const hint = await adminQuery<{ bundle_id: string }>(
+    `select bundle_id from web.bundle_name_hint where old_name = $1`,
+    [SKILL.name],
+  );
+  expect(hint[0]?.bundle_id).toBe(SKILL.id);
+  await gotoSettled(page, `/workspaces/${ws.id}/skills/${SKILL.name}`);
+  await page.waitForURL(`**/workspaces/${ws.id}/skills/${RENAMED}`);
 });
 
-test("delete: the archived name must be typed exactly before the byte drop", async ({ page }) => {
-  await signIn(page, LIFECYCLE_OWNER2_EMAIL);
-  await gotoSettled(page, `/workspaces/${LIFECYCLE_WS}/archive`);
+test("the protection pin: owner + step-up flips the bundle to reviewed", async ({ page }) => {
+  const ws = await theWorkspace();
+  await gotoSettled(page, `/workspaces/${ws.id}/skills/${RENAMED}/settings`);
 
-  // The archived skill is listed by its archived name.
-  await expect(page.getByText(LIFECYCLE_ARCHIVED_NAME).first()).toBeVisible();
+  await page.getByRole("radio", { name: /Reviewed — a member's publish/ }).check();
+  // Three ceremonies on this page carry password fields; target the protection form's own.
+  await page.locator("#protection-password").fill(E2E_PASSWORD);
+  await page.getByRole("button", { name: "Save protection" }).click();
+  await expect
+    .poll(
+      async () =>
+        (
+          await adminQuery<{ protection: string | null }>(
+            `select protection from web.bundle where id = $1`,
+            [SKILL.id],
+          )
+        )[0]?.protection,
+    )
+    .toBe("reviewed");
+});
+
+test("archive retires the skill: the base name frees, the catalog drops it, the archive lists it", async ({
+  page,
+}) => {
+  const ws = await theWorkspace();
+  await gotoSettled(page, `/workspaces/${ws.id}/skills/${RENAMED}/settings`);
+
+  await page.locator("#archive-password").fill(E2E_PASSWORD);
+  await page.getByRole("button", { name: `Archive ${RENAMED}` }).click();
+  await page.waitForURL(`**/workspaces/${ws.id}/archive`);
+
+  const row = await adminQuery<{ status: string; name: string; base_name: string }>(
+    `select status, name, base_name from web.bundle where id = $1`,
+    [SKILL.id],
+  );
+  expect(row[0]?.status).toBe("archived");
+  expect(row[0]?.name.startsWith(`${RENAMED}-archived-`)).toBe(true);
+  expect(row[0]?.base_name).toBe(RENAMED);
+
+  // The archive page lists it under the archived name; the dashboard no longer does.
+  await expect(page.getByText(row[0]?.name as string).first()).toBeVisible();
+  await gotoSettled(page, `/workspaces/${ws.id}`);
+  await expect(page.getByRole("link", { name: RENAMED })).toHaveCount(0);
+});
+
+test("unarchive restores the base name exactly", async ({ page }) => {
+  const ws = await theWorkspace();
+  await gotoSettled(page, `/workspaces/${ws.id}/archive`);
+
+  await page.getByText("Unarchive…", { exact: true }).click();
+  await page.locator(`#unarchive-${SKILL.id}-password`).fill(E2E_PASSWORD);
+  await page.getByRole("button", { name: "Unarchive", exact: true }).click();
+
+  // A landed unarchive revalidates the row off the archive list…
+  await expect(page.getByText(`${RENAMED}-archived-`, { exact: false })).toHaveCount(0);
+  // …and the row is active again under its exact pre-archive name.
+  const row = await adminQuery<{ status: string; name: string }>(
+    `select status, name from web.bundle where id = $1`,
+    [SKILL.id],
+  );
+  expect(row[0]?.status).toBe("active");
+  expect(row[0]?.name).toBe(RENAMED);
+});
+
+test("delete is archive-first + typed-name gated; the tombstone stays, the bytes drop", async ({
+  page,
+}) => {
+  const ws = await theWorkspace();
+  // Archive again — deletion is a step further than archive, never a shortcut around it.
+  await gotoSettled(page, `/workspaces/${ws.id}/skills/${RENAMED}/settings`);
+  await page.locator("#archive-password").fill(E2E_PASSWORD);
+  await page.getByRole("button", { name: `Archive ${RENAMED}` }).click();
+  await page.waitForURL(`**/workspaces/${ws.id}/archive`);
+  const archivedName = (
+    await adminQuery<{ name: string }>(`select name from web.bundle where id = $1`, [SKILL.id])
+  )[0]?.name as string;
+
   await page.getByText("Delete permanently…", { exact: true }).click();
+  const confirm = page.locator(`#delete-${SKILL.id}-confirm`);
+  const password = page.locator(`#delete-${SKILL.id}-password`);
 
-  const confirm = page.locator(`#delete-${LIFECYCLE_ARCHIVED_SKILL_ID}-confirm`);
-  const password = page.locator(`#delete-${LIFECYCLE_ARCHIVED_SKILL_ID}-password`);
-
-  // The WRONG name (with the right password) is refused by the typed-name gate — no vault call.
+  // The WRONG name (with the right password) is refused by the typed-name gate — no byte drop.
   await confirm.fill("not-the-name");
   await password.fill(E2E_PASSWORD);
   await page.getByRole("button", { name: "Delete permanently" }).click();
-  await expect(page.getByText(/Type the exact name/i)).toBeVisible();
-  expect(await recorded(page, "delete")).toHaveLength(0);
+  await expect(page.getByText(/Type the exact name/)).toBeVisible();
+  expect(await custodyCalls({ route: "delete-bundle", bundle: SKILL.id })).toHaveLength(0);
 
-  // The EXACT archived name: the delete call lands, keyed on the immutable skill_id.
-  await confirm.fill(LIFECYCLE_ARCHIVED_NAME);
+  // The EXACT archived name: the tombstone lands, then the vault drops the whole custody.
+  await confirm.fill(archivedName);
   await password.fill(E2E_PASSWORD);
   await page.getByRole("button", { name: "Delete permanently" }).click();
+  await expect(page.getByText(`Deleted ${archivedName}`, { exact: false })).toBeVisible();
+  await expect(page.getByText("Its bytes are reclaimed from the server")).toBeVisible();
 
-  await expect.poll(async () => (await recorded(page, "delete")).length).toBeGreaterThan(0);
-  const call = (await recorded(page, "delete")).at(-1);
-  expect(call?.skill).toBe(LIFECYCLE_ARCHIVED_SKILL_ID);
-  expect(call?.acting).toBe(LIFECYCLE_OWNER2_EMAIL);
+  expect(await custodyCalls({ route: "delete-bundle", bundle: SKILL.id })).toHaveLength(1);
+  // The row survives as a tombstone (history outlives the bytes); the custody rows are gone.
+  const row = await adminQuery<{ status: string }>(`select status from web.bundle where id = $1`, [
+    SKILL.id,
+  ]);
+  expect(row[0]?.status).toBe("deleted");
+  const custody = await adminQuery<{ n: string }>(
+    `select count(*)::text as n from plane.version where bundle_id = $1`,
+    [SKILL.id],
+  );
+  expect(custody[0]?.n).toBe("0");
 });
 
-test("purge: a non-current version records the internal-lane purge call", async ({ page }) => {
-  await signIn(page, LIFECYCLE_OWNER2_EMAIL);
-  await gotoSettled(page, `/workspaces/${LIFECYCLE_WS}/skills/${LIFECYCLE_SKILL}/history`);
+test("purge drops ONE past version's bytes; the hash stays a tombstone and history says so", async ({
+  page,
+}) => {
+  const ws = await theWorkspace();
+  await gotoSettled(page, `/workspaces/${ws.id}/skills/${PURGE_SKILL.name}/history`);
 
   const purgeSection = page.getByRole("region", { name: "Purge version bytes" });
   await expect(purgeSection).toBeVisible();
   await purgeSection.locator("summary").first().click();
 
-  const short = L_GOOD.slice(0, 12);
-  await page.locator(`#purge-${short}-confirm`).fill(LIFECYCLE_SKILL);
+  const short = goodId.slice(0, 12);
+  await page.locator(`#purge-${short}-confirm`).fill(PURGE_SKILL.name);
   await page.locator(`#purge-${short}-password`).fill(E2E_PASSWORD);
   await page.getByRole("button", { name: "Purge this version" }).click();
+  await expect(
+    page.getByText("Purged — this version's bytes are gone from the server"),
+  ).toBeVisible();
 
-  await expect.poll(async () => (await recorded(page, "purge")).length).toBeGreaterThan(0);
-  const call = (await recorded(page, "purge")).at(-1);
-  expect(call?.skill).toBe(LIFECYCLE_SKILL);
-  expect(call?.body.version_id).toBe(L_GOOD);
-  expect(call?.acting).toBe(LIFECYCLE_OWNER2_EMAIL);
-});
+  // The vault call carried exactly this version; the mirror rows wear the tombstone.
+  const calls = await custodyCalls({ route: "purge", bundle: PURGE_SKILL.id });
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.body.version_id).toBe(goodId);
+  const purged = await adminQuery<{ purged: boolean }>(
+    `select purged_at is not null as purged from plane.version
+     where bundle_id = $1 and version_id = $2`,
+    [PURGE_SKILL.id, goodId],
+  );
+  expect(purged[0]?.purged).toBe(true);
 
-test("hint redirect: an old renamed name lands on the live skill name", async ({ page }) => {
-  await signIn(page, JOINER_EMAIL);
-  await gotoSettled(page, `/workspaces/${WS}/skills/${HINT_OLD_NAME}`);
-
-  // The catalog_name_hints row resolves the old name to SKILL; the loader 302s to the live name.
-  await page.waitForURL(`**/workspaces/${WS}/skills/${SKILL}`);
-  await expect(page.getByRole("heading", { name: SKILL })).toBeVisible();
+  // The purge is about BYTES: the version's metadata may keep rendering from the app's
+  // immutable-content LRU (a hit can never be stale — retention is the vault's fact), but the
+  // leaked bytes themselves are no longer served: the file view degrades to an honest card and
+  // the secret never reaches the page.
+  await gotoSettled(
+    page,
+    `/workspaces/${ws.id}/skills/${PURGE_SKILL.name}/versions/${goodId}/files/SKILL.md`,
+  );
+  await expect(page.getByText(/couldn't be fetched|This version isn't available/)).toBeVisible();
+  expect(await page.content()).not.toContain("leaked-secret");
 });

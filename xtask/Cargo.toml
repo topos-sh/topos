@@ -12,7 +12,7 @@ description = "The ONE codegen + invariant-gate entrypoint (a cargo-xtask bin, n
 # `contract-derives` turns on the JsonSchema/ToSchema impls gen-schema reads — xtask is one of the two
 # contract producers (with topos-plane); the feature stays off everywhere else (the client stays lean).
 topos-types = { workspace = true, features = ["contract-derives"] }
-topos-plane.workspace = true # the OSS plane lib — for `topos_plane::openapi()` (the OpenAPI drift gate)
+topos-plane.workspace = true # the OSS vault lib — for `topos_plane::openapi()` (the OpenAPI drift gate)
 # The client lib — for `topos::cli_command()` (the CLI-reference drift gate). Default features ONLY: the
 # `test-fixtures` surface stays OFF, so gen-cli-ref never compiles the test-only `test_support` facade.
 topos = { workspace = true }

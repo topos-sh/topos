@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE upload SET state = 'aborted'\n               WHERE id = $1 AND state IN ('staging', 'quarantined')\n                 AND created_at <= to_timestamp($2::double precision / 1000.0)\n               RETURNING id AS \"id!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Float8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0ed562f012121e745011b538d7f7404f9fcb2d1d71aba0460ee2d181194f6785"
+}

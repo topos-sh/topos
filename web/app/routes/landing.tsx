@@ -1,8 +1,9 @@
-import { Link, type MetaFunction, useLoaderData } from "react-router";
+import { Link, type LoaderFunctionArgs, type MetaFunction, useLoaderData } from "react-router";
 import { CommandBlock } from "@/components/command-block";
 import { RoutingStar } from "@/components/landing/routing-star";
 import { TerminalDemo } from "@/components/landing/terminal-demo";
-import { hasAnyWorkspace } from "@/lib/db/resolve.server";
+import { serverEnv } from "@/env.server";
+import { theWorkspace } from "@/lib/db/identity.server";
 
 /**
  * The public landing page ("Klein"): warm-gray print ground, near-black ink, links in ink,
@@ -22,13 +23,18 @@ import { hasAnyWorkspace } from "@/lib/db/resolve.server";
  */
 
 /**
- * The single sessionless probe: does this plane hold ANY workspace yet? A fresh self-hosted
- * deployment ("virgin plane") leads with a claim block — the first person to sign in stands the
- * first workspace up and owns it. Once any workspace exists, the ordinary marketing page renders
- * unchanged. This discloses one boolean about the deployment, never a row.
+ * The single sessionless probe: has this install's ONE workspace been claimed yet? While it
+ * hasn't (a virgin database included — boot mints the row on the first request), the page leads
+ * with the claim hint: the setup link lives in the SERVER LOGS, and this page shows only its
+ * shape, never a code. Once claimed, the ordinary marketing page renders unchanged. This
+ * discloses one boolean about the deployment, never a row.
  */
-export async function loader() {
-  return { virgin: !(await hasAnyWorkspace()) };
+export async function loader({ request }: LoaderFunctionArgs) {
+  const workspace = await theWorkspace();
+  const awaitingOwner = workspace === null || workspace.claimedAt === null;
+  // The same origin resolution the printed log line uses, so the hint matches it exactly.
+  const origin = (serverEnv().TOPOS_PUBLIC_URL ?? new URL(request.url).origin).replace(/\/+$/, "");
+  return { awaitingOwner, setupLine: `${origin}/claim?code=…` };
 }
 
 export const meta: MetaFunction = () => [
@@ -56,13 +62,13 @@ const VERBS: { tag: string; main?: boolean; prompt: string; out: string; ok: str
     main: true,
     prompt: "share our incident-response skill with the team",
     out: "● Published incident-response@a7d2",
-    ok: "  invite link → topos.sh/i/8f3k…",
+    ok: "  topos invite teammate@you.com → the mail carries your address",
   },
   {
     tag: "Join",
-    prompt: "[pastes topos.sh/i/8f3k…]",
-    out: "● Joined. Now following incident-response.",
-    ok: "  I’ll keep it current from here.",
+    prompt: "[pastes topos.sh/acme]",
+    out: "● topos follow topos.sh/acme",
+    ok: "  approve this device in your browser — then I keep it current.",
   },
   {
     tag: "Follow",
@@ -89,7 +95,8 @@ const COMPARISON: { statement: string; git: boolean }[] = [
     git: false,
   },
   {
-    statement: "Every version is signed, so agents run exactly what the team approved",
+    statement:
+      "Every version is content-addressed, so agents run exactly the bytes the team approved",
     git: false,
   },
   { statement: "One command rolls every machine back to a known-good version", git: false },
@@ -104,33 +111,28 @@ function CheckChip() {
 }
 
 /**
- * The empty-plane claim band: shown ONLY when no workspace exists anywhere yet. The first
- * visitor to sign in stands the first workspace up and owns it — the ordinary create flow IS the
- * claim, so the CTA is just sign-in. Honest about the ownership: whoever creates it owns it.
+ * The unclaimed-install band: shown ONLY while this install still awaits its first owner. The
+ * claim rides the one-time link the server printed at boot — machine control is the proof — so
+ * the page points at the logs and shows the link's SHAPE, never a code.
  */
-function ClaimBlock() {
+function ClaimBlock({ setupLine }: { setupLine: string }) {
   return (
     <section className="border-line-soft border-b bg-panel">
       <div className={`${WRAP} py-8`}>
         <div className="rounded-lg border border-line-soft bg-panel2 px-6 py-6 shadow-card">
           <p className="font-display text-[10px] text-accent uppercase tracking-[0.14em]">
-            Set up this plane
+            Set up this install
           </p>
           <h2 className="mt-3 max-w-[40ch] font-display font-semibold text-[clamp(18px,2.2vw,23px)] text-ink leading-[1.4] tracking-[-0.02em]">
-            This plane has no workspace yet.
+            This install is waiting for its owner.
           </h2>
           <p className="mt-3 max-w-[60ch] text-dim">
-            The first person to sign in sets it up. Create the first workspace and you become its
-            owner — everyone else joins the address you share.
+            The setup link is printed in the server logs — whoever opens it creates the first
+            account and owns the workspace. Look for the line:
           </p>
-          <div className="mt-5">
-            <Link
-              to="/login"
-              className="inline-block rounded-md bg-accent px-4 py-2.5 font-mono text-[13px] text-on-accent transition-colors hover:bg-accent-deep focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 active:scale-[0.98]"
-            >
-              Sign in to set it up
-            </Link>
-          </div>
+          <pre className="mt-4 overflow-x-auto rounded-md border border-line-soft bg-ground px-4 py-3 font-mono text-[13px] text-dim">
+            → Finish setup: {setupLine}
+          </pre>
         </div>
       </div>
     </section>
@@ -138,7 +140,7 @@ function ClaimBlock() {
 }
 
 export default function LandingPage() {
-  const { virgin } = useLoaderData<typeof loader>();
+  const { awaitingOwner, setupLine } = useLoaderData<typeof loader>();
   return (
     <div className="min-h-dvh text-[15px] leading-[1.6]">
       <nav className="border-line-soft border-b">
@@ -172,7 +174,7 @@ export default function LandingPage() {
         </div>
       </nav>
 
-      {virgin && <ClaimBlock />}
+      {awaitingOwner && <ClaimBlock setupLine={setupLine} />}
 
       <header className="pt-11 pb-8 lg:pt-[58px] lg:pb-9">
         <div

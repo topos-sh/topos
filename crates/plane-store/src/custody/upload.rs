@@ -1,9 +1,10 @@
-//! The candidate-upload types — a full bundle's files + lineage, as the publish/propose paths receive them.
+//! The candidate-upload types — a full bundle's files + lineage, as the commit/publish paths
+//! receive them.
 //!
-//! Every file carries its raw bytes (there is **no** blob-id field — no reference-by-id; the server rehashes
-//! every byte). The server-rehash + canonical-rule + roster + cross-bundle enforcement lives in the
-//! ingest → migrate → one-pointer-move-transaction path (`lifecycle` + `set_current`); this module is just
-//! the shared input shape.
+//! Every file carries its raw bytes (there is **no** blob-id field — no reference-by-id; the vault
+//! rehashes every byte). The server-rehash + canonical-rule enforcement lives in the
+//! ingest → migrate → one-transaction commit path (`lifecycle` + `commit`); this module is just the
+//! shared input shape.
 
 use topos_core::digest::FileMode;
 
@@ -21,17 +22,18 @@ pub struct UploadedFile {
     pub bytes: Vec<u8>,
 }
 
-/// A full candidate bundle: every file's bytes, the candidate commit's declared parents (bound into
-/// the recomputed id, so a lie changes the id), and the author + message.
+/// A full candidate bundle: every file's bytes, the declared parent (bound into the recomputed id,
+/// so a lie changes the id), and the attribution + message recorded in the commit frame.
 #[derive(Debug, Clone)]
 pub struct CandidateUpload {
     /// Every file in the candidate bundle.
     pub files: Vec<UploadedFile>,
-    /// The candidate commit's parents (`0` for a genesis publish, `1` for a normal publish/revert/propose,
-    /// `2` for an author merge). Each must already be present in the workspace's store.
-    pub parents: Vec<CommitId>,
-    /// The author device id recorded in the commit frame.
-    pub author: String,
+    /// The candidate's parent version (`None` for a genesis commit). Must already exist as a
+    /// version of the target bundle.
+    pub parent: Option<CommitId>,
+    /// The attribution display string recorded verbatim as the commit frame's author (and the
+    /// version row's `author_display`). Pass-through from the app; shape-checked, never interpreted.
+    pub attribution: String,
     /// The commit message (title + body composed into one string).
     pub message: String,
 }

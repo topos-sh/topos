@@ -1,225 +1,159 @@
-//! HERO — the real client pull engine over loopback HTTP against the real plane.
+//! The distribute HERO — the whole product loop through the REAL composed stack, one test:
+//! boot → claim the workspace (preset code) → the owner's authoring CLI enrolls through the
+//! device flow → publishes a genesis → a SECOND device (same person) follows and lands the bytes
+//! byte-exact → v2 propagates on the next sweep (and a repeat sweep is a no-op) → a revert
+//! restores the v1 bytes as a NEW forward version the follower lands. SMTP stays unset the whole
+//! way — nothing in the loop needs mail.
 //!
-//! One real `plane-store` [`Authority`] (seeded through the feature-gated test-fixtures shims) is served by
-//! the composed [`topos_plane::router`] on a real `127.0.0.1:0` socket on a background multi-threaded tokio
-//! runtime — all through the shared `common` harness. The client side is the GENUINE pull engine
-//! (`topos::ops::pull` via `topos::test_support`) over the GENUINE [`topos::test_support`]-wrapped `ureq`
-//! transport — the SYNC client is driven from a plain (non-async) thread, never inside the runtime.
-//!
-//! Three scenarios, each on its own freshly-seeded plane + client home:
-//! 1. first pull fast-forwards onto the plane's genesis, byte-exact incl. the executable bit;
-//! 2. an immediate second pull is a commit-sensitive **304 no-op** (nothing re-materialized);
-//! 3. a forward move to a v2 (an ordinary UNSIGNED advanced record) applies byte-exact on the next pull —
-//!    no signature, no verification, just the served record + the content-addressed digest re-check on apply.
+//! This is the release-blocker probe: every hop rides the public surfaces (the claim ceremony,
+//! `/verify`, the `/api/v1` device lane) exactly as production traffic would.
 
 mod common;
 
-use common::{NOW, Plane, SKILL, WS, expected_placement, genesis_files};
-use plane_store::{Authority, FileMode, OpId, UploadedFile};
-use topos::test_support::{Follow, PullHarness, Scope};
-use topos_types::results::PullAction;
-use topos_types::{Generation, TerminalOutcome};
+use common::{OWNER_EMAIL, SKILL, Stack, expected, genesis_files};
+use topos::test_support::{FollowHarness, PublishResult, Scope};
 
-// ── shared constants ──────────────────────────────────────────────────────────────────────────────
-const DKID: &str = "dk_a";
-const PRINCIPAL: &str = "p_dev";
-/// The publisher device's workspace Bearer credential — and the one the follower presents to read (a
-/// confirmed member reads every skill; per-skill read tokens are gone).
-const CRED: &str = "wc_hero_secret_value";
-const AUTHOR: &str = "d_test";
-const MESSAGE: &str = "topos publish";
-const CREATED_AT: &str = "2026-06-29T00:00:00Z";
-/// The device's registered 32-byte public key (a fixed test value; nothing verifies against it).
-const DEVICE_PUBKEY: [u8; 32] = [7u8; 32];
-const GENESIS_OP: &str = "a0000000-0000-4000-8000-000000000001";
-const CHILD_OP: &str = "a0000000-0000-4000-8000-000000000002";
-
-/// A v2 bundle (a forward child of genesis) — the forward-move scenario 3 applies it byte-exact.
-fn v2_files() -> Vec<UploadedFile> {
+/// The v2 draft the author ships after the genesis.
+fn v2_files() -> Vec<(&'static str, bool, &'static [u8])> {
     vec![
-        UploadedFile {
-            path: "SKILL.md".to_owned(),
-            mode: FileMode::Regular,
-            bytes: b"# deploy v2\nDeploy the service, faster.\n".to_vec(),
-        },
-        UploadedFile {
-            path: "run.sh".to_owned(),
-            mode: FileMode::Executable,
-            bytes: b"#!/bin/sh\necho deploying v2\n".to_vec(),
-        },
+        (
+            "SKILL.md",
+            false,
+            b"# deploy\nDeploy the service.\nNow with canary steps.\n" as &[u8],
+        ),
+        (
+            "run.sh",
+            true,
+            b"#!/bin/sh\necho deploying --canary\n" as &[u8],
+        ),
     ]
 }
 
-/// The LOCAL placeholder a client adopts before any pull (intentionally NOT the plane's genesis, so the
-/// first pull genuinely fast-forwards onto — and materializes — the plane's bytes).
-const LOCAL_PLACEHOLDER: &[(&str, bool, &[u8])] = &[("SKILL.md", false, b"# local placeholder\n")];
-
-/// Seed a real authority (device+credential+confirmed-member → genesis), then stand the COMPOSED
-/// stack up — the web app in front, the vault internal — via the shared harness. The pull engine
-/// below dials the APP's `/api` base, exactly like a real client after the door cutover.
-fn start_plane(tag: &str) -> Plane {
-    common::start_stack(
-        "topos-hero-plane",
-        tag,
-        false,
-        async |authority: &Authority| {
-            let genesis = common::seed_genesis_plane(
-                authority,
-                common::GenesisSpec {
-                    dkid: DKID,
-                    device_pubkey: &DEVICE_PUBKEY,
-                    op_id: GENESIS_OP,
-                    files: genesis_files(),
-                    principal: PRINCIPAL,
-                    author: AUTHOR,
-                    message: MESSAGE,
-                    created_at: CREATED_AT,
-                    credential: CRED,
-                },
-            )
-            .await;
-            common::Seeded {
-                genesis: Some(genesis),
-                ..Default::default()
-            }
-        },
-    )
+/// Publish the current draft of `skill` from `client`, expecting a DIRECT landing; returns
+/// `(version_id_hex, new_generation)`.
+fn publish_direct(client: &FollowHarness, skill: &str, message: &str) -> (String, u64) {
+    let digest = client.draft_digest(skill);
+    match client
+        .publish_message("", &format!("{skill}@{digest}"), message)
+        .expect("the publish lands")
+    {
+        PublishResult::Published(d) => (d.version_id, d.current_generation),
+        other => panic!("expected a direct publish, got {other:?}"),
+    }
 }
 
-// ── scenario 1: first pull fast-forwards + byte-exact (incl. the executable bit) ──────────────────────
-
-#[test]
-fn first_pull_fast_forwards_byte_exact() {
-    let plane = start_plane("ff");
-    let mut client = PullHarness::new("ff");
-    client.adopt_followed(SKILL, WS, CRED, Follow::Auto, LOCAL_PLACEHOLDER);
-
-    let data = client.run_pull(&plane.base_url, Scope::AllFollowed);
-
-    // The engine fast-forwarded onto the plane's genesis at (1,1).
-    assert_eq!(data.skills.len(), 1, "exactly one followed skill");
-    let row = &data.skills[0];
-    assert_eq!(row.action, PullAction::FastForwarded, "row: {row:?}");
-    assert_eq!(row.applied, Generation { epoch: 1, seq: 1 });
-    assert_eq!(row.observed, Generation { epoch: 1, seq: 1 });
-
-    // The placement now holds the EXACT genesis bytes — path/mode/content byte-for-byte, incl. the exec bit.
-    let got = client.placement_files(SKILL);
-    let want = expected_placement(&genesis_files());
-    assert_eq!(got, want, "placement must be the genesis bundle byte-exact");
-    // Spell the executable-bit guarantee out explicitly.
-    let run_sh = got
+/// Land a delivered skill on `client` regardless of the consent shape the sweep chose: run the
+/// bare reconcile, and if the entry is a first-receive OFFER, accept it explicitly (I-TOFU).
+fn land(stack: &Stack, client: &FollowHarness, name: &str) {
+    let _ = stack; // the stack pins the composed topology alive for the sweep
+    let (data, warnings) = client.reconcile(true);
+    assert!(warnings.is_empty(), "a clean sweep: {warnings:?}");
+    if data
+        .skills
         .iter()
-        .find(|(p, _, _)| p == "run.sh")
-        .expect("run.sh present");
-    assert_eq!(run_sh.1 & 0o111, 0o111, "run.sh keeps its executable bit");
-    let skill_md = got
+        .any(|s| s.skill == name && s.action == topos_types::results::PullAction::Offered)
+    {
+        let _ = client.pull(Scope::Accept {
+            name: name.to_owned(),
+        });
+    }
+}
+
+#[test]
+fn e2e_the_full_loop_publish_propagate_revert() {
+    let stack = common::start_stack("hero");
+
+    // Boot → claim: the first account, seated as the owner, signed in by the ceremony itself.
+    let owner = stack.claim_owner(OWNER_EMAIL);
+
+    // Device 1 — the authoring CLI: the gh-style device flow, approved at /verify.
+    let author = FollowHarness::new("hero-author");
+    stack.enroll_begin_and_approve(&author, &owner);
+    let applied = author.resume_apply().expect("the author's resume applies");
+    assert!(applied.enrolled_now);
+
+    // The genesis: adopt the draft, publish it. `current` is born at generation 1.
+    author.adopt(SKILL, &genesis_files());
+    let (v1, gen1) = publish_direct(&author, SKILL, "genesis: deploy runbook");
+    assert_eq!(gen1, 1, "genesis creates the pointer at generation 1");
+    // The author's own copy is followed locally (the workspace scope every later verb resolves).
+    author.follow_locally(SKILL, &stack.workspace_id);
+
+    // Device 2 — a second machine of the SAME person: follow the address, approve, apply.
+    let follower = FollowHarness::new("hero-follower");
+    stack.enroll_begin_and_approve(&follower, &owner);
+    let applied = follower
+        .resume_apply()
+        .expect("the follower's resume applies");
+    assert!(applied.enrolled_now);
+    land(&stack, &follower, SKILL);
+    assert_eq!(
+        follower.placement_files(SKILL),
+        expected(&genesis_files()),
+        "the genesis lands byte-exact on the second device"
+    );
+
+    // v2: the author edits + publishes; the follower's next sweep fast-forwards byte-exact.
+    author.edit_placement(SKILL, &v2_files());
+    let (_v2, gen2) = publish_direct(&author, SKILL, "v2: canary steps");
+    assert_eq!(gen2, 2);
+    let (data, warnings) = follower.reconcile(true);
+    assert!(warnings.is_empty(), "a clean v2 sweep: {warnings:?}");
+    let entry = data
+        .skills
         .iter()
-        .find(|(p, _, _)| p == "SKILL.md")
-        .expect("SKILL.md present");
-    assert_eq!(skill_md.1 & 0o111, 0, "SKILL.md is not executable");
-
-    // sync.json advanced: applied == observed == (1,1), base == the genesis version id.
-    let sync = client.sync_state(SKILL);
-    assert_eq!(sync.applied, Generation { epoch: 1, seq: 1 });
-    assert_eq!(sync.observed, Generation { epoch: 1, seq: 1 });
-    assert_eq!(sync.base_commit, hex::encode(plane.genesis().0));
-}
-
-// ── scenario 2: an immediate second pull is a 304 no-op ───────────────────────────────────────────────
-
-#[test]
-fn second_pull_is_a_304_no_op() {
-    let plane = start_plane("304");
-    let mut client = PullHarness::new("304");
-    client.adopt_followed(SKILL, WS, CRED, Follow::Auto, LOCAL_PLACEHOLDER);
-
-    // First pull fast-forwards to (1,1).
-    let first = client.run_pull(&plane.base_url, Scope::AllFollowed);
-    assert_eq!(first.skills[0].action, PullAction::FastForwarded);
-    let placement_after_ff = client.placement_files(SKILL);
-    let sync_after_ff = client.sync_state(SKILL);
-
-    // Second pull: the client sends If-None-Match: "1.1" + Topos-Known-Version-Id: <genesis>; the plane,
-    // unchanged at (1,1)/<genesis>, answers 304. The engine maps that to UpToDate and re-materializes nothing.
-    let second = client.run_pull(&plane.base_url, Scope::AllFollowed);
+        .find(|s| s.skill == SKILL)
+        .expect("the followed skill rides the sweep");
     assert_eq!(
-        second.skills[0].action,
-        PullAction::UpToDate,
-        "an unchanged pointer (304) is a no-op: {:?}",
-        second.skills[0]
+        entry.action,
+        topos_types::results::PullAction::FastForwarded,
+        "v2 auto-applies on a standing follow"
+    );
+    assert_eq!(follower.placement_files(SKILL), expected(&v2_files()));
+
+    // A REPEAT sweep is a commit-sensitive no-op.
+    let (data, _) = follower.reconcile(true);
+    let entry = data
+        .skills
+        .iter()
+        .find(|s| s.skill == SKILL)
+        .expect("still followed");
+    assert_eq!(
+        entry.action,
+        topos_types::results::PullAction::UpToDate,
+        "nothing moved — nothing re-applies"
     );
 
-    // Nothing re-materialized: the placement bytes/modes and sync floor are byte-identical to post-FF.
+    // The fleet report: the follower's applied snapshot landed as a row.
+    let follower_device = follower.device_id().expect("the follower is enrolled");
     assert_eq!(
-        client.placement_files(SKILL),
-        placement_after_ff,
-        "a 304 must not rewrite the placement"
-    );
-    let sync_now = client.sync_state(SKILL);
-    assert_eq!(sync_now.applied, sync_after_ff.applied);
-    assert_eq!(sync_now.observed, sync_after_ff.observed);
-    assert_eq!(sync_now.applied, Generation { epoch: 1, seq: 1 });
-}
-
-// ── scenario 3: a forward move to v2 applies byte-exact (an unsigned advanced record, no ceremony) ─────
-
-#[test]
-fn a_forward_move_to_v2_applies_byte_exact() {
-    let plane = start_plane("v2");
-    let mut client = PullHarness::new("v2");
-    client.adopt_followed(SKILL, WS, CRED, Follow::Auto, LOCAL_PLACEHOLDER);
-
-    // Reach the genesis (1,1).
-    let ff = client.run_pull(&plane.base_url, Scope::AllFollowed);
-    assert_eq!(ff.skills[0].action, PullAction::FastForwarded);
-    assert_eq!(
-        client.placement_files(SKILL),
-        expected_placement(&genesis_files())
+        stack.count(&format!(
+            "SELECT count(*) FROM web.device_bundle_state WHERE device_id = '{follower_device}'"
+        )),
+        1,
+        "the reconcile reported this device's applied state"
     );
 
-    // Move `current` FORWARD to a v2 (a 1-parent publish on genesis) — an ordinary UNSIGNED advanced record.
-    let authority = plane.authority.clone();
-    let ws = plane.ws();
-    let skill = plane.skill();
-    let genesis = plane.genesis();
-    plane.rt.block_on(async {
-        let receipt = authority
-            .seed_published_child(
-                &ws,
-                &skill,
-                CRED,
-                &OpId::parse(CHILD_OP).unwrap(),
-                genesis,
-                v2_files(),
-                AUTHOR,
-                MESSAGE,
-                CREATED_AT,
-                NOW,
-            )
-            .await
-            .expect("publish v2");
-        assert_eq!(receipt.outcome, TerminalOutcome::Ok);
-        assert_eq!(receipt.current, Some(Generation { epoch: 1, seq: 2 }));
-    });
-
-    // The next pull fetches the advanced record and fast-forwards onto v2 byte-exact — there is no
-    // signature and no client-side verification, only the served record plus the content-addressed digest
-    // re-check on apply (a mismatch would be a loud integrity error; a clean move just lands).
-    let applied = client.run_pull(&plane.base_url, Scope::AllFollowed);
+    // REVERT: the owner rolls back to v1 — a FORWARD commit carrying the good bytes (generation
+    // 3), never a pointer rollback. The follower's next sweep lands the restored bytes.
+    let reverted = author.revert(SKILL, &v1, true).expect("the revert lands");
+    assert_eq!(reverted.reverted_to, v1);
+    assert_eq!(reverted.current_generation, 3, "a revert moves FORWARD");
+    assert_ne!(reverted.new_version_id, v1, "the revert is a NEW version");
+    let (data, warnings) = follower.reconcile(true);
+    assert!(warnings.is_empty(), "a clean revert sweep: {warnings:?}");
+    let entry = data
+        .skills
+        .iter()
+        .find(|s| s.skill == SKILL)
+        .expect("still followed");
     assert_eq!(
-        applied.skills[0].action,
-        PullAction::FastForwarded,
-        "an unsigned advanced record applies with no ceremony: {:?}",
-        applied.skills[0]
+        entry.action,
+        topos_types::results::PullAction::FastForwarded
     );
-    assert_eq!(applied.skills[0].applied, Generation { epoch: 1, seq: 2 });
     assert_eq!(
-        client.placement_files(SKILL),
-        expected_placement(&v2_files()),
-        "the v2 bundle materializes byte-exact"
+        follower.placement_files(SKILL),
+        expected(&genesis_files()),
+        "the revert restored the v1 bytes byte-exact"
     );
-    let sync = client.sync_state(SKILL);
-    assert_eq!(sync.applied, Generation { epoch: 1, seq: 2 });
-    assert_eq!(sync.observed, Generation { epoch: 1, seq: 2 });
 }

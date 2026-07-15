@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useFetcher } from "react-router";
+import { type LastSetLine, LastSetNote } from "@/components/policy/last-set-line";
 import { StepUpConfirm } from "@/components/policy/step-up-confirm";
 import { Card, SectionHeading } from "@/components/ui";
 
@@ -10,7 +11,7 @@ interface InviteFetcherData {
 type InvitePolicy = "members" | "owners";
 
 const COPY: Record<InvitePolicy, string> = {
-  members: "Any confirmed member can invite",
+  members: "Any member can invite",
   owners: "Only owners can invite",
 };
 
@@ -23,9 +24,11 @@ const COPY: Record<InvitePolicy, string> = {
 export function InvitePolicyPanel({
   isOwner,
   invitePolicy,
+  lastSet,
 }: {
   isOwner: boolean;
   invitePolicy: InvitePolicy;
+  lastSet: LastSetLine | null;
 }) {
   return (
     <section aria-labelledby="invite-policy-heading" className="space-y-3">
@@ -48,6 +51,10 @@ export function InvitePolicyPanel({
             . Only an owner can change this.
           </p>
         )}
+        <LastSetNote
+          lastSet={lastSet}
+          describe={(v) => (v === "owners" ? "owners only" : "every member")}
+        />
       </Card>
     </section>
   );

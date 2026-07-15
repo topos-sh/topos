@@ -8,104 +8,66 @@
 //! It persists an op-WAL before the first send (so an uncertain retry replays the same
 //! `op_id`), and maps the plane's typed outcome.
 //!
-//! **The workspace-standup branch.** An UN-ENROLLED direct publish does not fail — it stands the
-//! workspace up: after the FULL normal pre-flight (skill resolution, scan, digest computation, the
-//! optional `@<digest>` consent gate — so consent binds BEFORE any network), the client starts a standup device
-//! authorization against the hosted plane (`TOPOS_PLANE_URL` override, else the compiled-in default),
-//! guards one-plane-per-install (no key to pin — the pointer is unsigned), writes an `AuthorizingStandup`
-//! WAL, and returns a PENDING
-//! receipt whose `ENROLL_RESUME` next-action is the SAME publish command. Re-invoking it polls once;
-//! once a signed-in human approves (creating the workspace and seating them as owner), the same
-//! invocation redeems, promotes the enrollment, and CONTINUES into the ordinary publish — disclosing
-//! "workspace X — owner Y" so a hijacked approval is visible. When the target pins a `@<digest>` the
-//! standup re-runs the same consent gate on every invocation, so bytes that drift are refused before any
-//! network. `--propose` never stands up (a proposal against a workspace that does not exist yet is
-//! meaningless) and keeps the typed not-enrolled error.
+//! An UN-ENROLLED publish is refused typed — enrollment is `topos follow <workspace-address>` (the
+//! device-authorization flow), and workspaces are born server-side, never from a publish.
 
 use topos_core::digest::to_hex;
 use topos_core::identity::{self, Commit};
 use topos_gitstore::{ImportFile, Store};
-use topos_types::bootstrap::VerifiedDomainStatus;
 use topos_types::persisted::{ConflictState, Lock, OpKind, OpRecord, PlacementMap, SyncState};
-use topos_types::results::{
-    AddedNote, ProposeData, PublishData, PublishPending, PublishPendingStatus, StandupReceipt,
-};
-use topos_types::{Generation, PERSISTED_SCHEMA_VERSION, TerminalOutcome};
+use topos_types::results::{AddedNote, ProposeData, PublishData};
+use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
 use topos_types::results::{PublishDescribeData, PublishGate};
 
 use super::contribute::{self, ContributeConnect, PUBLISH_MESSAGE};
-use super::follow::{
-    DeliveryConnect, DirectoryConnect, EnrollConnect, complete_uri, device_fingerprint,
-    guard_one_plane, machine_name, promote_core, resolve_api_base,
-};
+use super::follow::{DeliveryConnect, DirectoryConnect};
 use super::sync_engine;
 use super::{
     DiscoveryRoots, add, add_with_name, parse_hex32, resolve_add_target, resolve_skill,
     resolve_skill_in_workspace, split_target, tracked_skill_at, write_workspace_for_skill,
 };
 use crate::ctx::Ctx;
-use crate::device_signer::DeviceSigner;
 use crate::enroll;
 use crate::error::ClientError;
-use crate::plane::{Card, TokenPoll, WriteReceipt};
+use crate::plane::WriteReceipt;
 use crate::source::{self, SourceSpec};
 use crate::{doc, op_wal, scan, sidecar};
 
-/// The result of `publish`: either `current` moved (a direct publish), a proposal opened (`--propose`), or
-/// the publish is PENDING the workspace-standup sign-in (the un-enrolled first publish).
+/// The result of `publish`: either `current` moved (a direct publish), or a proposal opened
+/// (`--propose`, or the protection gate's downgrade).
 #[derive(Debug)]
 pub(crate) enum PublishOutcome {
     /// A direct publish moved `current` to the draft.
     Published(PublishData),
     /// `--propose` opened a proposal (NEEDS_REVIEW); `current` did NOT move.
     Proposed(ProposeData),
-    /// The un-enrolled standup branch is waiting on a human sign-in: nothing was published; the envelope
-    /// stays `ok = true` with `data.pending` set, and the `ENROLL_RESUME` next-action carries the ORIGINAL
-    /// publish argv (re-invoking it IS the resume — consent re-derives from the optional `@<digest>` pin
-    /// each invocation).
-    Pending {
-        data: PublishData,
-        /// The argv the agent re-invokes to resume (the canonical spelling of this same command).
-        resume_argv: Vec<String>,
-    },
-}
-
-/// The standup branch's network seam + dial point — the enroll transport factory (the same creds-free
-/// connector `follow` uses) and the base the door card-fetches FIRST (the `TOPOS_PLANE_URL` override,
-/// else the compiled-in hosted WEB ORIGIN; tests always pass an explicit base). Like every other door,
-/// the base may be a human origin or an API base: the constant card at either declares the API base to
-/// re-root onto.
-pub(crate) struct StandupConnectors<'a> {
-    pub enroll: &'a EnrollConnect<'a>,
-    pub base_url: String,
 }
 
 /// The genesis base — a skill whose `current` does not exist yet is published as a zero-parent commit at
-/// `(0,0)` (the plane's genesis branch creates `current` at `(1,1)`).
-const GENESIS: Generation = Generation { epoch: 0, seq: 0 };
+/// generation `0` (the plane's genesis branch creates `current` at `1`).
+const GENESIS: u64 = 0;
 
 /// Ship `target`'s draft (or, with `propose`, open a proposal), ADDING the skill to topos first if it is an
 /// untracked LOCAL source. `target` is `<source>[@<digest>]`: the optional `@<digest>` pin re-verifies the
 /// scanned bytes, and the SOURCE (the rest) is a tracked skill name, an untracked `<name>` / `<name>@<harness>`
 /// / `<dir>` the client adopts before publishing (the auto-add convenience — one command instead of
-/// `add` then `publish`), or a remote/unsupported form that is refused typed. Un-enrolled + direct dispatches
-/// to the workspace-standup branch (see the module doc); `--propose` keeps the typed not-enrolled error.
+/// `add` then `publish`), or a remote/unsupported form that is refused typed. An un-enrolled publish is
+/// refused BEFORE any local adoption, so it never mutates local state.
 ///
 /// # Errors
-/// [`ClientError::Enrollment`] if not enrolled (`--propose`) or a standup step fails typed;
+/// [`ClientError::Enrollment`] if not enrolled (run `topos follow <workspace-address>` first);
 /// [`ClientError::InvalidArgument`] if the source is remote/unsupported (add it first);
 /// [`ClientError::HarnessMismatch`] if a `@<harness>` names a different harness than the tracked skill;
 /// the `add`-family errors ([`ClientError::AmbiguousHarness`] / [`ClientError::NoUntrackedSkill`] / …) when
 /// resolving an untracked source; [`ClientError::ApprovalMismatch`] if a `@<digest>` pin does not match the
 /// scanned bytes; [`ClientError::PublishBlocked`] if an unresolved merge conflict is present;
 /// [`ClientError::Conflict`] / [`ClientError::Denied`] on the plane's
-/// typed verdict; a signing / transport / store failure otherwise.
+/// typed verdict; a transport / store failure otherwise.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn publish(
     ctx: &Ctx<'_>,
     connect: &ContributeConnect<'_>,
-    standup: &StandupConnectors<'_>,
     roots: Option<&DiscoveryRoots>,
     target: &str,
     propose: bool,
@@ -113,16 +75,15 @@ pub(crate) fn publish(
     workspace: Option<&str>,
     message: Option<&str>,
 ) -> Result<PublishOutcome, ClientError> {
-    // Split off an optional `@<digest>` consent pin (64-hex only); everything else is the SOURCE. A pin only
-    // ever rides a standup RESUME, by which point the skill is already tracked, so it never collides with a
-    // `<name>@<harness>` or `<dir>` source on a first (untracked) publish.
+    // Split off an optional `@<digest>` consent pin (64-hex only); everything else is the SOURCE.
     let (source_str, pin) = parse_target(target);
 
-    // A `--propose` needs prior enrollment (a proposal against a workspace that does not exist yet is
-    // meaningless). Refuse BEFORE any local adoption, so an un-enrolled propose never mutates local state.
-    if propose && enroll::read_instance(ctx.fs, &ctx.layout)?.is_none() {
+    // Enrollment first — BEFORE any local adoption, so an un-enrolled publish never mutates local
+    // state. Sharing needs a workspace, and joining one is the device flow, not a publish.
+    if enroll::read_instance(ctx.fs, &ctx.layout)?.is_none() {
         return Err(ClientError::Enrollment(
-            "not enrolled; run `topos follow <link>` first".into(),
+            "not enrolled — run `topos follow <workspace-address>` first, then re-run this publish"
+                .into(),
         ));
     }
 
@@ -130,14 +91,13 @@ pub(crate) fn publish(
     // rest of the flow resolves. `added` is `Some` iff THIS invocation performed the adoption (disclosure).
     let (skill_name, added) = ensure_tracked(ctx, roots, &source_str)?;
 
-    let outcome = publish_tracked(
+    let outcome = enrolled_publish(
         ctx,
         connect,
-        standup,
         &skill_name,
-        pin.as_deref(),
         propose,
         channel,
+        pin.as_deref(),
         workspace,
         message,
     )?;
@@ -156,7 +116,7 @@ pub(crate) struct PublishDescribeConnectors<'a> {
 /// The bare (no `--yes`) ENROLLED publish describe — what shipping this draft WOULD do: where it lands,
 /// the gate outcome, the audience, the share line, and the undo path. Mutates nothing on the plane (a
 /// local auto-add of an untracked source is the one disclosed local step, exactly as the apply performs).
-/// The network is read only AFTER the local scan; the standup / genesis / WAL apply paths are untouched
+/// The network is read only AFTER the local scan; the genesis / WAL apply paths are untouched
 /// (this runs only for an enrolled `!yes` invocation, dispatched in the composition root).
 ///
 /// # Errors
@@ -326,55 +286,6 @@ fn fresh_review_required(
         .map(|s| s.review_required)
 }
 
-/// Publish an ALREADY-tracked skill by name (the pre-auto-add body): dispatch enrolled vs standup, then run
-/// the ordinary publish. `skill_name` is the tracked name [`ensure_tracked`] resolved; `pin` the optional
-/// `@<digest>` consent. A `--propose` here always implies enrollment (the un-enrolled case was refused in
-/// [`publish`] before adoption).
-#[allow(clippy::too_many_arguments)]
-fn publish_tracked(
-    ctx: &Ctx<'_>,
-    connect: &ContributeConnect<'_>,
-    standup: &StandupConnectors<'_>,
-    skill_name: &str,
-    pin: Option<&str>,
-    propose: bool,
-    channel: Option<&str>,
-    workspace: Option<&str>,
-    message: Option<&str>,
-) -> Result<PublishOutcome, ClientError> {
-    // The branch gate is enrollment itself: `instance.json` present ⇒ the ordinary enrolled publish (an
-    // enrolled device NEVER hits the standup branch); absent + direct ⇒ standup. Absent + propose was
-    // already refused in `publish` (before any adoption), so a bare un-enrolled publish here is a direct.
-    if enroll::read_instance(ctx.fs, &ctx.layout)?.is_none() {
-        debug_assert!(
-            !propose,
-            "propose + un-enrolled is refused in publish() before adoption"
-        );
-        return standup_publish(ctx, connect, standup, skill_name, pin, message);
-    }
-    // `instance.json` PRESENT does not yet mean the promotion COMPLETED: promote_core writes it FIRST and
-    // `user.json` later, so a crash inside a standup promotion leaves instance present, user absent, and
-    // the standup `Redeemed` WAL still holding the recovery fence. The enrolled path below would then fail
-    // "could not determine your workspace" without ever consulting the WAL — a wedge, because the standup
-    // receipt's own next-action is to re-run THIS command. Route a standup-rooted Redeemed WAL back
-    // through the standup dispatch, whose Redeemed arm completes the promotion idempotently and continues
-    // into the publish. (An invite/claim-rooted Redeemed WAL keeps its own recovery door, a re-invoked
-    // `follow` — exactly what the enrolled path's error message points at. And once the WAL is gone — a
-    // crash AFTER the delete — a retry publishes without the "workspace X — owner Y" standup disclosure:
-    // an accepted cosmetic residual; the workspace and the genesis are correct, and no durable-receipt
-    // machinery is worth re-creating that one line.)
-    if !propose
-        && let Some(wal) = enroll::read_wal(ctx.fs, &ctx.layout)?
-        && let enroll::EnrollPhase::Redeemed { context, .. } = &wal.state
-        && matches!(context.root, enroll::EnrollRoot::Standup)
-    {
-        return standup_publish(ctx, connect, standup, skill_name, pin, message);
-    }
-    enrolled_publish(
-        ctx, connect, skill_name, propose, channel, pin, None, workspace, message,
-    )
-}
-
 /// Resolve `source_str` (the target minus any `@<digest>` pin) to a TRACKED skill NAME the rest of the
 /// publish flow resolves, ADDING it first if it is an untracked local source. Returns the name plus the
 /// per-invocation [`AddedNote`] disclosure (`Some` iff THIS call adopted the skill; `None` when already
@@ -382,8 +293,8 @@ fn publish_tracked(
 ///
 /// An EXACT tracked-name match wins BEFORE any source-shape classification — so a tracked skill whose name
 /// happens to look like a path / remote / `<name>@<harness>` shape (`owner/repo`, `foo@bar`) still publishes
-/// by its literal name (and its standup resume argv self-heals to that exact name). Only a name tracked
-/// NOWHERE is classified by shape ([`crate::source::classify`], the same classifier `add` uses) and adopted.
+/// by its literal name. Only a name tracked NOWHERE is classified by shape ([`crate::source::classify`],
+/// the same classifier `add` uses) and adopted.
 ///
 /// # Errors
 /// [`ClientError::InvalidArgument`] for a remote/unsupported source (add it first);
@@ -497,23 +408,21 @@ fn ensure_path(
     ))
 }
 
-/// Attach the per-invocation `added` disclosure to the outcome — Published, Pending, AND Proposed all carry
+/// Attach the per-invocation `added` disclosure to the outcome — Published AND Proposed both carry
 /// it (a `--propose` of an untracked source adopts it first too), so a success path never hides the local
 /// `add` it performed. A no-op when nothing was added this invocation.
 fn stamp_added(mut outcome: PublishOutcome, added: Option<AddedNote>) -> PublishOutcome {
     if let Some(note) = added {
         match &mut outcome {
             PublishOutcome::Published(data) => data.added = Some(note),
-            PublishOutcome::Pending { data, .. } => data.added = Some(note),
             PublishOutcome::Proposed(data) => data.added = Some(note),
         }
     }
     outcome
 }
 
-/// The ordinary ENROLLED publish (the pre-standup body). `pin` is the optional `@<digest>` consent — when
-/// present, the scanned bytes must match it; when absent, the computed digest ships as-is. `standup_receipt`
-/// is the disclosure a workspace-creating invocation attaches to its Published outcome (`None` normally).
+/// The ENROLLED publish body. `pin` is the optional `@<digest>` consent — when present, the scanned
+/// bytes must match it; when absent, the computed digest ships as-is.
 #[allow(clippy::too_many_arguments)]
 fn enrolled_publish(
     ctx: &Ctx<'_>,
@@ -522,12 +431,13 @@ fn enrolled_publish(
     propose: bool,
     channel: Option<&str>,
     pin: Option<&str>,
-    standup_receipt: Option<StandupReceipt>,
     workspace: Option<&str>,
     message: Option<&str>,
 ) -> Result<PublishOutcome, ClientError> {
     let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
-        ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
+        ClientError::Enrollment(
+            "not enrolled — run `topos follow <workspace-address>` first".into(),
+        )
     })?;
 
     // The `--workspace` filter disambiguates a name shared across workspaces. A FOLLOWED skill signs in
@@ -612,462 +522,7 @@ fn enrolled_publish(
     };
 
     let receipt = contribute::run_write(ctx, &*transport, &sp, &rec, None)?;
-    let mut outcome = map_outcome(ctx, &sp, &lock, &map, &rec, &receipt, skill_name)?;
-
-    // A workspace-creating invocation discloses what it stood up and who owns it (hijack visibility), and —
-    // when the standup disclosed the workspace ADDRESS — folds in the paste-able share line for the shipped
-    // skill (`<workspace address>/skills/<name>`). An ordinary enrolled publish has no standup address, so
-    // `share_line` is simply omitted (the pointer move is the real outcome; the line is a convenience). The
-    // client-side post-genesis invite mint is retired — the workspace address IS the share surface now.
-    if let PublishOutcome::Published(data) = &mut outcome {
-        if let Some(addr) = standup_receipt.as_ref().and_then(|r| r.address.as_deref()) {
-            data.share_line = Some(format!("{addr}/skills/{}", lock.name));
-        }
-        data.standup = standup_receipt;
-    }
-    Ok(outcome)
-}
-
-// =================================================================================================
-// The workspace-standup branch — the un-enrolled direct publish. Two calls share one WAL: call 1 runs
-// the full consent pre-flight, starts the standup device authorization, guards one-plane-per-install, and
-// returns PENDING; call 2 (the SAME command re-invoked) re-runs the pre-flight (consent re-binds — bytes
-// that drifted since call 1 are refused, never silently shipped), polls ONCE, and on a granted poll
-// redeems, promotes the enrollment, and continues into the ordinary publish above.
-// =================================================================================================
-
-fn standup_publish(
-    ctx: &Ctx<'_>,
-    connect: &ContributeConnect<'_>,
-    standup: &StandupConnectors<'_>,
-    skill_name: &str,
-    pin: Option<&str>,
-    message: Option<&str>,
-) -> Result<PublishOutcome, ClientError> {
-    // FULL pre-flight FIRST — skill resolution, scan, digest computation, the optional `@<digest>` match —
-    // so the consent decision binds BEFORE any network call ever happens. Returns the computed digest the
-    // pending receipt discloses.
-    let computed_digest = standup_preflight(ctx, skill_name, pin)?;
-
-    // The WAL decides which call this is. Any OTHER in-flight enrollment owns the shared WAL slot — this
-    // publish neither hijacks nor clobbers it (typed guidance instead).
-    match enroll::read_wal(ctx.fs, &ctx.layout)?.map(|w| w.state) {
-        None => standup_begin(ctx, standup, skill_name, pin, &computed_digest),
-        Some(enroll::EnrollPhase::AuthorizingStandup {
-            base_url,
-            deployment_mode,
-            enrollment_method,
-            device_code,
-            user_code,
-            verification_uri_complete,
-            expires_at_millis,
-        }) => standup_resume(
-            ctx,
-            connect,
-            standup,
-            skill_name,
-            pin,
-            &computed_digest,
-            message,
-            StandupWal {
-                base_url,
-                deployment_mode,
-                enrollment_method,
-                device_code,
-                user_code,
-                verification_uri_complete,
-                expires_at_millis,
-            },
-        ),
-        // A crash between redeem and promotion: complete the promotion from the persisted facts (the
-        // existing follow fence — never re-redeem a spent grant), then continue into the publish.
-        Some(enroll::EnrollPhase::Redeemed {
-            context,
-            credential,
-            device_key_id,
-            principal,
-            enrolled_at_millis,
-        }) => {
-            let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-            promote_core(
-                ctx,
-                &context,
-                &credential,
-                &device_key_id,
-                principal.as_deref(),
-                enrolled_at_millis,
-                &signer,
-            )?;
-            // Only a STANDUP-rooted enrollment claims the standup receipt — a crashed invite/claim
-            // promotion completed here is disclosed as the ordinary publish it then is. The workspace
-            // ADDRESS is not on the recovery WAL (a crash residual — the share line lands on the normal
-            // granted path, below), so it is omitted here.
-            let receipt =
-                matches!(context.root, enroll::EnrollRoot::Standup).then(|| StandupReceipt {
-                    workspace_display_name: context.workspace_display_name.clone(),
-                    address: None,
-                    owner_principal: principal.clone(),
-                });
-            continue_enrolled(ctx, connect, skill_name, pin, receipt, message)
-        }
-        Some(enroll::EnrollPhase::Authorizing { .. }) => Err(ClientError::Enrollment(
-            "an invite enrollment is in progress; re-run `topos follow` to finish it first".into(),
-        )),
-        Some(enroll::EnrollPhase::AuthorizingAddress { .. }) => Err(ClientError::Enrollment(
-            "a workspace-address enrollment is in progress; re-run `topos follow` to finish it \
-             first"
-                .into(),
-        )),
-        Some(enroll::EnrollPhase::AuthorizingLogin { .. }) => Err(ClientError::Enrollment(
-            "a sign-in is in progress; re-run `topos auth login` to finish it first".into(),
-        )),
-        Some(enroll::EnrollPhase::ClaimPending { .. }) => Err(ClientError::Enrollment(
-            "a claim enrollment is in progress; re-run `topos follow` to finish it first".into(),
-        )),
-    }
-}
-
-/// The standup pre-flight: resolve the skill, refuse an unresolved merge conflict, scan the live draft,
-/// and run the optional `@<digest>` consent gate — all BEFORE any network. Returns the computed digest (the
-/// bytes being published) for the pending receipt. The per-skill lock is held only for the scan (the
-/// continuation re-acquires it and re-runs the authoritative gate, so pinned bytes that drift after this
-/// check are still refused, never silently shipped).
-fn standup_preflight(
-    ctx: &Ctx<'_>,
-    skill_name: &str,
-    pin: Option<&str>,
-) -> Result<String, ClientError> {
-    let (id, lock) = resolve_skill(ctx, skill_name)?;
-    let sp = ctx.layout.published(&id);
-    let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
-    if doc::read_doc::<ConflictState>(ctx.fs, &sp.conflict)?.is_some() {
-        return Err(ClientError::PublishBlocked {
-            skill: skill_name.to_owned(),
-        });
-    }
-    let map: PlacementMap = doc::read_doc(ctx.fs, &sp.map)?
-        .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
-    let placement = sync_engine::first_placement(&map)?;
-    let scanned = scan::scan(std::path::Path::new(&placement))?;
-    let digest_hex = to_hex(&scanned.bundle_digest);
-    if let Some(pin) = pin
-        && digest_hex != pin
-    {
-        return Err(ClientError::ApprovalMismatch {
-            skill: lock.name,
-            expected: digest_hex,
-            got: pin.to_owned(),
-        });
-    }
-    Ok(digest_hex)
-}
-
-/// Call 1: card-fetch the configured base for the API base (the ONE discovery rule every door runs),
-/// start the standup device authorization there, guard one-plane-per-install against the response's
-/// declared plane base, write the `AuthorizingStandup` WAL, and return the PENDING receipt.
-fn standup_begin(
-    ctx: &Ctx<'_>,
-    standup: &StandupConnectors<'_>,
-    skill_name: &str,
-    pin: Option<&str>,
-    computed_digest: &str,
-) -> Result<PublishOutcome, ClientError> {
-    let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-
-    // The card fetch FIRST, exactly as the address and login doors do: the configured base is a web
-    // ORIGIN (the compiled-in hosted origin, a `TOPOS_PLANE_URL` override, a self-host address) whose
-    // constant card declares the API base to dial. A base that already IS an API base re-roots onto
-    // itself — every face serves the same card — so no caller has to know which kind it holds.
-    let origin = standup.base_url.trim_end_matches('/');
-    let api_base = match (standup.enroll)(origin).fetch_card(origin)? {
-        Card::Protocol(card) => resolve_api_base(origin, &card.api_base_url)?,
-        Card::Claim(_) => {
-            return Err(ClientError::Enrollment(
-                "this address answered a claim bootstrap — pass the full /i/ claim link to \
-                 `topos follow` instead of publishing"
-                    .into(),
-            ));
-        }
-    };
-    let enroll_src = (standup.enroll)(&api_base);
-    let start = enroll_src.device_authorize_standup(signer.public_key(), &machine_name(&signer))?;
-
-    // RE-ROOT once more, exactly as a link follow does: the response's plane block declares the API base
-    // every later call dials (normally the card-declared base itself). Guard one-plane-per-install
-    // against that declared base, so the standup door and a later `/i/`-link door never refuse each
-    // other as cross-plane.
-    let base_url = resolve_api_base(&api_base, &start.plane.base_url)?;
-    guard_one_plane(ctx, &base_url)?;
-
-    let expires_at_millis = i64::try_from(ctx.clock.now_unix_millis())
-        .unwrap_or(i64::MAX)
-        .saturating_add(
-            i64::try_from(start.auth.expires_in)
-                .unwrap_or(0)
-                .saturating_mul(1000),
-        );
-    // The SERVER-built complete URI, verbatim when present (the reconstruction is only the fallback).
-    let complete = start
-        .auth
-        .verification_uri_complete
-        .clone()
-        .unwrap_or_else(|| complete_uri(&start.auth.verification_uri, &start.auth.user_code));
-    enroll::write_wal(
-        ctx.fs,
-        &ctx.layout,
-        &enroll::PendingEnrollment {
-            schema_version: PERSISTED_SCHEMA_VERSION,
-            state: enroll::EnrollPhase::AuthorizingStandup {
-                base_url,
-                deployment_mode: start.plane.deployment_mode,
-                enrollment_method: start.plane.enrollment_method.clone(),
-                device_code: start.auth.device_code.clone(),
-                user_code: start.auth.user_code.clone(),
-                verification_uri_complete: complete.clone(),
-                expires_at_millis,
-            },
-        },
-    )?;
-
-    Ok(pending_outcome(
-        ctx,
-        skill_name,
-        pin,
-        computed_digest,
-        complete,
-        start.auth.user_code,
-        device_fingerprint(&signer),
-        expires_at_millis,
-    ))
-}
-
-/// The persisted `AuthorizingStandup` facts (destructured out of the WAL for the resume path).
-struct StandupWal {
-    base_url: String,
-    deployment_mode: topos_types::bootstrap::DeploymentMode,
-    enrollment_method: String,
-    device_code: String,
-    user_code: String,
-    verification_uri_complete: String,
-    expires_at_millis: i64,
-}
-
-/// Call 2 (the same command re-invoked): poll ONCE; pending re-emits the pending receipt (the WAL stays),
-/// a terminal denial/expiry clears the WAL typed, and a granted poll redeems + promotes + CONTINUES into
-/// the ordinary publish in this same invocation.
-#[allow(clippy::too_many_arguments)]
-fn standup_resume(
-    ctx: &Ctx<'_>,
-    connect: &ContributeConnect<'_>,
-    standup: &StandupConnectors<'_>,
-    skill_name: &str,
-    pin: Option<&str>,
-    computed_digest: &str,
-    message: Option<&str>,
-    wal: StandupWal,
-) -> Result<PublishOutcome, ClientError> {
-    // The in-flight session's base URL is authoritative for this session (a changed TOPOS_PLANE_URL
-    // affects the NEXT standup, never a half-done one).
-    let enroll_src = (standup.enroll)(&wal.base_url);
-    match enroll_src.poll_token(&wal.device_code)? {
-        // Still waiting on the human — re-emit the pending receipt verbatim; the WAL stays put. The
-        // device key is deterministic, so the re-emitted fingerprint matches the one on the sign-in page.
-        TokenPoll::Pending | TokenPoll::SlowDown => {
-            let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-            Ok(pending_outcome(
-                ctx,
-                skill_name,
-                pin,
-                computed_digest,
-                wal.verification_uri_complete,
-                wal.user_code,
-                device_fingerprint(&signer),
-                wal.expires_at_millis,
-            ))
-        }
-        TokenPoll::Denied => {
-            enroll::delete_wal(ctx.fs, &ctx.layout)?;
-            Err(ClientError::Enrollment(
-                "the workspace standup was denied at the sign-in page".into(),
-            ))
-        }
-        TokenPoll::Expired => {
-            enroll::delete_wal(ctx.fs, &ctx.layout)?;
-            Err(ClientError::Enrollment(
-                "the standup sign-in expired; re-run this publish to start over".into(),
-            ))
-        }
-        TokenPoll::Granted(granted) => {
-            // The workspace context is what a standup client (no /i/ bootstrap) signs its possession
-            // frame over — a granted standup poll without it is unusable.
-            let workspace = granted.workspace.ok_or_else(|| {
-                ClientError::WireInvalid("a granted standup poll carried no workspace".into())
-            })?;
-            let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-            // Redeem the grant (the bearer credential) into the workspace credential; nothing is signed.
-            let redeem = enroll_src.redeem(
-                &workspace.workspace_id,
-                granted.grant.as_str(),
-                signer.public_key(),
-            )?;
-            if redeem.workspace_id != workspace.workspace_id {
-                return Err(ClientError::Enrollment(
-                    "the redeemed workspace does not match the granted session".into(),
-                ));
-            }
-            // The workspace ADDRESS (server-built on the public link base) is the standup receipt's share
-            // surface — captured before `workspace`'s fields move into the enroll context.
-            let workspace_address = workspace.address.clone();
-            let context = enroll::EnrollContext {
-                base_url: wal.base_url,
-                deployment_mode: wal.deployment_mode,
-                enrollment_method: wal.enrollment_method,
-                workspace_id: workspace.workspace_id,
-                workspace_display_name: workspace.display_name,
-                verified_domain: None,
-                verified_domain_status: VerifiedDomainStatus::Unverified,
-                offered_skills: Vec::new(),
-                mode: enroll::FollowModeDoc::Auto,
-                root: enroll::EnrollRoot::Standup,
-                follow_target: None,
-            };
-            let enrolled_at = i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX);
-            // The lockout fence: record the redeemed facts BEFORE promotion, so a crash mid-promote
-            // completes from the WAL without re-redeeming the spent grant.
-            enroll::write_wal(
-                ctx.fs,
-                &ctx.layout,
-                &enroll::PendingEnrollment {
-                    schema_version: PERSISTED_SCHEMA_VERSION,
-                    state: enroll::EnrollPhase::Redeemed {
-                        context: context.clone(),
-                        credential: redeem.credential.clone(),
-                        device_key_id: redeem.device_key_id.clone(),
-                        principal: redeem.principal.clone(),
-                        enrolled_at_millis: enrolled_at,
-                    },
-                },
-            )?;
-            promote_core(
-                ctx,
-                &context,
-                &redeem.credential,
-                &redeem.device_key_id,
-                redeem.principal.as_deref(),
-                enrolled_at,
-                &signer,
-            )?;
-            // CONTINUE into the ordinary enrolled publish in this SAME invocation (when a `@<digest>` pin is
-            // present the gate runs again inside — bytes that drifted since the pre-flight are refused,
-            // never silently shipped), carrying the standup disclosure onto the receipt.
-            continue_enrolled(
-                ctx,
-                connect,
-                skill_name,
-                pin,
-                Some(StandupReceipt {
-                    workspace_display_name: context.workspace_display_name.clone(),
-                    address: workspace_address,
-                    owner_principal: redeem.principal,
-                }),
-                message,
-            )
-        }
-    }
-}
-
-/// Continue a just-promoted standup invocation into the ordinary enrolled publish. Nothing needs the
-/// pinned plane key any more (the `current` pointer is unsigned; the OK receipt's pointer is scope-checked
-/// and confirmed to name the moved-to version), so the ambient `ctx` flows straight through.
-fn continue_enrolled(
-    ctx: &Ctx<'_>,
-    connect: &ContributeConnect<'_>,
-    skill_name: &str,
-    pin: Option<&str>,
-    standup_receipt: Option<StandupReceipt>,
-    message: Option<&str>,
-) -> Result<PublishOutcome, ClientError> {
-    enrolled_publish(
-        ctx,
-        connect,
-        skill_name,
-        false,
-        // A standup-resumed publish is the genesis of a brand-new workspace — no channel flag rode the
-        // resume; the genesis default (`everyone`) places it.
-        None,
-        pin,
-        standup_receipt,
-        // The standup created exactly ONE workspace membership — resolve it ambiently (no `--workspace`).
-        None,
-        message,
-    )
-}
-
-/// Build the PENDING outcome: `ok = true`, no version (nothing shipped), the sign-in block, and the
-/// resume argv (this same command, canonically spelled). The receipt's `bundle_digest` is the computed
-/// digest of the bytes being published; the resume argv carries the ORIGINAL target — `<skill>@<digest>`
-/// when the caller pinned one (so re-invoking re-runs the consent gate), else the bare `<skill>`.
-#[allow(clippy::too_many_arguments)]
-fn pending_outcome(
-    ctx: &Ctx<'_>,
-    skill_name: &str,
-    pin: Option<&str>,
-    computed_digest: &str,
-    verification_uri_complete: String,
-    user_code: String,
-    device_fingerprint: String,
-    expires_at_millis: i64,
-) -> PublishOutcome {
-    // The sidecar skill id is the receipt's stable handle (matching the enrolled receipt's skill_id).
-    let skill_id = resolve_skill(ctx, skill_name)
-        .map(|(id, _)| id.into_string())
-        .unwrap_or_else(|_| skill_name.to_owned());
-    // The resume argv carries a `@<digest>` pin even when the caller gave none: the pending receipt
-    // discloses `bundle_digest`, and baking that computed digest into the resume makes it BINDING across
-    // the sign-in gap — the resume's pre-flight refuses drift, so nothing lands that the pending receipt
-    // did not disclose. (topos self-supplies the pin it computed; the caller never had to type it.)
-    let resume_target = match pin {
-        Some(pin) => format!("{skill_name}@{pin}"),
-        None => format!("{skill_name}@{computed_digest}"),
-    };
-    PublishOutcome::Pending {
-        data: PublishData {
-            skill_id,
-            version_id: None,
-            bundle_digest: computed_digest.to_owned(),
-            current_generation: None,
-            share_line: None,
-            pending: Some(PublishPending {
-                status: PublishPendingStatus::SigninRequired,
-                verification_uri_complete,
-                user_code,
-                device_fingerprint,
-                expires_at: Some(fmt_rfc3339_millis(expires_at_millis)),
-            }),
-            standup: None,
-            added: None,
-        },
-        resume_argv: vec![
-            "topos".to_owned(),
-            "publish".to_owned(),
-            resume_target,
-            "--json".to_owned(),
-        ],
-    }
-}
-
-/// Epoch-millis → an RFC-3339 `YYYY-MM-DDTHH:MM:SSZ` string (UTC, second precision) — enough for the
-/// pending receipt's expiry disclosure. Negative inputs clamp to the epoch.
-fn fmt_rfc3339_millis(millis: i64) -> String {
-    let secs = millis.max(0) as u64 / 1000;
-    let (days, rem) = (secs / 86_400, secs % 86_400);
-    let (y, m, d) = crate::render::civil_from_days(days as i64);
-    format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
-        rem / 3600,
-        (rem % 3600) / 60,
-        rem % 60
-    )
+    map_outcome(ctx, &sp, &lock, &map, &rec, &receipt, skill_name)
 }
 
 /// Split the single positional `target` into `(skill, Option<consent-digest>)`. A trailing `@<digest>` is
@@ -1124,8 +579,9 @@ fn build_publish_op(
 
     let digest_hex = to_hex(&digest);
 
-    // Genesis (no `current` yet) is a zero-parent commit at (0,0); a normal publish parents on `current`.
-    let (parents, expected): (Vec<[u8; 32]>, Generation) = if sync.observed == GENESIS {
+    // Genesis (no `current` yet) is a zero-parent commit at generation 0; a normal publish parents on
+    // `current`.
+    let (parents, expected): (Vec<[u8; 32]>, u64) = if sync.observed == GENESIS {
         (Vec::new(), GENESIS)
     } else {
         (vec![parse_hex32(&lock.base_commit)?], sync.observed)
@@ -1204,12 +660,9 @@ fn map_outcome(
             let new_gen = contribute::apply_publish_ok(ctx, sp, lock, map, rec, record)?;
             Ok(PublishOutcome::Published(PublishData {
                 skill_id: rec.skill_id.clone(),
-                version_id: Some(rec.candidate_commit.clone()),
+                version_id: rec.candidate_commit.clone(),
                 bundle_digest: rec.bundle_digest.clone(),
-                current_generation: Some(new_gen),
-                share_line: None,
-                pending: None,
-                standup: None,
+                current_generation: new_gen,
                 added: None,
             }))
         }

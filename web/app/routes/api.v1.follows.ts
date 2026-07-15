@@ -1,16 +1,15 @@
 import type { ActionFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
-import { nowUtc, rowOpResponse } from "@/lib/api/row-envelopes.server";
+import { rowOpResponse } from "@/lib/api/row-envelopes.server";
 import { uniformNotFound } from "@/lib/api/wire.server";
 import { requireDeviceActor } from "@/lib/auth/guards.server";
-import { deviceFollowSkill, deviceUnfollowSkill } from "@/lib/db/queries.device.server";
+import { followBundle, unfollowBundle } from "@/lib/db/queries.lane.server";
 
 /**
- * `PUT | DELETE /api/v1/workspaces/{ws}/follows/{skill}` — a person-scoped direct follow (PUT) /
- * unfollow (DELETE) of a skill by its immutable id. Bodyless, naturally idempotent (no receipt).
- * `follow` may answer a 200 DENIED `SKILL_NOT_ACTIVE`; `unfollow` only ever yields `unfollowed` or
- * the uniform 404 (the guarded function has no `skill_not_active` arm). An unsupported method is the
- * uniform 404 (the door's no-method-oracle posture, matching `api.v1.report`).
+ * `PUT | DELETE /api/v1/workspaces/{ws}/follows/{skill}` — the person's ONE stance row: a
+ * direct follow (PUT — also lifts THIS device's exclusion and clears re-entitled detach
+ * records) / an unfollow (DELETE — the standing negative mask + the detach records). Bodyless,
+ * naturally idempotent (no receipt). An unsupported method is the uniform 404.
  */
 export async function action({ request, params }: ActionFunctionArgs): Promise<Response> {
   const belted = checkBelt(request);
@@ -22,19 +21,16 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   }
   const actor = await requireDeviceActor(request, params.ws ?? "");
   const skill = params.skill ?? "";
-  const { createdAt, nowMs } = nowUtc();
   if (request.method === "PUT") {
-    const status = await deviceFollowSkill(actor, skill, createdAt);
+    const status = await followBundle(actor, skill);
     return rowOpResponse(
       "follow",
       status,
       { followed: "followed" },
-      {
-        skill_not_active: "SKILL_NOT_ACTIVE",
-      },
+      { skill_not_active: "SKILL_NOT_ACTIVE" },
     );
   }
-  const status = await deviceUnfollowSkill(actor, skill, nowMs, createdAt);
+  const status = await unfollowBundle(actor, skill);
   return rowOpResponse("unfollow", status, { unfollowed: "unfollowed" }, {});
 }
 

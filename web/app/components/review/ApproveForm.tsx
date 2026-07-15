@@ -21,28 +21,19 @@ interface ReviewActionData {
 
 /**
  * The approve form — one primary action, posting `intent=approve` to the review route's action.
- * The hidden `request_id` is minted by the loader (a retried submit replays the same idempotent
- * outcome), and the hidden `expected_epoch`/`seq` are the SAME render's current generation — the
- * exact base the diff above was computed against, so the server refuses a moved pointer instead of
- * approving something the reviewer didn't see. The hidden `version_id` names the candidate. A
- * success, a conflict, or a resolved race re-renders the page (the state below is the fallback copy
- * for outcomes that leave this panel mounted).
+ * The hidden `expected_generation` is the SAME render's current generation — the exact base the
+ * diff above was computed against, so the server refuses a moved pointer instead of approving
+ * something the reviewer didn't see; the CAS itself makes a retried approve idempotent (a move
+ * that already landed answers success). The hidden `version_id` names the candidate. A success,
+ * a conflict, or a resolved race re-renders the page (the state below is the fallback copy for
+ * outcomes that leave this panel mounted).
  */
 export function ApproveForm({
-  ws: _ws,
-  skill: _skill,
   versionId,
-  requestId,
-  expectedEpoch,
-  expectedSeq,
+  expectedGeneration,
 }: {
-  /** Carried for the panel's API shape; the route action reads ws/skill from its own params. */
-  ws: string;
-  skill: string;
   versionId: string;
-  requestId: string;
-  expectedEpoch: string;
-  expectedSeq: string;
+  expectedGeneration: string;
 }) {
   const fetcher = useFetcher<ReviewActionData>();
   const pending = fetcher.state !== "idle";
@@ -53,9 +44,7 @@ export function ApproveForm({
       <fetcher.Form method="post">
         <input type="hidden" name="intent" value="approve" />
         <input type="hidden" name="version_id" value={versionId} />
-        <input type="hidden" name="request_id" value={requestId} />
-        <input type="hidden" name="expected_epoch" value={expectedEpoch} />
-        <input type="hidden" name="expected_seq" value={expectedSeq} />
+        <input type="hidden" name="expected_generation" value={expectedGeneration} />
         <button type="submit" disabled={pending} className={`${buttonClasses("primary")} min-h-11`}>
           {pending ? "Approving…" : "Approve — make this current"}
         </button>
@@ -89,8 +78,7 @@ export function ApproveForm({
       )}
       {state?.status === "error" && (
         <p className="text-red-600 text-sm" role="alert">
-          That didn&apos;t go through — nothing was decided. A retry is safe: it resumes this same
-          request.
+          That didn&apos;t go through — nothing was decided. A retry is safe.
         </p>
       )}
     </div>

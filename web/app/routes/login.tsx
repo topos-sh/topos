@@ -8,20 +8,33 @@ import {
 import { composition } from "@/composition.server";
 import { authClient } from "@/lib/auth/client";
 import { safeNextPath } from "@/lib/auth/guards.server";
+import { REGISTRATION_REFUSED } from "@/lib/auth/registration.server";
+import { mailDelivery } from "@/lib/mail/transport.server";
 
 export const meta: MetaFunction = () => [{ title: "Sign in · Topos" }];
 
 /**
  * The `next` query (where sign-in returns to — e.g. back to a /verify page) is request data,
  * validated to a same-app path. Which sign-in rungs exist is composition, not client state: the
- * loader reads it server-side and passes a plain flag, so the interactive form imports no server
+ * loader reads it server-side and passes plain flags, so the interactive form imports no server
  * config. The base rung is email + password (works with zero delivery dependency); the
  * magic-link rung shows only when a composition provides delivery.
+ *
+ * Sign-UP here is the invited/open-knob path (the claim ceremony has its own page), and
+ * REGISTRATION IS NEVER OPEN by default: every refusal — uninvited, expired, already taken —
+ * answers the ONE constant refusal string, carried through the loader so the client bundle
+ * never imports the server module that owns it. With mail armed, a successful sign-up waits on
+ * the mailbox round-trip (the seat binds after verification); mail-less, it signs in directly.
  */
 export async function loader({ request }: LoaderFunctionArgs) {
   const url = new URL(request.url);
   const next = safeNextPath(url.searchParams.get("next") ?? undefined);
-  return { next, magicLink: Boolean(composition.auth.magicLink) };
+  return {
+    next,
+    magicLink: Boolean(composition.auth.magicLink),
+    mailArmed: mailDelivery().canSend,
+    signupRefusal: REGISTRATION_REFUSED,
+  };
 }
 
 type Mode = "signin" | "signup";
@@ -30,7 +43,7 @@ const INPUT =
   "block h-11 w-full rounded-md border border-line px-3 text-sm text-ink placeholder:text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25";
 
 export default function LoginPage() {
-  const { next, magicLink } = useLoaderData<typeof loader>();
+  const { next, magicLink, mailArmed, signupRefusal } = useLoaderData<typeof loader>();
   const navigate = useNavigate();
 
   const [mode, setMode] = useState<Mode>("signin");
@@ -40,6 +53,7 @@ export default function LoginPage() {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [magicSent, setMagicSent] = useState(false);
+  const [verifySent, setVerifySent] = useState(false);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -59,11 +73,18 @@ export default function LoginPage() {
           });
     if (authError) {
       setPending(false);
+      // The sign-up refusal is CONSTANT whatever failed — an uninvited address, an expired
+      // invitation, and a taken email all read the same, so the form enumerates nothing.
       setError(
-        mode === "signin"
-          ? "Couldn’t sign in. Check your email and password."
-          : "Couldn’t create the account. That email may already be taken.",
+        mode === "signin" ? "Couldn’t sign in. Check your email and password." : signupRefusal,
       );
+      return;
+    }
+    if (mode === "signup" && mailArmed) {
+      // The seat binds only after the mailbox round-trip — hold here instead of navigating
+      // into an app the account cannot enter yet.
+      setPending(false);
+      setVerifySent(true);
       return;
     }
     // Sign-up signs in on success, so both rungs land the same place.
@@ -93,6 +114,16 @@ export default function LoginPage() {
       <Shell>
         <p className="text-sm text-dim" role="status">
           Check your email — the link works for a few minutes.
+        </p>
+      </Shell>
+    );
+  }
+
+  if (verifySent) {
+    return (
+      <Shell>
+        <p className="text-sm text-dim" role="status">
+          Check your mailbox to verify your address — your seat binds after verification.
         </p>
       </Shell>
     );

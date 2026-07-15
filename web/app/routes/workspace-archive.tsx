@@ -1,12 +1,16 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { data, useFetcher, useLoaderData } from "react-router";
+import { data, Form, useActionData, useFetcher, useLoaderData, useNavigation } from "react-router";
 import { StepUpFields } from "@/components/step-up";
 import { buttonClasses, Card, PageHeader } from "@/components/ui";
 import { notFound, requireMember, requireWorkspaceOwner } from "@/lib/auth/guards.server";
 import { requireStepUp, requireTypedName } from "@/lib/auth/step-up.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
-import { archivedSkillById, archivedSkillsOf } from "@/lib/db/queries.lifecycle.server";
-import { deleteSkill, unarchiveSkill } from "@/lib/plane/lifecycle.server";
+import {
+  archivedSkillById,
+  archivedSkillsOf,
+  deleteBundle,
+  unarchiveBundle,
+} from "@/lib/db/queries.lifecycle.server";
 import { deleteDeniedCopy, unarchiveDeniedCopy } from "@/lib/plane/lifecycle-copy";
 
 export function meta({ params }: { params: { ws?: string } }) {
@@ -16,9 +20,9 @@ export function meta({ params }: { params: { ws?: string } }) {
 /**
  * The workspace's archived skills — a MEMBER-visible list (requireMember; the archive is honest
  * history, not a secret), with OWNER-only per-row actions: UNARCHIVE (restore the base name) and
- * DELETE (drop the server-side bytes — a step further, and gated by typing the archived name). The
- * two writes ride the vault's internal lane keyed on the immutable skill id; the loader hands the
- * page the owner flag so a plain member sees the list without the action controls.
+ * DELETE (tombstone the row and drop the server-side bytes — a step further, and gated by typing
+ * the archived name). Both are app-tier ceremonies keyed on the immutable skill id; the loader
+ * hands the page the owner flag so a plain member sees the list without the action controls.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const ws = params.ws;
@@ -39,18 +43,18 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   };
 }
 
-/** One typed inline error per row action (success revalidates the loader; the row re-renders). */
-interface ArchiveFormError {
-  op: "unarchive" | "delete";
-  skillId: string;
-  message: string;
-}
+/** The two ceremonies' typed replies — unarchive rides a fetcher; delete a full-page post. */
+type ArchiveActionData =
+  | { op: "unarchive"; skillId: string; message: string }
+  | { op: "delete"; skillId: string; status: "deleted"; name: string; bytesDropped: boolean }
+  | { op: "delete"; skillId: string; status: "refused"; message: string };
 
 /**
- * The two owner ceremonies, dispatched on the hidden `intent`. Each RE-GUARDS as owner, re-proves
- * the password (step-up), and — for DELETE — requires typing the ARCHIVED name (re-read from the
- * database, never trusted from the form) before the byte drop. The vault keys on the immutable
- * skill id; one admin_event lands whatever the outcome.
+ * The two owner ceremonies, dispatched on the hidden `intent`. Each RE-GUARDS as owner,
+ * re-proves the password (step-up), and — for DELETE — requires typing the ARCHIVED name
+ * (re-read from the database, never trusted from the form). The ceremonies land their own audit
+ * rows in-transaction; the route records the attempts they never see — refused step-ups, typed
+ * names that miss, faults.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
   const ws = params.ws;
@@ -65,7 +69,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
   if (intent === "delete") {
     return deleteIntent(request, ws, formData);
   }
-  return data<ArchiveFormError>(
+  return data<ArchiveActionData>(
     { op: "unarchive", skillId: "", message: "Unknown action." },
     { status: 400 },
   );
@@ -78,39 +82,45 @@ async function unarchiveIntent(request: Request, ws: string, formData: FormData)
   const subject = row?.name ?? skillId;
   const stepUp = await requireStepUp(request, formData);
   if (!stepUp.ok) {
-    await recordAdminEvent(owner, { kind: "unarchive", subject, outcome: "denied" });
-    return data<ArchiveFormError>({ op: "unarchive", skillId, message: stepUp.error });
+    await recordAdminEvent(owner, {
+      kind: "skill_unarchived",
+      subject,
+      detail: "step_up",
+      outcome: "denied",
+    });
+    return data<ArchiveActionData>({ op: "unarchive", skillId, message: stepUp.error });
   }
   if (row === undefined) {
-    return data<ArchiveFormError>({
+    return data<ArchiveActionData>({
       op: "unarchive",
       skillId,
       message: "This skill is no longer archived.",
     });
   }
-  const outcome = await unarchiveSkill(owner.email, ws, skillId);
-  if (outcome === null) {
-    await recordAdminEvent(owner, { kind: "unarchive", subject, outcome: "error" });
-    return data<ArchiveFormError>({
+  let outcome: Awaited<ReturnType<typeof unarchiveBundle>>;
+  try {
+    outcome = await unarchiveBundle(owner, skillId);
+  } catch {
+    await recordAdminEvent(owner, { kind: "skill_unarchived", subject, outcome: "error" });
+    return data<ArchiveActionData>({
       op: "unarchive",
       skillId,
       message: "That didn't go through — nothing was unarchived. A retry is safe.",
     });
   }
   if (outcome.outcome === "unarchived") {
-    await recordAdminEvent(owner, {
-      kind: "unarchive",
-      subject,
-      detail: outcome.name,
-      outcome: "ok",
-    });
-    return data<ArchiveFormError>({ op: "unarchive", skillId, message: "" });
+    return data<ArchiveActionData>({ op: "unarchive", skillId, message: "" });
   }
-  await recordAdminEvent(owner, { kind: "unarchive", subject, outcome: "denied" });
-  return data<ArchiveFormError>({
+  await recordAdminEvent(owner, {
+    kind: "skill_unarchived",
+    subject,
+    detail: outcome.outcome,
+    outcome: "denied",
+  });
+  return data<ArchiveActionData>({
     op: "unarchive",
     skillId,
-    message: unarchiveDeniedCopy(outcome.reason),
+    message: unarchiveDeniedCopy(outcome.outcome),
   });
 }
 
@@ -121,13 +131,24 @@ async function deleteIntent(request: Request, ws: string, formData: FormData) {
   const subject = row?.name ?? skillId;
   const stepUp = await requireStepUp(request, formData);
   if (!stepUp.ok) {
-    await recordAdminEvent(owner, { kind: "delete", subject, outcome: "denied" });
-    return data<ArchiveFormError>({ op: "delete", skillId, message: stepUp.error });
-  }
-  if (row === undefined) {
-    return data<ArchiveFormError>({
+    await recordAdminEvent(owner, {
+      kind: "skill_deleted",
+      subject,
+      detail: "step_up",
+      outcome: "denied",
+    });
+    return data<ArchiveActionData>({
       op: "delete",
       skillId,
+      status: "refused",
+      message: stepUp.error,
+    });
+  }
+  if (row === undefined) {
+    return data<ArchiveActionData>({
+      op: "delete",
+      skillId,
+      status: "refused",
       message: "This skill is no longer archived.",
     });
   }
@@ -135,35 +156,72 @@ async function deleteIntent(request: Request, ws: string, formData: FormData) {
   // the server re-read, never a form-supplied expected value).
   const typed = requireTypedName(formData, row.name);
   if (!typed.ok) {
-    await recordAdminEvent(owner, { kind: "delete", subject, outcome: "denied" });
-    return data<ArchiveFormError>({ op: "delete", skillId, message: typed.error });
-  }
-  const outcome = await deleteSkill(owner.email, ws, skillId);
-  if (outcome === null) {
-    await recordAdminEvent(owner, { kind: "delete", subject, outcome: "error" });
-    return data<ArchiveFormError>({
+    await recordAdminEvent(owner, {
+      kind: "skill_deleted",
+      subject,
+      detail: "confirm_name",
+      outcome: "denied",
+    });
+    return data<ArchiveActionData>({
       op: "delete",
       skillId,
+      status: "refused",
+      message: typed.error,
+    });
+  }
+  let outcome: Awaited<ReturnType<typeof deleteBundle>>;
+  try {
+    outcome = await deleteBundle(owner, skillId);
+  } catch {
+    await recordAdminEvent(owner, { kind: "skill_deleted", subject, outcome: "error" });
+    return data<ArchiveActionData>({
+      op: "delete",
+      skillId,
+      status: "refused",
       message: "That didn't go through — nothing was deleted. A retry is safe.",
     });
   }
   if (outcome.outcome === "deleted") {
-    await recordAdminEvent(owner, { kind: "delete", subject, outcome: "ok" });
-    return data<ArchiveFormError>({ op: "delete", skillId, message: "" });
+    return data<ArchiveActionData>({
+      op: "delete",
+      skillId,
+      status: "deleted",
+      name: row.name,
+      bytesDropped: outcome.bytesDropped,
+    });
   }
-  await recordAdminEvent(owner, { kind: "delete", subject, outcome: "denied" });
-  return data<ArchiveFormError>({
+  await recordAdminEvent(owner, {
+    kind: "skill_deleted",
+    subject,
+    detail: outcome.outcome,
+    outcome: "denied",
+  });
+  return data<ArchiveActionData>({
     op: "delete",
     skillId,
-    message: deleteDeniedCopy(outcome.reason),
+    status: "refused",
+    message: deleteDeniedCopy(outcome.outcome),
   });
 }
 
 export default function WorkspaceArchive() {
   const { ws, isOwner, archived } = useLoaderData<typeof loader>();
+  const actionData = useActionData<typeof action>();
+  const deleted =
+    actionData?.op === "delete" && actionData.status === "deleted" ? actionData : null;
   return (
     <div className="space-y-6">
       <PageHeader title="Archived skills" meta={<code className="font-mono">{ws}</code>} />
+      {deleted !== null && (
+        <Card className="px-4 py-3">
+          <p className="text-dim text-sm" role="status">
+            Deleted <span className="font-mono text-ink">{deleted.name}</span>.{" "}
+            {deleted.bytesDropped
+              ? "Its bytes are reclaimed from the server; the row stays as a tombstone so history survives."
+              : "The row is tombstoned; the byte reclaim faulted and will be retried — running the delete again is safe."}
+          </p>
+        </Card>
+      )}
       {archived.length === 0 ? (
         <Card className="px-4 py-3">
           <p className="text-dim text-sm">
@@ -214,7 +272,7 @@ function ArchivedRow({
 }
 
 function UnarchiveControl({ skillId }: { skillId: string }) {
-  const fetcher = useFetcher<ArchiveFormError>();
+  const fetcher = useFetcher<Extract<ArchiveActionData, { op: "unarchive" }>>();
   const pending = fetcher.state !== "idle";
   const message =
     fetcher.data?.op === "unarchive" && fetcher.data.skillId === skillId
@@ -248,19 +306,29 @@ function UnarchiveControl({ skillId }: { skillId: string }) {
   );
 }
 
+/**
+ * The delete ceremony posts as a FULL-PAGE form (not a fetcher): a landed delete revalidates the
+ * row away, and the outcome — including whether the bytes actually dropped — must survive that
+ * unmount, so the page-level banner above renders it. Refusals leave the row standing and render
+ * inline here.
+ */
 function DeleteControl({ skillId, archivedName }: { skillId: string; archivedName: string }) {
-  const fetcher = useFetcher<ArchiveFormError>();
-  const pending = fetcher.state !== "idle";
+  const navigation = useNavigation();
+  const actionData = useActionData<typeof action>();
+  const pending =
+    navigation.state !== "idle" &&
+    navigation.formData?.get("intent") === "delete" &&
+    navigation.formData?.get("skill_id") === skillId;
   const message =
-    fetcher.data?.op === "delete" && fetcher.data.skillId === skillId
-      ? fetcher.data.message
+    actionData?.op === "delete" && actionData.status === "refused" && actionData.skillId === skillId
+      ? actionData.message
       : undefined;
   return (
     <details className="flex-1">
       <summary className="cursor-pointer select-none font-mono text-red-700 text-xs hover:text-red-800">
         Delete permanently…
       </summary>
-      <fetcher.Form method="post" className="mt-2 space-y-3">
+      <Form method="post" className="mt-2 space-y-3">
         <input type="hidden" name="intent" value="delete" />
         <input type="hidden" name="skill_id" value={skillId} />
         <p className="text-dim text-xs">
@@ -268,7 +336,7 @@ function DeleteControl({ skillId, archivedName }: { skillId: string; archivedNam
           devices already hold — the fleet page shows who still holds them.
         </p>
         <StepUpFields idPrefix={`delete-${skillId}`} typedName={archivedName} />
-        {message !== undefined && message.length > 0 && (
+        {message !== undefined && (
           <p className="text-red-600 text-sm" role="alert">
             {message}
           </p>
@@ -278,7 +346,7 @@ function DeleteControl({ skillId, archivedName }: { skillId: string; archivedNam
             {pending ? "Deleting…" : "Delete permanently"}
           </button>
         </div>
-      </fetcher.Form>
+      </Form>
     </details>
   );
 }

@@ -2,36 +2,32 @@ import type { LoaderFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
 import { requireDeviceActor } from "@/lib/auth/guards.server";
-import { deviceMe } from "@/lib/db/queries.device.server";
-import type { paths } from "@/lib/plane/contract/schema";
+import { laneMe } from "@/lib/db/queries.lane.server";
 import { followBase } from "@/lib/plane/follow-base.server";
 
 /**
- * `GET /api/v1/workspaces/{ws}/me` — the caller's own membership (identity + address + role + inviter
- * + invite policy), served by this tier from the directory rows (no guarded function; the vault's own
- * read is raw SQL too). Per-member and hot — never cacheable. The share ADDRESS is `<origin>/<name>`:
- * the vault builds it from its `link_base`, and here the request origin IS that base (the app is the
- * door). `invited_by` is OMITTED for a genesis/self-standup seat (never serialized as null).
+ * `GET /api/v1/workspaces/{ws}/me` — the caller's own membership (identity + address + role +
+ * inviter + invite policy). Per-member and hot — never cacheable. The share ADDRESS is
+ * `<origin>/<name>`: the request origin IS that base (the app is the door). `invited_by` is
+ * OMITTED for a genesis seat (never serialized as null); `principal` carries the acting
+ * person's display identity (email is a login attribute, not an authority key).
  */
-type WireMe =
-  paths["/v1/workspaces/{ws}/me"]["get"]["responses"][200]["content"]["application/json"];
-
 export async function loader({ request, params }: LoaderFunctionArgs): Promise<Response> {
   const belted = checkBelt(request);
   if (belted !== null) {
     return belted;
   }
   const actor = await requireDeviceActor(request, params.ws ?? "");
-  const row = await deviceMe(actor);
+  const row = await laneMe(actor);
   if (row === null) {
     return uniformNotFound();
   }
-  const body: WireMe = {
+  const body = {
     workspace_id: actor.workspaceId,
     name: row.name,
     display_name: row.displayName,
     address: `${followBase(request)}/${row.name}`,
-    principal: actor.person,
+    principal: actor.display,
     role: row.role,
     invite_policy: row.invitePolicy,
     ...(row.invitedBy !== null ? { invited_by: row.invitedBy } : {}),

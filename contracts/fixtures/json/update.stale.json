@@ -20,14 +20,8 @@
     "skills": [
       {
         "action": "up_to_date",
-        "applied": {
-          "epoch": 1,
-          "seq": 12
-        },
-        "observed": {
-          "epoch": 1,
-          "seq": 12
-        },
+        "applied": 12,
+        "observed": 12,
         "skill": "deploy",
         "workspace_id": "w_acme"
       }

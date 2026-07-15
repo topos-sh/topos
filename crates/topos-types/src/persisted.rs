@@ -9,7 +9,7 @@
 //!
 //! Private keys are NEVER stored here — these JSON docs hold references and public metadata only.
 
-use crate::{Generation, Receipt};
+use crate::Receipt;
 use serde::{Deserialize, Serialize};
 
 /// `skills/<id>/sync.json` — the durable client sync state (the four-state currency machine's memory).
@@ -22,7 +22,7 @@ pub struct SyncState {
     pub schema_version: u32,
     /// The generation the plane most recently served — the sync target the engine drives `applied`
     /// toward.
-    pub observed: Generation,
+    pub observed: u64,
     /// The `version_id` (the 64-hex commit) the served `observed` generation named — the target bytes
     /// the engine materializes and re-verifies by digest on apply.
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
@@ -30,7 +30,7 @@ pub struct SyncState {
     /// Highest generation actually MATERIALIZED — advances only after a successful swap. After a server
     /// restore the served target may sit below this; that is a legitimate state the engine simply
     /// applies toward.
-    pub applied: Generation,
+    pub applied: u64,
     /// The commit the working tree derives from (= the applied commit when clean).
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub base_commit: String,
@@ -261,8 +261,8 @@ pub struct OpRecord {
     /// The candidate's byte-exact bundle digest (the consent hash) — part of the op's bound identity.
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: String,
-    /// The `(epoch,seq)` this op's compare-and-set targets — part of the op's bound identity.
-    pub expected_generation: Generation,
+    /// The generation this op's compare-and-set targets — part of the op's bound identity.
+    pub expected_generation: u64,
     /// The GOOD version a `revert` restores (the wire `good`) — present only for a `Revert` op (the
     /// server builds the forward commit from it; it is NOT the `candidate_commit`, so a replay must carry
     /// it). `None` for every other op.
@@ -291,18 +291,18 @@ mod tests {
     fn sync_state_round_trips() {
         let s = SyncState {
             schema_version: 1,
-            observed: Generation { epoch: 1, seq: 7 },
+            observed: 7,
             observed_version_id: "a".repeat(64),
-            applied: Generation { epoch: 1, seq: 7 },
+            applied: 7,
             base_commit: "a".repeat(64),
             work_hash: "b".repeat(64),
             held: false,
         };
         let v = serde_json::to_value(&s).unwrap();
-        assert_eq!(v["observed"]["seq"], 7);
+        assert_eq!(v["observed"], 7);
         assert_eq!(v["observed_version_id"], "a".repeat(64));
         let back: SyncState = serde_json::from_value(v).unwrap();
-        assert_eq!(back.applied.seq, 7);
+        assert_eq!(back.applied, 7);
         assert!(!back.held);
     }
 }

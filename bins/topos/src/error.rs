@@ -2,7 +2,7 @@
 //! [`TerminalOutcome`]; raw `gix`/io strings stay internal and never reach a user surface.
 
 use topos_gitstore::{GitstoreError, VerifyError};
-use topos_types::{Generation, TerminalOutcome};
+use topos_types::TerminalOutcome;
 
 use topos_core::digest::RejectReason;
 
@@ -176,10 +176,7 @@ pub(crate) enum ClientError {
     /// The compare-and-set saw a base the team has moved past (`CONFLICT`) — the local view is stale. The
     /// agent pulls (rebases) and re-shows the diff before retrying; never a silent retry.
     #[error("the team moved past your base; pull to rebase, then retry")]
-    Conflict {
-        skill: String,
-        current: Option<Generation>,
-    },
+    Conflict { skill: String, current: Option<u64> },
     /// The plane denied the op (`DENIED`) — not rostered, four-eyes self-approve, or an already-resolved
     /// proposal. Carries the wire code for the agent to branch on; never a secret.
     #[error("the plane denied this operation ({0})")]
@@ -192,15 +189,16 @@ pub(crate) enum ClientError {
     /// transport-fault-shaped "the plane returned PERMANENT_FAILURE". The message is self-authored guidance.
     #[error("{0}")]
     ReviewNotOpen(String),
-    /// An enrollment REDEEM came back DENIED — on a hosted plane this is the authenticated-but-uninvited
-    /// case (a confirmed identity that is not on the workspace roster), so the guidance is ask-an-owner:
-    /// the message tells the human exactly what to request, and the envelope carries `REQUEST_ACCESS`.
-    /// Carries the wire code (never a secret; the plane's denial is deliberately uniform).
+    /// A device-flow enrollment was DENIED at the approval page — on a hosted plane this is the
+    /// authenticated-but-uninvited case (a signed-in identity that is not on the workspace roster), so
+    /// the guidance is ask-an-owner: the message tells the human exactly what to request, and the
+    /// envelope carries `REQUEST_ACCESS`. (The server's denial is deliberately uniform — no existence
+    /// oracle; the guidance comes from the door that was knocked on.)
     #[error(
-        "the workspace did not admit this enrollment ({code}) — ask a workspace owner to run \
+        "the workspace did not admit this enrollment — ask a workspace owner to run \
          `topos invite <your-email>`, then re-run `topos follow`"
     )]
-    RedeemDenied { code: String },
+    EnrollDenied,
     /// A `publish` is blocked because an unresolved author-merge conflict (`conflict.json`) is present —
     /// the draft must be resolved first. Refused before any build / WAL / send (the publish guard).
     #[error("publish is blocked: resolve the merge conflict in this skill first")]
@@ -331,11 +329,6 @@ pub(crate) enum ClientError {
         name: String,
         candidates: Vec<String>,
     },
-    /// A mutating verb outside `revert` needs `--yes` to proceed (the two-phase consent gate): the
-    /// message IS the describe of what `--yes` would change — nothing has changed yet. Shown VERBATIM
-    /// (usage guidance this code wrote; never wire/document bytes).
-    #[error("{0}")]
-    ConfirmFirst(String),
 }
 
 impl ClientError {
@@ -377,7 +370,7 @@ impl ClientError {
             ClientError::Conflict { .. } => "CONFLICT",
             ClientError::Denied(_) => "DENIED",
             // The same closed DENIED code — only the guidance message differs (enrollment ask-an-owner).
-            ClientError::RedeemDenied { .. } => "DENIED",
+            ClientError::EnrollDenied => "DENIED",
             // A review verdict on a no-longer-open proposal — an open code, its own domain refusal.
             ClientError::ReviewNotOpen(_) => "REVIEW_NOT_OPEN",
             ClientError::PublishBlocked { .. } => "PUBLISH_BLOCKED",
@@ -404,8 +397,6 @@ impl ClientError {
             // The address-grammar ambiguity shares the tracked-name ambiguity's code (agents branch the
             // same); the candidates additionally ride the envelope's `data.candidates`.
             ClientError::AmbiguousTarget { .. } => "AMBIGUOUS_NAME",
-            // The two-phase consent gate shares `revert`'s code (both mean "re-run with --yes").
-            ClientError::ConfirmFirst(_) => "CONFIRM_REQUIRED",
         }
     }
 
@@ -442,7 +433,7 @@ impl ClientError {
             // The contribute typed outcomes carry their own terminal classification (the plane's verdict,
             // surfaced 1:1 so the agent branches on the same outcome it would on the wire).
             ClientError::Conflict { .. } => TerminalOutcome::Conflict,
-            ClientError::Denied(_) | ClientError::RedeemDenied { .. } => TerminalOutcome::Denied,
+            ClientError::Denied(_) | ClientError::EnrollDenied => TerminalOutcome::Denied,
             ClientError::PublishBlocked { .. } => TerminalOutcome::Diverged,
             // An in-flight op must be settled, then the command retried.
             ClientError::PendingOp { .. } => TerminalOutcome::RetryableFailure,
@@ -458,9 +449,9 @@ impl ClientError {
         }
     }
 
-    /// The live `(epoch, seq)` to carry on a `CONFLICT` envelope (the rebase target the agent pulls to) —
+    /// The live generation to carry on a `CONFLICT` envelope (the rebase target the agent pulls to) —
     /// `None` for every other error.
-    pub(crate) fn current_generation(&self) -> Option<Generation> {
+    pub(crate) fn current_generation(&self) -> Option<u64> {
         match self {
             ClientError::Conflict { current, .. } => *current,
             _ => None,

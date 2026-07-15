@@ -10,10 +10,7 @@
       "protection": "open",
       "version_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "bundle_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      "generation": {
-        "epoch": 1,
-        "seq": 42
-      },
+      "generation": 42,
       "updated_at": 1700000000000,
       "via": {
         "channels": [
@@ -29,10 +26,7 @@
       "protection": "reviewed",
       "version_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "bundle_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-      "generation": {
-        "epoch": 2,
-        "seq": 3
-      },
+      "generation": 23,
       "updated_at": 1700000100000,
       "via": {
         "channels": [

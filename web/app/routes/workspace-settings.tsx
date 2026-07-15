@@ -2,33 +2,33 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Link, useLoaderData } from "react-router";
 import { AddressBlock } from "@/components/members/address-block";
 import { InvitePolicyPanel } from "@/components/policy/invite-policy-panel";
+import type { LastSetLine } from "@/components/policy/last-set-line";
+import { RegistrationPanel } from "@/components/policy/registration-panel";
 import { ReviewRequiredPanel } from "@/components/policy/review-required-panel";
 import { StalenessWindowPanel } from "@/components/policy/staleness-window-panel";
 import { buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
 import { notFound, requireMember, requireWorkspaceOwner } from "@/lib/auth/guards.server";
 import { requireStepUp } from "@/lib/auth/step-up.server";
-import { type AdminOutcome, recordAdminEvent } from "@/lib/db/audit.server";
+import { type AuditEventRow, lastAuditEventOfKind, recordAdminEvent } from "@/lib/db/audit.server";
 import {
-  type InvitePolicyOutcome,
-  invitePolicyOf,
-  type StalenessWindowOutcome,
   setInvitePolicy,
+  setRegistration,
   setStalenessWindow,
-  stalenessWindowOf,
-} from "@/lib/db/queries.policy.server";
-import {
-  lastPolicyEvent,
-  type PolicyOutcome,
-  planeWorkspaceById,
-  type ReviewDefaultOutcome,
-  recordPolicyEvent,
-  setReviewDefault,
   workspacePolicyOf,
-} from "@/lib/db/queries.server";
+} from "@/lib/db/queries.policy.server";
+import { setReviewDefault, workspaceById } from "@/lib/db/queries.server";
 import { followBase } from "@/lib/plane/follow-base.server";
 
 export function meta({ params }: { params: { ws?: string } }) {
   return [{ title: `Settings · ${params.ws ?? "Workspace"}` }];
+}
+
+/** Shape one audit row into the panels' "last set by" line (null = never set from here). */
+function lastSetOf(row: AuditEventRow | undefined): LastSetLine | null {
+  if (row === undefined) {
+    return null;
+  }
+  return { value: row.subject, by: row.actorDisplay, at: row.createdAt };
 }
 
 export async function loader({ request, params }: LoaderFunctionArgs) {
@@ -37,38 +37,46 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     notFound();
   }
   const actor = await requireMember(request, ws);
-  // Management is a confirmed OWNER seat — the actor's role IS the directory's.
+  // Management is a confirmed OWNER seat — the actor's role IS the seat table's.
   const isOwner = actor.role === "owner";
-  // The invite policy + staleness window come through the guarded reader functions so a workspace
-  // with NO policy row shows the true defaults (members / 7 days), never a blank — the defaults
-  // live once, in SQL. Review-required rides the direct policy-row read as before.
-  const [lastEvent, policy, workspace, invitePolicy, stalenessWindowMs] = await Promise.all([
-    lastPolicyEvent(actor, ws),
-    workspacePolicyOf(actor),
-    planeWorkspaceById(actor, ws),
-    invitePolicyOf(actor),
-    stalenessWindowOf(actor),
-  ]);
+  // The knobs are plain columns on the ONE workspace row; the column DEFAULTs are the canonical
+  // fallbacks, so a fresh install shows the true defaults, never a blank. The "last set by"
+  // lines read the audit ledger — the same rows the setters land in their own transactions.
+  const [policy, workspace, lastReview, lastInvite, lastStaleness, lastRegistration] =
+    await Promise.all([
+      workspacePolicyOf(actor),
+      workspaceById(actor, ws),
+      lastAuditEventOfKind(actor, "policy_review_default"),
+      lastAuditEventOfKind(actor, "policy_invite"),
+      lastAuditEventOfKind(actor, "policy_staleness"),
+      lastAuditEventOfKind(actor, "policy_registration"),
+    ]);
   return {
     ws,
     isOwner,
-    lastEvent,
     address: workspace?.name ?? ws,
     origin: followBase(request),
-    // The directory holds the real value now (a bigint 0/1 flag) — the switch reflects it.
-    reviewRequired: policy ? policy.reviewRequired === 1 : false,
-    invitePolicy,
-    stalenessWindowMs,
+    reviewRequired: policy.protectionDefault === "reviewed",
+    invitePolicy: policy.invitePolicy,
+    stalenessWindowMs: policy.stalenessWindowMs,
+    registration: policy.registration,
+    lastSet: {
+      review: lastSetOf(lastReview),
+      invite: lastSetOf(lastInvite),
+      staleness: lastSetOf(lastStaleness),
+      registration: lastSetOf(lastRegistration),
+    },
   };
 }
 
 /**
  * ONE action, dispatched on the hidden `intent`. Each branch RE-GUARDS itself as an owner (a
  * loader gate never extends to an action), then runs the STEP-UP ceremony — the person re-enters
- * their password inside the form and it is verified immediately before the write. A failed step-up
- * writes NOTHING and still records the refused attempt (`admin_event`, outcome denied, detail
- * `step_up`); a passing one writes, then records the outcome. Membership admin lives on its own
- * page (/workspaces/:ws/members); this page is the workspace's policy + address surface.
+ * their password inside the form and it is verified immediately before the write. A failed
+ * step-up writes NOTHING and still records the refused attempt under the knob's own audit kind
+ * (outcome `denied`, detail `step_up` — the "last set by" lines read `ok` rows only, so refusals
+ * never pollute them); a passing one writes, and the setter lands the `ok` audit row in its own
+ * transaction. Membership admin lives on its own page (/workspaces/:ws/members).
  */
 export async function action({ request, params }: ActionFunctionArgs) {
   const ws = params.ws;
@@ -86,187 +94,131 @@ export async function action({ request, params }: ActionFunctionArgs) {
   if (intent === "set-staleness-window") {
     return stalenessWindowIntent(request, ws, formData);
   }
+  if (intent === "set-registration") {
+    return registrationIntent(request, ws, formData);
+  }
   return data({ intent: "unknown" as const, status: "error" as const }, { status: 400 });
 }
 
-/** The copy a role-denial (owner_role_required / member_required) surfaces — the actor's seat moved. */
-const ROLE_DENIED_ERROR =
-  "The server refused the change — you may no longer be an owner of this workspace.";
 /** The copy a transient server fault surfaces. */
 const SERVER_ERROR = "The server couldn't be reached. Try again.";
 
-/** Map a setter's outcome (anything but 'set') to the audit outcome + the inline error copy. */
-function denialOutcome(error: string): { admin: AdminOutcome; error: string } {
-  return { admin: "denied", error };
-}
+type KnobStatus = "ok" | "denied" | "error" | "step_up_failed";
 
 /**
- * The review-required gate — owner-only, now step-up gated. `topos_set_review_default` re-runs
- * the owner gate inside the function; this web guard is defense-in-depth. Every attempt lands a
- * `policy_event` row (this tier's audit line) AND an `admin_event` row, so both trails stay honest.
+ * The shared ceremony frame: owner guard → step-up → the setter. A refused step-up records the
+ * attempt under the knob's audit kind and returns its typed error; a bounds/vocabulary refusal
+ * ("denied") records too — the setter never saw it or refused it without writing, so the route
+ * is the only place that attempt can land in the trail.
  */
+async function knobIntent<Outcome extends string>(
+  request: Request,
+  ws: string,
+  formData: FormData,
+  args: {
+    auditKind: string;
+    detail: string;
+    run: (owner: Awaited<ReturnType<typeof requireWorkspaceOwner>>) => Promise<Outcome>;
+    deniedError: (outcome: Outcome) => string;
+  },
+): Promise<{ status: KnobStatus; error?: string }> {
+  const owner = await requireWorkspaceOwner(request, ws);
+  const stepUp = await requireStepUp(request, formData);
+  if (!stepUp.ok) {
+    await recordAdminEvent(owner, {
+      kind: args.auditKind,
+      subject: ws,
+      detail: "step_up",
+      outcome: "denied",
+    });
+    return { status: "step_up_failed", error: stepUp.error };
+  }
+  let outcome: Outcome;
+  try {
+    outcome = await args.run(owner);
+  } catch {
+    await recordAdminEvent(owner, {
+      kind: args.auditKind,
+      subject: ws,
+      detail: args.detail,
+      outcome: "error",
+    });
+    return { status: "error", error: SERVER_ERROR };
+  }
+  if (outcome === "set") {
+    return { status: "ok" };
+  }
+  await recordAdminEvent(owner, {
+    kind: args.auditKind,
+    subject: ws,
+    detail: args.detail,
+    outcome: "denied",
+  });
+  return { status: "denied", error: args.deniedError(outcome) };
+}
+
+/** The review-required gate — the workspace's protection DEFAULT, as one switch. */
 async function reviewRequiredIntent(request: Request, ws: string, formData: FormData) {
-  const owner = await requireWorkspaceOwner(request, ws);
   const value = String(formData.get("review_required") ?? "") === "true";
-
-  const stepUp = await requireStepUp(request, formData);
-  if (!stepUp.ok) {
-    await recordAdminEvent(owner, {
-      kind: "review_default",
-      subject: ws,
-      detail: "step_up",
-      outcome: "denied",
-    });
-    return {
-      intent: "set-review-required" as const,
-      status: "step_up_failed" as const,
-      error: stepUp.error,
-    };
-  }
-
-  let policyOutcome: PolicyOutcome;
-  let adminOutcome: AdminOutcome;
-  let error: string | undefined;
-  try {
-    const set: ReviewDefaultOutcome = await setReviewDefault(owner, value);
-    if (set === "set") {
-      policyOutcome = "ok";
-      adminOutcome = "ok";
-    } else {
-      policyOutcome = "denied";
-      adminOutcome = "denied";
-      error = ROLE_DENIED_ERROR;
-    }
-  } catch {
-    policyOutcome = "error";
-    adminOutcome = "error";
-    error = SERVER_ERROR;
-  }
-  await recordPolicyEvent(owner, value, policyOutcome);
-  await recordAdminEvent(owner, {
-    kind: "review_default",
-    subject: ws,
-    detail: value ? "on" : "off",
-    outcome: adminOutcome,
+  const result = await knobIntent(request, ws, formData, {
+    auditKind: "policy_review_default",
+    detail: value ? "reviewed" : "open",
+    run: (owner) => setReviewDefault(owner, value),
+    deniedError: () => SERVER_ERROR,
   });
-  return { intent: "set-review-required" as const, status: policyOutcome, error };
+  return { intent: "set-review-required" as const, ...result };
 }
 
-/**
- * Who may invite — owner-only, step-up gated. The database's `topos_set_invite_policy` re-runs the
- * owner gate and validates the policy string (an unexpected value comes back `bad_policy`). Records
- * one `admin_event` per attempt whatever the outcome.
- */
+/** Who may invite — 'members' (any member) or 'owners'. */
 async function invitePolicyIntent(request: Request, ws: string, formData: FormData) {
-  const owner = await requireWorkspaceOwner(request, ws);
-  // The form offers 'members' | 'owners' only; pass it through and let the DB validate.
-  const policy = String(formData.get("invite_policy") ?? "") as "members" | "owners";
-
-  const stepUp = await requireStepUp(request, formData);
-  if (!stepUp.ok) {
-    await recordAdminEvent(owner, {
-      kind: "invite_policy",
-      subject: ws,
-      detail: "step_up",
-      outcome: "denied",
-    });
-    return {
-      intent: "set-invite-policy" as const,
-      status: "step_up_failed" as const,
-      error: stepUp.error,
-    };
-  }
-
-  const { status, admin, error } = await runSetter<InvitePolicyOutcome>(
-    () => setInvitePolicy(owner, policy),
-    (outcome) =>
-      outcome === "bad_policy"
-        ? denialOutcome("Choose members or owners.")
-        : denialOutcome(ROLE_DENIED_ERROR),
-  );
-  await recordAdminEvent(owner, {
-    kind: "invite_policy",
-    subject: ws,
+  const policy = String(formData.get("invite_policy") ?? "");
+  const result = await knobIntent(request, ws, formData, {
+    auditKind: "policy_invite",
     detail: policy,
-    outcome: admin,
+    run: (owner) => setInvitePolicy(owner, policy),
+    deniedError: () => "Choose members or owners.",
   });
-  return { intent: "set-invite-policy" as const, status, error };
+  return { intent: "set-invite-policy" as const, ...result };
 }
 
-/**
- * The staleness window — owner-only, step-up gated. The days input is converted to milliseconds at
- * hour granularity here; the database bounds it (1ms .. 366 days) and refuses anything else as
- * `bad_window`. Records one `admin_event` per attempt.
- */
+/** The staleness window — entered in days, converted to milliseconds at hour granularity. */
 async function stalenessWindowIntent(request: Request, ws: string, formData: FormData) {
-  const owner = await requireWorkspaceOwner(request, ws);
   const days = Number(formData.get("staleness_days") ?? "");
-  // Round to the nearest hour, then to milliseconds — the UI's "hour granularity". A NaN input
-  // (empty/garbage) becomes 0, which the database refuses as bad_window (honest, not a crash).
+  // Round to the nearest hour, then to milliseconds. A NaN input (empty/garbage) becomes 0,
+  // which the setter refuses as bad_window (honest, not a crash).
   const windowMs = Number.isFinite(days) ? Math.round(days * 24) * 3_600_000 : 0;
-
-  const stepUp = await requireStepUp(request, formData);
-  if (!stepUp.ok) {
-    await recordAdminEvent(owner, {
-      kind: "staleness_window",
-      subject: ws,
-      detail: "step_up",
-      outcome: "denied",
-    });
-    return {
-      intent: "set-staleness-window" as const,
-      status: "step_up_failed" as const,
-      error: stepUp.error,
-    };
-  }
-
-  const { status, admin, error } = await runSetter<StalenessWindowOutcome>(
-    () => setStalenessWindow(owner, windowMs),
-    (outcome) =>
-      outcome === "bad_window"
-        ? denialOutcome("Enter a window between 1 hour and 366 days.")
-        : denialOutcome(ROLE_DENIED_ERROR),
-  );
-  await recordAdminEvent(owner, {
-    kind: "staleness_window",
-    subject: ws,
+  const result = await knobIntent(request, ws, formData, {
+    auditKind: "policy_staleness",
     detail: String(windowMs),
-    outcome: admin,
+    run: (owner) => setStalenessWindow(owner, windowMs),
+    deniedError: () => "Enter a window between 1 hour and 366 days.",
   });
-  return { intent: "set-staleness-window" as const, status, error };
+  return { intent: "set-staleness-window" as const, ...result };
 }
 
-/**
- * Run a guarded setter and fold its outcome into a UI status + audit outcome + inline error. A
- * `'set'` is the success; any other code (a role refusal, a bounds refusal) is a denial mapped by
- * `onDenied`; a thrown fault is the transient error case.
- */
-async function runSetter<Outcome extends string>(
-  call: () => Promise<Outcome>,
-  onDenied: (outcome: Outcome) => { admin: AdminOutcome; error: string },
-): Promise<{ status: "ok" | "denied" | "error"; admin: AdminOutcome; error?: string }> {
-  try {
-    const outcome = await call();
-    if (outcome === "set") {
-      return { status: "ok", admin: "ok" };
-    }
-    const denied = onDenied(outcome);
-    return { status: "denied", admin: denied.admin, error: denied.error };
-  } catch {
-    return { status: "error", admin: "error", error: SERVER_ERROR };
-  }
+/** The registration knob — `open` disables the invitation proof; default invite_only. */
+async function registrationIntent(request: Request, ws: string, formData: FormData) {
+  const value = String(formData.get("registration") ?? "");
+  const result = await knobIntent(request, ws, formData, {
+    auditKind: "policy_registration",
+    detail: value,
+    run: (owner) => setRegistration(owner, value),
+    deniedError: () => "Choose invite-only or open.",
+  });
+  return { intent: "set-registration" as const, ...result };
 }
 
 export default function WorkspaceSettings() {
   const {
     ws,
     isOwner,
-    lastEvent,
     address,
     origin,
     reviewRequired,
     invitePolicy,
     stalenessWindowMs,
+    registration,
+    lastSet,
   } = useLoaderData<typeof loader>();
   return (
     <div className="space-y-8">
@@ -282,12 +234,21 @@ export default function WorkspaceSettings() {
       <MembersPointer ws={ws} />
       <AddressSection address={address} origin={origin} />
       <ReviewRequiredPanel
-        lastEvent={lastEvent}
         isOwner={isOwner}
         reviewRequired={reviewRequired}
+        lastSet={lastSet.review}
       />
-      <InvitePolicyPanel isOwner={isOwner} invitePolicy={invitePolicy} />
-      <StalenessWindowPanel isOwner={isOwner} stalenessWindowMs={stalenessWindowMs} />
+      <InvitePolicyPanel isOwner={isOwner} invitePolicy={invitePolicy} lastSet={lastSet.invite} />
+      <StalenessWindowPanel
+        isOwner={isOwner}
+        stalenessWindowMs={stalenessWindowMs}
+        lastSet={lastSet.staleness}
+      />
+      <RegistrationPanel
+        isOwner={isOwner}
+        registration={registration}
+        lastSet={lastSet.registration}
+      />
     </div>
   );
 }
@@ -312,8 +273,8 @@ function MembersPointer({ ws }: { ws: string }) {
 }
 
 /**
- * The workspace address — its own pane section (replacing the old door link). Sharing and joining
- * speak this address: `topos follow <origin>/<address>`.
+ * The workspace address — its own pane section. Sharing and joining speak this address:
+ * `topos follow <origin>/<address>`.
  */
 function AddressSection({ address, origin }: { address: string; origin: string }) {
   return (

@@ -40,6 +40,34 @@ const serverSchema = z.object({
     z.url().optional(),
   ),
   /**
+   * The first-boot workspace's address slug (renameable later in the product). The workspace
+   * row is born at boot; this only names it.
+   */
+  TOPOS_WORKSPACE_NAME: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z
+      .string()
+      .regex(/^[a-z0-9][a-z0-9-]*$/)
+      .max(100)
+      .default("team"),
+  ),
+  /**
+   * Presets the setup claim code (CI/IaC). Unset, a high-entropy code is minted fresh on
+   * every boot while the workspace is unclaimed. Only the SHA-256 is ever stored.
+   */
+  TOPOS_SETUP_CODE: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z.string().min(16).optional(),
+  ),
+  /**
+   * Optional file path the printed setup line is ALSO written to (a compose volume makes it
+   * readable without log access). Unset ⇒ logs only.
+   */
+  TOPOS_SETUP_LINK_FILE: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z.string().optional(),
+  ),
+  /**
    * The outbound-mail relay — BRING YOUR OWN SMTP, all five or none (the vault's old five-flag
    * rule, moved app-side with the mail unification). With all five set, the app's ONE mail seam
    * really sends: invite notices, the enrollment passcode, and a composition's magic links. Any

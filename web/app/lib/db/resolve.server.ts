@@ -1,13 +1,13 @@
-import { count } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { MemberActor } from "@/lib/auth/guards.server";
-import { getDb, getPool } from "@/lib/db/index.server";
-import { planeWorkspace } from "@/lib/db/schema.plane";
+import { getDb } from "@/lib/db/index.server";
+import { bundle, bundleNameHint } from "@/lib/db/schema.app";
 
 /**
- * Skill-name resolution over the directory's ONE resolver (`topos_resolve_skill`): the live
- * catalog first, the rename hints second — so an old name in a bookmark or a doc keeps
- * resolving until someone claims it for a new identity. `via` says which arm answered; a
- * 'hint' hit on an active skill is the redirect case (send the browser to the live name).
+ * Bundle-name resolution: the live catalog first, the rename hints second — so an old name in
+ * a bookmark or a doc keeps resolving until someone claims it for a new identity. `via` says
+ * which arm answered; a 'hint' hit on an active bundle is the redirect case (send the browser
+ * to the live name). One implementation, used by every tier of this app.
  */
 export interface ResolvedSkillName {
   skillId: string;
@@ -21,20 +21,40 @@ export async function resolveSkillName(
   actor: MemberActor,
   name: string,
 ): Promise<ResolvedSkillName | undefined> {
-  const result = await getPool().query<ResolvedSkillName>(
-    'select skill_id as "skillId", name, status, via from topos_resolve_skill($1, $2)',
-    [actor.workspaceId, name],
-  );
-  return result.rows[0];
-}
-
-/**
- * Whether ANY workspace exists on this plane — the first-run probe, and the ONE deliberately
- * actor-less read in the data layer: it discloses a single boolean about the deployment (is
- * this a virgin plane?), never a row, and the landing page needs it before anyone can hold a
- * seat to mint an actor from. Everything else in the data layer stays actor-first.
- */
-export async function hasAnyWorkspace(): Promise<boolean> {
-  const rows = await getDb().select({ n: count() }).from(planeWorkspace);
-  return (rows[0]?.n ?? 0) > 0;
+  const ws = actor.workspaceId;
+  const db = getDb();
+  const live = await db
+    .select({ skillId: bundle.id, name: bundle.name, status: bundle.status })
+    .from(bundle)
+    .where(and(eq(bundle.workspaceId, ws), eq(bundle.name, name)))
+    .limit(1);
+  if (live[0] !== undefined) {
+    return {
+      skillId: live[0].skillId,
+      name: live[0].name,
+      status: live[0].status as ResolvedSkillName["status"],
+      via: "name",
+    };
+  }
+  const hinted = await db
+    .select({ skillId: bundle.id, name: bundle.name, status: bundle.status })
+    .from(bundleNameHint)
+    .innerJoin(
+      bundle,
+      and(
+        eq(bundle.workspaceId, bundleNameHint.workspaceId),
+        eq(bundle.id, bundleNameHint.bundleId),
+      ),
+    )
+    .where(and(eq(bundleNameHint.workspaceId, ws), eq(bundleNameHint.oldName, name)))
+    .limit(1);
+  if (hinted[0] !== undefined) {
+    return {
+      skillId: hinted[0].skillId,
+      name: hinted[0].name,
+      status: hinted[0].status as ResolvedSkillName["status"],
+      via: "hint",
+    };
+  }
+  return undefined;
 }

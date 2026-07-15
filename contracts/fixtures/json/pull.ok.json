@@ -7,14 +7,8 @@
     "skills": [
       {
         "action": "up_to_date",
-        "applied": {
-          "epoch": 1,
-          "seq": 42
-        },
-        "observed": {
-          "epoch": 1,
-          "seq": 42
-        },
+        "applied": 42,
+        "observed": 42,
         "skill": "pr-describe",
         "workspace_id": "w_acme"
       }

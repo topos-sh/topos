@@ -5,22 +5,22 @@ import { Providers } from "@/components/providers";
 import { AppSidebar } from "@/components/shell/app-sidebar";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { composition } from "@/composition.server";
-import { actorFromSession, normalizeEmail, requireSession } from "@/lib/auth/guards.server";
-import { planeMembershipsFor } from "@/lib/db/queries.server";
+import { actorFromSession, requireSession } from "@/lib/auth/guards.server";
+import { membershipsFor } from "@/lib/db/queries.server";
 import type { NavContext } from "@/topos-web/nav";
 
 /**
  * The signed-in shell — the sidebar rail + the content pane. It is CHROME, never a gate:
  * authorization lives in each child route's own guard (guards.server.ts), which this layout
  * never stands in for. Two independent layers keep it honest — the optimistic cookie bounce
- * below, and the real per-request roster check every child loader runs.
+ * below, and the real per-request seat check every child loader runs.
  */
 
 /**
  * Optimistic sign-in bounce: if no session cookie is even PRESENT, send an obviously
  * signed-out visitor to /login before rendering the shell. This is UX only — the cookie is
  * never verified here and this check is NEVER authorization. Every child loader re-establishes
- * the session (requireSession) and re-derives admission from the roster; a forged or stale
+ * the session (requireSession) and re-derives admission from the seat table; a forged or stale
  * cookie sails past this bounce and dies at the guard, as it must.
  */
 export const middleware: MiddlewareFunction[] = [
@@ -31,14 +31,9 @@ export const middleware: MiddlewareFunction[] = [
   },
 ];
 
-/** The active workspace segment, when the current path is workspace-scoped (never `new`). */
+/** The active workspace segment, when the current path is workspace-scoped. */
 function activeWorkspaceId(pathname: string): string | null {
-  const match = pathname.match(/^\/workspaces\/([^/]+)/);
-  const segment = match?.[1];
-  if (!segment || segment === "new") {
-    return null;
-  }
-  return segment;
+  return pathname.match(/^\/workspaces\/([^/]+)/)?.[1] ?? null;
 }
 
 interface ResolvedNavEntry {
@@ -50,19 +45,19 @@ interface ResolvedNavEntry {
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  const session = await requireSession(request);
-  const email = normalizeEmail(session.user.email);
-  const actor = actorFromSession(session);
-  // An unverified session renders the shell with an empty rail — membership is keyed on a
-  // verified email only, and the mint refuses everything else.
-  const memberships = actor ? await planeMembershipsFor(actor) : [];
+  const actor = actorFromSession(await requireSession(request));
+  if (!actor) {
+    throw redirect("/login");
+  }
+  const memberships = await membershipsFor(actor);
 
   // Resolve every nav slot's href here, per the ACTIVE workspace (derived from the URL — a
   // layout loader has no child `:ws` param). Entries whose href returns null for this context
-  // (a workspace-scoped slot on a non-workspace page) are dropped.
+  // (a workspace-scoped slot on a non-workspace page) are dropped. The context's `email` field
+  // keeps its seam spelling but carries the actor's display identity (see topos-web/nav.ts).
   const ctx: NavContext = {
     workspaceId: activeWorkspaceId(new URL(request.url).pathname),
-    email,
+    email: actor.display,
   };
   const nav = composition.nav.flatMap<ResolvedNavEntry>((entry) => {
     const href = entry.href(ctx);
@@ -76,17 +71,17 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const cookie = request.headers.get("cookie") ?? "";
   const sidebarOpen = !/(?:^|;\s*)sidebar_state=false(?:;|$)/.test(cookie);
 
-  return { email, memberships, nav, sidebarOpen };
+  return { display: actor.display, memberships, nav, sidebarOpen };
 }
 
 export default function Shell() {
-  const { email, memberships, nav, sidebarOpen } = useLoaderData<typeof loader>();
+  const { display, memberships, nav, sidebarOpen } = useLoaderData<typeof loader>();
   return (
     // Providers seeds React Query with the rail's memberships (the loader already fetched them),
     // so the first paint carries data and a later mutation revalidates the list live.
     <Providers memberships={memberships}>
       <SidebarProvider defaultOpen={sidebarOpen}>
-        <AppSidebar email={email} nav={nav} />
+        <AppSidebar display={display} nav={nav} />
         {/* The content column: a banner landmark + the main region as SIBLINGS (not
             header-inside-main), so both `banner` and `main` stay discoverable. */}
         <div className="relative flex w-full min-w-0 flex-1 flex-col bg-ground">

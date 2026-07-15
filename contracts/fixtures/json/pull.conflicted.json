@@ -7,10 +7,7 @@
     "skills": [
       {
         "action": "conflicted",
-        "applied": {
-          "epoch": 1,
-          "seq": 7
-        },
+        "applied": 7,
         "merge": {
           "base_version_id": "d77b648d8149d63189864c6b6d06da4f7919935c4242cc197e708b1dafe941d5",
           "clean": false,
@@ -24,10 +21,7 @@
           "result_version_id": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
           "theirs_version_id": "c35004153b0f72e2e8363b557f36594319d5382eb9e4c7add5ff0feb3b15c369"
         },
-        "observed": {
-          "epoch": 1,
-          "seq": 7
-        },
+        "observed": 7,
         "skill": "pr-describe",
         "workspace_id": "w_acme"
       }

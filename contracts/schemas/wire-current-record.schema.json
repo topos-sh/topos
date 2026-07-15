@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "WireCurrentRecord",
-  "description": "The `current` pointer's wire body — the UNSIGNED document the plane serves at the pointer read,\nembeds in OK receipts, and stores. It is unsigned: authority is the database row behind the pointer,\nand integrity is the content-addressed `version_id` re-verified byte-for-byte on apply. A versioned\nenvelope; `ETag = \"<epoch>.<seq>\"`.",
+  "description": "The `current` pointer's wire body — the UNSIGNED document the pointer read serves and OK\nreceipts embed. It is unsigned: authority is the database row behind the pointer, and integrity\nis the content-addressed `version_id` re-verified byte-for-byte on apply. A versioned envelope;\n`ETag = \"<generation>\"`.",
   "type": "object",
   "properties": {
     "record": {
@@ -28,7 +28,9 @@
       "type": "object",
       "properties": {
         "generation": {
-          "$ref": "#/$defs/Generation"
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
         },
         "version_id": {
           "description": "The full commit SHA-256 (lowercase hex) — the `version_id`. NOT the `bundle_digest`: the\npointer names the version, and the commit transitively pins the bytes.",
@@ -39,26 +41,6 @@
       "required": [
         "version_id",
         "generation"
-      ]
-    },
-    "Generation": {
-      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
-      "type": "object",
-      "properties": {
-        "epoch": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "epoch",
-        "seq"
       ]
     },
     "PointerScope": {

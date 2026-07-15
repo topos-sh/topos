@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT vo.object_id AS \"object_id!: Vec<u8>\" FROM version_object vo\n           WHERE vo.workspace_id = $1 AND vo.bundle_id = $2 AND vo.version_id = $3\n             AND NOT EXISTS (\n                 SELECT 1 FROM version_object vo2\n                 JOIN version v2\n                   ON v2.workspace_id = vo2.workspace_id AND v2.bundle_id = vo2.bundle_id\n                  AND v2.version_id = vo2.version_id\n                 WHERE vo2.workspace_id = $1 AND vo2.object_id = vo.object_id\n                   AND NOT (vo2.bundle_id = $2 AND vo2.version_id = $3)\n                   AND v2.purged_at IS NULL)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "object_id!: Vec<u8>",
+        "type_info": "Bytea"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "acc001ffb20b322d2fe9f22a3efcd378c07d7819fce6aa9efb8b0460f8fa24f9"
+}

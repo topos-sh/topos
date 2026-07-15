@@ -23,7 +23,6 @@ use topos_core::digest::{self, to_hex};
 use topos_core::identity::{self, Commit};
 use topos_core::sync::{self, ApplyClass};
 use topos_gitstore::{ImportFile, Store, WriteBatch};
-use topos_types::Generation;
 use topos_types::persisted::{Lock, LockedFile, PlacementMap, SyncState};
 use topos_types::results::{Conflict, Offer, PullAction, PullSkill};
 
@@ -31,7 +30,7 @@ use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::fs_seam::PathKind;
 use crate::materialize::{self, MaterializeReport, MaterializeReq, NextMapCore};
-use crate::plane::{FollowContext, FollowMode, KnownCurrent, PlaneError, PointerFetch, gen_cmp};
+use crate::plane::{FollowContext, FollowMode, KnownCurrent, PlaneError, PointerFetch};
 use crate::scan::{self, ScannedBundle};
 use crate::{doc, logfile, sidecar};
 
@@ -44,7 +43,7 @@ const MAX_BACKFILL: usize = 256;
 /// any real served `observed`, so a later `pull` sees `applied != observed` (behind) and — once the `held`
 /// pin is released by an explicit pull — fast-forwards back to the team's current. (The go-back installs an
 /// OLD version whose true generation is no longer tracked locally; `(0,0)` is the honest "not at current".)
-const GO_BACK_APPLIED: Generation = Generation { epoch: 0, seq: 0 };
+const GO_BACK_APPLIED: u64 = 0;
 
 /// A capability token proving the author-merge code was reached from a divergence. Its field is private to
 /// this module, so NO other module can mint one; [`super::merge_resolve::resolve_diverged`] takes it by
@@ -193,7 +192,7 @@ pub(crate) fn sync_one_with(
     }
 
     // ---- plan: classify via the kernel's four-state transition, driving toward `observed` ----
-    let applied_eq_observed = gen_cmp(sync.applied, sync.observed) == core::cmp::Ordering::Equal;
+    let applied_eq_observed = sync.applied == sync.observed;
     let work = compute_work(ctx, &map, &lock)?;
     let work_eq_base = match &work {
         WorkState::Absent => true, // nothing on disk to clobber → a clean install
@@ -953,8 +952,8 @@ fn fetch_served(
 }
 
 /// Whether `g` is the genesis sentinel `(0,0)`.
-fn is_zero_gen(g: Generation) -> bool {
-    g.epoch == 0 && g.seq == 0
+fn is_zero_gen(g: u64) -> bool {
+    g == 0
 }
 
 /// Whether this followed skill has NEVER received bytes — the first-receive baseline `follow` lays: nothing

@@ -16,7 +16,16 @@ const REQUIRED: Record<string, string> = {
 };
 
 /** Every schema key — each case stubs ALL of them so ambient env never leaks into a parse. */
-const SCHEMA_KEYS = [...Object.keys(REQUIRED), "INSTALL_SH_PATH", "APP_ENV"];
+const SCHEMA_KEYS = [
+  ...Object.keys(REQUIRED),
+  "INSTALL_SH_PATH",
+  "APP_ENV",
+  "TOPOS_WEB_RATELIMIT",
+  "TOPOS_PUBLIC_URL",
+  "TOPOS_WORKSPACE_NAME",
+  "TOPOS_SETUP_CODE",
+  "TOPOS_SETUP_LINK_FILE",
+];
 
 // serverEnv() memoizes per module instance, so each case gets a fresh module registry.
 async function parseWith(env: Record<string, string | undefined>) {
@@ -72,5 +81,19 @@ describe("serverEnv", () => {
   it("rejects a non-URL BETTER_AUTH_URL and PLANE_INTERNAL_URL", async () => {
     await expect(parseWith({ ...REQUIRED, BETTER_AUTH_URL: "not-a-url" })).rejects.toThrow();
     await expect(parseWith({ ...REQUIRED, PLANE_INTERNAL_URL: "not-a-url" })).rejects.toThrow();
+  });
+
+  it("TOPOS_WORKSPACE_NAME defaults to 'team' and refuses a value outside the slug charset", async () => {
+    const env = await parseWith(REQUIRED);
+    expect(env.TOPOS_WORKSPACE_NAME).toBe("team");
+    // The address-slug regex: lowercase alphanumerics + interior hyphens, no leading hyphen.
+    await expect(parseWith({ ...REQUIRED, TOPOS_WORKSPACE_NAME: "Acme Corp" })).rejects.toThrow();
+    const named = await parseWith({ ...REQUIRED, TOPOS_WORKSPACE_NAME: "acme-corp" });
+    expect(named.TOPOS_WORKSPACE_NAME).toBe("acme-corp");
+  });
+
+  it("the /api/v1 rate belt defaults ON (the unit suites must turn it off explicitly)", async () => {
+    const env = await parseWith(REQUIRED);
+    expect(env.TOPOS_WEB_RATELIMIT).toBe("on");
   });
 });

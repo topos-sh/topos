@@ -2,27 +2,38 @@ import { useEffect, useState } from "react";
 import { useFetcher } from "react-router";
 import { StepUpFields } from "@/components/step-up";
 import { buttonClasses } from "@/components/ui";
-import type { SeatRole } from "@/lib/db/queries.roster.server";
 
 /** The members route's typed reply for `intent=set-role`. */
 interface RoleActionData {
   intent: "set-role";
-  status: "ok" | "sole_owner" | "step_up" | "error";
+  status: "ok" | "sole_owner" | "missing" | "step_up" | "error";
   /** The step-up failure copy — rendered inline on a wrong password / rate limit. */
   error?: string;
 }
+
+type SeatRole = "owner" | "reviewer" | "member";
 
 /** Owner outranks reviewer outranks member — the select lists them low-to-high. */
 const ROLE_OPTIONS: SeatRole[] = ["member", "reviewer", "owner"];
 
 /**
- * The per-seat role control — a STEP-UP ceremony. Collapsed, it is a quiet button; expanded, it is
- * a small panel with a role select (preselected to the seat's current role) and the acting owner's
- * password re-entry. A landed change revalidates the row and the role chip re-renders, so the panel
- * closes itself. The database refuses demoting the sole owner (`sole_owner`) — surfaced honestly
- * here as "the workspace must always have an owner", never swallowed.
+ * The per-seat role control — a STEP-UP ceremony keyed by the seat's USER ID (the one
+ * identity; the display name is what a human reads). Collapsed, it is a quiet button;
+ * expanded, it is a small panel with a role select (preselected to the seat's current role)
+ * and the acting owner's password re-entry. A landed change revalidates the row and the role
+ * chip re-renders, so the panel closes itself. The data layer refuses demoting the sole owner
+ * (`last_owner`) — surfaced honestly here as "the workspace must keep an owner", never
+ * swallowed.
  */
-export function RoleForm({ email, role }: { email: string; role: SeatRole }) {
+export function RoleForm({
+  userId,
+  display,
+  role,
+}: {
+  userId: string;
+  display: string;
+  role: SeatRole;
+}) {
   const fetcher = useFetcher<RoleActionData>();
   const pending = fetcher.state !== "idle";
   const state = fetcher.data;
@@ -48,13 +59,13 @@ export function RoleForm({ email, role }: { email: string; role: SeatRole }) {
       className="w-full max-w-sm space-y-3 rounded-md border border-line-soft bg-panel2 p-3"
     >
       <input type="hidden" name="intent" value="set-role" />
-      <input type="hidden" name="email" value={email} />
-      <label className="block" htmlFor={`role-${email}-select`}>
+      <input type="hidden" name="user_id" value={userId} />
+      <label className="block" htmlFor={`role-${userId}-select`}>
         <span className="mb-1 block font-medium text-sm text-dim">
-          Role for <span className="text-ink">{email}</span>
+          Role for <span className="text-ink">{display}</span>
         </span>
         <select
-          id={`role-${email}-select`}
+          id={`role-${userId}-select`}
           name="role"
           // Keyed by the current role so a landed change re-seeds the default cleanly on the next
           // open; uncontrolled so an unsaved pick survives a wrong-password re-render.
@@ -69,7 +80,7 @@ export function RoleForm({ email, role }: { email: string; role: SeatRole }) {
           ))}
         </select>
       </label>
-      <StepUpFields idPrefix={`role-${email}`} />
+      <StepUpFields idPrefix={`role-${userId}`} />
       {state?.status === "step_up" && (
         <p className="text-red-700 text-xs" role="alert">
           {state.error}
@@ -77,7 +88,12 @@ export function RoleForm({ email, role }: { email: string; role: SeatRole }) {
       )}
       {state?.status === "sole_owner" && (
         <p className="text-red-700 text-xs" role="alert">
-          The workspace must always have an owner. Make another member an owner first.
+          The workspace must keep an owner. Make another member an owner first.
+        </p>
+      )}
+      {state?.status === "missing" && (
+        <p className="text-red-700 text-xs" role="alert">
+          This seat no longer exists — reload to see the current roster.
         </p>
       )}
       {state?.status === "error" && (

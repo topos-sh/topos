@@ -7,7 +7,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
  * The accumulating dev outbox — outside production EVERY product mail lands in ONE
  * `.outbox.jsonl` as the full rendered message, kind-tagged, so a human tester watches a single
  * file. The per-flow credential files keep their own contracts (their own suites); this suite
- * pins the superset view: three different mails, one file, three lines, in send order.
+ * pins the superset view: the four mail kinds — magic-link, invite, and the two auth rungs
+ * (verification + reset) — one file, four lines, in send order.
  */
 
 const { sendMailSpy, createTransportSpy } = vi.hoisted(() => {
@@ -32,15 +33,15 @@ afterEach(() => {
 });
 
 describe("the dev outbox accumulates across mail kinds", () => {
-  it("collects magic-link, passcode, and invite mails as kind-tagged lines in ONE file", async () => {
+  it("collects magic-link, invite, verification, and reset mails as kind-tagged lines in ONE file", async () => {
     vi.resetModules();
     for (const [k, v] of Object.entries(BASE_ENV)) {
       vi.stubEnv(k, v);
     }
     vi.stubEnv("APP_ENV", "test");
     const magicLink = await import("@/lib/mail/magic-link-mail.server");
-    const passcode = await import("@/lib/mail/passcode-mail.server");
     const invite = await import("@/lib/mail/invite-mail.server");
+    const authMail = await import("@/lib/mail/auth-mail.server");
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "topos-dev-outbox-"));
     const previousCwd = process.cwd();
     process.chdir(dir);
@@ -49,26 +50,31 @@ describe("the dev outbox accumulates across mail kinds", () => {
         email: "alice@example.com",
         url: "https://topos.example/magic?token=abc",
       });
-      await passcode.sendPasscodeEmail({
-        to: "bob@example.com",
-        code: "424242",
-        workspaceDisplayName: "Acme",
-        verifyBaseUrl: "https://topos.example",
-      });
       await invite.sendInviteEmail({
         to: "carol@example.com",
         workspaceDisplayName: "Acme",
-        address: "acme",
+        address: "https://topos.example/acme",
         invitedBy: "owner@example.com",
       });
+      await authMail.sendVerificationMail(
+        "dana@example.com",
+        "https://topos.example/verify-email?token=def",
+      );
+      await authMail.sendResetMail("erin@example.com", "https://topos.example/reset?token=ghi");
       const lines = (await fs.readFile(path.join(dir, ".outbox.jsonl"), "utf8")).trim().split("\n");
-      expect(lines).toHaveLength(3);
+      expect(lines).toHaveLength(4);
       const mails = lines.map((line) => JSON.parse(line));
-      expect(mails.map((m) => m.kind)).toEqual(["magic-link", "passcode", "invite"]);
+      expect(mails.map((m) => m.kind)).toEqual([
+        "magic-link",
+        "invite",
+        "auth-verify",
+        "auth-reset",
+      ]);
       expect(mails.map((m) => m.to)).toEqual([
         "alice@example.com",
-        "bob@example.com",
         "carol@example.com",
+        "dana@example.com",
+        "erin@example.com",
       ]);
       for (const mail of mails) {
         // Every line is the full rendered message a transport would have been handed.
@@ -78,6 +84,7 @@ describe("the dev outbox accumulates across mail kinds", () => {
         expect(typeof mail.text).toBe("string");
         expect(mail.text).not.toBe("");
       }
+      // SMTP is unarmed (no TOPOS_MAIL_SMTP_*): nothing ever reached a real transport.
       expect(sendMailSpy).not.toHaveBeenCalled();
     } finally {
       process.chdir(previousCwd);

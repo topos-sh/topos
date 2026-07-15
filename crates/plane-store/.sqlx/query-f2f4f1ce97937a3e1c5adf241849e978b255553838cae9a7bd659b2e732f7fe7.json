@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT bundle_digest AS \"bundle_digest!\" FROM version_digest\n               WHERE workspace_id = $1 AND bundle_id = $2 AND version_id = $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "bundle_digest!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f2f4f1ce97937a3e1c5adf241849e978b255553838cae9a7bd659b2e732f7fe7"
+}

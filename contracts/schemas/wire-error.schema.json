@@ -17,24 +17,20 @@
       "default": null
     },
     "current_generation": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/Generation"
-        },
-        {
-          "type": "null"
-        }
-      ]
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
     },
     "expected_generation": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/Generation"
-        },
-        {
-          "type": "null"
-        }
-      ]
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
     },
     "next_actions": {
       "type": "array",
@@ -102,26 +98,6 @@
           ]
         }
       }
-    },
-    "Generation": {
-      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
-      "type": "object",
-      "properties": {
-        "epoch": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "epoch",
-        "seq"
-      ]
     },
     "NextAction": {
       "description": "A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent\nbranch on the known set and still pass through unknowns.",

@@ -1,127 +1,61 @@
-import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { data, Form, Link, useActionData, useLoaderData } from "react-router";
+import type { LoaderFunctionArgs } from "react-router";
+import { Link, useLoaderData } from "react-router";
 import { relativeTime, shortDevice } from "@/components/format";
-import { StepUpFields } from "@/components/step-up";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading, ShortId } from "@/components/ui";
 import { notFound, requireMember } from "@/lib/auth/guards.server";
-import { requireStepUp } from "@/lib/auth/step-up.server";
-import { recordAdminEvent } from "@/lib/db/audit.server";
 import {
+  type DetachedCopyRow,
+  detachedCopiesOf,
   type Fleet,
   type FleetDevice,
   type FleetFreshness,
   type FleetSkillState,
   type FleetSkillStatus,
   fleetOf,
-  revokeDevice,
 } from "@/lib/db/queries.fleet.server";
 
 export function meta({ params }: { params: { ws?: string } }) {
   return [{ title: `Fleet · ${params.ws ?? "Workspace"}` }];
 }
 
+/**
+ * The fleet page is a visibility surface, read-only by design: it enumerates every device that
+ * touches the workspace and the version each one last reported, and it NAMES its blind spots
+ * (stale devices, detached copies, per-device exclusions, removed members' devices) instead of
+ * omitting them. It carries NO revoke arm — a device is a possession, revocation is self-only,
+ * and the one place a device signs out is the owner's own /settings/devices page.
+ */
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const ws = params.ws;
   if (!ws) {
     notFound();
   }
   const actor = await requireMember(request, ws);
-  const fleet = await fleetOf(actor);
-  return { ws, fleet };
-}
-
-/**
- * ONE action, dispatched on the hidden `intent`. Every branch RE-GUARDS (a loader gate never
- * extends to an action). Revoke re-guards at MEMBER grade — a member may sign their OWN device
- * out — and the guarded `topos_revoke_device` runs the real owner-or-self matrix behind it.
- */
-export async function action({ request, params }: ActionFunctionArgs) {
-  const ws = params.ws;
-  if (!ws) {
-    notFound();
-  }
-  const formData = await request.formData();
-  const intent = String(formData.get("intent") ?? "");
-  if (intent === "revoke") {
-    return revokeIntent(request, ws, formData);
-  }
-  return data({ intent: "unknown" as const, status: "error" as const }, { status: 400 });
-}
-
-async function revokeIntent(request: Request, ws: string, formData: FormData) {
-  const actor = await requireMember(request, ws);
-  const deviceKeyId = String(formData.get("device_key_id") ?? "").trim();
-  if (deviceKeyId.length === 0) {
-    return { intent: "revoke" as const, status: "error" as const, deviceKeyId };
-  }
-  // Step-up FIRST — a failed re-auth performs nothing (no guarded call), but the attempt is still
-  // audited (with detail "step_up" so a refused ceremony reads as one).
-  const stepUp = await requireStepUp(request, formData);
-  if (!stepUp.ok) {
-    await recordAdminEvent(actor, {
-      kind: "device_revoke",
-      subject: deviceKeyId,
-      detail: "step_up",
-      outcome: "denied",
-    });
-    return {
-      intent: "revoke" as const,
-      status: "step_up_failed" as const,
-      deviceKeyId,
-      error: stepUp.error,
-    };
-  }
-  let outcome: Awaited<ReturnType<typeof revokeDevice>>;
-  try {
-    outcome = await revokeDevice(actor, deviceKeyId);
-  } catch {
-    await recordAdminEvent(actor, {
-      kind: "device_revoke",
-      subject: deviceKeyId,
-      outcome: "error",
-    });
-    return { intent: "revoke" as const, status: "error" as const, deviceKeyId };
-  }
-  await recordAdminEvent(actor, {
-    kind: "device_revoke",
-    subject: deviceKeyId,
-    outcome: outcome === "revoked" ? "ok" : "denied",
-  });
-  return { intent: "revoke" as const, status: outcome, deviceKeyId };
-}
-
-// The hook UNWRAPS the `data(...)` response (and serializes), so derive the client-side shape from
-// useActionData rather than the raw action return — otherwise the unknown-intent branch's
-// DataWithResponseInit wrapper leaks into the type and mismatches the rendered value.
-type FleetActionData = NonNullable<ReturnType<typeof useActionData<typeof action>>>;
-
-/** The per-device result of the last submit, if it targeted this device. */
-function resultFor(
-  action: FleetActionData | undefined,
-  deviceKeyId: string,
-): Extract<FleetActionData, { intent: "revoke" }> | undefined {
-  if (action === undefined || !("deviceKeyId" in action) || action.intent !== "revoke") {
-    return undefined;
-  }
-  return action.deviceKeyId === deviceKeyId ? action : undefined;
+  const [fleet, detached] = await Promise.all([fleetOf(actor), detachedCopiesOf(actor)]);
+  return { ws, fleet, detached };
 }
 
 export default function FleetPage() {
-  const { ws, fleet } = useLoaderData<typeof loader>();
-  const actionData = useActionData<typeof action>();
+  const { ws, fleet, detached } = useLoaderData<typeof loader>();
   return (
     <div className="space-y-8">
       <PageHeader
         title="Fleet"
         meta={<FleetMeta fleet={fleet} />}
         actions={
-          <Link to={`/workspaces/${ws}`} className={buttonClasses("quiet")}>
-            Back to workspace
-          </Link>
+          <>
+            <Link to="/settings/devices" className={buttonClasses("quiet")}>
+              Your devices
+            </Link>
+            <Link to={`/workspaces/${ws}`} className={buttonClasses("quiet")}>
+              Back to workspace
+            </Link>
+          </>
         }
       />
       <IntroCopy wholeFleet={fleet.wholeFleet} />
-      <FleetBody fleet={fleet} actionData={actionData} />
+      <FleetBody fleet={fleet} />
+      {detached.length > 0 && <DetachedCopies rows={detached} />}
       <BlindSpots />
     </div>
   );
@@ -148,9 +82,9 @@ function IntroCopy({ wholeFleet }: { wholeFleet: boolean }) {
     <p className="text-dim text-sm leading-relaxed">
       {wholeFleet ? (
         <>
-          Every enrolled device in this workspace and the version each one last reported. Use it to
-          confirm a change has reached the fleet — after a fix lands, watch until every non-stale
-          device reads <em className="text-ink not-italic">current</em>.
+          Every enrolled device that touches this workspace and the version each one last reported.
+          Use it to confirm a change has reached the fleet — after a fix lands, watch until every
+          non-stale device reads <em className="text-ink not-italic">current</em>.
         </>
       ) : (
         <>
@@ -162,13 +96,7 @@ function IntroCopy({ wholeFleet }: { wholeFleet: boolean }) {
   );
 }
 
-function FleetBody({
-  fleet,
-  actionData,
-}: {
-  fleet: Fleet;
-  actionData: FleetActionData | undefined;
-}) {
+function FleetBody({ fleet }: { fleet: Fleet }) {
   if (fleet.devices.length === 0) {
     return (
       <div className="rounded-lg border border-line-soft border-dashed bg-panel px-6 py-12 text-center">
@@ -195,14 +123,9 @@ function FleetBody({
         devices={present}
         wholeFleet={fleet.wholeFleet}
         stalenessWindowMs={fleet.stalenessWindowMs}
-        actionData={actionData}
       />
       {removed.length > 0 && (
-        <RemovedUpstream
-          devices={removed}
-          stalenessWindowMs={fleet.stalenessWindowMs}
-          actionData={actionData}
-        />
+        <RemovedUpstream devices={removed} stalenessWindowMs={fleet.stalenessWindowMs} />
       )}
     </div>
   );
@@ -212,12 +135,10 @@ function PresentDevices({
   devices,
   wholeFleet,
   stalenessWindowMs,
-  actionData,
 }: {
   devices: FleetDevice[];
   wholeFleet: boolean;
   stalenessWindowMs: number;
-  actionData: FleetActionData | undefined;
 }) {
   if (devices.length === 0) {
     return null;
@@ -232,11 +153,10 @@ function PresentDevices({
         <div className="space-y-3">
           {devices.map((device) => (
             <DeviceCard
-              key={device.deviceKeyId}
+              key={device.deviceId}
               device={device}
-              showPrincipal={false}
+              showOwner={false}
               stalenessWindowMs={stalenessWindowMs}
-              actionData={actionData}
             />
           ))}
         </div>
@@ -244,23 +164,25 @@ function PresentDevices({
     );
   }
 
-  const groups = groupByPrincipal(devices);
+  const groups = groupByOwner(devices);
   return (
     <section aria-labelledby="fleet-heading" className="space-y-6">
       <SectionHeading>
         <span id="fleet-heading">Enrolled devices</span>
       </SectionHeading>
-      {groups.map(([principal, group]) => (
-        <div key={principal} className="space-y-3">
-          <h3 className="font-medium text-ink text-sm">{principal}</h3>
+      {groups.map(([ownerUserId, group]) => (
+        <div key={ownerUserId} className="space-y-3">
+          <h3 className="font-medium text-ink text-sm">
+            {group[0]?.ownerDisplay}{" "}
+            <span className="font-normal text-faint text-xs">{group[0]?.ownerEmail}</span>
+          </h3>
           <div className="space-y-3">
             {group.map((device) => (
               <DeviceCard
-                key={device.deviceKeyId}
+                key={device.deviceId}
                 device={device}
-                showPrincipal={false}
+                showOwner={false}
                 stalenessWindowMs={stalenessWindowMs}
-                actionData={actionData}
               />
             ))}
           </div>
@@ -271,17 +193,16 @@ function PresentDevices({
 }
 
 /**
- * The removed-upstream blind spot, named and enumerated: devices whose principal no longer holds a
- * confirmed seat. Removal deleted the seat, never the device — the copies are still out there.
+ * The removed-upstream blind spot, named and enumerated: devices whose owner no longer holds a
+ * seat. Removal deleted the seat, never the device — the copies are still out there, and only
+ * the person themselves can sign the device out.
  */
 function RemovedUpstream({
   devices,
   stalenessWindowMs,
-  actionData,
 }: {
   devices: FleetDevice[];
   stalenessWindowMs: number;
-  actionData: FleetActionData | undefined;
 }) {
   return (
     <section aria-labelledby="removed-upstream-heading" className="space-y-3">
@@ -290,17 +211,15 @@ function RemovedUpstream({
       </SectionHeading>
       <p className="text-dim text-sm leading-relaxed">
         The seat is gone, but these copies remain on their devices — this page can no longer move
-        them. Revoke a device to stop its credential; the bytes already on disk must be chased by
-        hand.
+        them, and the bytes already on disk must be chased by hand.
       </p>
       <div className="space-y-3">
         {devices.map((device) => (
           <DeviceCard
-            key={device.deviceKeyId}
+            key={device.deviceId}
             device={device}
-            showPrincipal={true}
+            showOwner={true}
             stalenessWindowMs={stalenessWindowMs}
-            actionData={actionData}
           />
         ))}
       </div>
@@ -310,23 +229,24 @@ function RemovedUpstream({
 
 function DeviceCard({
   device,
-  showPrincipal,
+  showOwner,
   stalenessWindowMs,
-  actionData,
 }: {
   device: FleetDevice;
-  showPrincipal: boolean;
+  showOwner: boolean;
   stalenessWindowMs: number;
-  actionData: FleetActionData | undefined;
 }) {
   return (
     <Card className="overflow-hidden">
-      <div data-testid={`fleet-device-${device.deviceKeyId}`} className="space-y-3 px-4 py-3">
+      <div data-testid={`fleet-device-${device.deviceId}`} className="space-y-3 px-4 py-3">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <span className="font-mono text-ink text-sm">
-            device {shortDevice(device.deviceKeyId)}
-          </span>
-          {showPrincipal && <span className="text-dim text-sm">{device.principal}</span>}
+          <span className="text-ink text-sm">{device.displayName}</span>
+          <span className="font-mono text-faint text-xs">{shortDevice(device.deviceId)}</span>
+          {showOwner && (
+            <span className="text-dim text-sm">
+              {device.ownerDisplay} <span className="text-faint text-xs">{device.ownerEmail}</span>
+            </span>
+          )}
           <span className="ml-auto flex flex-wrap items-center gap-1.5">
             <FreshnessChip freshness={device.freshness} />
             {device.removedUpstream && <RemovedChip />}
@@ -334,11 +254,11 @@ function DeviceCard({
           </span>
         </div>
         <div className="text-faint text-xs">
-          {device.lastReportAt === null ? (
+          {device.lastSeenAtMs === null ? (
             <>Has never reported — no session has run on it since it enrolled.</>
           ) : (
             <>
-              last reported {relativeTime(new Date(device.lastReportAt))}
+              last seen {relativeTime(new Date(device.lastSeenAtMs))}
               {device.freshness === "stale" && (
                 <> · past the {formatWindow(stalenessWindowMs)} window — chase by hand</>
               )}
@@ -346,9 +266,6 @@ function DeviceCard({
           )}
         </div>
         <SkillStates skills={device.skills} />
-        {device.canRevoke && !device.revoked && (
-          <RevokeControl deviceKeyId={device.deviceKeyId} actionData={actionData} />
-        )}
         {device.revoked && (
           <p className="text-faint text-xs">
             Credential revoked — the device is signed out. Re-enrolling (
@@ -376,13 +293,19 @@ function SkillStates({ skills }: { skills: FleetSkillState[] }) {
             {skill.skillName ?? skill.skillId}
           </span>
           <SkillStatusChip status={skill.status} />
-          {skill.appliedCommit !== null && <ShortId value={skill.appliedCommit} />}
+          <ShortId value={skill.appliedVersionId} />
+          <span className="text-faint text-xs">
+            reported {relativeTime(new Date(skill.reportedAtMs))}
+          </span>
           {skill.status === "detached" && (
             <span className="text-faint text-xs">
               last known state
-              {skill.detachedAt !== null && (
-                <> · frozen {relativeTime(new Date(skill.detachedAt))}</>
-              )}
+              {skill.detachCause !== null && <> · {detachCauseLabel(skill.detachCause)}</>}
+            </span>
+          )}
+          {skill.status === "behind" && skill.currentVersionId !== null && (
+            <span className="text-faint text-xs">
+              current is <ShortId value={skill.currentVersionId} />
             </span>
           )}
         </li>
@@ -391,62 +314,49 @@ function SkillStates({ skills }: { skills: FleetSkillState[] }) {
   );
 }
 
-/**
- * The revoke ceremony, folded behind a disclosure so it never crowds the row. Step-up is embedded
- * (the password is re-verified before the guarded call); the copy names the boundary — revocation
- * is instant and re-enrollment is the only way back.
- */
-function RevokeControl({
-  deviceKeyId,
-  actionData,
-}: {
-  deviceKeyId: string;
-  actionData: FleetActionData | undefined;
-}) {
-  const result = resultFor(actionData, deviceKeyId);
-  const error = result !== undefined && "error" in result ? result.error : failureCopy(result);
-  return (
-    <details className="rounded-md border border-line-soft bg-panel2/40 px-3 py-2">
-      <summary className="cursor-pointer font-mono text-[13px] text-dim">
-        Revoke this device
-      </summary>
-      <Form method="post" className="mt-3 space-y-3">
-        <input type="hidden" name="intent" value="revoke" />
-        <input type="hidden" name="device_key_id" value={deviceKeyId} />
-        <p className="text-dim text-sm leading-relaxed">
-          Revocation is instant — the device&apos;s credential stops working immediately. Fresh work
-          on it dies; re-enrolling is the recovery.
-        </p>
-        <StepUpFields idPrefix={`revoke-${deviceKeyId}`} />
-        {error !== undefined && <p className="text-red-700 text-sm">{error}</p>}
-        <button type="submit" className={buttonClasses("danger")}>
-          Revoke device
-        </button>
-      </Form>
-    </details>
-  );
+/** The detach records' cause vocabulary, humanized; unknown codes fall through verbatim. */
+function detachCauseLabel(cause: string): string {
+  if (cause === "membership_removed") {
+    return "the seat was removed";
+  }
+  if (cause === "channel_leave") {
+    return "they left the channel";
+  }
+  return cause;
 }
 
-/** Map a non-error revoke outcome to its human copy (the step-up error carries its own). */
-function failureCopy(
-  result: Extract<FleetActionData, { intent: "revoke" }> | undefined,
-): string | undefined {
-  if (result === undefined) {
-    return undefined;
-  }
-  switch (result.status) {
-    case "owner_or_self_required":
-      return "You can only revoke your own devices — an owner can revoke any device here.";
-    case "unknown_device":
-      return "That device is no longer registered.";
-    case "member_required":
-      return "Your seat in this workspace has changed — reload and try again.";
-    case "error":
-      return "Something went wrong. Reload and try again.";
-    default:
-      // "revoked" and "step_up_failed" are handled elsewhere (revalidation / the error field).
-      return undefined;
-  }
+/**
+ * The standing detach records, person-joined — the chase list that survives even when the
+ * device rows themselves are revoked or quiet: whose copies froze, of what, and why.
+ */
+function DetachedCopies({ rows }: { rows: DetachedCopyRow[] }) {
+  return (
+    <section aria-labelledby="detached-copies-heading" className="space-y-3">
+      <SectionHeading>
+        <span id="detached-copies-heading">Detached copies</span>
+      </SectionHeading>
+      <p className="text-dim text-sm leading-relaxed">
+        Copies delivery no longer reaches — frozen where their devices last applied them. Sync
+        cannot move or recall them; chase them by hand where it matters.
+      </p>
+      <Card className="overflow-hidden">
+        <ul>
+          {rows.map((row) => (
+            <li
+              key={`${row.userId}:${row.bundleId}`}
+              className="flex flex-wrap items-center gap-x-3 gap-y-1 border-line-soft border-b px-4 py-3 last:border-b-0"
+            >
+              <span className="text-ink text-sm">{row.display}</span>
+              <span className="font-mono text-dim text-xs">{row.bundleName ?? row.bundleId}</span>
+              <span className="text-faint text-xs">
+                {detachCauseLabel(row.cause)} · {relativeTime(new Date(row.createdAt))}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </Card>
+    </section>
+  );
 }
 
 function FreshnessChip({ freshness }: { freshness: FleetFreshness }) {
@@ -465,6 +375,12 @@ function SkillStatusChip({ status }: { status: FleetSkillStatus }) {
   }
   if (status === "behind") {
     return <Chip tone="pending">behind</Chip>;
+  }
+  if (status === "excluded") {
+    return <Chip tone="neutral">excluded</Chip>;
+  }
+  if (status === "removed_upstream") {
+    return <Chip tone="neutral">removed upstream</Chip>;
   }
   return <Chip tone="neutral">detached</Chip>;
 }
@@ -487,8 +403,8 @@ function RemovedChip() {
 
 /**
  * The legend + the load-bearing footnote: devices report at SESSION START, so a healthy but idle
- * machine reads stale. Naming each state here keeps the blind spots explicit — the page enumerates
- * them, it never hides them.
+ * machine reads stale. Naming each state here keeps the blind spots explicit — the page
+ * enumerates them, it never hides them.
  */
 function BlindSpots() {
   return (
@@ -504,30 +420,43 @@ function BlindSpots() {
         </p>
         <p>
           <em className="text-ink not-italic">Detached</em> copies are a device&apos;s last known
-          state, frozen when the person unfollowed or left; the bytes stay on their machine and this
-          page can no longer move them.
+          state, frozen when delivery stopped reaching the person; the bytes stay on their machine
+          and this page can no longer move them.
         </p>
         <p>
-          <em className="text-ink not-italic">Removed upstream</em> devices belong to a principal
-          whose seat is gone; the copies remain on their devices and must be chased by hand.
+          <em className="text-ink not-italic">Excluded</em> copies were opted out on that one device
+          — the person still follows the skill elsewhere; this device holds what it held.
+        </p>
+        <p>
+          <em className="text-ink not-italic">Removed upstream</em> devices belong to a person whose
+          seat is gone; the copies remain on their devices and must be chased by hand.
+        </p>
+        <p>
+          Signing a device out is SELF-service — a device is a possession, and its owner does it
+          from{" "}
+          <Link to="/settings/devices" className="text-ink underline decoration-hairline">
+            your devices
+          </Link>
+          . This page watches; it doesn&apos;t reach into pockets.
         </p>
         <p>
           After publishing a scrubbed version, watch until every non-stale device reads{" "}
-          <em className="text-ink not-italic">current</em>, then enumerate the stale, detached, and
-          removed-upstream copies and chase them directly — none of them are silently omitted here.
+          <em className="text-ink not-italic">current</em>, then enumerate the stale, detached,
+          excluded, and removed-upstream copies and chase them directly — none of them are silently
+          omitted here.
         </p>
       </Card>
     </section>
   );
 }
 
-/** A group of one person's devices, preserving the query's principal order. */
-function groupByPrincipal(devices: FleetDevice[]): [string, FleetDevice[]][] {
+/** A group of one person's devices, keyed by user id, preserving the query's order. */
+function groupByOwner(devices: FleetDevice[]): [string, FleetDevice[]][] {
   const groups = new Map<string, FleetDevice[]>();
   for (const device of devices) {
-    const list = groups.get(device.principal);
+    const list = groups.get(device.ownerUserId);
     if (list === undefined) {
-      groups.set(device.principal, [device]);
+      groups.set(device.ownerUserId, [device]);
     } else {
       list.push(device);
     }

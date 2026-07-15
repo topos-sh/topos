@@ -7,10 +7,10 @@
 //! invited email. Member-level unless the workspace's invite policy restricts inviting to owners.
 //!
 //! Requires prior enrollment: the plane (`base_url`) and the workspace (`workspace_id`) come from the
-//! sidecar `follow` wrote; the acting device rides the transport's workspace **Bearer credential** (the
-//! plane resolves the non-revoked registry row → principal → the invite-policy gate). Nothing is signed —
-//! the trust level is git/GitHub-level. Emails are folded to the kernel's canonical (ASCII-lowercase)
-//! principal form so the roster rows carry one identity per human.
+//! sidecar `follow` wrote; the acting device rides the transport's ONE **Bearer credential** (the
+//! server resolves credential → device → user → the invite-policy gate). Nothing is signed —
+//! the trust level is git/GitHub-level. Emails are folded to the canonical (ASCII-lowercase)
+//! form so the roster rows carry one identity per human.
 //!
 //! Bare `invite` (no emails) is the no-mutation read (address + policy) — a MARKED SEAM until the two-phase
 //! describe leg lands.
@@ -95,12 +95,12 @@ pub(crate) fn invite(
         }));
     }
 
-    // Fold the emails to the kernel's canonical (ASCII-lowercase) principal form ONCE, before they reach
-    // the wire body / the describe — the plane folds at its parse boundary, so the roster rows carry one
-    // identity per human regardless of how the address was typed.
+    // Fold the emails to the canonical (ASCII-lowercase) form ONCE, before they reach the wire body /
+    // the describe — the server folds at its parse boundary, so the roster rows carry one identity per
+    // human regardless of how the address was typed.
     let emails: Vec<String> = emails
         .iter()
-        .map(|e| topos_core::identity::canonical_principal(e))
+        .map(|e| enroll::canonical_principal(e))
         .collect();
 
     // The describe reads `/me` for the address + policy the two-phase surface discloses (nothing mutates).

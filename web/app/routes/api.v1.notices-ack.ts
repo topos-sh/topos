@@ -1,16 +1,15 @@
 import type { ActionFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
-import { nowUtc, rowOpResponse } from "@/lib/api/row-envelopes.server";
+import { rowOpResponse } from "@/lib/api/row-envelopes.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
 import { requireDeviceActor } from "@/lib/auth/guards.server";
-import { deviceNoticesAck } from "@/lib/db/queries.device.server";
+import { laneAckNotices } from "@/lib/db/queries.lane.server";
 
 /**
- * `POST /api/v1/workspaces/{ws}/notices/ack` — mark the caller's own notices read by id (the delivery
- * feed carries them unacked; an interactive session acks what it narrated). A JSON body `{ ids }`;
- * ORDERING mirrors the vault's extractor — a malformed body is a 400 BEFORE the credential resolve.
- * Idempotent (only the person's own unacked rows move); the 200 envelope carries `{ status: "acked" }`
- * (the CODE is authoritative over the vault's stale `{"acked":true}` doc string).
+ * `POST /api/v1/workspaces/{ws}/notices/ack` — mark the caller's own notices read by id (the
+ * delivery feed carries them unacked; an interactive session acks what it narrated). A JSON
+ * body `{ ids }`; a malformed body is a 400 BEFORE the credential resolve. Idempotent (only
+ * the person's own unacked rows move); the 200 envelope carries `{ status: "acked" }`.
  */
 const BODY_CAP = 64 * 1024;
 
@@ -42,8 +41,7 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
     return badRequest("malformed notices ack body");
   }
   const actor = await requireDeviceActor(request, params.ws ?? "");
-  const { nowMs } = nowUtc();
-  const status = await deviceNoticesAck(actor, ids as string[], nowMs);
+  const status = await laneAckNotices(actor, ids as string[]);
   return rowOpResponse("notices", status, { acked: "acked" }, {});
 }
 

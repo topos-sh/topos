@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DeviceAuthPollResponse",
+  "description": "`POST /v1/device/token` response — the poll `status`; a `granted` poll carries the device's ONE\nbearer credential (the promoted device code — returned here and stored from this ONE field),\nits device id, and the joined workspace. A re-poll of an approved flow returns the same answer.",
+  "type": "object",
+  "properties": {
+    "credential": {
+      "description": "The device's plaintext bearer credential — present ONLY when `status` is `granted`. Returned\nonce per poll; the server stores only its sha256.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "device_id": {
+      "description": "The registered device's id — present ONLY when `status` is `granted`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "description": "The poll status.",
+      "$ref": "#/$defs/DeviceAuthPollStatus"
+    },
+    "workspace": {
+      "description": "The joined workspace — present ONLY when `status` is `granted`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DeviceAuthWorkspace"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "status"
+  ],
+  "$defs": {
+    "DeviceAuthPollStatus": {
+      "description": "A device-authorization poll status (snake_case). `granted` carries the credential + the joined\nworkspace; every other status carries only itself.",
+      "oneOf": [
+        {
+          "description": "Not yet approved — keep polling at the interval.",
+          "type": "string",
+          "const": "pending"
+        },
+        {
+          "description": "The flow was denied at the approval page.",
+          "type": "string",
+          "const": "denied"
+        },
+        {
+          "description": "The flow expired before approval.",
+          "type": "string",
+          "const": "expired"
+        },
+        {
+          "description": "Approved — `credential`, `device_id`, and `workspace` are present.",
+          "type": "string",
+          "const": "granted"
+        }
+      ]
+    },
+    "DeviceAuthWorkspace": {
+      "description": "The workspace context a `granted` poll carries — everything the CLI needs to record what it\nenrolled into (the id it scopes requests by, the address slug it joined at, and a display name).",
+      "type": "object",
+      "properties": {
+        "display_name": {
+          "description": "The workspace's display name.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The workspace's ADDRESS slug (what the human typed at `follow`).",
+          "type": "string"
+        },
+        "workspace_id": {
+          "description": "The workspace id (the `{ws}` path segment of every subsequent request).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_id",
+        "name",
+        "display_name"
+      ]
+    }
+  }
+}

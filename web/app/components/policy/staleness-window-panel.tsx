@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useFetcher } from "react-router";
+import { type LastSetLine, LastSetNote } from "@/components/policy/last-set-line";
 import { StepUpConfirm } from "@/components/policy/step-up-confirm";
 import { Card, SectionHeading } from "@/components/ui";
 
@@ -26,9 +27,11 @@ const FIELD_CLASSES =
 export function StalenessWindowPanel({
   isOwner,
   stalenessWindowMs,
+  lastSet,
 }: {
   isOwner: boolean;
   stalenessWindowMs: number;
+  lastSet: LastSetLine | null;
 }) {
   const days = msToDaysString(stalenessWindowMs);
   return (
@@ -49,6 +52,13 @@ export function StalenessWindowPanel({
             can change this.
           </p>
         )}
+        <LastSetNote
+          lastSet={lastSet}
+          describe={(v) => {
+            const ms = Number(v);
+            return Number.isFinite(ms) && ms > 0 ? `${msToDaysString(ms)} days` : (v ?? "—");
+          }}
+        />
       </Card>
     </section>
   );

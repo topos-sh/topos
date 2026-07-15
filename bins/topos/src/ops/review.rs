@@ -92,7 +92,7 @@ fn review_inbox(
     // Fold the caller's principal to the canonical form so the outbox match is address-shape-agnostic.
     let me_principal = enroll::read_user(ctx.fs, &ctx.layout)?
         .and_then(|u| u.principal)
-        .map(|p| topos_core::identity::canonical_principal(&p));
+        .map(|p| enroll::canonical_principal(&p));
     let directory = (connectors.directory)(&base_url);
     let mut inbox = Vec::new();
     let mut outbox = Vec::new();
@@ -116,7 +116,7 @@ fn review_inbox(
             };
             let mine = me_principal
                 .as_deref()
-                .is_some_and(|me| me == topos_core::identity::canonical_principal(&p.proposer));
+                .is_some_and(|me| me == enroll::canonical_principal(&p.proposer));
             if mine {
                 outbox.push(entry);
             } else {

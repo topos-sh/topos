@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DeviceAuthStartResponse",
+  "description": "`POST /v1/device/authorize` response — the device-authorization grant (RFC-8628-shaped names).",
+  "type": "object",
+  "properties": {
+    "device_code": {
+      "description": "The SECRET device code the client polls `device/token` with. On approval this same secret is\npromoted to the device's bearer credential (see the module note), so it is stored like one.",
+      "type": "string"
+    },
+    "expires_in_secs": {
+      "description": "The flow lifetime, in seconds.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "interval_secs": {
+      "description": "The minimum poll interval, in seconds.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "user_code": {
+      "description": "The short human-facing code the approval page displays (a cross-check, never typed as a\nsecret).",
+      "type": "string"
+    },
+    "verification_uri": {
+      "description": "The approval URL a signed-in human visits.",
+      "type": "string"
+    },
+    "verification_uri_complete": {
+      "description": "The approval URL with the user code already embedded — the one link to open; a client uses\nit VERBATIM when present.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "device_code",
+    "user_code",
+    "verification_uri",
+    "verification_uri_complete",
+    "expires_in_secs",
+    "interval_secs"
+  ]
+}

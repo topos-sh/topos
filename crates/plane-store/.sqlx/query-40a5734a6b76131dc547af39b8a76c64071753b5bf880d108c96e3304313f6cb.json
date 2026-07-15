@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id AS \"id!\", workspace_id AS \"workspace_id!\" FROM upload\n               WHERE state IN ('staging', 'quarantined')\n                 AND created_at <= to_timestamp($1::double precision / 1000.0)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "workspace_id!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Float8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "40a5734a6b76131dc547af39b8a76c64071753b5bf880d108c96e3304313f6cb"
+}

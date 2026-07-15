@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO version_object (workspace_id, bundle_id, version_id, object_id) SELECT $1, $2, $3, UNNEST($4::bytea[]) ON CONFLICT (workspace_id, bundle_id, version_id, object_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "ByteaArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a813a7f337b2e93acda160603ed76d47b36ce99ab736df76ad817a415217f600"
+}

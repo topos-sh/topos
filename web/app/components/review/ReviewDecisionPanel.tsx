@@ -4,41 +4,25 @@ import { RejectDialog } from "./RejectDialog";
 
 /**
  * The browser decision surface for a PENDING proposal, rendered for a viewer whose seat can
- * decide (owner|reviewer) — the server's in-transaction gate re-checks all of it. The page mints
- * one request id PER VERB (approve and reject occupy separate idempotency slots) and binds each
- * form to what the reviewer saw: approve to the rendered diff's current generation, reject to
- * the proposal's base.
+ * decide (owner|reviewer) — the route action re-checks all of it. The approve binds
+ * `expectedGeneration`, the current generation the rendered diff was computed against, so the
+ * server refuses a moved pointer instead of approving something the reviewer didn't see.
  *
- * `withholdApprove` is the four-eyes case — the viewer proposed this candidate and
- * review-required is on. The gate applies to APPROVE only, so the panel keeps the reject flow
- * live as a WITHDRAW (the same reject write, reason still mandatory) and renders an inline
- * four-eyes line where Approve would be. Display-only either way: the server refuses a
- * self-approve regardless. `skill` is the catalog NAME; ws/skill/versionId ride the review
- * route's own params, and each form re-sends the version id as the source instructs.
+ * `withholdApprove` is the four-eyes case — the viewer proposed this candidate and the skill's
+ * effective protection is 'reviewed'. The gate applies to APPROVE only, so the panel keeps the
+ * reject flow live as a WITHDRAW (the same resolve, verdict `withdrawn`, reason still
+ * mandatory) and renders an inline four-eyes line where Approve would be. Display-only either
+ * way: the action refuses a self-approve regardless. ws/skill ride the review route's own
+ * params; each form re-sends the version id.
  */
 export function ReviewDecisionPanel({
-  ws,
-  skill,
   versionId,
-  approveRequestId,
-  rejectRequestId,
-  expectedEpoch,
-  expectedSeq,
-  baseEpoch,
-  baseSeq,
+  expectedGeneration,
   withholdApprove = false,
 }: {
-  ws: string;
-  skill: string;
   versionId: string;
-  approveRequestId: string;
-  rejectRequestId: string;
   /** The live current generation the diff above was computed against (the approve binding). */
-  expectedEpoch: string;
-  expectedSeq: string;
-  /** The proposal's base generation (the reject binding — a reject moves no pointer). */
-  baseEpoch: string;
-  baseSeq: string;
+  expectedGeneration: string;
   /** The viewer proposed this candidate under review-required — Approve is withheld. */
   withholdApprove?: boolean;
 }) {
@@ -48,8 +32,8 @@ export function ReviewDecisionPanel({
         <SectionHeading>{withholdApprove ? "Your proposal" : "Decide"}</SectionHeading>
         <p className="text-sm text-dim">
           {withholdApprove
-            ? "You proposed this candidate, and review-required is on for this workspace. Withdrawing records your reason under your workspace email, and the server re-checks your seat when it lands."
-            : "Approving makes this candidate the team's current version — followers pick it up on their next pull. Either decision records under your workspace email, and the server re-checks your seat when it lands."}
+            ? "You proposed this candidate, and review is required for this skill. Withdrawing records your reason under your name, and the server re-checks your seat when it lands."
+            : "Approving makes this candidate the team's current version — followers pick it up on their next pull. Either decision records under your name, and the server re-checks your seat when it lands."}
         </p>
       </div>
       {withholdApprove ? (
@@ -57,25 +41,10 @@ export function ReviewDecisionPanel({
           A different owner or reviewer must approve your own proposal.
         </p>
       ) : (
-        <ApproveForm
-          ws={ws}
-          skill={skill}
-          versionId={versionId}
-          requestId={approveRequestId}
-          expectedEpoch={expectedEpoch}
-          expectedSeq={expectedSeq}
-        />
+        <ApproveForm versionId={versionId} expectedGeneration={expectedGeneration} />
       )}
       <div className="border-line-soft border-t pt-3">
-        <RejectDialog
-          ws={ws}
-          skill={skill}
-          versionId={versionId}
-          requestId={rejectRequestId}
-          baseEpoch={baseEpoch}
-          baseSeq={baseSeq}
-          variant={withholdApprove ? "withdraw" : "reject"}
-        />
+        <RejectDialog versionId={versionId} variant={withholdApprove ? "withdraw" : "reject"} />
       </div>
     </Card>
   );

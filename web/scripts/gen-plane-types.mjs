@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 /**
- * gen-plane-types.mjs — generate the TypeScript types for the PUBLIC vault routes the app reads.
+ * gen-plane-types.mjs — generate the TypeScript types for the DEVICE WIRE this app SERVES.
  *
  *   ../contracts/openapi/openapi.json  →  app/lib/plane/contract/schema.d.ts
  *
- * The vault's committed OpenAPI lives in the SAME repo (the Rust plane owns it), so there is no
- * lock file and no rev pinning here — the contract is read straight off disk and pruned to the
- * public routes the web tier calls (today: `GET /v1/enroll/verify/{user_code}`, the verification-
- * page disclosure). components.schemas ride whole so response schemas $ref freely.
+ * Since the identity unification the committed OpenAPI describes the `/v1` device lane the
+ * PRODUCT APP itself serves (the vault has no public routes) — the Rust repo produces it from
+ * the shared wire DTOs, and this generator keeps a typed mirror in the web tree. The gate's
+ * value is LOCKSTEP: when the contract moves, `check:contract` fails until the types are
+ * regenerated and the served routes are reconciled against the diff.
  *
  * Usage:
  *   node scripts/gen-plane-types.mjs           regenerate the committed types
@@ -22,29 +23,41 @@ const OPENAPI_PATH = resolve(WEB_ROOT, "..", "contracts", "openapi", "openapi.js
 const TYPES_OUT = join(WEB_ROOT, "app", "lib", "plane", "contract", "schema.d.ts");
 
 /**
- * The vault routes the web tier needs types for: the public verification-page read, plus the
- * member-lane device routes this tier now SERVES itself (the door cutover) — their DESCRIBE-read
- * response bodies are typed against these generated shapes so a wire drift fails the build. The two
- * BYTE-DECORATED reads (`/proposals`, `/skills/{skill}/log`) are deliberately ABSENT: they read git
- * commit author/message from the vault's byte custody, which this tier has none of, so they stay on
- * the vault and reach it through the `/api/v1` splat forwarder.
+ * The served device wire, whole: every `/v1` route in the committed contract is this app's to
+ * serve now, so the pruning list IS the contract's own path table (a route the contract adds
+ * that this list misses fails the gate loudly, forcing the reconcile).
  */
 const PUBLIC_ROUTES = [
-  { method: "get", path: "/v1/enroll/verify/{user_code}" },
-  { method: "get", path: "/v1/workspaces/{ws}/me" },
+  { method: "post", path: "/v1/device/authorize" },
+  { method: "post", path: "/v1/device/token" },
+  { method: "post", path: "/v1/proposals" },
+  { method: "post", path: "/v1/publish" },
+  { method: "post", path: "/v1/reverts" },
+  { method: "post", path: "/v1/reviews" },
   { method: "get", path: "/v1/workspaces/{ws}/channels" },
-  { method: "get", path: "/v1/workspaces/{ws}/skills/{skill}/reach" },
-  { method: "post", path: "/v1/workspaces/{ws}/notices/ack" },
-  { method: "post", path: "/v1/workspaces/{ws}/invitations" },
-  { method: "put", path: "/v1/workspaces/{ws}/follows/{skill}" },
-  { method: "delete", path: "/v1/workspaces/{ws}/follows/{skill}" },
-  { method: "put", path: "/v1/workspaces/{ws}/exclusions/{skill}" },
-  { method: "put", path: "/v1/workspaces/{ws}/channels/{ch}/membership" },
   { method: "delete", path: "/v1/workspaces/{ws}/channels/{ch}/membership" },
-  { method: "put", path: "/v1/workspaces/{ws}/channels/{ch}/skills/{skill}" },
-  { method: "delete", path: "/v1/workspaces/{ws}/channels/{ch}/skills/{skill}" },
-  { method: "put", path: "/v1/workspaces/{ws}/skills/{skill}/protection" },
+  { method: "put", path: "/v1/workspaces/{ws}/channels/{ch}/membership" },
   { method: "put", path: "/v1/workspaces/{ws}/channels/{ch}/protection" },
+  { method: "delete", path: "/v1/workspaces/{ws}/channels/{ch}/skills/{skill}" },
+  { method: "put", path: "/v1/workspaces/{ws}/channels/{ch}/skills/{skill}" },
+  { method: "get", path: "/v1/workspaces/{ws}/delivery" },
+  { method: "delete", path: "/v1/workspaces/{ws}/devices" },
+  { method: "put", path: "/v1/workspaces/{ws}/exclusions/{skill}" },
+  { method: "delete", path: "/v1/workspaces/{ws}/follows/{skill}" },
+  { method: "put", path: "/v1/workspaces/{ws}/follows/{skill}" },
+  { method: "post", path: "/v1/workspaces/{ws}/invitations" },
+  { method: "get", path: "/v1/workspaces/{ws}/me" },
+  { method: "post", path: "/v1/workspaces/{ws}/notices/ack" },
+  { method: "get", path: "/v1/workspaces/{ws}/proposals" },
+  { method: "put", path: "/v1/workspaces/{ws}/report" },
+  { method: "get", path: "/v1/workspaces/{ws}/skills" },
+  { method: "get", path: "/v1/workspaces/{ws}/skills/{skill}/bundles/{object_id}" },
+  { method: "get", path: "/v1/workspaces/{ws}/skills/{skill}/current" },
+  { method: "get", path: "/v1/workspaces/{ws}/skills/{skill}/log" },
+  { method: "get", path: "/v1/workspaces/{ws}/skills/{skill}/proposals" },
+  { method: "put", path: "/v1/workspaces/{ws}/skills/{skill}/protection" },
+  { method: "get", path: "/v1/workspaces/{ws}/skills/{skill}/reach" },
+  { method: "get", path: "/v1/workspaces/{ws}/skills/{skill}/versions/{version_id}" },
 ];
 
 const GENERATED_HEADER = `/**
@@ -53,14 +66,14 @@ const GENERATED_HEADER = `/**
  */
 `;
 
-/** Prune the vault contract to the public routes the app reads; keep components whole. */
+/** Prune to the served routes (today: the whole table); keep components whole. */
 function buildPublicDocument(document) {
   const paths = {};
   for (const { method, path } of PUBLIC_ROUTES) {
     const operation = document.paths?.[path]?.[method];
     if (!operation) {
       throw new Error(
-        `public route missing from the vault contract: ${method.toUpperCase()} ${path}`,
+        `served route missing from the committed contract: ${method.toUpperCase()} ${path}`,
       );
     }
     // Merge methods into the SAME path object — a path can carry more than one verb (PUT + DELETE on
@@ -70,9 +83,9 @@ function buildPublicDocument(document) {
   return {
     openapi: document.openapi,
     info: {
-      title: "topos plane — public read surface",
+      title: "topos device wire — the served /v1 lane",
       description:
-        "The public vault routes the web tier reads with no credential. Generated by " +
+        "The /v1 device lane the product app serves. Generated by " +
         "scripts/gen-plane-types.mjs — do not edit.",
       version: document.info?.version ?? "0.0.0",
     },

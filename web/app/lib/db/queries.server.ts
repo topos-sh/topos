@@ -1,147 +1,86 @@
-import { and, asc, count, desc, eq, inArray, sql } from "drizzle-orm";
-import type { MemberActor, OwnerActor, PlaneSeat, UserActor } from "@/lib/auth/guards.server";
-import { getDb, getPool } from "@/lib/db/index.server";
-import { policyEvent, proposalComment } from "@/lib/db/schema.app";
-import {
-  planeCatalog,
-  planeCurrent,
-  planeProposals,
-  planeSkillCommit,
-  planeWorkspace,
-  planeWorkspaceMember,
-  planeWorkspacePolicy,
-} from "@/lib/db/schema.plane";
+import { and, asc, count, desc, eq, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
+import type { MemberActor, OwnerActor, UserActor } from "@/lib/auth/guards.server";
+import { auditInTx } from "@/lib/db/identity.server";
+import { getDb } from "@/lib/db/index.server";
+import { bundle, proposal, proposalComment, seat, workspace } from "@/lib/db/schema.app";
+import { user } from "@/lib/db/schema.auth";
+import { planeCurrentPointer, planeVersionDigest } from "@/lib/db/schema.custody";
 
 /**
- * The DATA ACCESS LAYER — the one sanctioned door to the web tier's OWN tables AND the
- * read-only `plane` models (scripts/check-boundary.mjs forbids the pool/schema/drizzle imports
- * everywhere else). Every function REQUIRES the actor whose authority it exercises: actors are
- * mintable only by the guards in app/lib/auth/guards.server.ts, so a caller that skipped its
- * guard cannot compile, and workspace-scoped reads derive their scope FROM the actor (or assert
- * it) so a wrong-workspace actor fails loudly instead of leaking.
+ * The DATA ACCESS LAYER — the one sanctioned door to the app's OWN `web` schema AND the
+ * read-only `plane` custody mirror (scripts/check-boundary.mjs forbids the pool/schema/drizzle
+ * imports everywhere else). Every function REQUIRES the actor whose authority it exercises:
+ * actors are mintable only by the guards in app/lib/auth/guards.server.ts, so a caller that
+ * skipped its guard cannot compile, and workspace-scoped reads derive their scope FROM the
+ * actor (or assert it) so a wrong-workspace actor fails loudly instead of leaking.
  *
- * Membership, roles, workspace addresses, and the skill catalog come from the DIRECTORY's
- * tables (SELECT-only by grant on the vault tables); the ONE row-write door into the directory
- * is the guarded `topos_*` SQL functions — policy logic lives in the database, written once,
- * and this tier never re-implements a role gate.
+ * Since the identity unification, EVERY directory/policy/product row lives in this app's own
+ * schema — there are no guarded SQL functions and no plane row-writes: policy logic is written
+ * here, once, with role gates carried by the branded actor types and every mutating op
+ * emitting its audit row in the SAME transaction (auditInTx).
  */
 
-export type PolicyEventRow = typeof policyEvent.$inferSelect;
-export type PlaneWorkspaceRow = typeof planeWorkspace.$inferSelect;
-export type PlaneMemberRow = typeof planeWorkspaceMember.$inferSelect;
+export type BundleRow = typeof bundle.$inferSelect;
+export type WorkspaceRow = typeof workspace.$inferSelect;
 
 /** A member actor must match the workspace it reads. A mismatch is a bug, never a leak. */
-function assertWorkspaceScope(actor: MemberActor, ws: string): void {
+export function assertWorkspaceScope(actor: MemberActor, ws: string): void {
   if (actor.workspaceId !== ws) {
     throw new Error(`workspace-scope mismatch: actor for ${actor.workspaceId} used against ${ws}`);
   }
 }
 
-/** One dashboard row: a directory roster seat (the ONLY membership there is). */
+/** One dashboard row: a seat (the ONLY membership there is). */
 export interface WorkspaceMembership {
   id: string;
   displayName: string;
   /** The workspace's address slug — what joining and sharing speak. */
   address: string;
   role: "owner" | "reviewer" | "member";
-  status: "invited" | "confirmed";
-  /**
-   * Whether the row may render as a LINK into the workspace — the same rule the guard applies
-   * (a CONFIRMED seat), carried ON the row so no consumer re-derives it. An invited-only row
-   * is visible but not navigable.
-   */
+  /** A seat always admits — kept on the row so no consumer re-derives the rule. */
   navigable: boolean;
 }
 
 /**
- * The workspaces visible to the actor's OWN email: roster seats (invited + confirmed, seat
- * order). Display names come from `plane.workspace` with the id as the honest fallback (a
- * seat can outlive its workspace row).
+ * The workspaces the actor holds a seat in — on this single-tenant install, zero or one row.
+ * Seats ARE admission (invitations are claims on future users in their own table and list
+ * nowhere here).
  */
-export async function planeMembershipsFor(actor: UserActor): Promise<WorkspaceMembership[]> {
-  const seats = await getDb()
+export async function membershipsFor(actor: UserActor): Promise<WorkspaceMembership[]> {
+  const rows = await getDb()
     .select({
-      id: planeWorkspaceMember.workspaceId,
-      displayName: planeWorkspace.displayName,
-      address: planeWorkspace.name,
-      role: planeWorkspaceMember.role,
-      status: planeWorkspaceMember.status,
+      id: seat.workspaceId,
+      displayName: workspace.displayName,
+      address: workspace.name,
+      role: seat.role,
     })
-    .from(planeWorkspaceMember)
-    .leftJoin(planeWorkspace, eq(planeWorkspace.workspaceId, planeWorkspaceMember.workspaceId))
-    .where(
-      and(
-        eq(planeWorkspaceMember.principal, actor.email),
-        inArray(planeWorkspaceMember.status, ["invited", "confirmed"]),
-      ),
-    )
-    // Seat order, TEXT ISO-8601 — never the LEFT-JOINed workspace.created_at (NULL for a
-    // rowless workspace).
-    .orderBy(asc(planeWorkspaceMember.addedAt), asc(planeWorkspaceMember.workspaceId));
-  return seats.map((s) => ({
+    .from(seat)
+    .innerJoin(workspace, eq(workspace.id, seat.workspaceId))
+    .where(eq(seat.userId, actor.userId))
+    .orderBy(asc(seat.createdAt), asc(seat.workspaceId));
+  return rows.map((s) => ({
     id: s.id,
-    displayName: s.displayName ?? s.id,
-    address: s.address ?? s.id,
-    role: s.role,
-    status: s.status,
-    navigable: s.status === "confirmed",
+    displayName: s.displayName,
+    address: s.address,
+    role: s.role as WorkspaceMembership["role"],
+    navigable: true,
   }));
 }
 
-/** The actor's own roster seat in ONE workspace — the guard's roster probe (single row). */
-export async function planeMembership(
-  actor: UserActor,
-  ws: string,
-): Promise<PlaneSeat | undefined> {
-  const rows = await getDb()
-    .select({ role: planeWorkspaceMember.role, status: planeWorkspaceMember.status })
-    .from(planeWorkspaceMember)
-    .where(
-      and(
-        eq(planeWorkspaceMember.workspaceId, ws),
-        eq(planeWorkspaceMember.principal, actor.email),
-      ),
-    )
-    .limit(1);
-  return rows[0];
-}
-
-/** One workspace row (display name + address + created_at TEXT ISO-8601 — parse at render). */
-export async function planeWorkspaceById(
+/** One workspace row for a member's render (display name + address + knobs). */
+export async function workspaceById(
   actor: MemberActor,
   ws: string,
-): Promise<PlaneWorkspaceRow | undefined> {
+): Promise<WorkspaceRow | undefined> {
   assertWorkspaceScope(actor, ws);
-  const rows = await getDb()
-    .select()
-    .from(planeWorkspace)
-    .where(eq(planeWorkspace.workspaceId, ws))
-    .limit(1);
+  const rows = await getDb().select().from(workspace).where(eq(workspace.id, ws)).limit(1);
   return rows[0];
 }
 
-/** The workspace's full roster, seat order — the members panel's read (plain rows). */
-export async function rosterOf(actor: MemberActor): Promise<PlaneMemberRow[]> {
-  return getDb()
-    .select()
-    .from(planeWorkspaceMember)
-    .where(eq(planeWorkspaceMember.workspaceId, actor.workspaceId))
-    .orderBy(asc(planeWorkspaceMember.addedAt), asc(planeWorkspaceMember.principal));
-}
+// ── The bundle catalog (the identity surface pages route on) ────────────────────────────────
 
-/** The workspace policy row — knob display (the write path is elsewhere, never a table write). */
-export async function workspacePolicyOf(
-  actor: MemberActor,
-): Promise<typeof planeWorkspacePolicy.$inferSelect | undefined> {
-  const rows = await getDb()
-    .select()
-    .from(planeWorkspacePolicy)
-    .where(eq(planeWorkspacePolicy.workspaceId, actor.workspaceId))
-    .limit(1);
-  return rows[0];
-}
-
-/** One catalog entry in the workspace — named identity + the current pointer, when one exists. */
+/** One catalog entry — named identity + the custody pointer, when one exists. */
 export interface SkillIndexRow {
   /** The immutable custody key — what every vault call keys on. */
   skillId: string;
@@ -150,102 +89,92 @@ export interface SkillIndexRow {
   /** The advisory display name (the author's folder name); render falls back to `name`. */
   displayName: string | null;
   status: "active" | "archived" | "deleted";
-  /** The bundle kind — `"skill"` for everything today; display metadata only, never branched on. */
+  /** The bundle kind — `"skill"` today; display metadata only, never branched on. */
   kind: string;
-  /** The `current` version id (lowercase hex64), or null while nothing is published. */
+  /** The `current` version id, or null while nothing is published. */
   versionId: string | null;
-  epoch: number | null;
-  seq: number | null;
-  /** BIGINT epoch-milliseconds off the pointer row — `new Date(ms)` at the display edge only. */
+  /** The pointer's CAS generation, or null while nothing is published. */
+  generation: number | null;
+  /** Epoch-milliseconds off the pointer row — `new Date(ms)` at the display edge only. */
   updatedAtMs: number | null;
-  /** hex64, or null (schema-honest: `skill_commit.bundle_digest` is NULLABLE) — render an em-dash. */
+  /** The consent digest of `current`, or null — render an em-dash. */
   bundleDigest: string | null;
   openProposals: number;
 }
 
-/**
- * The grouped open-proposal count per skill. The `epoch = base_epoch AND seq = base_seq` join
- * is a DISPLAY-ONLY mirror of the vault's staleness rule (`open AND base == current`) — the
- * vault is the authority; if its predicate ever moves, this count is the thing that silently
- * drifts, which is why the publish-stales-a-proposal seed pins it in the e2e. ONE spelled
- * copy, shared by the index and the single-row probe.
- */
-function openProposalCounts(ws: string, skillId?: string) {
+/** The grouped OPEN-proposal count per bundle (one spelled copy, index + single-row probe). */
+function openProposalCounts(ws: string, bundleId?: string) {
   return getDb()
-    .select({ skillId: planeProposals.skillId, n: count() })
-    .from(planeProposals)
-    .innerJoin(
-      planeCurrent,
-      and(
-        eq(planeCurrent.workspaceId, planeProposals.workspaceId),
-        eq(planeCurrent.skillId, planeProposals.skillId),
-        eq(planeCurrent.epoch, planeProposals.baseEpoch),
-        eq(planeCurrent.seq, planeProposals.baseSeq),
-      ),
-    )
+    .select({ bundleId: proposal.bundleId, n: count() })
+    .from(proposal)
     .where(
       and(
-        eq(planeProposals.workspaceId, ws),
-        eq(planeProposals.status, "open"),
-        ...(skillId === undefined ? [] : [eq(planeProposals.skillId, skillId)]),
+        eq(proposal.workspaceId, ws),
+        eq(proposal.status, "open"),
+        ...(bundleId === undefined ? [] : [eq(proposal.bundleId, bundleId)]),
       ),
     )
-    .groupBy(planeProposals.skillId);
+    .groupBy(proposal.bundleId);
 }
 
 /**
- * The catalog SELECT shared by the index and the single-row probe: catalog ⟕ current ⟕
- * skill_commit. The CATALOG is the identity surface (a skill exists the moment its name is
- * minted); the pointer joins in when a publish has landed one.
+ * The catalog SELECT shared by the index and the single-row probe: bundle ⟕ current_pointer ⟕
+ * version_digest. The BUNDLE row is the identity surface (a bundle exists the moment its name
+ * is minted); the pointer joins in when a publish has landed one.
  */
 function skillIndexSelect() {
   return getDb()
     .select({
-      skillId: planeCatalog.skillId,
-      name: planeCatalog.name,
-      displayName: planeCatalog.displayName,
-      status: planeCatalog.status,
-      // Straight off the catalog (the FROM table), like name/status — never LEFT-JOIN-null; the
-      // column is NOT NULL DEFAULT 'skill', so a pre-kind producer's rows already read 'skill'.
-      kind: planeCatalog.kind,
-      versionId: planeCurrent.commitId,
-      epoch: planeCurrent.epoch,
-      seq: planeCurrent.seq,
-      updatedAtMs: planeCurrent.updatedAt,
-      bundleDigest: planeSkillCommit.bundleDigest,
+      skillId: bundle.id,
+      name: bundle.name,
+      displayName: bundle.displayName,
+      status: bundle.status,
+      kind: bundle.kind,
+      versionId: planeCurrentPointer.versionId,
+      generation: planeCurrentPointer.generation,
+      updatedAtMs: sql<
+        number | null
+      >`(extract(epoch from ${planeCurrentPointer.movedAt}) * 1000)::bigint`.mapWith((v) =>
+        v === null ? null : Number(v),
+      ),
+      bundleDigest: planeVersionDigest.bundleDigest,
     })
-    .from(planeCatalog)
+    .from(bundle)
     .leftJoin(
-      planeCurrent,
+      planeCurrentPointer,
       and(
-        eq(planeCurrent.workspaceId, planeCatalog.workspaceId),
-        eq(planeCurrent.skillId, planeCatalog.skillId),
+        eq(planeCurrentPointer.workspaceId, bundle.workspaceId),
+        eq(planeCurrentPointer.bundleId, bundle.id),
       ),
     )
     .leftJoin(
-      planeSkillCommit,
+      planeVersionDigest,
       and(
-        eq(planeSkillCommit.workspaceId, planeCurrent.workspaceId),
-        eq(planeSkillCommit.commitId, planeCurrent.commitId),
+        eq(planeVersionDigest.workspaceId, bundle.workspaceId),
+        eq(planeVersionDigest.bundleId, bundle.id),
+        eq(planeVersionDigest.versionId, planeCurrentPointer.versionId),
       ),
     );
 }
 
 /**
- * The workspace's skill catalog, straight from the directory's own tables (a CLI publish
- * lands its rows and the next page load shows them — no web-tier state). Active entries only:
- * archived/deleted identities are lifecycle surfaces, not catalog rows.
+ * The workspace's catalog (a CLI publish lands its rows and the next page load shows them —
+ * no extra state). Active entries only: archived/deleted identities are lifecycle surfaces.
  */
 export async function skillIndexOf(actor: MemberActor, ws: string): Promise<SkillIndexRow[]> {
   assertWorkspaceScope(actor, ws);
   const [rows, counts] = await Promise.all([
     skillIndexSelect()
-      .where(and(eq(planeCatalog.workspaceId, ws), eq(planeCatalog.status, "active")))
-      .orderBy(asc(planeCatalog.name)),
+      .where(and(eq(bundle.workspaceId, ws), eq(bundle.status, "active")))
+      .orderBy(asc(bundle.name)),
     openProposalCounts(ws),
   ]);
-  const open = new Map(counts.map((c) => [c.skillId, c.n]));
-  return rows.map((row) => ({ ...row, openProposals: open.get(row.skillId) ?? 0 }));
+  const open = new Map(counts.map((c) => [c.bundleId, c.n]));
+  return rows.map((row) => ({
+    ...row,
+    status: row.status as SkillIndexRow["status"],
+    openProposals: open.get(row.skillId) ?? 0,
+  }));
 }
 
 /**
@@ -258,83 +187,119 @@ export async function skillIndexRow(
 ): Promise<SkillIndexRow | undefined> {
   const ws = actor.workspaceId;
   const rows = await skillIndexSelect()
-    .where(
-      and(
-        eq(planeCatalog.workspaceId, ws),
-        eq(planeCatalog.name, name),
-        eq(planeCatalog.status, "active"),
-      ),
-    )
+    .where(and(eq(bundle.workspaceId, ws), eq(bundle.name, name), eq(bundle.status, "active")))
     .limit(1);
   const row = rows[0];
   if (row === undefined) {
     return undefined;
   }
   const counts = await openProposalCounts(ws, row.skillId);
-  return { ...row, openProposals: counts[0]?.n ?? 0 };
+  return {
+    ...row,
+    status: row.status as SkillIndexRow["status"],
+    openProposals: counts[0]?.n ?? 0,
+  };
 }
 
-/** The outcome codes `topos_invite` speaks (the database's vocabulary, relayed verbatim). */
-export type InviteOutcome =
-  | "invited"
-  | "member_required"
-  | "owner_role_required"
-  | "unknown_channel";
-
-/**
- * Invitation IS a guarded roster write: ONE call to the database's `topos_invite`, which
- * re-runs the membership + invite-policy gates itself, records who invited whom, and
- * pre-places invitees into named channels — this tier adds nothing to the decision. The
- * outcome code is the function's own vocabulary.
- */
-export async function inviteMembers(
+/** One bundle row by its immutable id (any status) — the ceremonies' re-read anchor. */
+export async function bundleById(
   actor: MemberActor,
-  emails: string[],
-  channels: string[] = [],
-): Promise<InviteOutcome> {
-  const createdAt = new Date().toISOString();
-  // The email + channel lists bind as single `text[]` params: the driver serializes a JS array
-  // into one Postgres array literal, so an empty list is `'{}'` (never a spread of scalars, which
-  // a drizzle `sql` template would produce — malformed for a `::text[]` cast).
-  const result = await getPool().query<{ outcome: InviteOutcome }>(
-    "select topos_invite($1, $2, $3::text[], $4::text[], $5) as outcome",
-    [actor.workspaceId, actor.email, emails, channels, createdAt],
-  );
-  const outcome = result.rows[0]?.outcome;
-  if (outcome === undefined) {
-    throw new Error("topos_invite returned no outcome");
-  }
-  return outcome;
-}
-
-export type PolicyOutcome = "ok" | "denied" | "error";
-
-export async function recordPolicyEvent(
-  actor: OwnerActor,
-  reviewRequired: boolean,
-  outcome: PolicyOutcome,
-): Promise<void> {
-  await getDb().insert(policyEvent).values({
-    workspaceId: actor.workspaceId,
-    reviewRequired,
-    setBy: actor.email,
-    outcome,
-  });
-}
-
-export async function lastPolicyEvent(
-  actor: MemberActor,
-  ws: string,
-): Promise<PolicyEventRow | undefined> {
-  assertWorkspaceScope(actor, ws);
+  bundleId: string,
+): Promise<BundleRow | undefined> {
   const rows = await getDb()
     .select()
-    .from(policyEvent)
-    .where(eq(policyEvent.workspaceId, ws))
-    .orderBy(desc(policyEvent.setAt))
+    .from(bundle)
+    .where(and(eq(bundle.workspaceId, actor.workspaceId), eq(bundle.id, bundleId)))
     .limit(1);
   return rows[0];
 }
+
+// ── Proposals (web rows; candidates live vault-side by digest) ──────────────────────────────
+
+export type ProposalRow = typeof proposal.$inferSelect;
+
+/**
+ * A proposal row with the two people joined in for DISPLAY: the proposer's and resolver's
+ * current names (null when the user id is null — a deleted account). Display attributes only;
+ * every authority decision keys on the ids.
+ */
+export type ProposalDisplayRow = ProposalRow & {
+  proposedByDisplay: string | null;
+  resolvedByDisplay: string | null;
+};
+
+const proposerUser = alias(user, "proposer_user");
+const resolverUser = alias(user, "resolver_user");
+
+function proposalDisplaySelect() {
+  return getDb()
+    .select({
+      row: proposal,
+      proposedByDisplay: proposerUser.name,
+      resolvedByDisplay: resolverUser.name,
+    })
+    .from(proposal)
+    .leftJoin(proposerUser, eq(proposerUser.id, proposal.proposedBy))
+    .leftJoin(resolverUser, eq(resolverUser.id, proposal.resolvedBy));
+}
+
+function toDisplayRow(joined: {
+  row: ProposalRow;
+  proposedByDisplay: string | null;
+  resolvedByDisplay: string | null;
+}): ProposalDisplayRow {
+  return {
+    ...joined.row,
+    proposedByDisplay: joined.proposedByDisplay,
+    resolvedByDisplay: joined.resolvedByDisplay,
+  };
+}
+
+/** The bundle's proposal rows, open first then newest-resolved — the proposals page's read. */
+export async function proposalsOf(
+  actor: MemberActor,
+  bundleId: string,
+): Promise<ProposalDisplayRow[]> {
+  const rows = await proposalDisplaySelect()
+    .where(and(eq(proposal.workspaceId, actor.workspaceId), eq(proposal.bundleId, bundleId)))
+    .orderBy(
+      sql`case when ${proposal.status} = 'open' then 0 else 1 end`,
+      desc(proposal.createdAt),
+    );
+  return rows.map(toDisplayRow);
+}
+
+/** One proposal row by its candidate version id — the review page's read. */
+export async function proposalByCandidate(
+  actor: MemberActor,
+  bundleId: string,
+  versionId: string,
+): Promise<ProposalDisplayRow | undefined> {
+  const rows = await proposalDisplaySelect()
+    .where(
+      and(
+        eq(proposal.workspaceId, actor.workspaceId),
+        eq(proposal.bundleId, bundleId),
+        eq(proposal.candidateVersionId, versionId),
+      ),
+    )
+    // An open row outranks a resolved one for the same candidate (a re-propose after reject).
+    .orderBy(sql`case when ${proposal.status} = 'open' then 0 else 1 end`, desc(proposal.createdAt))
+    .limit(1);
+  const row = rows[0];
+  return row === undefined ? undefined : toDisplayRow(row);
+}
+
+/** Whether a proposal row exists for this candidate — the comment lane's existence probe. */
+export async function proposalExists(
+  actor: MemberActor,
+  bundleId: string,
+  versionId: string,
+): Promise<boolean> {
+  return (await proposalByCandidate(actor, bundleId, versionId)) !== undefined;
+}
+
+// ── Proposal comments (re-keyed to the ONE user identity) ───────────────────────────────────
 
 export type ProposalCommentRow = typeof proposalComment.$inferSelect;
 
@@ -358,7 +323,7 @@ export interface ProposalCommentThread {
  */
 export async function proposalCommentsFor(
   actor: MemberActor,
-  skillId: string,
+  bundleId: string,
   versionId: string,
 ): Promise<ProposalCommentThread> {
   const rows = await getDb()
@@ -367,7 +332,7 @@ export async function proposalCommentsFor(
     .where(
       and(
         eq(proposalComment.workspaceId, actor.workspaceId),
-        eq(proposalComment.skillId, skillId),
+        eq(proposalComment.bundleId, bundleId),
         eq(proposalComment.versionId, versionId),
       ),
     )
@@ -383,27 +348,26 @@ export type CommentInsertOutcome = "inserted" | "replayed" | "thread_full";
 
 /**
  * Append ONE comment. The id is the render-minted UUID from the form, so a retried submit is
- * idempotent by PK — ON CONFLICT DO NOTHING, never a duplicate row, never an error. The author
- * is the guard-minted actor's verified email; the thread is append-only (no update/delete
- * function exists in this DAL by design).
+ * idempotent by PK — ON CONFLICT DO NOTHING, never a duplicate row, never an error. Authorship
+ * is the actor's user id + a display snapshot (readable after renames/deletes); the thread is
+ * append-only (no update/delete function exists in this DAL by design).
  *
  * The INSERT … SELECT gates atomically on the thread's row count staying under
- * `COMMENT_THREAD_CAP` — comments are otherwise an unbounded write lane (route actions bypass
- * every route-level limiter). A zero row count is then disambiguated: the id already landed (a
- * replay — success) or the thread is genuinely full.
+ * `COMMENT_THREAD_CAP` — comments are otherwise an unbounded write lane. A zero row count is
+ * then disambiguated: the id already landed (a replay — success) or the thread is full.
  */
 export async function insertProposalComment(
   actor: MemberActor,
-  input: { id: string; skillId: string; versionId: string; body: string },
+  input: { id: string; bundleId: string; versionId: string; body: string },
 ): Promise<CommentInsertOutcome> {
   const db = getDb();
   const result = await db.execute(sql`
-    insert into ${proposalComment} (id, workspace_id, skill_id, version_id, author_email, body)
-    select ${input.id}, ${actor.workspaceId}, ${input.skillId}, ${input.versionId}, ${actor.email}, ${input.body}
+    insert into ${proposalComment} (id, workspace_id, bundle_id, version_id, author_user_id, author_display, body)
+    select ${input.id}, ${actor.workspaceId}, ${input.bundleId}, ${input.versionId}, ${actor.userId}, ${actor.display}, ${input.body}
     where (
       select count(*) from ${proposalComment}
       where ${proposalComment.workspaceId} = ${actor.workspaceId}
-        and ${proposalComment.skillId} = ${input.skillId}
+        and ${proposalComment.bundleId} = ${input.bundleId}
         and ${proposalComment.versionId} = ${input.versionId}
     ) < ${COMMENT_THREAD_CAP}
     on conflict (id) do nothing
@@ -418,7 +382,7 @@ export async function insertProposalComment(
       and(
         eq(proposalComment.id, input.id),
         eq(proposalComment.workspaceId, actor.workspaceId),
-        eq(proposalComment.skillId, input.skillId),
+        eq(proposalComment.bundleId, input.bundleId),
         eq(proposalComment.versionId, input.versionId),
       ),
     )
@@ -426,45 +390,31 @@ export async function insertProposalComment(
   return replay.length > 0 ? "replayed" : "thread_full";
 }
 
-/** Whether a proposal row exists for this candidate — the comment lane's existence probe. */
-export async function proposalExists(
-  actor: MemberActor,
-  skillId: string,
-  versionId: string,
-): Promise<boolean> {
-  const rows = await getDb()
-    .select({ id: planeProposals.id })
-    .from(planeProposals)
-    .where(
-      and(
-        eq(planeProposals.workspaceId, actor.workspaceId),
-        eq(planeProposals.skillId, skillId),
-        eq(planeProposals.commitId, versionId),
-      ),
-    )
-    .limit(1);
-  return rows.length > 0;
-}
+// ── The review-default knob (a plain workspace column now) ──────────────────────────────────
 
-/** The outcome codes `topos_set_review_default` speaks. */
-export type ReviewDefaultOutcome = "set" | "member_required" | "owner_role_required" | "bad_value";
+export type ReviewDefaultOutcome = "set";
 
 /**
- * The review-required DEFAULT is a database policy decision: ONE call to the guarded
- * `topos_set_review_default`, which re-runs the owner gate itself — the web guard on the
- * calling action is defense-in-depth, never the lock.
+ * Set the workspace's protection DEFAULT (`open`/`reviewed` — what an unpinned bundle
+ * inherits). The OwnerActor brand IS the gate; the audit row lands in the same transaction.
  */
 export async function setReviewDefault(
   actor: OwnerActor,
   required: boolean,
 ): Promise<ReviewDefaultOutcome> {
-  const result = await getPool().query<{ outcome: ReviewDefaultOutcome }>(
-    "select topos_set_review_default($1, $2, $3) as outcome",
-    [actor.workspaceId, actor.email, required ? 1 : 0],
-  );
-  const outcome = result.rows[0]?.outcome;
-  if (outcome === undefined) {
-    throw new Error("topos_set_review_default returned no outcome");
-  }
-  return outcome;
+  const value = required ? "reviewed" : "open";
+  await getDb().transaction(async (tx) => {
+    await tx
+      .update(workspace)
+      .set({ protectionDefault: value })
+      .where(eq(workspace.id, actor.workspaceId));
+    await auditInTx(tx, {
+      workspaceId: actor.workspaceId,
+      actor: { userId: actor.userId, display: actor.display },
+      kind: "policy_review_default",
+      subject: value,
+      outcome: "ok",
+    });
+  });
+  return "set";
 }

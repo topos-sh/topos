@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO current_pointer (workspace_id, bundle_id, version_id, generation, moved_by_display, moved_at) VALUES ($1, $2, $3, 1, $4, to_timestamp($5::double precision / 1000.0))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "153357a44f87698fa7d98248354d7e3c03dad00d78d9883fc6722cb75f4043f7"
+}

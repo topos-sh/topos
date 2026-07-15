@@ -2,26 +2,21 @@ import type { LoaderFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
 import { requireDeviceActor } from "@/lib/auth/guards.server";
-import { deviceChannels } from "@/lib/db/queries.device.server";
-import type { paths } from "@/lib/plane/contract/schema";
+import { laneChannels } from "@/lib/db/queries.lane.server";
 
 /**
- * `GET /api/v1/workspaces/{ws}/channels` — the workspace channels (the structural `everyone`
- * included, name-sorted), each with the caller's membership, its member count, and its name-sorted
- * skill references. Pure directory rows; per-member and hot, never cacheable. Every field is always
- * present (no omissions) — an empty workspace still carries its `everyone`.
+ * `GET /api/v1/workspaces/{ws}/channels` — the workspace channels (the default channel
+ * included, name-sorted), each with the caller's membership, its member count, and its
+ * name-sorted bundle references. Per-member and hot, never cacheable.
  */
-type WireChannelIndex =
-  paths["/v1/workspaces/{ws}/channels"]["get"]["responses"][200]["content"]["application/json"];
-
 export async function loader({ request, params }: LoaderFunctionArgs): Promise<Response> {
   const belted = checkBelt(request);
   if (belted !== null) {
     return belted;
   }
   const actor = await requireDeviceActor(request, params.ws ?? "");
-  const channels = await deviceChannels(actor);
-  const body: WireChannelIndex = {
+  const channels = await laneChannels(actor);
+  const body = {
     channels: channels.map((c) => ({
       name: c.name,
       mode: c.mode,

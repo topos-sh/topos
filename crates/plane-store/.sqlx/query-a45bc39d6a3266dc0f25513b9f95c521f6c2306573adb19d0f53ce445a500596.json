@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT first_parent FROM version WHERE workspace_id = $1 AND bundle_id = $2 AND version_id = $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "first_parent",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "a45bc39d6a3266dc0f25513b9f95c521f6c2306573adb19d0f53ce445a500596"
+}

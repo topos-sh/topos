@@ -1,48 +1,47 @@
 //! `follow` — the device-flow enrollment + first-receive client.
 //!
 //! One verb, dispatched by the single positional (the harness drives it non-interactively):
-//! - **`follow <link>`** (call 1) — read the `/i/` bootstrap, guard one-plane-per-install, start a device
-//!   authorization, write a `0600` WAL, and return `ENROLLMENT_PENDING` + the verification URL.
-//! - **re-invoking `follow`** (call 2) — with a pending enrollment WAL on disk, re-invoking `follow` (with
-//!   any target, or none) RESUMES it — the "re-invoking IS the resume" idiom the standup publish uses:
-//!   poll once; on a granted poll, redeem the grant into the workspace credential, record it in the WAL
-//!   (the lockout fence), PROMOTE (write `instance.json` / `credentials.json` / `follows.json` /
-//!   `user.json` / the device key + lay the first-receive baselines), delete the WAL, and disclose the
-//!   offers.
+//! - **`follow <workspace-address>`** (call 1) — card-fetch the address, re-root onto the declared API
+//!   base, guard one-plane-per-install, start a device authorization
+//!   (`POST /v1/device/authorize {requested_name, workspace}`), write a `0600` WAL, and return the
+//!   pending disclosure ("open `verification_uri_complete`, enter the code").
+//! - **re-invoking `follow`** (call 2) — with a pending enrollment WAL on disk, re-invoking `follow`
+//!   (with any target, or none) RESUMES it — "re-invoking IS the resume": poll `/v1/device/token`
+//!   once; on a granted poll the answer carries the device's ONE bearer credential (the promoted
+//!   device code), the registered device id, and the joined workspace — persist them
+//!   (`instance.json` / `credentials.json` / `user.json`), delete the WAL, and CONTINUE into the
+//!   recorded follow intent's describe / `--yes` apply in the same invocation.
 //! - **`follow <skill>[@<hash>]`** (post-enroll) — a KNOWN followed-skill name drives the existing pull
 //!   engine to place the named, already-disclosed first-receive bytes (the I-TOFU "one accept"). On a
 //!   retained entry `unfollow` paused (`following == false`) it RESUMES the follow instead: the flag flips
 //!   back on, a still-pending first-receive offer is placed, and otherwise the next `pull` lands current.
 //!
-//! The positional is dispatched by SHAPE (see [`follow`]): a pending WAL wins (re-invoke resumes); `@`
-//! forces the skill path; a known skill name is the skill path; otherwise it is an `/i/` link or a bare
-//! invite token.
+//! The positional is dispatched by SHAPE (see [`follow`]): a pending WAL wins (re-invoke resumes); a
+//! known skill name is the skill path; a retired `/i/` invite link refuses typed (join by the
+//! workspace ADDRESS); otherwise it is the address / subscribe grammar.
 //!
-//! **I-NO-USER-TOKEN.** The agent only ever holds the opaque grant + the minted workspace credential —
-//! never a user token; enrollment completes by POLLING. **Secrets** (the device code, the grant, the
-//! workspace credential) live only in the `0600` WAL / `credentials.json`, are redacted in `Debug`, and
-//! never reach a URL / log / error.
+//! **One secret, one field.** The agent only ever holds the device code (promoted server-side to the
+//! device credential on approval) and then the credential itself; enrollment completes by POLLING —
+//! no keypair, no link token, no per-workspace mint. **Secrets** live only in the `0600` WAL /
+//! `credentials.json`, are redacted in `Debug`, and never reach a URL / log / error.
 
 use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
-use topos_core::digest::{self, ManifestEntry, to_hex};
+use topos_core::digest::to_hex;
 use topos_gitstore::Store;
-use topos_types::bootstrap::{DeploymentMode, VerifiedDomainStatus};
+use topos_types::PERSISTED_SCHEMA_VERSION;
 use topos_types::persisted::{Lock, PlacementMap, SwapCapability, SyncState};
 use topos_types::requests::{WireChannelIndex, WireMe, WireSkillIndex};
 use topos_types::results::{EnrollmentPending, FollowData, FollowOffer, Offer, PullAction};
-use topos_types::{Generation, PERSISTED_SCHEMA_VERSION};
 
 use crate::ctx::Ctx;
-use crate::device_signer::DeviceSigner;
 use crate::error::ClientError;
-use crate::identity::{self, DeviceKeyRef};
 use crate::plane::{
-    Card, DeliverySnapshot, DeliverySource, DirectorySource, EnrollSource, FollowContext,
-    PlaneError, PlaneSource, PointerFetch, ReconcileTransport, TokenPoll,
+    DeliverySnapshot, DeliverySource, DeviceAuthPoll, DirectorySource, EnrollSource, EnrolledGrant,
+    FollowContext, PlaneError, PlaneSource, ReconcileTransport,
 };
-use crate::plane_http::{FileFollow, SkillCred};
+use crate::plane_http::FileFollow;
 use crate::resolve::{self, ParsedTarget, Resolution, ResourceKind};
 use crate::{doc, enroll, sidecar};
 
@@ -51,8 +50,8 @@ use super::sync_engine::{self, Invocation};
 
 /// The 64-char all-zero hex sentinel a never-received baseline uses for its (absent) base commit / digest.
 const ZERO_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-/// The genesis generation sentinel — `(0,0)` means "nothing authenticated / applied yet".
-const GENESIS: Generation = Generation { epoch: 0, seq: 0 };
+/// The genesis generation sentinel — `0` means "nothing authenticated / applied yet".
+const GENESIS: u64 = 0;
 
 /// `follow`'s flags, parsed from argv (the positional targets ride separately).
 #[derive(Clone)]
@@ -75,15 +74,12 @@ pub(crate) struct FollowOpts {
 
 /// Builds the creds-free enrollment transport for a plane base URL.
 pub(crate) type EnrollConnect<'a> = dyn Fn(&str) -> Box<dyn EnrollSource> + 'a;
-/// Builds the read transport (the offer-disclosure source) for a base URL + the minted workspace credential.
-pub(crate) type PlaneConnect<'a> =
-    dyn Fn(&str, HashMap<String, SkillCred>) -> Box<dyn PlaneSource> + 'a;
 /// Builds the credentialed DIRECTORY transport (describe reads + subscription rows) for a base URL.
 /// Re-reads `credentials.json` per build, so a mid-invocation enrollment's fresh mint is seen.
 pub(crate) type DirectoryConnect<'a> = dyn Fn(&str) -> Box<dyn DirectorySource> + 'a;
 /// Builds the credentialed RECONCILE transport (delivery + fleet report + the per-skill read lane,
-/// on one object — the reconcile binds a new arrival's credential onto the read side). Re-reads the
-/// on-disk credentials per build, for the same mid-invocation reason.
+/// on one object — the reconcile binds a new arrival's workspace onto the read side). Re-reads the
+/// on-disk credential per build, for the same mid-invocation reason.
 pub(crate) type DeliveryConnect<'a> = dyn Fn(&str) -> Box<dyn ReconcileTransport> + 'a;
 
 /// The network seams the op needs, as factories — the base URL is known only after the op parses the
@@ -91,10 +87,9 @@ pub(crate) type DeliveryConnect<'a> = dyn Fn(&str) -> Box<dyn ReconcileTransport
 /// Production wires the `ureq` transports; the tests wire fakes (no HTTP).
 pub(crate) struct FollowConnectors<'a> {
     pub enroll: &'a EnrollConnect<'a>,
-    pub plane: &'a PlaneConnect<'a>,
     pub directory: &'a DirectoryConnect<'a>,
     pub delivery: &'a DeliveryConnect<'a>,
-    /// The default WEB origin the token-less doors dial when nothing is pinned yet (`follow <bare
+    /// The default WEB origin the enrollment door dials when nothing is pinned yet (`follow <bare
     /// workspace>` on a fresh install) — the composition root resolves `TOPOS_PLANE_URL`, else the
     /// hosted default; the card fetch re-roots it onto the declared API base.
     pub web_origin: String,
@@ -274,9 +269,10 @@ pub(crate) struct Reattach {
 
 /// Dispatch the `follow` verb over its positional targets + selectors, in this precedence order:
 ///
-/// 1. a pending enrollment WAL exists → RESUME it (poll/promote/retry/continue), regardless of the
+/// 1. a pending enrollment WAL exists → RESUME it (poll / persist / continue), regardless of the
 ///    targets — the "re-invoking IS the resume" path;
-/// 2. a single `/i/` link → the admin-CLAIM door (unchanged; `/i/` is claims-only);
+/// 2. a single `/i/` link → the typed retirement refusal (invite links are retired; join by the
+///    workspace ADDRESS);
 /// 3. a single bare `<skill>@<digest>` — the name-part MUST be a known followed skill — or a bare
 ///    word matching a KNOWN followed skill → the classic skill path (place offer / resume a paused
 ///    entry). **Known-skill-name wins** over the address grammar;
@@ -286,8 +282,8 @@ pub(crate) struct Reattach {
 ///    two-phase describe / `--yes` apply.
 ///
 /// # Errors
-/// [`ClientError::Enrollment`] for a missing target / denied / expired session;
-/// [`ClientError::InvalidArgument`] for an `@`-pinned unknown skill or a malformed address;
+/// [`ClientError::Enrollment`] for a missing target / a retired `/i/` link / a denied or expired
+/// flow; [`ClientError::InvalidArgument`] for an `@`-pinned unknown skill or a malformed address;
 /// [`ClientError::TargetNotFound`] (the uniform not-found) for an unresolvable target;
 /// [`ClientError::AmbiguousTarget`] for a name with several meanings;
 /// [`ClientError::PlacementUnsupported`] for a follow against a different plane than the one
@@ -298,18 +294,17 @@ pub(crate) fn follow(
     targets: Vec<String>,
     opts: FollowOpts,
 ) -> Result<FollowOutcome, ClientError> {
-    // 1) A pending enrollment WAL: re-invoking `follow` (with any target, or none) resumes it. `resume`
-    // routes each WAL phase (Authorizing poll / Redeemed promote / ClaimPending retry / a standup owned by
-    // `publish` / a login owned by `auth login`) — so a second follow while one is in flight never
-    // clobbers the in-flight session's single-use secrets; it advances it.
+    // 1) A pending enrollment WAL: re-invoking `follow` (with any target, or none) resumes it — so a
+    // second follow while one is in flight never clobbers the in-flight flow's single-use secret; it
+    // advances it. (A login-owned WAL refuses toward `auth login` inside `resume`.)
     if enroll::read_wal(ctx.fs, &ctx.layout)?.is_some() {
         return resume(ctx, connectors, &opts);
     }
     let ws = opts.workspace.as_deref();
     if targets.is_empty() && opts.channels.is_empty() && opts.skills.is_empty() {
         return Err(ClientError::Enrollment(
-            "follow needs a target — a workspace address, a channel or skill name, or an /i/ claim \
-             link (or a pending enrollment to resume)"
+            "follow needs a target — a workspace address, or a channel or skill name (or a pending \
+             enrollment to resume)"
                 .into(),
         ));
     }
@@ -317,10 +312,14 @@ pub(crate) fn follow(
         && opts.skills.is_empty()
         && let [single] = targets.as_slice()
     {
-        // 2) The `/i/` claim door. Checked BEFORE `@` so an `/i/` link carrying userinfo
+        // 2) A retired `/i/` invite link. Checked BEFORE `@` so a link carrying userinfo
         // (`https://u@host/i/tok`) or a query param (`?x=a@b`) is never misread as `<skill>@<hash>`.
         if single.contains("/i/") {
-            return begin(ctx, connectors, single, opts.manual).map(FollowOutcome::plain);
+            return Err(ClientError::Enrollment(
+                "invite links are retired — join by the workspace ADDRESS instead: `topos follow \
+                 <server>/<workspace>` (ask your inviter for it)"
+                    .into(),
+            ));
         }
         if !single.contains("://") && !single.contains('/') {
             // 3a/3b) A bare word (or `<skill>@<digest>`) matching a KNOWN followed skill wins over
@@ -391,57 +390,9 @@ fn is_excluded_here(ctx: &Ctx<'_>, skill_id: &str) -> Result<bool, ClientError> 
         .any(|e| e.skill_id == skill_id && e.excluded_here))
 }
 
-// =================================================================================================
-// Call 1 — `follow <//i/ link>`: bootstrap → one-plane guard → the claim door (claims-only now).
-// =================================================================================================
-
-fn begin(
-    ctx: &Ctx<'_>,
-    connectors: &FollowConnectors<'_>,
-    link: &str,
-    _manual: bool,
-) -> Result<FollowData, ClientError> {
-    let (link_base, token) = parse_link(link)?;
-
-    // `begin` is only reached with NO pending enrollment WAL on disk: the [`follow`] dispatch resumes an
-    // in-flight session (rule 1) BEFORE ever dispatching a target to `begin`, and the start-of-command
-    // recovery sweep reaps an expired authorizing/standup WAL first. So a fresh follow never clobbers a
-    // live session's single-use secrets — re-invoking `follow` advances it (`resume`), it does not begin.
-
-    let bootstrap = (connectors.enroll)(&link_base).fetch_bootstrap(&token)?;
-    // RE-ROOT onto the plane's declared API base. The link is only where the bootstrap lives (a hosted
-    // team's share links ride its web origin); the bootstrap declares the plane every later call — the
-    // redeem, every pull — must dial. The declared base passes the same gate as the link base and may never
-    // downgrade the transport. This adds no attacker capability: whoever mints the link already controls the
-    // bootstrap (the link IS the channel the human chose to trust).
-    let base_url = resolve_api_base(&link_base, &bootstrap.plane.base_url)?;
-    // v0 is one plane per install: refuse a follow that would enroll against a DIFFERENT plane than the one
-    // already on disk (keyed on the RE-ROOTED API base — the base every later call dials and `instance.json`
-    // records). There is no trust root to pin — the `current` pointer is unsigned, its integrity the
-    // content-addressed version id.
-    guard_one_plane(ctx, &base_url)?;
-
-    // Branch on the enrollment method the bootstrap disclosed. `/i/` is now the admin-CLAIM door ONLY.
-    match bootstrap.plane.enrollment_method.as_str() {
-        // The one-shot admin-claim door (self-host bearer): no device-auth session, enrolls in one call.
-        "admin_claim" => claim_follow(ctx, connectors, &base_url, &token, &bootstrap),
-        // The old invite-link device/passcode enrollment is retired — joining an existing workspace
-        // is a workspace-ADDRESS follow (invites are roster rows now; the address carries nothing).
-        "device_code" | "passcode" => Err(ClientError::Enrollment(
-            "invite links are retired — join by the workspace ADDRESS instead: `topos follow \
-             <server>/<workspace>` (ask your inviter for it)"
-                .into(),
-        )),
-        other => Err(ClientError::Enrollment(format!(
-            "this plane offers enrollment method '{other}', which this topos build does not \
-             support; upgrade topos"
-        ))),
-    }
-}
-
-/// The one-plane-per-install guard, shared by every pre-enrollment door (`/i/` bootstrap, standup authorize).
-/// `base_url` is the plane's API base — for a link follow that is the RE-ROOTED base the bootstrap declared
-/// (never the share host the link string rode), so it matches what every later call dials. If an
+/// The one-plane-per-install guard, shared by every enrollment door (`follow <address>`,
+/// `auth login`). `base_url` is the plane's API base — the RE-ROOTED base the card declared (never
+/// the human origin the address string rode), so it matches what every later call dials. If an
 /// `instance.json` already names a DIFFERENT plane, refuse (v0 is one plane per install); otherwise OK.
 /// There is no trust root to pin — the `current` pointer is unsigned, its integrity the content-addressed
 /// version id re-verified by digest on apply.
@@ -467,7 +418,8 @@ pub(crate) fn wrong_server_refusal(enrolled_base: &str) -> ClientError {
 }
 
 // =================================================================================================
-// Call 2 — re-invoking `follow` with a pending WAL: poll → (granted) redeem → Redeemed WAL → promote.
+// Call 2 — re-invoking `follow` with a pending WAL: poll once → pending re-emit / typed terminal /
+// granted persist + continue into the recorded follow intent.
 // =================================================================================================
 
 fn resume(
@@ -476,189 +428,111 @@ fn resume(
     opts: &FollowOpts,
 ) -> Result<FollowOutcome, ClientError> {
     let wal = enroll::read_wal(ctx.fs, &ctx.layout)?.ok_or_else(|| {
-        ClientError::Enrollment("no enrollment in progress; run `follow <link>` first".into())
+        ClientError::Enrollment(
+            "no enrollment in progress; run `follow <workspace-address>` first".into(),
+        )
     })?;
-
-    match wal.state {
-        // A Redeemed-but-unpromoted WAL: PROMOTE without re-redeeming (the single-use grant is spent;
-        // recovery completes from the persisted workspace credential). An ADDRESS-rooted redeem then
-        // CONTINUES into its recorded follow intent (the describe / `--yes` apply).
-        enroll::EnrollPhase::Redeemed {
-            context,
-            credential,
-            device_key_id,
-            principal,
-            enrolled_at_millis,
-        } => {
-            let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-            if let Some(target) = context.follow_target.clone() {
-                promote_core(
-                    ctx,
-                    &context,
-                    &credential,
-                    &device_key_id,
-                    principal.as_deref(),
-                    enrolled_at_millis,
-                    &signer,
-                )?;
-                return continue_into_target(ctx, connectors, &context, &target, opts);
-            }
-            promote(
+    // A login-owned flow belongs to `auth login` (the same ownership rule holds in reverse there) —
+    // so a `follow` while a sign-in is in flight never clobbers its single-use secret.
+    let (recorded_target, recorded_mode) = match &wal.intent {
+        enroll::EnrollIntentDoc::Login => {
+            return Err(ClientError::Enrollment(
+                "a sign-in is in progress; re-run `topos auth login` to finish it first".into(),
+            ));
+        }
+        enroll::EnrollIntentDoc::Follow { target, mode } => (target.clone(), *mode),
+    };
+    let enroll_src = (connectors.enroll)(&wal.base_url);
+    match enroll_src.device_auth_poll(&wal.device_code)? {
+        // Still pending — re-surface the persisted SERVER-built URL, verbatim (the approval page
+        // lives wherever the server put it; the client never reconstructs it).
+        DeviceAuthPoll::Pending => Ok(FollowOutcome::plain(pending_followdata(&wal))),
+        // A terminal denial / expiry — sweep the WAL, surface a typed error.
+        DeviceAuthPoll::Denied => {
+            enroll::delete_wal(ctx.fs, &ctx.layout)?;
+            Err(ClientError::EnrollDenied)
+        }
+        DeviceAuthPoll::Expired => {
+            enroll::delete_wal(ctx.fs, &ctx.layout)?;
+            Err(ClientError::Enrollment(
+                "the enrollment flow expired; start over with `topos follow <workspace-address>`"
+                    .into(),
+            ))
+        }
+        // Granted: the poll carries the device's ONE credential + the AUTHORITATIVE workspace (the
+        // requested name was only ever a request; unknown/not-yours died at the uniform denial).
+        // Persist, then CONTINUE into the recorded follow intent in this same invocation.
+        DeviceAuthPoll::Granted(grant) => {
+            persist_enrollment(ctx, &wal.base_url, &grant)?;
+            let target = recorded_target.unwrap_or(enroll::FollowTargetDoc {
+                kind: enroll::FollowKindDoc::Workspace,
+                name: wal.workspace_name.clone(),
+            });
+            // The original invocation's `--manual` rode the WAL; honor it on a resume that omits the
+            // flag (a fresh flag still wins — the resumed invocation's consent is the current one).
+            let mut opts = opts.clone();
+            opts.manual = opts.manual || recorded_mode == enroll::FollowModeDoc::ConfirmEach;
+            continue_into_target(
                 ctx,
                 connectors,
-                &context,
-                &credential,
-                &device_key_id,
-                principal.as_deref(),
-                enrolled_at_millis,
-                &signer,
+                &wal.base_url,
+                &grant.workspace.workspace_id,
+                &target,
+                &opts,
             )
-            .map(FollowOutcome::plain)
-        }
-        // A standup session belongs to `publish` — its resume is the ORIGINAL publish command (the
-        // optional `@<digest>` pin re-derives from that command each invocation, which `follow` cannot
-        // supply).
-        enroll::EnrollPhase::AuthorizingStandup { .. } => Err(ClientError::Enrollment(
-            "a workspace standup is in progress; re-run the `topos publish …` command that started it"
-                .into(),
-        )),
-        // A login session belongs to `auth login` — same ownership rule as the standup.
-        enroll::EnrollPhase::AuthorizingLogin { .. } => Err(ClientError::Enrollment(
-            "a sign-in is in progress; re-run `topos auth login` to finish it first".into(),
-        )),
-        // An unsettled claim redeem: retry the POST directly (never refetch the possibly-consumed /i/).
-        state @ enroll::EnrollPhase::ClaimPending { .. } => {
-            let wal = enroll::PendingEnrollment {
-                schema_version: PERSISTED_SCHEMA_VERSION,
-                state,
-            };
-            retry_claim(ctx, connectors, &wal).map(FollowOutcome::plain)
-        }
-        // A live ADDRESS enrollment: poll; granted ⇒ redeem into the workspace the grant names,
-        // fence, promote, and continue into the recorded follow intent.
-        enroll::EnrollPhase::AuthorizingAddress {
-            base_url,
-            workspace_name,
-            follow_target,
-            mode,
-            device_code,
-            user_code,
-            verification_uri_complete,
-            ..
-        } => resume_address(
-            ctx,
-            connectors,
-            opts,
-            AddressWal {
-                base_url,
-                workspace_name,
-                follow_target,
-                mode,
-                device_code,
-                user_code,
-                verification_uri_complete,
-            },
-        ),
-        enroll::EnrollPhase::Authorizing {
-            context,
-            device_code,
-            user_code,
-            verification_uri_complete,
-            ..
-        } => {
-            let enroll_src = (connectors.enroll)(&context.base_url);
-            match enroll_src.poll_token(&device_code)? {
-                // Still pending — re-surface the persisted SERVER-built URL, verbatim. There is no
-                // client-side reconstruction: the plane's verification page lives on its (possibly
-                // separate) verify base, which this client cannot derive — a fabricated URL would point
-                // the human at a page that does not exist. A WAL an older build wrote without the URL
-                // restarts cleanly.
-                TokenPoll::Pending | TokenPoll::SlowDown => {
-                    let complete = verification_uri_complete.ok_or_else(|| {
-                        ClientError::Enrollment(
-                            "this enrollment session carries no verification URL; start over with \
-                             `follow <link>`"
-                                .into(),
-                        )
-                    })?;
-                    // The device key is deterministic (load-or-generate returns the same key), so the
-                    // re-surfaced pending discloses the same fingerprint the human sees on the page.
-                    let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-                    Ok(FollowOutcome::plain(pending_followdata(
-                        &context,
-                        &user_code,
-                        complete,
-                        device_fingerprint(&signer),
-                    )))
-                }
-                // A terminal denial / expiry — sweep the WAL, surface a typed error.
-                TokenPoll::Denied => {
-                    enroll::delete_wal(ctx.fs, &ctx.layout)?;
-                    Err(ClientError::Enrollment(
-                        "the enrollment was denied at the verification page".into(),
-                    ))
-                }
-                TokenPoll::Expired => {
-                    enroll::delete_wal(ctx.fs, &ctx.layout)?;
-                    Err(ClientError::Enrollment(
-                        "the enrollment session expired; start over with `follow <link>`".into(),
-                    ))
-                }
-                TokenPoll::Granted(granted) => {
-                    let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-                    // Redeem the grant (the bearer credential) into the workspace credential; nothing is signed.
-                    let redeem =
-                        redeem_grant(&*enroll_src, &context, granted.grant.as_str(), &signer)?;
-                    let enrolled_at = now_millis(ctx);
-                    // The lockout fence: record the redeemed workspace credential (a single-use grant cannot
-                    // be re-redeemed) BEFORE promotion, so a crash mid-promote completes from this WAL.
-                    enroll::write_wal(
-                        ctx.fs,
-                        &ctx.layout,
-                        &enroll::PendingEnrollment {
-                            schema_version: PERSISTED_SCHEMA_VERSION,
-                            state: enroll::EnrollPhase::Redeemed {
-                                context: context.clone(),
-                                credential: redeem.credential.clone(),
-                                device_key_id: redeem.device_key_id.clone(),
-                                principal: redeem.principal.clone(),
-                                enrolled_at_millis: enrolled_at,
-                            },
-                        },
-                    )?;
-                    promote(
-                        ctx,
-                        connectors,
-                        &context,
-                        &redeem.credential,
-                        &redeem.device_key_id,
-                        redeem.principal.as_deref(),
-                        enrolled_at,
-                        &signer,
-                    )
-                    .map(FollowOutcome::plain)
-                }
-            }
         }
     }
 }
 
+/// Persist a granted enrollment — every durable write, in an order that keeps a crash recoverable by
+/// RE-POLLING (an approved flow re-answers the same granted poll until it expires, so no separate
+/// post-grant fence phase exists):
+///
+///   1) `instance.json` — pin the plane (idempotent bytes on a same-plane re-enrollment);
+///   2) `credentials.json` — the ONE device credential + registered device id (`0600`, replaced
+///      wholesale: a device holds exactly one credential);
+///   3) `user.json` — upsert the joined membership (a second workspace ADDS, never drops);
+///   4) delete the WAL — the last durable step, so "WAL absent" proves 1-3 completed;
+///   5) arm the session-start currency trigger — best-effort + idempotent (a pure follower never
+///      runs `add`, so enrollment is where their hook gets armed); infallible by construction, so it
+///      can never roll back a completed enrollment.
+///
+/// Idempotent — a re-granted resume re-persists identical facts.
+pub(super) fn persist_enrollment(
+    ctx: &Ctx<'_>,
+    base_url: &str,
+    grant: &EnrolledGrant,
+) -> Result<topos_types::TriggerReport, ClientError> {
+    enroll::write_instance(
+        ctx.fs,
+        &ctx.layout,
+        &enroll::Instance {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            base_url: base_url.to_owned(),
+        },
+    )?;
+    enroll::write_credentials(ctx.fs, &ctx.layout, &grant.credential, &grant.device_id)?;
+    let mut user = enroll::read_user(ctx.fs, &ctx.layout)?.unwrap_or_default();
+    user.schema_version = PERSISTED_SCHEMA_VERSION;
+    enroll::upsert_membership(
+        &mut user,
+        enroll::Membership {
+            workspace_id: grant.workspace.workspace_id.clone(),
+            name: grant.workspace.name.clone(),
+            display_name: grant.workspace.display_name.clone(),
+            enrolled_at: now_millis(ctx),
+        },
+    );
+    enroll::write_user(ctx.fs, &ctx.layout, &user)?;
+    enroll::delete_wal(ctx.fs, &ctx.layout)?;
+    Ok(ctx.harness.install_currency_trigger())
+}
+
 // =================================================================================================
 // The ADDRESS flow — `follow <workspace>[/channels|skills/<name>]`: card → re-root guard →
-// device-authorize (intent enroll, the workspace named by ADDRESS) → WAL → poll/resume → redeem at
-// the granted workspace → promote → the two-phase subscribe (describe / `--yes` apply).
+// device-authorize (the workspace named by ADDRESS) → WAL → poll/resume → the granted credential
+// persists → the two-phase subscribe (describe / `--yes` apply).
 // =================================================================================================
-
-/// The `AuthorizingAddress` WAL fields, destructured once (mirrors `publish`'s `StandupWal`).
-struct AddressWal {
-    base_url: String,
-    workspace_name: String,
-    follow_target: Option<enroll::FollowTargetDoc>,
-    mode: enroll::FollowModeDoc,
-    device_code: String,
-    user_code: String,
-    verification_uri_complete: String,
-}
 
 /// The enroll intent an unresolved single target may fold in: the workspace ADDRESS name, the
 /// follow intent to continue into, and the explicit host when the target was a full URL.
@@ -716,7 +590,7 @@ fn enroll_intent(parsed: &ParsedTarget) -> Option<EnrollIntent> {
 /// Start the ADDRESS enrollment: card fetch at the workspace's own address (the card is constant at
 /// every path — no existence signal), re-root onto the declared API base, guard one-plane (the
 /// wrong-server refusal names the `TOPOS_HOME` second-install hatch), device-authorize toward the
-/// named workspace, and persist the `AuthorizingAddress` WAL with the follow intent.
+/// named workspace, and persist the WAL with the follow intent.
 fn begin_address(
     ctx: &Ctx<'_>,
     connectors: &FollowConnectors<'_>,
@@ -733,334 +607,69 @@ fn begin_address(
         },
     };
     let card_url = format!("{origin}/{}", intent.workspace_name);
-    let base_url = match (connectors.enroll)(&origin).fetch_card(&card_url)? {
-        Card::Protocol(card) => resolve_api_base(&origin, &card.api_base_url)?,
-        // A claim bootstrap only ever lives on an `/i/` link, which the dispatch routes to the claim
-        // door before this flow — an ADDRESS answering one is a mis-pasted link.
-        Card::Claim(bootstrap) => {
-            return Err(ClientError::Enrollment(format!(
-                "this address answered a claim bootstrap (workspace '{}') — pass the full /i/ \
-                 claim link to `topos follow` instead",
-                bootstrap.workspace.display_name
-            )));
-        }
-    };
+    let card = (connectors.enroll)(&origin).fetch_card(&card_url)?;
+    let base_url = resolve_api_base(&origin, &card.api_base_url)?;
     guard_one_plane(ctx, &base_url)?;
 
-    let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-    let auth = (connectors.enroll)(&base_url).device_authorize(
-        &intent.workspace_name,
-        signer.public_key(),
-        &machine_name(&signer),
-    )?;
-    let complete = auth
-        .verification_uri_complete
-        .clone()
-        .unwrap_or_else(|| complete_uri(&auth.verification_uri, &auth.user_code));
-    let expires_at = now_millis(ctx)
-        .saturating_add(i64::try_from(auth.expires_in.saturating_mul(1000)).unwrap_or(i64::MAX));
-    enroll::write_wal(
-        ctx.fs,
-        &ctx.layout,
-        &enroll::PendingEnrollment {
-            schema_version: PERSISTED_SCHEMA_VERSION,
-            state: enroll::EnrollPhase::AuthorizingAddress {
-                base_url: base_url.clone(),
-                workspace_name: intent.workspace_name.clone(),
-                follow_target: Some(intent.target),
-                mode: if opts.manual {
-                    enroll::FollowModeDoc::ConfirmEach
-                } else {
-                    enroll::FollowModeDoc::Auto
-                },
-                device_code: auth.device_code.clone(),
-                user_code: auth.user_code.clone(),
-                verification_uri_complete: complete.clone(),
-                expires_at_millis: expires_at,
+    let start = (connectors.enroll)(&base_url)
+        .device_auth_start(&intent.workspace_name, &machine_name())?;
+    let expires_at = now_millis(ctx).saturating_add(
+        i64::try_from(start.expires_in_secs.saturating_mul(1000)).unwrap_or(i64::MAX),
+    );
+    let wal = enroll::PendingEnrollment {
+        schema_version: PERSISTED_SCHEMA_VERSION,
+        base_url,
+        workspace_name: intent.workspace_name,
+        intent: enroll::EnrollIntentDoc::Follow {
+            target: Some(intent.target),
+            mode: if opts.manual {
+                enroll::FollowModeDoc::ConfirmEach
+            } else {
+                enroll::FollowModeDoc::Auto
             },
         },
-    )?;
-    Ok(FollowOutcome::plain(pending_address_followdata(
-        &intent.workspace_name,
-        &base_url,
-        &auth.user_code,
-        complete,
-        device_fingerprint(&signer),
-    )))
+        device_code: start.device_code,
+        user_code: start.user_code,
+        verification_uri_complete: start.verification_uri_complete,
+        interval_secs: start.interval_secs,
+        expires_at_millis: expires_at,
+    };
+    enroll::write_wal(ctx.fs, &ctx.layout, &wal)?;
+    Ok(FollowOutcome::plain(pending_followdata(&wal)))
 }
 
-/// Resume a live ADDRESS enrollment: poll once; granted ⇒ redeem at the workspace the grant names
-/// (the authoritative id — the address name was never trusted to exist), fence, promote, continue.
-fn resume_address(
-    ctx: &Ctx<'_>,
-    connectors: &FollowConnectors<'_>,
-    opts: &FollowOpts,
-    wal: AddressWal,
-) -> Result<FollowOutcome, ClientError> {
-    let enroll_src = (connectors.enroll)(&wal.base_url);
-    match enroll_src.poll_token(&wal.device_code)? {
-        TokenPoll::Pending | TokenPoll::SlowDown => {
-            let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-            Ok(FollowOutcome::plain(pending_address_followdata(
-                &wal.workspace_name,
-                &wal.base_url,
-                &wal.user_code,
-                wal.verification_uri_complete,
-                device_fingerprint(&signer),
-            )))
-        }
-        TokenPoll::Denied => {
-            enroll::delete_wal(ctx.fs, &ctx.layout)?;
-            Err(ClientError::Enrollment(
-                "the enrollment was denied at the verification page".into(),
-            ))
-        }
-        TokenPoll::Expired => {
-            enroll::delete_wal(ctx.fs, &ctx.layout)?;
-            Err(ClientError::Enrollment(
-                "the enrollment session expired; start over with `topos follow <address>`".into(),
-            ))
-        }
-        TokenPoll::Granted(granted) => {
-            // The granted poll carries the AUTHORITATIVE workspace context (the requested name was
-            // only ever a request; unknown/not-yours dies at the redeem's uniform denial).
-            let workspace = granted.workspace.ok_or_else(|| {
-                ClientError::WireInvalid("a granted enroll poll carried no workspace".into())
-            })?;
-            let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-            let redeem = enroll_src.redeem(
-                &workspace.workspace_id,
-                granted.grant.as_str(),
-                signer.public_key(),
-            )?;
-            if redeem.workspace_id != workspace.workspace_id {
-                return Err(ClientError::Enrollment(
-                    "the redeemed workspace does not match the granted session".into(),
-                ));
-            }
-            // The deployment posture is unknowable from the constant card — keep whatever an earlier
-            // enrollment recorded, else the conservative self-host default (disclosure only).
-            let deployment_mode = enroll::read_instance(ctx.fs, &ctx.layout)?
-                .map(|i| i.deployment_mode)
-                .unwrap_or(DeploymentMode::SelfHost);
-            let context = enroll::EnrollContext {
-                base_url: wal.base_url,
-                deployment_mode,
-                enrollment_method: "device_code".to_owned(),
-                workspace_id: workspace.workspace_id,
-                workspace_display_name: workspace.display_name,
-                verified_domain: None,
-                verified_domain_status: VerifiedDomainStatus::Unverified,
-                offered_skills: Vec::new(),
-                mode: wal.mode,
-                root: enroll::EnrollRoot::Address,
-                follow_target: wal.follow_target.clone(),
-            };
-            let enrolled_at = now_millis(ctx);
-            // The lockout fence, exactly as the invite flow: the redeemed facts land BEFORE
-            // promotion, so a crash mid-promote completes from the WAL without re-redeeming.
-            enroll::write_wal(
-                ctx.fs,
-                &ctx.layout,
-                &enroll::PendingEnrollment {
-                    schema_version: PERSISTED_SCHEMA_VERSION,
-                    state: enroll::EnrollPhase::Redeemed {
-                        context: context.clone(),
-                        credential: redeem.credential.clone(),
-                        device_key_id: redeem.device_key_id.clone(),
-                        principal: redeem.principal.clone(),
-                        enrolled_at_millis: enrolled_at,
-                    },
-                },
-            )?;
-            promote_core(
-                ctx,
-                &context,
-                &redeem.credential,
-                &redeem.device_key_id,
-                redeem.principal.as_deref(),
-                enrolled_at,
-                &signer,
-            )?;
-            let target = context
-                .follow_target
-                .clone()
-                .unwrap_or(enroll::FollowTargetDoc {
-                    kind: enroll::FollowKindDoc::Workspace,
-                    name: wal.workspace_name,
-                });
-            continue_into_target(ctx, connectors, &context, &target, opts)
-        }
-    }
-}
-
-/// The pending `FollowData` an ADDRESS enrollment surfaces (there is no workspace ID yet — the
-/// requested ADDRESS name rides the disclosure slot; the id arrives with the grant).
-fn pending_address_followdata(
-    workspace_name: &str,
-    base_url: &str,
-    user_code: &str,
-    verification_uri_complete: String,
-    device_fingerprint: String,
-) -> FollowData {
+/// The pending `FollowData` an enrollment surfaces (there is no workspace ID yet — the requested
+/// ADDRESS name rides the disclosure slot; the id arrives with the grant). The human opens
+/// `verification_uri_complete` and cross-checks the code; the agent re-invokes `follow` to poll.
+fn pending_followdata(wal: &enroll::PendingEnrollment) -> FollowData {
     FollowData {
-        workspace_id: workspace_name.to_owned(),
+        workspace_id: wal.workspace_name.clone(),
         enrolled: false,
         skills: Vec::new(),
-        deployment_mode: None,
         workspace_display_name: None,
-        verified_domain: None,
-        verified_domain_status: None,
-        plane_base_url: Some(base_url.to_owned()),
+        plane_base_url: Some(wal.base_url.clone()),
         pending: Some(EnrollmentPending {
-            verification_uri_complete,
-            user_code: user_code.to_owned(),
-            device_fingerprint,
-            expires_at: None,
+            verification_uri_complete: wal.verification_uri_complete.clone(),
+            user_code: wal.user_code.clone(),
+            expires_at: Some(fmt_rfc3339_millis(wal.expires_at_millis)),
+            interval_secs: Some(wal.interval_secs),
         }),
         currency: None,
     }
 }
 
-// =================================================================================================
-// The admin-claim door — `follow <claim-link>` in ONE invocation (self-host bearer). The `/i/` bootstrap
-// disclosed `enrollment_method: "admin_claim"`; there is no device-auth session and no re-invoke on the
-// happy path. A pre-send WAL makes an uncertain send safely retryable: the retry POSTs `/v1/admin-claim`
-// directly (a consumed claim's bootstrap serves 404 by design; the server's same-device replay of a
-// consumed claim deterministically re-answers Redeemed).
-// =================================================================================================
-
-fn claim_follow(
-    ctx: &Ctx<'_>,
-    connectors: &FollowConnectors<'_>,
-    // The RE-ROOTED API base (the WAL records it; the redeem POST + the promote ride it).
-    base_url: &str,
-    token: &str,
-    bootstrap: &topos_types::BootstrapData,
-) -> Result<FollowData, ClientError> {
-    // The pre-send WAL (0600 — the claim token is a bearer secret), BEFORE the first POST.
-    let wal = enroll::PendingEnrollment {
-        schema_version: PERSISTED_SCHEMA_VERSION,
-        state: enroll::EnrollPhase::ClaimPending {
-            base_url: base_url.to_owned(),
-            deployment_mode: bootstrap.plane.deployment_mode,
-            enrollment_method: bootstrap.plane.enrollment_method.clone(),
-            workspace_id: bootstrap.workspace.workspace_id.clone(),
-            workspace_display_name: bootstrap.workspace.display_name.clone(),
-            claim_token: token.to_owned(),
-        },
-    };
-    enroll::write_wal(ctx.fs, &ctx.layout, &wal)?;
-    retry_claim(ctx, connectors, &wal)
-}
-
-/// Send (or re-send) the claim redeem recorded in a `ClaimPending` WAL, then convert to the ordinary
-/// `Redeemed` fence and promote. Callable any number of times: the server treats a same-device replay of a
-/// consumed claim as the SAME redeem (lost-200 recovery), so the retry is idempotent by construction.
-fn retry_claim(
-    ctx: &Ctx<'_>,
-    connectors: &FollowConnectors<'_>,
-    wal: &enroll::PendingEnrollment,
-) -> Result<FollowData, ClientError> {
-    let enroll::EnrollPhase::ClaimPending {
-        base_url,
-        deployment_mode,
-        enrollment_method,
-        workspace_id,
-        workspace_display_name,
-        claim_token,
-    } = &wal.state
-    else {
-        return Err(ClientError::Corrupt(
-            "retry_claim needs a claim_pending WAL".into(),
-        ));
-    };
-    let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-    let enroll_src = (connectors.enroll)(base_url);
-    // The display name rides for DISCLOSURE only (the seated name comes from the mint-time claim row).
-    let redeem =
-        match enroll_src.admin_claim(claim_token, signer.public_key(), workspace_display_name) {
-            Ok(redeem) => redeem,
-            // A TERMINAL plane denial — per the seam's contract, `admin_claim` returns
-            // [`ClientError::Enrollment`] ONLY for the 200+DENIED claim verdict (consumed by another device /
-            // expired / the workspace already exists). The claim is definitively dead, so the ClaimPending WAL
-            // is cleared BEFORE the error surfaces (mirroring the poll Denied/Expired arms clearing the
-            // Authorizing WAL) — otherwise the sweep-exempt WAL wedges every later `follow <other-link>`
-            // behind the dispatch while a re-invoke re-denies forever.
-            Err(e @ ClientError::Enrollment(_)) => {
-                enroll::delete_wal(ctx.fs, &ctx.layout)?;
-                return Err(e);
-            }
-            // Everything else is an UNCERTAIN fault (a transport error, a non-200, a malformed body — the
-            // send may or may not have consumed the claim): KEEP the WAL, so the next invocation retries the
-            // POST directly and the server's same-device replay re-answers Redeemed.
-            Err(e) => return Err(e),
-        };
-    // The redeem names the claim row's authoritative workspace — it must match what the link disclosed.
-    if redeem.workspace_id != *workspace_id {
-        return Err(ClientError::Enrollment(
-            "the claimed workspace does not match the claim link".into(),
-        ));
-    }
-    let context = enroll::EnrollContext {
-        base_url: base_url.clone(),
-        deployment_mode: *deployment_mode,
-        enrollment_method: enrollment_method.clone(),
-        workspace_id: workspace_id.clone(),
-        workspace_display_name: workspace_display_name.clone(),
-        verified_domain: None,
-        verified_domain_status: VerifiedDomainStatus::Unverified,
-        offered_skills: Vec::new(),
-        mode: enroll::FollowModeDoc::Auto,
-        root: enroll::EnrollRoot::Claim,
-        follow_target: None,
-    };
-    let enrolled_at = now_millis(ctx);
-    // The same lockout fence as the grant flow: the claim is consumed server-side, so the redeemed facts
-    // are recorded BEFORE promotion and a crash mid-promote completes from here without re-sending.
-    enroll::write_wal(
-        ctx.fs,
-        &ctx.layout,
-        &enroll::PendingEnrollment {
-            schema_version: PERSISTED_SCHEMA_VERSION,
-            state: enroll::EnrollPhase::Redeemed {
-                context: context.clone(),
-                credential: redeem.credential.clone(),
-                device_key_id: redeem.device_key_id.clone(),
-                principal: redeem.principal.clone(),
-                enrolled_at_millis: enrolled_at,
-            },
-        },
-    )?;
-    promote(
-        ctx,
-        connectors,
-        &context,
-        &redeem.credential,
-        &redeem.device_key_id,
-        redeem.principal.as_deref(),
-        enrolled_at,
-        &signer,
+/// Epoch-millis → an RFC-3339 `YYYY-MM-DDTHH:MM:SSZ` string (UTC, second precision) — enough for the
+/// pending disclosure's expiry. Negative inputs clamp to the epoch.
+fn fmt_rfc3339_millis(millis: i64) -> String {
+    let secs = millis.max(0) as u64 / 1000;
+    let (days, rem) = (secs / 86_400, secs % 86_400);
+    let (y, m, d) = crate::render::civil_from_days(days as i64);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
     )
-}
-
-/// Redeem the grant into a registered device + its workspace credential. The grant is the bearer credential
-/// and the body's `device_public_key` registers this device (the server checks it matches the grant's bound
-/// pubkey) — nothing is signed.
-fn redeem_grant(
-    enroll_src: &dyn EnrollSource,
-    context: &enroll::EnrollContext,
-    grant: &str,
-    signer: &DeviceSigner,
-) -> Result<crate::plane::Redeem, ClientError> {
-    let redeem = enroll_src.redeem(&context.workspace_id, grant, signer.public_key())?;
-    // The redeem echoes the grant's authoritative workspace — it must match the one we enrolled against.
-    if redeem.workspace_id != context.workspace_id {
-        return Err(ClientError::Enrollment(
-            "the redeemed workspace does not match the invite".into(),
-        ));
-    }
-    Ok(redeem)
 }
 
 // =================================================================================================
@@ -1226,22 +835,23 @@ fn universe_for(
     ))
 }
 
-/// Continue a just-promoted ADDRESS enrollment into its recorded follow intent: resolve the intent
-/// WITHIN the newly-joined workspace, then describe/apply per this invocation's flags. A bare
-/// resumed `follow` therefore lands on the DESCRIBE (with the `--yes` argv as its next action) —
-/// the enrollment happened, the subscription still waits for consent.
+/// Continue a just-enrolled `follow` into its recorded follow intent: resolve the intent WITHIN the
+/// newly-joined workspace, then describe/apply per this invocation's flags. A bare resumed `follow`
+/// therefore lands on the DESCRIBE (with the `--yes` argv as its next action) — the enrollment
+/// happened, the subscription still waits for consent.
 fn continue_into_target(
     ctx: &Ctx<'_>,
     connectors: &FollowConnectors<'_>,
-    context: &enroll::EnrollContext,
+    base_url: &str,
+    workspace_id: &str,
     target: &enroll::FollowTargetDoc,
     opts: &FollowOpts,
 ) -> Result<FollowOutcome, ClientError> {
-    let directory = (connectors.directory)(&context.base_url);
-    let names = universe_for(&*directory, &context.workspace_id)?;
+    let directory = (connectors.directory)(base_url);
+    let names = universe_for(&*directory, workspace_id)?;
     let resolution = match target.kind {
         enroll::FollowKindDoc::Workspace => Resolution::Workspace {
-            workspace_id: context.workspace_id.clone(),
+            workspace_id: workspace_id.to_owned(),
             workspace_name: names.name.clone(),
         },
         enroll::FollowKindDoc::Channel => {
@@ -1266,8 +876,8 @@ fn continue_into_target(
     subscribe(
         ctx,
         connectors,
-        &context.base_url,
-        &context.workspace_id,
+        base_url,
+        workspace_id,
         std::slice::from_ref(&resolution),
         opts,
         true,
@@ -1342,10 +952,10 @@ fn subscribe(
     }
 
     // ---- APPLY (`--yes`) ----
-    // 0) Refresh the stored display name to the workspace's TRUE name — the enroll poll could only
-    //    echo the requested address slug (it must not disclose the real name before the redeem gate),
-    //    and this member-authenticated `me` read is the first place the real name is known.
-    enroll::set_membership_display_name(ctx.fs, &ctx.layout, ws_id, &me.display_name)?;
+    // 0) Refresh the stored membership facts from this member-authenticated `me` read — the first
+    //    place the workspace's true display name and the person's principal are known client-side
+    //    (the enrollment poll deliberately disclosed the minimum).
+    enroll::refresh_membership_facts(ctx.fs, &ctx.layout, ws_id, &me.display_name, &me.principal)?;
     // 1) The subscription rows — the consented change (a workspace target needs none: membership
     //    itself entitles `everyone`).
     let mut subscribed = Vec::new();
@@ -1706,198 +1316,11 @@ fn tracked_names(ctx: &Ctx<'_>) -> Result<Vec<TrackedName>, ClientError> {
 }
 
 // =================================================================================================
-// Promotion — the sidecar writers (crash-safe; idempotent so a re-resume re-promotes cleanly).
+// The never-received baseline — the sidecar scaffold a brand-new arrival's first receive lands into.
 // =================================================================================================
 
-#[allow(clippy::too_many_arguments)]
-fn promote(
-    ctx: &Ctx<'_>,
-    connectors: &FollowConnectors<'_>,
-    context: &enroll::EnrollContext,
-    credential: &str,
-    device_key_id: &str,
-    principal: Option<&str>,
-    enrolled_at: i64,
-    signer: &DeviceSigner,
-) -> Result<FollowData, ClientError> {
-    let currency = promote_core(
-        ctx,
-        context,
-        credential,
-        device_key_id,
-        principal,
-        enrolled_at,
-        signer,
-    )?;
-
-    // Disclose the batched offers (a READ-ONLY metadata fetch — places NOTHING, never mutates the
-    // sidecar, so first-receive stays an OFFER). Best-effort: a fetch hiccup omits that skill's offer.
-    let skills = disclose_offers(connectors, context, credential);
-
-    Ok(FollowData {
-        workspace_id: context.workspace_id.clone(),
-        enrolled: true,
-        skills,
-        deployment_mode: Some(context.deployment_mode),
-        workspace_display_name: Some(context.workspace_display_name.clone()),
-        verified_domain: context.verified_domain.clone(),
-        verified_domain_status: Some(context.verified_domain_status),
-        plane_base_url: Some(context.base_url.clone()),
-        pending: None,
-        currency: Some(currency),
-    })
-}
-
-/// The sidecar half of a promotion — every durable write, WITHOUT the follow-shaped offer disclosure (the
-/// standup `publish` promotes through this too, then continues into its own publish body). Returns the
-/// currency-trigger report. Idempotent, so a re-resume re-promotes cleanly.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn promote_core(
-    ctx: &Ctx<'_>,
-    context: &enroll::EnrollContext,
-    credential: &str,
-    device_key_id: &str,
-    principal: Option<&str>,
-    enrolled_at: i64,
-    signer: &DeviceSigner,
-) -> Result<topos_types::TriggerReport, ClientError> {
-    // Crash-coherence of a (possibly second, same-plane) promotion. Every step below is a SINGLE
-    // atomic-per-file durable write (or an idempotent read-merge-write). The `Redeemed` enrollment WAL —
-    // written BEFORE this fn and deleted only in the last step — is the transaction log: a crash at any step
-    // leaves every touched file byte-for-byte pre- or post-write (never torn), and the next
-    // re-invoking `follow` REPLAYS this whole sequence from the WAL until it converges. Each step is
-    // idempotent under that replay:
-    //   1) instance.json      — atomic write of identical bytes (the plane is the same on a re-promote);
-    //   2) credentials.json   — read-merge-write, upsert this workspace's credential (the Bearer for every
-    //                           request in it), deduped by workspace_id, so an already-joined workspace's
-    //                           credential is never dropped;
-    //   3) follows.json       — read-merge-write, deduped by skill_id, so this workspace's rows are added-
-    //                           or-refreshed and an already-followed workspace's rows are never dropped;
-    //   4) user.json          — read-upsert-write, deduped by workspace_id, so this membership is added-or-
-    //                           refreshed and any already-joined workspace's membership is never dropped;
-    //   5) host.json          — re-records the same device-key reference (identical bytes);
-    //   6) baselines          — a skill dir that already exists is left untouched; a partial staging is rebuilt;
-    //   7) delete the WAL      — the LAST durable step, so "WAL absent" proves steps 1-6 all completed.
-    // The write ORDER is load-bearing: credentials.json (step 2) lands before the membership (step 4), so a
-    // committed membership always implies its workspace credential is already on disk. Proven by the
-    // crash-gate test `second_enrollment_promote_is_crash_coherent_and_never_drops_the_first`.
-    //
-    // Residual (documented, not closed): the steps are atomic PER FILE, not as one transaction, so a
-    // DIFFERENT command running CONCURRENTLY during this promotion could observe the transient gap where
-    // credentials.json already carries this workspace but user.json does not yet. This is benign and
-    // self-healing: every file is atomic (no torn reads), the WAL heals the gap on the next resume, and the
-    // worst an ambient write can observe is a fail-closed WorkspaceSelection/Enrollment error — user.json
-    // is all-or-nothing, so a membership is either fully present or absent, never a wrong-workspace
-    // signature and never corruption. Widening the identity lock across the credential / follows / user
-    // writes to make them one critical section would need lock-free inner variants (each re-takes that
-    // lock, so calling one under a held lock would deadlock) — meaningful new internal surface to close a
-    // sub-second window whose worst case is already a clean, self-healing error, so this stays a documented
-    // residual rather than a lock-widening refactor.
-
-    // 1) instance.json — PUBLIC (no secret) → ordinary perms. PLANE-scoped only now; the per-workspace
-    // disclosure moved to the user.json membership written in step 4.
-    enroll::write_instance(
-        ctx.fs,
-        &ctx.layout,
-        &enroll::Instance {
-            schema_version: PERSISTED_SCHEMA_VERSION,
-            base_url: context.base_url.clone(),
-            deployment_mode: context.deployment_mode,
-            enrollment_method: context.enrollment_method.clone(),
-        },
-    )?;
-
-    // 2) credentials.json — 0600 (the workspace credential is THE secret); UPSERT this workspace's
-    // credential, so a second-workspace follow never drops the first's credential. Lands BEFORE the
-    // membership (step 4), so a committed membership always implies its Bearer credential is on disk.
-    enroll::write_credential(ctx.fs, &ctx.layout, &context.workspace_id, credential)?;
-
-    // 3) follows.json — pure subscription state; READ-MERGE-WRITE so a second follow never clobbers the
-    // first. One entry per skill the enrollment offered (the bootstrap-declared set the WAL carries).
-    let additions: Vec<enroll::FollowEntry> = context
-        .offered_skills
-        .iter()
-        .map(|s| enroll::FollowEntry {
-            skill_id: s.skill_id.clone(),
-            workspace_id: context.workspace_id.clone(),
-            mode: context.mode,
-            review_required: false,
-            following: true,
-            excluded_here: false,
-        })
-        .collect();
-    enroll::write_follows_merged(ctx.fs, &ctx.layout, &additions)?;
-
-    // 4) user.json — metadata only (no secret) → ordinary perms. READ-MERGE-WRITE the memberships so a
-    // second follow (into another workspace on the same plane) ADDS a membership rather than dropping the
-    // first. The per-INSTALL identity (principal/email) is refreshed only when this promote carries a
-    // principal (an email-shaped one also fills `email`; a device-rooted `dev.…` id is NOT an email and
-    // never pretends to be one — and never clobbers a previously-seated email).
-    let mut user = enroll::read_user(ctx.fs, &ctx.layout)?.unwrap_or_else(|| enroll::UserDoc {
-        schema_version: PERSISTED_SCHEMA_VERSION,
-        email: None,
-        principal: None,
-        workspaces: Vec::new(),
-    });
-    user.schema_version = PERSISTED_SCHEMA_VERSION;
-    if let Some(p) = principal {
-        user.principal = Some(p.to_owned());
-        if p.contains('@') {
-            user.email = Some(p.to_owned());
-        }
-    }
-    enroll::upsert_membership(
-        &mut user,
-        enroll::Membership {
-            workspace_id: context.workspace_id.clone(),
-            display_name: Some(context.workspace_display_name.clone()),
-            roles: Vec::new(),
-            verified_domain: context.verified_domain.clone(),
-            verified_domain_status: context.verified_domain_status,
-            invite_rooted: matches!(context.root, enroll::EnrollRoot::Invite),
-            enrolled_at,
-        },
-    );
-    enroll::write_user(ctx.fs, &ctx.layout, &user)?;
-
-    // 5) Record the device key reference in host.json (the PUBLIC key + a pointer to the 0600 seed).
-    identity::set_device_key(
-        ctx.fs,
-        &ctx.layout,
-        &DeviceKeyRef {
-            alg: "Ed25519".to_owned(),
-            device_key_id: device_key_id.to_owned(),
-            public_key: to_hex(&signer.public_key()),
-            private_key_ref: "device.key".to_owned(),
-        },
-    )?;
-
-    // 6) Lay the first-receive baseline for each offered skill (so the pull engine treats it as state-②).
-    // The bootstrap-declared skill id is parsed at this boundary too (the wire transport already validated
-    // it; a WAL-resumed promote revalidates) — only the validated newtype reaches the path joins below.
-    for offered in &context.offered_skills {
-        let skill_id = crate::id::SkillId::parse(&offered.skill_id)?;
-        lay_first_receive_baseline(
-            ctx,
-            &skill_id,
-            display_name(context, &offered.skill_id),
-            &context.workspace_display_name,
-        )?;
-    }
-
-    // 7) Delete the WAL — enrollment is complete.
-    enroll::delete_wal(ctx.fs, &ctx.layout)?;
-
-    // 8) Arm session-start currency for this follower — best-effort + idempotent, mirroring `add`. A pure
-    // follower never runs `add`, so this is the one place their hook gets installed; it edits the harness
-    // CONFIG (never a skill dir), and the sweep no-ops until the first bytes land. Infallible (a
-    // TriggerReport, degraded on a config hiccup), so it can never roll back the completed enrollment;
-    // the outcome is disclosed on the result.
-    Ok(ctx.harness.install_currency_trigger())
-}
-
 /// Lay the NEVER-RECEIVED sidecar baseline for `skill_id` (mirrors `ops::add`'s staged-then-renamed,
-/// all-or-nothing publish). A fresh `sync` (`observed = applied = (0,0)`, empty `recorded`), an empty
+/// all-or-nothing publish). A fresh `sync` (`observed = applied = 0`, empty `recorded`), an empty
 /// `lock` (the name + zero base/digest, no files), and a `map` carrying the harness placement target (so
 /// the existing apply path can first-install there) but no applied content. Idempotent: a skill dir that
 /// already exists (already baselined, or received) is left untouched — `follow` never clobbers bytes.
@@ -1996,67 +1419,6 @@ pub(crate) fn lay_first_receive_baseline(
     Ok(())
 }
 
-/// Disclose the batched first-receive offers via a READ-ONLY metadata fetch (get the served `current`,
-/// scope-check it, fetch the version bytes, recompute the `bundle_digest`). It writes NOTHING to the
-/// sidecar, so the skill stays never-received (an OFFER on the next pull). Best-effort.
-fn disclose_offers(
-    connectors: &FollowConnectors<'_>,
-    context: &enroll::EnrollContext,
-    credential: &str,
-) -> Vec<FollowOffer> {
-    if context.offered_skills.is_empty() {
-        return Vec::new();
-    }
-    // Every offered skill reads under the ONE workspace credential (a `SkillCred` per skill sharing it).
-    let creds: HashMap<String, SkillCred> = context
-        .offered_skills
-        .iter()
-        .map(|s| {
-            (
-                s.skill_id.clone(),
-                SkillCred::new(context.workspace_id.clone(), credential.to_owned()),
-            )
-        })
-        .collect();
-    let plane = (connectors.plane)(&context.base_url, creds);
-
-    let mut offers = Vec::new();
-    for s in &context.offered_skills {
-        if let Some(offer) = disclose_one(&*plane, &s.skill_id, &context.workspace_id) {
-            offers.push(FollowOffer {
-                skill_id: s.skill_id.clone(),
-                name: display_name(context, &s.skill_id),
-                offer,
-            });
-        }
-    }
-    offers
-}
-
-/// One skill's offer: scope-check its `current` pointer, fetch the version, recompute the digest. `None`
-/// on any read/scope failure (the offer is then simply not disclosed — the subsequent `pull` discloses it).
-fn disclose_one(plane: &dyn PlaneSource, skill_id: &str, workspace_id: &str) -> Option<Offer> {
-    let PointerFetch::Record(rec) = plane.get_current(skill_id, None).ok()? else {
-        return None;
-    };
-    let version_id = sync_engine::scoped_version_id(&rec, skill_id, workspace_id)?;
-    let fetched = plane.fetch_version(skill_id, version_id).ok()?;
-    let entries: Vec<ManifestEntry> = fetched
-        .files
-        .iter()
-        .map(|f| ManifestEntry {
-            path: f.path.clone(),
-            mode: f.mode,
-            content_sha256: digest::sha256(&f.bytes),
-        })
-        .collect();
-    let digest = digest::bundle_digest(&entries).ok()?;
-    Some(Offer {
-        version_id: to_hex(&version_id),
-        bundle_digest: to_hex(&digest),
-    })
-}
-
 // =================================================================================================
 // The skill path — drive the existing pull engine to place the named first-receive bytes.
 // =================================================================================================
@@ -2129,10 +1491,7 @@ fn approve(
             workspace_id,
             enrolled: true,
             skills,
-            deployment_mode: None,
             workspace_display_name: None,
-            verified_domain: None,
-            verified_domain_status: None,
             plane_base_url: None,
             pending: None,
             currency: None,
@@ -2298,7 +1657,7 @@ fn workspace_label(ctx: &Ctx<'_>, workspace_id: &str) -> String {
             u.workspaces
                 .into_iter()
                 .find(|m| m.workspace_id == workspace_id)
-                .and_then(|m| m.display_name)
+                .map(|m| m.display_name)
         })
         .unwrap_or_else(|| workspace_id.to_owned())
 }
@@ -2307,33 +1666,7 @@ fn workspace_label(ctx: &Ctx<'_>, workspace_id: &str) -> String {
 // Small helpers.
 // =================================================================================================
 
-/// Parse `<base_url>/i/<token>` into `(base_url, token)` — the FULL URL splits on `/i/` (the token is
-/// the first path segment after it). That is the ONLY spelling the product hands out (`mint-claim`
-/// prints the whole link; the web shows the whole link), and the dispatch routes only `/i/`-carrying
-/// targets here, so a bare token is a malformed link — never a base to guess.
-///
-/// The base is validated as a well-formed absolute http(s) URL HERE — before the secret token is ever
-/// spliced into a request URL — because a malformed base would otherwise surface downstream as a ureq
-/// `BadUri` transport error whose message echoes the FULL URI (token included), and every transport error
-/// detail is persisted to the `~/.topos/log.jsonl` diagnostics file.
-fn parse_link(link: &str) -> Result<(String, String), ClientError> {
-    let link = link.trim();
-    if let Some(idx) = link.find("/i/") {
-        let base = link[..idx].trim_end_matches('/');
-        let rest = &link[idx + 3..];
-        let token = rest.split(['/', '?', '#']).next().unwrap_or("");
-        if base.is_empty() || token.is_empty() {
-            return Err(ClientError::Enrollment("malformed invite link".into()));
-        }
-        validate_base_url(base)?;
-        return Ok((base.to_owned(), token.to_owned()));
-    }
-    Err(ClientError::Enrollment(
-        "pass the full /i/<token> claim link".into(),
-    ))
-}
-
-/// Resolve the API base a follow re-roots onto: the bootstrap's declared `plane.base_url`, normalized
+/// Resolve the API base a follow re-roots onto: the card's declared `api_base_url`, normalized
 /// (trimmed of trailing slashes — the pin comparisons are exact string equality) and gated the same way
 /// as the link base — plus the one extra rule the re-root introduces: an `https` link must never re-root
 /// onto a plain-`http` plane (a transport downgrade the human who pasted the link could not see).
@@ -2341,22 +1674,22 @@ pub(super) fn resolve_api_base(link_base: &str, declared: &str) -> Result<String
     let declared = declared.trim().trim_end_matches('/');
     if declared.is_empty() {
         return Err(ClientError::Enrollment(
-            "the bootstrap declared no plane base URL; upgrade the plane".into(),
+            "the protocol card declared no API base URL; upgrade the server".into(),
         ));
     }
     validate_base_url(declared)?;
     if link_base.starts_with("https://") && !declared.starts_with("https://") {
         return Err(ClientError::Enrollment(
-            "refusing to enroll: the link is https but the plane declares a plain-http base URL"
+            "refusing to enroll: the address is https but the card declares a plain-http API base"
                 .into(),
         ));
     }
     Ok(declared.to_owned())
 }
 
-/// Refuse a plane base that is not a well-formed absolute `http(s)://…` URL (the transport's own `Uri`
-/// grammar, so anything accepted here builds cleanly downstream). The error names the problem — never the
-/// link's token, which the caller has not yet joined onto the base.
+/// Refuse an API base that is not a well-formed absolute `http(s)://…` URL (the transport's own `Uri`
+/// grammar, so anything accepted here builds cleanly downstream). A malformed base would otherwise
+/// surface as a transport error whose message echoes the full URI into the diagnostics log.
 fn validate_base_url(base: &str) -> Result<(), ClientError> {
     let well_formed = base.parse::<ureq::http::Uri>().is_ok_and(|uri| {
         matches!(uri.scheme_str(), Some("http" | "https")) && authority_usable(&uri)
@@ -2365,7 +1698,7 @@ fn validate_base_url(base: &str) -> Result<(), ClientError> {
         Ok(())
     } else {
         Err(ClientError::Enrollment(
-            "malformed invite link: the plane base URL is not a valid http(s) URL".into(),
+            "the declared API base URL is not a valid http(s) URL".into(),
         ))
     }
 }
@@ -2386,56 +1719,6 @@ fn authority_usable(uri: &ureq::http::Uri) -> bool {
     }
 }
 
-/// Build the pending FollowData (the agent surfaces the URL WITH the verified-domain provenance — the
-/// relay-phishing guard — then re-invokes `follow`). `verification_uri_complete` is the SERVER-built
-/// link when the plane provided one (used verbatim), else the caller's reconstruction.
-fn pending_followdata(
-    context: &enroll::EnrollContext,
-    user_code: &str,
-    verification_uri_complete: String,
-    device_fingerprint: String,
-) -> FollowData {
-    FollowData {
-        workspace_id: context.workspace_id.clone(),
-        enrolled: false,
-        skills: Vec::new(),
-        deployment_mode: Some(context.deployment_mode),
-        workspace_display_name: Some(context.workspace_display_name.clone()),
-        verified_domain: context.verified_domain.clone(),
-        verified_domain_status: Some(context.verified_domain_status),
-        plane_base_url: Some(context.base_url.clone()),
-        pending: Some(EnrollmentPending {
-            verification_uri_complete,
-            user_code: user_code.to_owned(),
-            device_fingerprint,
-            // No RFC-3339 formatter client-side; the WAL holds the absolute expiry for the recovery sweep.
-            expires_at: None,
-        }),
-        currency: None,
-    }
-}
-
-/// The verification URL with the `user_code` embedded (RFC-8628 `verification_uri_complete`) — the
-/// CLIENT-side reconstruction, used only as the fallback when the plane did not provide the complete URI.
-pub(super) fn complete_uri(verification_uri: &str, user_code: &str) -> String {
-    let sep = if verification_uri.contains('?') {
-        '&'
-    } else {
-        '?'
-    };
-    format!("{verification_uri}{sep}user_code={user_code}")
-}
-
-/// A followed skill's display name from the bootstrap (else its id).
-fn display_name(context: &enroll::EnrollContext, skill_id: &str) -> String {
-    context
-        .offered_skills
-        .iter()
-        .find(|s| s.skill_id == skill_id)
-        .and_then(|s| s.name.clone())
-        .unwrap_or_else(|| skill_id.to_owned())
-}
-
 /// Drop an `@<hash>` suffix from a `follow <skill>[@<hash>]` target when the part after the last `@` is a valid
 /// version id, leaving the skill name (so a name containing `@` is still accepted).
 fn strip_digest(target: &str) -> &str {
@@ -2447,23 +1730,18 @@ fn strip_digest(target: &str) -> &str {
     target
 }
 
-/// A human-readable machine name for the verification page (a confused-deputy aid, not authority) — carries
-/// the device key id so a human can cross-check the fingerprint shown on the page.
-pub(super) fn machine_name(signer: &DeviceSigner) -> String {
-    format!("topos CLI ({})", signer.device_key_id())
-}
-
-/// The 16-hex device fingerprint the plane shows on its verification page — the first 16 hex chars of
-/// `sha256(device_public_key)`. The device key id is `dk_` + the 32 hex of that same digest, so the
-/// fingerprint is exactly the leading half of the id's hex portion. Returned raw (no grouping); the TTY
-/// renderer groups it for eyeball comparison. A human cross-checks it against the page before approving.
-pub(super) fn device_fingerprint(signer: &DeviceSigner) -> String {
-    let id = signer.device_key_id();
-    id.strip_prefix("dk_")
-        .unwrap_or(id)
-        .chars()
-        .take(16)
-        .collect()
+/// A human-readable device name for the approval page (a confused-deputy aid, not authority) — the
+/// host's node name, so a person approving in the browser recognizes which machine is asking. Kept as
+/// the device's display name once approved.
+pub(super) fn machine_name() -> String {
+    let uname = rustix::system::uname();
+    let node = uname.nodename().to_string_lossy();
+    let node = node.trim();
+    if node.is_empty() {
+        "topos CLI".to_owned()
+    } else {
+        format!("topos CLI ({node})")
+    }
 }
 
 /// `now` as epoch-millis (saturating), via the injected clock.
@@ -2473,42 +1751,14 @@ fn now_millis(ctx: &Ctx<'_>) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{device_fingerprint, resolve_api_base, validate_base_url};
+    use super::{machine_name, resolve_api_base, validate_base_url};
 
-    /// The device fingerprint is the leading 16 hex of the device key id's hex portion (`dk_` + 32 hex);
-    /// grouped in fours by the TTY renderer, it is what a human cross-checks against the verification page.
+    /// The device name shown on the approval page derives from the HOST (no key material exists to
+    /// fingerprint) and always carries the recognizable `topos CLI` prefix.
     #[test]
-    fn device_fingerprint_is_the_first_16_hex_of_the_key_id() {
-        use crate::device_signer::DeviceSigner;
-        use crate::fs_seam::RealFs;
-        use crate::sidecar::Layout;
-
-        let dir = std::env::temp_dir().join(format!(
-            "topos-fp-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let signer = DeviceSigner::load_or_generate(&RealFs, &Layout::new(&dir)).unwrap();
-
-        let fp = device_fingerprint(&signer);
-        // Exactly the first 16 hex of the id (id = `dk_` + 32 hex of sha256(pubkey)).
-        let id_hex = signer.device_key_id().strip_prefix("dk_").unwrap();
-        assert_eq!(fp, id_hex[..16]);
-        assert_eq!(fp.len(), 16);
-        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
-
-        // The grouped display (raw id → grouped): 4×4 hex separated by single spaces.
-        let grouped = crate::render::group_fingerprint(&fp);
-        assert_eq!(grouped.split(' ').count(), 4);
-        assert!(grouped.split(' ').all(|chunk| chunk.len() == 4));
-        assert_eq!(grouped.replace(' ', ""), fp);
-
-        let _ = std::fs::remove_dir_all(&dir);
+    fn machine_name_is_host_derived_and_recognizable() {
+        let name = machine_name();
+        assert!(name.starts_with("topos CLI"), "{name}");
     }
 
     /// The re-root resolver: normalizes trailing slashes (the pin compares are exact strings), applies

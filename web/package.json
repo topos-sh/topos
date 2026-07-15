@@ -22,10 +22,11 @@
     "gen:plane": "node scripts/gen-plane-types.mjs",
     "check:contract": "node scripts/gen-plane-types.mjs --check",
     "check:boundary": "node scripts/check-boundary.mjs",
+    "check:email": "node scripts/check-email-authz.mjs",
     "check:tokens": "node scripts/check-design-tokens.mjs",
     "check:bundle": "node scripts/scan-bundle.mjs",
     "db:migrate": "node scripts/migrate.mjs",
-    "check": "biome ci --error-on-warnings . && node scripts/check-design-tokens.mjs && node scripts/check-boundary.mjs && node scripts/gen-plane-types.mjs --check && react-router typegen && tsc --noEmit",
+    "check": "biome ci --error-on-warnings . && node scripts/check-design-tokens.mjs && node scripts/check-boundary.mjs && node scripts/check-email-authz.mjs && node scripts/gen-plane-types.mjs --check && react-router typegen && tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "playwright test"
   },

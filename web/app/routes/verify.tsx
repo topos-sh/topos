@@ -2,321 +2,247 @@ import type { ReactNode } from "react";
 import {
   type ActionFunctionArgs,
   data,
-  Link,
+  Form,
   type LoaderFunctionArgs,
   type MetaFunction,
   redirect,
+  useActionData,
   useLoaderData,
+  useNavigation,
 } from "react-router";
+import { StepUpFields } from "@/components/step-up";
 import { buttonClasses } from "@/components/ui";
-import { ApproveEnrollCard } from "@/components/verify/ApproveEnrollCard";
-import { ApproveLoginCard } from "@/components/verify/ApproveLoginCard";
-import { ApproveStandupCard } from "@/components/verify/ApproveStandupCard";
-import { VerifyCard } from "@/components/verify/VerifyCard";
-import { actorFromSession } from "@/lib/auth/guards.server";
+import { actorFromSession, notFound, requireSession } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
-import { vaultFetch } from "@/lib/plane/client.server";
-import { getVerificationContext } from "@/lib/plane/reads.server";
+import { requireStepUp } from "@/lib/auth/step-up.server";
+import {
+  approveDeviceAuth,
+  denyDeviceAuth,
+  pendingDeviceAuth,
+  theWorkspace,
+} from "@/lib/db/identity.server";
 
-export const meta: MetaFunction = () => [{ title: "Device verification · Topos" }];
+export const meta: MetaFunction = () => [{ title: "Approve a device · Topos" }];
 
 /**
- * PUBLIC — this page arrives via emailed links (and the agent's verification_uri_complete) on
- * phones and must work on a blocking, one-document render. Signed OUT: the vault-reported
- * disclosure + a "Sign in to continue" gate. Signed IN (with a verified email): the approve
- * variant for the session's intent — join (enroll) or create-a-workspace (standup) — a form, an
- * action, and a redirect back here with an `outcome` query (pure display state; the vault's
- * answer is the authority).
+ * The ONE device-approve ceremony (the gh-style device flow's browser half). A device that
+ * wants to act as you shows a short code and points here; a SIGNED-IN person types (or arrives
+ * with) that code, sees what is asking, and approves or denies. Approval mints the device's
+ * bearer credential — a credential that acts as you — so the approve arm is STEP-UP gated:
+ * the password re-entry proves who is ACTING, seconds before the mint. Denying destroys a
+ * pending request and mints nothing, so it needs no step-up.
+ *
+ * Signed out, the page bounces to /login carrying itself (code included) as the `next` path.
+ * An unknown or expired code is an honest in-page state, never a 404 — the person may have
+ * mistyped and needs the form back.
  */
 
-/** The vault's static create-denial reason for the per-owner cap (rendered as the limit state). */
-const CAP_REASON = "workspace creation limit reached";
-
-type VerifyOutcome = "approved" | "limit" | "miss" | "error";
-
-// ── The action: the approve legs ──────────────────────────────────────────────────────────────
-// A verified session actor is required HERE (the gate); the acting identity then rides the vault
-// transport's own acting-principal header — never anything client-supplied (the form submits only
-// an intent and, for standup, a display name). Result → a redirect back with `outcome` (display
-// only; forging the query changes pixels, never the vault).
-
-export async function action({ request, params }: ActionFunctionArgs): Promise<Response> {
-  const userCode = params.userCode ?? "";
+/**
+ * The loader's own sign-in bounce (not requireSession, whose bounce drops the query): the
+ * `next` path carries the code, so a person landing here from a mailed/printed link signs in
+ * and returns to the resolved request.
+ */
+export async function loader({ request }: LoaderFunctionArgs) {
+  const code = (new URL(request.url).searchParams.get("code") ?? "").trim();
   const actor = actorFromSession(await getAuth().api.getSession({ headers: request.headers }));
-  if (!actor) {
-    return redirect(`/login?next=${encodeURIComponent(`/verify/${userCode}`)}`);
+  if (actor === null) {
+    const next = `/verify${code === "" ? "" : `?code=${encodeURIComponent(code)}`}`;
+    throw redirect(`/login?next=${encodeURIComponent(next)}`);
+  }
+  const pending = code === "" ? null : await pendingDeviceAuth(code);
+  return { code, pending };
+}
+
+const REQUEST_GONE =
+  "That request expired or was already handled — nothing was approved. Ask the device to start again.";
+
+export async function action({ request }: ActionFunctionArgs) {
+  // A POST has no query to preserve — the plain guard's /login bounce is right here.
+  const actor = actorFromSession(await requireSession(request));
+  if (actor === null) {
+    notFound();
   }
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");
-
-  if (intent === "approve-enroll") {
-    return redirect(outcomeUrl(userCode, await approveEnroll(userCode, actor.email)));
+  const userCode = String(form.get("code") ?? "").trim();
+  if (userCode === "" || (intent !== "approve" && intent !== "deny")) {
+    throw data(null, { status: 400 });
   }
-  if (intent === "approve-standup") {
-    const name = String(form.get("display_name") ?? "").trim();
-    return redirect(
-      outcomeUrl(
-        userCode,
-        await approveStandup(userCode, actor.email, name === "" ? undefined : name),
-      ),
+  // The single-tenant resolve: the one workspace scopes the ceremony's audit row.
+  const workspace = await theWorkspace();
+  if (workspace === null) {
+    notFound();
+  }
+
+  if (intent === "approve") {
+    const stepUp = await requireStepUp(request, form);
+    if (!stepUp.ok) {
+      return data({ kind: "refused" as const, error: stepUp.error }, { status: 400 });
+    }
+    const approved = await approveDeviceAuth(
+      userCode,
+      { userId: actor.userId, display: actor.display },
+      workspace.id,
     );
-  }
-  throw data(null, { status: 400 });
-}
-
-function outcomeUrl(userCode: string, outcome: VerifyOutcome): string {
-  return `/verify/${encodeURIComponent(userCode)}?outcome=${outcome}`;
-}
-
-/** Read the vault write's outcome envelope, tolerating a body that never parsed. */
-async function readOutcome(res: Response): Promise<{ outcome?: string; reason?: string }> {
-  try {
-    return (await res.json()) as { outcome?: string; reason?: string };
-  } catch {
-    return {};
-  }
-}
-
-/** Approve an ENROLL session (join an existing workspace) as the signed-in email. */
-async function approveEnroll(userCode: string, actingEmail: string): Promise<VerifyOutcome> {
-  try {
-    const res = await vaultFetch({
-      method: "POST",
-      template: "/internal/v1/device-sessions/{user_code}/approve",
-      params: { user_code: userCode },
-      actingEmail,
-    });
-    const { outcome } = await readOutcome(res);
-    if (outcome === "confirmed") return "approved";
-    if (outcome === "not_found") return "miss";
-    return "error";
-  } catch {
-    return "error";
-  }
-}
-
-/**
- * Approve a STANDUP session — creates the workspace (named by the optional field; blank takes the
- * vault default) and seats the signed-in email as its first owner in the directory. A same-email
- * re-click (`already_approved`) renders the SAME success — idempotent UX; the per-owner cap
- * denial renders the honest limit state.
- */
-async function approveStandup(
-  userCode: string,
-  actingEmail: string,
-  name: string | undefined,
-): Promise<VerifyOutcome> {
-  try {
-    const res = await vaultFetch({
-      method: "POST",
-      template: "/internal/v1/device-sessions/{user_code}/approve-standup",
-      params: { user_code: userCode },
-      actingEmail,
-      body: name === undefined ? {} : { display_name: name },
-    });
-    const { outcome, reason } = await readOutcome(res);
-    if (outcome === "approved" || outcome === "already_approved") return "approved";
-    if (outcome === "denied") return reason === CAP_REASON ? "limit" : "error";
-    if (outcome === "not_found") return "miss";
-    return "error";
-  } catch {
-    return "error";
-  }
-}
-
-// ── The loader: what to render ────────────────────────────────────────────────────────────────
-
-export async function loader({ request, params }: LoaderFunctionArgs) {
-  const userCode = params.userCode ?? "";
-  const outcome = new URL(request.url).searchParams.get("outcome");
-
-  // The post-approve display states — a redirect lands here with `outcome`, no context read
-  // needed. Display only.
-  if (outcome === "approved") {
-    return { state: "approved" as const };
-  }
-  if (outcome === "limit") {
-    return { state: "limit" as const };
-  }
-  // `error` and `miss` fall through: the context read below re-renders the live affordance (so
-  // "try again" is real), or answers 404 for a session that died in the meantime.
-
-  // The session and the context are independent reads — start the session alongside the context
-  // read instead of after it. The detached catch keeps an early context-path return from leaving
-  // an unhandled rejection behind; awaiting below still surfaces a real session-read failure.
-  const sessionPromise = getAuth().api.getSession({ headers: request.headers });
-  void sessionPromise.catch(() => {});
-  const result = await getVerificationContext(userCode);
-
-  if (!result.ok) {
-    if (result.kind === "not_found") {
-      return { state: "not_found" as const };
+    if (approved === null) {
+      return data({ kind: "refused" as const, error: REQUEST_GONE }, { status: 400 });
     }
-    if (result.kind === "rate_limited") {
-      return { state: "rate_limited" as const };
-    }
-    return { state: "unreachable" as const };
-  }
-  if (outcome === "miss") {
-    // A live session, but the approve missed (a different email got there first, or a race).
-    return { state: "miss" as const };
+    return { kind: "approved" as const, name: approved.requestedName };
   }
 
-  const banner = outcome === "error";
-  const actor = actorFromSession(await sessionPromise);
-  if (!actor) {
-    // Signed out (or unverified): the full disclosure + the sign-in gate.
-    return { state: "signed_out" as const, userCode, banner, context: result.data };
-  }
-  if (result.data.intent === "login") {
-    return {
-      state: "login" as const,
-      userCode,
-      banner,
-      context: result.data,
-      sessionEmail: actor.email,
-    };
-  }
-  if (result.data.intent === "standup") {
-    const localpart = actor.email.split("@")[0] ?? actor.email;
-    return {
-      state: "standup" as const,
-      userCode,
-      banner,
-      context: result.data,
-      sessionEmail: actor.email,
-      defaultName: `${localpart}'s workspace`,
-    };
-  }
-  return {
-    state: "enroll" as const,
+  const denied = await denyDeviceAuth(
     userCode,
-    banner,
-    context: result.data,
-    sessionEmail: actor.email,
-  };
+    { userId: actor.userId, display: actor.display },
+    workspace.id,
+  );
+  if (!denied) {
+    return data({ kind: "refused" as const, error: REQUEST_GONE }, { status: 400 });
+  }
+  return { kind: "denied" as const };
 }
 
-// ── The page ──────────────────────────────────────────────────────────────────────────────────
+const INPUT =
+  "block h-11 w-full rounded-md border border-line px-3 text-sm text-ink placeholder:text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25";
 
 export default function VerifyPage() {
-  const view = useLoaderData<typeof loader>();
+  const { code, pending } = useLoaderData<typeof loader>();
+  const actionData = useActionData<typeof action>();
+
+  if (actionData?.kind === "approved") {
+    return (
+      <Shell>
+        <PlainState heading="Device connected">
+          {actionData.name} is connected — you can close this tab; the device picks the approval up
+          on its next poll.
+        </PlainState>
+      </Shell>
+    );
+  }
+  if (actionData?.kind === "denied") {
+    return (
+      <Shell>
+        <PlainState heading="Request denied">
+          Nothing was connected — the device is told on its next poll.
+        </PlainState>
+      </Shell>
+    );
+  }
+
   return (
-    <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-4 py-10">
-      <div className="rounded-lg border border-line-soft bg-panel p-6 shadow-sm sm:p-8">
-        <VerifyBody view={view} />
+    <Shell>
+      <div className="flex flex-col gap-6">
+        <div className="flex flex-col gap-2 text-center">
+          <p className="font-medium text-faint text-xs uppercase tracking-wide">Device approval</p>
+          <h1 className="font-display font-semibold text-ink text-lg tracking-[-0.02em]">
+            Approve a device
+          </h1>
+          <p className="text-dim text-sm">
+            Enter the code your device shows — it looks like{" "}
+            <code className="font-mono text-ink">AB29-CD34</code>.
+          </p>
+        </div>
+        {actionData?.kind === "refused" && (
+          <p className="text-center text-red-600 text-sm" role="alert">
+            {actionData.error}
+          </p>
+        )}
+        <CodeLookup code={code} />
+        {pending !== null ? (
+          <PendingRequest code={code} requestedName={pending.requestedName} />
+        ) : (
+          code !== "" && (
+            <p className="text-center text-dim text-sm" role="status">
+              No pending request for this code — it may have expired, or a character is off. Check
+              your terminal and try again.
+            </p>
+          )
+        )}
       </div>
-    </main>
+    </Shell>
   );
 }
 
-function VerifyBody({ view }: { view: Awaited<ReturnType<typeof loader>> }) {
-  switch (view.state) {
-    case "approved":
-      return (
-        <PlainState heading="Approved">
-          Return to your terminal — your agent finishes from here (it may already have).
-        </PlainState>
-      );
-    case "limit":
-      return (
-        <PlainState heading="You already own 3 workspaces">
-          The vault declined: workspace creation limit reached. Nothing was created — use one of
-          your existing workspaces, or contact us.
-        </PlainState>
-      );
-    case "not_found":
-      return (
-        <PlainState heading="This code isn’t active">
-          Codes expire after a few minutes — start again from your device.
-        </PlainState>
-      );
-    case "rate_limited":
-      return (
-        <PlainState heading="Too many attempts">Wait a minute and reload this page.</PlainState>
-      );
-    case "unreachable":
-      return (
-        <PlainState heading="Verification is unavailable right now">
-          The vault couldn’t be reached. Nothing was confirmed — reload this page in a moment.
-        </PlainState>
-      );
-    case "miss":
-      return (
-        <PlainState heading="This approval didn’t match">
-          The session couldn’t be approved by this account. If this device isn’t yours, ignore this
-          page — nothing happens.
-        </PlainState>
-      );
-    case "signed_out":
-      return (
-        <div className="flex flex-col gap-6">
-          <Banner show={view.banner} />
-          <VerifyCard context={view.context} />
-          <Link
-            to={`/login?next=${encodeURIComponent(`/verify/${view.userCode}`)}`}
-            className={`${buttonClasses("primary")} min-h-11 w-full`}
-          >
-            Sign in to continue
-          </Link>
-        </div>
-      );
-    case "standup":
-      return (
-        <div className="flex flex-col gap-6">
-          <Banner show={view.banner} />
-          <ApproveStandupCard
-            userCode={view.userCode}
-            context={view.context}
-            sessionEmail={view.sessionEmail}
-            defaultName={view.defaultName}
-          />
-        </div>
-      );
-    case "login":
-      return (
-        <div className="flex flex-col gap-6">
-          <Banner show={view.banner} />
-          <ApproveLoginCard
-            userCode={view.userCode}
-            context={view.context}
-            sessionEmail={view.sessionEmail}
-          />
-        </div>
-      );
-    case "enroll":
-      return (
-        <div className="flex flex-col gap-6">
-          <Banner show={view.banner} />
-          <ApproveEnrollCard
-            userCode={view.userCode}
-            context={view.context}
-            sessionEmail={view.sessionEmail}
-          />
-        </div>
-      );
-  }
+/** The code form, a GET: submitting re-resolves the pending request server-side. */
+function CodeLookup({ code }: { code: string }) {
+  return (
+    <Form method="get" className="flex items-end gap-2">
+      <label className="block flex-1">
+        <span className="mb-1 block font-medium text-dim text-sm">Code</span>
+        <input
+          type="text"
+          name="code"
+          defaultValue={code}
+          required
+          autoComplete="off"
+          spellCheck={false}
+          className={`${INPUT} font-mono uppercase`}
+          placeholder="AB29-CD34"
+        />
+      </label>
+      <button type="submit" className={`${buttonClasses("quiet")} min-h-11`}>
+        Look up
+      </button>
+    </Form>
+  );
 }
 
-/** The retryable-error alert — rendered ABOVE the live affordance, never instead of it. */
-function Banner({ show }: { show: boolean }) {
-  if (!show) {
-    return null;
-  }
+/**
+ * The resolved request: what is asking, then the two arms. The approve form posts the RESOLVED
+ * code as a hidden field — the approval applies to exactly the request shown, never to whatever
+ * the lookup input holds at submit time.
+ */
+function PendingRequest({ code, requestedName }: { code: string; requestedName: string }) {
+  const navigation = useNavigation();
+  const submitting = navigation.state !== "idle";
   return (
-    <p className="text-center text-red-600 text-sm" role="alert">
-      That didn’t go through — the vault couldn’t complete the approval. Nothing was confirmed. Try
-      again below.
-    </p>
+    <div className="flex flex-col gap-4 rounded-md border border-line-soft bg-ground p-4">
+      <p className="text-ink text-sm">
+        Device <span className="font-medium">“{requestedName}”</span> wants to act as you. It gets a
+        credential that publishes, follows, and reads with your seat until you sign it out.
+      </p>
+      <Form method="post" className="flex flex-col gap-3">
+        <input type="hidden" name="intent" value="approve" />
+        <input type="hidden" name="code" value={code} />
+        <StepUpFields idPrefix="verify" />
+        <button
+          type="submit"
+          disabled={submitting}
+          className={`${buttonClasses("primary")} min-h-11 w-full`}
+        >
+          {submitting ? "Working…" : `Approve “${requestedName}”`}
+        </button>
+      </Form>
+      <Form method="post">
+        <input type="hidden" name="intent" value="deny" />
+        <input type="hidden" name="code" value={code} />
+        <button
+          type="submit"
+          disabled={submitting}
+          className={`${buttonClasses("danger")} min-h-11 w-full`}
+        >
+          Deny — this isn’t my device
+        </button>
+      </Form>
+    </div>
   );
 }
 
 function PlainState({ heading, children }: { heading: string; children: ReactNode }) {
   return (
     <div className="flex flex-col items-center gap-2 text-center">
-      <p className="font-medium text-xs text-faint uppercase tracking-wide">Device verification</p>
-      <h1 className="font-display font-semibold text-lg tracking-[-0.02em] text-ink">{heading}</h1>
-      <p className="text-sm text-dim">{children}</p>
+      <p className="font-medium text-faint text-xs uppercase tracking-wide">Device approval</p>
+      <h1 className="font-display font-semibold text-ink text-lg tracking-[-0.02em]">{heading}</h1>
+      <p className="text-dim text-sm">{children}</p>
     </div>
+  );
+}
+
+function Shell({ children }: { children: ReactNode }) {
+  return (
+    <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-4 py-10">
+      <div className="rounded-lg border border-line-soft bg-panel p-6 shadow-sm sm:p-8">
+        {children}
+      </div>
+    </main>
   );
 }

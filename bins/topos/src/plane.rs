@@ -15,7 +15,7 @@ use topos_types::requests::{
     ProposeRequest, PublishRequest, RevertRequest, ReviewRequest, WireChannelIndex, WireMe,
     WireNotice, WireProposalIndex, WireProtocolCard, WireReach, WireSkillIndex, WireSkillLog,
 };
-use topos_types::{Generation, Receipt, TerminalOutcome, WireCurrentRecord, WireError};
+use topos_types::{Receipt, TerminalOutcome, WireCurrentRecord, WireError};
 
 use crate::error::ClientError;
 
@@ -73,12 +73,12 @@ pub(crate) enum PlaneError {
 
 /// What the client already holds as `current` — the conditional-GET validator. The source returns
 /// [`PointerFetch::NotModified`] ONLY when its current matches BOTH the generation AND the commit, so a
-/// record that reuses the same `(epoch,seq)` for a DIFFERENT `version_id` is always returned (and applied
+/// record that reuses the same generation for a DIFFERENT `version_id` is always returned (and applied
 /// as the new target) rather than hidden behind a generation-only 304. (The HTTP ETag is therefore
-/// commit-sensitive, not just `<epoch>.<seq>`.)
+/// commit-sensitive, not just `"<generation>"`.)
 #[derive(Clone, Copy)]
 pub(crate) struct KnownCurrent {
-    pub generation: Generation,
+    pub generation: u64,
     pub version_id: [u8; 32],
 }
 
@@ -174,7 +174,7 @@ pub(crate) struct DeliverySkill {
     pub review_required: bool,
     /// The pinned current version (the sync target — the engine re-verifies bytes by digest).
     pub version_id: [u8; 32],
-    pub generation: Generation,
+    pub generation: u64,
     /// The `current` byte-exact consent hash — what a follow describe DISCLOSES per install (the
     /// engine still re-derives it from the fetched bytes; this copy is disclosure, not trust).
     pub bundle_digest: [u8; 32],
@@ -408,316 +408,124 @@ pub(crate) trait DirectorySource {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The enrollment seam — the device-flow CLIENT's read/write side, behind a port so the `follow`
-// tests run against a fake WITHOUT HTTP. Creds-free (it holds no read token): the device code + the
-// grant are the only secrets it carries, and they are redacted from every `Debug`. The real impl is
-// `crate::plane_http::UreqDeviceClient`; the fake lives in the follow tests.
+// The enrollment seam — the gh-style device-flow client, behind a port so the `follow`/`auth login`
+// tests run against a fake WITHOUT HTTP. The device code (and, once granted, the device credential)
+// are the only secrets it carries; both are redacted from every `Debug`. The real impl is
+// `crate::plane_http::UreqDeviceClient`; the fakes live in the in-crate tests.
 // ---------------------------------------------------------------------------------------------
 
-/// The RFC-8628 device-authorization grant from `device/authorize`.
+/// The device-authorization grant from `POST /v1/device/authorize` (RFC-8628-shaped names).
 #[derive(Clone)]
-pub(crate) struct DeviceAuthorize {
-    /// **SECRET** — the device code the client polls with. Redacted in `Debug`, never logged / in a URL.
+pub(crate) struct DeviceAuthStart {
+    /// **SECRET** — the device code the client polls with (promoted server-side to the device's ONE
+    /// bearer credential on approval). Redacted in `Debug`, never logged / in a URL.
     pub device_code: String,
-    /// The short user code (also the `device_auth_id` the enroll flow presents).
+    /// The short human-facing code the approval page displays (a cross-check, never typed as a secret).
     pub user_code: String,
-    /// The verification URL a human visits to approve the session.
-    pub verification_uri: String,
-    /// The verification URL with the code already embedded (RFC-8628 `verification_uri_complete`) — the
-    /// SERVER-built link, used verbatim when present (the client-side reconstruction is only the fallback
-    /// for an older plane that omits it).
-    pub verification_uri_complete: Option<String>,
-    /// The session lifetime, in seconds.
-    pub expires_in: u64,
+    /// The approval URL with the user code already embedded — used VERBATIM.
+    pub verification_uri_complete: String,
+    /// The flow lifetime, in seconds.
+    pub expires_in_secs: u64,
     /// The minimum poll interval, in seconds.
-    pub interval: u64,
+    pub interval_secs: u64,
 }
 
-impl std::fmt::Debug for DeviceAuthorize {
+impl std::fmt::Debug for DeviceAuthStart {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DeviceAuthorize")
+        f.debug_struct("DeviceAuthStart")
             .field("device_code", &"<redacted>")
             .field("user_code", &self.user_code)
-            .field("verification_uri", &self.verification_uri)
             .field("verification_uri_complete", &self.verification_uri_complete)
-            .field("expires_in", &self.expires_in)
-            .field("interval", &self.interval)
+            .field("expires_in_secs", &self.expires_in_secs)
+            .field("interval_secs", &self.interval_secs)
             .finish()
     }
 }
 
-/// A STANDUP device-authorization start: the RFC-8628 grant PLUS the plane block a standup device has no
-/// `/i/` bootstrap to learn — the base URL / posture / enrollment method.
+/// The workspace context a granted poll carries — everything the client records about what it joined.
 #[derive(Debug, Clone)]
-pub(crate) struct StandupAuthorize {
-    pub auth: DeviceAuthorize,
-    /// The plane's self-description (its API base to dial, posture, enrollment method).
-    pub plane: topos_types::bootstrap::BootstrapPlane,
-}
-
-/// The opaque single-use enrollment grant (the redeem credential). **SECRET** — its `Debug` is redacted
-/// and it is never logged / placed in a URL / surfaced in an error.
-#[derive(Clone)]
-pub(crate) struct Grant(String);
-
-impl Grant {
-    pub(crate) fn new(value: String) -> Self {
-        Self(value)
-    }
-    /// The raw grant — used only to compute its `sha256` and to send it in the redeem body.
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for Grant {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Grant(<redacted>)")
-    }
-}
-
-/// The workspace context a granted poll carries — the id + display name a STANDUP client (which never read
-/// an `/i/` bootstrap) needs to build its redeem body and disclose what it joined. `None` on an
-/// older plane's response (the enroll flow already knows its workspace from the bootstrap).
-#[derive(Debug, Clone)]
-pub(crate) struct GrantedWorkspace {
+pub(crate) struct EnrolledWorkspace {
+    /// The workspace id (the `{ws}` path segment of every subsequent request).
     pub workspace_id: String,
-    pub display_name: String,
-    /// The workspace's full ADDRESS (server-built on the public link base) — the standup receipt's share
-    /// surface; `None` when the plane predates addresses or the grant is workspace-less.
-    pub address: Option<String>,
-}
-
-/// A granted `device/token` poll: the opaque grant (redacted `Debug`) + the optional workspace context.
-#[derive(Debug, Clone)]
-pub(crate) struct GrantedToken {
-    pub grant: Grant,
-    pub workspace: Option<GrantedWorkspace>,
-}
-
-/// The outcome of a `device/token` poll (RFC-8628). NOT an error — every variant is a legitimate poll
-/// state. `Granted` carries the opaque grant (redacted `Debug`).
-#[derive(Debug, Clone)]
-pub(crate) enum TokenPoll {
-    /// Not yet confirmed — the human hasn't approved the session yet; re-invoke `follow` again later.
-    /// (Re-invoking `follow` re-polls on demand, so no in-process interval is carried.)
-    Pending,
-    /// Polled too fast — back off (treated as still-pending by the on-demand resume).
-    SlowDown,
-    /// Denied at the verification page.
-    Denied,
-    /// The session expired before confirmation.
-    Expired,
-    /// Confirmed — the grant (and, for a standup session, the workspace context) is present.
-    Granted(GrantedToken),
-}
-
-/// A successful redeem — the registered device key id + the ONE minted **workspace credential** (the Bearer
-/// secret this device presents on every read/write/governance request in the workspace). **NO user token,
-/// no per-skill token.** Hand-written `Debug` redacts the credential.
-#[derive(Clone)]
-pub(crate) struct Redeem {
-    pub workspace_id: String,
-    pub device_key_id: String,
-    /// The principal this device now acts as (the confirmed email, or a device-rooted id) — a disclosure
-    /// the client persists and prints so a hijacked standup is visible. `None` from an older plane.
-    pub principal: Option<String>,
-    /// **SECRET** — the plaintext workspace credential (returned once; redacted in `Debug`).
-    pub credential: String,
-}
-
-impl std::fmt::Debug for Redeem {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Redeem")
-            .field("workspace_id", &self.workspace_id)
-            .field("device_key_id", &self.device_key_id)
-            .field("principal", &self.principal)
-            .field("credential", &"<redacted>")
-            .finish()
-    }
-}
-
-/// What an unauthenticated `GET <address>` with `Accept: application/json` answered — the ONE
-/// machine bootstrap read. Every plane resource address serves the constant protocol card (no
-/// content, no existence signal — just enough to re-root onto the API); an `/i/` claim link serves
-/// its bootstrap instead.
-pub(crate) enum Card {
-    /// The constant protocol card — re-root onto `api_base_url` and speak `/v1`.
-    Protocol(WireProtocolCard),
-    /// The URL was an `/i/` claim link — its bootstrap (the admin-claim door's input).
-    Claim(Box<topos_types::BootstrapData>),
-}
-
-/// One workspace seat a LOGIN redeem re-minted (or could not re-mint) a credential for — the client
-/// mirror of the wire `LoginMembership`. Hand-written `Debug` redacts the credential.
-#[derive(Clone)]
-pub(crate) struct LoginSeat {
-    pub workspace_id: String,
-    /// The workspace's ADDRESS name.
+    /// The workspace's ADDRESS slug (what the human typed at `follow`).
     pub name: String,
+    /// The workspace's display name.
     pub display_name: String,
-    /// The person's role on the seat (`owner` / `reviewer` / `member`).
-    pub role: String,
-    /// The device's non-secret key id in this workspace (server-derived).
-    pub device_key_id: String,
-    /// **SECRET** — the freshly minted workspace credential; `None` when the mint was refused.
-    pub credential: Option<String>,
-    /// Why no credential was minted (e.g. this device is revoked there); `None` on success.
-    pub blocked: Option<String>,
 }
 
-impl std::fmt::Debug for LoginSeat {
+/// A GRANTED device-authorization poll: the device's ONE bearer credential (the promoted device code),
+/// the registered device's id, and the joined workspace. Hand-written `Debug` redacts the credential.
+#[derive(Clone)]
+pub(crate) struct EnrolledGrant {
+    /// **SECRET** — the device's plaintext bearer credential (returned by the poll; stored `0600`).
+    pub credential: String,
+    /// The registered device's id (the non-secret handle a self-revoke names).
+    pub device_id: String,
+    /// The joined workspace.
+    pub workspace: EnrolledWorkspace,
+}
+
+impl std::fmt::Debug for EnrolledGrant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LoginSeat")
-            .field("workspace_id", &self.workspace_id)
-            .field("name", &self.name)
-            .field("role", &self.role)
-            .field("device_key_id", &self.device_key_id)
-            .field(
-                "credential",
-                &self.credential.as_ref().map(|_| "<redacted>"),
-            )
-            .field("blocked", &self.blocked)
+        f.debug_struct("EnrolledGrant")
+            .field("credential", &"<redacted>")
+            .field("device_id", &self.device_id)
+            .field("workspace", &self.workspace)
             .finish()
     }
 }
 
-/// A successful login redeem: the proven principal + one entry per confirmed seat.
+/// The outcome of a `POST /v1/device/token` poll. NOT an error — every variant is a legitimate poll
+/// state; only a transport/parse fault is an `Err`. A re-poll of an approved flow returns the same
+/// granted answer, so a crash between the grant and the sidecar writes recovers by re-polling.
 #[derive(Debug, Clone)]
-pub(crate) struct LoginRedeem {
-    pub principal: String,
-    pub seats: Vec<LoginSeat>,
+pub(crate) enum DeviceAuthPoll {
+    /// Not yet approved — keep polling at the interval (re-invoking the verb re-polls on demand).
+    Pending,
+    /// Denied at the approval page.
+    Denied,
+    /// The flow expired before approval.
+    Expired,
+    /// Approved — the credential, device id, and workspace are present.
+    Granted(EnrolledGrant),
 }
 
-/// The creds-free enrollment transport (device-flow). The follow op drives it: read the bootstrap,
-/// start a device-authorization, POLL for the grant (the agent only ever polls — never a user token), and
-/// redeem the grant into the workspace credential. The real impl is `UreqDeviceClient`; the fake is the
-/// follow tests'.
-///
-/// The CARD read and the LOGIN pair carry default erroring bodies: they are optional facets a
-/// transport (or a test fake that never exercises them) need not serve; the production
-/// `UreqDeviceClient` overrides all three.
+/// The enrollment transport (the gh-style device flow the app serves). `follow <address>` and
+/// `auth login` drive it: read the constant protocol card, start a device authorization toward a
+/// workspace ADDRESS, and poll for the outcome — the granted poll carries the device's ONE bearer
+/// credential (no separate redeem round-trip exists). The real impl is
+/// [`crate::plane_http::UreqDeviceClient`]; the fakes live in the in-crate tests.
 pub(crate) trait EnrollSource {
     /// `GET <url>` with `Accept: application/json` — the unauthenticated CARD read of any resource
-    /// address: the constant protocol card (re-root onto its `api_base_url`), or a claim link's
-    /// bootstrap. The URL is the user's pasted address (never a secret, unlike an `/i/` token —
-    /// which the caller routes to [`fetch_bootstrap`](Self::fetch_bootstrap) instead).
+    /// address: the constant protocol card (re-root onto its `api_base_url`). Identical at every
+    /// path — no content, no existence signal.
     ///
     /// # Errors
     /// [`ClientError::Plane`] on a transport fault / non-2xx; [`ClientError::WireInvalid`] on a body
-    /// that is neither a protocol card nor a claim bootstrap.
-    fn fetch_card(&self, url: &str) -> Result<Card, ClientError> {
-        let _ = url;
-        Err(ClientError::Plane(
-            "this transport serves no protocol card".into(),
-        ))
-    }
+    /// that is not a protocol card.
+    fn fetch_card(&self, url: &str) -> Result<WireProtocolCard, ClientError>;
 
-    /// `POST /v1/device/authorize` with `intent = "login"` — begin a workspace-less LOGIN device
-    /// flow whose grant redeems at `POST /v1/login`.
+    /// `POST /v1/device/authorize` — begin a device-authorization toward the workspace named by its
+    /// ADDRESS slug (whether the name exists is never disclosed here — an unknown name runs the same
+    /// flow to the same uniform denial). `requested_name` is the human-readable device name shown on
+    /// the approval page (a confused-deputy aid, not authority).
     ///
     /// # Errors
     /// [`ClientError::Plane`] on a transport fault / non-OK status; [`ClientError::WireInvalid`] on a
     /// malformed body.
-    fn device_authorize_login(
-        &self,
-        device_public_key: [u8; 32],
-        machine_name: &str,
-    ) -> Result<DeviceAuthorize, ClientError> {
-        let _ = (device_public_key, machine_name);
-        Err(ClientError::Plane(
-            "this transport serves no login flow".into(),
-        ))
-    }
-
-    /// `POST /v1/login` — redeem a LOGIN grant into the proven principal + one freshly-minted
-    /// workspace credential per confirmed seat (a revoked device's seat comes back `blocked`
-    /// instead). The grant is the bearer credential; nothing is signed.
-    ///
-    /// # Errors
-    /// [`ClientError::Enrollment`] on a 200+refused login; [`ClientError::Plane`] on a transport
-    /// fault; [`ClientError::WireInvalid`] on a malformed body.
-    fn login_redeem(
-        &self,
-        grant: &str,
-        device_public_key: [u8; 32],
-    ) -> Result<LoginRedeem, ClientError> {
-        let _ = (grant, device_public_key);
-        Err(ClientError::Plane(
-            "this transport serves no login flow".into(),
-        ))
-    }
-
-    /// `GET /i/{token}` — the unauthenticated invite bootstrap (the workspace + the plane API base to dial).
-    ///
-    /// # Errors
-    /// [`ClientError::Plane`] for a dead/unknown invite (404) or a transport fault; [`ClientError::Corrupt`]
-    /// for a malformed body.
-    fn fetch_bootstrap(&self, token: &str) -> Result<topos_types::BootstrapData, ClientError>;
-
-    /// `POST /v1/device/authorize` with `intent = "enroll"` — begin a device-authorization to join the
-    /// workspace named by its ADDRESS (the `follow <address>` flow's start; whether the name exists is
-    /// never disclosed here — an unknown name runs the same flow to the same uniform denial).
-    ///
-    /// # Errors
-    /// [`ClientError::Plane`] on a transport fault / non-OK status; [`ClientError::Corrupt`] on a malformed body.
-    fn device_authorize(
+    fn device_auth_start(
         &self,
         workspace: &str,
-        device_public_key: [u8; 32],
-        machine_name: &str,
-    ) -> Result<DeviceAuthorize, ClientError>;
+        requested_name: &str,
+    ) -> Result<DeviceAuthStart, ClientError>;
 
-    /// `POST /v1/device/authorize` with `intent = "standup"` and NO invite token — begin the workspace
-    /// STANDUP device flow (hosted planes only). The response additionally carries the plane block (its API
-    /// base to dial), which a standup device has no `/i/` bootstrap to learn from.
-    ///
-    /// # Errors
-    /// [`ClientError::Plane`] on a transport fault / non-OK status (a plane that does not offer standup is
-    /// a 404); [`ClientError::WireInvalid`] on a malformed body or a response missing the plane block.
-    fn device_authorize_standup(
-        &self,
-        device_public_key: [u8; 32],
-        machine_name: &str,
-    ) -> Result<StandupAuthorize, ClientError>;
-
-    /// `POST /v1/device/token` — one poll of the session. The poll STATE (pending/slow_down/denied/expired/
+    /// `POST /v1/device/token` — one poll of the flow. The poll STATE (pending / denied / expired /
     /// granted) is the `Ok` value; only a transport/parse fault is an `Err`.
     ///
     /// # Errors
-    /// [`ClientError::Plane`] on a transport fault; [`ClientError::Corrupt`] on a malformed body.
-    fn poll_token(&self, device_code: &str) -> Result<TokenPoll, ClientError>;
-
-    /// `POST /v1/workspaces/{ws}/devices` — redeem the grant into a registered device + its ONE workspace
-    /// credential. The grant is the bearer credential; the body's `device_public_key` registers this device
-    /// (the server checks it matches the grant's bound pubkey). Nothing is signed.
-    ///
-    /// # Errors
-    /// [`ClientError::Plane`] on a transport fault or a 200+DENIED redeem (e.g. a device-key mismatch);
-    /// [`ClientError::Corrupt`] on a malformed body.
-    fn redeem(
-        &self,
-        workspace_id: &str,
-        grant: &str,
-        device_public_key: [u8; 32],
-    ) -> Result<Redeem, ClientError>;
-
-    /// `POST /v1/admin-claim` — consume a one-time claim token to stand up the workspace + seat this device
-    /// as its first owner (the self-host bearer door). NOT device-signed on the wire; the body's public key
-    /// is the identity anchor, and the server's same-device replay of a consumed claim re-answers Redeemed
-    /// (lost-200 recovery), so a WAL retry POSTs this directly — never refetching the consumed `/i/` link.
-    /// `display_name` is disclosure-only (the seated name comes from the mint-time claim row).
-    ///
-    /// # Errors
-    /// [`ClientError::Enrollment`] on a 200+DENIED claim (consumed by another device / expired / the
-    /// workspace already exists); [`ClientError::Plane`] on a transport fault; [`ClientError::WireInvalid`]
-    /// on a malformed body.
-    fn admin_claim(
-        &self,
-        claim_token: &str,
-        device_public_key: [u8; 32],
-        display_name: &str,
-    ) -> Result<Redeem, ClientError>;
+    /// [`ClientError::Plane`] on a transport fault; [`ClientError::WireInvalid`] on a malformed body
+    /// (including a `granted` poll missing its credential / device / workspace).
+    fn device_auth_poll(&self, device_code: &str) -> Result<DeviceAuthPoll, ClientError>;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -857,12 +665,6 @@ pub(crate) trait CatalogSource {
     /// [`PlaneError::Unreachable`] / [`PlaneError::Unavailable`] on a transport / non-200 / missing-credential
     /// fault; [`PlaneError::Malformed`] on a corrupt body or an unsafe workspace-id path segment.
     fn fetch_catalog(&self, workspace_id: &str) -> Result<WireSkillIndex, PlaneError>;
-}
-
-/// Compare two wire generations with the epoch-dominant order (epoch first, then seq; the wire type
-/// derives no `Ord`).
-pub(crate) fn gen_cmp(a: Generation, b: Generation) -> core::cmp::Ordering {
-    (a.epoch, a.seq).cmp(&(b.epoch, b.seq))
 }
 
 // ---------------------------------------------------------------------------------------------

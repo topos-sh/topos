@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO tombstones (workspace_id, blob_id, reason, at) SELECT $1, UNNEST($2::bytea[]), $3, $4 ON CONFLICT (workspace_id, blob_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "ByteaArray",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2f062b5247a6b188fe91cc41f7fac39834939ec86b7b2d308840310a498fc281"
+}

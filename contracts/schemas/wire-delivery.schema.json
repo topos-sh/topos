@@ -66,26 +66,6 @@
     "proposals_awaiting"
   ],
   "$defs": {
-    "Generation": {
-      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
-      "type": "object",
-      "properties": {
-        "epoch": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "epoch",
-        "seq"
-      ]
-    },
     "WireDeliverySkill": {
       "description": "One skill THIS device should have, in the delivery answer: the catalog identity, the pinned `current`\nversion + its consent digest, the resolved protection posture, and the `via` attribution. **NO bytes** —\nafter reconciling the client fetches each version through the per-blob bundle read.",
       "type": "object",
@@ -103,8 +83,10 @@
           ]
         },
         "generation": {
-          "description": "The `current` pointer's `(epoch, seq)`.",
-          "$ref": "#/$defs/Generation"
+          "description": "The `current` pointer's generation.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
         },
         "kind": {
           "description": "The catalog's bundle kind — `\"skill\"` for everything that exists today. Display metadata\nonly: clients render it and never branch on it (an OPEN vocabulary, like `protection`).\nAdditive: an older producer that omits it is serving skills.",

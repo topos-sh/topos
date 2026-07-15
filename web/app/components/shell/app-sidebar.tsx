@@ -6,7 +6,6 @@ import {
   Layers,
   LogOut,
   MonitorSmartphone,
-  Plus,
   Settings,
   UserRound,
   Users,
@@ -29,7 +28,6 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
-  SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
@@ -42,7 +40,7 @@ import { fetchMemberships, membershipsQueryKey } from "@/lib/query/memberships";
  * shell route's loader already RESOLVED against the request's context (so no function crosses the
  * loader's serialization boundary, and null-href entries are already dropped), and whose `icon` is
  * a NAME resolved here through the icon map below. A downstream superset build appends its own
- * its own entries to this list; the shell renders whatever it's handed.
+ * entries to this list; the shell renders whatever it's handed.
  */
 export interface SidebarNavEntry {
   id: string;
@@ -65,22 +63,22 @@ const NAV_ICONS: Record<string, ElementType> = {
 };
 
 /**
- * The signed-in shell's rail — workspaces as channels, on shadcn's collapsible Sidebar. The
- * workspace list is a React Query the shell route's loader seeded into the cache (see providers.tsx),
- * so first paint has data (no loading flash); creating a workspace invalidates this same query and
- * the rail updates without a reload. `email`/`nav` are loader-derived, passed once as props — the
- * account menu renders the resolved nav registry, so a downstream build's appended entries
- * appear there with no shell change.
+ * The signed-in shell's rail — the workspace as a channel, on shadcn's collapsible Sidebar. The
+ * seat list is a React Query the shell route's loader seeded into the cache (see providers.tsx),
+ * so first paint has data (no loading flash); a membership change invalidates this same query and
+ * the rail updates without a reload. Every seat admits (there is no half-membership), and this
+ * OSS install serves ONE workspace — the rail carries no create action; a superset build appends
+ * its own. `display`/`nav` are loader-derived, passed once as props — the account menu renders
+ * the resolved nav registry, so a downstream build's appended entries appear there with no shell
+ * change.
  */
-export function AppSidebar({ email, nav }: { email: string; nav: readonly SidebarNavEntry[] }) {
+export function AppSidebar({ display, nav }: { display: string; nav: readonly SidebarNavEntry[] }) {
   const location = useLocation();
   const activeWorkspaceId = workspaceFromPath(location.pathname);
   const { data: memberships = [] } = useQuery({
     queryKey: membershipsQueryKey,
     queryFn: fetchMemberships,
   });
-  const channels = memberships.filter((m) => m.navigable);
-  const invited = memberships.filter((m) => !m.navigable);
 
   return (
     <Sidebar collapsible="icon">
@@ -99,7 +97,7 @@ export function AppSidebar({ email, nav }: { email: string; nav: readonly Sideba
         <SidebarGroup>
           <SidebarGroupLabel>Workspaces</SidebarGroupLabel>
           <SidebarMenu>
-            {channels.map((m) => {
+            {memberships.map((m) => {
               const active = m.id === activeWorkspaceId;
               return (
                 <SidebarMenuItem key={m.id}>
@@ -117,37 +115,8 @@ export function AppSidebar({ email, nav }: { email: string; nav: readonly Sideba
                 </SidebarMenuItem>
               );
             })}
-            <SidebarMenuItem>
-              <SidebarMenuButton asChild tooltip="New workspace">
-                <Link to="/workspaces/new">
-                  <Plus />
-                  <span className="group-data-[collapsible=icon]:hidden">New workspace</span>
-                </Link>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
           </SidebarMenu>
         </SidebarGroup>
-
-        {invited.length > 0 && (
-          <SidebarGroup>
-            <SidebarGroupLabel>Invited</SidebarGroupLabel>
-            <SidebarMenu>
-              {invited.map((m) => (
-                <SidebarMenuItem key={m.id}>
-                  {/* Not navigable — an invited seat can't be entered until a device enrolls. */}
-                  <SidebarMenuButton
-                    tooltip={`${m.displayName} — connect an agent to join`}
-                    className="cursor-default text-sidebar-foreground/60 hover:bg-transparent hover:text-sidebar-foreground/60"
-                  >
-                    <ChannelGlyph name={m.displayName} />
-                    <span className="group-data-[collapsible=icon]:hidden">{m.displayName}</span>
-                  </SidebarMenuButton>
-                  <SidebarMenuBadge>invited</SidebarMenuBadge>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarGroup>
-        )}
       </SidebarContent>
 
       <SidebarFooter>
@@ -157,17 +126,17 @@ export function AppSidebar({ email, nav }: { email: string; nav: readonly Sideba
               <DropdownMenuTrigger asChild>
                 <SidebarMenuButton
                   size="lg"
-                  tooltip={email}
+                  tooltip={display}
                   className="group-data-[collapsible=icon]:justify-center! data-[state=open]:bg-sidebar-accent"
                 >
                   <UserRound />
-                  <span className="truncate group-data-[collapsible=icon]:hidden">{email}</span>
+                  <span className="truncate group-data-[collapsible=icon]:hidden">{display}</span>
                   <ChevronsUpDown className="ml-auto group-data-[collapsible=icon]:hidden" />
                 </SidebarMenuButton>
               </DropdownMenuTrigger>
               <DropdownMenuContent side="top" align="start" className="min-w-56">
                 <DropdownMenuLabel className="truncate font-normal text-faint text-xs">
-                  {email}
+                  {display}
                 </DropdownMenuLabel>
                 {nav.length > 0 && <DropdownMenuSeparator />}
                 {nav.map((entry) => {
@@ -217,14 +186,9 @@ function ChannelGlyph({ name }: { name: string }) {
   );
 }
 
-/** The workspace id in a `/workspaces/{id}…` path, or null (the home / create routes). */
+/** The workspace id in a `/workspaces/{id}…` path, or null (the home route). */
 function workspaceFromPath(pathname: string): string | null {
-  const match = pathname.match(/^\/workspaces\/([^/]+)/);
-  const id = match?.[1];
-  if (!id || id === "new") {
-    return null;
-  }
-  return id;
+  return pathname.match(/^\/workspaces\/([^/]+)/)?.[1] ?? null;
 }
 
 /** The smallest honest sign-out: the Better Auth client call, then a hard move to /login. */

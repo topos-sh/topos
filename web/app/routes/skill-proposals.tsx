@@ -1,28 +1,25 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { redirect, useLoaderData } from "react-router";
-import { ProposalsSection, type ProposalsSectionData } from "@/components/skill/proposals-section";
+import { type ProposalListItem, ProposalsSection } from "@/components/skill/proposals-section";
 import { SkillHeader } from "@/components/skill/skill-header";
 import { SkillTabs } from "@/components/skill/skill-tabs";
 import { notFound, requireMember } from "@/lib/auth/guards.server";
-import { skillIndexRow } from "@/lib/db/queries.server";
+import { proposalsOf, skillIndexRow } from "@/lib/db/queries.server";
 import { resolveSkillName } from "@/lib/db/resolve.server";
-import { sessionProposals } from "@/lib/plane/reads.server";
 
 export function meta({ params }: { params: { skill?: string } }) {
   return [{ title: `${params.skill ?? "skill"} · proposals · Topos` }];
 }
 
 /**
- * The skill's Proposals tab — the "Awaiting review" queue as its own shareable route (a sibling of
- * Current and History; each `…/proposals/{versionId}` review page is a MEMBER of this collection).
- * Same guard-then-probe order as every skill page: requireMember before any data, then the DB
- * catalog probe as the uniform 404 (an unknown NAME). A name that has never published carries no
- * `current` base, so it can hold no open proposals — the queue renders its honest empty state.
+ * The skill's Proposals tab — the review queue as its own shareable route (a sibling of Current
+ * and History; each `…/proposals/{versionId}` review page is a MEMBER of this collection). Same
+ * guard-then-probe order as every skill page: requireMember before any data, then the DB catalog
+ * probe as the uniform 404 (an unknown NAME).
  *
- * The list is read HERE on the member-session lane and handed to ProposalsSection as plain data.
- * The vault lists only open proposals ON the current base, so the tab badge (the DB count) and this
- * list agree by construction; the current generation feeds only the per-row "current moved"
- * comparison — no epoch or seq is ever rendered.
+ * Proposals are the app's OWN rows now — one read, no vault call: the open ones first (the
+ * queue), then the resolved record (who decided, and why on a reject). The tab badge (the DB
+ * count) and the open list agree by construction — they read the same table.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const ws = params.ws as string;
@@ -38,19 +35,17 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     notFound();
   }
 
-  let proposals: ProposalsSectionData;
-  if (row.versionId === null || row.epoch === null || row.seq === null) {
-    proposals = { published: false };
-  } else {
-    const result = await sessionProposals(actor.email, ws, row.skillId);
-    proposals = {
-      published: true,
-      currentGeneration: { epoch: row.epoch, seq: row.seq },
-      result: result.ok
-        ? { ok: true, proposals: result.data.proposals }
-        : { ok: false, message: result.message },
-    };
-  }
+  const rows = await proposalsOf(actor, row.skillId);
+  const proposals: ProposalListItem[] = rows.map((p) => ({
+    id: p.id,
+    candidateVersionId: p.candidateVersionId,
+    status: p.status as ProposalListItem["status"],
+    proposedByDisplay: p.proposedByDisplay,
+    createdAt: p.createdAt.toISOString(),
+    resolvedByDisplay: p.resolvedByDisplay,
+    resolvedAt: p.resolvedAt !== null ? p.resolvedAt.toISOString() : null,
+    resolvedReason: p.resolvedReason,
+  }));
 
   return {
     ws,
@@ -80,7 +75,7 @@ export default function SkillProposalsPage() {
         active="proposals"
         openProposals={openProposals}
       />
-      <ProposalsSection ws={ws} skill={skill} data={proposals} />
+      <ProposalsSection ws={ws} skill={skill} proposals={proposals} />
     </div>
   );
 }

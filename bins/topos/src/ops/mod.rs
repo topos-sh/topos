@@ -61,9 +61,7 @@ pub(crate) use unfollow::{UnfollowApplied, UnfollowDescribe};
 #[cfg(test)]
 pub(crate) use list::{FollowNote, ListEnrollment};
 pub(crate) use log::{LogConnectors, log};
-pub(crate) use publish::{
-    PublishDescribeConnectors, PublishOutcome, StandupConnectors, publish, publish_describe,
-};
+pub(crate) use publish::{PublishDescribeConnectors, PublishOutcome, publish, publish_describe};
 // The auto-add pre-step is driven internally by `publish`; the re-export exists only for its unit tests.
 pub(crate) use protect::{ProtectConnectors, ProtectOutcome, protect};
 #[cfg(test)]

@@ -10,9 +10,7 @@ use jsonschema::Validator;
 use schemars::schema_for;
 use serde_json::{Value, json};
 use topos_types::requests::{WireDelivery, WireDeliverySkill, WireNotice, WireVia};
-use topos_types::{
-    CurrentRecord, Generation, PointerScope, Receipt, TerminalOutcome, WireCurrentRecord,
-};
+use topos_types::{CurrentRecord, PointerScope, Receipt, TerminalOutcome, WireCurrentRecord};
 
 fn validator_for<T: schemars::JsonSchema>() -> Validator {
     let schema = serde_json::to_value(schema_for!(T)).expect("schema serializes");
@@ -28,7 +26,7 @@ fn good_pointer() -> WireCurrentRecord {
         },
         record: CurrentRecord {
             version_id: "a".repeat(64),
-            generation: Generation { epoch: 1, seq: 1 },
+            generation: 1,
         },
     }
 }
@@ -77,7 +75,7 @@ fn good_delivery() -> WireDelivery {
             protection: "open".into(),
             version_id: "a".repeat(64),
             bundle_digest: "b".repeat(64),
-            generation: Generation { epoch: 1, seq: 1 },
+            generation: 1,
             updated_at: 1,
             via: WireVia {
                 channels: vec!["everyone".into()],

@@ -1,16 +1,15 @@
 import type { ActionFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
-import { nowUtc, rowOpResponse } from "@/lib/api/row-envelopes.server";
+import { rowOpResponse } from "@/lib/api/row-envelopes.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
 import { requireDeviceActor } from "@/lib/auth/guards.server";
-import { deviceProtectChannel } from "@/lib/db/queries.device.server";
+import { laneProtectChannel } from "@/lib/db/queries.lane.server";
 
 /**
- * `PUT /api/v1/workspaces/{ws}/channels/{ch}/protection` — set a channel's mode (`curated` | `open`).
- * `{ch}` is the channel NAME. A JSON body `{ level }`. Same ordering as skill protection: malformed
- * body → 400 before auth; an invalid level → 400 after auth (with the channel-specific message). The
- * channel name goes straight to the guarded function — an unknown channel is the uniform 404.
- * Tightening to `curated` takes reviewer+; loosening to `open` takes owner.
+ * `PUT /api/v1/workspaces/{ws}/channels/{ch}/protection` — set a channel's mode (`curated` |
+ * `open`). `{ch}` is the channel NAME. A JSON body `{ level }`; malformed body → 400 before
+ * auth, invalid level → 400 unconditionally. An unknown channel is the uniform 404. Tightening
+ * to `curated` takes reviewer+; loosening to `open` takes owner.
  */
 const BODY_CAP = 64 * 1024;
 
@@ -41,14 +40,11 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   if (typeof parsed !== "object" || parsed === null || typeof level !== "string") {
     return badRequest("malformed protection body");
   }
-  // Level validation BEFORE auth — the vault's `parse_level` runs before the credential resolve, so
-  // a bad level is a 400 for everyone (never a 400-vs-404 membership signal to a non-member).
   if (level !== "open" && level !== "curated") {
     return badRequest("a channel protection level must be `curated` or `open`");
   }
   const actor = await requireDeviceActor(request, params.ws ?? "");
-  const { createdAt } = nowUtc();
-  const status = await deviceProtectChannel(actor, params.channel ?? "", level, createdAt);
+  const status = await laneProtectChannel(actor, params.channel ?? "", level);
   return rowOpResponse("protect", status, { set: "set" }, PROTECT_DENIED);
 }
 

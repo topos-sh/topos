@@ -43,10 +43,11 @@ pub(crate) enum Command {
     /// Follow a workspace, channel, or skill — enroll if needed, then subscribe two-phase (a bare
     /// invocation DESCRIBES what would land; `--yes` applies). Targets: a workspace address
     /// (`https://topos.sh/acme`, or a bare workspace name), a qualified path
-    /// (`acme/channels/eng`, `acme/skills/deploy`), a bare channel/skill name, or an `/i/` admin
-    /// CLAIM link. `follow <skill>` on a KNOWN followed skill places its disclosed first-receive
-    /// offer (or resumes a skill `unfollow` paused). While a device-flow enrollment is pending,
-    /// re-invoking `follow` RESUMES it.
+    /// (`acme/channels/eng`, `acme/skills/deploy`), or a bare channel/skill name. A first follow
+    /// enrolls this device: open the printed approval URL in a browser, check the code matches, and
+    /// approve — the device then holds ONE credential for everything your seats reach. `follow
+    /// <skill>` on a KNOWN followed skill places its disclosed first-receive offer (or resumes a
+    /// skill `unfollow` paused). While an enrollment is pending, re-invoking `follow` RESUMES it.
     Follow {
         /// The follow targets (addresses, qualified paths, or names). Omitted, it resumes a
         /// pending enrollment.
@@ -194,8 +195,8 @@ pub(crate) enum Command {
     // ---- Team-scoped ----
     /// Ship a draft to the team, ADDING the skill to topos first if it isn't tracked yet. `publish` moves
     /// `current` to your draft (or genesis-creates a never-published skill); `--propose` opens a PR without
-    /// moving `current`. Pin the bytes with an optional `@<digest>` suffix. Un-enrolled, a direct publish
-    /// STANDS UP a workspace on the hosted plane (a human signs in to approve). Roster-gated.
+    /// moving `current`. Pin the bytes with an optional `@<digest>` suffix. Needs enrollment — un-enrolled,
+    /// it refuses with "run `topos follow <workspace-address>` first". Roster-gated.
     Publish {
         /// The skill to publish: a tracked NAME, an untracked `<skill>` / `<skill>@<harness>` to adopt from
         /// discovery, or a `<dir>` to adopt in place — optionally pinned as `<source>@<digest>`.
@@ -213,10 +214,6 @@ pub(crate) enum Command {
         /// Apply without the describe step. Parses today; the two-phase describe lands later.
         #[arg(long)]
         yes: bool,
-        /// Block until the browser sign-in settles, then auto-create the workspace and publish in ONE
-        /// command (the un-enrolled standup path). Put `--wait` AFTER the positional target.
-        #[arg(long, value_name = "SECONDS", num_args = 0..=1)]
-        wait: Option<Option<u64>>,
     },
     /// Resolve a proposal (the `gh pr review` model). `--approve` moves `current` to the candidate (a
     /// compare-and-set on its base; a stale base re-dos); `--reject` declines a proposal (reviewer,
@@ -322,30 +319,30 @@ pub(crate) enum Command {
 /// The `auth` sign-in subcommands.
 #[derive(Debug, Subcommand)]
 pub(crate) enum AuthCmd {
-    /// Sign in to a plane (device flow): prove who you are in the browser, and every workspace
-    /// where you hold a confirmed seat re-mints this device's credential. An optional `<server>`
-    /// names the server (default https://topos.sh; TOPOS_PLANE_URL overrides).
+    /// Re-enroll this machine (the same browser-approval device flow `follow` runs, minus a follow
+    /// target): approve in the browser and this device's ONE credential is re-minted — it covers
+    /// every workspace your seats reach. On an already-enrolled install the new credential REPLACES
+    /// the stored one. An optional `<server>` names the server (default https://topos.sh;
+    /// TOPOS_PLANE_URL overrides). A never-enrolled install joins with `topos follow
+    /// <workspace-address>` instead.
     Login {
         /// The server URL to sign in to (optional; the enrolled plane, else the hosted default).
         #[arg(value_name = "SERVER_URL")]
         server_url: Option<String>,
-        /// Replace a DIFFERENT signed-in account's credentials wholesale (refused without it).
-        #[arg(long)]
-        yes: bool,
-        /// Block until the browser sign-in settles in ONE command. Bare `--wait` waits until the
+        /// Block until the browser approval settles in ONE command. Bare `--wait` waits until the
         /// code expires; `--wait <seconds>` caps the wait.
         #[arg(long, value_name = "SECONDS", num_args = 0..=1)]
         wait: Option<Option<u64>>,
     },
     /// Sign out of this install: revoke this device in each workspace (best-effort), delete the
-    /// stored credentials — skills, follows, and drafts stay. Two-phase (bare describes; `--yes`
+    /// stored credential — skills, follows, and drafts stay. Two-phase (bare describes; `--yes`
     /// applies).
     Logout {
         /// Apply the described sign-out.
         #[arg(long)]
         yes: bool,
     },
-    /// Show who you are, per-workspace credential health, hook health, and reporting posture.
+    /// Show who you are, per-workspace access health, hook health, and reporting posture.
     /// Side-effect-free.
     Status,
 }
@@ -486,23 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn wait_flag_is_an_optional_valued_flag_on_publish_and_follow() {
-        let bare = Cli::try_parse_from(["topos", "publish", "docs", "--wait"]).unwrap();
-        assert!(matches!(
-            bare.command,
-            Command::Publish {
-                wait: Some(None),
-                ..
-            }
-        ));
-        let valued = Cli::try_parse_from(["topos", "publish", "docs", "--wait", "300"]).unwrap();
-        assert!(matches!(
-            valued.command,
-            Command::Publish {
-                wait: Some(Some(300)),
-                ..
-            }
-        ));
+    fn wait_flag_is_an_optional_valued_flag_on_follow_and_gone_from_publish() {
         let follow_bare = Cli::try_parse_from(["topos", "follow", "--wait"]).unwrap();
         assert!(matches!(
             follow_bare.command,
@@ -511,6 +492,18 @@ mod tests {
                 ..
             }
         ));
+        let follow_valued =
+            Cli::try_parse_from(["topos", "follow", "acme", "--wait", "300"]).unwrap();
+        assert!(matches!(
+            follow_valued.command,
+            Command::Follow {
+                wait: Some(Some(300)),
+                ..
+            }
+        ));
+        // `publish` has no pending flow any more (an un-enrolled publish refuses typed), so no --wait.
+        let removed = Cli::try_parse_from(["topos", "publish", "docs", "--wait"]).unwrap_err();
+        assert_eq!(removed.kind(), ErrorKind::UnknownArgument);
     }
 
     #[test]
@@ -534,19 +527,21 @@ mod tests {
     }
 
     #[test]
-    fn auth_login_takes_yes_and_wait_and_logout_takes_yes() {
-        let login =
-            Cli::try_parse_from(["topos", "auth", "login", "--yes", "--wait", "60"]).unwrap();
+    fn auth_login_takes_wait_and_logout_takes_yes() {
+        let login = Cli::try_parse_from(["topos", "auth", "login", "--wait", "60"]).unwrap();
         assert!(matches!(
             login.command,
             Command::Auth {
                 cmd: super::AuthCmd::Login {
-                    yes: true,
                     wait: Some(Some(60)),
                     ..
                 }
             }
         ));
+        // The account-switch `--yes` died with the per-account credential set (the identity is
+        // whoever approves in the browser; the one credential is replaced wholesale).
+        let removed = Cli::try_parse_from(["topos", "auth", "login", "--yes"]).unwrap_err();
+        assert_eq!(removed.kind(), ErrorKind::UnknownArgument);
         let logout = Cli::try_parse_from(["topos", "auth", "logout", "--yes"]).unwrap();
         assert!(matches!(
             logout.command,

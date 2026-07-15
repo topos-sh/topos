@@ -1213,7 +1213,6 @@ fn unfollow_of_a_tracked_but_never_followed_skill_is_a_clean_success() {
 #[test]
 fn list_discloses_enrollment_follow_state_and_hook() {
     use crate::enroll::{self, FollowEntry, FollowModeDoc, Instance, Membership, UserDoc};
-    use topos_types::bootstrap::{DeploymentMode, VerifiedDomainStatus};
 
     let src = editable_source();
     let root = src.0.join("pr-describe");
@@ -1234,8 +1233,6 @@ fn list_discloses_enrollment_follow_state_and_hook() {
         &Instance {
             schema_version: 1,
             base_url: "https://topos.example".to_owned(),
-            deployment_mode: DeploymentMode::SelfHost,
-            enrollment_method: "device_code".to_owned(),
         },
     )
     .unwrap();
@@ -1244,15 +1241,11 @@ fn list_discloses_enrollment_follow_state_and_hook() {
         &ctx.layout,
         &UserDoc {
             schema_version: 1,
-            email: None,
             principal: None,
             workspaces: vec![Membership {
                 workspace_id: "w_acme".to_owned(),
-                display_name: Some("Acme".to_owned()),
-                roles: Vec::new(),
-                verified_domain: None,
-                verified_domain_status: VerifiedDomainStatus::Unverified,
-                invite_rooted: true,
+                name: "acme".to_owned(),
+                display_name: "Acme".to_owned(),
                 enrolled_at: 1,
             }],
         },
@@ -1349,12 +1342,8 @@ fn list_discloses_enrollment_follow_state_and_hook() {
 
 #[test]
 fn follow_approve_resumes_an_unfollowed_skill() {
-    use std::collections::HashMap;
-
     use crate::enroll::{self, FollowEntry, FollowModeDoc, Instance};
-    use crate::plane::{EnrollSource, PlaneSource};
-    use crate::plane_http::SkillCred;
-    use topos_types::bootstrap::DeploymentMode;
+    use crate::plane::EnrollSource;
 
     let src = editable_source();
     let root = src.0.join("pr-describe");
@@ -1370,8 +1359,6 @@ fn follow_approve_resumes_an_unfollowed_skill() {
         &Instance {
             schema_version: 1,
             base_url: "https://topos.example".to_owned(),
-            deployment_mode: DeploymentMode::SelfHost,
-            enrollment_method: "device_code".to_owned(),
         },
     )
     .unwrap();
@@ -1396,9 +1383,6 @@ fn follow_approve_resumes_an_unfollowed_skill() {
     // connectors panic if reached, and the inert ctx plane would error on any fetch.
     let enroll_connect =
         |_b: &str| -> Box<dyn EnrollSource> { unreachable!("the skill path never enrolls") };
-    let plane_connect = |_b: &str, _c: HashMap<String, SkillCred>| -> Box<dyn PlaneSource> {
-        unreachable!("the skill path builds no offer-disclosure transport")
-    };
     let dir_connect2 = |_b: &str| -> Box<dyn crate::plane::DirectorySource> {
         unreachable!("the skill path builds no directory transport")
     };
@@ -1407,7 +1391,6 @@ fn follow_approve_resumes_an_unfollowed_skill() {
     };
     let connectors = ops::FollowConnectors {
         enroll: &enroll_connect,
-        plane: &plane_connect,
         directory: &dir_connect2,
         delivery: &del_connect2,
         web_origin: "https://topos.sh".to_owned(),

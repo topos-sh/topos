@@ -1,25 +1,26 @@
-//! The DOOR's wire contract — the device-lane row ops the composing web app serves since the
-//! cutover (the guarded `topos_*` SQL functions under its scoped role are the implementation;
-//! `web/` in this repo is the serving tier). The vault does NOT mount these paths: its own surface
-//! is bytes/pointers, enrollment, and governance. What stays HERE is the contract — these stubs
-//! carry the `#[utoipa::path]` annotations the committed OpenAPI is generated from, so the wire
-//! stays pinned in ONE generated artifact no matter which tier serves an operation. The stub
-//! bodies never run and nothing routes to them. The enrollment passcode START rides here too
-//! since the mail unification: the app mints the code over the internal lane and delivers it
-//! through its own mail seam (the vault keeps only the confirm — no mail transport).
+//! The PUBLIC device lane's wire contract — served by the composing product app, never by the
+//! vault. The vault's own HTTP surface is the internal custody lane (out of the committed
+//! OpenAPI); what lives HERE is the contract: these stubs carry the `#[utoipa::path]` annotations
+//! the committed OpenAPI is generated from, so the product's frozen wire stays ONE generated
+//! artifact whichever tier serves an operation. The stub bodies never run and nothing routes to
+//! them.
 //!
-//! Two describe reads that LOOK like row ops — the review inbox (`GET /v1/workspaces/{ws}/proposals`)
-//! and the skill log — are deliberately absent: both decorate their rows with git commit
-//! messages (byte custody), so the vault keeps serving them and their annotations stay on the
-//! live handlers in [`super::describe`].
+//! The lane: the gh-style device-auth start/poll (enrollment — on approval the device code is
+//! promoted to the device's ONE bearer credential), the publish/propose/revert/review writes, the
+//! current/version/object/catalog/proposals reads, the delivery + applied-state report, the
+//! describe reads (me / channels / reach / review inbox / log), the row ops (follows / exclusions /
+//! channel membership + curation / protection / notices-ack / invitations), and the device revoke.
 
 #![allow(dead_code)] // contract-only: referenced by the OpenAPI derive, routed by the web app.
 
-use topos_types::JsonEnvelope;
 use topos_types::requests::{
-    InvitationRequest, NoticeAckRequest, PasscodeAck, PasscodeRequest, ProtectionSetRequest,
-    WireAppliedReport, WireChannelIndex, WireDelivery, WireMe, WireReach,
+    DeviceAuthPollRequest, DeviceAuthPollResponse, DeviceAuthStartRequest, DeviceAuthStartResponse,
+    DeviceRevokeRequest, InvitationRequest, NoticeAckRequest, ProposeRequest, ProtectionSetRequest,
+    PublishRequest, RevertRequest, ReviewRequest, WireAppliedReport, WireChannelIndex,
+    WireDelivery, WireMe, WireProposalIndex, WireProposalList, WireReach, WireSkillIndex,
+    WireSkillLog, WireVersionMeta,
 };
+use topos_types::{JsonEnvelope, WireCurrentRecord};
 
 #[utoipa::path(
     get,
@@ -315,17 +316,247 @@ pub(crate) fn get_delivery() {}
 )]
 pub(crate) fn put_report() {}
 
+// ── the device-auth flow (enrollment — the app serves it; the vault never sees this lane) ───────
+
 #[utoipa::path(
     post,
-    path = "/v1/enroll/passcode",
+    path = "/v1/device/authorize",
     tag = "enrollment",
-    request_body = PasscodeRequest,
+    request_body = DeviceAuthStartRequest,
     responses(
-        (status = 200, description = "A constant-shaped ack (delivery is fire-and-forget through the serving tier's mail seam; no enumeration oracle).", body = PasscodeAck),
+        (status = 200, description = "The device-authorization grant: the secret device_code to poll with (promoted to the device's ONE bearer credential on approval), the human-facing user_code, and the approval URLs.", body = DeviceAuthStartResponse),
         (status = 400, description = "Malformed body.", body = JsonEnvelope),
-        (status = 404, description = "No live session for that user code.", body = JsonEnvelope),
-        (status = 429, description = "Rate limited.", body = JsonEnvelope),
-        (status = 500, description = "Internal store fault.", body = JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
+        (status = 500, description = "Internal fault.", body = JsonEnvelope),
     ),
 )]
-pub(crate) fn start_passcode() {}
+pub(crate) fn device_auth_start() {}
+
+#[utoipa::path(
+    post,
+    path = "/v1/device/token",
+    tag = "enrollment",
+    request_body = DeviceAuthPollRequest,
+    responses(
+        (status = 200, description = "The poll status; `granted` carries the ONE bearer credential (the promoted device code), the device id, and the joined workspace.", body = DeviceAuthPollResponse),
+        (status = 400, description = "Malformed body.", body = JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
+        (status = 500, description = "Internal fault.", body = JsonEnvelope),
+    ),
+)]
+pub(crate) fn device_auth_poll() {}
+
+// ── the writes (publish / propose / revert / review) ─────────────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/v1/publish",
+    tag = "writes",
+    request_body = PublishRequest,
+    params(("Authorization" = String, Header, description = "`Bearer <device credential>`.")),
+    responses(
+        (status = 200, description = "The all-outcome envelope + receipt (OK / NEEDS_REVIEW / CONFLICT / DENIED …). An op_id retry replays byte-identically.", body = JsonEnvelope),
+        (status = 400, description = "Malformed body / id / candidate.", body = JsonEnvelope),
+        (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
+        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
+    ),
+)]
+pub(crate) fn publish() {}
+
+#[utoipa::path(
+    post,
+    path = "/v1/proposals",
+    tag = "writes",
+    request_body = ProposeRequest,
+    params(("Authorization" = String, Header, description = "`Bearer <device credential>`.")),
+    responses(
+        (status = 200, description = "The all-outcome envelope + receipt (NEEDS_REVIEW on success — the candidate is committed without moving `current`).", body = JsonEnvelope),
+        (status = 400, description = "Malformed body / id / candidate.", body = JsonEnvelope),
+        (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
+        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
+    ),
+)]
+pub(crate) fn propose() {}
+
+#[utoipa::path(
+    post,
+    path = "/v1/reverts",
+    tag = "writes",
+    request_body = RevertRequest,
+    params(("Authorization" = String, Header, description = "`Bearer <device credential>`.")),
+    responses(
+        (status = 200, description = "The all-outcome envelope + receipt — a revert is a FORWARD commit restoring the good version's bytes (the pointer never moves backward).", body = JsonEnvelope),
+        (status = 400, description = "Malformed body / id.", body = JsonEnvelope),
+        (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
+        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
+    ),
+)]
+pub(crate) fn revert() {}
+
+#[utoipa::path(
+    post,
+    path = "/v1/reviews",
+    tag = "writes",
+    request_body = ReviewRequest,
+    params(("Authorization" = String, Header, description = "`Bearer <device credential>`.")),
+    responses(
+        (status = 200, description = "The all-outcome envelope + receipt (approve promotes; reject requires its reason; withdraw is author-only).", body = JsonEnvelope),
+        (status = 400, description = "Malformed body / id.", body = JsonEnvelope),
+        (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
+        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
+    ),
+)]
+pub(crate) fn review() {}
+
+// ── the reads (current / catalog / version / object / proposals / inbox / log) ───────────────────
+
+#[utoipa::path(
+    get,
+    path = "/v1/workspaces/{ws}/skills/{skill}/current",
+    tag = "reads",
+    params(
+        ("ws" = String, Path, description = "Workspace id."),
+        ("skill" = String, Path, description = "The skill's immutable id."),
+        ("Authorization" = String, Header, description = "`Bearer <device credential>`."),
+    ),
+    responses(
+        (status = 200, description = "The `current` pointer record (`ETag = \"<generation>\"`; a conditional GET answers 304).", body = WireCurrentRecord),
+        (status = 404, description = "Missing/blank credential, unknown/revoked one, non-member, or no pointer (indistinguishable).", body = JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
+        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
+    ),
+)]
+pub(crate) fn get_current() {}
+
+#[utoipa::path(
+    get,
+    path = "/v1/workspaces/{ws}/skills",
+    tag = "reads",
+    params(
+        ("ws" = String, Path, description = "Workspace id."),
+        ("Authorization" = String, Header, description = "`Bearer <device credential>`."),
+    ),
+    responses(
+        (status = 200, description = "The workspace catalog (metadata only, no bytes; catalog visibility == membership).", body = WireSkillIndex),
+        (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
+        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
+    ),
+)]
+pub(crate) fn list_skills() {}
+
+#[utoipa::path(
+    get,
+    path = "/v1/workspaces/{ws}/skills/{skill}/bundles/{object_id}",
+    tag = "reads",
+    params(
+        ("ws" = String, Path, description = "Workspace id."),
+        ("skill" = String, Path, description = "The skill's immutable id."),
+        ("object_id" = String, Path, description = "The object's content id (64-char lowercase hex sha256)."),
+        ("Authorization" = String, Header, description = "`Bearer <device credential>`."),
+    ),
+    responses(
+        (status = 200, description = "The object's verified bytes (application/octet-stream). Served only through a skill that reaches it — never by bare hash."),
+        (status = 404, description = "Missing/blank credential, non-member, unreachable/unknown object, or a malformed id (indistinguishable).", body = JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
+        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
+    ),
+)]
+pub(crate) fn get_object() {}
+
+#[utoipa::path(
+    get,
+    path = "/v1/workspaces/{ws}/skills/{skill}/versions/{version_id}",
+    tag = "reads",
+    params(
+        ("ws" = String, Path, description = "Workspace id."),
+        ("skill" = String, Path, description = "The skill's immutable id."),
+        ("version_id" = String, Path, description = "The version's commit id (64-char lowercase hex)."),
+        ("Authorization" = String, Header, description = "`Bearer <device credential>`."),
+    ),
+    responses(
+        (status = 200, description = "The version's metadata + file listing (no blob bytes; the per-object read serves those).", body = WireVersionMeta),
+        (status = 404, description = "Missing/blank credential, non-member, or an unknown/purged version (indistinguishable).", body = JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
+        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
+    ),
+)]
+pub(crate) fn get_version() {}
+
+#[utoipa::path(
+    get,
+    path = "/v1/workspaces/{ws}/skills/{skill}/proposals",
+    tag = "reads",
+    params(
+        ("ws" = String, Path, description = "Workspace id."),
+        ("skill" = String, Path, description = "The skill's immutable id."),
+        ("Authorization" = String, Header, description = "`Bearer <device credential>`."),
+    ),
+    responses(
+        (status = 200, description = "The skill's OPEN proposals — handles only (version id, base generation, opened-at); no bytes, no proposer.", body = WireProposalList),
+        (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
+        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
+    ),
+)]
+pub(crate) fn list_proposals() {}
+
+#[utoipa::path(
+    get,
+    path = "/v1/workspaces/{ws}/proposals",
+    tag = "reads",
+    params(
+        ("ws" = String, Path, description = "Workspace id."),
+        ("Authorization" = String, Header, description = "`Bearer <device credential>`."),
+    ),
+    responses(
+        (status = 200, description = "The review inbox: every OPEN proposal in the workspace, author message first.", body = WireProposalIndex),
+        (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
+        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
+    ),
+)]
+pub(crate) fn get_proposals() {}
+
+#[utoipa::path(
+    get,
+    path = "/v1/workspaces/{ws}/skills/{skill}/log",
+    tag = "reads",
+    params(
+        ("ws" = String, Path, description = "Workspace id."),
+        ("skill" = String, Path, description = "The skill's immutable id (an archived skill stays addressable)."),
+        ("Authorization" = String, Header, description = "`Bearer <device credential>`."),
+    ),
+    responses(
+        (status = 200, description = "The skill's version history (purge tombstones included) + its proposal events.", body = WireSkillLog),
+        (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
+        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
+    ),
+)]
+pub(crate) fn get_log() {}
+
+// ── the device revoke (the CLI logout wire) ──────────────────────────────────────────────────────
+
+#[utoipa::path(
+    delete,
+    path = "/v1/workspaces/{ws}/devices",
+    tag = "governance",
+    request_body = DeviceRevokeRequest,
+    params(
+        ("ws" = String, Path, description = "Workspace id."),
+        ("Authorization" = String, Header, description = "`Bearer <device credential>`."),
+    ),
+    responses(
+        (status = 200, description = "The revoke receipt (instant: the target credential stops authorizing fresh work the moment it commits).", body = JsonEnvelope),
+        (status = 400, description = "Malformed body.", body = JsonEnvelope),
+        (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
+        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
+    ),
+)]
+pub(crate) fn revoke_device() {}

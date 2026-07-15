@@ -6,46 +6,18 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "The OSS plane, library-first (lib + thin bin). The lib is the composable plane-core (the public authority API over plane-store, a router(state) builder, the review-required workspace policy, the enrollment state machine). The bin is a thin axum main. The private cloud plane IMPORTS this lib and COMPOSES it — no fork, no extension hook."
-
-[features]
-# The enrollment OIDC connector (one generic single-provider id_token flow). DEFAULT-OFF: the default build
-# pulls in NEITHER oauth2 nor openidconnect (nor their reqwest/tokio/hyper stack) — `cargo build -p
-# topos-plane` resolves none of it; only `--features enroll-oidc` does.
-enroll-oidc = ["dep:oauth2", "dep:openidconnect"]
-# The built-in ACME TLS listener (tls-alpn-01 via rustls-acme + axum-server). DEFAULT-OFF and
-# EXPERIMENTAL: bin-side composition only (the lib's public surface gains nothing), armed at runtime only
-# by a non-empty --acme-domain — a build with the feature but no domains serves exactly like a default
-# build. ring-only, so aws-lc-rs never enters this graph.
-acme = [
-    "dep:rustls-acme",
-    "dep:axum-server",
-    "dep:webpki-roots",
-    "dep:rustls-pki-types",
-    "dep:futures-util",
-]
+description = "The OSS vault, library-first (lib + thin bin). PURE BYTE CUSTODY: the lib composes plane-store's Authority behind the bearer-gated /internal/v1 custody lane (one caller — the product app — every request pre-authorized) plus /healthz; the bin is a thin axum main. The committed OpenAPI describes the PUBLIC device lane the app serves (contract stubs), never this internal lane."
 
 [dependencies]
 topos-core.workspace = true
 # `contract-derives` turns on the `utoipa::ToSchema` impls this crate's OpenAPI assembly references at
-# compile time (and the schemars twins) — the plane is one of the two contract producers (with xtask);
+# compile time (and the schemars twins) — the vault is one of the two contract producers (with xtask);
 # the feature stays off everywhere else, so the client's DTOs stay pure serde.
 topos-types = { workspace = true, features = ["contract-derives"] }
 plane-store.workspace = true
-# The enrollment OIDC connector — feature-gated (`enroll-oidc`), so a default build never resolves them. The
-# id/access token is consumed SERVER-SIDE and never returned to the agent.
-oauth2 = { workspace = true, optional = true }
-openidconnect = { workspace = true, optional = true }
-# The built-in ACME TLS serve path — feature-gated (`acme`, default-off), BIN-SIDE composition only (the
-# module hangs off main.rs; lib.rs never references it). A default build resolves none of these.
-rustls-acme = { workspace = true, optional = true }
-axum-server = { workspace = true, optional = true }
-webpki-roots = { workspace = true, optional = true }
-rustls-pki-types = { workspace = true, optional = true }
-futures-util = { workspace = true, optional = true }
-thiserror.workspace = true # the OIDC typed error (creds never reach its Debug/Display)
+thiserror.workspace = true
 # The HTTP surface: axum (default features cover json/http1/tokio/query; matchit is built-in), the OpenAPI
-# generator, the async runtime, the observability spine, the bin's arg parser, and the edge codecs.
+# generator, the async runtime, the observability spine, the bin's arg parser, and the edge codec.
 axum.workspace = true
 utoipa.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time"] } # `time`: the maintenance scheduler's interval
@@ -55,19 +27,15 @@ clap = { workspace = true, features = ["env"] } # `derive` from the workspace ba
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-base64.workspace = true
-hex.workspace = true
-uuid.workspace = true # validate that a write op_id is a canonical UUID at the edge, before the authority ingests
+base64.workspace = true # candidate file bytes ride base64 in JSON
 
 [dev-dependencies]
-# The per-route tests drive `router(state)` via `oneshot` (no socket), seeding an authority through the
-# feature-gated shims and presenting the device credential (the body's `device_key_id`) — no signatures.
-# `plane-store/test-fixtures` is dev-ONLY here, so the production `cargo build -p topos-plane` never enables
-# it (the CI guard asserts this).
+# The per-route tests drive `router(state)` via `oneshot` (no socket) over a real authority.
+# `plane-store/test-fixtures` is dev-ONLY here, so the production `cargo build -p topos-plane` never
+# enables it (the CI guard asserts this).
 plane-store = { workspace = true, features = ["test-fixtures"] }
-# The route tests inject a per-test Postgres via `#[sqlx::test]` into `Authority::from_pool`; the single
-# parity test that exercises the production `PlaneState::open(database_url)` path provisions its own database
-# and passes its URL. Dev-only, so the production plane build never carries a driver it doesn't use.
+# The route tests inject a per-test Postgres via `#[sqlx::test]` into `Authority::from_pool`. Dev-only,
+# so the production vault build never carries a driver it doesn't use.
 sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "migrate"] }
 tower = { version = "0.5", features = ["util"] }
 

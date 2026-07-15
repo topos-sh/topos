@@ -2,43 +2,49 @@
 /**
  * check-boundary.mjs — the source-level trust-boundary gate over app/.
  *
- * The web tier is surfaces only: it holds no signing key, computes no digest, and makes no
- * device-signed write. It also keeps a fail-closed actor model (guards mint actors; the DAL
- * requires them) and a zero-client-env stance. This script makes all of that executable:
+ * The web tier is the authority for identity and policy, but it still computes no digest and
+ * holds no signing machinery: hashing happens IN Postgres (sha256 over presented secrets) or
+ * inside better-auth's own password hasher — never in this tier's code. It keeps a fail-closed
+ * actor model (guards mint actors; the DAL requires them), one vault transport, and a
+ * zero-client-env stance. This script makes all of that executable:
  *
- *  1. Hard-zero crypto/signing identifiers anywhere under app/ (generated schema.d.ts excluded):
- *     ed25519, private key, createHash, createSign, createHmac, sha256, crypto.subtle, `sign(`
- *     as a word, the cipher primitives, and `digest`. The ONE carve-out: `bundle_digest` /
- *     `bundleDigest` are allowed — they DISPLAY the vault's recorded consent value; computing any
- *     digest stays forbidden absolutely.
- *  2. No (node:)crypto module specifier anywhere under app/ — any quote style, including a
- *     backtick template literal — and no process.getBuiltinModule escape hatch. (`crypto.randomUUID`
- *     is the Web Crypto GLOBAL, not an import — unaffected.)
- *  3. PLANE_INTERNAL_URL may appear ONLY in app/env.server.ts + app/lib/plane/client.server.ts;
- *     inside app/lib/plane/ only client.server.ts may call fetch( — every vault byte goes through
- *     the one allowlisted transport.
- *  4. No DEVICE-signed write path may even be spelled: `/v1/publish`, `/v1/proposals`,
- *     `/v1/reviews`, `/v1/reverts` as a request path, anywhere. (Those ops stay on the enrolled
- *     device; the web tier's writes ride the vault's internal session lane.)
+ *  1. Hard-zero crypto/signing identifiers anywhere under app/: ed25519, private key,
+ *     createHash, createSign, createHmac, crypto.subtle, `sign(` as a word, the cipher
+ *     primitives, `digest(` computation, and `sha256` — with TWO carve-outs: the Postgres-side
+ *     hashing spelling `sha256(convert_to(` (SQL text, not a TS call) and the stored-hash
+ *     COLUMN identifiers (`*_sha256` / `*Sha256`). `bundle_digest`/`bundleDigest` stay allowed —
+ *     they DISPLAY the vault's recorded consent value.
+ *  2. The (node:)crypto module specifier and `randomBytes` are allowed ONLY in
+ *     app/lib/db/identity.server.ts and app/lib/auth/recovery.server.ts — the two mints of
+ *     random SECRETS/ids (randomness is this tier's; hashing stays in Postgres/better-auth).
+ *     No process.getBuiltinModule escape hatch anywhere.
+ *  3. Transport containment: PLANE_INTERNAL_URL only in app/env.server.ts +
+ *     app/lib/plane/client.server.ts; `fetch(` inside app/lib/plane/ only in client.server.ts;
+ *     the `/internal/v1` custody-lane spelling and `vaultFetch(` calls confined to
+ *     app/lib/plane/ — every vault byte goes through the one allowlisted transport.
+ *  4. The dead acting-identity header may not be spelled: `x-topos-acting-email` is GONE (the
+ *     vault is identity-free; authorization happens in this tier's guards + rows).
  *  5. Every server-tier module under app/lib that imports app/env.server or the raw pg/drizzle
- *     driver must carry the `.server` suffix (React Router's server-module exclusion keys on it),
- *     so a value-bearing server module can never reach the client bundle. Exempt: the value-only
- *     Drizzle schema files (loaded by drizzle-kit in plain node) and the named auth entry.
+ *     driver must carry the `.server` suffix. Exempt: the value-only Drizzle schema files and
+ *     the named auth entry.
  *  6. Every route module under app/routes/ that reads data (exports a loader/action) calls a
- *     require* guard — unless it is on the explicit sessionless allowlist. The shell's cookie
- *     bounce is optimistic UX only; authorization lives in the route's own guard.
+ *     require* guard — unless it is on the explicit sessionless allowlist.
  *  7. The raw DB surface (drizzle-orm, app/lib/db/schema*, app/lib/db/index.server) may be
- *     imported ONLY inside app/lib/db/**, the guards, the auth entry, and the healthz probe —
- *     everything else goes through the actor-requiring DAL (app/lib/db/queries.server.ts).
- *  8. Zero client env: no `VITE_` prefix and no custom `import.meta.env` read anywhere under app/.
+ *     imported ONLY inside app/lib/db/**, the guards, the auth entry, and the healthz probe.
+ *  8. Zero client env: no `VITE_` prefix and no custom `import.meta.env` read anywhere.
+ *
+ * Self-test: `node scripts/check-boundary.mjs <dir>` scans <dir> as if it were app/ (the red
+ * test drives a fixture tree with planted violations through the same rules).
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const WEB_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const APP = join(WEB_ROOT, "app");
-const SCHEMA_DTS = join("app", "lib", "plane", "contract", "schema.d.ts");
+const APP_OVERRIDE = process.argv[2];
+const APP = APP_OVERRIDE ? resolve(APP_OVERRIDE) : join(WEB_ROOT, "app");
+/** rel paths are always spelled app/… so the per-file rules hold under a fixture override. */
+const REL_ROOT = APP_OVERRIDE ? dirname(APP) : WEB_ROOT;
 
 const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs"]);
 /** React Router treats a module as server-only iff its filename matches this. */
@@ -72,19 +78,21 @@ function fail(file, message) {
   console.error(`FAIL ${file}: ${message}`);
 }
 
+const SCHEMA_DTS = join("app", "lib", "plane", "contract", "schema.d.ts");
+
 const files = [];
 for (const full of walk(APP)) {
   if (!SOURCE_EXTENSIONS.has(extensionOf(full))) {
     continue;
   }
-  const rel = relative(WEB_ROOT, full);
+  const rel = APP_OVERRIDE ? join("app", relative(APP, full)) : relative(REL_ROOT, full);
   if (rel === SCHEMA_DTS) {
     continue; // generated contract types — gated by regen-clean instead
   }
   files.push({ rel, text: readFileSync(full, "utf8"), base: rel.slice(rel.lastIndexOf(sep) + 1) });
 }
 
-// 1. hard-zero crypto/signing identifiers (with the documented bundle_digest display carve-out)
+// 1. hard-zero crypto/signing identifiers (with the documented carve-outs)
 const HARD_ZERO = [
   [/ed25519/i, "ed25519"],
   [/private[_-]?key/i, "private key"],
@@ -96,31 +104,49 @@ const HARD_ZERO = [
   [/\bsign\(/, "sign("],
   [/\bcreateCipheriv\b/, "createCipheriv"],
   [/\bcreateDecipheriv\b/, "createDecipheriv"],
-  [/\brandomBytes\b/, "randomBytes"],
 ];
+/** The two random-secret mints — the ONLY homes of node:crypto randomness. */
+const CRYPTO_MINT_ALLOWED = new Set([
+  join("app", "lib", "db", "identity.server.ts"),
+  join("app", "lib", "auth", "recovery.server.ts"),
+]);
 for (const { rel, text } of files) {
-  // the display carve-out: strip the exact allowed identifiers before scanning for `digest`
-  const carved = text.replaceAll(/bundle_digest|bundleDigest/g, "");
+  // The carve-outs, stripped before scanning:
+  //  - bundle_digest/bundleDigest DISPLAY the vault's recorded consent value;
+  //  - `sha256(convert_to(` is the POSTGRES hashing spelling inside SQL text (TS has no such
+  //    function — presented secrets are hashed in the database, never here);
+  //  - `*_sha256`/`*Sha256` name the STORED-HASH columns those statements compare against.
+  const carved = text
+    .replaceAll(/bundle_digest|bundleDigest/g, "")
+    .replaceAll(/sha256\(convert_to\(/g, "")
+    // The identity mint's named builder of that SQL fragment (still zero TS hashing).
+    .replaceAll(/\bsha256OfText\b/g, "")
+    // Stored-hash COLUMN/CHECK identifiers (snake `…_sha256…`, camel `…Sha256…`). A BARE
+    // `sha256` identifier — a TS-side hash call — is deliberately not covered and still fails.
+    .replaceAll(/[A-Za-z0-9_]+_sha256[A-Za-z0-9_]*/g, "")
+    .replaceAll(/[A-Za-z0-9_]*Sha256[A-Za-z0-9_]*/g, "");
   for (const [regex, name] of HARD_ZERO) {
     if (regex.test(carved)) {
       fail(rel, `forbidden identifier: ${name}`);
     }
   }
   // Ban DIGEST COMPUTATION (a `digest(` / `.digest(` finalizer call), not the word — which
-  // legitimately names the displayed `bundle_digest`/`bundleDigest` value and appears in prose
-  // ("commit ids, digests"). Computing a digest still needs a banned primitive (createHash …).
+  // legitimately names the displayed `bundle_digest`/`bundleDigest` value and appears in prose.
   if (/\bdigest\s*\(/i.test(carved)) {
     fail(
       rel,
       "forbidden: a digest( computation (only bundle_digest/bundleDigest display is allowed)",
     );
   }
+  if (/\brandomBytes\b/.test(text) && !CRYPTO_MINT_ALLOWED.has(rel)) {
+    fail(rel, "randomBytes outside the two random-secret mints (identity/recovery .server.ts)");
+  }
 }
 
-// 2. HARD ZERO: no (node:)crypto module specifier + no getBuiltinModule escape hatch
+// 2. the (node:)crypto module specifier confined to the two mints; no builtin escape hatch
 for (const { rel, text } of files) {
-  if (/["'`](?:node:)?crypto["'`]/.test(text)) {
-    fail(rel, "a (node:)crypto module specifier — the web tier has no crypto, full stop");
+  if (/["'`](?:node:)?crypto["'`]/.test(text) && !CRYPTO_MINT_ALLOWED.has(rel)) {
+    fail(rel, "a (node:)crypto module specifier outside the two random-secret mints");
   }
   if (/\bgetBuiltinModule\b/.test(text)) {
     fail(rel, "process.getBuiltinModule — the import-free path into node builtins is forbidden");
@@ -141,13 +167,18 @@ for (const { rel, text } of files) {
   if (rel.startsWith(PLANE_DIR) && rel !== CLIENT_SERVER && /\bfetch\s*\(/.test(text)) {
     fail(rel, "fetch( inside app/lib/plane/ outside client.server.ts");
   }
+  if (!rel.startsWith(PLANE_DIR) && text.includes("/internal/v1")) {
+    fail(rel, "the /internal/v1 custody lane spelled outside app/lib/plane/");
+  }
+  if (!rel.startsWith(PLANE_DIR) && /\bvaultFetch\s*\(/.test(text)) {
+    fail(rel, "vaultFetch( called outside app/lib/plane/ — go through the typed wrappers");
+  }
 }
 
-// 4. no DEVICE-signed write path, anywhere
-const DEVICE_WRITE_PATH = /\/v1\/(?:publish|proposals|reviews|reverts)\b/;
+// 4. the dead acting-identity header may not come back
 for (const { rel, text } of files) {
-  if (DEVICE_WRITE_PATH.test(text)) {
-    fail(rel, "a device-signed write path (/v1/publish|proposals|reviews|reverts) — never here");
+  if (/x-topos-acting-email/i.test(text)) {
+    fail(rel, "the retired x-topos-acting-email header — the vault is identity-free now");
   }
 }
 
@@ -158,7 +189,7 @@ const SERVER_SUFFIX_EXEMPT = new Set([
   join("app", "lib", "db", "schema.ts"),
   join("app", "lib", "db", "schema.app.ts"),
   join("app", "lib", "db", "schema.auth.ts"),
-  join("app", "lib", "db", "schema.plane.ts"),
+  join("app", "lib", "db", "schema.custody.ts"),
   // The named auth entry (imported only by server modules; also allowlisted in rule 7 below).
   join("app", "lib", "auth", "server.ts"),
 ]);
@@ -183,10 +214,12 @@ const ROUTES_DIR = join("app", "routes") + sep;
 const SESSIONLESS_ROUTES = new Set([
   "landing",
   "login",
-  "verify",
+  // The first-boot claim + the mail-less recovery hatch: sessionless BY DESIGN (the code IS the
+  // proof — machine control), uniform-404 on a miss, public-read belted.
+  "claim",
+  "recovery",
   "healthz",
   "install",
-  "claim-link",
   "api.auth",
   "redirect-create",
   "redirect-link",
@@ -198,15 +231,12 @@ const SESSIONLESS_ROUTES = new Set([
   "resource-channel",
   "resource-skill",
   "catch-all",
-  // The device lane's PASS-THROUGH splat: no session and no guard BY DESIGN — it forwards
-  // byte/pointer + enrollment ops verbatim and the vault's in-transaction credential resolve
-  // is the authority (a guard here could only drift from the vault's replay-before-revoked
-  // ordering). Every SERVED /api/v1 route guards with requireDeviceActor like any other.
+  // The device flow's unauthenticated start + poll: no credential EXISTS yet (approval mints
+  // it); the belt is their gate and the flow rows are single-use, short-TTL.
+  "api.v1.device-authorize",
+  "api.v1.device-token",
+  // The lane's catch-all answers the constant uniform 404 — it reads nothing.
   "api.v1.$",
-  // The passcode START — PRE-IDENTITY by definition (the emailed code is what proves the
-  // person): no session, no device credential exists yet; the vault's internal-lane mint does
-  // the only authoritative work and the constant ack discloses nothing.
-  "api.v1.enroll.passcode",
 ]);
 const GUARD_CALL = /\brequire(?:Session|Member|WorkspaceOwner|Reviewer|DeviceActor)\s*\(/;
 const READS_DATA = /export\s+(?:async\s+)?(?:function|const)\s+(?:loader|action)\b/;
@@ -227,6 +257,10 @@ for (const { rel, text, base } of files) {
 const DB_SURFACE_ALLOWED = new Set([
   join("app", "lib", "auth", "guards.server.ts"),
   join("app", "lib", "auth", "server.ts"),
+  // The two auth ceremonies whose sanctioned email LOOKUPS the email-authz gate allowlists —
+  // their reads are the design (registration proof; the operator recovery hatch).
+  join("app", "lib", "auth", "registration.server.ts"),
+  join("app", "lib", "auth", "recovery.server.ts"),
   join("app", "routes", "healthz.ts"),
 ]);
 const DB_DIR = join("app", "lib", "db") + sep;

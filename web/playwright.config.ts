@@ -3,8 +3,10 @@ import {
   APP_PORT,
   appEnv,
   BASE_URL,
+  E2E_ADMIN_URL,
   PLANE_INTERNAL_TOKEN,
   PLANE_PORT,
+  SMTP_SINK_PORT,
   STORAGE_STATE,
 } from "./tests/e2e/env";
 
@@ -47,7 +49,19 @@ export default defineConfig({
       env: {
         PLANE_FIXTURE_PORT: String(PLANE_PORT),
         PLANE_INTERNAL_TOKEN,
+        // The fixture MIRRORS its custody state into the plane.* tables (the app's read-only
+        // DB mirror), so HTTP reads and DB joins agree — the superuser URL is the writer.
+        PLANE_FIXTURE_DB_URL: E2E_ADMIN_URL,
       },
+      timeout: 30_000,
+    },
+    {
+      // The fake SMTP sink the app's armed TOPOS_MAIL_SMTP_* point at — real sends succeed
+      // against it, and the assertable copies land in the dev outbox.
+      command: "node tests/fixtures/smtp-sink.mjs",
+      port: SMTP_SINK_PORT,
+      reuseExistingServer: !process.env.CI,
+      env: { SMTP_SINK_PORT: String(SMTP_SINK_PORT) },
       timeout: 30_000,
     },
     {

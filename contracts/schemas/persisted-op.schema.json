@@ -29,8 +29,10 @@
       ]
     },
     "expected_generation": {
-      "description": "The `(epoch,seq)` this op's compare-and-set targets — part of the op's bound identity.",
-      "$ref": "#/$defs/Generation"
+      "description": "The generation this op's compare-and-set targets — part of the op's bound identity.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
     },
     "good": {
       "description": "The GOOD version a `revert` restores (the wire `good`) — present only for a `Revert` op (the\nserver builds the forward commit from it; it is NOT the `candidate_commit`, so a replay must carry\nit). `None` for every other op.",
@@ -86,26 +88,6 @@
     "expected_generation"
   ],
   "$defs": {
-    "Generation": {
-      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
-      "type": "object",
-      "properties": {
-        "epoch": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "epoch",
-        "seq"
-      ]
-    },
     "OpKind": {
       "description": "The device operation an [`OpRecord`] carries — the durable record of a replayed write's kind (the op\nkind an idempotent retry re-sends; the kind otherwise rides the route). snake_case on the wire/disk.",
       "oneOf": [
@@ -162,27 +144,23 @@
           "format": "date-time"
         },
         "current_generation": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Generation"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
         },
         "details": {
           "description": "Outcome-specific extra detail."
         },
         "expected_generation": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Generation"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
         },
         "op_id": {
           "description": "Client-minted UUIDv4, persisted before the first send.",

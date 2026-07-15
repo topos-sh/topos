@@ -1,16 +1,16 @@
 import type { ActionFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
-import { nowUtc, rowOpResponse } from "@/lib/api/row-envelopes.server";
+import { rowOpResponse } from "@/lib/api/row-envelopes.server";
 import { uniformNotFound } from "@/lib/api/wire.server";
 import { requireDeviceActor } from "@/lib/auth/guards.server";
-import { deviceChannelPlace, deviceChannelUnplace } from "@/lib/db/queries.device.server";
+import { lanePlaceBundle, laneUnplaceBundle } from "@/lib/db/queries.lane.server";
 
 /**
- * `PUT | DELETE /api/v1/workspaces/{ws}/channels/{ch}/skills/{skill}` — curation: place (PUT) /
- * remove (DELETE) a skill reference in a channel. `{ch}` is the channel NAME (created member-level on
- * first placement — a bad new name is a 200 DENIED `BAD_NAME`); `{skill}` is the immutable id.
- * Bodyless, naturally idempotent. Curation on a `curated` channel takes reviewer+
- * (`CURATED_ROLE_REQUIRED`); an inactive skill is `SKILL_NOT_ACTIVE`.
+ * `PUT | DELETE /api/v1/workspaces/{ws}/channels/{ch}/skills/{skill}` — curation: place (PUT)
+ * / remove (DELETE) a bundle reference in a channel. `{ch}` is the channel NAME (created
+ * member-level on first placement — a bad new name is a 200 DENIED `BAD_NAME`); `{skill}` is
+ * the immutable id. Bodyless, naturally idempotent. Curation on a `curated` channel takes
+ * reviewer+ (`CURATED_ROLE_REQUIRED`); an inactive bundle is `SKILL_NOT_ACTIVE`.
  */
 const CURATION_DENIED = {
   curated_role_required: "CURATED_ROLE_REQUIRED",
@@ -29,9 +29,8 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   const actor = await requireDeviceActor(request, params.ws ?? "");
   const channel = params.channel ?? "";
   const skill = params.skill ?? "";
-  const { createdAt } = nowUtc();
   if (request.method === "PUT") {
-    const status = await deviceChannelPlace(actor, channel, skill, createdAt);
+    const status = await lanePlaceBundle(actor, channel, skill);
     return rowOpResponse(
       "channel",
       status,
@@ -39,7 +38,7 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
       CURATION_DENIED,
     );
   }
-  const status = await deviceChannelUnplace(actor, channel, skill, createdAt);
+  const status = await laneUnplaceBundle(actor, channel, skill);
   return rowOpResponse(
     "channel",
     status,

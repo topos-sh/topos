@@ -181,23 +181,16 @@ pub(crate) fn list_with(
     let follows = enroll::read_follows(ctx.fs, &ctx.layout)?
         .map(|f| f.follows)
         .unwrap_or_default();
-    // The offline signals the SOURCE/STATUS/CAUSE columns read: the stored credentials (a followed
-    // workspace with no credential is signed out here) and the membership labels (the friendly source
-    // name for a followed skill). Both best-effort — absence just narrows what a column can say.
-    let credentials: std::collections::HashMap<String, String> =
-        enroll::read_credentials(ctx.fs, &ctx.layout)?
-            .map(enroll::Credentials::into_map)
-            .unwrap_or_default();
+    // The offline signals the SOURCE/STATUS/CAUSE columns read: the stored device credential (its
+    // absence means every followed workspace is signed out here) and the membership labels (the
+    // friendly source name for a followed skill). Both best-effort — absence just narrows what a
+    // column can say.
+    let signed_in = enroll::read_credentials(ctx.fs, &ctx.layout)?.is_some();
     let labels: HashMap<String, String> = enroll::read_user(ctx.fs, &ctx.layout)?
         .map(|u| {
             u.workspaces
                 .into_iter()
-                .map(|m| {
-                    (
-                        m.workspace_id.clone(),
-                        m.display_name.unwrap_or(m.workspace_id),
-                    )
-                })
+                .map(|m| (m.workspace_id, m.display_name))
                 .collect()
         })
         .unwrap_or_default();
@@ -247,9 +240,7 @@ pub(crate) fn list_with(
             draft,
             origin_host,
             workspace_id.as_deref().and_then(|w| labels.get(w)),
-            workspace_id
-                .as_deref()
-                .is_none_or(|w| credentials.contains_key(w)),
+            workspace_id.is_none() || signed_in,
             delivered,
             &lock.base_commit,
         );
@@ -342,7 +333,7 @@ pub(crate) fn list_with(
                     u.workspaces
                         .into_iter()
                         .map(|m| {
-                            let label = m.display_name.unwrap_or_else(|| m.workspace_id.clone());
+                            let label = m.display_name;
                             (m.workspace_id, label)
                         })
                         .collect()
@@ -733,9 +724,9 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use topos_harness::ClaudeCode;
+    use topos_types::PERSISTED_SCHEMA_VERSION;
     use topos_types::persisted::Lock;
     use topos_types::requests::{WireSkillIndex, WireSkillIndexEntry};
-    use topos_types::{Generation, PERSISTED_SCHEMA_VERSION};
 
     use super::*;
     use crate::ctx::Ctx;
@@ -795,7 +786,7 @@ mod tests {
             status: "active".to_owned(),
             version_id: hex(version),
             bundle_digest: hex(DIGEST),
-            generation: Generation { epoch: 1, seq: 1 },
+            generation: 1,
             display_name: Some(skill_id.to_owned()),
             updated_at: 1,
             open_proposals: 0,
@@ -1093,7 +1084,7 @@ mod tests {
             ],
         )
         .unwrap();
-        enroll::write_credential(&fs, &layout, "w_acme", "wsc").unwrap();
+        enroll::write_credentials(&fs, &layout, "wsc", "dev_1").unwrap();
         // The cache: `beh` was last served @C (≠ local A → behind); `gone` was withdrawn.
         seed_delivered(
             &fs,
@@ -1154,7 +1145,7 @@ mod tests {
             ],
         )
         .unwrap();
-        enroll::write_credential(&fs, &layout, "w_acme", "wsc").unwrap();
+        enroll::write_credentials(&fs, &layout, "wsc", "dev_1").unwrap();
         // `deploy` + `docs` ride channel `eng`; `lint` rides `release`.
         seed_delivered(
             &fs,

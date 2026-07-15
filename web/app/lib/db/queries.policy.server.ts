@@ -1,97 +1,122 @@
+import { eq } from "drizzle-orm";
 import type { MemberActor, OwnerActor } from "@/lib/auth/guards.server";
-import { getPool } from "@/lib/db/index.server";
+import { auditInTx } from "@/lib/db/identity.server";
+import { getDb } from "@/lib/db/index.server";
+import { workspace } from "@/lib/db/schema.app";
 
 /**
- * The WORKSPACE-POLICY data access — the invite policy and the staleness window, the two knobs
- * that join the review-required default on the settings page. Every read goes through the
- * directory's guarded accessor functions (`topos_invite_policy` / `topos_staleness_window`), which
- * COALESCE a missing `workspace_policy` row to the ONE canonical default — so this tier never
- * re-derives "members" or 604800000 in TypeScript, and a workspace with no policy row shows the
- * true default rather than a blank. Every write goes through the guarded setter functions
- * (`topos_set_invite_policy` / `topos_set_staleness_window`), which re-run the owner gate INSIDE
- * the database — the OwnerActor on the call is the web tier's matching lock, never the only one.
- * The outcome codes are the functions' own vocabulary, relayed verbatim.
- *
- * Actor-first like the rest of the DAL: workspace-scoped reads take their scope FROM the actor, so
- * a wrong-scope actor cannot leak another workspace's policy.
+ * The WORKSPACE-POLICY data access — the settings page's knobs, now plain columns on the app's
+ * OWN `web.workspace` row (the old guarded setter functions and the separate policy table are
+ * gone; there is exactly one row per install and its DEFAULTs are the canonical fallbacks, so
+ * no reader re-derives "members" or 604800000 anywhere). Reads take a MemberActor; writes take
+ * the OwnerActor brand as the gate (step-up runs in the route) and land their audit row in the
+ * SAME transaction.
  */
 
-/** The invite policy a missing row falls back to is 'members' — decided in SQL, read here. */
+export interface WorkspacePolicy {
+  invitePolicy: "members" | "owners";
+  stalenessWindowMs: number;
+  /** The protection DEFAULT an unpinned bundle inherits (`reviewed` = review-required). */
+  protectionDefault: "open" | "reviewed";
+  registration: "invite_only" | "open";
+}
+
+/** The workspace's policy knobs, one read. */
+export async function workspacePolicyOf(actor: MemberActor): Promise<WorkspacePolicy> {
+  const rows = await getDb()
+    .select({
+      invitePolicy: workspace.invitePolicy,
+      stalenessWindowMs: workspace.stalenessWindowMs,
+      protectionDefault: workspace.protectionDefault,
+      registration: workspace.registration,
+    })
+    .from(workspace)
+    .where(eq(workspace.id, actor.workspaceId))
+    .limit(1);
+  const row = rows[0];
+  if (row === undefined) {
+    throw new Error("workspace row missing for a member actor");
+  }
+  return {
+    invitePolicy: row.invitePolicy as WorkspacePolicy["invitePolicy"],
+    stalenessWindowMs: row.stalenessWindowMs,
+    protectionDefault: row.protectionDefault as WorkspacePolicy["protectionDefault"],
+    registration: row.registration as WorkspacePolicy["registration"],
+  };
+}
+
 export async function invitePolicyOf(actor: MemberActor): Promise<"members" | "owners"> {
-  const result = await getPool().query<{ policy: "members" | "owners" }>(
-    "select topos_invite_policy($1) as policy",
-    [actor.workspaceId],
-  );
-  const policy = result.rows[0]?.policy;
-  if (policy === undefined) {
-    throw new Error("topos_invite_policy returned no row");
-  }
-  return policy;
+  return (await workspacePolicyOf(actor)).invitePolicy;
 }
 
-/**
- * The fleet's staleness window in milliseconds (a bigint). `pg` hands a bigint back as a string,
- * so parse it at the edge — the default 604800000 (7 days) and the 366-day ceiling both sit well
- * inside `Number.MAX_SAFE_INTEGER`, so a plain `Number` is exact.
- */
 export async function stalenessWindowOf(actor: MemberActor): Promise<number> {
-  const result = await getPool().query<{ window_ms: string }>(
-    "select topos_staleness_window($1) as window_ms",
-    [actor.workspaceId],
-  );
-  const raw = result.rows[0]?.window_ms;
-  if (raw === undefined || raw === null) {
-    throw new Error("topos_staleness_window returned no row");
-  }
-  return Number(raw);
+  return (await workspacePolicyOf(actor)).stalenessWindowMs;
 }
 
-/** The outcome codes `topos_set_invite_policy` speaks (the database's vocabulary, relayed verbatim). */
-export type InvitePolicyOutcome = "set" | "member_required" | "owner_role_required" | "bad_policy";
+/** One owner-gated knob write + its same-transaction audit row. */
+async function setKnob(
+  actor: OwnerActor,
+  values: Partial<typeof workspace.$inferInsert>,
+  kind: string,
+  subject: string,
+): Promise<void> {
+  await getDb().transaction(async (tx) => {
+    await tx.update(workspace).set(values).where(eq(workspace.id, actor.workspaceId));
+    await auditInTx(tx, {
+      workspaceId: actor.workspaceId,
+      actor: { userId: actor.userId, display: actor.display },
+      kind,
+      subject,
+      outcome: "ok",
+    });
+  });
+}
 
-/**
- * Set who may invite: 'members' (any confirmed member) or 'owners' (owners only). The guarded
- * function re-runs the owner gate itself; this DAL is a thin relay — it does NOT pre-validate the
- * policy string, so an unexpected value comes back as the function's own `bad_policy`.
- */
+export type InvitePolicyOutcome = "set" | "bad_policy";
+
+/** Set who may invite: 'members' (any member) or 'owners' (owners only). */
 export async function setInvitePolicy(
   actor: OwnerActor,
-  policy: "members" | "owners",
+  policy: string,
 ): Promise<InvitePolicyOutcome> {
-  const result = await getPool().query<{ outcome: InvitePolicyOutcome }>(
-    "select topos_set_invite_policy($1, $2, $3) as outcome",
-    [actor.workspaceId, actor.email, policy],
-  );
-  const outcome = result.rows[0]?.outcome;
-  if (outcome === undefined) {
-    throw new Error("topos_set_invite_policy returned no outcome");
+  if (policy !== "members" && policy !== "owners") {
+    return "bad_policy";
   }
-  return outcome;
+  await setKnob(actor, { invitePolicy: policy }, "policy_invite", policy);
+  return "set";
 }
 
-/** The outcome codes `topos_set_staleness_window` speaks. */
-export type StalenessWindowOutcome =
-  | "set"
-  | "member_required"
-  | "owner_role_required"
-  | "bad_window";
+export type StalenessWindowOutcome = "set" | "bad_window";
 
-/**
- * Set the fleet's staleness window in milliseconds. The guarded function bounds it (1ms .. 366d)
- * and refuses anything outside as `bad_window`; the OwnerActor is the web tier's lock, the
- * database's own owner gate the authoritative one.
- */
+/** The old bound, kept: 1ms .. 366 days. */
+const STALENESS_WINDOW_MAX_MS = 31_622_400_000;
+
+/** Set the fleet's staleness window in milliseconds (bounded; refuses anything outside). */
 export async function setStalenessWindow(
   actor: OwnerActor,
   windowMs: number,
 ): Promise<StalenessWindowOutcome> {
-  const result = await getPool().query<{ outcome: StalenessWindowOutcome }>(
-    "select topos_set_staleness_window($1, $2, $3) as outcome",
-    [actor.workspaceId, actor.email, windowMs],
-  );
-  const outcome = result.rows[0]?.outcome;
-  if (outcome === undefined) {
-    throw new Error("topos_set_staleness_window returned no outcome");
+  if (!Number.isSafeInteger(windowMs) || windowMs <= 0 || windowMs > STALENESS_WINDOW_MAX_MS) {
+    return "bad_window";
   }
-  return outcome;
+  await setKnob(actor, { stalenessWindowMs: windowMs }, "policy_staleness", String(windowMs));
+  return "set";
+}
+
+export type RegistrationOutcome = "set" | "bad_value";
+
+/**
+ * The registration knob — `invite_only` (the default) or `open`. `open` disables the
+ * invitation proof: any address may sign itself up. Owner + step-up; the settings page carries
+ * the honest copy.
+ */
+export async function setRegistration(
+  actor: OwnerActor,
+  value: string,
+): Promise<RegistrationOutcome> {
+  if (value !== "invite_only" && value !== "open") {
+    return "bad_value";
+  }
+  await setKnob(actor, { registration: value }, "policy_registration", value);
+  return "set";
 }

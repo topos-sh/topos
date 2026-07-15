@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) AS \"n!\" FROM version_object vo\n           WHERE vo.workspace_id = $1 AND vo.bundle_id = $2 AND vo.version_id = $3\n             AND NOT EXISTS (\n                 SELECT 1 FROM object_presence op\n                 WHERE op.workspace_id = vo.workspace_id AND op.object_id = vo.object_id\n                   AND op.status = 'present')",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "n!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "f1a546e39f91a28d1088b0e9daa6ab55a28f7d9165d6898c2b28b2aef8b3b9c6"
+}

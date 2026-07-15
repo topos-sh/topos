@@ -1,164 +1,72 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import type { UserActor } from "@/lib/auth/guards.server";
-import type { AdminOutcome } from "@/lib/db/audit.server";
-import { getDb, getPool } from "@/lib/db/index.server";
-import { adminEvent } from "@/lib/db/schema.app";
-import { planeDeviceRegistry, planeWorkspace, planeWorkspaceMember } from "@/lib/db/schema.plane";
+import { revokeOwnDevice, theWorkspace } from "@/lib/db/identity.server";
+import { getDb } from "@/lib/db/index.server";
+import { device } from "@/lib/db/schema.app";
 
 /**
  * The ACCOUNT-level device DAL — the "your devices" page's reads and its self sign-out write.
- * Like the rest of the DAL (queries.server.ts) it lives under app/lib/db/, so raw drizzle/schema
- * imports are sanctioned here (scripts/check-boundary.mjs forbids them elsewhere); every function
- * takes the guard-minted actor whose authority it exercises as its first argument.
- *
- * This module is the ONE place a DAL function is scoped by a bare UserActor rather than a
- * workspace-admitted MemberActor — and that is deliberately safe: the reads and the write below
- * disclose or touch ONLY the person's own rows, keyed on their VERIFIED email (the same email the
- * roster gates on). There is no single-workspace admission because the page spans every workspace
- * the person belongs to; the disclosure stays the person's own devices, and the sign-out is
- * SELF-ONLY in this module (a stricter grade than the database's owner-or-self matrix — see the
- * comment on `signOutDevice`), then re-gated by the database.
+ * A device is a POSSESSION of ONE user now (workspace-less), so this module is scoped by a
+ * bare UserActor and discloses ONLY the person's own device rows. Revocation is SELF-ONLY by
+ * design — no owner arm reaches into someone else's pocket — and FINAL (the database trigger
+ * refuses any un-revoke); re-enrolling through the device flow is the recovery.
  */
 
-/** One device_registry row as the account page renders it. */
+/** One device row as the account page renders it. */
 export interface AccountDevice {
-  deviceKeyId: string;
-  revoked: boolean;
-  /** BIGINT epoch-milliseconds off the registry row, or null — `new Date(ms)` at the render edge. */
-  lastReportAtMs: number | null;
-}
-
-/** The person's devices in ONE workspace they hold a confirmed seat in — a render group. */
-export interface WorkspaceDevices {
-  workspaceId: string;
+  deviceId: string;
   displayName: string;
-  /** The workspace's address slug — what enrolling a new device speaks. */
-  address: string;
-  devices: AccountDevice[];
+  revoked: boolean;
+  /** Epoch-milliseconds, or null when the device has never phoned home. */
+  lastSeenAtMs: number | null;
+  createdAtMs: number;
 }
 
-/**
- * The person's OWN device_registry rows across EVERY workspace where their email holds a CONFIRMED
- * seat, grouped per workspace for render. The join pins device.principal to the confirmed seat's
- * principal AND to the actor's own email, so a row is disclosed only when it is BOTH the person's
- * own device AND in a workspace they are confirmed in — no other person's devices, no workspace the
- * person is only invited to (or absent from). Display name + address come from `plane.workspace`
- * with the workspace id as the honest fallback (a seat can outlive its workspace row). Workspaces
- * holding none of the person's devices contribute no group (the page shows the empty state instead).
- */
-export async function devicesFor(actor: UserActor): Promise<WorkspaceDevices[]> {
+/** The person's OWN devices, oldest first. */
+export async function devicesFor(actor: UserActor): Promise<AccountDevice[]> {
   const rows = await getDb()
     .select({
-      workspaceId: planeWorkspaceMember.workspaceId,
-      displayName: planeWorkspace.displayName,
-      address: planeWorkspace.name,
-      deviceKeyId: planeDeviceRegistry.deviceKeyId,
-      revoked: planeDeviceRegistry.revoked,
-      lastReportAt: planeDeviceRegistry.lastReportAt,
+      deviceId: device.id,
+      displayName: device.displayName,
+      revokedAt: device.revokedAt,
+      lastSeenAtMs: sql<string | null>`(extract(epoch from ${device.lastSeenAt}) * 1000)::bigint`,
+      createdAtMs: sql<string>`(extract(epoch from ${device.createdAt}) * 1000)::bigint`,
     })
-    .from(planeWorkspaceMember)
-    .innerJoin(
-      planeDeviceRegistry,
-      and(
-        eq(planeDeviceRegistry.workspaceId, planeWorkspaceMember.workspaceId),
-        eq(planeDeviceRegistry.principal, planeWorkspaceMember.principal),
-      ),
-    )
-    .leftJoin(planeWorkspace, eq(planeWorkspace.workspaceId, planeWorkspaceMember.workspaceId))
-    .where(
-      and(
-        eq(planeWorkspaceMember.principal, actor.email),
-        eq(planeWorkspaceMember.status, "confirmed"),
-      ),
-    )
-    .orderBy(asc(planeWorkspaceMember.workspaceId), asc(planeDeviceRegistry.deviceKeyId));
-
-  // Group per workspace, preserving the (workspace id, device key id) order the query established.
-  const groups = new Map<string, WorkspaceDevices>();
-  for (const row of rows) {
-    let group = groups.get(row.workspaceId);
-    if (group === undefined) {
-      group = {
-        workspaceId: row.workspaceId,
-        displayName: row.displayName ?? row.workspaceId,
-        address: row.address ?? row.workspaceId,
-        devices: [],
-      };
-      groups.set(row.workspaceId, group);
-    }
-    group.devices.push({
-      deviceKeyId: row.deviceKeyId,
-      revoked: row.revoked === 1,
-      lastReportAtMs: row.lastReportAt,
-    });
-  }
-  return [...groups.values()];
+    .from(device)
+    .where(eq(device.userId, actor.userId))
+    .orderBy(asc(device.createdAt), asc(device.id));
+  return rows.map((r) => ({
+    deviceId: r.deviceId,
+    displayName: r.displayName,
+    revoked: r.revokedAt !== null,
+    lastSeenAtMs: r.lastSeenAtMs === null ? null : Number(r.lastSeenAtMs),
+    createdAtMs: Number(r.createdAtMs),
+  }));
 }
 
-/** The outcome codes `topos_revoke_device` speaks (the database's vocabulary, relayed verbatim). */
-export type SignOutOutcome =
-  | "revoked"
-  | "unknown_device"
-  /** The self-only refusal this lane speaks: the target is someone else's device. */
-  | "self_required"
-  | "owner_or_self_required"
-  | "member_required";
+export type SignOutOutcome = "revoked" | "unknown_device";
 
 /**
- * Sign one device out — ONE call to the guarded `topos_revoke_device`, which re-runs its own
- * role matrix under this lane's SELF-ONLY grade. The web guard on the action is a signed-in-actor
- * check, never the lock: a self sign-out is legal in ANY workspace where the actor holds a
- * confirmed seat because the function's OWN matrix admits the device's own principal regardless of
- * role. The outcome code is the function's vocabulary, relayed to the caller as-is.
+ * Sign one of the actor's OWN devices out — self-only by the WHERE clause itself (a foreign
+ * device id simply matches nothing: the same answer as an unknown one, no oracle). Effective
+ * immediately and final; the audit row rides the same transaction. IDEMPOTENT: re-revoking a
+ * device the actor already signed out answers `revoked` again (a retried logout must not read
+ * as a miss).
  */
-export async function signOutDevice(
-  actor: UserActor,
-  workspaceId: string,
-  deviceKeyId: string,
-): Promise<SignOutOutcome> {
-  // SELF-ONLY, enforced IN THE DATABASE: `topos_revoke_device`'s matrix is owner-or-self, and the
-  // owner arm belongs to the fleet page's STEP-UP ceremony. This account page runs no step-up (a
-  // person signing their own device out needs no second proof), so it must not be able to reach
-  // the owner arm — otherwise an owner could forge a POST here and revoke a teammate's device
-  // through the lighter ceremony. The self-only flag narrows the matrix for this lane; a foreign
-  // target answers `self_required` and writes nothing.
-  const result = await getPool().query<{ outcome: SignOutOutcome }>(
-    "select topos_revoke_device($1, $2, $3, 1) as outcome",
-    [workspaceId, actor.email, deviceKeyId],
+export async function signOutDevice(actor: UserActor, deviceId: string): Promise<SignOutOutcome> {
+  const ws = await theWorkspace();
+  const revoked = await revokeOwnDevice(
+    { userId: actor.userId, display: actor.display },
+    deviceId,
+    ws?.id ?? "",
   );
-  const outcome = result.rows[0]?.outcome;
-  if (outcome === undefined) {
-    throw new Error("topos_revoke_device returned no outcome");
+  if (revoked) {
+    return "revoked";
   }
-  return outcome;
-}
-
-/**
- * Record the self sign-out in the web tier's admin audit — ONE row per attempt, whatever the
- * outcome (mirroring recordAdminEvent in audit.server.ts). This is the ONE admin_event write that
- * lives OUTSIDE audit.server.ts, and by necessity: recordAdminEvent takes a MemberActor, whose
- * brand is module-private to guards.server.ts, and this ACCOUNT-level page never admits into a
- * single workspace — it holds only a UserActor. So the row is written here directly (raw drizzle
- * is sanctioned under app/lib/db/) with set_by = the actor's verified email and workspace_id = the
- * TARGET workspace, kind `device_revoke`, subject the device key id, detail "self". Best-effort by
- * design: an audit fault must never mask the sign-out's own outcome.
- */
-export async function recordSelfDeviceRevoke(
-  actor: UserActor,
-  workspaceId: string,
-  deviceKeyId: string,
-  outcome: AdminOutcome,
-): Promise<void> {
-  try {
-    await getDb().insert(adminEvent).values({
-      workspaceId,
-      kind: "device_revoke",
-      subject: deviceKeyId,
-      detail: "self",
-      setBy: actor.email,
-      outcome,
-    });
-  } catch (error) {
-    console.error("admin_event insert failed", error);
-  }
+  const rows = await getDb()
+    .select({ revokedAt: device.revokedAt })
+    .from(device)
+    .where(and(eq(device.id, deviceId), eq(device.userId, actor.userId)))
+    .limit(1);
+  return rows[0]?.revokedAt != null ? "revoked" : "unknown_device";
 }

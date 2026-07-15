@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM version WHERE workspace_id = $1 AND bundle_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2e4520d85b518c454bbbb3c50310905d63d6702d96ce280055ee3c43f70b068c"
+}

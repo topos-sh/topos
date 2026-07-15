@@ -1,44 +1,43 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Topos OSS plane",
-    "description": "The self-hostable Topos plane — workspace-credential writes AND reads (one Bearer credential per enrolled device; membership is the authorization), plus the enrollment + governance surface. Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
+    "title": "Topos product API (device lane)",
+    "description": "The device lane the product app serves: the gh-style device-auth enrollment (start/poll — approval promotes the device code to the device's ONE bearer credential), the publish/propose/revert/review writes, the current/version/object/catalog/proposals reads, the delivery + applied-state report, the describe reads, the row ops, and the device revoke. Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
     "license": {
       "name": "Apache-2.0"
     },
     "version": "0.0.0"
   },
   "paths": {
-    "/i/{token}": {
-      "get": {
+    "/v1/device/authorize": {
+      "post": {
         "tags": [
           "enrollment"
         ],
-        "operationId": "read_bootstrap",
-        "parameters": [
-          {
-            "name": "token",
-            "in": "path",
-            "description": "The opaque `/i/<token>` one-time admin-claim token.",
-            "required": true,
-            "schema": {
-              "type": "string"
+        "operationId": "device_auth_start",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceAuthStartRequest"
+              }
             }
-          }
-        ],
+          },
+          "required": true
+        },
         "responses": {
           "200": {
-            "description": "The claim bootstrap (workspace-to-be + plane API base; no bytes, no role, no trust root; enrollment_method \"admin_claim\", no skills). Content-negotiated: an Accept asking for JSON (or absent) gets this payload; anything else (curl `*/*`, a browser) gets a markdown agent-instruction document rendered from the same data, served as `text/plain` so browsers display it inline.",
+            "description": "The device-authorization grant: the secret device_code to poll with (promoted to the device's ONE bearer credential on approval), the human-facing user_code, and the approval URLs.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BootstrapData"
+                  "$ref": "#/components/schemas/DeviceAuthStartResponse"
                 }
               }
             }
           },
-          "404": {
-            "description": "No such claim, or it is revoked/consumed/expired (always the JSON envelope, any Accept).",
+          "400": {
+            "description": "Malformed body.",
             "content": {
               "application/json": {
                 "schema": {
@@ -58,137 +57,7 @@
             }
           },
           "500": {
-            "description": "Internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/admin-claim": {
-      "post": {
-        "tags": [
-          "enrollment"
-        ],
-        "operationId": "admin_claim",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AdminClaimRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "The admin-claim receipt — OK stands up the workspace + seats the first owner; DENIED the flat error.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed body or device public key.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/device/authorize": {
-      "post": {
-        "tags": [
-          "enrollment"
-        ],
-        "operationId": "start_device_auth",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DeviceAuthorizeRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "The device-authorization grant (device_code / user_code / verification_uri(_complete)) plus the plane block (API base + posture + method, no trust root) every start now carries.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DeviceAuthorizeResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed body, device public key, workspace name, or intent/workspace combination.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "A standup start on a plane that does not offer it (self-host).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal store fault.",
+            "description": "Internal fault.",
             "content": {
               "application/json": {
                 "schema": {
@@ -205,12 +74,12 @@
         "tags": [
           "enrollment"
         ],
-        "operationId": "poll_device_auth",
+        "operationId": "device_auth_poll",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/DeviceTokenRequest"
+                "$ref": "#/components/schemas/DeviceAuthPollRequest"
               }
             }
           },
@@ -218,11 +87,11 @@
         },
         "responses": {
           "200": {
-            "description": "The poll status (pending/slow_down/denied/expired/granted + the grant on granted).",
+            "description": "The poll status; `granted` carries the ONE bearer credential (the promoted device code), the device id, and the joined workspace.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/DeviceTokenResponse"
+                  "$ref": "#/components/schemas/DeviceAuthPollResponse"
                 }
               }
             }
@@ -237,18 +106,8 @@
               }
             }
           },
-          "404": {
-            "description": "No such device code.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
           "429": {
-            "description": "Rate limited.",
+            "description": "Rate limited (Retry-After header).",
             "content": {
               "application/json": {
                 "schema": {
@@ -258,268 +117,7 @@
             }
           },
           "500": {
-            "description": "Internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/enroll/passcode": {
-      "post": {
-        "tags": [
-          "enrollment"
-        ],
-        "operationId": "start_passcode",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PasscodeRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "A constant-shaped ack (delivery is fire-and-forget through the serving tier's mail seam; no enumeration oracle).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PasscodeAck"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed body.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "No live session for that user code.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/enroll/passcode/confirm": {
-      "post": {
-        "tags": [
-          "enrollment"
-        ],
-        "operationId": "complete_passcode",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PasscodeConfirmRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "The confirmation status (confirmed/wrong_code/expired/too_many_attempts).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PasscodeConfirmResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed body.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "No live session for that user code.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/enroll/verify/{user_code}": {
-      "get": {
-        "tags": [
-          "enrollment"
-        ],
-        "operationId": "read_verification_context",
-        "parameters": [
-          {
-            "name": "user_code",
-            "in": "path",
-            "description": "The user code shown by `device/authorize`.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The verification-page disclosure (machine name, fingerprint, workspace, offered skills).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/VerificationContextResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "No live session for that user code.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/login": {
-      "post": {
-        "tags": [
-          "enrollment"
-        ],
-        "operationId": "login",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/LoginRedeemRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "The login receipt — OK carries the LoginData (the proven identity + one re-minted credential, or a blocked marker, per confirmed seat); DENIED the flat error.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed body or device public key.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal store fault.",
+            "description": "Internal fault.",
             "content": {
               "application/json": {
                 "schema": {
@@ -541,7 +139,7 @@
           {
             "name": "Authorization",
             "in": "header",
-            "description": "`Bearer <workspace credential>` — the acting device's credential.",
+            "description": "`Bearer <device credential>`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -560,7 +158,7 @@
         },
         "responses": {
           "200": {
-            "description": "The proposal receipt (NEEDS_REVIEW on success; CONFLICT / DENIED / … otherwise).",
+            "description": "The all-outcome envelope + receipt (NEEDS_REVIEW on success — the candidate is committed without moving `current`).",
             "content": {
               "application/json": {
                 "schema": {
@@ -570,7 +168,7 @@
             }
           },
           "400": {
-            "description": "Malformed body or identifier.",
+            "description": "Malformed body / id / candidate.",
             "content": {
               "application/json": {
                 "schema": {
@@ -580,7 +178,7 @@
             }
           },
           "404": {
-            "description": "Missing/blank credential.",
+            "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
             "content": {
               "application/json": {
                 "schema": {
@@ -622,7 +220,7 @@
           {
             "name": "Authorization",
             "in": "header",
-            "description": "`Bearer <workspace credential>` — the acting device's credential.",
+            "description": "`Bearer <device credential>`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -641,7 +239,7 @@
         },
         "responses": {
           "200": {
-            "description": "The publish receipt — EVERY protocol outcome (OK / CONFLICT / APPROVAL_REQUIRED / DENIED / …).",
+            "description": "The all-outcome envelope + receipt (OK / NEEDS_REVIEW / CONFLICT / DENIED …). An op_id retry replays byte-identically.",
             "content": {
               "application/json": {
                 "schema": {
@@ -651,7 +249,7 @@
             }
           },
           "400": {
-            "description": "Malformed body or identifier.",
+            "description": "Malformed body / id / candidate.",
             "content": {
               "application/json": {
                 "schema": {
@@ -661,7 +259,7 @@
             }
           },
           "404": {
-            "description": "Missing/blank credential.",
+            "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
             "content": {
               "application/json": {
                 "schema": {
@@ -703,7 +301,7 @@
           {
             "name": "Authorization",
             "in": "header",
-            "description": "`Bearer <workspace credential>` — the acting device's credential.",
+            "description": "`Bearer <device credential>`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -722,7 +320,7 @@
         },
         "responses": {
           "200": {
-            "description": "The revert receipt (OK on success; CONFLICT / DENIED / … otherwise).",
+            "description": "The all-outcome envelope + receipt — a revert is a FORWARD commit restoring the good version's bytes (the pointer never moves backward).",
             "content": {
               "application/json": {
                 "schema": {
@@ -732,7 +330,7 @@
             }
           },
           "400": {
-            "description": "Malformed body or identifier.",
+            "description": "Malformed body / id.",
             "content": {
               "application/json": {
                 "schema": {
@@ -742,7 +340,7 @@
             }
           },
           "404": {
-            "description": "Missing/blank credential.",
+            "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
             "content": {
               "application/json": {
                 "schema": {
@@ -784,7 +382,7 @@
           {
             "name": "Authorization",
             "in": "header",
-            "description": "`Bearer <workspace credential>` — the acting device's credential.",
+            "description": "`Bearer <device credential>`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -803,7 +401,7 @@
         },
         "responses": {
           "200": {
-            "description": "The review receipt (OK on an approve that promoted; CONFLICT / DENIED / … otherwise).",
+            "description": "The all-outcome envelope + receipt (approve promotes; reject requires its reason; withdraw is author-only).",
             "content": {
               "application/json": {
                 "schema": {
@@ -813,7 +411,7 @@
             }
           },
           "400": {
-            "description": "Malformed body or identifier.",
+            "description": "Malformed body / id.",
             "content": {
               "application/json": {
                 "schema": {
@@ -823,7 +421,7 @@
             }
           },
           "404": {
-            "description": "Missing/blank credential.",
+            "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1425,75 +1023,6 @@
       }
     },
     "/v1/workspaces/{ws}/devices": {
-      "post": {
-        "tags": [
-          "enrollment"
-        ],
-        "operationId": "redeem",
-        "parameters": [
-          {
-            "name": "ws",
-            "in": "path",
-            "description": "Workspace id (the grant is authoritative for the workspace).",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RedeemRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "The redeem receipt — OK carries the registered device + minted read creds; DENIED the flat error.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed body or key.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      },
       "delete": {
         "tags": [
           "governance"
@@ -1503,7 +1032,7 @@
           {
             "name": "ws",
             "in": "path",
-            "description": "Workspace id (REST sugar; the authoritative workspace_id rides the body).",
+            "description": "Workspace id.",
             "required": true,
             "schema": {
               "type": "string"
@@ -1512,7 +1041,7 @@
           {
             "name": "Authorization",
             "in": "header",
-            "description": "`Bearer <workspace credential>` — the acting device's credential (owner, or the target's own principal).",
+            "description": "`Bearer <device credential>`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -1531,7 +1060,7 @@
         },
         "responses": {
           "200": {
-            "description": "The revoke receipt — OK on success (instant revoke), DENIED (a 200) on a role denial.",
+            "description": "The revoke receipt (instant: the target credential stops authorizing fresh work the moment it commits).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1541,7 +1070,17 @@
             }
           },
           "400": {
-            "description": "Malformed body or identifier.",
+            "description": "Malformed body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1551,7 +1090,7 @@
             }
           },
           "429": {
-            "description": "Rate limited.",
+            "description": "Rate limited (Retry-After header).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1561,7 +1100,7 @@
             }
           },
           "500": {
-            "description": "Internal store fault.",
+            "description": "Integrity / internal store fault.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2058,99 +1597,6 @@
         }
       }
     },
-    "/v1/workspaces/{ws}/policy/review-required": {
-      "put": {
-        "tags": [
-          "policy"
-        ],
-        "operationId": "set_review_required",
-        "parameters": [
-          {
-            "name": "ws",
-            "in": "path",
-            "description": "The workspace id.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "Authorization",
-            "in": "header",
-            "description": "Bearer <admin token> (the plane operator's secret).",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PolicyReviewRequiredRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "204": {
-            "description": "The policy was set (an idempotent write)."
-          },
-          "400": {
-            "description": "Malformed body or workspace id.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Admin token configured but missing/invalid on the request.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "No admin token is configured on this plane (the route is disabled).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/workspaces/{ws}/proposals": {
       "get": {
         "tags": [
@@ -2170,7 +1616,7 @@
           {
             "name": "Authorization",
             "in": "header",
-            "description": "`Bearer <workspace credential>`.",
+            "description": "`Bearer <device credential>`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -2179,7 +1625,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Every OPEN proposal in the workspace (the review inbox), author-message first.",
+            "description": "The review inbox: every OPEN proposal in the workspace, author message first.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2304,182 +1750,6 @@
         }
       }
     },
-    "/v1/workspaces/{ws}/roster/{email}": {
-      "put": {
-        "tags": [
-          "governance"
-        ],
-        "operationId": "roster_set",
-        "parameters": [
-          {
-            "name": "ws",
-            "in": "path",
-            "description": "Workspace id (REST sugar; the authoritative workspace_id rides the body).",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "email",
-            "in": "path",
-            "description": "The target principal whose role is set.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "Authorization",
-            "in": "header",
-            "description": "`Bearer <workspace credential>` — the acting owner device's credential.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RosterSetRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "The roster-set receipt — OK on success, DENIED (a 200) on a role denial.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed body or identifier.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "governance"
-        ],
-        "operationId": "roster_remove",
-        "parameters": [
-          {
-            "name": "ws",
-            "in": "path",
-            "description": "Workspace id (REST sugar; the authoritative workspace_id rides the body).",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "email",
-            "in": "path",
-            "description": "The target principal to remove from the roster.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "Authorization",
-            "in": "header",
-            "description": "`Bearer <workspace credential>` — the acting owner device's credential.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RosterRemoveRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "The roster-remove receipt — OK on success, DENIED (a 200) on a role denial.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed body or identifier.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/workspaces/{ws}/skills": {
       "get": {
         "tags": [
@@ -2499,7 +1769,7 @@
           {
             "name": "Authorization",
             "in": "header",
-            "description": "`Bearer <workspace credential>`.",
+            "description": "`Bearer <device credential>`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -2508,7 +1778,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The workspace skill catalog (metadata only; a possibly-empty list ordered by skill id).",
+            "description": "The workspace catalog (metadata only, no bytes; catalog visibility == membership).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2555,7 +1825,7 @@
         "tags": [
           "reads"
         ],
-        "operationId": "get_bundle",
+        "operationId": "get_object",
         "parameters": [
           {
             "name": "ws",
@@ -2569,7 +1839,7 @@
           {
             "name": "skill",
             "in": "path",
-            "description": "Skill id.",
+            "description": "The skill's immutable id.",
             "required": true,
             "schema": {
               "type": "string"
@@ -2578,7 +1848,7 @@
           {
             "name": "object_id",
             "in": "path",
-            "description": "The content id (hex64) of the object to fetch.",
+            "description": "The object's content id (64-char lowercase hex sha256).",
             "required": true,
             "schema": {
               "type": "string"
@@ -2587,7 +1857,7 @@
           {
             "name": "Authorization",
             "in": "header",
-            "description": "`Bearer <workspace credential>`.",
+            "description": "`Bearer <device credential>`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -2596,17 +1866,10 @@
         ],
         "responses": {
           "200": {
-            "description": "The raw object bytes (content-addressed, immutable).",
-            "content": {
-              "application/octet-stream": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
+            "description": "The object's verified bytes (application/octet-stream). Served only through a skill that reaches it — never by bare hash."
           },
           "404": {
-            "description": "No/blank credential, scope/path mismatch, or unreachable object.",
+            "description": "Missing/blank credential, non-member, unreachable/unknown object, or a malformed id (indistinguishable).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2648,7 +1911,7 @@
           {
             "name": "ws",
             "in": "path",
-            "description": "The workspace id.",
+            "description": "Workspace id.",
             "required": true,
             "schema": {
               "type": "string"
@@ -2657,7 +1920,7 @@
           {
             "name": "skill",
             "in": "path",
-            "description": "The skill id.",
+            "description": "The skill's immutable id.",
             "required": true,
             "schema": {
               "type": "string"
@@ -2666,40 +1929,16 @@
           {
             "name": "Authorization",
             "in": "header",
-            "description": "`Bearer <workspace credential>` — the device's one workspace credential.",
+            "description": "`Bearer <device credential>`.",
             "required": true,
             "schema": {
               "type": "string"
-            }
-          },
-          {
-            "name": "If-None-Match",
-            "in": "header",
-            "description": "The cached ETag \"<epoch>.<seq>\".",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "Topos-Known-Version-Id",
-            "in": "header",
-            "description": "The client's known current commit id (hex64) — the commit-sensitive half of the 304.",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
             }
           }
         ],
         "responses": {
           "200": {
-            "description": "The current record (application/json) + a commit-sensitive ETag.",
+            "description": "The `current` pointer record (`ETag = \"<generation>\"`; a conditional GET answers 304).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2708,11 +1947,8 @@
               }
             }
           },
-          "304": {
-            "description": "Pointer unchanged (the ETag AND the known version both match)."
-          },
           "404": {
-            "description": "No such credential/membership/skill, or no current pointer yet.",
+            "description": "Missing/blank credential, unknown/revoked one, non-member, or no pointer (indistinguishable).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2763,7 +1999,7 @@
           {
             "name": "skill",
             "in": "path",
-            "description": "The skill's catalog name (or an archived successor's freed base name, or a bare skill id).",
+            "description": "The skill's immutable id (an archived skill stays addressable).",
             "required": true,
             "schema": {
               "type": "string"
@@ -2772,7 +2008,7 @@
           {
             "name": "Authorization",
             "in": "header",
-            "description": "`Bearer <workspace credential>`.",
+            "description": "`Bearer <device credential>`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -2791,7 +2027,7 @@
             }
           },
           "404": {
-            "description": "Missing/blank credential, non-member, or unknown skill (indistinguishable).",
+            "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2842,7 +2078,7 @@
           {
             "name": "skill",
             "in": "path",
-            "description": "Skill id.",
+            "description": "The skill's immutable id.",
             "required": true,
             "schema": {
               "type": "string"
@@ -2851,7 +2087,7 @@
           {
             "name": "Authorization",
             "in": "header",
-            "description": "`Bearer <workspace credential>`.",
+            "description": "`Bearer <device credential>`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -2860,7 +2096,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The skill's OPEN, non-stale proposals (a possibly-empty list).",
+            "description": "The skill's OPEN proposals — handles only (version id, base generation, opened-at); no bytes, no proposer.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2870,7 +2106,7 @@
             }
           },
           "404": {
-            "description": "No/blank credential, non-member, or scope/path mismatch (indistinguishable).",
+            "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3099,7 +2335,7 @@
           {
             "name": "skill",
             "in": "path",
-            "description": "Skill id.",
+            "description": "The skill's immutable id.",
             "required": true,
             "schema": {
               "type": "string"
@@ -3108,7 +2344,7 @@
           {
             "name": "version_id",
             "in": "path",
-            "description": "The version (commit) id (hex64) whose metadata to read.",
+            "description": "The version's commit id (64-char lowercase hex).",
             "required": true,
             "schema": {
               "type": "string"
@@ -3117,7 +2353,7 @@
           {
             "name": "Authorization",
             "in": "header",
-            "description": "`Bearer <workspace credential>`.",
+            "description": "`Bearer <device credential>`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -3126,7 +2362,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The version's authenticated metadata (immutable).",
+            "description": "The version's metadata + file listing (no blob bytes; the per-object read serves those).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3136,7 +2372,7 @@
             }
           },
           "404": {
-            "description": "No/blank credential, scope/path mismatch, or unauthorized/unreachable version.",
+            "description": "Missing/blank credential, non-member, or an unknown/purged version (indistinguishable).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3206,29 +2442,6 @@
           }
         }
       },
-      "AdminClaimRequest": {
-        "type": "object",
-        "description": "`POST /v1/admin-claim` body — consume a one-time self-host claim token to stand up a workspace + seat its\nfirst owner. The server re-derives the device key id from `device_public_key`.",
-        "required": [
-          "claim_token",
-          "device_public_key",
-          "display_name"
-        ],
-        "properties": {
-          "claim_token": {
-            "type": "string",
-            "description": "The one-time admin-claim token."
-          },
-          "device_public_key": {
-            "type": "string",
-            "description": "The claiming device's raw 32-byte public key, base64url-unpadded."
-          },
-          "display_name": {
-            "type": "string",
-            "description": "The display name for the standing-up workspace."
-          }
-        }
-      },
       "Affected": {
         "type": "object",
         "description": "What an outcome refers to (every field optional — a policy flip has no skill/version).",
@@ -3260,153 +2473,6 @@
           }
         }
       },
-      "BootstrapData": {
-        "type": "object",
-        "description": "The payload an `/i/<token>` invite link resolves to — read once, before enrollment, to learn the\nworkspace + the plane API base to dial. No bytes, no role.",
-        "required": [
-          "schema_version",
-          "invite",
-          "plane",
-          "workspace"
-        ],
-        "properties": {
-          "invite": {
-            "$ref": "#/components/schemas/BootstrapInvite",
-            "description": "The invite's non-secret descriptor (consent posture, expiry)."
-          },
-          "offered_skills": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/BootstrapSkill"
-            },
-            "description": "The skills the invite pre-offers (a name may be absent → the client shows the id). Empty for a\nmembership-only door."
-          },
-          "plane": {
-            "$ref": "#/components/schemas/BootstrapPlane",
-            "description": "The plane the workspace lives on — its API base and enrollment method."
-          },
-          "schema_version": {
-            "type": "integer",
-            "format": "int32",
-            "description": "Always `1` for this contract version (the schema pins it `const`).",
-            "minimum": 0
-          },
-          "workspace": {
-            "$ref": "#/components/schemas/BootstrapWorkspace",
-            "description": "The workspace the invite is for."
-          }
-        }
-      },
-      "BootstrapInvite": {
-        "type": "object",
-        "description": "The invite's non-secret descriptor — the consent posture a redeemer agrees to, never a role.",
-        "required": [
-          "token_id",
-          "consent",
-          "first_receive_auto_land"
-        ],
-        "properties": {
-          "consent": {
-            "$ref": "#/components/schemas/ConsentMode",
-            "description": "The consent posture every first-receive follows."
-          },
-          "expires_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The invite's expiry as an RFC-3339 string, if it expires (`None` = never)."
-          },
-          "first_receive_auto_land": {
-            "type": "boolean",
-            "description": "Whether a first-received skill auto-lands. **ALWAYS false** — a received skill is offered, never\nsilently applied (a direct human yes is required)."
-          },
-          "token_id": {
-            "type": "string",
-            "description": "A stable, non-secret reference for this invite (the link token the client used to reach the\npayload). Empty for an admin-claim bootstrap — a claim token is a live one-time bearer capability\nthe server never echoes into a body; the claim client uses the token it parsed from the link."
-          }
-        }
-      },
-      "BootstrapPlane": {
-        "type": "object",
-        "description": "The plane a workspace lives on — its public base URL, deployment posture, and offered enrollment method.",
-        "required": [
-          "base_url",
-          "deployment_mode",
-          "enrollment_method"
-        ],
-        "properties": {
-          "base_url": {
-            "type": "string",
-            "description": "The plane's public API base URL — the root the client dials for enrollment and sync after this\nbootstrap read. Always the plane itself, never a web front: a share link may ride another host,\nbut the client re-roots onto this value the moment the bootstrap is fetched."
-          },
-          "deployment_mode": {
-            "$ref": "#/components/schemas/DeploymentMode",
-            "description": "This plane's deployment posture."
-          },
-          "enrollment_method": {
-            "type": "string",
-            "description": "The enrollment method advertised to a bootstrapping device (e.g. `\"device_code\"` / `\"passcode\"`)."
-          }
-        }
-      },
-      "BootstrapSkill": {
-        "type": "object",
-        "description": "One skill an invite pre-offers — its id, plus an optional display name (names ride the invite; a missing\nname means the client shows the id).",
-        "required": [
-          "skill_id"
-        ],
-        "properties": {
-          "name": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The skill's display name, if the invite carried one (else the client shows the id)."
-          },
-          "skill_id": {
-            "type": "string",
-            "description": "The offered skill id."
-          }
-        }
-      },
-      "BootstrapWorkspace": {
-        "type": "object",
-        "description": "The workspace an invite is for — its id, display name, and domain-verification state. No role (the role\nlives server-side on the pre-seeded member rows).",
-        "required": [
-          "workspace_id",
-          "display_name",
-          "verified_domain_status"
-        ],
-        "properties": {
-          "display_name": {
-            "type": "string",
-            "description": "The workspace display name (shown on the verification page + in the agent's disclosure)."
-          },
-          "verified_domain": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The org-domain claim, if any."
-          },
-          "verified_domain_status": {
-            "$ref": "#/components/schemas/VerifiedDomainStatus",
-            "description": "The domain-verification state."
-          },
-          "workspace_id": {
-            "type": "string",
-            "description": "The workspace id."
-          }
-        }
-      },
-      "ConsentMode": {
-        "type": "string",
-        "description": "The consent posture of an invite — a CLOSED set. v0 is a single mode: a received skill is disclosed and\nawaits a direct human yes on first receive (never auto-landed).",
-        "enum": [
-          "direct_human_first_receive"
-        ]
-      },
       "CurrentRecord": {
         "type": "object",
         "required": [
@@ -3415,7 +2481,9 @@
         ],
         "properties": {
           "generation": {
-            "$ref": "#/components/schemas/Generation"
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           },
           "version_id": {
             "type": "string",
@@ -3423,102 +2491,147 @@
           }
         }
       },
-      "DeploymentMode": {
-        "type": "string",
-        "description": "A plane's deployment posture — a CLOSED set. `cloud` requires a confirmed identity step at enrollment;\n`self_host` grants membership straight from a valid grant.",
-        "enum": [
-          "cloud",
-          "self_host"
-        ]
-      },
-      "DeviceAuthorizeRequest": {
+      "DeviceAuthPollRequest": {
         "type": "object",
-        "description": "`POST /v1/device/authorize` body — begin an RFC-8628 device-authorization flow. With a `workspace`\n(the address name; the default `enroll` intent) the device enrolls toward that workspace; with\n`intent = \"standup\"` — or neither field — it starts a STANDUP session (no workspace yet; hosted\nplanes only); with `intent = \"login\"` it starts a workspace-less LOGIN session whose grant redeems\nat `POST /v1/login`. The server SERVER-derives the device key id from `device_public_key` (a\nclient-asserted id is never trusted).",
+        "description": "`POST /v1/device/token` body — poll a device-authorization flow for its outcome.",
         "required": [
-          "device_public_key",
-          "machine_name"
-        ],
-        "properties": {
-          "device_public_key": {
-            "type": "string",
-            "description": "The device's raw 32-byte public key, base64url-unpadded. The server derives the device key id from\nit (never a client-asserted id) and binds it to the enrollment session."
-          },
-          "intent": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/SessionIntent",
-                "description": "The session intent. Absent defaults to `enroll` when a workspace is named, `standup` otherwise."
-              }
-            ]
-          },
-          "machine_name": {
-            "type": "string",
-            "description": "A human-readable machine name shown on the verification page (a confused-deputy guard, not authority)."
-          },
-          "workspace": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The workspace ADDRESS name an enroll session targets (`topos.sh/<name>` minus the origin).\nWhether the name exists is never disclosed on this route: an unknown name runs the same flow to\nthe same uniform denial a not-yours workspace gets."
-          }
-        }
-      },
-      "DeviceAuthorizeResponse": {
-        "type": "object",
-        "description": "`POST /v1/device/authorize` response — the RFC-8628 device-authorization grant (the names mirror the RFC).",
-        "required": [
-          "device_code",
-          "user_code",
-          "verification_uri",
-          "expires_in",
-          "interval"
+          "device_code"
         ],
         "properties": {
           "device_code": {
             "type": "string",
-            "description": "The SECRET device code the client polls `device/token` with."
+            "description": "The SECRET device code from `device/authorize`."
+          }
+        }
+      },
+      "DeviceAuthPollResponse": {
+        "type": "object",
+        "description": "`POST /v1/device/token` response — the poll `status`; a `granted` poll carries the device's ONE\nbearer credential (the promoted device code — returned here and stored from this ONE field),\nits device id, and the joined workspace. A re-poll of an approved flow returns the same answer.",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "credential": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The device's plaintext bearer credential — present ONLY when `status` is `granted`. Returned\nonce per poll; the server stores only its sha256."
           },
-          "expires_in": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The session lifetime, in seconds (RFC-8628 `expires_in`).",
-            "minimum": 0
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The registered device's id — present ONLY when `status` is `granted`."
           },
-          "interval": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The minimum poll interval, in seconds (RFC-8628 `interval`).",
-            "minimum": 0
+          "status": {
+            "$ref": "#/components/schemas/DeviceAuthPollStatus",
+            "description": "The poll status."
           },
-          "plane": {
+          "workspace": {
             "oneOf": [
               {
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/BootstrapPlane",
-                "description": "The plane block a STANDUP start carries (base URL, deployment posture, enrollment method) — a\nstandup device has no `/i/` bootstrap to learn these from. Absent on an enroll start."
+                "$ref": "#/components/schemas/DeviceAuthWorkspace",
+                "description": "The joined workspace — present ONLY when `status` is `granted`."
               }
             ]
+          }
+        }
+      },
+      "DeviceAuthPollStatus": {
+        "type": "string",
+        "description": "A device-authorization poll status (snake_case). `granted` carries the credential + the joined\nworkspace; every other status carries only itself.",
+        "enum": [
+          "pending",
+          "denied",
+          "expired",
+          "granted"
+        ]
+      },
+      "DeviceAuthStartRequest": {
+        "type": "object",
+        "description": "`POST /v1/device/authorize` body — begin a device-authorization flow toward a workspace named by\nits address slug. Whether the name exists is never disclosed on this route: an unknown name runs\nthe same flow to the same uniform denial.",
+        "required": [
+          "requested_name",
+          "workspace"
+        ],
+        "properties": {
+          "requested_name": {
+            "type": "string",
+            "description": "A human-readable device name shown on the approval page (a confused-deputy guard, not\nauthority) and kept as the device's display name once approved."
+          },
+          "workspace": {
+            "type": "string",
+            "description": "The workspace ADDRESS slug the device asks to join (`topos.sh/<name>` minus the origin)."
+          }
+        }
+      },
+      "DeviceAuthStartResponse": {
+        "type": "object",
+        "description": "`POST /v1/device/authorize` response — the device-authorization grant (RFC-8628-shaped names).",
+        "required": [
+          "device_code",
+          "user_code",
+          "verification_uri",
+          "verification_uri_complete",
+          "expires_in_secs",
+          "interval_secs"
+        ],
+        "properties": {
+          "device_code": {
+            "type": "string",
+            "description": "The SECRET device code the client polls `device/token` with. On approval this same secret is\npromoted to the device's bearer credential (see the module note), so it is stored like one."
+          },
+          "expires_in_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The flow lifetime, in seconds.",
+            "minimum": 0
+          },
+          "interval_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The minimum poll interval, in seconds.",
+            "minimum": 0
           },
           "user_code": {
             "type": "string",
-            "description": "The opaque code identifying this device-auth session; it rides inside `verification_uri_complete`\n(the human clicks the URL — it is not typed)."
+            "description": "The short human-facing code the approval page displays (a cross-check, never typed as a\nsecret)."
           },
           "verification_uri": {
             "type": "string",
-            "description": "The verification URL a human visits to approve the session."
+            "description": "The approval URL a signed-in human visits."
           },
           "verification_uri_complete": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The verification URL with the user code already embedded (RFC-8628 `verification_uri_complete`) —\nthe one link to open; a client uses it VERBATIM when present."
+            "type": "string",
+            "description": "The approval URL with the user code already embedded — the one link to open; a client uses\nit VERBATIM when present."
+          }
+        }
+      },
+      "DeviceAuthWorkspace": {
+        "type": "object",
+        "description": "The workspace context a `granted` poll carries — everything the CLI needs to record what it\nenrolled into (the id it scopes requests by, the address slug it joined at, and a display name).",
+        "required": [
+          "workspace_id",
+          "name",
+          "display_name"
+        ],
+        "properties": {
+          "display_name": {
+            "type": "string",
+            "description": "The workspace's display name."
+          },
+          "name": {
+            "type": "string",
+            "description": "The workspace's ADDRESS slug (what the human typed at `follow`)."
+          },
+          "workspace_id": {
+            "type": "string",
+            "description": "The workspace id (the `{ws}` path segment of every subsequent request)."
           }
         }
       },
@@ -3542,106 +2655,6 @@
           "workspace_id": {
             "type": "string",
             "description": "The target workspace id (scopes the op to one workspace)."
-          }
-        }
-      },
-      "DeviceTokenRequest": {
-        "type": "object",
-        "description": "`POST /v1/device/token` body — poll a device-authorization session for its grant.",
-        "required": [
-          "device_code"
-        ],
-        "properties": {
-          "device_code": {
-            "type": "string",
-            "description": "The SECRET device code from `device/authorize`."
-          }
-        }
-      },
-      "DeviceTokenResponse": {
-        "type": "object",
-        "description": "`POST /v1/device/token` response — the poll `status`, plus the opaque single-use enrollment `grant` ONLY\nwhen `status` is `granted`. A re-poll of a confirmed session re-derives the SAME grant (idempotent issue).",
-        "required": [
-          "status"
-        ],
-        "properties": {
-          "grant": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The opaque single-use enrollment grant — present ONLY when `status` is `granted` (the redeem credential)."
-          },
-          "status": {
-            "$ref": "#/components/schemas/DeviceTokenStatus",
-            "description": "The poll status."
-          },
-          "workspace": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/DeviceTokenWorkspace",
-                "description": "The granted session's workspace context — present when `status` is `granted`."
-              }
-            ]
-          }
-        }
-      },
-      "DeviceTokenStatus": {
-        "type": "string",
-        "description": "A device-authorization poll status — the RFC-8628 outcomes (snake_case). `granted` carries the opaque\ngrant; every other status carries only itself (no grant).",
-        "enum": [
-          "pending",
-          "slow_down",
-          "denied",
-          "expired",
-          "granted"
-        ]
-      },
-      "DeviceTokenWorkspace": {
-        "type": "object",
-        "description": "The workspace context a `granted` poll carries — the id + display name a STANDUP client (which never\nread an `/i/` bootstrap) needs to build its redeem possession frame and disclose what it joined.",
-        "required": [
-          "workspace_id",
-          "display_name"
-        ],
-        "properties": {
-          "address": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The workspace's full ADDRESS (server-built on the public link base) — the share line's root;\nabsent when the plane predates addresses or the grant is workspace-less."
-          },
-          "display_name": {
-            "type": "string",
-            "description": "The workspace display name (a disclosure aid; `\"\"` if the plane no longer has one)."
-          },
-          "workspace_id": {
-            "type": "string",
-            "description": "The workspace the grant is scoped to."
-          }
-        }
-      },
-      "Generation": {
-        "type": "object",
-        "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
-        "required": [
-          "epoch",
-          "seq"
-        ],
-        "properties": {
-          "epoch": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          },
-          "seq": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
           }
         }
       },
@@ -3756,92 +2769,6 @@
           }
         }
       },
-      "LoginData": {
-        "type": "object",
-        "description": "`POST /v1/login` success `data` — the proven identity + one entry per confirmed seat.",
-        "required": [
-          "principal",
-          "memberships"
-        ],
-        "properties": {
-          "memberships": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/LoginMembership"
-            },
-            "description": "One entry per workspace where the principal holds a confirmed seat (possibly empty)."
-          },
-          "principal": {
-            "type": "string",
-            "description": "The proven principal (canonical form)."
-          }
-        }
-      },
-      "LoginMembership": {
-        "type": "object",
-        "description": "One workspace a login re-minted (or could not re-mint) a credential for.",
-        "required": [
-          "workspace_id",
-          "name",
-          "display_name",
-          "role",
-          "device_key_id"
-        ],
-        "properties": {
-          "blocked": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Why no credential was minted (e.g. this device is revoked in that workspace); absent on success."
-          },
-          "credential": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The freshly minted plaintext workspace credential — absent when the mint was refused (see\n`blocked`). Returned ONCE; the server stores only its hash."
-          },
-          "device_key_id": {
-            "type": "string",
-            "description": "The device's non-secret key id in this workspace (server-derived)."
-          },
-          "display_name": {
-            "type": "string",
-            "description": "The workspace's display name."
-          },
-          "name": {
-            "type": "string",
-            "description": "The workspace's ADDRESS name."
-          },
-          "role": {
-            "type": "string",
-            "description": "The person's role on the seat (`owner` / `reviewer` / `member`)."
-          },
-          "workspace_id": {
-            "type": "string",
-            "description": "The workspace id."
-          }
-        }
-      },
-      "LoginRedeemRequest": {
-        "type": "object",
-        "description": "`POST /v1/login` body — redeem a LOGIN grant: prove the device key the grant is bound to and\nreceive one workspace credential per confirmed seat. The grant is the bearer credential; the\ndevice public key is a binding check (nothing signs).",
-        "required": [
-          "grant",
-          "device_public_key"
-        ],
-        "properties": {
-          "device_public_key": {
-            "type": "string",
-            "description": "The device's raw 32-byte public key, base64url-unpadded — must equal the grant's bound key."
-          },
-          "grant": {
-            "type": "string",
-            "description": "The opaque grant from the login device flow (the bearer credential for this one exchange)."
-          }
-        }
-      },
       "NextAction": {
         "type": "object",
         "description": "A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent\nbranch on the known set and still pass through unknowns.",
@@ -3878,90 +2805,6 @@
           }
         }
       },
-      "PasscodeAck": {
-        "type": "object",
-        "description": "`POST /v1/enroll/passcode` response — a CONSTANT-shaped ack (always `sent`); the send is fire-and-forget,\nso neither the body nor its latency reveals whether the address was rostered.",
-        "required": [
-          "status"
-        ],
-        "properties": {
-          "status": {
-            "$ref": "#/components/schemas/PasscodeAckStatus",
-            "description": "Always `sent`."
-          }
-        }
-      },
-      "PasscodeAckStatus": {
-        "type": "string",
-        "description": "The constant-shaped status of a started passcode challenge — always `sent`, so a non-rostered address is\nno enumeration oracle (the cloud roster gate is enforced at redeem, never here).",
-        "enum": [
-          "sent"
-        ]
-      },
-      "PasscodeConfirmRequest": {
-        "type": "object",
-        "description": "`POST /v1/enroll/passcode/confirm` body — submit a passcode to confirm the session's identity.",
-        "required": [
-          "user_code",
-          "email",
-          "code"
-        ],
-        "properties": {
-          "code": {
-            "type": "string",
-            "description": "The 6-digit passcode the human entered."
-          },
-          "email": {
-            "type": "string",
-            "description": "The email the passcode was sent to."
-          },
-          "user_code": {
-            "type": "string",
-            "description": "The user code naming the live device-auth session."
-          }
-        }
-      },
-      "PasscodeConfirmResponse": {
-        "type": "object",
-        "description": "`POST /v1/enroll/passcode/confirm` response — the confirmation status.",
-        "required": [
-          "status"
-        ],
-        "properties": {
-          "status": {
-            "$ref": "#/components/schemas/PasscodeConfirmStatus",
-            "description": "The confirmation status."
-          }
-        }
-      },
-      "PasscodeConfirmStatus": {
-        "type": "string",
-        "description": "The outcome of a passcode confirmation (snake_case). A wrong code carries only the status — never the\nattempts remaining (no brute-force timing/count oracle on the wire).",
-        "enum": [
-          "confirmed",
-          "wrong_code",
-          "expired",
-          "too_many_attempts"
-        ]
-      },
-      "PasscodeRequest": {
-        "type": "object",
-        "description": "`POST /v1/enroll/passcode` body — start a passcode challenge for an email on a live device-auth session.",
-        "required": [
-          "user_code",
-          "email"
-        ],
-        "properties": {
-          "email": {
-            "type": "string",
-            "description": "The email the passcode proves control of."
-          },
-          "user_code": {
-            "type": "string",
-            "description": "The user code naming the live device-auth session."
-          }
-        }
-      },
       "PointerScope": {
         "type": "object",
         "required": [
@@ -3974,19 +2817,6 @@
           },
           "workspace_id": {
             "type": "string"
-          }
-        }
-      },
-      "PolicyReviewRequiredRequest": {
-        "type": "object",
-        "description": "`PUT /v1/workspaces/{ws}/policy/review-required` body — the self-host operator toggle for the\n`review-required` workspace policy (an idempotent set; JSON so the body stays extensible without a\npath-shape change). Authenticated by the plane's admin token, not a device credential; the route is\ninvisible (404) on a plane with no admin token configured.",
-        "required": [
-          "review_required"
-        ],
-        "properties": {
-          "review_required": {
-            "type": "boolean",
-            "description": "The desired policy value: `true` gates any direct publish behind a reviewer's approval."
           }
         }
       },
@@ -4058,8 +2888,10 @@
             "description": "The skill's human display name (the author's skill-folder name) — ADVISORY metadata, carried for\nsymmetry with [`PublishRequest`]. It rides the proposal but is never digested or part of the\ncandidate; the plane records a name only when the pointer actually moves (a later approve/publish)."
           },
           "expected": {
-            "$ref": "#/components/schemas/Generation",
-            "description": "The `(epoch, seq)` the proposal is born against (its base); a stale base later makes it non-current."
+            "type": "integer",
+            "format": "int64",
+            "description": "The generation the proposal is born against (its base); a stale base later makes it non-current.",
+            "minimum": 0
           },
           "op_id": {
             "type": "string",
@@ -4090,10 +2922,12 @@
       },
       "PublishData": {
         "type": "object",
-        "description": "`publish` (a direct publish that moves `current`). On a GENESIS (first) publish the client also folds in\na shareable `/i/` link pre-offering the skill — **best-effort + owner-gated** (minting it signs a\ngovernance op the plane denies for a non-owner), so `invite_link` is `Some` only on a genesis publish by\nan owner, and `None` otherwise. Under `review-required` a direct publish instead returns\n`APPROVAL_REQUIRED` (with the `publish --propose` next-action) and carries no `data`. **INFERRED.**\n\nAn UN-ENROLLED direct publish on the hosted plane starts a workspace STANDUP instead of failing: the\nenvelope is still `ok = true`, but `data` carries the [`PublishPending`] block (sign in to approve) and\nno version — `version_id` / `current_generation` are `None` at pending because nothing was published yet\n(only the computed digest of the bytes being published can be honestly filled). Re-invoking the SAME\npublish command (the `ENROLL_RESUME` next-action) resumes: once the sign-in is approved, the same command\ncompletes enrollment AND the publish in one invocation, and the receipt carries the [`StandupReceipt`]\ndisclosure.",
+        "description": "`publish` (a direct publish that moves `current`). Under a `reviewed` bundle a direct publish is\nDOWNGRADED to a proposal (see [`ProposeData`]); an un-enrolled publish is refused typed (enroll with\n`topos follow <workspace-address>` first). **INFERRED.**",
         "required": [
           "skill_id",
-          "bundle_digest"
+          "version_id",
+          "bundle_digest",
+          "current_generation"
         ],
         "properties": {
           "added": {
@@ -4109,101 +2943,22 @@
           },
           "bundle_digest": {
             "type": "string",
-            "description": "The byte-exact digest of the shipped (or, at pending, the scanned) bytes — always present: it is\ncomputed over the draft before any network call, and an optional `<skill>@<digest>` pin gates it."
+            "description": "The byte-exact digest of the shipped bytes — computed over the draft before any network call;\nan optional `<skill>@<digest>` pin gates it."
           },
           "current_generation": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Generation",
-                "description": "The pointer's new generation after the move — `None` while the publish is PENDING a standup sign-in\n(no pointer moved yet)."
-              }
-            ]
-          },
-          "pending": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/PublishPending",
-                "description": "Present when this publish is WAITING on the workspace-standup sign-in (the un-enrolled first publish\non a hosted plane): a human opens `verification_uri_complete` and approves; the agent then re-runs\nthe SAME publish command (the `ENROLL_RESUME` next-action carries the argv)."
-              }
-            ]
-          },
-          "share_line": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The paste-able share line for the shipped skill (`<workspace address>/skills/<name>`) — present\nwhen the plane disclosed the workspace address. The pointer move is the real outcome; the line is\nwhat a human pastes in chat."
+            "type": "integer",
+            "format": "int64",
+            "description": "The pointer's new generation after the move.",
+            "minimum": 0
           },
           "skill_id": {
             "type": "string"
           },
-          "standup": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/StandupReceipt",
-                "description": "Present ONLY when THIS invocation completed a workspace standup before publishing — the disclosure\nthat makes a hijacked approval visible (\"workspace X — owner Y\"): the human who approved the sign-in\nis the seated owner, so a name you don't recognize means someone else owns your workspace."
-              }
-            ]
-          },
           "version_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The new commit — `None` while the publish is PENDING a workspace-standup sign-in (nothing was\npublished yet; the version id is only knowable once the bytes actually ship)."
+            "type": "string",
+            "description": "The new commit (the shipped `version_id`)."
           }
         }
-      },
-      "PublishPending": {
-        "type": "object",
-        "description": "The workspace-standup sign-in a pending `publish` waits on. **INFERRED.**",
-        "required": [
-          "status",
-          "verification_uri_complete",
-          "user_code",
-          "device_fingerprint"
-        ],
-        "properties": {
-          "device_fingerprint": {
-            "type": "string",
-            "description": "16-hex fingerprint of this device's public key; a human cross-checks it against the sign-in page."
-          },
-          "expires_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The sign-in session's expiry as an RFC-3339 string, if it expires."
-          },
-          "status": {
-            "$ref": "#/components/schemas/PublishPendingStatus",
-            "description": "Always `signin_required` — the one pending state this block discloses."
-          },
-          "user_code": {
-            "type": "string",
-            "description": "The code embedded in the URL, shown for cross-checking on the sign-in page."
-          },
-          "verification_uri_complete": {
-            "type": "string",
-            "description": "The sign-in URL with the code already embedded — the ONE link a human opens to approve (served by\nthe plane; the client uses it verbatim)."
-          }
-        }
-      },
-      "PublishPendingStatus": {
-        "type": "string",
-        "description": "A pending publish's status — a CLOSED single-value set (snake_case): the standup sign-in is required.",
-        "enum": [
-          "signin_required"
-        ]
       },
       "PublishRequest": {
         "type": "object",
@@ -4235,8 +2990,10 @@
             "description": "The skill's human display name (the author's skill-folder name) — ADVISORY metadata the plane\nstores last-writer-wins and serves for display only (a follower names its folder by it; the\ndashboard shows it). It is NOT part of the byte-exact bundle digest, the candidate, or the commit\nid — a rename never changes a version id or digest. Absent ⇒ the plane keeps any existing name\n(never clobbered to NULL)."
           },
           "expected": {
-            "$ref": "#/components/schemas/Generation",
-            "description": "The `(epoch, seq)` this publish's compare-and-set targets; a stale pair yields `CONFLICT`."
+            "type": "integer",
+            "format": "int64",
+            "description": "The generation this publish's compare-and-set targets; a stale value yields `CONFLICT`.",
+            "minimum": 0
           },
           "op_id": {
             "type": "string",
@@ -4279,27 +3036,23 @@
             "description": "RFC 3339 timestamp (the plane stamps it; never an ambient clock in `topos-core`)."
           },
           "current_generation": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Generation"
-              }
-            ]
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
           },
           "details": {
             "description": "Outcome-specific extra detail."
           },
           "expected_generation": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Generation"
-              }
-            ]
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
           },
           "op_id": {
             "type": "string",
@@ -4332,62 +3085,9 @@
           }
         }
       },
-      "RedeemRequest": {
-        "type": "object",
-        "description": "`POST /v1/workspaces/{ws}/devices` body — redeem an enrollment grant into a registered device + its\nONE minted workspace credential. The server checks `device_public_key` equals the grant's bound key\n(a binding check) and re-derives the device key id from it.",
-        "required": [
-          "workspace_id",
-          "grant",
-          "device_public_key"
-        ],
-        "properties": {
-          "device_public_key": {
-            "type": "string",
-            "description": "The device's raw 32-byte public key, base64url-unpadded (must equal the grant's bound key)."
-          },
-          "grant": {
-            "type": "string",
-            "description": "The opaque single-use enrollment grant (from a `granted` device-token poll)."
-          },
-          "workspace_id": {
-            "type": "string",
-            "description": "The workspace the device enrolls into (authoritatively the grant's; echoed for the client's clarity)."
-          }
-        }
-      },
-      "RedeemResponse": {
-        "type": "object",
-        "description": "`POST /v1/workspaces/{ws}/devices` success payload — the confirmed enrollment: the registered device\nand its ONE workspace credential (the `0600` at-rest secret this device presents on every read and\nwrite in this workspace). **NO user token, ever; no per-skill token, ever.** Rides in the all-outcome\nenvelope's `data`.",
-        "required": [
-          "workspace_id",
-          "device_key_id",
-          "credential"
-        ],
-        "properties": {
-          "credential": {
-            "type": "string",
-            "description": "The plaintext workspace credential (returned ONCE; only its sha256 is stored server-side, on the\ndevice's registry row). No expiry — revocation is a directory row-write, re-enrollment the rotation."
-          },
-          "device_key_id": {
-            "type": "string",
-            "description": "The server-derived device key id now registered (the device's stable, non-secret name — the\nreceipts/audit actor; never an authenticator)."
-          },
-          "principal": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The principal the device now acts as (the confirmed email, or a device-rooted id) — a disclosure the\nclient persists and prints so a hijacked standup is visible (\"workspace X — owner Y\")."
-          },
-          "workspace_id": {
-            "type": "string",
-            "description": "The workspace the device enrolled into."
-          }
-        }
-      },
       "RevertData": {
         "type": "object",
-        "description": "`revert` (a **forward** git-revert restoring older bytes as a new, higher-`seq` version — never a\npointer rollback, never a delete). `--to` names the GOOD version. **INFERRED.**",
+        "description": "`revert` (a **forward** git-revert restoring older bytes as a new, higher-generation version —\nnever a pointer rollback, never a delete). `--to` names the GOOD version. **INFERRED.**",
         "required": [
           "skill_id",
           "reverted_to",
@@ -4396,7 +3096,9 @@
         ],
         "properties": {
           "current_generation": {
-            "$ref": "#/components/schemas/Generation"
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           },
           "new_version_id": {
             "type": "string",
@@ -4429,8 +3131,10 @@
             "description": "The author device id recorded in the forward-revert commit frame."
           },
           "expected": {
-            "$ref": "#/components/schemas/Generation",
-            "description": "The `(epoch, seq)` this revert's compare-and-set targets; a stale pair yields `CONFLICT`."
+            "type": "integer",
+            "format": "int64",
+            "description": "The generation this revert's compare-and-set targets; a stale value yields `CONFLICT`.",
+            "minimum": 0
           },
           "good": {
             "type": "string",
@@ -4463,15 +3167,13 @@
         ],
         "properties": {
           "current_generation": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Generation",
-                "description": "The pointer's new generation when an approval moved `current`."
-              }
-            ]
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The pointer's new generation when an approval moved `current`.",
+            "minimum": 0
           },
           "decision": {
             "$ref": "#/components/schemas/ReviewDecision"
@@ -4493,7 +3195,7 @@
       },
       "ReviewRequest": {
         "type": "object",
-        "description": "`POST /v1/reviews` body — a governance decision on an open proposal. `approve` runs the shared\n`(epoch, seq)` compare-and-set on the proposal's base (a stale base ⇒ `CONFLICT`) and, under\n`review_required`, enforces four-eyes (the proposer may not self-approve) before promoting; `reject`\nis a standalone status flip (no pointer move).",
+        "description": "`POST /v1/reviews` body — a governance decision on an open proposal. `approve` runs the shared\ngeneration compare-and-set on the proposal's base (a stale base ⇒ `CONFLICT`) and, under\n`review_required`, enforces four-eyes (the proposer may not self-approve) before promoting; `reject`\nis a standalone status flip (no pointer move).",
         "required": [
           "workspace_id",
           "skill_id",
@@ -4508,8 +3210,10 @@
             "description": "The verdict — `approve` (promote), `reject` (with its reason), or `withdraw` (the author\nretracting their own open proposal)."
           },
           "expected": {
-            "$ref": "#/components/schemas/Generation",
-            "description": "The `(epoch, seq)` the approval's compare-and-set targets (the proposal's base); a stale pair on an\n`approve` yields `CONFLICT`."
+            "type": "integer",
+            "format": "int64",
+            "description": "The generation the approval's compare-and-set targets (the proposal's base); a stale value on\nan `approve` yields `CONFLICT`.",
+            "minimum": 0
           },
           "op_id": {
             "type": "string",
@@ -4536,83 +3240,6 @@
           }
         }
       },
-      "RosterRemoveRequest": {
-        "type": "object",
-        "description": "`DELETE /v1/workspaces/{ws}/roster/{email}` body — remove a principal from the workspace roster\n(owner-only). The target principal is the `{email}` path segment; the body carries only the op identity.",
-        "required": [
-          "workspace_id",
-          "op_id"
-        ],
-        "properties": {
-          "op_id": {
-            "type": "string",
-            "description": "The client-minted UUIDv4 idempotency key."
-          },
-          "workspace_id": {
-            "type": "string",
-            "description": "The target workspace id (scopes the op to one workspace)."
-          }
-        }
-      },
-      "RosterSetRequest": {
-        "type": "object",
-        "description": "`PUT /v1/workspaces/{ws}/roster/{email}` body — set a principal's workspace role (owner-only). The target\nprincipal is the `{email}` path segment; the role rides the body.",
-        "required": [
-          "workspace_id",
-          "op_id",
-          "role"
-        ],
-        "properties": {
-          "op_id": {
-            "type": "string",
-            "description": "The client-minted UUIDv4 idempotency key."
-          },
-          "role": {
-            "$ref": "#/components/schemas/WorkspaceRole",
-            "description": "The role to set on the `{email}` target."
-          },
-          "workspace_id": {
-            "type": "string",
-            "description": "The target workspace id (scopes the op to one workspace)."
-          }
-        }
-      },
-      "SessionIntent": {
-        "type": "string",
-        "description": "A device-auth session's intent — a CLOSED set (snake_case). `enroll` joins an existing workspace named\nby its ADDRESS; `standup` starts with NO workspace (a signed-in human's approval creates one and seats\nthe approver as its first owner); `login` proves the person's identity and re-mints this device's\nworkspace credentials.",
-        "enum": [
-          "enroll",
-          "standup",
-          "login"
-        ]
-      },
-      "StandupReceipt": {
-        "type": "object",
-        "description": "The standup disclosure a workspace-creating publish carries: which workspace was stood up and who owns\nit. **INFERRED.**",
-        "required": [
-          "workspace_display_name"
-        ],
-        "properties": {
-          "address": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The stood-up workspace's ADDRESS (the share link — printed once at genesis, pasted anywhere)."
-          },
-          "owner_principal": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The seated owner principal (the approver's confirmed email, or a device-rooted id) — the hijack\ntripwire: a principal you don't recognize means someone else approved (and owns) this workspace."
-          },
-          "workspace_display_name": {
-            "type": "string",
-            "description": "The stood-up workspace's display name (chosen at the sign-in approval)."
-          }
-        }
-      },
       "TerminalOutcome": {
         "type": "string",
         "description": "The closed set of terminal outcomes the agent branches on. SCREAMING_SNAKE on the wire.",
@@ -4626,68 +3253,6 @@
           "AMBIGUOUS_NAME",
           "RETRYABLE_FAILURE",
           "PERMANENT_FAILURE"
-        ]
-      },
-      "VerificationContextResponse": {
-        "type": "object",
-        "description": "`GET /v1/enroll/verify/{user_code}` response — the verification-page disclosure a human reviews before\nconfirming an identity (the RFC-8628 confused-deputy guard). Carries no secret.",
-        "required": [
-          "machine_name",
-          "device_fingerprint",
-          "workspace_display_name",
-          "verified_domain_status"
-        ],
-        "properties": {
-          "device_fingerprint": {
-            "type": "string",
-            "description": "A short hex fingerprint of the device's public key — a human cross-checks it against the device. A\ndisplay aid only, never an authority input."
-          },
-          "intent": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/SessionIntent",
-                "description": "The session's intent — `enroll` (join an existing workspace) or `standup` (approving CREATES one).\nAbsent from older planes ⇒ `enroll`; the page branches its copy on it."
-              }
-            ]
-          },
-          "machine_name": {
-            "type": "string",
-            "description": "The human-readable machine name the device offered at start."
-          },
-          "offered_skills": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/BootstrapSkill"
-            },
-            "description": "The skills the invite pre-offers (each with an optional display name)."
-          },
-          "verified_domain": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The org-domain claim, if any."
-          },
-          "verified_domain_status": {
-            "$ref": "#/components/schemas/VerifiedDomainStatus",
-            "description": "The domain-verification state."
-          },
-          "workspace_display_name": {
-            "type": "string",
-            "description": "The workspace display name the device would join."
-          }
-        }
-      },
-      "VerifiedDomainStatus": {
-        "type": "string",
-        "description": "A workspace's domain-verification state — snake_case on the wire.",
-        "enum": [
-          "unverified",
-          "pending",
-          "verified"
         ]
       },
       "WireAppliedReport": {
@@ -4844,7 +3409,7 @@
       },
       "WireCurrentRecord": {
         "type": "object",
-        "description": "The `current` pointer's wire body — the UNSIGNED document the plane serves at the pointer read,\nembeds in OK receipts, and stores. It is unsigned: authority is the database row behind the pointer,\nand integrity is the content-addressed `version_id` re-verified byte-for-byte on apply. A versioned\nenvelope; `ETag = \"<epoch>.<seq>\"`.",
+        "description": "The `current` pointer's wire body — the UNSIGNED document the pointer read serves and OK\nreceipts embed. It is unsigned: authority is the database row behind the pointer, and integrity\nis the content-addressed `version_id` re-verified byte-for-byte on apply. A versioned envelope;\n`ETag = \"<generation>\"`.",
         "required": [
           "schema_version",
           "scope",
@@ -4955,8 +3520,10 @@
             "description": "The unsigned, advisory display name (the author's folder name); absent ⇒ show `name`."
           },
           "generation": {
-            "$ref": "#/components/schemas/Generation",
-            "description": "The `current` pointer's `(epoch, seq)`."
+            "type": "integer",
+            "format": "int64",
+            "description": "The `current` pointer's generation.",
+            "minimum": 0
           },
           "kind": {
             "type": "string",
@@ -5009,24 +3576,20 @@
             "description": "Structured context (no TTY prose to parse)."
           },
           "current_generation": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Generation"
-              }
-            ]
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
           },
           "expected_generation": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Generation"
-              }
-            ]
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
           },
           "next_actions": {
             "type": "array",
@@ -5301,8 +3864,10 @@
         ],
         "properties": {
           "base_generation": {
-            "$ref": "#/components/schemas/Generation",
-            "description": "The `(epoch, seq)` the proposal was opened against (its base); when `current` advances past it the\nproposal stales and drops out of this list."
+            "type": "integer",
+            "format": "int64",
+            "description": "The generation the proposal was opened against (its base); when `current` advances past it\nthe proposal stales and drops out of this list.",
+            "minimum": 0
           },
           "created_at": {
             "type": "string",
@@ -5483,8 +4048,10 @@
             "description": "The unsigned, advisory folder display name (may be absent)."
           },
           "generation": {
-            "$ref": "#/components/schemas/Generation",
-            "description": "The `current` pointer's `(epoch, seq)`."
+            "type": "integer",
+            "format": "int64",
+            "description": "The `current` pointer's generation.",
+            "minimum": 0
           },
           "kind": {
             "type": "string",
@@ -5656,15 +4223,6 @@
             "description": "Whether the person also follows the skill directly (independent of any channel)."
           }
         }
-      },
-      "WorkspaceRole": {
-        "type": "string",
-        "description": "A workspace-level governance role (the RBAC roster — DISTINCT from the per-skill read roster). snake_case.",
-        "enum": [
-          "owner",
-          "reviewer",
-          "member"
-        ]
       }
     }
   },
@@ -5675,15 +4233,15 @@
     },
     {
       "name": "reads",
-      "description": "Workspace-credential device reads (current / bundles / versions / proposals / catalog / delivery / me / channels / proposals / log / reach) plus the body-light applied-state report."
+      "description": "Device-credential reads (current / bundles / versions / proposals / catalog / delivery / me / channels / log / reach) plus the body-light applied-state report."
     },
     {
       "name": "enrollment",
-      "description": "Claim bootstrap + the device-auth / passcode / redeem / admin-claim / login enrollment flow."
+      "description": "The gh-style device-auth flow (start / poll; approval promotes the device code to the ONE bearer credential)."
     },
     {
       "name": "governance",
-      "description": "Owner/admin device-credential mutations (roster / revoke) and the member-lane invitation (a roster write)."
+      "description": "The device revoke and the member-lane invitation (a roster write)."
     }
   ]
 }

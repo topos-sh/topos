@@ -1,16 +1,11 @@
-//! Custody — the raw-SQL twins for byte custody: the pointer-move transaction, the object-lifecycle
-//! fence, the contribute-table SQL, the receipt machinery, the read authorizations' reach half, and
-//! the restore epoch bump. Access facts enter ONLY through the [`witness`] seam.
+//! The custody raw-SQL half — grouped by concern:
+//!
+//! - [`lifecycle`] — the fenced `object_presence` state machine, promotion leases, the `upload`
+//!   staging bookkeeping, and tombstones (the GC fence).
+//! - [`pointer`]   — the version/commit transaction and the generation-fenced pointer CAS, plus the
+//!   purge and the bundle/workspace row reclaims.
+//! - [`read`]      — the pool reads (the pointer record, version rows, reachability, the log joins).
 
-pub(crate) mod read;
-pub(crate) mod set_current;
-pub(crate) mod witness;
-
-// The object-lifecycle transitions (the fenced CAS state machine, leases, quarantine, tombstones). A few
-// helpers (e.g. `release_lease`) are exercised only by tests, so the dead-code waiver stays on the module.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod lifecycle;
-
-pub(crate) mod proposals;
-pub(crate) mod receipts;
-pub(crate) mod restore;
+pub(crate) mod pointer;
+pub(crate) mod read;

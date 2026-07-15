@@ -1,241 +1,190 @@
-import { expect, type Page, test } from "@playwright/test";
-import { Client } from "pg";
-import { E2E_ADMIN_URL, E2E_PASSWORD } from "./env";
-import { gotoSettled, signIn } from "./sign-in";
+import { expect, test } from "@playwright/test";
+import { SKILL_MD_V1, SKILL_MD_V2 } from "../fixtures/plane/data.mjs";
+import {
+  adminQuery,
+  ensureAccount,
+  ensureBundle,
+  ensureSeatedUser,
+  seedCustody,
+  theWorkspace,
+} from "./seed";
+import { gotoSettled } from "./sign-in";
 
 /**
- * The fleet page over a DEDICATED workspace, so it never races the other specs' shared rows. The
- * directory seed (a superuser connection — never the SELECT-only app URL) stands up ONE workspace
- * with a confirmed OWNER, two skills with current pointers, and three enrolled devices that cover
- * every state the page names: current, behind, detached, stale, and a removed member's still-live
- * copy. Signed in as the owner, the whole fleet is visible (a member would see only their own).
+ * The fleet page — a read-only visibility surface that enumerates every device touching the
+ * workspace, the version each one last reported, and NAMES its blind spots (stale devices,
+ * detached copies, per-device exclusions, removed members' still-live copies) instead of
+ * omitting them. It carries NO revoke arm — a device is a possession, revocation is self-only
+ * on /settings/devices.
  *
- * HARNESS DISCIPLINE: everything here is a DIRECTORY-row surface — the guards, the chips, and the
- * guarded revoke all read/write plane.* rows this spec owns; no vault call is involved. The seed is
- * idempotent (delete-then-insert), so a reused local database converges run to run.
+ * Staleness joins `device.last_seen_at` against the workspace window (set to ONE HOUR here,
+ * restored after); per-copy status joins `device_bundle_state` against the custody pointer
+ * mirror, the person's detach records, and the device's exclusions. The suite's default
+ * identity is the claimed OWNER, so the WHOLE fleet is visible.
  */
 
-const FLEET_WS = "w_fleet_e2e";
-const FLEET_ADDRESS = "fleet-e2e";
-const FLEET_OWNER_EMAIL = "fleet-owner@example.com";
-const DEPARTED_EMAIL = "departed@example.com";
+const MATE_EMAIL = "fleet-mate@example.com";
+const DEPARTED_EMAIL = "fleet-departed@example.com";
 
-const SKILL_A = "release-guide";
-const SKILL_A_ID = "fg-release";
-const SKILL_B = "handbook";
-const SKILL_B_ID = "fg-handbook";
+const SKILL_A = { id: "s_e2e_fleet_a", name: "release-guide" };
+const SKILL_B = { id: "s_e2e_fleet_b", name: "handbook" };
 
-const CUR_A = "e1".repeat(32);
-const OLD_A = "e0".repeat(32);
-const CUR_B = "f1".repeat(32);
-const OLD_B = "f0".repeat(32);
+const DEV_FRESH = "dk_e2e_fleet_fresh"; // owner: current + behind, fresh
+const DEV_EXCL = "dk_e2e_fleet_excl"; // owner: excluded copy, stale
+const DEV_MATE = "dk_e2e_fleet_mate"; // seated mate: detached copy, stale
+const DEV_GONE = "dk_e2e_fleet_gone"; // departed (no seat): removed upstream
 
-// A one-hour staleness window, so the "stale" device is deterministic under a 2-hour-old report.
 const WINDOW_1H = 3_600_000;
-
-const DEV_OWNER_FRESH = "own1device"; // current + behind; the revoke target
-const DEV_OWNER_STALE = "own2device"; // detached + stale
-const DEV_DEPARTED = "gonedevice"; // removed upstream, still reporting
-
-const PUBKEY = Buffer.alloc(32, 9);
 
 test.describe.configure({ mode: "serial" });
 
-async function withAdmin<T>(fn: (db: Client) => Promise<T>): Promise<T> {
-  const db = new Client({ connectionString: E2E_ADMIN_URL });
-  await db.connect();
-  try {
-    return await fn(db);
-  } finally {
-    await db.end();
-  }
-}
-
-async function seedFleet(): Promise<void> {
-  const now = Date.now();
-  await withAdmin(async (db) => {
-    // Idempotent teardown FIRST (current before skill_commit for the FK).
-    for (const table of [
-      "device_skill_state",
-      "device_registry",
-      "current",
-      "skill_commit",
-      "catalog",
-      "workspace_member",
-      "workspace_policy",
-      "workspace",
-    ]) {
-      await db.query(`DELETE FROM plane.${table} WHERE workspace_id = $1`, [FLEET_WS]);
-    }
-
-    await db.query(
-      `INSERT INTO plane.workspace
-         (workspace_id, display_name, verified_domain, verified_domain_status, deployment_mode, created_at, name)
-       VALUES ($1, 'Fleet E2E', null, 'unverified', 'cloud', '2026-07-01T00:00:00Z', $2)`,
-      [FLEET_WS, FLEET_ADDRESS],
-    );
-    // The one-hour override — the fleet clock the page reads via topos_staleness_window.
-    await db.query(
-      `INSERT INTO plane.workspace_policy (workspace_id, review_required, invite_policy, staleness_window_ms)
-       VALUES ($1, 0, 'members', $2)`,
-      [FLEET_WS, WINDOW_1H],
-    );
-    await db.query(
-      `INSERT INTO plane.workspace_member (workspace_id, principal, role, status, invited_by, added_at)
-       VALUES ($1, $2, 'owner', 'confirmed', null, '2026-07-01T00:00:00Z')`,
-      [FLEET_WS, FLEET_OWNER_EMAIL],
-    );
-    // DEPARTED_EMAIL is deliberately NOT seated — its device must read "removed upstream".
-
-    for (const [skillId, name, cur] of [
-      [SKILL_A_ID, SKILL_A, CUR_A],
-      [SKILL_B_ID, SKILL_B, CUR_B],
-    ] as const) {
-      await db.query(
-        `INSERT INTO plane.catalog (workspace_id, skill_id, name, display_name, status, created_at)
-         VALUES ($1, $2, $3, null, 'active', '2026-07-01T00:00:00Z')`,
-        [FLEET_WS, skillId, name],
-      );
-      await db.query(
-        `INSERT INTO plane.skill_commit (workspace_id, commit_id, skill_id, bundle_digest)
-         VALUES ($1, $2, $3, null)`,
-        [FLEET_WS, Buffer.from(cur, "hex"), skillId],
-      );
-      await db.query(
-        `INSERT INTO plane.current (workspace_id, skill_id, commit_id, epoch, seq, record, updated_at)
-         VALUES ($1, $2, $3, 1, 1, null, $4)`,
-        [FLEET_WS, skillId, Buffer.from(cur, "hex"), now],
-      );
-    }
-
-    const device = async (
-      deviceKeyId: string,
-      principal: string,
-      lastReportAt: number | null,
-    ): Promise<void> => {
-      await db.query(
-        `INSERT INTO plane.device_registry (workspace_id, device_key_id, public_key, principal, revoked, last_report_at)
-         VALUES ($1, $2, $3, $4, 0, $5)`,
-        [FLEET_WS, deviceKeyId, PUBKEY, principal, lastReportAt],
-      );
-    };
-    const state = async (
-      deviceKeyId: string,
-      skillId: string,
-      appliedHex: string | null,
-      reportedAt: number,
-      detached = 0,
-      detachedAt: number | null = null,
-    ): Promise<void> => {
-      await db.query(
-        `INSERT INTO plane.device_skill_state
-           (workspace_id, device_key_id, skill_id, applied_commit, reported_at, detached, detached_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [
-          FLEET_WS,
-          deviceKeyId,
-          skillId,
-          appliedHex === null ? null : Buffer.from(appliedHex, "hex"),
-          reportedAt,
-          detached,
-          detachedAt,
-        ],
-      );
-    };
-
-    // The owner's fresh device: release-guide is current, handbook is behind.
-    await device(DEV_OWNER_FRESH, FLEET_OWNER_EMAIL, now - 60_000);
-    await state(DEV_OWNER_FRESH, SKILL_A_ID, CUR_A, now - 60_000);
-    await state(DEV_OWNER_FRESH, SKILL_B_ID, OLD_B, now - 60_000);
-
-    // The owner's stale device (2 h ago, past the 1 h window), carrying a detached copy.
-    await device(DEV_OWNER_STALE, FLEET_OWNER_EMAIL, now - 7_200_000);
-    await state(DEV_OWNER_STALE, SKILL_A_ID, OLD_A, now - 7_200_000, 1, now - 10_800_000);
-
-    // A removed member's device — still reporting recently, still holding a behind copy.
-    await device(DEV_DEPARTED, DEPARTED_EMAIL, now - 1_800_000);
-    await state(DEV_DEPARTED, SKILL_A_ID, OLD_A, now - 1_800_000);
-  });
-}
-
-async function revokedFlag(deviceKeyId: string): Promise<string | undefined> {
-  return withAdmin(async (db) => {
-    const { rows } = await db.query(
-      `SELECT revoked::text AS revoked FROM plane.device_registry
-       WHERE workspace_id = $1 AND device_key_id = $2`,
-      [FLEET_WS, deviceKeyId],
-    );
-    return rows[0]?.revoked as string | undefined;
-  });
-}
-
-async function openFleet(page: Page): Promise<void> {
-  await signIn(page, FLEET_OWNER_EMAIL);
-  await gotoSettled(page, `/workspaces/${FLEET_WS}/fleet`);
-  await expect(page.getByRole("heading", { name: "Fleet", exact: true })).toBeVisible();
-}
-
 test.beforeAll(async () => {
-  await seedFleet();
+  const ws = await theWorkspace();
+  await adminQuery(`update web.workspace set staleness_window_ms = $1`, [WINDOW_1H]);
+
+  const mate = await ensureSeatedUser(MATE_EMAIL, "member");
+  const departed = await ensureAccount(DEPARTED_EMAIL); // an ACCOUNT, deliberately seatless
+  const owner = (
+    await adminQuery<{ user_id: string }>(
+      `select user_id from web.seat where role = 'owner' limit 1`,
+    )
+  )[0]?.user_id as string;
+
+  await ensureBundle(SKILL_A);
+  await ensureBundle(SKILL_B);
+  const seeded = await seedCustody([
+    {
+      ws: ws.id,
+      bundle: SKILL_A.id,
+      versions: [
+        { files: [{ path: "SKILL.md", content: SKILL_MD_V1 }], message: "v1" },
+        { files: [{ path: "SKILL.md", content: SKILL_MD_V2 }], parent: 0, message: "v2" },
+      ],
+      current: 1,
+    },
+    {
+      ws: ws.id,
+      bundle: SKILL_B.id,
+      versions: [
+        { files: [{ path: "SKILL.md", content: "# Handbook v1\n" }], message: "v1" },
+        { files: [{ path: "SKILL.md", content: "# Handbook v2\n" }], parent: 0, message: "v2" },
+      ],
+      current: 1,
+    },
+  ]);
+  const [oldA, curA] = [seeded[0]?.versions[0]?.version_id, seeded[0]?.versions[1]?.version_id];
+  const oldB = seeded[1]?.versions[0]?.version_id;
+
+  // A clean slate for THIS file's devices + records (idempotent on a reused database).
+  await adminQuery(`delete from web.device where id = any($1::text[])`, [
+    [DEV_FRESH, DEV_EXCL, DEV_MATE, DEV_GONE],
+  ]);
+  await adminQuery(`delete from web.bundle_detachment where user_id = $1`, [mate.userId]);
+
+  const device = async (id: string, userId: string, name: string, lastSeenAgoMs: number) => {
+    await adminQuery(
+      `insert into web.device (id, user_id, display_name, credential_sha256, last_seen_at)
+       values ($1, $2, $3, sha256(convert_to($4, 'UTF8')), now() - ($5 || ' milliseconds')::interval)`,
+      [id, userId, name, `cred-${id}`, String(lastSeenAgoMs)],
+    );
+  };
+  const state = async (deviceId: string, bundleId: string, applied: string) => {
+    await adminQuery(
+      `insert into web.device_bundle_state (device_id, bundle_id, applied_version_id, reported_at)
+       values ($1, $2, $3, now() - interval '10 minutes')`,
+      [deviceId, bundleId, applied],
+    );
+  };
+
+  // The owner's fresh device: release-guide is current, handbook is behind.
+  await device(DEV_FRESH, owner, "fresh-workstation", 60_000);
+  await state(DEV_FRESH, SKILL_A.id, curA as string);
+  await state(DEV_FRESH, SKILL_B.id, oldB as string);
+
+  // The owner's stale device carries a per-device EXCLUDED copy (2h > the 1h window).
+  await device(DEV_EXCL, owner, "excluded-laptop", 7_200_000);
+  await state(DEV_EXCL, SKILL_B.id, oldB as string);
+  await adminQuery(
+    `insert into web.device_exclusion (device_id, bundle_id) values ($1, $2)
+     on conflict do nothing`,
+    [DEV_EXCL, SKILL_B.id],
+  );
+
+  // The seated mate's stale device holds a DETACHED copy (the person's detach record names it).
+  await device(DEV_MATE, mate.userId, "mates-machine", 7_200_000);
+  await state(DEV_MATE, SKILL_A.id, oldA as string);
+  await adminQuery(
+    `insert into web.bundle_detachment (user_id, workspace_id, bundle_id, cause)
+     values ($1, $2, $3, 'channel_leave') on conflict do nothing`,
+    [mate.userId, ws.id, SKILL_A.id],
+  );
+
+  // A REMOVED member's device — no seat, still reporting: the removed-upstream blind spot.
+  await device(DEV_GONE, departed.userId, "departed-device", 1_800_000);
+  await state(DEV_GONE, SKILL_A.id, oldA as string);
 });
 
-test("renders every enrolled device with the right status chips", async ({ page }) => {
-  await openFleet(page);
+test.afterAll(async () => {
+  await adminQuery(`update web.workspace set staleness_window_ms = 604800000`);
+});
 
-  // The owner sees the WHOLE fleet grouped by person — the owner's email heads their group.
-  await expect(page.getByRole("heading", { name: FLEET_OWNER_EMAIL })).toBeVisible();
+test("renders every device with the right freshness and per-copy status chips", async ({
+  page,
+}) => {
+  const ws = await theWorkspace();
+  await gotoSettled(page, `/workspaces/${ws.id}/fleet`);
+  await expect(page.getByRole("heading", { name: "Fleet", exact: true })).toBeVisible();
 
-  // The fresh device: release-guide current, handbook behind, and a "fresh" liveness chip.
-  const fresh = page.getByTestId(`fleet-device-${DEV_OWNER_FRESH}`);
+  // The fresh device: release-guide current, handbook behind, a "fresh" liveness chip.
+  const fresh = page.getByTestId(`fleet-device-${DEV_FRESH}`);
   await expect(fresh.getByText("current", { exact: true })).toBeVisible();
   await expect(fresh.getByText("behind", { exact: true })).toBeVisible();
   await expect(fresh.getByText("fresh", { exact: true })).toBeVisible();
 
-  // The stale device: a "detached" copy and a "stale" liveness chip.
-  const stale = page.getByTestId(`fleet-device-${DEV_OWNER_STALE}`);
-  await expect(stale.getByText("detached", { exact: true })).toBeVisible();
-  await expect(stale.getByText("stale", { exact: true })).toBeVisible();
-  await expect(stale.getByText("last known state")).toBeVisible();
+  // The excluded copy: opted out on that one device; the device itself is past the window.
+  const excluded = page.getByTestId(`fleet-device-${DEV_EXCL}`);
+  await expect(excluded.getByText("excluded", { exact: true })).toBeVisible();
+  await expect(excluded.getByText("stale", { exact: true })).toBeVisible();
+
+  // The detached copy: the person's detach record names it, with its cause humanized.
+  const mate = page.getByTestId(`fleet-device-${DEV_MATE}`);
+  await expect(mate.getByText("detached", { exact: true })).toBeVisible();
+  await expect(mate.getByText("last known state")).toBeVisible();
+  await expect(mate.getByText("they left the channel")).toBeVisible();
 });
 
-test("names its blind spots — detached copies and removed-upstream devices", async ({ page }) => {
-  await openFleet(page);
+test("names its blind spots: removed-upstream devices and the standing detach records", async ({
+  page,
+}) => {
+  const ws = await theWorkspace();
+  await gotoSettled(page, `/workspaces/${ws.id}/fleet`);
 
-  // The removed-upstream section names the departed principal and its still-present copy.
+  // The removed-upstream section names the departed person and their still-present copy.
   await expect(page.getByRole("heading", { name: "Removed upstream" })).toBeVisible();
-  const gone = page.getByTestId(`fleet-device-${DEV_DEPARTED}`);
-  await expect(gone.getByText("removed upstream", { exact: true })).toBeVisible();
-  await expect(gone.getByText(DEPARTED_EMAIL)).toBeVisible();
-  await expect(gone.getByText("behind", { exact: true })).toBeVisible();
+  const gone = page.getByTestId(`fleet-device-${DEV_GONE}`);
+  await expect(gone.getByText("removed upstream", { exact: true }).first()).toBeVisible();
+  await expect(gone.getByText(DEPARTED_EMAIL).first()).toBeVisible();
 
-  // The reading-guide footnote names the reporting cadence + the detached/removed blind spots.
+  // The chase list: whose copies froze, of what, and why — surviving quiet devices.
+  const detached = page.getByRole("region", { name: "Detached copies" });
+  await expect(detached).toBeVisible();
+  await expect(detached.getByText(SKILL_A.name)).toBeVisible();
+  await expect(detached.getByText("they left the channel")).toBeVisible();
+
+  // The reading guide names the reporting cadence + every blind-spot vocabulary word.
   const guide = page.getByRole("region", { name: "Reading this page" });
   await expect(guide.getByText(/start of a session/)).toBeVisible();
   await expect(guide.getByText(/Detached/)).toBeVisible();
   await expect(guide.getByText(/Removed upstream/)).toBeVisible();
 });
 
-test("an owner revokes a device through step-up; the row flips to revoked on reload", async ({
+test("read-only by design: no revoke arm anywhere — your-devices is the sign-out surface", async ({
   page,
 }) => {
-  await openFleet(page);
-
-  const fresh = page.getByTestId(`fleet-device-${DEV_OWNER_FRESH}`);
-  // Open the revoke ceremony, confirm with the account password, and revoke.
-  await fresh.getByText("Revoke this device").click();
-  await fresh.getByLabel("Confirm with your password").fill(E2E_PASSWORD);
-  await fresh.getByRole("button", { name: "Revoke device" }).click();
-
-  // The revalidated loader re-reads the flipped row: the "revoked" chip appears and the control is
-  // gone (a revoked device offers no revoke).
-  await expect(fresh.getByText("revoked", { exact: true })).toBeVisible();
-  await expect(fresh.getByRole("button", { name: "Revoke device" })).toHaveCount(0);
-
-  // The guarded write is the proof — the directory row is flipped.
-  expect(await revokedFlag(DEV_OWNER_FRESH)).toBe("1");
-
-  // And it survives a fresh load.
-  await gotoSettled(page, `/workspaces/${FLEET_WS}/fleet`);
-  const reloaded = page.getByTestId(`fleet-device-${DEV_OWNER_FRESH}`);
-  await expect(reloaded.getByText("revoked", { exact: true })).toBeVisible();
+  const ws = await theWorkspace();
+  await gotoSettled(page, `/workspaces/${ws.id}/fleet`);
+  await expect(page.getByRole("button", { name: /revoke/i })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Sign out" })).toHaveCount(0);
+  // The header action (the reading guide carries a second, lowercase link to the same place).
+  await expect(page.getByRole("link", { name: "Your devices", exact: true })).toBeVisible();
 });

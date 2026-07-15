@@ -2,13 +2,12 @@ import type { LoaderFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
 import { requireDeviceActor } from "@/lib/auth/guards.server";
-import { deviceDelivery } from "@/lib/db/queries.device.server";
+import { deliveryFor } from "@/lib/db/queries.lane.server";
 
 /**
- * `GET /api/v1/workspaces/{ws}/delivery` — the currency answer for ONE enrolled device, served
- * by this tier: `topos_delivery` assembles the COMPLETE `WireDelivery` body in one SQL
- * statement (one snapshot), so the entitled/detached/notices sets can never straddle a
- * subscription change. Per-device, hot, never cacheable.
+ * `GET /api/v1/workspaces/{ws}/delivery` — the currency answer for ONE enrolled device,
+ * assembled in ONE snapshot transaction (the entitled/detached/notices sets can never straddle
+ * a subscription change). Per-device, hot, never cacheable.
  */
 export async function loader({ request, params }: LoaderFunctionArgs): Promise<Response> {
   const belted = checkBelt(request);
@@ -16,10 +15,7 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
     return belted;
   }
   const actor = await requireDeviceActor(request, params.ws ?? "");
-  const body = await deviceDelivery(actor);
-  if (body === null) {
-    return uniformNotFound();
-  }
+  const body = await deliveryFor(actor);
   return Response.json(body, { headers: NO_STORE });
 }
 

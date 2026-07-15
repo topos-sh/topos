@@ -1,27 +1,23 @@
-//! Wire request/response DTOs for the plane's HTTP write + version-metadata routes.
+//! Wire request/response DTOs for the product's public device-lane HTTP routes.
 //!
-//! The JSON bodies the plane accepts on `publish` / `propose` / `revert` / `review`, plus the body the
-//! version-metadata read route returns. These are **deserialization shapes** only (no logic): the route
-//! handler parses them into `plane-store`/`topos-core` domain types at the edge (parse-don't-validate) and
-//! **server-rehashes every candidate byte** — a client-supplied id or hash is never trusted.
+//! The JSON bodies the app accepts on `publish` / `propose` / `revert` / `review`, the read bodies
+//! (current / version metadata / proposals / catalog / delivery / describe), and the device-auth
+//! start/poll pair. These are **deserialization shapes** only (no logic): the serving tier parses
+//! them into validated domain types at the edge (parse-don't-validate), and every candidate byte is
+//! **server-rehashed** — a client-supplied id or hash is never trusted.
 //!
-//! **No `created_at` on any request.** The plane stamps the receipt's time from the server clock; a client
-//! never supplies a wall clock (an ambient time would be a replay / skew lever). The handler derives both
-//! the RFC-3339 string and the `now: i64` it passes into the authority op.
+//! **No `created_at` on any request.** The server stamps the receipt's time from its own clock; a
+//! client never supplies a wall clock (an ambient time would be a replay / skew lever).
 //!
-//! **The write credential is the workspace credential in the `Authorization: Bearer` header — never a
-//! body field.** The plane resolves the presented secret (by its sha256) to the device's registry row
-//! in-transaction: the row supplies the acting `device_key_id` and its bound principal, whose CONFIRMED
-//! `workspace_member` seat is the authorization. Keeping the secret out of the body keeps it out of the
-//! receipt request identities and the client's persisted op-WAL, so a credential rotation between
-//! retries never breaks byte-identical replay. The `op` (publish / propose /
-//! revert / review-decision) is derived from the route, never the body.
+//! **The write credential is the device credential in the `Authorization: Bearer` header — never a
+//! body field.** Keeping the secret out of the body keeps it out of receipt request identities and
+//! the client's persisted op-WAL, so a credential rotation between retries never breaks
+//! byte-identical replay. The `op` (publish / propose / revert / review-decision) is derived from
+//! the route, never the body.
 //!
 //! Field names are snake_case as written (no `rename_all`). Hex id fields carry the same `^[0-9a-f]{64}$`
 //! constraint used across [`crate`].
 
-use crate::Generation;
-use crate::bootstrap::{BootstrapSkill, VerifiedDomainStatus};
 use crate::results::ReviewDecision;
 use serde::{Deserialize, Serialize};
 
@@ -103,8 +99,8 @@ pub struct PublishRequest {
     /// The client-minted UUIDv4 idempotency key — the same `op_id` replays the stored receipt byte-for-byte.
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
-    /// The `(epoch, seq)` this publish's compare-and-set targets; a stale pair yields `CONFLICT`.
-    pub expected: Generation,
+    /// The generation this publish's compare-and-set targets; a stale value yields `CONFLICT`.
+    pub expected: u64,
     /// The full candidate bundle to ingest + publish.
     pub candidate: WireCandidate,
     /// The skill's human display name (the author's skill-folder name) — ADVISORY metadata the plane
@@ -139,8 +135,8 @@ pub struct ProposeRequest {
     /// The client-minted UUIDv4 idempotency key (replays the stored receipt on retry).
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
-    /// The `(epoch, seq)` the proposal is born against (its base); a stale base later makes it non-current.
-    pub expected: Generation,
+    /// The generation the proposal is born against (its base); a stale base later makes it non-current.
+    pub expected: u64,
     /// The full candidate bundle to ingest as the proposal's content.
     pub candidate: WireCandidate,
     /// The skill's human display name (the author's skill-folder name) — ADVISORY metadata, carried for
@@ -171,8 +167,8 @@ pub struct RevertRequest {
     /// The client-minted UUIDv4 idempotency key (replays the stored receipt on retry).
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
-    /// The `(epoch, seq)` this revert's compare-and-set targets; a stale pair yields `CONFLICT`.
-    pub expected: Generation,
+    /// The generation this revert's compare-and-set targets; a stale value yields `CONFLICT`.
+    pub expected: u64,
     /// The GOOD version (the `version_id` whose bytes are restored) as 64-char lowercase hex.
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub good: String,
@@ -183,7 +179,7 @@ pub struct RevertRequest {
 }
 
 /// `POST /v1/reviews` body — a governance decision on an open proposal. `approve` runs the shared
-/// `(epoch, seq)` compare-and-set on the proposal's base (a stale base ⇒ `CONFLICT`) and, under
+/// generation compare-and-set on the proposal's base (a stale base ⇒ `CONFLICT`) and, under
 /// `review_required`, enforces four-eyes (the proposer may not self-approve) before promoting; `reject`
 /// is a standalone status flip (no pointer move).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,9 +195,9 @@ pub struct ReviewRequest {
     /// The client-minted UUIDv4 idempotency key (replays the stored receipt on retry).
     #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
     pub op_id: String,
-    /// The `(epoch, seq)` the approval's compare-and-set targets (the proposal's base); a stale pair on an
-    /// `approve` yields `CONFLICT`.
-    pub expected: Generation,
+    /// The generation the approval's compare-and-set targets (the proposal's base); a stale value on
+    /// an `approve` yields `CONFLICT`.
+    pub expected: u64,
     /// The proposal being reviewed, named by its candidate commit id (64-char lowercase hex).
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub proposal: String,
@@ -271,9 +267,9 @@ pub struct WireOpenProposal {
     /// The proposal's candidate commit id (64-char lowercase hex) — the `<skill>@<version_id>` handle.
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub version_id: String,
-    /// The `(epoch, seq)` the proposal was opened against (its base); when `current` advances past it the
-    /// proposal stales and drops out of this list.
-    pub base_generation: Generation,
+    /// The generation the proposal was opened against (its base); when `current` advances past it
+    /// the proposal stales and drops out of this list.
+    pub base_generation: u64,
     /// When the proposal was opened (the server-stamped RFC-3339 string).
     pub created_at: String,
 }
@@ -319,8 +315,8 @@ pub struct WireSkillIndexEntry {
     /// The `current` byte-exact consent hash (64-char lowercase hex).
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: String,
-    /// The `current` pointer's `(epoch, seq)`.
-    pub generation: Generation,
+    /// The `current` pointer's generation.
+    pub generation: u64,
     /// The unsigned, advisory folder display name (may be absent).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -391,8 +387,8 @@ pub struct WireDeliverySkill {
     /// The `current` byte-exact consent hash (64-char lowercase hex) — the fetch + re-hash pin.
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: String,
-    /// The `current` pointer's `(epoch, seq)`.
-    pub generation: Generation,
+    /// The `current` pointer's generation.
+    pub generation: u64,
     /// When `current` last moved (epoch milliseconds).
     pub updated_at: i64,
     /// Why this device is entitled to the skill (channels ∪ direct).
@@ -524,336 +520,123 @@ pub struct WireAppliedReport {
 }
 
 // =================================================================================================
-// Enrollment request/response DTOs — the device-flow / passcode / redeem / admin-claim wire bodies.
+// Device-auth request/response DTOs — the gh-style device flow the APP serves (`POST
+// /v1/device/authorize` + `POST /v1/device/token`). A device asks to join a workspace; a signed-in
+// human approves it in the browser; the poll then returns the device's ONE bearer credential.
 //
-// The enrollment credentials (device code, grant, read token, device public key) are OPAQUE strings,
-// never trusted as ids: the server re-derives every id from the bytes (the device key id from the public
-// key, the grant by its sha256). Redeem binds the device by checking its body `device_public_key` equals
-// the grant's bound key — a binding check, not a possession proof. Field names are snake_case as written.
+// Design fact: on approval the `device_code` itself is PROMOTED to the device's bearer credential
+// server-side (the same sha256 stored twice — once as the flow row's code hash, once as the device
+// credential hash), and the poll's `credential` field carries it back — so the CLI stores ONE secret
+// from ONE field and no second mint/redeem round-trip exists.
 // =================================================================================================
 
-/// A device-auth session's intent — a CLOSED set (snake_case). `enroll` joins an existing workspace named
-/// by its ADDRESS; `standup` starts with NO workspace (a signed-in human's approval creates one and seats
-/// the approver as its first owner); `login` proves the person's identity and re-mints this device's
-/// workspace credentials.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionIntent {
-    /// Join an existing workspace, named by its address (the default when a `workspace` is present).
-    Enroll,
-    /// Create a workspace on approval (the hosted self-serve first-boot flow).
-    Standup,
-    /// Prove the person's identity and re-mint this device's credential in every workspace where that
-    /// identity holds a confirmed seat (sign-in + the one credential-recovery action).
-    Login,
-}
-
-/// `POST /v1/device/authorize` body — begin an RFC-8628 device-authorization flow. With a `workspace`
-/// (the address name; the default `enroll` intent) the device enrolls toward that workspace; with
-/// `intent = "standup"` — or neither field — it starts a STANDUP session (no workspace yet; hosted
-/// planes only); with `intent = "login"` it starts a workspace-less LOGIN session whose grant redeems
-/// at `POST /v1/login`. The server SERVER-derives the device key id from `device_public_key` (a
-/// client-asserted id is never trusted).
+/// `POST /v1/device/authorize` body — begin a device-authorization flow toward a workspace named by
+/// its address slug. Whether the name exists is never disclosed on this route: an unknown name runs
+/// the same flow to the same uniform denial.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
-pub struct DeviceAuthorizeRequest {
-    /// The workspace ADDRESS name an enroll session targets (`topos.sh/<name>` minus the origin).
-    /// Whether the name exists is never disclosed on this route: an unknown name runs the same flow to
-    /// the same uniform denial a not-yours workspace gets.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace: Option<String>,
-    /// The session intent. Absent defaults to `enroll` when a workspace is named, `standup` otherwise.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intent: Option<SessionIntent>,
-    /// The device's raw 32-byte public key, base64url-unpadded. The server derives the device key id from
-    /// it (never a client-asserted id) and binds it to the enrollment session.
-    pub device_public_key: String,
-    /// A human-readable machine name shown on the verification page (a confused-deputy guard, not authority).
-    pub machine_name: String,
+pub struct DeviceAuthStartRequest {
+    /// A human-readable device name shown on the approval page (a confused-deputy guard, not
+    /// authority) and kept as the device's display name once approved.
+    pub requested_name: String,
+    /// The workspace ADDRESS slug the device asks to join (`topos.sh/<name>` minus the origin).
+    pub workspace: String,
 }
 
-/// `POST /v1/device/authorize` response — the RFC-8628 device-authorization grant (the names mirror the RFC).
+/// `POST /v1/device/authorize` response — the device-authorization grant (RFC-8628-shaped names).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
-pub struct DeviceAuthorizeResponse {
-    /// The SECRET device code the client polls `device/token` with.
+pub struct DeviceAuthStartResponse {
+    /// The SECRET device code the client polls `device/token` with. On approval this same secret is
+    /// promoted to the device's bearer credential (see the module note), so it is stored like one.
     pub device_code: String,
-    /// The opaque code identifying this device-auth session; it rides inside `verification_uri_complete`
-    /// (the human clicks the URL — it is not typed).
+    /// The short human-facing code the approval page displays (a cross-check, never typed as a
+    /// secret).
     pub user_code: String,
-    /// The verification URL a human visits to approve the session.
+    /// The approval URL a signed-in human visits.
     pub verification_uri: String,
-    /// The verification URL with the user code already embedded (RFC-8628 `verification_uri_complete`) —
-    /// the one link to open; a client uses it VERBATIM when present.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verification_uri_complete: Option<String>,
-    /// The session lifetime, in seconds (RFC-8628 `expires_in`).
-    pub expires_in: u64,
-    /// The minimum poll interval, in seconds (RFC-8628 `interval`).
-    pub interval: u64,
-    /// The plane block a STANDUP start carries (base URL, deployment posture, enrollment method) — a
-    /// standup device has no `/i/` bootstrap to learn these from. Absent on an enroll start.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plane: Option<crate::bootstrap::BootstrapPlane>,
+    /// The approval URL with the user code already embedded — the one link to open; a client uses
+    /// it VERBATIM when present.
+    pub verification_uri_complete: String,
+    /// The flow lifetime, in seconds.
+    pub expires_in_secs: u64,
+    /// The minimum poll interval, in seconds.
+    pub interval_secs: u64,
 }
 
-/// `POST /v1/device/token` body — poll a device-authorization session for its grant.
+/// `POST /v1/device/token` body — poll a device-authorization flow for its outcome.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
-pub struct DeviceTokenRequest {
+pub struct DeviceAuthPollRequest {
     /// The SECRET device code from `device/authorize`.
     pub device_code: String,
 }
 
-/// A device-authorization poll status — the RFC-8628 outcomes (snake_case). `granted` carries the opaque
-/// grant; every other status carries only itself (no grant).
+/// A device-authorization poll status (snake_case). `granted` carries the credential + the joined
+/// workspace; every other status carries only itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 #[serde(rename_all = "snake_case")]
-pub enum DeviceTokenStatus {
-    /// Not yet confirmed — keep polling at the interval.
+pub enum DeviceAuthPollStatus {
+    /// Not yet approved — keep polling at the interval.
     Pending,
-    /// Polled too fast — back off.
-    SlowDown,
-    /// The session was denied at the verification page.
+    /// The flow was denied at the approval page.
     Denied,
-    /// The session expired before confirmation.
+    /// The flow expired before approval.
     Expired,
-    /// Confirmed — the `grant` is present.
+    /// Approved — `credential`, `device_id`, and `workspace` are present.
     Granted,
 }
 
-/// The workspace context a `granted` poll carries — the id + display name a STANDUP client (which never
-/// read an `/i/` bootstrap) needs to build its redeem possession frame and disclose what it joined.
+/// The workspace context a `granted` poll carries — everything the CLI needs to record what it
+/// enrolled into (the id it scopes requests by, the address slug it joined at, and a display name).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
-pub struct DeviceTokenWorkspace {
-    /// The workspace the grant is scoped to.
+pub struct DeviceAuthWorkspace {
+    /// The workspace id (the `{ws}` path segment of every subsequent request).
     pub workspace_id: String,
-    /// The workspace display name (a disclosure aid; `""` if the plane no longer has one).
+    /// The workspace's ADDRESS slug (what the human typed at `follow`).
+    pub name: String,
+    /// The workspace's display name.
     pub display_name: String,
-    /// The workspace's full ADDRESS (server-built on the public link base) — the share line's root;
-    /// absent when the plane predates addresses or the grant is workspace-less.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub address: Option<String>,
 }
 
-/// `POST /v1/device/token` response — the poll `status`, plus the opaque single-use enrollment `grant` ONLY
-/// when `status` is `granted`. A re-poll of a confirmed session re-derives the SAME grant (idempotent issue).
+/// `POST /v1/device/token` response — the poll `status`; a `granted` poll carries the device's ONE
+/// bearer credential (the promoted device code — returned here and stored from this ONE field),
+/// its device id, and the joined workspace. A re-poll of an approved flow returns the same answer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
-pub struct DeviceTokenResponse {
+pub struct DeviceAuthPollResponse {
     /// The poll status.
-    pub status: DeviceTokenStatus,
-    /// The opaque single-use enrollment grant — present ONLY when `status` is `granted` (the redeem credential).
+    pub status: DeviceAuthPollStatus,
+    /// The device's plaintext bearer credential — present ONLY when `status` is `granted`. Returned
+    /// once per poll; the server stores only its sha256.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grant: Option<String>,
-    /// The granted session's workspace context — present when `status` is `granted`.
+    pub credential: Option<String>,
+    /// The registered device's id — present ONLY when `status` is `granted`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace: Option<DeviceTokenWorkspace>,
-}
-
-/// `GET /v1/enroll/verify/{user_code}` response — the verification-page disclosure a human reviews before
-/// confirming an identity (the RFC-8628 confused-deputy guard). Carries no secret.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct VerificationContextResponse {
-    /// The session's intent — `enroll` (join an existing workspace) or `standup` (approving CREATES one).
-    /// Absent from older planes ⇒ `enroll`; the page branches its copy on it.
+    pub device_id: Option<String>,
+    /// The joined workspace — present ONLY when `status` is `granted`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intent: Option<SessionIntent>,
-    /// The human-readable machine name the device offered at start.
-    pub machine_name: String,
-    /// A short hex fingerprint of the device's public key — a human cross-checks it against the device. A
-    /// display aid only, never an authority input.
-    pub device_fingerprint: String,
-    /// The workspace display name the device would join.
-    pub workspace_display_name: String,
-    /// The org-domain claim, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verified_domain: Option<String>,
-    /// The domain-verification state.
-    pub verified_domain_status: VerifiedDomainStatus,
-    /// The skills the invite pre-offers (each with an optional display name).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub offered_skills: Vec<BootstrapSkill>,
-}
-
-/// `POST /v1/enroll/passcode` body — start a passcode challenge for an email on a live device-auth session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct PasscodeRequest {
-    /// The user code naming the live device-auth session.
-    pub user_code: String,
-    /// The email the passcode proves control of.
-    pub email: String,
-}
-
-/// The constant-shaped status of a started passcode challenge — always `sent`, so a non-rostered address is
-/// no enumeration oracle (the cloud roster gate is enforced at redeem, never here).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-#[serde(rename_all = "snake_case")]
-pub enum PasscodeAckStatus {
-    /// The challenge was accepted (and, for a valid address, mailed). The ONLY possible status.
-    Sent,
-}
-
-/// `POST /v1/enroll/passcode` response — a CONSTANT-shaped ack (always `sent`); the send is fire-and-forget,
-/// so neither the body nor its latency reveals whether the address was rostered.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct PasscodeAck {
-    /// Always `sent`.
-    pub status: PasscodeAckStatus,
-}
-
-/// `POST /v1/enroll/passcode/confirm` body — submit a passcode to confirm the session's identity.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct PasscodeConfirmRequest {
-    /// The user code naming the live device-auth session.
-    pub user_code: String,
-    /// The email the passcode was sent to.
-    pub email: String,
-    /// The 6-digit passcode the human entered.
-    pub code: String,
-}
-
-/// The outcome of a passcode confirmation (snake_case). A wrong code carries only the status — never the
-/// attempts remaining (no brute-force timing/count oracle on the wire).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-#[serde(rename_all = "snake_case")]
-pub enum PasscodeConfirmStatus {
-    /// The code matched — the session's identity is confirmed (the device's next poll yields a grant).
-    Confirmed,
-    /// The code was wrong.
-    WrongCode,
-    /// The passcode expired.
-    Expired,
-    /// The attempt cap was hit — the passcode is locked.
-    TooManyAttempts,
-}
-
-/// `POST /v1/enroll/passcode/confirm` response — the confirmation status.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct PasscodeConfirmResponse {
-    /// The confirmation status.
-    pub status: PasscodeConfirmStatus,
-}
-
-/// `POST /v1/workspaces/{ws}/devices` body — redeem an enrollment grant into a registered device + its
-/// ONE minted workspace credential. The server checks `device_public_key` equals the grant's bound key
-/// (a binding check) and re-derives the device key id from it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct RedeemRequest {
-    /// The workspace the device enrolls into (authoritatively the grant's; echoed for the client's clarity).
-    pub workspace_id: String,
-    /// The opaque single-use enrollment grant (from a `granted` device-token poll).
-    pub grant: String,
-    /// The device's raw 32-byte public key, base64url-unpadded (must equal the grant's bound key).
-    pub device_public_key: String,
-}
-
-/// `POST /v1/workspaces/{ws}/devices` success payload — the confirmed enrollment: the registered device
-/// and its ONE workspace credential (the `0600` at-rest secret this device presents on every read and
-/// write in this workspace). **NO user token, ever; no per-skill token, ever.** Rides in the all-outcome
-/// envelope's `data`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct RedeemResponse {
-    /// The workspace the device enrolled into.
-    pub workspace_id: String,
-    /// The server-derived device key id now registered (the device's stable, non-secret name — the
-    /// receipts/audit actor; never an authenticator).
-    pub device_key_id: String,
-    /// The principal the device now acts as (the confirmed email, or a device-rooted id) — a disclosure the
-    /// client persists and prints so a hijacked standup is visible ("workspace X — owner Y").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub principal: Option<String>,
-    /// The plaintext workspace credential (returned ONCE; only its sha256 is stored server-side, on the
-    /// device's registry row). No expiry — revocation is a directory row-write, re-enrollment the rotation.
-    pub credential: String,
-}
-
-/// `POST /v1/admin-claim` body — consume a one-time self-host claim token to stand up a workspace + seat its
-/// first owner. The server re-derives the device key id from `device_public_key`.
-#[derive(Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct AdminClaimRequest {
-    /// The one-time admin-claim token.
-    pub claim_token: String,
-    /// The claiming device's raw 32-byte public key, base64url-unpadded.
-    pub device_public_key: String,
-    /// The display name for the standing-up workspace.
-    pub display_name: String,
-}
-
-// `claim_token` is the LIVE one-time bearer owner capability — redact it so a formatted request value
-// (a debug trace, a panic message) can never mint a second custody surface for it.
-impl std::fmt::Debug for AdminClaimRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AdminClaimRequest")
-            .field("claim_token", &"<redacted>")
-            .field("device_public_key", &self.device_public_key)
-            .field("display_name", &self.display_name)
-            .finish()
-    }
+    pub workspace: Option<DeviceAuthWorkspace>,
 }
 
 // =================================================================================================
@@ -861,22 +644,6 @@ impl std::fmt::Debug for AdminClaimRequest {
 // Bearer` workspace credential (resolved in-transaction to its registry row; authority is the row +
 // role matrix — never a body field); the op is derived from the route + body. `op_id` is a UUIDv4.
 // =================================================================================================
-
-/// A workspace-level governance role (the RBAC roster — DISTINCT from the per-skill read roster). snake_case.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkspaceRole {
-    /// Full governance authority (invite, roster, revoke).
-    Owner,
-    /// A reviewer (review-gate authority; no governance authority in v0).
-    Reviewer,
-    /// An ordinary member (no governance authority).
-    Member,
-}
 
 /// `POST /v1/workspaces/{ws}/invitations` body — invitation as a ROSTER WRITE: seat each email as an
 /// invited member (recording who invited whom) and optionally pre-place the person into channels.
@@ -913,38 +680,6 @@ pub struct InvitationData {
     pub mailed: bool,
 }
 
-/// `PUT /v1/workspaces/{ws}/roster/{email}` body — set a principal's workspace role (owner-only). The target
-/// principal is the `{email}` path segment; the role rides the body.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct RosterSetRequest {
-    /// The target workspace id (scopes the op to one workspace).
-    pub workspace_id: String,
-    /// The client-minted UUIDv4 idempotency key.
-    #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
-    pub op_id: String,
-    /// The role to set on the `{email}` target.
-    pub role: WorkspaceRole,
-}
-
-/// `DELETE /v1/workspaces/{ws}/roster/{email}` body — remove a principal from the workspace roster
-/// (owner-only). The target principal is the `{email}` path segment; the body carries only the op identity.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct RosterRemoveRequest {
-    /// The target workspace id (scopes the op to one workspace).
-    pub workspace_id: String,
-    /// The client-minted UUIDv4 idempotency key.
-    #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
-    pub op_id: String,
-}
-
 /// `DELETE /v1/workspaces/{ws}/devices` body — revoke a registered device key (owner, or the device's own
 /// principal). The revoke is INSTANT (flip `revoked` in one transaction — the row's credential stops
 /// authorizing fresh work the moment it commits).
@@ -964,78 +699,10 @@ pub struct DeviceRevokeRequest {
     pub target_device_key_id: String,
 }
 
-/// `PUT /v1/workspaces/{ws}/policy/review-required` body — the self-host operator toggle for the
-/// `review-required` workspace policy (an idempotent set; JSON so the body stays extensible without a
-/// path-shape change). Authenticated by the plane's admin token, not a device credential; the route is
-/// invisible (404) on a plane with no admin token configured.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct PolicyReviewRequiredRequest {
-    /// The desired policy value: `true` gates any direct publish behind a reviewer's approval.
-    pub review_required: bool,
-}
-
 // =================================================================================================
 // The adopted verb surface — subscription / curation / protection / notices / invitation wire
 // bodies, the login redeem, and the member-scoped describe reads the two-phase verbs run.
 // =================================================================================================
-
-/// `POST /v1/login` body — redeem a LOGIN grant: prove the device key the grant is bound to and
-/// receive one workspace credential per confirmed seat. The grant is the bearer credential; the
-/// device public key is a binding check (nothing signs).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct LoginRedeemRequest {
-    /// The opaque grant from the login device flow (the bearer credential for this one exchange).
-    pub grant: String,
-    /// The device's raw 32-byte public key, base64url-unpadded — must equal the grant's bound key.
-    pub device_public_key: String,
-}
-
-/// One workspace a login re-minted (or could not re-mint) a credential for.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct LoginMembership {
-    /// The workspace id.
-    pub workspace_id: String,
-    /// The workspace's ADDRESS name.
-    pub name: String,
-    /// The workspace's display name.
-    pub display_name: String,
-    /// The person's role on the seat (`owner` / `reviewer` / `member`).
-    pub role: String,
-    /// The device's non-secret key id in this workspace (server-derived).
-    pub device_key_id: String,
-    /// The freshly minted plaintext workspace credential — absent when the mint was refused (see
-    /// `blocked`). Returned ONCE; the server stores only its hash.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credential: Option<String>,
-    /// Why no credential was minted (e.g. this device is revoked in that workspace); absent on success.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blocked: Option<String>,
-}
-
-/// `POST /v1/login` success `data` — the proven identity + one entry per confirmed seat.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct LoginData {
-    /// The proven principal (canonical form).
-    pub principal: String,
-    /// One entry per workspace where the principal holds a confirmed seat (possibly empty).
-    pub memberships: Vec<LoginMembership>,
-}
 
 /// `PUT /v1/workspaces/{ws}/skills/{skill}/protection` and
 /// `PUT /v1/workspaces/{ws}/channels/{ch}/protection` body — the safety knob. Levels are per kind:
@@ -1311,30 +978,13 @@ mod tests {
     }
 
     #[test]
-    fn admin_claim_request_debug_redacts_the_claim_token() {
-        let req = AdminClaimRequest {
-            claim_token: "one_time_bearer_secret".to_owned(),
-            device_public_key: "pubkey_b64".to_owned(),
-            display_name: "Acme".to_owned(),
-        };
-        let dbg = format!("{req:?}");
-        assert!(dbg.contains("<redacted>"), "got {dbg}");
-        assert!(
-            !dbg.contains("one_time_bearer_secret"),
-            "the live bearer must never appear in Debug: {dbg}"
-        );
-        // The non-secret fields still print (the redaction is surgical).
-        assert!(dbg.contains("pubkey_b64") && dbg.contains("Acme"));
-    }
-
-    #[test]
     fn publish_request_round_trips_snake_case_no_created_at() {
         let req = PublishRequest {
             channel: None,
             workspace_id: "w_demo".to_owned(),
             skill_id: "s_prdescribe".to_owned(),
             op_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_owned(),
-            expected: Generation { epoch: 1, seq: 42 },
+            expected: 42,
             candidate: WireCandidate {
                 files: vec![WireFile {
                     path: "SKILL.md".to_owned(),
@@ -1351,7 +1001,7 @@ mod tests {
         // snake_case field names, candidate nested, the server-stamped time absent — and NO credential
         // material: the workspace credential rides the Authorization header, never a body field.
         assert_eq!(v["workspace_id"], "w_demo");
-        assert_eq!(v["expected"]["seq"], 42);
+        assert_eq!(v["expected"], 42);
         assert_eq!(v["candidate"]["files"][0]["mode"], "100644");
         assert_eq!(v["display_name"], "Deploy");
         assert!(v.get("created_at").is_none());
@@ -1364,7 +1014,7 @@ mod tests {
             "workspace_id": "w_demo",
             "skill_id": "s_prdescribe",
             "op_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-            "expected": { "epoch": 1, "seq": 42 },
+            "expected": 42,
             "candidate": { "files": [], "parents": [], "author": "d", "message": "m" },
         }))
         .unwrap();
@@ -1397,17 +1047,17 @@ mod tests {
         let list = WireProposalList {
             proposals: vec![WireOpenProposal {
                 version_id: "e".repeat(64),
-                base_generation: Generation { epoch: 1, seq: 7 },
+                base_generation: 7,
                 created_at: "2026-06-30T00:00:00Z".to_owned(),
             }],
         };
         let v = serde_json::to_value(&list).unwrap();
         assert_eq!(v["proposals"][0]["version_id"], "e".repeat(64));
-        assert_eq!(v["proposals"][0]["base_generation"]["seq"], 7);
+        assert_eq!(v["proposals"][0]["base_generation"], 7);
         assert_eq!(v["proposals"][0]["created_at"], "2026-06-30T00:00:00Z");
         let back: WireProposalList = serde_json::from_value(v).unwrap();
         assert_eq!(back.proposals.len(), 1);
-        assert_eq!(back.proposals[0].base_generation.epoch, 1);
+        assert_eq!(back.proposals[0].base_generation, 7);
         // An empty list is a valid response (no open proposals).
         let empty: WireProposalList =
             serde_json::from_value(serde_json::json!({ "proposals": [] })).unwrap();
@@ -1415,156 +1065,59 @@ mod tests {
     }
 
     #[test]
-    fn device_token_status_is_snake_case_and_granted_carries_a_grant() {
+    fn device_auth_poll_is_snake_case_and_granted_carries_the_one_credential() {
         assert_eq!(
-            serde_json::to_string(&DeviceTokenStatus::SlowDown).unwrap(),
-            "\"slow_down\""
+            serde_json::to_string(&DeviceAuthPollStatus::Pending).unwrap(),
+            "\"pending\""
         );
-        // A pending poll carries only the status (no grant, no workspace).
-        let pending = DeviceTokenResponse {
-            status: DeviceTokenStatus::Pending,
-            grant: None,
+        // A pending poll carries only the status.
+        let pending = DeviceAuthPollResponse {
+            status: DeviceAuthPollStatus::Pending,
+            credential: None,
+            device_id: None,
             workspace: None,
         };
         let v = serde_json::to_value(&pending).unwrap();
         assert_eq!(v["status"], "pending");
-        assert!(v.get("grant").is_none(), "no grant unless granted");
-        assert!(v.get("workspace").is_none(), "no workspace unless granted");
-        // A granted poll carries the opaque grant + the workspace context.
-        let granted = DeviceTokenResponse {
-            status: DeviceTokenStatus::Granted,
-            grant: Some("g_opaque".to_owned()),
-            workspace: Some(DeviceTokenWorkspace {
+        assert!(v.get("credential").is_none() && v.get("workspace").is_none());
+        // A granted poll carries the ONE credential (the promoted device code), the device id, and
+        // the joined workspace — everything the CLI stores, from one field each.
+        let granted = DeviceAuthPollResponse {
+            status: DeviceAuthPollStatus::Granted,
+            credential: Some("dc_secret".to_owned()),
+            device_id: Some("dev_1".to_owned()),
+            workspace: Some(DeviceAuthWorkspace {
                 workspace_id: "w_acme".to_owned(),
+                name: "acme".to_owned(),
                 display_name: "Acme".to_owned(),
-                address: Some("https://topos.example/acme".to_owned()),
             }),
         };
         let v = serde_json::to_value(&granted).unwrap();
         assert_eq!(v["status"], "granted");
-        assert_eq!(v["grant"], "g_opaque");
-        assert_eq!(v["workspace"]["workspace_id"], "w_acme");
-        assert_eq!(v["workspace"]["display_name"], "Acme");
-        assert_eq!(v["workspace"]["address"], "https://topos.example/acme");
-        // An OLD response without the workspace block still deserializes (additive-compat).
-        let old: DeviceTokenResponse =
-            serde_json::from_value(serde_json::json!({ "status": "granted", "grant": "g" }))
-                .unwrap();
-        assert!(old.workspace.is_none());
-    }
-
-    #[test]
-    fn device_authorize_request_intent_and_optional_workspace_are_additive() {
-        assert_eq!(
-            serde_json::to_string(&SessionIntent::Standup).unwrap(),
-            "\"standup\""
-        );
-        assert_eq!(
-            serde_json::to_string(&SessionIntent::Enroll).unwrap(),
-            "\"enroll\""
-        );
-        assert_eq!(
-            serde_json::to_string(&SessionIntent::Login).unwrap(),
-            "\"login\""
-        );
-        // The ENROLL body names the workspace ADDRESS; intent may default to absent.
-        let enroll: DeviceAuthorizeRequest = serde_json::from_value(serde_json::json!({
+        assert_eq!(v["credential"], "dc_secret");
+        assert_eq!(v["device_id"], "dev_1");
+        assert_eq!(v["workspace"]["name"], "acme");
+        // The start pair round-trips; the poll target is the same secret the start returned.
+        let start = DeviceAuthStartResponse {
+            device_code: "dc_secret".to_owned(),
+            user_code: "AAAA-BBBB".to_owned(),
+            verification_uri: "https://topos.example/devices".to_owned(),
+            verification_uri_complete: "https://topos.example/devices?code=AAAA-BBBB".to_owned(),
+            expires_in_secs: 900,
+            interval_secs: 5,
+        };
+        let v = serde_json::to_value(&start).unwrap();
+        assert_eq!(v["expires_in_secs"], 900);
+        assert_eq!(v["interval_secs"], 5);
+        let req: DeviceAuthStartRequest = serde_json::from_value(serde_json::json!({
+            "requested_name": "laptop",
             "workspace": "acme",
-            "device_public_key": "AAAA",
-            "machine_name": "laptop",
         }))
         .unwrap();
-        assert_eq!(enroll.workspace.as_deref(), Some("acme"));
-        assert!(enroll.intent.is_none());
-        // The STANDUP body: no workspace, intent standup.
-        let standup: DeviceAuthorizeRequest = serde_json::from_value(serde_json::json!({
-            "intent": "standup",
-            "device_public_key": "AAAA",
-            "machine_name": "laptop",
-        }))
-        .unwrap();
-        assert!(standup.workspace.is_none());
-        assert_eq!(standup.intent, Some(SessionIntent::Standup));
-        // The LOGIN body: no workspace, intent login.
-        let login: DeviceAuthorizeRequest = serde_json::from_value(serde_json::json!({
-            "intent": "login",
-            "device_public_key": "AAAA",
-            "machine_name": "laptop",
-        }))
-        .unwrap();
-        assert!(login.workspace.is_none());
-        assert_eq!(login.intent, Some(SessionIntent::Login));
-        // An unknown intent is a CLOSED-enum parse failure, not a silent default.
-        assert!(
-            serde_json::from_value::<DeviceAuthorizeRequest>(serde_json::json!({
-                "intent": "takeover",
-                "device_public_key": "AAAA",
-                "machine_name": "laptop",
-            }))
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn device_authorize_response_standup_extras_are_optional() {
-        // An OLD response (no complete URI, no plane block) still deserializes.
-        let old: DeviceAuthorizeResponse = serde_json::from_value(serde_json::json!({
-            "device_code": "dc",
-            "user_code": "AAAA-BBBB",
-            "verification_uri": "https://plane.test/verify",
-            "expires_in": 900,
-            "interval": 5,
-        }))
-        .unwrap();
-        assert!(old.verification_uri_complete.is_none());
-        assert!(old.plane.is_none());
-    }
-
-    #[test]
-    fn passcode_ack_is_constant_shaped() {
-        let ack = PasscodeAck {
-            status: PasscodeAckStatus::Sent,
-        };
-        assert_eq!(serde_json::to_value(&ack).unwrap()["status"], "sent");
-    }
-
-    #[test]
-    fn passcode_confirm_status_is_snake_case() {
-        assert_eq!(
-            serde_json::to_string(&PasscodeConfirmStatus::TooManyAttempts).unwrap(),
-            "\"too_many_attempts\""
-        );
-        assert_eq!(
-            serde_json::to_string(&PasscodeConfirmStatus::WrongCode).unwrap(),
-            "\"wrong_code\""
-        );
-    }
-
-    #[test]
-    fn redeem_response_carries_one_credential_and_no_user_token() {
-        let resp = RedeemResponse {
-            workspace_id: "w_acme".to_owned(),
-            device_key_id: "dk_abc".to_owned(),
-            principal: Some("alice@acme.com".to_owned()),
-            credential: "wsc_secret".to_owned(),
-        };
-        let v = serde_json::to_value(&resp).unwrap();
-        assert_eq!(v["credential"], "wsc_secret");
-        assert_eq!(v["principal"], "alice@acme.com");
-        // NO user token field, ever — and no per-skill token list.
-        assert!(v.get("user_token").is_none());
-        assert!(v.get("token").is_none());
-        assert!(v.get("read_creds").is_none());
-        let back: RedeemResponse = serde_json::from_value(v).unwrap();
-        assert_eq!(back.credential, "wsc_secret");
-        // A response without the principal still deserializes (additive-compat).
-        let old: RedeemResponse = serde_json::from_value(serde_json::json!({
-            "workspace_id": "w_acme",
-            "device_key_id": "dk_abc",
-            "credential": "wsc_secret",
-        }))
-        .unwrap();
-        assert!(old.principal.is_none());
+        assert_eq!(req.workspace, "acme");
+        let poll: DeviceAuthPollRequest =
+            serde_json::from_value(serde_json::json!({ "device_code": "dc_secret" })).unwrap();
+        assert_eq!(poll.device_code, "dc_secret");
     }
 
     #[test]
@@ -1576,7 +1129,7 @@ mod tests {
             status: "active".to_owned(),
             version_id: "a".repeat(64),
             bundle_digest: "b".repeat(64),
-            generation: Generation { epoch: 1, seq: 3 },
+            generation: 3,
             display_name: None,
             updated_at: 1_700_000_000_000,
             open_proposals: 0,
@@ -1605,7 +1158,7 @@ mod tests {
                 protection: "reviewed".to_owned(),
                 version_id: "a".repeat(64),
                 bundle_digest: "b".repeat(64),
-                generation: Generation { epoch: 1, seq: 7 },
+                generation: 7,
                 updated_at: 1_700_000_000_000,
                 via: WireVia {
                     channels: vec!["everyone".to_owned()],
@@ -1686,11 +1239,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_role_is_snake_case_and_invitation_bodies_round_trip() {
-        assert_eq!(
-            serde_json::to_string(&WorkspaceRole::Reviewer).unwrap(),
-            "\"reviewer\""
-        );
+    fn invitation_bodies_round_trip() {
         // The invitation is a roster write: emails + optional channel pre-placements, no role
         // field (every CLI invitee starts as a member) and no link (the address is the answer).
         let req = InvitationRequest {

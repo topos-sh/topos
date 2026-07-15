@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE object_presence SET status = CASE WHEN EXISTS ( SELECT 1 FROM tombstones t WHERE t.workspace_id = $1 AND t.blob_id = $2) THEN 'unavailable' ELSE 'absent' END, status_updated_at = $4 WHERE workspace_id = $1 AND object_id = $2 AND status = 'deleting' AND status_updated_at = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0cf6f35d15dd3af85b9996769ec32299a1ad343de56758d0b533d031e3394fa6"
+}

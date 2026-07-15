@@ -3,15 +3,14 @@ import { checkBelt } from "@/lib/api/belt.server";
 import { rowOpResponse } from "@/lib/api/row-envelopes.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
 import { requireDeviceActor } from "@/lib/auth/guards.server";
-import { deviceProtectSkill } from "@/lib/db/queries.device.server";
+import { laneProtectBundle } from "@/lib/db/queries.lane.server";
 
 /**
- * `PUT /api/v1/workspaces/{ws}/skills/{skill}/protection` — set a skill's protection level
- * (`reviewed` | `open`). `{skill}` is the immutable id. A JSON body `{ level }`. ORDERING mirrors the
- * vault's extractor: a malformed body AND an invalid LEVEL are both a 400 BEFORE the credential
- * resolve (the vault's `parse_level` runs before `authority().protect`), so a bad level is a 400
- * unconditionally — never a membership signal a non-member could read off. Tightening to `reviewed`
- * takes reviewer+ (`REVIEWER_ROLE_REQUIRED`); loosening to `open` takes owner
+ * `PUT /api/v1/workspaces/{ws}/skills/{skill}/protection` — set a bundle's protection level
+ * (`reviewed` | `open`). `{skill}` is the immutable id. A JSON body `{ level }`. A malformed
+ * body AND an invalid LEVEL are both a 400 BEFORE the credential resolve, so a bad level is a
+ * 400 unconditionally — never a membership signal a non-member could read off. Tightening to
+ * `reviewed` takes reviewer+ (`REVIEWER_ROLE_REQUIRED`); loosening to `open` takes owner
  * (`OWNER_ROLE_REQUIRED`).
  */
 const BODY_CAP = 64 * 1024;
@@ -29,7 +28,6 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   if (request.method !== "PUT") {
     return uniformNotFound();
   }
-  // Body FIRST — a malformed body is a 400 before the credential is ever checked.
   const body = await readCappedBody(request, BODY_CAP, "protection body");
   if (body instanceof Response) {
     return body;
@@ -44,13 +42,11 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   if (typeof parsed !== "object" || parsed === null || typeof level !== "string") {
     return badRequest("malformed protection body");
   }
-  // Level validation BEFORE auth — the vault's `parse_level` runs before the credential resolve, so
-  // a bad level is a 400 for everyone (a non-member must not read a 400-vs-404 membership signal).
   if (level !== "open" && level !== "reviewed") {
     return badRequest("a skill protection level must be `reviewed` or `open`");
   }
   const actor = await requireDeviceActor(request, params.ws ?? "");
-  const status = await deviceProtectSkill(actor, params.skill ?? "", level);
+  const status = await laneProtectBundle(actor, params.skill ?? "", level);
   return rowOpResponse("protect", status, { set: "set" }, PROTECT_DENIED);
 }
 

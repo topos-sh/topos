@@ -6,7 +6,9 @@
   "properties": {
     "applied": {
       "description": "Highest generation actually MATERIALIZED — advances only after a successful swap. After a server\nrestore the served target may sit below this; that is a legitimate state the engine simply\napplies toward.",
-      "$ref": "#/$defs/Generation"
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
     },
     "base_commit": {
       "description": "The commit the working tree derives from (= the applied commit when clean).",
@@ -19,7 +21,9 @@
     },
     "observed": {
       "description": "The generation the plane most recently served — the sync target the engine drives `applied`\ntoward.",
-      "$ref": "#/$defs/Generation"
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
     },
     "observed_version_id": {
       "description": "The `version_id` (the 64-hex commit) the served `observed` generation named — the target bytes\nthe engine materializes and re-verifies by digest on apply.",
@@ -46,27 +50,5 @@
     "base_commit",
     "work_hash",
     "held"
-  ],
-  "$defs": {
-    "Generation": {
-      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
-      "type": "object",
-      "properties": {
-        "epoch": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "epoch",
-        "seq"
-      ]
-    }
-  }
+  ]
 }

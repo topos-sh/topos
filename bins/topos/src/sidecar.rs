@@ -108,14 +108,7 @@ impl Layout {
         self.identity_dir().join("host.json")
     }
 
-    /// `identity/device.key` — the raw 32-byte Ed25519 seed (the device signing key), a `0600` secret.
-    /// NEVER in JSON; `host.json` carries only the PUBLIC key + a [`crate::identity::DeviceKeyRef`] that
-    /// points here.
-    pub(crate) fn device_key_path(&self) -> PathBuf {
-        self.identity_dir().join("device.key")
-    }
-
-    /// `instance.json` — the enrolled plane + the pinned plane public key (a home-level enrollment doc).
+    /// `instance.json` — the enrolled plane (a home-level enrollment doc).
     pub(crate) fn instance_path(&self) -> PathBuf {
         self.home.join("instance.json")
     }
@@ -127,15 +120,15 @@ impl Layout {
         self.home.join("follows.json")
     }
 
-    /// `identity/credentials.json` — the per-workspace bearer credentials (a `0600` secret: one credential
-    /// per workspace authenticates EVERY read / write / governance request in that workspace). Written
-    /// read-merge-write under the identity lock, one entry per workspace.
+    /// `identity/credentials.json` — the device's ONE bearer credential + its registered device id (a
+    /// `0600` secret: the credential authenticates EVERY request in every workspace the person's seats
+    /// reach). Written whole under the identity lock.
     pub(crate) fn credentials_path(&self) -> PathBuf {
         self.identity_dir().join("credentials.json")
     }
 
-    /// `identity/user.json` — the enrolled principal's NON-secret metadata (email / roles / workspace /
-    /// deployment posture / enrolled-at). Ordinary perms — it carries no secret.
+    /// `identity/user.json` — the enrolled workspaces' NON-secret metadata (ids / names / enrolled-at).
+    /// Ordinary perms — it carries no secret.
     pub(crate) fn user_path(&self) -> PathBuf {
         self.identity_dir().join("user.json")
     }
@@ -228,6 +221,14 @@ fn walk(fs: &dyn FsOps, dir: &Path, out: &mut Vec<String>) -> Result<(), ClientE
 pub(crate) fn recover(fs: &dyn FsOps, layout: &Layout, now_millis: i64) -> Result<(), ClientError> {
     crate::logfile::repair_torn_tail(fs, &layout.log_path())?;
     crate::enroll::sweep_expired_wal(fs, layout, now_millis)?;
+
+    // Sweep the retired device-keypair seed (`identity/device.key`) a pre-flip install left behind —
+    // nothing reads or mints it any more (a device authenticates with its ONE bearer credential), so a
+    // leftover secret file is deleted on sight.
+    let dead_key = layout.identity_dir().join("device.key");
+    if fs.exists(&dead_key) {
+        fs.remove_file(&dead_key)?;
+    }
 
     // Sweep any orphaned op-WAL temp (`ops/<op_id>.json.tmp`) a faulted WAL write left — harmless litter
     // (find_pending only matches a `.json` name) but nothing else cleans the ops dir.

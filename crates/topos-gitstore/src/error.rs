@@ -1,5 +1,5 @@
 //! The two typed error families. Raw `gix` error strings are captured for diagnostics only; the client
-//! maps these typed variants to clean wire codes and never echoes the inner string to a user surface.
+//! maps these typed variants to clean wire codes and never echoes the inner string to a caller-facing surface.
 
 use topos_core::digest::RejectReason;
 

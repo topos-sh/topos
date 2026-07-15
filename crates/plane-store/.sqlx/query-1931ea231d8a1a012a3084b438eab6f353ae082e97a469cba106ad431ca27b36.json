@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) AS \"n!\" FROM tombstones\n               WHERE workspace_id = $1 AND blob_id = ANY($2)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "n!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "ByteaArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "1931ea231d8a1a012a3084b438eab6f353ae082e97a469cba106ad431ca27b36"
+}

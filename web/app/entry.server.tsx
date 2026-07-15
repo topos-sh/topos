@@ -6,6 +6,7 @@ import type { EntryContext, RouterContextProvider } from "react-router";
 import { ServerRouter } from "react-router";
 import { canonicalOriginRedirect } from "@/lib/canonical.server";
 import { cardResponse } from "@/lib/card.server";
+import { ensureSetup } from "@/lib/db/identity.server";
 import { runMigrations } from "@/lib/db/migrate.server";
 import { redactTokenPaths } from "@/lib/sentry-scrub";
 
@@ -63,16 +64,17 @@ Sentry.init({
 export const handleError = Sentry.createSentryHandleError({ logErrors: true });
 
 /**
- * Migrations at boot, first-request-once. React Router's serve process has NO boot hook (no
- * `instrumentation.register` equivalent), so migrations run on the first request through a
- * module-level promise that every later request reuses — deterministic and idempotent. Awaited
- * at the top of handleRequest so the DB schema is present before any loader reads it. A failure
- * crashes the request loudly (and every subsequent one, since the rejected promise is cached):
- * the orchestrator restarts the process rather than serving against an unmigrated database.
+ * Migrations + the setup ceremony at boot, first-request-once. React Router's serve process
+ * has NO boot hook (no `instrumentation.register` equivalent), so both run on the first
+ * request through a module-level promise every later request reuses — deterministic and
+ * idempotent. Awaited at the top of handleRequest so the DB schema AND the boot-minted
+ * workspace (with its printed claim link, while unclaimed) exist before any loader reads. A
+ * failure crashes the request loudly (and every subsequent one, since the rejected promise is
+ * cached): the orchestrator restarts the process rather than serving half-initialized.
  */
 let migrationsPromise: Promise<void> | undefined;
-function ensureMigrations(): Promise<void> {
-  migrationsPromise ??= runMigrations();
+function ensureMigrations(request: Request): Promise<void> {
+  migrationsPromise ??= runMigrations().then(() => ensureSetup(new URL(request.url).origin));
   return migrationsPromise;
 }
 
@@ -109,7 +111,7 @@ export default async function handleRequest(
     return card;
   }
 
-  await ensureMigrations();
+  await ensureMigrations(request);
 
   return new Promise((resolve, reject) => {
     let shellRendered = false;

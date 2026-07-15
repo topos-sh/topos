@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO upload (id, workspace_id, bundle_id, digest, state, created_at) VALUES ($1, $2, $3, '-', 'staging', to_timestamp($4::double precision / 1000.0)) ON CONFLICT (id) DO UPDATE SET state = 'staging', created_at = excluded.created_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "934052fbe5ec5719e74d046fa5baf5ef58df4e673dd2bdc08e09830748debe5f"
+}

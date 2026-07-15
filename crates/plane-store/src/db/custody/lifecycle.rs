@@ -1,8 +1,19 @@
-//! The object-lifecycle SQL — the fenced `object_presence` state machine, promotion leases, the upload
-//! quarantine, and tombstones. Raw `sqlx` stays here (a child of `mod db`); every method takes the
-//! validated id newtypes + an explicit `now` and returns plain domain values, so no `sqlx` type crosses
-//! the module boundary and no caller can run an unbound query. The database is the sole authority for an
+//! The object-lifecycle SQL — the fenced `object_presence` state machine, promotion leases, the
+//! `upload` staging bookkeeping, and tombstones. Raw `sqlx` stays here (a child of `mod db`); every
+//! method takes the validated id newtypes + an explicit `now` (epoch **milliseconds**, the one
+//! server-clock unit) and returns plain domain values, so no `sqlx` type crosses the module
+//! boundary and no caller can run an unbound query. The database is the sole authority for an
 //! object's byte status; the git store always trails it.
+//!
+//! **The GC keep-set** is two clauses, re-verified at acquire time: an object is kept while
+//! - some NON-PURGED `version` row reaches it through `version_object` (a version's bytes are
+//!   retained for as long as the version is), or
+//! - a LIVE `promotion_lease` names it (an in-flight ingest's pre-rooted set).
+//!
+//! Purge is the one way bytes leave a version: the version row gains `purged_at` (dropping its
+//! `version_object` edges out of the keep-set) and its unique blobs gain `tombstones` rows — the
+//! denylist ingest and the install CAS both refuse, and [`Db::finalize_delete`] lands a reclaimed
+//! tombstoned object on the terminal `unavailable` instead of `absent`.
 
 use std::collections::HashMap;
 
@@ -21,7 +32,7 @@ pub(crate) const GIT_OID_LEN: usize = 20;
 pub(crate) enum ObjectStatus {
     /// The bytes are durably installed and verifiable — the only readable/reusable state.
     Present,
-    /// A GC has claimed the object for unlink — a non-resurrectable fence (never returns to present).
+    /// A GC has acquired the object for unlink — a non-resurrectable fence (never returns to present).
     Deleting,
     /// The bytes are not installed (no row, or a GC finalized the unlink).
     Absent,
@@ -29,12 +40,12 @@ pub(crate) enum ObjectStatus {
     Unavailable,
 }
 
-/// The outcome of a migrate's install transition (the `absent → present` CAS).
+/// The outcome of an ingest's install transition (the `absent → present` CAS).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InstallOutcome {
     /// This call installed the object (a fresh row, or a reclaimed `absent` row brought back to present).
     Installed,
-    /// The object was already present — a concurrent migrate won, or a prior version still holds it (reuse).
+    /// The object was already present — a concurrent ingest won, or a prior version still holds it (reuse).
     AlreadyPresent,
     /// The object is mid-unlink; the caller must wait for `absent` (outside any write transaction) and retry.
     Deleting,
@@ -42,24 +53,24 @@ pub(crate) enum InstallOutcome {
     Unavailable,
 }
 
-/// The outcome of a GC claim step (the guarded `present → deleting` CAS).
+/// The outcome of a GC acquire step (the guarded `present → deleting` CAS).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ClaimOutcome {
-    /// The object was claimed for unlink. `location` selects which store the unlink targets; `git_oid`
+pub(crate) enum AcquireOutcome {
+    /// The object was acquired for unlink. `location` selects which store the unlink targets; `git_oid`
     /// locates the loose git object (used when `location` is [`Location::Git`]; for an offloaded object the
     /// unlink keys on the object id, and `git_oid` is the carrier value the row always carries).
-    Claimed {
+    Acquired {
         location: Location,
         git_oid: [u8; GIT_OID_LEN],
     },
-    /// The object was spared — it is reachable from a commit, named by a live lease, or not present.
+    /// The object was spared — it is reachable from a live version, named by a live lease, or not present.
     Spared,
 }
 
 /// Which physical store holds an object's bytes. The database is the sole authority for this; only the
-/// physical fetch/install/unlink dispatches on it — reachability (`commit_object`) and access reference the
+/// physical fetch/install/unlink dispatches on it — reachability (`version_object`) references the
 /// `object_id` regardless of where the bytes sit. `large-remote` is schema-reserved for the deferred
-/// S3-compatible backend; v0 never writes it.
+/// S3-compatible backend; nothing writes it yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Location {
     /// A loose object in the per-workspace git store (physically located by its `git_oid`).
@@ -82,7 +93,7 @@ impl Location {
 impl Db {
     // ── object_presence: the fenced state machine ─────────────────────────────────────────────────────
 
-    /// The current byte status of an object (a pool read; no transaction). Drives a migrate's
+    /// The current byte status of an object (a pool read; no transaction). Drives an ingest's
     /// reuse-vs-install decision and the deleting-wait poll — both OUTSIDE any write transaction.
     pub(crate) async fn object_status(
         &self,
@@ -110,7 +121,7 @@ impl Db {
     /// reclaimed `absent`/`deleting`/`unavailable` one). The caller treats `None` as `git`. **The
     /// `status = 'present'` filter is load-bearing for reads:** after a large-local object is GC'd its row
     /// lingers as `absent` with `location = 'large-local'`; the filter makes this report no live location for
-    /// it, so a read can never be routed to the deleted side-store object. Drives the migrate dedup-reuse belt
+    /// it, so a read can never be routed to the deleted side-store object. Drives the ingest dedup-reuse belt
     /// (always called on a `present` row, so the filter is transparent there) and the single-object read dispatch.
     pub(crate) async fn object_location(
         &self,
@@ -135,12 +146,11 @@ impl Db {
     }
 
     /// The [`Location`] **and** git locator of a **`present`** object — `(location, git_oid)` for a present
-    /// row, else `None` (no live row: a legacy git object, or one never installed / reclaimed). This drives
-    /// the single-object read dispatch: the git arm reads the loose object **directly by `git_oid`** rather
-    /// than walking the version's tree, so a git-resident object in a MIXED bundle — one that also contains
-    /// an offloaded blob whose git object is intentionally absent — reads correctly (a whole-tree re-hash
-    /// would fault on the absent offloaded sibling before reaching the requested blob). `None` falls back to
-    /// the tree walk, which is safe there because a no-row object's version is all-git (legacy).
+    /// row, else `None` (no live row). This drives the single-object read dispatch: the git arm reads the
+    /// loose object **directly by `git_oid`** rather than walking the version's tree, so a git-resident
+    /// object in a MIXED bundle — one that also contains an offloaded blob whose git object is intentionally
+    /// absent — reads correctly (a whole-tree re-hash would fault on the absent offloaded sibling before
+    /// reaching the requested blob). `None` falls back to the tree walk.
     pub(crate) async fn object_dispatch(
         &self,
         ws: &WorkspaceId,
@@ -168,7 +178,7 @@ impl Db {
     }
 
     /// The install transition: `absent → present`, set ONLY after the caller has durably installed the
-    /// bytes at their final path **in the store named by `location`**. One immediate-write transaction:
+    /// bytes at their final path **in the store named by `location`**. One serializable transaction:
     /// reject a denylisted blob; then the guarded upsert (the `WHERE status = 'absent'` cannot fire on a
     /// `deleting` row, so resurrection is impossible by construction); then, if the upsert was suppressed,
     /// classify the blocking state so the caller can reuse / wait / reject. `git_oid` is always recorded —
@@ -189,64 +199,56 @@ impl Db {
         })
     }
 
-    /// The GC claim step: `present → deleting`, **guarded by the exact read-authorization surface** so a
-    /// readable object is never reclaimed. One immediate-write transaction re-verifies AT DELETE TIME that
-    /// the object is kept by NONE of the three roots — closing the snapshot-then-delete race (a root added
-    /// after the candidate scan but before this claim is seen here and the object is spared):
-    /// - **no `commit_object` edge** (the accepted trunk — what `read_object`'s trunk arm authorizes over),
-    /// - **no live `promotion_lease`** (an in-flight migrate's pre-rooted set), and
-    /// - **no OPEN, NON-STALE proposal** rooting it via `proposal_object` (the pending-review surface). This
-    ///   last `NOT EXISTS` shares its `open ∧ base == current` predicate **verbatim** with the read arm
-    ///   ([`crate::db::Db::authorize_object_read`]) and the recovery claim
-    ///   ([`Self::claim_stale_for_recovery`]), so the instant a publish advances `current` (staling the
-    ///   proposal) the object drops out of retention AND read in the same step — no reaper, no edge deletion,
-    ///   no window (the equivalence test pins the copies together).
-    pub(crate) async fn claim_for_delete(
+    /// The GC acquire step: `present → deleting`, **guarded by the exact keep-set** so a kept object is
+    /// never reclaimed. One serializable transaction re-verifies AT DELETE TIME that the object is kept by
+    /// NEITHER root — closing the snapshot-then-delete race (a root added after the candidate scan but
+    /// before this acquire is seen here and the object is spared):
+    /// - **no NON-PURGED version reaches it** through `version_object` (the retention surface = the read
+    ///   surface), and
+    /// - **no live `promotion_lease`** names it (an in-flight ingest's pre-rooted set).
+    pub(crate) async fn acquire_for_delete(
         &self,
         ws: &WorkspaceId,
         object_id: ObjectId,
         now: i64,
-    ) -> Result<ClaimOutcome> {
+    ) -> Result<AcquireOutcome> {
         run_serializable!(
             self,
             tx,
-            claim_for_delete_txn(&mut tx, ws, object_id, now).await
+            acquire_for_delete_txn(&mut tx, ws, object_id, now).await
         )
     }
 
-    /// The GC finalize step: `deleting → absent`, after the loose object has been unlinked OUTSIDE any
-    /// transaction. Guarded on `status = 'deleting'` **and the claimant's fence token** (`status_updated_at =
-    /// claim_token`, the value this actor's own claim stamped) — so it is idempotent against a concurrent
-    /// recovery AND can never flip a row a recovery sweep has since re-claimed (a re-claim bumps the token):
-    /// only the current owner finalizes. A superseded finalize matches no row — a harmless no-op. The token
-    /// is the `now`/`older_than` the claimant passed to [`Self::claim_for_delete`] /
-    /// [`Self::claim_stale_for_recovery`] (each stamps it into `status_updated_at`), so the caller already
-    /// holds it — no value is threaded back out of the claim.
+    /// The GC finalize step: after the bytes have been unlinked OUTSIDE any transaction, land the row on
+    /// `absent` — or on the terminal `unavailable` when the blob is tombstoned (a purge's denylist entry:
+    /// the bytes are gone AND may never return). Guarded on `status = 'deleting'` **and the acquirer's
+    /// fence token** (`status_updated_at = acquire_token`, the value this actor's own acquire stamped) — so it
+    /// is idempotent against a concurrent recovery AND can never flip a row a recovery sweep has since
+    /// re-acquired (a re-acquire bumps the token): only the current owner finalizes. A superseded finalize
+    /// matches no row — a harmless no-op.
     pub(crate) async fn finalize_delete(
         &self,
         ws: &WorkspaceId,
         object_id: ObjectId,
-        claim_token: i64,
+        acquire_token: i64,
         now: i64,
     ) -> Result<()> {
         run_serializable!(self, tx, {
-            finalize_delete_txn(&mut tx, ws, object_id, claim_token, now).await
+            finalize_delete_txn(&mut tx, ws, object_id, acquire_token, now).await
         })
     }
 
-    /// Whether THIS actor still owns the `deleting` claim it took — `status = 'deleting'` AND the row's
-    /// `status_updated_at` still equals the `claim_token` the claimant stamped. The GC + recovery unlink
-    /// steps consult this IMMEDIATELY before the physical `delete_loose_object` (with no `.await` between the
-    /// check and the synchronous unlink), so a row a concurrent recovery sweep re-claimed — which bumps the
-    /// token — is never also unlinked by the superseded original claimant. Exactly one actor ever removes the
-    /// bytes, closing the recovery-vs-live-GC race that would otherwise unlink a row another actor finalized
-    /// and a re-migrate then re-installed (a phantom-`present` byte loss). A pool read: it sees the latest
-    /// committed claim.
+    /// Whether THIS actor still owns the `deleting` acquire it took — `status = 'deleting'` AND the row's
+    /// `status_updated_at` still equals the `acquire_token` the acquirer stamped. The GC + recovery unlink
+    /// steps consult this IMMEDIATELY before the physical unlink (with no `.await` between the
+    /// check and the synchronous unlink), so a row a concurrent recovery sweep re-acquired — which bumps the
+    /// token — is never also unlinked by the superseded original acquirer. Exactly one actor ever removes the
+    /// bytes. A pool read: it sees the latest committed acquire.
     pub(crate) async fn confirm_deleting_owner(
         &self,
         ws: &WorkspaceId,
         object_id: ObjectId,
-        claim_token: i64,
+        acquire_token: i64,
     ) -> Result<bool> {
         let ws_s = ws.as_str();
         let oid = object_id.0.as_slice();
@@ -255,7 +257,7 @@ impl Db {
                WHERE workspace_id = $1 AND object_id = $2 AND status = 'deleting' AND status_updated_at = $3"#,
             ws_s,
             oid,
-            claim_token,
+            acquire_token,
         )
         .fetch_optional(self.pool())
         .await
@@ -264,13 +266,13 @@ impl Db {
     }
 
     /// The GC pass's ADVISORY candidate list: every `present` object the keep-set does NOT currently root —
-    /// the SAME three exclusion clauses [`Self::claim_for_delete`] re-verifies (a `commit_object` trunk
-    /// edge, a live promotion lease, an open-non-stale `proposal_object` root), evaluated here as one
-    /// indexed SQL anti-join so a pass does work proportional to actual garbage, not to every object the
-    /// workspace ever accumulated. Purely advisory (a point-in-time pool read): the guarded per-object
-    /// claim remains the SOLE authority — an object rooted between this scan and the claim is spared there,
-    /// and one unrooted after the scan is simply picked up by the next pass. Bound on `workspace_id`: an
-    /// unbound scan would silently enumerate another tenant's (content-addressed, repeatable) ids.
+    /// the SAME two exclusion clauses [`Self::acquire_for_delete`] re-verifies (a non-purged version's
+    /// `version_object` edge, a live promotion lease), evaluated here as one indexed SQL anti-join so a
+    /// pass does work proportional to actual garbage, not to every object the workspace ever accumulated.
+    /// Purely advisory (a point-in-time pool read): the guarded per-object acquire remains the SOLE authority
+    /// — an object rooted between this scan and the acquire is spared there, and one unrooted after the scan
+    /// is simply picked up by the next pass. Bound on `workspace_id`: an unbound scan would silently
+    /// enumerate another tenant's (content-addressed, repeatable) ids.
     pub(crate) async fn gc_candidates(&self, ws: &WorkspaceId, now: i64) -> Result<Vec<ObjectId>> {
         let ws_s = ws.as_str();
         let rows = sqlx::query!(
@@ -278,20 +280,18 @@ impl Db {
             SELECT op.object_id AS "object_id!: Vec<u8>" FROM object_presence op
             WHERE op.workspace_id = $1 AND op.status = 'present'
               AND NOT EXISTS (
-                  SELECT 1 FROM commit_object co
-                  WHERE co.workspace_id = op.workspace_id AND co.object_id = op.object_id)
+                  SELECT 1 FROM version_object vo
+                  JOIN version v
+                    ON v.workspace_id = vo.workspace_id AND v.bundle_id = vo.bundle_id
+                   AND v.version_id = vo.version_id
+                  WHERE vo.workspace_id = op.workspace_id AND vo.object_id = op.object_id
+                    AND v.purged_at IS NULL)
               AND NOT EXISTS (
                   SELECT 1 FROM promotion_lease_object plo
                   JOIN promotion_lease pl
                     ON pl.workspace_id = plo.workspace_id AND pl.op_id = plo.op_id
                   WHERE plo.workspace_id = op.workspace_id AND plo.object_id = op.object_id
                     AND (pl.expires_at IS NULL OR pl.expires_at > $2))
-              AND NOT EXISTS (
-                  SELECT 1 FROM proposal_object po
-                  JOIN proposals p ON p.workspace_id = po.workspace_id AND p.id = po.proposal_id
-                  JOIN current   c ON c.workspace_id = p.workspace_id  AND c.skill_id = p.skill_id
-                  WHERE po.workspace_id = op.workspace_id AND po.object_id = op.object_id
-                    AND p.status = 'open' AND c.epoch = p.base_epoch AND c.seq = p.base_seq)
             "#,
             ws_s,
             now,
@@ -309,9 +309,7 @@ impl Db {
     /// presence row, so this set is exactly the workspaces a periodic [`Self::gc_candidates`]-driven pass
     /// could reclaim in; a workspace that never stored a byte is deliberately absent (nothing to sweep).
     /// Deliberately unfiltered on `status`: a workspace holding only `deleting`/`absent` rows still costs
-    /// one cheap empty candidate scan, and filtering would only save that. Like
-    /// [`Self::workspaces_with_stale_deleting`], each id is re-parsed and every per-workspace query
-    /// re-binds it.
+    /// one cheap empty candidate scan. Each id is re-parsed and every per-workspace query re-binds it.
     pub(crate) async fn workspaces_with_objects(&self) -> Result<Vec<WorkspaceId>> {
         let rows = sqlx::query!(
             r#"SELECT DISTINCT workspace_id AS "workspace_id!" FROM object_presence"#,
@@ -328,8 +326,7 @@ impl Db {
     /// location-dispatching render's offloaded set. Render anchors on the version's git tree structure
     /// (`(path, mode, git_oid)` per file); a tree entry whose `git_oid` is in this set is offloaded and is
     /// fetched from the large store by its `object_id`, while a git-resident leaf recovers its id by rehash
-    /// with NO database dependency. Big blobs are rare, so this set is small — no `git_oid` index is needed
-    /// (it uses the existing `(workspace_id, status)` index, then filters to `large-local`).
+    /// with NO database dependency. Big blobs are rare, so this set is small.
     pub(crate) async fn large_local_objects(
         &self,
         ws: &WorkspaceId,
@@ -358,9 +355,9 @@ impl Db {
     /// version-metadata read's join table. Each tree leaf's `git_oid` (the loose-object id for a
     /// git-resident blob, the tree-entry bridge key for an offloaded one — both stored in
     /// `object_presence.git_oid`) resolves to its content id WITHOUT reading any blob bytes (pure
-    /// metadata). Filtered to the requested leaves with an array bind (`git_oid = ANY($2)`) over the
-    /// `(workspace_id, git_oid)` index, so the read scales with the requested version's tree — never with
-    /// the workspace's lifetime present-object count. Bound on `workspace_id`.
+    /// metadata). Filtered to the requested leaves with an array bind (`git_oid = ANY($2)`) so the read
+    /// scales with the requested version's tree — never with the workspace's lifetime present-object
+    /// count. Bound on `workspace_id`.
     pub(crate) async fn objects_by_git_oids(
         &self,
         ws: &WorkspaceId,
@@ -390,7 +387,7 @@ impl Db {
 
     /// The object ids of every STALE `deleting` row in the workspace — ones a crashed GC left behind (older
     /// than the recovery threshold). This is the recovery sweep's ADVISORY candidate list (a pool read); the
-    /// authoritative one-winner claim + the git locator come from [`Self::claim_stale_for_recovery`], so two
+    /// authoritative one-winner acquire + the git locator come from [`Self::acquire_stale_for_recovery`], so two
     /// concurrent sweeps never both act on the same row.
     pub(crate) async fn stale_deleting(
         &self,
@@ -412,31 +409,31 @@ impl Db {
             .collect()
     }
 
-    /// Atomically claim a STALE `deleting` row for recovery — the one-winner guard that makes the recovery
+    /// Atomically acquire a STALE `deleting` row for recovery — the one-winner guard that makes the recovery
     /// sweep safe under concurrency. Bumps `status_updated_at` to now (so a second concurrent sweep no
     /// longer sees it as stale) while KEEPING it `deleting`, and returns its git locator only to the winner.
-    /// A `None` result means another sweeper already claimed it (or it is no longer a stale unrooted
+    /// A `None` result means another sweeper already acquired it (or it is no longer a stale unrooted
     /// `deleting` row) — the caller must NOT unlink. Keeping the row `deleting` across the unlink preserves
-    /// the unlink-before-`absent` ordering, so a concurrent migrate cannot reinstall the bytes mid-recovery.
+    /// the unlink-before-`absent` ordering, so a concurrent ingest cannot reinstall the bytes mid-recovery.
     ///
-    /// Re-verifies the **read-authorization surface AT DELETE TIME** — the `commit_object` trunk edge AND the
-    /// open-non-stale `proposal_object` root (the same two read arms, verbatim) — exactly as
-    /// [`Self::claim_for_delete`] does, so a stale `deleting` row that became read-authorized after the
-    /// crashed claim is spared rather than unlinked. This re-check is DEFENSIVE: the promote/handoff (the only
-    /// `commit_object` writer) holds the candidate's lease across the edge write, so a normally-migrated edge
-    /// never lands on a `deleting` object — but re-verifying at delete time keeps the recovery sweep's keep-set
-    /// == the read surface unconditionally, so a recovery unlink can never reclaim a now-readable object's
-    /// bytes (byte loss). A spared row is left `deleting` (its `status_updated_at` un-bumped); since `deleting`
-    /// is non-resurrectable the bytes stay on disk + readable, while a re-migrate of that exact content is the
-    /// only blocked op (a rare, no-data-loss residual the lease→edge handoff removes).
+    /// Re-verifies the **retention surface AT DELETE TIME** — the non-purged `version_object` root,
+    /// exactly as [`Self::acquire_for_delete`] does — so a stale `deleting` row that became version-rooted
+    /// after the crashed acquire is spared rather than unlinked. This re-check is DEFENSIVE: the commit
+    /// transaction (the only `version_object` writer) holds the candidate's lease across the edge write,
+    /// so a normally-ingested edge never lands on a `deleting` object — but re-verifying at delete time
+    /// keeps the recovery sweep's keep-set == the retention surface unconditionally. A spared row is left
+    /// `deleting` (its `status_updated_at` un-bumped); since `deleting` is non-resurrectable the bytes stay
+    /// on disk + readable, while a re-ingest of that exact content is the only blocked op (a rare,
+    /// no-data-loss residual).
     ///
-    /// Unlike `claim_for_delete`, this deliberately does **NOT** check the promotion lease. A live lease over
-    /// a `present` object means "in use, do not reclaim"; but over a *`deleting`* object it means a migrate's
-    /// `install_one` is **waiting** for recovery to flip it to `absent` so it can re-copy (the migrate leased
+    /// Unlike `acquire_for_delete`, this deliberately does **NOT** check the promotion lease. A live lease over
+    /// a `present` object means "in use, do not reclaim"; but over a *`deleting`* object it means an ingest's
+    /// `install_one` is **waiting** for recovery to flip it to `absent` so it can re-copy (the ingest leased
     /// its full set *before* the wait). Sparing it on the lease would strand that waiter until the lease TTL
-    /// lapses. A lease alone is not readable (the read path authorizes via `commit_object`, never a lease), so
-    /// finalizing a leased-but-unedged `deleting` row loses no readable bytes — the waiter simply re-installs.
-    pub(crate) async fn claim_stale_for_recovery(
+    /// lapses. A lease alone is not readable (the read path authorizes via `version_object`, never a lease),
+    /// so finalizing a leased-but-unedged `deleting` row loses no readable bytes — the waiter simply
+    /// re-installs.
+    pub(crate) async fn acquire_stale_for_recovery(
         &self,
         ws: &WorkspaceId,
         object_id: ObjectId,
@@ -444,7 +441,7 @@ impl Db {
         now: i64,
     ) -> Result<Option<(Location, [u8; GIT_OID_LEN])>> {
         run_serializable!(self, tx, {
-            claim_stale_for_recovery_txn(&mut tx, ws, object_id, older_than, now).await
+            acquire_stale_for_recovery_txn(&mut tx, ws, object_id, older_than, now).await
         })
     }
 
@@ -469,14 +466,16 @@ impl Db {
 
     // ── promotion leases (the GC roots) ───────────────────────────────────────────────────────────────
 
-    /// Insert a promotion lease over a commit's FULL object set, BEFORE any byte migrates — so a
+    /// Insert a promotion lease over a candidate's FULL object set, BEFORE any byte migrates — so a
     /// concurrent GC's keep-set already protects every needed object (even an old, already-present one a
-    /// dedup-skip would otherwise leave exposed). `expires_at` is the in-flight guard (a crashed migrate's
-    /// lease lapses and becomes GC-reclaimable); a successful migrate later makes it non-expiring.
+    /// dedup-skip would otherwise leave exposed: the dedup race). `expires_at` is the in-flight guard (a
+    /// crashed ingest's lease lapses and becomes GC-reclaimable); a successful ingest later makes it
+    /// non-expiring.
     ///
-    /// On op-id reuse (a retry, or a re-run with a different candidate) the child object set is REBUILT, not
-    /// merged: stale rows from a prior candidate are cleared first, so a later `commit_lease` can never pin
-    /// objects the current candidate does not name.
+    /// On op-id reuse (a retry) the child object set is REBUILT, not merged: stale rows from a prior
+    /// candidate are cleared first, so a later `commit_lease` can never pin objects the current candidate
+    /// does not name. (Op ids are vault-minted fresh per ingest, so reuse only ever happens inside one
+    /// op's own retry loop.)
     pub(crate) async fn insert_lease(
         &self,
         ws: &WorkspaceId,
@@ -490,12 +489,12 @@ impl Db {
         })
     }
 
-    /// Make a lease non-expiring on migrate SUCCESS, so the migrated version stays rooted until the later
-    /// pointer-move consumes it (a finite TTL would let GC reclaim a good, just-migrated version). A guarded
+    /// Make a lease non-expiring on ingest SUCCESS, so the migrated candidate stays rooted until its
+    /// version row lands (a finite TTL would let GC reclaim a good, just-migrated candidate). A guarded
     /// CAS on the expected `commit_id` AND lease liveness (still non-expired, or already committed): a
-    /// **stale** `migrate_finish` whose lease expired or was replaced under a reused op id updates no row
-    /// and gets [`AuthorityError::Internal`], so it can never falsely claim a success whose objects GC may
-    /// already have reclaimed — nor mark a *different* reused lease non-expiring.
+    /// **stale** `migrate_finish` whose lease expired updates no row and gets
+    /// [`AuthorityError::Internal`], so it can never falsely acquire a success whose objects GC may
+    /// already have reclaimed.
     pub(crate) async fn commit_lease(
         &self,
         ws: &WorkspaceId,
@@ -510,114 +509,94 @@ impl Db {
         )
     }
 
-    /// Release a lease (and, by cascade, its object rows). Used by tests + the abandoned-migrate path; the
-    /// later pointer-move releases it after handing the root to `current`.
+    /// Release a lease (and, by cascade, its object rows). The commit transaction's caller releases it
+    /// AFTER the version rows land (success) or after a refusal rolled the transaction back.
     pub(crate) async fn release_lease(&self, ws: &WorkspaceId, op_id: &OpId) -> Result<()> {
         run_serializable!(self, tx, release_lease_txn(&mut tx, ws, op_id).await)
     }
 
-    // ── upload quarantine ─────────────────────────────────────────────────────────────────────────────
+    // ── upload staging bookkeeping ────────────────────────────────────────────────────────────────────
 
-    /// Record an in-flight upload's quarantine objdir (the GC scanner never touches it). `objdir` is
-    /// reference metadata only — the janitor rebuilds the deletion path from the validated ids.
-    pub(crate) async fn insert_quarantine(
+    /// Record an in-flight ingest's staging row BEFORE any byte is staged (a crash mid-stage leaves a
+    /// janitor-able row). `state = 'staging'`; the digest is a placeholder until the stage completes.
+    pub(crate) async fn insert_upload(
         &self,
         ws: &WorkspaceId,
+        bundle: &crate::id::BundleId,
         op_id: &OpId,
-        objdir: &str,
-        expires_at: i64,
+        now: i64,
     ) -> Result<()> {
         run_serializable!(self, tx, {
-            insert_quarantine_txn(&mut tx, ws, op_id, objdir, expires_at).await
+            insert_upload_txn(&mut tx, ws, bundle, op_id, now).await
         })
     }
 
-    /// Drop a quarantine row (after a successful migrate, or after the janitor swept its dir).
-    pub(crate) async fn delete_quarantine(&self, ws: &WorkspaceId, op_id: &OpId) -> Result<()> {
-        run_serializable!(self, tx, delete_quarantine_txn(&mut tx, ws, op_id).await)
-    }
-
-    /// The op ids of every expired/abandoned quarantine in a workspace — the janitor re-parses each into an
-    /// [`OpId`] before building any `rm -rf` path.
-    pub(crate) async fn expired_quarantine_ops(
+    /// Mark a staged upload `quarantined` and record its recomputed consent digest — the stage
+    /// completed; the candidate sits in its quarantine awaiting install + commit.
+    pub(crate) async fn mark_upload_quarantined(
         &self,
-        ws: &WorkspaceId,
-        now: i64,
-    ) -> Result<Vec<OpId>> {
-        let ws_s = ws.as_str();
-        let rows = sqlx::query!(
-            r#"SELECT op_id AS "op_id!" FROM upload_quarantine WHERE workspace_id = $1 AND expires_at <= $2"#,
-            ws_s,
-            now,
-        )
-        .fetch_all(self.pool())
-        .await
-        .map_err(AuthorityError::internal)?;
-        rows.into_iter().map(|r| reparse_op(&r.op_id)).collect()
-    }
-
-    /// Atomically claim an EXPIRED quarantine slot for the janitor's sweep: delete the row **iff it is still
-    /// expired** (`expires_at <= now`), returning whether this call won the claim. A concurrent re-ingest that
-    /// reused the op id and refreshed `expires_at` into the future before this CAS is NOT claimed, so the
-    /// janitor never sweeps a *visibly* refreshed quarantine (the [`Self::expired_quarantine_ops`] candidate
-    /// list is point-in-time and advisory; this CAS is the guard, mirroring the GC claim). A later rm failure
-    /// leaves only an orphan dir — the same low-severity, disk-only residual a lost-WAL row leaves (see
-    /// `lifecycle::ingest`), never a wrongly-swept *refreshed* quarantine.
-    ///
-    /// Residual (narrow, liveness-only): the claim frees the `(workspace_id, op_id)` PK before the janitor's
-    /// `rm -rf`, so a retry reusing that op id can re-insert and begin staging into the same id-derived path
-    /// inside the claim→rm window; the rm then removes the re-staged dir and its migrate fails (and retries).
-    /// This needs op-id REUSE (the norm is a fresh op id per attempt) AND a multi-threaded caller, and loses
-    /// no committed bytes. The full close (a per-ingest generation so reuse can never alias a being-swept dir)
-    /// lands with the wired pointer-move / large-object janitor — the same wired-future bucket as the live-GC
-    /// claim→unlink window (see the `gc` module docs).
-    pub(crate) async fn claim_expired_quarantine(
-        &self,
-        ws: &WorkspaceId,
         op_id: &OpId,
-        now: i64,
-    ) -> Result<bool> {
-        run_serializable!(
-            self,
-            tx,
-            claim_expired_quarantine_txn(&mut tx, ws, op_id, now).await
-        )
+        digest_hex: &str,
+    ) -> Result<()> {
+        run_serializable!(self, tx, {
+            mark_upload_txn(&mut tx, op_id, "quarantined", Some(digest_hex)).await
+        })
     }
 
-    /// Distinct workspaces holding an expired quarantine — the only cross-workspace read the janitor runs.
-    pub(crate) async fn workspaces_with_expired_quarantine(
+    /// Mark an upload `committed` — its version row landed (the audit-trail terminal for a successful
+    /// ingest).
+    pub(crate) async fn mark_upload_committed(&self, op_id: &OpId) -> Result<()> {
+        run_serializable!(self, tx, {
+            mark_upload_txn(&mut tx, op_id, "committed", None).await
+        })
+    }
+
+    /// Mark an upload `aborted` — the ingest was refused or its pointer move lost (the audit-trail
+    /// terminal for a failed ingest).
+    pub(crate) async fn mark_upload_aborted(&self, op_id: &OpId) -> Result<()> {
+        run_serializable!(self, tx, {
+            mark_upload_txn(&mut tx, op_id, "aborted", None).await
+        })
+    }
+
+    /// Every expired in-flight upload (state `staging`/`quarantined`, created before `older_than`) as
+    /// `(workspace, op)` — the janitor's ADVISORY candidate list; [`Self::acquire_expired_upload`] is the
+    /// authoritative one-winner acquire.
+    pub(crate) async fn expired_uploads(
         &self,
-        now: i64,
-    ) -> Result<Vec<WorkspaceId>> {
+        older_than: i64,
+    ) -> Result<Vec<(WorkspaceId, OpId)>> {
         let rows = sqlx::query!(
-            r#"SELECT DISTINCT workspace_id AS "workspace_id!" FROM upload_quarantine WHERE expires_at <= $1"#,
-            now,
+            r#"SELECT id AS "id!", workspace_id AS "workspace_id!" FROM upload
+               WHERE state IN ('staging', 'quarantined')
+                 AND created_at <= to_timestamp($1::double precision / 1000.0)"#,
+            older_than as f64,
         )
         .fetch_all(self.pool())
         .await
         .map_err(AuthorityError::internal)?;
         rows.into_iter()
-            .map(|r| reparse_workspace(&r.workspace_id))
+            .map(|r| Ok((reparse_workspace(&r.workspace_id)?, reparse_op(&r.id)?)))
             .collect()
     }
 
-    // ── tombstones (denylist + the unavailable terminal) ──────────────────────────────────────────────
-
-    /// Add a blob to the denylist and, if a row exists, drive it to the `unavailable` terminal state —
-    /// never interrupting an in-flight unlink (a `deleting` row is left for the GC to finish).
-    pub(crate) async fn insert_tombstone(
+    /// Atomically acquire an EXPIRED upload for the janitor's sweep: flip it `aborted` **iff it is still
+    /// an expired in-flight row**, returning whether this call won the acquire. Op ids are vault-minted
+    /// fresh per ingest, so a acquired row can never belong to a live ingest that "reused" the id; the
+    /// still-expired guard is belt-and-suspenders against a slow ingest crossing the TTL.
+    pub(crate) async fn acquire_expired_upload(
         &self,
-        ws: &WorkspaceId,
-        blob_id: ObjectId,
-        reason: &str,
-        now: i64,
-    ) -> Result<()> {
+        op_id: &OpId,
+        older_than: i64,
+    ) -> Result<bool> {
         run_serializable!(
             self,
             tx,
-            insert_tombstone_txn(&mut tx, ws, blob_id, reason, now).await
+            acquire_expired_upload_txn(&mut tx, op_id, older_than).await
         )
     }
+
+    // ── tombstones (denylist + the unavailable terminal) ──────────────────────────────────────────────
 
     /// Whether a blob is denylisted (the ingest early check).
     pub(crate) async fn is_tombstoned(&self, ws: &WorkspaceId, blob_id: ObjectId) -> Result<bool> {
@@ -635,8 +614,7 @@ impl Db {
     }
 
     /// Read an object's status while holding the write transaction (used inside [`Self::install_object`] to
-    /// classify a suppressed upsert with no time-of-check/time-of-use gap). Uses `query!` like every other
-    /// statement here, so it stays in the committed `.sqlx` compile-time drift gate.
+    /// classify a suppressed upsert with no time-of-check/time-of-use gap).
     async fn locked_status(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -680,8 +658,7 @@ async fn install_object_txn(
     let loc = location.as_str();
 
     // A denylisted blob is never (re-)introduced — the bytes the caller wrote stay an unreferenced
-    // orphan (harmless). This is the best-effort early guard; the serializing check lands with the
-    // pointer-move write.
+    // orphan (harmless). The ingest's pre-check is best-effort; THIS is the serializing check.
     let tomb = sqlx::query!(
         "SELECT blob_id FROM tombstones WHERE workspace_id = $1 AND blob_id = $2",
         ws_s,
@@ -740,14 +717,14 @@ async fn install_object_txn(
     Ok(outcome)
 }
 
-/// The body of [`Db::claim_for_delete`], extracted so the `run_serializable!` macro can re-run it on a
+/// The body of [`Db::acquire_for_delete`], extracted so the `run_serializable!` macro can re-run it on a
 /// serialization retry (it borrows its inputs and touches only the transaction).
-async fn claim_for_delete_txn(
+async fn acquire_for_delete_txn(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
     object_id: ObjectId,
     now: i64,
-) -> Result<ClaimOutcome> {
+) -> Result<AcquireOutcome> {
     let ws_s = ws.as_str();
     let oid = object_id.0.as_slice();
     let row = sqlx::query!(
@@ -755,19 +732,17 @@ async fn claim_for_delete_txn(
             UPDATE object_presence SET status = 'deleting', status_updated_at = $3
             WHERE workspace_id = $1 AND object_id = $2 AND status = 'present'
               AND NOT EXISTS (
-                  SELECT 1 FROM commit_object WHERE workspace_id = $1 AND object_id = $2)
+                  SELECT 1 FROM version_object vo
+                  JOIN version v
+                    ON v.workspace_id = vo.workspace_id AND v.bundle_id = vo.bundle_id
+                   AND v.version_id = vo.version_id
+                  WHERE vo.workspace_id = $1 AND vo.object_id = $2 AND v.purged_at IS NULL)
               AND NOT EXISTS (
                   SELECT 1 FROM promotion_lease_object plo
                   JOIN promotion_lease pl
                     ON pl.workspace_id = plo.workspace_id AND pl.op_id = plo.op_id
                   WHERE plo.workspace_id = $1 AND plo.object_id = $2
                     AND (pl.expires_at IS NULL OR pl.expires_at > $3))
-              AND NOT EXISTS (
-                  SELECT 1 FROM proposal_object po
-                  JOIN proposals p ON p.workspace_id = po.workspace_id AND p.id = po.proposal_id
-                  JOIN current   c ON c.workspace_id = p.workspace_id  AND c.skill_id = p.skill_id
-                  WHERE po.workspace_id = $1 AND po.object_id = $2
-                    AND p.status = 'open' AND c.epoch = p.base_epoch AND c.seq = p.base_seq)
             RETURNING git_oid AS "git_oid: Vec<u8>", location AS "location!"
             "#,
         ws_s,
@@ -778,10 +753,10 @@ async fn claim_for_delete_txn(
     .await
     .map_err(AuthorityError::internal)?;
     let outcome = match row {
-        None => ClaimOutcome::Spared,
+        None => AcquireOutcome::Spared,
         // `location` selects the store the unlink targets; `git_oid` is the git locator (used for a
         // `git` object). The keep-set re-check above is storage-independent, so the fence is unchanged.
-        Some(r) => ClaimOutcome::Claimed {
+        Some(r) => AcquireOutcome::Acquired {
             location: parse_location(&r.location)?,
             git_oid: git_oid_from_row(r.git_oid)?,
         },
@@ -790,23 +765,29 @@ async fn claim_for_delete_txn(
 }
 
 /// The body of [`Db::finalize_delete`], extracted so the `run_serializable!` macro can re-run it on a
-/// serialization retry (it borrows its inputs and touches only the transaction).
+/// serialization retry. A tombstoned blob lands on the terminal `unavailable` (denylisted + gone);
+/// everything else lands on `absent`.
 async fn finalize_delete_txn(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
     object_id: ObjectId,
-    claim_token: i64,
+    acquire_token: i64,
     now: i64,
 ) -> Result<()> {
     let ws_s = ws.as_str();
     let oid = object_id.0.as_slice();
     sqlx::query!(
-        "UPDATE object_presence SET status = 'absent', status_updated_at = $4 \
+        "UPDATE object_presence SET \
+             status = CASE WHEN EXISTS ( \
+                 SELECT 1 FROM tombstones t \
+                 WHERE t.workspace_id = $1 AND t.blob_id = $2) \
+               THEN 'unavailable' ELSE 'absent' END, \
+             status_updated_at = $4 \
          WHERE workspace_id = $1 AND object_id = $2 AND status = 'deleting' \
            AND status_updated_at = $3",
         ws_s,
         oid,
-        claim_token,
+        acquire_token,
         now,
     )
     .execute(&mut **tx)
@@ -815,9 +796,9 @@ async fn finalize_delete_txn(
     Ok(())
 }
 
-/// The body of [`Db::claim_stale_for_recovery`], extracted so the `run_serializable!` macro can re-run it on a
-/// serialization retry (it borrows its inputs and touches only the transaction).
-async fn claim_stale_for_recovery_txn(
+/// The body of [`Db::acquire_stale_for_recovery`], extracted so the `run_serializable!` macro can re-run it
+/// on a serialization retry (it borrows its inputs and touches only the transaction).
+async fn acquire_stale_for_recovery_txn(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
     object_id: ObjectId,
@@ -830,13 +811,11 @@ async fn claim_stale_for_recovery_txn(
         r#"UPDATE object_presence SET status_updated_at = $4
                WHERE workspace_id = $1 AND object_id = $2 AND status = 'deleting' AND status_updated_at < $3
                  AND NOT EXISTS (
-                     SELECT 1 FROM commit_object WHERE workspace_id = $1 AND object_id = $2)
-                 AND NOT EXISTS (
-                     SELECT 1 FROM proposal_object po
-                     JOIN proposals p ON p.workspace_id = po.workspace_id AND p.id = po.proposal_id
-                     JOIN current   c ON c.workspace_id = p.workspace_id  AND c.skill_id = p.skill_id
-                     WHERE po.workspace_id = $1 AND po.object_id = $2
-                       AND p.status = 'open' AND c.epoch = p.base_epoch AND c.seq = p.base_seq)
+                     SELECT 1 FROM version_object vo
+                     JOIN version v
+                       ON v.workspace_id = vo.workspace_id AND v.bundle_id = vo.bundle_id
+                      AND v.version_id = vo.version_id
+                     WHERE vo.workspace_id = $1 AND vo.object_id = $2 AND v.purged_at IS NULL)
                RETURNING git_oid AS "git_oid: Vec<u8>", location AS "location!""#,
         ws_s,
         oid,
@@ -846,11 +825,11 @@ async fn claim_stale_for_recovery_txn(
     .fetch_optional(&mut **tx)
     .await
     .map_err(AuthorityError::internal)?;
-    let claimed = match row {
+    let acquired = match row {
         None => None,
         Some(r) => Some((parse_location(&r.location)?, git_oid_from_row(r.git_oid)?)),
     };
-    Ok(claimed)
+    Ok(acquired)
 }
 
 /// The body of [`Db::insert_lease`], extracted so the `run_serializable!` macro can re-run it on a
@@ -866,8 +845,8 @@ async fn insert_lease_txn(
     let ws_s = ws.as_str();
     let op_s = op_id.as_str();
     let cid = commit_id.0.as_slice();
-    // A COMMITTED (non-expiring) lease is the durable root of an already-succeeded migrate; never
-    // rewrite it or clear its child set (that would unroot the version and let GC reclaim its blobs).
+    // A COMMITTED (non-expiring) lease is the durable root of an already-succeeded ingest; never
+    // rewrite it or clear its child set (that would unroot the candidate and let GC reclaim its blobs).
     // op-id reuse against a committed lease is therefore an idempotent no-op.
     let committed = sqlx::query!(
         r#"SELECT op_id AS "op_id!" FROM promotion_lease
@@ -892,7 +871,7 @@ async fn insert_lease_txn(
     .execute(&mut **tx)
     .await
     .map_err(AuthorityError::internal)?;
-    // Clear any prior in-flight child set for this op (op-id reuse) before re-inserting, so the lease
+    // Clear any prior in-flight child set for this op (an op-retry) before re-inserting, so the lease
     // names exactly this candidate's objects.
     sqlx::query!(
         "DELETE FROM promotion_lease_object WHERE workspace_id = $1 AND op_id = $2",
@@ -903,7 +882,7 @@ async fn insert_lease_txn(
     .await
     .map_err(AuthorityError::internal)?;
     // The full child set in ONE set-valued statement (an UNNEST array bind) — a per-object statement per
-    // blob would stretch the SERIALIZABLE conflict window linearly with bundle size on every publish/propose.
+    // blob would stretch the SERIALIZABLE conflict window linearly with bundle size on every commit.
     let oids: Vec<Vec<u8>> = object_ids.iter().map(|o| o.0.to_vec()).collect();
     sqlx::query!(
         "INSERT INTO promotion_lease_object (workspace_id, op_id, object_id) \
@@ -917,18 +896,17 @@ async fn insert_lease_txn(
     .await
     .map_err(AuthorityError::internal)?;
     // GC-lease MVCC fence (Postgres-specific): also WRITE the `object_presence` row of each currently
-    // `present` leased object, so a concurrent GC `claim_for_delete` — which UPDATEs the same row
+    // `present` leased object, so a concurrent GC `acquire_for_delete` — which UPDATEs the same row
     // `present → deleting` — has a genuine write-write conflict with this lease transaction. Under
-    // SQLite the global writer lock made a committed lease visible to any later claim; under Postgres
     // SSI a lease that wrote only `promotion_lease*` would be a lone rw-antidependency SSI does NOT
     // abort, so a GC whose snapshot predates the lease commit could reclaim a freshly-leased
-    // dedup-`present` object (the migrate present-path reuses it WITHOUT re-touching the row). The
+    // dedup-`present` object (the ingest present-path reuses it WITHOUT re-touching the row). The
     // self-assignment still writes a new row version (Postgres never elides a no-op UPDATE) and takes
-    // the row locks, so the loser aborts 40001 → the runner retries → the claim's keep-set re-check now
+    // the row locks, so the loser aborts 40001 → the runner retries → the acquire's keep-set re-check now
     // sees the live lease and spares the object. It changes no meaning: `status` stays `present`, and
     // `status_updated_at` only gates recovery-staleness of `deleting` rows. A to-be-installed (`absent`)
     // object matches nothing here and is instead protected by `install_object`'s own `absent → present`
-    // write. One set-valued UPDATE (`ANY` array bind), same rows touched as the old per-object loop.
+    // write. One set-valued UPDATE (`ANY` array bind).
     sqlx::query!(
         "UPDATE object_presence SET status_updated_at = status_updated_at \
          WHERE workspace_id = $1 AND status = 'present' AND object_id = ANY($2)",
@@ -992,108 +970,85 @@ async fn release_lease_txn(
     Ok(())
 }
 
-/// The body of [`Db::insert_quarantine`], extracted so the `run_serializable!` macro can re-run it on a
-/// serialization retry (it borrows its inputs and touches only the transaction).
-async fn insert_quarantine_txn(
+/// The body of [`Db::insert_upload`], extracted so the `run_serializable!` macro can re-run it on a
+/// serialization retry. The placeholder digest satisfies the shape CHECK until the stage records the
+/// real one.
+async fn insert_upload_txn(
     tx: &mut Transaction<'_, Postgres>,
     ws: &WorkspaceId,
-    op_id: &OpId,
-    objdir: &str,
-    expires_at: i64,
-) -> Result<()> {
-    let ws_s = ws.as_str();
-    let op_s = op_id.as_str();
-    sqlx::query!(
-        "INSERT INTO upload_quarantine (workspace_id, op_id, objdir, expires_at) VALUES ($1, $2, $3, $4) \
-         ON CONFLICT (workspace_id, op_id) DO UPDATE SET objdir = excluded.objdir, expires_at = excluded.expires_at",
-        ws_s,
-        op_s,
-        objdir,
-        expires_at,
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(AuthorityError::internal)?;
-    Ok(())
-}
-
-/// The body of [`Db::delete_quarantine`], extracted so the `run_serializable!` macro can re-run it on a
-/// serialization retry (it borrows its inputs and touches only the transaction).
-async fn delete_quarantine_txn(
-    tx: &mut Transaction<'_, Postgres>,
-    ws: &WorkspaceId,
-    op_id: &OpId,
-) -> Result<()> {
-    let ws_s = ws.as_str();
-    let op_s = op_id.as_str();
-    sqlx::query!(
-        "DELETE FROM upload_quarantine WHERE workspace_id = $1 AND op_id = $2",
-        ws_s,
-        op_s,
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(AuthorityError::internal)?;
-    Ok(())
-}
-
-/// The body of [`Db::claim_expired_quarantine`], extracted so the `run_serializable!` macro can re-run it on a
-/// serialization retry (it borrows its inputs and touches only the transaction).
-async fn claim_expired_quarantine_txn(
-    tx: &mut Transaction<'_, Postgres>,
-    ws: &WorkspaceId,
+    bundle: &crate::id::BundleId,
     op_id: &OpId,
     now: i64,
-) -> Result<bool> {
+) -> Result<()> {
     let ws_s = ws.as_str();
+    let b_s = bundle.as_str();
+    let op_s = op_id.as_str();
+    sqlx::query!(
+        "INSERT INTO upload (id, workspace_id, bundle_id, digest, state, created_at) \
+         VALUES ($1, $2, $3, '-', 'staging', to_timestamp($4::double precision / 1000.0)) \
+         ON CONFLICT (id) DO UPDATE SET state = 'staging', created_at = excluded.created_at",
+        op_s,
+        ws_s,
+        b_s,
+        now as f64,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(AuthorityError::internal)?;
+    Ok(())
+}
+
+/// The body of the upload state flips ([`Db::mark_upload_quarantined`] / `_committed` / `_aborted`),
+/// extracted for the macro. `state` is a plane-controlled literal, never caller input.
+async fn mark_upload_txn(
+    tx: &mut Transaction<'_, Postgres>,
+    op_id: &OpId,
+    state: &str,
+    digest_hex: Option<&str>,
+) -> Result<()> {
+    let op_s = op_id.as_str();
+    match digest_hex {
+        Some(digest) => {
+            sqlx::query!(
+                "UPDATE upload SET state = $2, digest = $3 WHERE id = $1",
+                op_s,
+                state,
+                digest,
+            )
+            .execute(&mut **tx)
+            .await
+            .map_err(AuthorityError::internal)?;
+        }
+        None => {
+            sqlx::query!("UPDATE upload SET state = $2 WHERE id = $1", op_s, state,)
+                .execute(&mut **tx)
+                .await
+                .map_err(AuthorityError::internal)?;
+        }
+    }
+    Ok(())
+}
+
+/// The body of [`Db::acquire_expired_upload`], extracted for the macro: flip a STILL-expired in-flight
+/// row to `aborted`, returning whether this call won.
+async fn acquire_expired_upload_txn(
+    tx: &mut Transaction<'_, Postgres>,
+    op_id: &OpId,
+    older_than: i64,
+) -> Result<bool> {
     let op_s = op_id.as_str();
     let row = sqlx::query!(
-        r#"DELETE FROM upload_quarantine
-               WHERE workspace_id = $1 AND op_id = $2 AND expires_at <= $3
-               RETURNING op_id AS "op_id!""#,
-        ws_s,
+        r#"UPDATE upload SET state = 'aborted'
+               WHERE id = $1 AND state IN ('staging', 'quarantined')
+                 AND created_at <= to_timestamp($2::double precision / 1000.0)
+               RETURNING id AS "id!""#,
         op_s,
-        now,
+        older_than as f64,
     )
     .fetch_optional(&mut **tx)
     .await
     .map_err(AuthorityError::internal)?;
     Ok(row.is_some())
-}
-
-/// The body of [`Db::insert_tombstone`], extracted so the `run_serializable!` macro can re-run it on a
-/// serialization retry (it borrows its inputs and touches only the transaction).
-async fn insert_tombstone_txn(
-    tx: &mut Transaction<'_, Postgres>,
-    ws: &WorkspaceId,
-    blob_id: ObjectId,
-    reason: &str,
-    now: i64,
-) -> Result<()> {
-    let ws_s = ws.as_str();
-    let bid = blob_id.0.as_slice();
-    sqlx::query!(
-        "INSERT INTO tombstones (workspace_id, blob_id, reason, at) VALUES ($1, $2, $3, $4) \
-         ON CONFLICT (workspace_id, blob_id) DO NOTHING",
-        ws_s,
-        bid,
-        reason,
-        now,
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(AuthorityError::internal)?;
-    sqlx::query!(
-        "UPDATE object_presence SET status = 'unavailable', status_updated_at = $3 \
-         WHERE workspace_id = $1 AND object_id = $2 AND status IN ('present', 'absent')",
-        ws_s,
-        bid,
-        now,
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(AuthorityError::internal)?;
-    Ok(())
 }
 
 /// Parse a stored status string. A bad value is store corruption (the schema CHECK forbids it).
@@ -1108,8 +1063,8 @@ fn parse_status(s: &str) -> Result<ObjectStatus> {
 }
 
 /// Parse a stored location string. `large-remote` is schema-reserved for the deferred S3-compatible backend
-/// and v0 writes none, so meeting it — or any unknown value — is store corruption (the read/unlink dispatch
-/// has no arm for it). The CHECK constraint already forbids anything outside the known set.
+/// and nothing writes it, so meeting it — or any unknown value — is store corruption (the read/unlink
+/// dispatch has no arm for it). The CHECK constraint already forbids anything outside the known set.
 fn parse_location(s: &str) -> Result<Location> {
     match s {
         "git" => Ok(Location::Git),
@@ -1118,15 +1073,15 @@ fn parse_location(s: &str) -> Result<Location> {
     }
 }
 
-/// Convert a stored 32-byte object-id BLOB into an [`ObjectId`], or an integrity fault on a bad width.
-fn object_id_from_row(bytes: Vec<u8>) -> Result<ObjectId> {
+/// Convert a stored 32-byte object-id BYTEA into an [`ObjectId`], or an integrity fault on a bad width.
+pub(in crate::db) fn object_id_from_row(bytes: Vec<u8>) -> Result<ObjectId> {
     let arr: [u8; 32] = bytes
         .try_into()
         .map_err(|_| AuthorityError::integrity(BadBlobWidth))?;
     Ok(ObjectId(arr))
 }
 
-/// Convert a stored git-oid BLOB into a 20-byte array. A NULL or wrong-width value on a row the fence is
+/// Convert a stored git-oid BYTEA into a 20-byte array. A NULL or wrong-width value on a row the fence is
 /// acting on is store corruption: every fenced object (git **and** large-local) records its 20-byte git oid
 /// — the loose-object locator for a `git` object, and the tree-entry bridge key for a `large-local` one.
 fn git_oid_from_row(bytes: Option<Vec<u8>>) -> Result<[u8; GIT_OID_LEN]> {
@@ -1137,8 +1092,8 @@ fn git_oid_from_row(bytes: Option<Vec<u8>>) -> Result<[u8; GIT_OID_LEN]> {
 }
 
 /// Re-parse a stored workspace id (a global sweep re-validates before binding it). A bad stored id is
-/// corruption, mapped to an integrity fault (mirroring `commit_owners`' handling of a stored skill id).
-fn reparse_workspace(s: &str) -> Result<WorkspaceId> {
+/// corruption, mapped to an integrity fault.
+pub(in crate::db) fn reparse_workspace(s: &str) -> Result<WorkspaceId> {
     WorkspaceId::parse(s).map_err(AuthorityError::integrity)
 }
 
@@ -1173,6 +1128,6 @@ struct SuppressedButAbsent;
 
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "the promotion lease is no longer live (expired or replaced) — the migrate must not claim success"
+    "the promotion lease is no longer live (expired or replaced) — the ingest must not acquire success"
 )]
 struct LeaseNotLive;

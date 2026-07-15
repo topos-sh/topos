@@ -16,8 +16,8 @@ use topos_types::requests::{
 };
 use topos_types::results::PublishGate;
 use topos_types::{
-    CurrencyKind, CurrentRecord, Generation, HarnessId, PointerScope, Receipt, TerminalOutcome,
-    TriggerReport, TriggerState, WIRE_SCHEMA_VERSION, WireCurrentRecord,
+    CurrencyKind, CurrentRecord, HarnessId, PointerScope, Receipt, TerminalOutcome, TriggerReport,
+    TriggerState, WIRE_SCHEMA_VERSION, WireCurrentRecord,
 };
 
 use crate::ctx::Ctx;
@@ -139,14 +139,11 @@ impl Rig {
             &enroll::Instance {
                 schema_version: 1,
                 base_url: API.to_owned(),
-                deployment_mode: topos_types::bootstrap::DeploymentMode::Cloud,
-                enrollment_method: "device_code".to_owned(),
             },
         )
         .unwrap();
         let mut user = enroll::UserDoc {
             schema_version: 1,
-            email: Some(principal.to_owned()),
             principal: Some(principal.to_owned()),
             workspaces: Vec::new(),
         };
@@ -154,16 +151,13 @@ impl Rig {
             &mut user,
             enroll::Membership {
                 workspace_id: WS.to_owned(),
-                display_name: Some("Acme Inc".to_owned()),
-                roles: Vec::new(),
-                verified_domain: None,
-                verified_domain_status: topos_types::bootstrap::VerifiedDomainStatus::Unverified,
-                invite_rooted: false,
+                name: "acme".to_owned(),
+                display_name: "Acme Inc".to_owned(),
                 enrolled_at: 1,
             },
         );
         enroll::write_user(&self.fs, &self.layout(), &user).unwrap();
-        enroll::write_credential(&self.fs, &self.layout(), WS, "wsc_secret").unwrap();
+        enroll::write_credentials(&self.fs, &self.layout(), "wsc_secret", "dev_1").unwrap();
     }
 }
 
@@ -235,7 +229,7 @@ fn skill(id: &str, name: &str) -> WireSkillIndexEntry {
         status: "active".to_owned(),
         version_id: "a".repeat(64),
         bundle_digest: "b".repeat(64),
-        generation: Generation { epoch: 1, seq: 1 },
+        generation: 1,
         display_name: None,
         updated_at: 0,
         open_proposals: 0,
@@ -973,7 +967,7 @@ impl PlaneSource for BindGatedPlane {
             },
             record: CurrentRecord {
                 version_id: "7".repeat(64),
-                generation: Generation { epoch: 1, seq: 1 },
+                generation: 1,
             },
         }))
     }
@@ -1103,7 +1097,7 @@ fn delivery_with(skill_id: &str, review_required: bool) -> DeliverySnapshot {
             name: "pd-skill".to_owned(),
             review_required,
             version_id: [0u8; 32],
-            generation: Generation { epoch: 1, seq: 1 },
+            generation: 1,
             bundle_digest: [0u8; 32],
             via_channels: vec!["everyone".to_owned()],
             via_direct: true,

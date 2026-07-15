@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE current_pointer SET version_id = $3, generation = $4, moved_by_display = $5, moved_at = to_timestamp($6::double precision / 1000.0) WHERE workspace_id = $1 AND bundle_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Text",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b67941ef2799584af60607c3e831d574a89aa0c9c7020d7820d63a44d13875cb"
+}

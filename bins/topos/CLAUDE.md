@@ -48,11 +48,11 @@ renderer over the SAME typed outcomes (one value, two presentations).
   one adoption path: mint id+name, scan + import, stage + publish with one rename — all-or-nothing;
   **recognize a Claude Code skill dir, tag it + arm the currency hook**; refuse re-adopting an
   already-tracked dir with `ALREADY_TRACKED`), `follow` (the device-flow enrollment + first-receive — see
-  below), `invite` (an owner mints an `/i/` link by POSTing the governance Invite op under the workspace credential — see below),
+  below), `invite` (the roster write — see below),
   `list [--footprint] [--tracked] [--remote]` (the tracked bucket + **untracked discovery** — skills sitting
   in any known harness's skill dir, across a baked registry ported from `vercel-labs/skills`, deduped against
   tracked placements by canonical path; `--tracked` suppresses discovery; `--remote` is the **catalog read** —
-  a `GET /v1/workspaces/{ws}/skills` (under the workspace Bearer credential) per followed workspace, merged
+  a `GET /v1/workspaces/{ws}/skills` (under the device Bearer credential) per followed workspace, merged
   with local follow-state
   (Available / Following / FollowingBehind), a per-workspace transport fault degrading to a warning;
   `followed`/`published_by_you` still render empty; footprint = the `~/.topos/` walk plus any harness config
@@ -73,21 +73,24 @@ renderer over the SAME typed outcomes (one value, two presentations).
   Unit-tested against a fixture universe (cross-workspace collisions, kind collisions, kind
   mismatches, the all-or-none batch).
 - **The `follow` verb** (`ops/follow`, `enroll`, `plane_http::UreqDeviceClient`) — enrollment + the
-  TWO-PHASE subscribe. Three doors, dispatched by shape (a pending WAL always wins — "re-invoking IS
-  the resume"; a KNOWN followed skill name wins over the address grammar):
-  - **the `/i/` admin-CLAIM door** (claims-only now): pin → pre-send `ClaimPending` WAL → POST
-    `/v1/admin-claim` → promote, with the same re-root + one-plane guard as ever (an `/i/` link still
-    declaring the retired invite methods answers "join by the workspace ADDRESS instead");
+  TWO-PHASE subscribe. Dispatched by shape (a pending WAL always wins — "re-invoking IS the resume";
+  a KNOWN followed skill name wins over the address grammar; a retired `/i/` invite link refuses
+  typed toward the workspace ADDRESS):
   - **the ADDRESS flow** (`follow <workspace>`, `<server>/<ws>`, `acme/channels/eng`, bare
     channel/skill names): an unresolved workspace-shaped single target fetches the constant
     **protocol card** at the address (`Accept: application/json` → `WireProtocolCard`; no existence
     signal), re-roots onto its declared `api_base_url` (same URL gate, https-never-downgrades),
     guards one-plane-per-install (the wrong-server refusal NAMES the `TOPOS_HOME` second-install
-    hatch), starts `device/authorize {workspace: <address-name>, intent: enroll}`, and persists an
-    `AuthorizingAddress` WAL carrying the FOLLOW INTENT; the granted poll's workspace context is the
-    authoritative id the redeem rides (an unknown/not-yours name dies at the redeem's uniform
-    denial); the `Redeemed` fence + promote are the shared machinery, and the promoted flow
-    CONTINUES into the intent's describe/apply in the same invocation;
+    hatch), starts the gh-style device flow (`POST /v1/device/authorize {requested_name:
+    "topos CLI (<hostname>)", workspace: <address-name>}`), and persists a ONE-phase `0600` WAL
+    carrying the FOLLOW INTENT + the secret device code. A re-invoked `follow` polls
+    `POST /v1/device/token` once: pending re-emits the server-built approval URL verbatim; denied /
+    expired sweep the WAL typed; GRANTED carries the device's ONE bearer credential (the promoted
+    device code), the registered device id, and the AUTHORITATIVE workspace context — the persist
+    writes `instance.json` → `credentials.json` (whole) → the `user.json` membership → deletes the
+    WAL → arms the currency trigger, and the flow CONTINUES into the intent's describe/apply in the
+    same invocation. There is no post-grant fence phase: an approved flow re-answers the same
+    granted poll, so a crash mid-persist recovers by re-polling;
   - **the classic skill path** (`follow <skill>[@<hash>]`) — the I-TOFU accept / the paused-entry
     resume, unchanged.
   The SUBSCRIBE is two-phase: bare = a DESCRIBE (`GET /me` + `/channels` + the catalog + `/delivery`
@@ -100,21 +103,15 @@ renderer over the SAME typed outcomes (one value, two presentations).
   (batch-accepting first-receive offers through the SAME engine — never a fork; collisions decline
   by default or install prefixed), then the fleet report. The transports are built per-base-URL
   behind injectable factories, so the whole flow is tested over fakes with no HTTP.
-- **The `invite` verb** (`ops/invite`, `plane_http::UreqDeviceClient`) — an OWNER mints an `/i/<token>` invite link
-  by POSTing the governance Invite op. Requires prior enrollment: the plane (`base_url` from `instance.json`)
-  and the workspace (`workspace_id` from `identity/user.json`) come from what `follow`
-  wrote (absent ⇒ a typed "run follow first" error). It mints an `op_id` (the canonical hyphenated UUID
-  rides the wire, the plane re-parses it to the SAME 16 bytes for idempotency) and POSTs the body under the
-  **workspace Bearer credential** — the plane resolves the credential's non-revoked registry row → principal
-  → role matrix (a non-owner is DENIED); the acting device is never a body field. **Nothing is signed**
-  (git/GitHub-level trust). The role rides the wire body (an
-  omitted `--role` defaults to member, matching the plane); the emails are folded to
-  `topos_core::identity::canonical_principal`'s ASCII-lowercase form ONCE before the wire body (the plane
-  re-folds at its parse boundary), so the roster rows carry one identity per human; the skill **ids** (never
-  names) are what the invite pre-offers. The POST rides through the `UreqDeviceClient` behind a
-  `GovernanceSource` seam, mapping the all-outcome **200 envelope** (`ok` ⇒ `InviteData`; a role-DENIED
-  `!ok` ⇒ a typed "not authorized"); the link never carries a role. A unit test proves the wire body's
-  shape (workspace / role / folded emails / skill ids) over a **fake** with no HTTP.
+- **The `invite` verb** (`ops/invite`, `plane_http::UreqDeviceClient`) — the two-phase roster write
+  (`POST /v1/workspaces/{ws}/invitations` under the ONE device Bearer credential; the server resolves
+  credential → device → user → the invite-policy gate; the acting device is never a body field).
+  **Nothing is signed** (git/GitHub-level trust). Emails are folded to the canonical ASCII-lowercase
+  form ONCE before the wire body (the server re-folds at its parse boundary), so the roster rows
+  carry one identity per human; there is no invite link and no role field — joining is
+  `follow <address>` plus proof of the invited email. The POST rides through the `UreqDeviceClient`
+  behind a `GovernanceSource` seam, mapping the all-outcome **200 envelope** (`ok` ⇒ `InvitationData`;
+  a policy-DENIED `!ok` ⇒ a typed "not authorized").
 - **The pull/apply sync engine** (`ops/sync_engine`, `ops/pull`, `materialize`, `plane`) — the
   `checkForUpdates → plan → apply` machine over the kernel's four-state transition: a conditional read of
   the **unsigned** `current` pointer through the `PlaneSource` seam, a workspace/skill **scope check** (a
@@ -167,32 +164,25 @@ renderer over the SAME typed outcomes (one value, two presentations).
   currency/harness hook.
 - **The real plane transport** (`plane_http`, `enroll`) — a blocking `ureq` (rustls+ring) `PlaneSource` that
   feeds the engine above (no engine change). `get_current` is the commit-sensitive conditional GET
-  (`GET /v1/workspaces/{ws}/skills/{skill}/current` with `If-None-Match` + `Topos-Known-Version-Id`);
-  `fetch_version` is a version-metadata GET + per-blob
-  content-addressed bundle GETs that **re-verify each `sha256 == object_id`** — all under the workspace
-  **Bearer credential**. It is a dumb transport — the
-  engine scope-checks the served (unsigned) pointer and re-verifies the fetched bytes against the version
-  id. `FileFollow` + the crash-safe `instance.json` (the plane base URL — no trust root), `follows.json`
-  (per-skill workspace + mode — pure subscription state), and `identity/credentials.json` (the per-workspace
-  Bearer credentials — the **secret**, redacted from `Debug`, never in an error message or URL, joined onto
-  the follow-state by `skill_creds`) supply the transport creds + the consent state. `app.rs` (via
-  `load_enrollment`) selects the real transport only when `instance.json` is present, else stays inert — and
-  `load_enrollment` is **no longer inert in practice**, because `follow` now writes `instance.json` +
-  `credentials.json` + `follows.json`. The end-to-end
-  pull-over-loopback-HTTP proof lives in the `tests/` member; adding `ureq` keeps the client arch-clean (no
-  `plane-store`/`sqlx`/`tokio` edge).
-- **The device keypair** (`device_signer`, `identity`) — the device's **keygen-only identity**. An Ed25519
-  keypair is **load-or-generated** from a `0600` `identity/device.key` seed (refuse-on-permissive,
-  exactly-32-bytes, a `Zeroizing` seed held only transiently, serialized under the identity lock; the
-  `SigningKey` self-zeroizes on drop and a hand-written `Debug` redacts the key material). The public key
-  REGISTERS the device at enroll; the **`device_key_id`** (`dk_` + the first 32 hex of `sha256(pubkey)`,
-  the ONE kernel derivation `topos_core::identity::device_key_id`) is the device's stable, non-secret NAME
-  (the receipts/audit actor) — the plane re-derives the SAME id from the registered public key. **Nothing
-  signs with the private key** (git/GitHub-level trust): every plane request — reads AND writes AND
-  governance — authenticates with the **workspace credential** the redeem mints (Bearer), never the key.
-  `host.json` carries a secret-free
-  **`DeviceKeyRef`** (the PUBLIC key + a pointer to the sibling `0600` seed, NEVER the seed) via
-  `set_device_key`. A KAT pins `device_key_id` against `topos_core::identity::device_key_id`.
+  (`GET /v1/workspaces/{ws}/skills/{skill}/current` with `If-None-Match: "<generation>"` +
+  `Topos-Known-Version-Id`); `fetch_version` is a version-metadata GET + per-blob content-addressed
+  bundle GETs that **re-verify each `sha256 == object_id`** — all under the device's ONE **Bearer
+  credential**. It is a dumb transport — the engine scope-checks the served (unsigned) pointer and
+  re-verifies the fetched bytes against the version id. `FileFollow` + the crash-safe `instance.json`
+  (the API base URL — no trust root), `follows.json` (per-skill workspace + mode — pure subscription
+  state; its `skill_id → workspace_id` map is the URL-path scope each read splices), and
+  `identity/credentials.json` (the ONE device credential + registered device id — the **secret**,
+  redacted from `Debug`, never in an error message or URL) supply the transport cred + the consent
+  state. `app.rs` (via `load_enrollment`) selects the real transport only when `instance.json` is
+  present, else stays inert. The end-to-end pull-over-loopback-HTTP proof lives in the `tests/`
+  member; adding `ureq` keeps the client arch-clean (no `plane-store`/`sqlx`/`tokio` edge).
+- **The device credential** (`enroll`, `identity`) — the device holds **ONE bearer credential**
+  (`identity/credentials.json`, a `0600` secret with the registered device id alongside), minted by
+  the device-authorization flow: on approval the flow's device code is promoted server-side to the
+  credential and the granted poll carries it back — one secret, one field, no keypair, no per-workspace
+  mint. It authenticates EVERY request (reads AND writes AND governance) in every workspace the
+  approving person's seats reach; the server resolves credential → device → user → seat per request.
+  `host.json` keeps only the LOCAL commit-author id (`d_<hex>`) — a label, never an auth artifact.
 - **The private-file FsOps primitives** (`fs_seam`, `atomic`, `doc`) — secrets need `0600`. The seam gains
   `write_private` (mode 0600 **from creation** — no world-readable window, no chmod-after-write race) +
   `private_perms_ok` (the refuse-on-permissive read gate), both threaded through the `FaultFs` crash gate;
@@ -220,9 +210,9 @@ are asserted byte-equal in tests.
   an untracked LOCAL source it adopts before publishing — a discovered `<name>` / `<name>@<harness>`
   (reusing `add`'s `resolve_add_target`) or a `<dir>` (adopted in place via `ops::add`); a remote
   `owner/repo`/URL is refused (add it first), a `@<harness>` disagreeing with an already-tracked skill is
-  `HARNESS_MISMATCH`, and `--propose` while un-enrolled is refused BEFORE any adoption. A folded-in add is
-  disclosed on the receipt (`PublishData`/`ProposeData` `added`), and the standup resume argv self-heals to
-  the adopted `<name>@<digest>`. Then it scans the draft
+  `HARNESS_MISMATCH`, and ANY un-enrolled publish is refused BEFORE any adoption ("not enrolled — run
+  `topos follow <workspace-address>` first"). A folded-in add is disclosed on the receipt
+  (`PublishData`/`ProposeData` `added`). Then it scans the draft
   (the same source `diff` uses), and when the target pins a `@<digest>` runs the **optional consent gate**
   (recompute the digest over the scanned bytes; refuse on mismatch — never a silent mode-flip; without a pin
   the computed digest just ships), computes the byte-identical `commit_id`/`bundle_digest`
@@ -230,7 +220,7 @@ are asserted byte-equal in tests.
   the candidate in the store, persists an **op-WAL** (the extended `OpRecord`, `0600`) BEFORE the first send,
   POSTs, and maps the outcome (OK advances local state read-your-writes; a NEEDS_REVIEW with the `downgraded` detail is the
   protection gate REROUTING a member's direct publish into a proposal — surfaced as Proposed, never an
-  error; CONFLICT surfaces rebase; a genesis publish folds in a best-effort, owner-gated `/i/` link).
+  error; CONFLICT surfaces rebase).
   `--to <channel>` rides the wire body + the op-WAL (a replay re-sends the identical placement; the
   channel's mode gates it server-side, independently of the version gate; a brand-new skill with no
   `--to` lands in `everyone`). **`review <skill>@<hash> --approve|--reject`** binds the proposal's re-derived
@@ -241,36 +231,6 @@ are asserted byte-equal in tests.
   (`current..<hash>` / `<hash>` / `<a>..<b>` — a plane endpoint fetches + re-verifies). The commit-id parity
   (I-COMMIT-PARITY) is proven by `topos-core`'s `commit_id` KAT; the op_id-replay test lives in
   `ops/contribute`; the full loop is proven e2e over loopback HTTP in `tests/`.
-
-- **The workspace-standup client** (`ops/publish`'s standup branch + `ops/follow`'s claim door) — the two
-  self-serve doors onto the server's genesis seat. **The un-enrolled direct `publish`** stands the
-  workspace up instead of failing: the FULL pre-flight (skill resolution, scan, digest, the optional
-  `@<digest>` gate) runs BEFORE any network, then the ONE discovery rule every door runs — card-fetch
-  the resolved web origin (`TOPOS_PLANE_URL` override, else the compiled-in `https://topos.sh`) and
-  re-root onto the card-declared API base — then a standup device authorization there, a
-  one-plane-per-install guard against the response's declared plane base, a `0600`
-  `AuthorizingStandup` WAL, and an `ok`
-  PENDING receipt (`PublishData.pending` = `signin_required` + the SERVER-built
-  `verification_uri_complete` verbatim + the code + an RFC-3339 expiry) whose `ENROLL_RESUME` next-action
-  argv is THE SAME publish command. Re-invoking it polls ONCE (when the target pins a `@<digest>` the
-  consent re-derives from it, so drifted bytes are refused before any poll); granted ⇒ redeem (the grant is
-  the bearer credential; nothing is signed) → `Redeemed` WAL BEFORE promotion (the shared crash fence) →
-  promote → the publish CONTINUES in
-  the same invocation, disclosing `workspace <name> — owner
-  <principal>` on both surfaces (hijack visibility). The op is unchanged either way — it polls once and
-  returns; the BIN (`app.rs`) is what turns that into ONE command: it re-invokes on a fixed cadence until
-  the sign-in settles for an INTERACTIVE run (or a `--wait [<seconds>]` `--json` run), and a headless
-  `--json` run without `--wait` still returns the PENDING receipt immediately (never hangs). `--propose`
-  keeps the typed not-enrolled error; an enrolled device never reaches the branch. **`follow <claim-link>`**
-  enrolls in ONE invocation: the
-  bootstrap's `enrollment_method` branches (`admin_claim` ⇒ pin → pre-send `ClaimPending` WAL (`0600`,
-  token redacted) → POST `/v1/admin-claim` → promote; an unknown method fails CLOSED typed); an uncertain
-  send retries the POST directly from the WAL on the next invocation — never refetching the
-  possibly-consumed `/i/` link (the server's same-device replay re-answers Redeemed). The seated
-  `principal` persists into `user.json` (+ `email` when email-shaped), the WAL context records the
-  enrollment ROOT (invite / standup / claim ⇒ an honest `invite_rooted`), a DENIED grant redeem is the
-  typed ask-an-owner error (`REQUEST_ACCESS`), and the invite follow now persists + re-emits the
-  server-built `verification_uri_complete` verbatim (reconstruction is only the older-plane fallback).
 
 - **The `unfollow` verb** (`ops/unfollow`) — the PERSON-scoped detach, two-phase and byte-inert.
   Resolves dual-kind through the one grammar: a WORKSPACE target is recognized and refused toward
@@ -285,19 +245,18 @@ are asserted byte-equal in tests.
   flag flips, nothing dials. Idempotent; never a skill file, never a `held` pin, never the currency
   hook; an explicit local `update <skill>@<hash>` remains available on an unfollowed copy.
 - **The `auth` group** (`ops/auth`) — `login` / `logout` / `status`. **`login [server]`** (default
-  `https://topos.sh`, `TOPOS_PLANE_URL` override, or the enrolled plane): card → re-root → the same
-  wrong-server `TOPOS_HOME` refusal → `device/authorize {intent: login}` → the shared WAL/poll/
-  resume idiom (an `AuthorizingLogin` phase; the BIN blocks interactively / under `--wait`) →
-  `POST /v1/login` re-mints ONE workspace credential per confirmed seat (a revoked device's seat
-  reports `blocked` instead) → writes `instance.json` / `credentials.json` / `user.json`. A
-  DIFFERENT account than `user.json`'s principal is a typed `CONFIRM_REQUIRED` without `--yes`;
-  `--yes` replaces the stored credentials + memberships WHOLESALE; a same-account re-login is an
-  idempotent re-mint. **`logout`** is two-phase: describe, then best-effort self device-revoke per
-  enrolled workspace (the governance `DELETE …/devices` with this device's own key id) and delete
-  `identity/credentials.json` — skills, follows, drafts, and the principal stay (no credentials IS
-  signed-out). **`status`** is side-effect-free: whoami, per-workspace credential health via a
-  `GET /me` probe (healthy / "no access — revoked or removed" on the uniform 404 / unreachable / no
-  credential), hook health (the adapter's config-entry probe), and the reporting posture from
+  `https://topos.sh`, `TOPOS_PLANE_URL` override, or the enrolled plane) re-runs the SAME device flow
+  `follow` runs, minus a follow intent: card → re-root → the wrong-server `TOPOS_HOME` refusal →
+  `device/authorize` toward an enrolled membership's ADDRESS (a never-enrolled install is pointed at
+  `follow <address>`) → the shared WAL/poll/resume idiom (a login-owned WAL; the BIN blocks
+  interactively / under `--wait`) → on the granted poll the device's ONE credential REPLACES the
+  stored one wholesale (the identity is whoever approved in the browser). **`logout`** is two-phase:
+  describe, then best-effort self device-revoke per enrolled workspace (the governance
+  `DELETE …/devices` naming the STORED device id) and delete `identity/credentials.json` — skills,
+  follows, drafts, and the memberships stay (no credential IS signed-out). **`status`** is
+  side-effect-free: whoami (the principal from the freshest `me` probe), per-workspace access health
+  via a `GET /me` probe (healthy / "no access — revoked or removed" on the uniform 404 / unreachable
+  / no credential), hook health (the adapter's config-entry probe), and the reporting posture from
   `state/sync_status.json`.
 - **The hook posture + notices** (`ops/pull`, `sync_status`) — the delivery-driven reconcile writes
   `state/sync_status.json` (`{workspaces: {ws: {last_delivery_at, last_report_at,
@@ -370,18 +329,18 @@ are asserted byte-equal in tests.
     the gate outcome (`open` → lands directly / `reviewed` → a proposal), the placements (`--to`, or
     `everyone` for a new skill), the audience (reach), the share line, the undo path, and the origin-demotion
     note; a no-op (the draft equals current) is a typed `NO_CHANGES`. The scan is local-first; the network is
-    read only after it; the standup / genesis / WAL apply paths stay byte-identical (the describe is gated on
-    enrollment, so an un-enrolled publish keeps the standup flow). `add -s/-a` accept MULTIPLE values (a
-    remote import loops per skill × harness); `'*'` and the keep-as-yours re-adopt stay marked seams.
+    read only after it; the genesis / WAL apply paths stay byte-identical. `add -s/-a` accept MULTIPLE
+    values (a remote import loops per skill × harness); `'*'` and the keep-as-yours re-adopt stay marked
+    seams.
 
 ## Planned (lands later)
 
-The **workspace-credential model is now in place**: enrollment mints ONE Bearer **workspace credential**
-per (workspace × device) that authenticates EVERY plane request — reads AND writes AND governance — and
-authorization server-side is workspace membership. The device keypair remains **keygen-only identity** (the
-non-secret `device_key_id` names the device; nothing signs). `follows.json` is pure subscription state;
-`identity/credentials.json` (a `0600` secret) holds the per-workspace credentials; a first-run migration in
-`read_follows` scrubs any legacy `read_token` field without losing a follow. Still to come:
+The **unified-identity credential model is now in place**: the device-authorization flow mints ONE
+Bearer **device credential** that authenticates EVERY plane request — reads AND writes AND governance
+— and authorization server-side is the credential's device → user → seat resolution. No key material
+exists client-side (nothing signs). `follows.json` is pure subscription state;
+`identity/credentials.json` (a `0600` secret) holds the one credential + the registered device id.
+Still to come:
 **Multi-reviewer
 governance** (reviewer roles / N-approver / a rendered diff UI — single-approver, plain unified diff only) +
 the **`review-required` policy toggle verb** (enforcement is built; the policy row is a plane/console
@@ -389,8 +348,8 @@ setting) + `log --team`'s plane half; harness *selection* in the composition roo
 Code only; both the OpenClaw and Hermes adapters are built + wired into `adapter_for` — OpenClaw's
 concrete config bytes and Hermes's per-turn-injection claim stay pilot-pending behind their readiness
 probes; only Claude Code guarantees the swap completes before skills resolve, so non-Claude adapters
-leave a named, bounded multi-file-read residual). The passcode / magic-link / OIDC identity steps run on
-the plane's verification page (the agent only polls), so the client needs no UI for them.
+leave a named, bounded multi-file-read residual). The identity step (sign-in) runs on the server's
+approval page (the agent only polls), so the client needs no UI for it.
 
 ## Architectural layering (enforced at the dependency graph)
 
@@ -401,12 +360,11 @@ The sidecar keys skills by id; harness skill directories stay byte-pristine, so 
 your skills.
 
 Dependencies: `topos-core`, `topos-types`, `topos-gitstore`, `topos-harness`, `clap`, `serde`/`serde_json`,
-`uuid`, `rustix` (safe fsync/flock + the atomic dir-swap), `hex` (decode sidecar id fields), `base64`
-(encode-side for the enrollment wire — the device public key in the authorize/redeem bodies is base64url —
-and the contribute candidate's `content_base64`; wire encoding only, not a signing edge), `ureq` (the
+`uuid`, `rustix` (safe fsync/flock + the atomic dir-swap; `system` for the host node name the
+device-authorization start sends as the requested device display name), `hex` (decode sidecar id
+fields), `base64` (the contribute candidate's `content_base64`; wire encoding only), `ureq` (the
 blocking rustls+ring plane + enrollment transport — self-contained, so no `tokio`/`plane-store`/`sqlx`
-edge), `ed25519-dalek` (`std` + `zeroize` — the device **keypair** custody: keygen only, NOTHING signs;
-the public key is the device's registered identity), `getrandom` (first-run seed entropy) + `zeroize`
-(wipe the transient seed buffer), `anyhow`, `thiserror`. None of these crates cross `check-arch`'s line
-(it bans only `plane-store`/`sqlx`/`libsqlite3-sys`/`tokio`/`reqwest`/`hyper`); `topos-core` is
-signature-free `no_std`.
+edge), `anyhow`, `thiserror`. No key material and no crypto deps: the device authenticates with the
+ONE bearer credential the device flow mints. None of these crates cross `check-arch`'s line (it bans
+only `plane-store`/`sqlx`/`libsqlite3-sys`/`tokio`/`reqwest`/`hyper`); `topos-core` is signature-free
+`no_std`.

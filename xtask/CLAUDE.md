@@ -10,9 +10,8 @@ cargo xtask gen-schema             # (re)generate contracts/schemas/*.schema.jso
 cargo xtask gen-schema --check     # the contract drift gate — a stale / missing / orphan artifact fails
 cargo xtask gen-fixtures           # (re)generate the golden --json fixtures under contracts/fixtures/
 cargo xtask gen-fixtures --check   # the fixture drift gate (same stale/missing/orphan discipline)
-cargo xtask gen-cli-ref            # (re)generate docs/cli.md from the real clap tree (topos::cli_command())
-cargo xtask gen-cli-ref --check    # the CLI-reference drift gate (byte-compare, like the other drift gates)
-cargo xtask check-arch             # the architectural-layering + lint-opt-in + toolchain-pin gate
+cargo xtask gen-cli-ref            # PARKED (bails): restored with the client rewrite
+cargo xtask check-arch             # the architectural-layering + vocabulary + schema-boundary gate
 cargo xtask ci                     # ALL the non-DB gates, in CI's order, failing fast
 cargo xtask conformance            # the store matrices (not yet implemented — prints so and exits 0)
 ```
@@ -20,46 +19,40 @@ cargo xtask conformance            # the store matrices (not yet implemented —
 ## The subcommands
 
 - **`gen-schema [--check]`** — reads the wire types from `topos-types` and emits one JSON-Schema per
-  top-level type, per-verb `data` payload, and persisted client document into `contracts/schemas/`; the
-  SAME run also generates (or `--check`s) the plane OpenAPI `contracts/openapi/openapi.json` from
-  `topos_plane::openapi()`, so one gate covers both contracts. **The artifacts are generated — never
-  hand-edit them**; change the types/routes, regenerate, commit, review the diff. `--check` fails on a
-  stale, missing, or orphan artifact (an orphan = a committed file no current generator produces).
-- **`gen-fixtures [--check]`** — builds the golden `--json` envelopes FROM the typed shapes (so they cannot
-  drift from the contract) and writes them under `contracts/fixtures/json/`; `--check` is the drift gate
-  with the same stale/missing/orphan discipline.
-- **`gen-cli-ref [--check]`** — renders the CLI reference `docs/cli.md` from the REAL clap tree
-  (`topos::cli_command()`, so the reference can never drift from what the binary parses): the consent-contract
-  preamble, the global flags, then every verb grouped by scope (self / team / maintenance) with its usage line,
-  about text, and args/flags table; hidden subcommands are omitted with a short "renamed verbs" note.
-  `--check` is a byte-compare drift gate like the others. (xtask takes a path dependency on `topos` for this —
-  default features only, so the test-only `test-fixtures` surface stays off; `check-arch` holds the line.)
-- **`check-arch`** — the dependency-graph trust claims as a gate, via `cargo tree`:
-  - the client (`topos`) carries no `plane-store` / `sqlx` / `libsqlite3-sys` / `tokio` / `reqwest` /
-    `hyper` edge (it is a thin sync tool, never an authority), and none of the contract-generation
-    machinery (`utoipa` / `utoipa-gen` / `schemars` / `schemars_derive` — `topos-types`' schema derives
-    are behind its default-off `contract-derives` feature, enabled only by xtask + `topos-plane`);
-  - the kernel (`topos-core`) carries no wire DTOs, async/IO/storage/HTTP crates, or diff engines;
-  - the test-only `test-fixtures` features stay OFF in the production graphs of `topos-plane` and `topos`;
-  - the leaf crates stay lean (`topos-types` / `topos-harness` / `topos-gitstore` ban
-    `tokio`/`axum`/`sqlx`/`ureq`/`hyper`, the first two also `gix`) — an `--all-features` check;
-  - the DEFAULT (production-features) `topos-plane` build resolves neither `oauth2` nor `openidconnect`
-    nor `reqwest` (the OIDC connector is feature-gated default-off) — a production-tree check;
-  - every workspace member opts into the shared `[workspace.lints]` (incl. `unsafe_code = forbid`);
-  - the Dockerfile's builder image tag AND ci.yml's cargo-deny `rust-version` both match
-    `rust-toolchain.toml`'s pinned channel (one toolchain, three pin sites, bumped together);
-  - **the vault/directory seam** (a source scan, not `cargo tree`): `plane-store`'s custody modules
-    (`src/custody/` + `src/db/custody/`) reference NO directory module path (group paths and the
-    crate-root aliases both banned) and name NO directory table after FROM/JOIN/INTO/UPDATE in SQL —
-    the access-witness trait is the only seam; the reverse direction (directory → custody) is
-    deliberately allowed (the row/byte rule: a review approve terminates in the shared pointer-move).
-- **`ci`** — the contributor's pre-push loop: runs the full NON-DB gate sequence in the same order as the
-  CI `gate` job, failing fast with a per-gate banner — `cargo fmt --all --check`, `cargo clippy --workspace
-  --all-targets --locked -- -D warnings`, `cargo doc --workspace --no-deps --locked` (with
-  `RUSTDOCFLAGS="-D warnings"`), `gen-schema --check`, `gen-fixtures --check`, `gen-cli-ref --check`,
-  `check-arch`. Not covered
-  (they need a database or an extra tool): `cargo test --workspace` (Postgres via `DATABASE_URL`),
-  `cargo deny check`, and CI's sqlx offline-metadata drift job.
-- **`conformance`** — a stub for the store conformance matrices; prints "not yet implemented".
-
-There is no formal-model subcommand — the integration interleaving tests are the correctness net.
+  top-level wire type, per-verb `data` payload, and persisted client document into
+  `contracts/schemas/`; the SAME run also generates (or `--check`s) the OpenAPI
+  `contracts/openapi/openapi.json` from `topos_plane::openapi()` (the PUBLIC device lane the product
+  app serves — contract stubs; the vault's internal custody lane stays out of the committed
+  contract). **The artifacts are generated — never hand-edit them.**
+- **`gen-fixtures [--check]`** — builds the golden `--json` envelopes FROM the typed shapes and
+  writes them under `contracts/fixtures/json/`; `--check` is the drift gate.
+- **`gen-cli-ref`** — PARKED during the custody rewrite (it bails with an explanation): `docs/cli.md`
+  is generated from the client's real clap tree, and the client is being rebuilt against the new
+  custody types; xtask carries no edge to it until that lands. The CLI rewrite restores the
+  generator, the `topos` dep, and the ci() gate entry.
+- **`check-arch`** — the dependency-graph + source-scan trust claims as one gate:
+  - the client (`topos`) carries no `plane-store` / `sqlx` / async-runtime / HTTP / contract-derive
+    edge; the kernel (`topos-core`) carries no wire DTOs or IO stacks; the leaf crates stay lean;
+  - the vault (`topos-plane`) cannot even NAME the identity-era stacks (`oauth2` / `openidconnect` /
+    `reqwest` / `lettre`), and `plane-store` carries no `uuid` / `ed25519-dalek` / `lettre` /
+    OAuth edge;
+  - the test-only `test-fixtures` features stay OFF in the production graphs;
+  - every workspace member opts into the shared `[workspace.lints]`; the toolchain pins agree;
+  - **the custody-vocabulary gate**: the word `skill` appears NOWHERE in the vault
+    (`crates/plane-store/src` + `crates/plane-store/migrations` + `crates/topos-gitstore/src`;
+    every file, any case);
+  - **the identity-vocabulary gate**: none of the identity stems (`email`, `principal`, `invit…`,
+    `claim`, `enroll`, `passcode`, `session`, `roster`, `seat`, `user`) appears in the same dirs —
+    matched case-insensitively as word-ish identifier parts (`reclaimed` does not trip `claim`),
+    with a SHORT explicit `(file, token)` allowlist for genuine non-identity uses (the gitstore's
+    git-committer signature plumbing; the Postgres `idle_in_transaction_session_timeout` GUC).
+    Prefer renaming code to allowlisting it (the GC's old `claim` vocabulary became `acquire`);
+  - **the schema-boundary gate** (`check_seam`): no app-schema table name follows a
+    FROM/JOIN/INTO/UPDATE token in any SQL string under `crates/plane-store/src` — the vault's own
+    tables (`version`, `current_pointer`, `upload`, …) are the only ones its SQL may touch.
+  All three scan gates are **red-tested** (`cargo test -p xtask` drives each scan over a violating
+  temp tree and asserts it fires, plus a real-tree clean run) and fail closed on a missing dir.
+- **`ci`** — the contributor's pre-push loop: fmt, clippy, doc, the drift gates, check-arch (the
+  cli-ref gate re-joins with the client rewrite). Not covered: `cargo test --workspace` (needs
+  `DATABASE_URL`), `cargo deny check`, the sqlx offline-metadata drift job.
+- **`conformance`** — a stub; prints "not yet implemented".

@@ -1,97 +1,127 @@
 import { expect, type Page, test } from "@playwright/test";
-import { MEMBER_EMAIL, PLANE_PORT } from "./env";
+import { E2E_PASSWORD, MEMBER_EMAIL, WORKSPACE_ADDRESS } from "./env";
+import { adminQuery } from "./seed";
 
 /**
- * The verification page's two halves. Signed OUT (fresh context): the zero-JS disclosure. Signed IN
- * (the suite's default storage state): the browser approve legs — the acting identity is the
- * session-derived acting-email header (never a client-supplied field), and the recorded fixture
- * calls prove what actually went over the wire (enroll → outcome `confirmed`, standup → `approved`).
+ * The gh-style DEVICE-APPROVE ceremony end to end: the CLI half is the real `/api/v1/device/*`
+ * flow (start → poll), the browser half is /verify — a signed-in person resolves the short
+ * user code, sees what is asking, and approves BEHIND STEP-UP (approval mints a credential
+ * that acts as them) or denies without one. Terminal poll answers are delivered ONCE.
+ *
+ * Runs with the suite's default storage state (the claimed owner) except the signed-out leg.
  */
 
-test.describe("the verification page, signed out", () => {
+test.describe.configure({ mode: "serial" });
+
+interface DeviceFlowStart {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete: string;
+}
+
+async function startDeviceFlow(page: Page, requestedName: string): Promise<DeviceFlowStart> {
+  const response = await page.request.post("/api/v1/device/authorize", {
+    data: { requested_name: requestedName, workspace: WORKSPACE_ADDRESS },
+  });
+  expect(response.ok(), `device authorize failed: ${response.status()}`).toBe(true);
+  return (await response.json()) as DeviceFlowStart;
+}
+
+async function pollDeviceFlow(
+  page: Page,
+  deviceCode: string,
+): Promise<{
+  status: string;
+  credential?: string;
+  device_id?: string;
+  workspace?: { name: string };
+}> {
+  const response = await page.request.post("/api/v1/device/token", {
+    data: { device_code: deviceCode },
+  });
+  expect(response.ok()).toBe(true);
+  return response.json();
+}
+
+test.describe("signed out", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
 
-  test("verified domain: full disclosure with the sign-in gate", async ({ page }) => {
-    await page.goto("/verify/APPROVED1");
-    await expect(page.getByRole("heading", { name: "Is this your device?" })).toBeVisible();
-    await expect(page.getByText("roberts-macbook")).toBeVisible();
-    // The fingerprint renders grouped in 4s for eyeball comparison.
-    await expect(page.getByText("9f3a 7c21 b4d8 e650")).toBeVisible();
-    await expect(page.getByText("This device will join")).toBeVisible();
-    await expect(page.getByText("acme.dev — domain verified by the server")).toBeVisible();
-    await expect(page.getByRole("link", { name: "Sign in to continue" })).toBeVisible();
+  test("the verify page bounces to /login carrying itself — code included — as the next path", async ({
+    page,
+  }) => {
+    await page.goto("/verify?code=AB12-CD34");
+    await page.waitForURL((u) => u.pathname === "/login");
+    const next = new URL(page.url()).searchParams.get("next");
+    expect(next).toBe("/verify?code=AB12-CD34");
   });
 });
 
-test.describe("the verification page, signed in", () => {
-  async function recordedCalls(
-    page: Page,
-  ): Promise<
-    { route: string; key: string | null; acting: string; body: Record<string, unknown> }[]
-  > {
-    const response = await page.request.get(`http://127.0.0.1:${PLANE_PORT}/__test/calls`);
-    return response.json();
-  }
+test("an unknown code is an honest in-page state, never a 404", async ({ page }) => {
+  await page.goto("/verify?code=ZZZZ-9999");
+  await expect(page.getByRole("heading", { name: "Approve a device" })).toBeVisible();
+  await expect(page.getByText("No pending request for this code")).toBeVisible();
+});
 
-  test("an enroll session renders Join + one Approve; approving confirms as the session email", async ({
-    page,
-  }) => {
-    await page.goto("/verify/APPROVED1");
-    await expect(page.getByRole("heading", { name: "Join Acme Platform" })).toBeVisible();
-    await expect(page.getByText("roberts-macbook")).toBeVisible();
+test("approve is step-up gated: a wrong password mints nothing; the right one mints the credential the poll delivers", async ({
+  page,
+}) => {
+  const flow = await startDeviceFlow(page, "e2e-laptop");
+  expect(flow.verification_uri_complete).toContain(`/verify?code=`);
 
-    await page.getByRole("button", { name: `Approve — join as ${MEMBER_EMAIL}` }).click();
-    await expect(page).toHaveURL(/\/verify\/APPROVED1\?outcome=approved/);
-    await expect(page.getByRole("heading", { name: "Approved" })).toBeVisible();
+  await page.goto(`/verify?code=${encodeURIComponent(flow.user_code)}`);
+  // The resolved request names what is asking, honestly (the name also rides the approve
+  // button's label, so pin the disclosure span exactly).
+  await expect(page.getByText("“e2e-laptop”", { exact: true })).toBeVisible();
+  await expect(page.getByText("wants to act as you", { exact: false })).toBeVisible();
 
-    const approve = (await recordedCalls(page)).filter(
-      (c) => c.route === "approve" && c.key === "APPROVED1",
-    );
-    expect(approve.length).toBeGreaterThan(0);
-    // The acting identity is the SESSION's header — nothing client-supplied; the approve body is empty.
-    expect(approve.at(-1)?.acting).toBe(MEMBER_EMAIL);
-    expect(approve.at(-1)?.body).toEqual({});
-  });
+  // A WRONG password refuses the mint; the device keeps polling `pending`.
+  await page.getByLabel("Confirm with your password").fill("not-the-password-999");
+  await page.getByRole("button", { name: "Approve “e2e-laptop”" }).click();
+  await expect(page.getByRole("alert")).toContainText("Password check failed");
+  expect((await pollDeviceFlow(page, flow.device_code)).status).toBe("pending");
 
-  test("a login session renders the sign-in consent, never a join framing", async ({ page }) => {
-    await page.goto("/verify/LOGIN77");
-    // The consent copy says the REAL operation: credentials re-mint across confirmed seats.
-    await expect(page.getByRole("heading", { name: "Sign this device in" })).toBeVisible();
-    await expect(page.getByText(/fresh credentials for every\s+workspace/)).toBeVisible();
-    await expect(page.getByRole("heading", { name: /Join/ })).toHaveCount(0);
-    await expect(page.getByText("travel-laptop")).toBeVisible();
+  // The RIGHT password mints the device and the page says so.
+  await page.getByLabel("Confirm with your password").fill(E2E_PASSWORD);
+  await page.getByRole("button", { name: "Approve “e2e-laptop”" }).click();
+  await expect(page.getByRole("heading", { name: "Device connected" })).toBeVisible();
 
-    await page.getByRole("button", { name: `Approve — sign in as ${MEMBER_EMAIL}` }).click();
-    await expect(page).toHaveURL(/\/verify\/LOGIN77\?outcome=approved/);
-    await expect(page.getByRole("heading", { name: "Approved" })).toBeVisible();
+  // The poll delivers the grant ONCE: the presented device_code IS the promoted credential.
+  const granted = await pollDeviceFlow(page, flow.device_code);
+  expect(granted.status).toBe("granted");
+  expect(granted.credential).toBe(flow.device_code);
+  expect(granted.workspace?.name).toBe(WORKSPACE_ADDRESS);
 
-    const approve = (await recordedCalls(page)).filter(
-      (c) => c.route === "approve" && c.key === "LOGIN77",
-    );
-    expect(approve.length).toBeGreaterThan(0);
-    expect(approve.at(-1)?.acting).toBe(MEMBER_EMAIL);
-  });
+  // The minted device row: owned by the approver, named as requested, hash-stored credential.
+  const rows = await adminQuery<{ id: string; display_name: string; email: string }>(
+    `select d.id, d.display_name, u.email from web.device d join web."user" u on u.id = d.user_id
+     where d.id = $1`,
+    [granted.device_id],
+  );
+  expect(rows[0]?.display_name).toBe("e2e-laptop");
+  expect(rows[0]?.email).toBe(MEMBER_EMAIL);
 
-  test("a standup session prefils the name from the email; the default untouched is a complete standup", async ({
-    page,
-  }) => {
-    await page.goto("/verify/STANDUP42");
-    await expect(page.getByRole("heading", { name: "Create your workspace" })).toBeVisible();
-    const name = page.getByRole("textbox", { name: "Workspace name" });
-    // Prefilled `<localpart>'s workspace` from the session email.
-    await expect(name).toHaveValue("reviewer's workspace");
+  // Terminal answers are delivered once — the flow row died as it was reported.
+  expect((await pollDeviceFlow(page, flow.device_code)).status).toBe("expired");
+});
 
-    await page
-      .getByRole("button", { name: `Approve — create workspace as ${MEMBER_EMAIL}` })
-      .click();
-    await expect(page).toHaveURL(/\/verify\/STANDUP42\?outcome=approved/);
-    await expect(page.getByRole("heading", { name: "Approved" })).toBeVisible();
+test("deny destroys the pending request and mints nothing — no step-up needed", async ({
+  page,
+}) => {
+  const flow = await startDeviceFlow(page, "e2e-stranger");
+  await page.goto(`/verify?code=${encodeURIComponent(flow.user_code)}`);
+  await expect(page.getByText("“e2e-stranger”", { exact: true })).toBeVisible();
 
-    const standup = (await recordedCalls(page)).filter(
-      (c) => c.route === "approve-standup" && c.key === "STANDUP42",
-    );
-    expect(standup.length).toBeGreaterThan(0);
-    expect(standup.at(-1)?.acting).toBe(MEMBER_EMAIL);
-    expect(standup.at(-1)?.body).toEqual({ display_name: "reviewer's workspace" });
-  });
+  await page.getByRole("button", { name: "Deny — this isn’t my device" }).click();
+  await expect(page.getByRole("heading", { name: "Request denied" })).toBeVisible();
+
+  // The device learns the denial on its next poll — once; after that the code names nothing.
+  expect((await pollDeviceFlow(page, flow.device_code)).status).toBe("denied");
+  expect((await pollDeviceFlow(page, flow.device_code)).status).toBe("expired");
+
+  // Nothing was minted for the denied request.
+  const rows = await adminQuery<{ n: string }>(
+    `select count(*)::text as n from web.device where display_name = 'e2e-stranger'`,
+  );
+  expect(rows[0]?.n).toBe("0");
 });

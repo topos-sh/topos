@@ -6,34 +6,32 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Workspace-level end-to-end integration tests — the loopback-HTTP e2e suites (the distribute HERO, the real-Claude-Code-adapter HERO, the real `follow` enrollment, the contribute write verbs) driving the genuine client engine against the real plane. No production code; the lib is an empty anchor so the integration tests in tests/ are a workspace member that `cargo test --workspace` runs."
+description = "Workspace-level end-to-end integration tests — the composed-stack e2e suites (the distribute HERO, the real `follow` enrollment, the contribute loop, delivery/channels, revocation, the claim door) driving the genuine client engine against the real web app in front of the in-process vault. No production code; the lib is an empty anchor so the integration tests in tests/ are a workspace member that `cargo test --workspace` runs."
 
-# The HERO drives BOTH sides through their feature-gated test-fixtures surfaces: the client's `test_support`
-# (set up `~/.topos/` + run the real pull engine over the real `ureq` transport) and plane-store's seed
-# shims (stage an authority + move `current`). `topos`'s `test-fixtures` adds NO server edge to the
-# client (check-arch asserts it). These are dev-deps of a test-only crate, so the feature never reaches a
-# production artifact (the production build is `cargo build -p topos-plane`, which excludes this member).
+# The suites drive the CLIENT through its feature-gated test-fixtures surface (set up `~/.topos/` +
+# run the real verbs over the real `ureq` transports). `topos`'s `test-fixtures` adds NO server edge
+# to the client (check-arch asserts it). These are dev-deps of a test-only crate, so the feature
+# never reaches a production artifact.
 [dev-dependencies]
 topos = { workspace = true, features = ["test-fixtures"] }
+# The in-process vault: the custody authority + its sqlx migrations, served via `topos_plane::router`.
+# `test-fixtures` exposes the pool-injection constructor + the MIGRATOR (compiled out of production).
 plane-store = { workspace = true, features = ["test-fixtures"] }
-# Provision a fresh, migrated per-test Postgres database for each loopback e2e (these harnesses run a
-# blocking `ureq` client alongside a live axum server on a self-owned multi-thread runtime, so they cannot
-# use `#[sqlx::test]`'s current-thread runtime without deadlocking — see `tests/common/mod.rs`). A dev-dep
-# of this test-only crate, so it never reaches a production artifact.
-sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "migrate"] }
 topos-plane.workspace = true
 topos-types.workspace = true
-# A multi-threaded runtime so the plane's async handlers make progress while the SYNC client (blocking
-# `ureq`) runs on a plain thread; `net` for the loopback listener.
+# Provision the per-test Postgres by the production recipe (roles/schemas/grants + both lineages).
+# These harnesses run a blocking `ureq` client alongside a live axum server on a self-owned
+# multi-thread runtime, so they cannot use `#[sqlx::test]`'s current-thread runtime without
+# deadlocking — see `tests/common/mod.rs`. A dev-dep of a test-only crate.
+sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "migrate"] }
+# A multi-threaded runtime so the vault's async handlers make progress while the SYNC client
+# (blocking `ureq`) runs on a plain thread; `net` for the loopback listener.
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
 # Serve the composed `router(state)` over a real loopback socket (with peer ConnectInfo).
 axum.workspace = true
-# Parse the follower's real settings.json to assert the EXACT installed SessionStart hook command.
+# The harness's own HTTP bodies (the browser-session forms + the device-lane probes).
 serde_json.workspace = true
-# Compare the client's `sync.json` base_commit (hex) to the plane's genesis version id.
-hex.workspace = true
-# The composed-stack harness polls the spawned web app's /healthz (the same blocking transport the
-# client itself runs; test-only here).
+# The blocking harness transport (the same crate the client itself runs; test-only here).
 ureq.workspace = true
 
 [lints]

@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# Compose smoke test for the POST-CUTOVER shape: the web app is the ONE public surface, the plane is
-# internal-only. A green run proves the images build, the app comes up and talks to its database, the
-# plane has NO published port yet is reachable THROUGH the app (forwarded to a DB-backed read), the
-# constant protocol card answers on any path, and first boot hardened the plane's enrollment secret.
+# Compose smoke test: the web app is the ONE public surface, the vault is internal-only, and a
+# FRESH VOLUME boots the whole first-run story. A green run proves the images build, the real
+# initdb provisions both roles/schemas/grants, both boot-time migration lineages run (the app's
+# drizzle lineage at first request, the vault's sqlx lineage at its boot), the vault publishes
+# NO host port, the constant protocol card answers on any path, the boot ceremony prints the
+# setup line, and the CLAIM CEREMONY seats a first owner whose signed-in dashboard reads
+# custody state across the schema boundary — the cross-lane SELECT grant, proven on the real
+# deploy artifact, not a test copy.
 #
 #   ./scripts/compose-smoke.sh
 #
@@ -11,28 +15,30 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PROJECT="topos-smoke-$$"
+# Preset the setup code (the CI/IaC hatch) so the smoke can drive the claim page itself.
+export TOPOS_SETUP_CODE="smoke-setup-code-$$-0123456789abcdef"
+export TOPOS_WORKSPACE_NAME="smoke-team"
 compose() { docker compose -p "$PROJECT" "$@"; }
-cleanup() { compose down -v --remove-orphans >/dev/null 2>&1 || true; }
+cleanup() { compose down -v --remove-orphans >/dev/null 2>&1 || true; rm -f "$COOKIES"; }
+COOKIES="$(mktemp)"
 trap cleanup EXIT
 
 echo "== building + starting the stack (project $PROJECT) =="
 compose up -d --build
 
-# ── (b) the plane publishes NO host port ─────────────────────────────────────────────────────────────
-# The whole point of the cutover: only the app is reachable. Inspect the plane container's port map and
-# require that no binding carries a HostPort (an unpublished container port maps to `null`).
-echo "== asserting the plane publishes no host port =="
+# ── the vault publishes NO host port ─────────────────────────────────────────────────────────────────
+echo "== asserting the vault publishes no host port =="
 plane_cid="$(compose ps -q plane)"
 [ -n "$plane_cid" ] || { echo "FAIL: no plane container found"; exit 1; }
 ports_json="$(docker inspect "$plane_cid" --format '{{json .NetworkSettings.Ports}}')"
 echo "plane port map: $ports_json"
 if printf '%s' "$ports_json" | grep -q 'HostPort'; then
-  echo "FAIL: the plane publishes a host port — it must be internal-only"
+  echo "FAIL: the vault publishes a host port — it must be internal-only"
   exit 1
 fi
-echo "PASS: the plane exposes no host port (internal-only)."
+echo "PASS: the vault exposes no host port (internal-only)."
 
-# ── (f) the app is up (own-database liveness) ────────────────────────────────────────────────────────
+# ── the app is up (own-database liveness) ────────────────────────────────────────────────────────────
 echo "== waiting for the web app's /healthz (own-database liveness) =="
 health=""
 for _ in $(seq 1 90); do
@@ -47,88 +53,103 @@ if [ "$health" != "200" ]; then
 fi
 echo "PASS: /healthz 200 — the app is up and its database is reachable."
 
-# ── (c) a DATABASE-BACKED read, forwarded THROUGH the app to the plane ───────────────────────────────
-# The app fronts `/api`, forwarding `/api/v1/*` to the internal plane. A device-lane catalog read
-# resolves the presented workspace credential in Postgres before answering, so an unknown credential
-# returning the uniform 404 (not 500, not a connection error, not the protocol card) proves the whole
-# path: app up → forwarding to the plane → plane migrated → DB-backed resolve.
-PROBE="http://localhost:3000/api/v1/workspaces/ws-smoke-unknown/skills"
-echo "== probing a forwarded database-backed read ($PROBE with an unknown credential must 404) =="
-code=""
-for _ in $(seq 1 90); do
-  code="$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer smoke-definitely-unknown' "$PROBE" || true)"
-  [ "$code" = "404" ] && break
-  sleep 1
+# ── a browser DOCUMENT render of the root (boot migrator + the setup ceremony) ───────────────────────
+# The first document request runs the app's drizzle lineage and the boot ceremony (workspace +
+# default channel + the printed claim link). Retried: a fresh-volume boot may race the vault's
+# first migrate — recovery, not a restart, must get the page green.
+echo "== rendering / as a browser document (boot migrations + setup ceremony) =="
+landing=""
+for _ in $(seq 1 30); do
+  landing="$(curl -s -o /dev/null -w '%{http_code}' -H 'Accept: text/html' http://localhost:3000/ || true)"
+  [ "$landing" = "200" ] && break
+  sleep 2
 done
-if [ "$code" != "404" ]; then
-  echo "FAIL: expected 404 from $PROBE, got '$code'"
-  compose logs --no-color web plane | tail -60
+if [ "$landing" != "200" ]; then
+  echo "FAIL: / never rendered 200 as a document (last: '$landing')"
+  compose logs --no-color web | tail -60
   exit 1
 fi
-echo "PASS: an unknown workspace credential 404'd through the app — forwarding + plane + Postgres all live."
+echo "PASS: the landing document renders."
 
-# ── (d) the constant protocol card on any path ───────────────────────────────────────────────────────
-# A non-browser JSON fetch of ANY path gets the byte-constant card (no existence oracle): the discriminant
-# plus the follow API base the client re-roots onto — the app origin + /api once the app fronts the API.
-echo "== probing the constant protocol card (any path, JSON) =="
-card="$(curl -s -H 'Accept: application/json' http://localhost:3000/anything-at-all || true)"
-echo "card: $card"
-if ! printf '%s' "$card" | grep -q 'topos-protocol-card'; then
-  echo "FAIL: the protocol card discriminant is missing from the response"
+# ── the boot ceremony printed the ONE setup line ─────────────────────────────────────────────────────
+echo "== asserting the setup line was printed to the app logs =="
+if ! compose logs --no-color web | grep -q 'Finish setup:'; then
+  echo "FAIL: the app logs carry no 'Finish setup:' line"
+  compose logs --no-color web | tail -60
   exit 1
 fi
-if ! printf '%s' "$card" | grep -q '"api_base_url":"http://localhost:3000/api"'; then
-  echo "FAIL: the card's api_base_url is not the app's /api follow base"
-  exit 1
-fi
-echo "PASS: the constant protocol card answers with the app's /api follow base."
+echo "PASS: the setup line is in the logs."
 
-# A BROWSER document render — the only face that runs the web tier's boot migrator. This is the
-# probe that catches a runtime image missing its drizzle folder (API + card green, every page 500)
-# and any first-render crash the resource routes never reach.
-echo "== rendering a browser document (the boot-migration path) =="
-doc_code="$(curl -s -o /tmp/smoke-doc.html -w '%{http_code}' -H 'Accept: text/html' http://localhost:3000/ || true)"
-if [ "$doc_code" != "200" ]; then
-  echo "FAIL: the landing document answered '$doc_code' (boot migration or render is broken)"
+# ── the constant protocol card, byte-identical on every path ─────────────────────────────────────────
+# Two non-browser faces: a JSON card (the discriminant + the API base a client re-roots onto)
+# for Accept: application/json, and a markdown card for a bare fetch. Both must be constant
+# across paths.
+echo "== fetching the protocol card (non-browser faces) =="
+card_json="$(curl -s -H 'Accept: application/json' http://localhost:3000/)"
+card_json_deep="$(curl -s -H 'Accept: application/json' http://localhost:3000/some/deep/path)"
+printf '%s' "$card_json" | grep -q 'topos-protocol-card' || { echo "FAIL: JSON card missing marker: $card_json"; exit 1; }
+printf '%s' "$card_json" | grep -q '"api_base_url":"http://localhost:3000/api"' \
+  || { echo "FAIL: card api_base_url wrong: $card_json"; exit 1; }
+[ "$card_json" = "$card_json_deep" ] || { echo "FAIL: JSON card differs between / and a deep path"; exit 1; }
+card_md_root="$(curl -s http://localhost:3000/)"
+card_md_deep="$(curl -s http://localhost:3000/some/deep/path)"
+printf '%s' "$card_md_root" | grep -q 'topos follow' || { echo "FAIL: markdown card missing the follow teaching"; exit 1; }
+[ "$card_md_root" = "$card_md_deep" ] || { echo "FAIL: markdown card differs between / and a deep path"; exit 1; }
+echo "PASS: both card faces answer, byte-identical, with the app-rooted api base."
+
+# ── the device lane answers the uniform miss on an unknown credential ────────────────────────────────
+echo "== probing the device lane with an unknown bearer =="
+lane="$(curl -s -o /dev/null -w '%{http_code}' \
+  -H 'Authorization: Bearer smoke-unknown-credential' \
+  http://localhost:3000/api/v1/workspaces/ws-smoke-unknown/delivery || true)"
+if [ "$lane" != "404" ]; then
+  echo "FAIL: unknown-credential delivery answered '$lane', wanted the uniform 404"
+  exit 1
+fi
+echo "PASS: the device lane answers the uniform 404."
+
+# ── THE CLAIM CEREMONY: the preset code seats a first owner ──────────────────────────────────────────
+echo "== claiming the workspace with the preset setup code =="
+claim_page="$(curl -s -o /dev/null -w '%{http_code}' -H 'Accept: text/html' \
+  "http://localhost:3000/claim?code=${TOPOS_SETUP_CODE}" || true)"
+[ "$claim_page" = "200" ] || { echo "FAIL: the live claim page answered '$claim_page'"; exit 1; }
+claim_post="$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIES" -b "$COOKIES" -L \
+  -H 'Accept: text/html' \
+  --data-urlencode "code=${TOPOS_SETUP_CODE}" \
+  --data-urlencode "name=Smoke Owner" \
+  --data-urlencode "email=owner@smoke.example" \
+  --data-urlencode "password=smoke-owner-password-1" \
+  http://localhost:3000/claim || true)"
+if [ "$claim_post" != "200" ]; then
+  echo "FAIL: the claim submit chain ended '$claim_post', wanted 200 after the redirect"
   compose logs --no-color web | tail -40
   exit 1
 fi
-if ! grep -qi 'topos' /tmp/smoke-doc.html; then
-  echo "FAIL: the rendered document does not look like the landing page"
+echo "PASS: the claim consumed and the owner is signed in."
+
+# A consumed code is DEAD: the same link now answers the uniform miss.
+dead="$(curl -s -o /dev/null -w '%{http_code}' -H 'Accept: text/html' \
+  "http://localhost:3000/claim?code=${TOPOS_SETUP_CODE}" || true)"
+[ "$dead" = "404" ] || { echo "FAIL: a consumed claim code still answers '$dead'"; exit 1; }
+echo "PASS: the consumed code is dead (uniform miss)."
+
+# ── the signed-in surface reads CUSTODY STATE across the schema boundary ─────────────────────────────
+# The dashboard's catalog join reads the vault's plane tables read-only — this is the
+# cross-lane SELECT grant (and the vault's own migration lineage) proven through the real
+# stack. Retried for the same fresh-volume race as the first render.
+echo "== loading the signed-in workspace surface (cross-schema custody reads) =="
+dash=""
+for _ in $(seq 1 15); do
+  dash="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIES" -L -H 'Accept: text/html' \
+    http://localhost:3000/workspaces || true)"
+  [ "$dash" = "200" ] && break
+  sleep 2
+done
+if [ "$dash" != "200" ]; then
+  echo "FAIL: the signed-in workspace surface answered '$dash'"
+  compose logs --no-color web | tail -60
   exit 1
 fi
-echo "PASS: a browser document renders (web-schema boot migration ran)."
+echo "PASS: the signed-in surface renders over cross-schema reads."
 
-# The ORIGIN ROOT serves the same card: the token-less CLI doors (`follow <bare-ws>`, `auth login`,
-# the un-enrolled standup publish) card-fetch the bare origin before re-rooting onto /api.
-echo "== probing the card at the origin root (the doors' own dial point) =="
-root_card="$(curl -s -H 'Accept: application/json' http://localhost:3000/ || true)"
-if [ "$root_card" != "$card" ]; then
-  echo "FAIL: the origin root's card differs from the deep path's card"
-  echo "root: $root_card"
-  exit 1
-fi
-echo "PASS: the origin root answers the byte-identical card."
-
-# The claim resource is mounted under the API base too — `{api_base}/i/<token>` — tier parity with
-# the vault, whose API base IS its root. An unknown token must answer the vault's own 404 THROUGH
-# the app (proving the mount forwards), never a 200 card.
-echo "== probing the API-base claim mount (/api/i/<unknown> must forward to the vault's 404) =="
-claim_code="$(curl -s -o /dev/null -w '%{http_code}' -H 'Accept: application/json' http://localhost:3000/api/i/smoke-unknown-token || true)"
-if [ "$claim_code" != "404" ]; then
-  echo "FAIL: expected the vault's 404 through /api/i/<unknown>, got '$claim_code'"
-  exit 1
-fi
-echo "PASS: the API-base claim mount forwards to the vault."
-
-# ── (e) first-boot secret hardening (mode 0600, owner uid 10001), via the internal-only plane ────────
-# The 404 above proved first boot completed, so the enrollment secret exists — now assert the stated
-# custody posture instead of trusting the docs. `compose exec` reaches the plane even with no host port.
-# GNU-stat syntax: fine on the debian-slim runtime; revisit if the base image ever changes family.
-echo "== verifying the plane's first-boot secret hardening (mode 0600, owner uid 10001) =="
-keys="$(compose exec -T plane stat -c '%a %u %n' /data/enroll.key)"
-echo "$keys"
-printf '%s' "$keys" | grep -q '^600 10001 /data/enroll.key$' || { echo "FAIL: enroll.key is not 0600 uid 10001"; exit 1; }
-echo "PASS: enrollment secret is 0600, owned by the unprivileged user."
-
-echo "== ALL CHECKS PASSED =="
+echo "== compose smoke: ALL GREEN =="

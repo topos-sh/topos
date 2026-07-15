@@ -17,7 +17,7 @@ use topos_types::requests::{
     WireChannelEntry, WireChannelIndex, WireMe, WireProposalIndex, WireReach, WireSkillIndex,
     WireSkillIndexEntry, WireSkillLog,
 };
-use topos_types::{CurrencyKind, Generation, HarnessId, TriggerReport, TriggerState};
+use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
 use crate::ctx::Ctx;
 use crate::enroll::{self, FollowEntry, FollowModeDoc};
@@ -146,7 +146,7 @@ impl Rig {
             }],
         )
         .unwrap();
-        enroll::write_credential(&self.fs, &self.layout(), WS, "wsc").unwrap();
+        enroll::write_credentials(&self.fs, &self.layout(), "wsc", "dev_1").unwrap();
         (data.skill_id, dir)
     }
 
@@ -158,14 +158,11 @@ impl Rig {
             &enroll::Instance {
                 schema_version: 1,
                 base_url: API.to_owned(),
-                deployment_mode: topos_types::bootstrap::DeploymentMode::Cloud,
-                enrollment_method: "device_code".to_owned(),
             },
         )
         .unwrap();
         let mut user = enroll::UserDoc {
             schema_version: 1,
-            email: None,
             principal: Some("alice@acme.com".to_owned()),
             workspaces: Vec::new(),
         };
@@ -173,16 +170,13 @@ impl Rig {
             &mut user,
             enroll::Membership {
                 workspace_id: WS.to_owned(),
-                display_name: Some("Acme".to_owned()),
-                roles: Vec::new(),
-                verified_domain: None,
-                verified_domain_status: topos_types::bootstrap::VerifiedDomainStatus::Unverified,
-                invite_rooted: false,
+                name: "acme".to_owned(),
+                display_name: "Acme".to_owned(),
                 enrolled_at: 1,
             },
         );
         enroll::write_user(&self.fs, &self.layout(), &user).unwrap();
-        enroll::write_credential(&self.fs, &self.layout(), WS, "wsc").unwrap();
+        enroll::write_credentials(&self.fs, &self.layout(), "wsc", "dev_1").unwrap();
     }
 
     fn read_follows(&self) -> Vec<FollowEntry> {
@@ -413,7 +407,7 @@ impl DirectorySource for FakeDir {
                 status: "active".into(),
                 version_id: "a".repeat(64),
                 bundle_digest: "b".repeat(64),
-                generation: Generation { epoch: 1, seq: 1 },
+                generation: 1,
                 display_name: None,
                 updated_at: 0,
                 open_proposals: 0,
@@ -579,7 +573,7 @@ fn delivered(id: &str, name: &str, version: [u8; 32], via: &[&str]) -> DeliveryS
         name: name.to_owned(),
         review_required: false,
         version_id: version,
-        generation: Generation { epoch: 0, seq: 0 },
+        generation: 0,
         bundle_digest: [0u8; 32],
         via_channels: via.iter().map(|c| (*c).to_owned()).collect(),
         via_direct: true,

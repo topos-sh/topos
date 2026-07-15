@@ -1,208 +1,146 @@
-//! [`router`] — the ONE composed surface. `router(state)` is the entire HTTP plane a downstream cloud mounts
-//! verbatim (its own middleware sits in front; there is no extension hook here). The workspace-credential
-//! writes and reads (one Bearer credential per enrolled device), the unauthenticated invite bootstrap, the
-//! enrollment flow, and the governance
-//! mutations (axum 0.8 `{param}` syntax), all under the rate-limit middleware, with the body-size belts.
+//! [`router`] — the ONE composed surface: `/healthz` + the bearer-gated `/internal/v1` custody
+//! lane. Anything else answers the uniform JSON 404 (the vault is internal-network-only with one
+//! caller; there is no public face to decorate).
 
-use axum::Router;
-use axum::extract::{DefaultBodyLimit, MatchedPath, Request};
+use axum::extract::{DefaultBodyLimit, MatchedPath, Request, State};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
-use axum::response::Response;
-use axum::routing::{get, post, put};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{delete, get, post};
+use axum::{Json, Router};
 use tracing::Instrument as _;
 
-use crate::rate_limit;
 use crate::routes;
 use crate::state::PlaneState;
 
-/// ~160 MiB: the authority's ~100 MiB per-blob reject cap, ×4/3 for base64, plus headroom for a multi-file
-/// candidate's JSON framing. The authority still enforces the real per-blob cap (typed, at ingest); this is
-/// only the transport belt that rejects an absurd body before it is buffered into memory.
+/// ~160 MiB: the authority's ~100 MiB per-blob reject cap, ×4/3 for base64, plus headroom for a
+/// multi-file candidate's JSON framing. The authority still enforces the real per-blob cap (typed,
+/// at ingest); this is only the transport belt that rejects an absurd body before it is buffered.
 const WRITE_BODY_LIMIT: usize = 160 * 1024 * 1024;
 
-/// ~64 KiB: the enrollment + governance bodies are tiny (ids, an email list, a base64url key) — a small belt
-/// rejects an absurd body for these non-candidate routes (the 160 MiB limit is only the byte-bearing writes).
-const ENROLL_BODY_LIMIT: usize = 64 * 1024;
+/// ~64 KiB: every non-candidate body (pointer moves, reverts, purges) is tiny.
+const SMALL_BODY_LIMIT: usize = 64 * 1024;
 
-/// Build the composed plane router. ONE argument — the limiter lives inside [`PlaneState`].
+/// Build the composed vault router.
 pub fn router(state: PlaneState) -> Router {
-    // The device-credential write routes carry a (large) JSON candidate body; the read routes carry none.
-    let writes = Router::new()
-        .route("/v1/publish", post(routes::publish::publish))
-        .route("/v1/proposals", post(routes::proposals::propose))
-        .route("/v1/reverts", post(routes::reverts::revert))
-        .route("/v1/reviews", post(routes::reviews::review))
+    // The byte-bearing ingest routes take the large belt; everything else the small one.
+    let ingest = Router::new()
+        .route(
+            "/internal/v1/workspaces/{ws}/bundles/{bundle}/versions",
+            post(routes::internal::commit_version),
+        )
+        .route(
+            "/internal/v1/workspaces/{ws}/bundles/{bundle}/publish",
+            post(routes::internal::publish),
+        )
         .layer(DefaultBodyLimit::max(WRITE_BODY_LIMIT));
 
-    let reads = Router::new()
+    let ops = Router::new()
         .route(
-            "/v1/workspaces/{ws}/skills/{skill}/current",
-            get(routes::current::get_current),
-        )
-        // The device-credential workspace CATALOG read (metadata only; catalog visibility == membership).
-        .route(
-            "/v1/workspaces/{ws}/skills",
-            get(routes::skills_index::list_skills),
+            "/internal/v1/workspaces/{ws}/bundles/{bundle}/pointer",
+            post(routes::internal::move_pointer),
         )
         .route(
-            "/v1/workspaces/{ws}/skills/{skill}/bundles/{object_id}",
-            get(routes::bundles::get_bundle),
+            "/internal/v1/workspaces/{ws}/bundles/{bundle}/revert",
+            post(routes::internal::revert),
         )
         .route(
-            "/v1/workspaces/{ws}/skills/{skill}/versions/{version_id}",
-            get(routes::versions::get_version),
+            "/internal/v1/workspaces/{ws}/bundles/{bundle}/current",
+            get(routes::internal::read_current),
         )
         .route(
-            "/v1/workspaces/{ws}/skills/{skill}/proposals",
-            get(routes::proposals::list_proposals),
-        )
-        // The two BYTE-DECORATED describe reads the vault keeps serving after the door cutover:
-        // the review inbox and the skill log both read git commit messages (byte custody), which
-        // the composing app deliberately does not hold. Every OTHER member-lane row op moved to
-        // the app (the guarded `topos_*` SQL functions under its scoped role are the one
-        // implementation; the contract stubs in `routes::door` keep the wire pinned here).
-        .route(
-            "/v1/workspaces/{ws}/proposals",
-            get(routes::describe::get_proposals),
+            "/internal/v1/workspaces/{ws}/bundles/{bundle}/versions/{version_id}",
+            get(routes::internal::read_version),
         )
         .route(
-            "/v1/workspaces/{ws}/skills/{skill}/log",
-            get(routes::describe::get_log),
-        );
+            "/internal/v1/workspaces/{ws}/bundles/{bundle}/versions/{version_id}/purge",
+            post(routes::internal::purge_version),
+        )
+        .route(
+            "/internal/v1/workspaces/{ws}/bundles/{bundle}/objects/{object_id}",
+            get(routes::internal::read_object),
+        )
+        .route(
+            "/internal/v1/workspaces/{ws}/bundles/{bundle}/log",
+            get(routes::internal::read_log),
+        )
+        .route(
+            "/internal/v1/workspaces/{ws}/bundles/{bundle}",
+            delete(routes::internal::delete_bundle),
+        )
+        .route(
+            "/internal/v1/workspaces/{ws}",
+            delete(routes::internal::delete_workspace),
+        )
+        .layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT));
 
-    // The unauthenticated claim bootstrap — a GET, no body, no body-size belt.
-    let public = Router::new().route("/i/{token}", get(routes::bootstrap::read_bootstrap));
-
-    // Enrollment + governance: small JSON bodies behind the 64 KiB belt. The `/v1/workspaces/{ws}/devices`
-    // and `/v1/workspaces/{ws}/roster/{email}` paths method-dispatch (redeem vs revoke; set vs remove).
-    let enroll_and_governance =
-        enroll_and_governance_routes().layer(DefaultBodyLimit::max(ENROLL_BODY_LIMIT));
-
-    // The INTERNAL session lane (`/internal/v1/*`): HTTP over the lib-only session wrappers for a downstream
-    // session-authenticated composing surface. Small JSON bodies behind the same 64 KiB belt; the whole lane
-    // is 404-invisible until an internal token is configured (`with_internal_token`).
-    let internal = internal_session_routes().layer(DefaultBodyLimit::max(ENROLL_BODY_LIMIT));
-
-    writes
-        .merge(reads)
-        .merge(public)
-        .merge(enroll_and_governance)
-        .merge(internal)
-        // Any UNMATCHED path is the constant protocol card (a GET) or the uniform JSON 404 (any other
-        // method) — a resource address a client can re-root from, with no path echo and no existence signal.
-        .fallback(routes::card::protocol_card)
+    // The ONE bearer gate in front of the whole internal lane: unconfigured ⇒ the uniform 404
+    // (the lane is invisible until armed), wrong/missing ⇒ an honest 401 (the caller is the app,
+    // debugging its own shared secret — no oracle discipline applies on an internal lane).
+    let internal = ingest
+        .merge(ops)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            rate_limit::enforce,
-        ))
-        // Outermost (the last layer added), so the rate limiter's 429s are recorded too.
+            internal_bearer_gate,
+        ));
+
+    Router::new()
+        .route("/healthz", get(healthz))
+        .merge(internal)
+        .fallback(uniform_not_found)
+        // Outermost (the last layer added), so every response is traced.
         .layer(axum::middleware::from_fn(trace_requests))
         .with_state(state)
 }
 
-/// The INTERNAL session-lane route group — HTTP over the lib-only session wrappers for a downstream
-/// session-authenticated composing surface. Every route is gated by the ONE internal bearer token (the whole
-/// lane is 404-invisible until [`PlaneState::with_internal_token`](crate::PlaneState::with_internal_token) is
-/// called) and reads the acting principal from the `x-topos-acting-email` header; the wrappers' own
-/// in-transaction gates re-verify the roster rows. Factored out so the body-size belt wraps the group in one
-/// place. These handlers carry NO `#[utoipa::path]` — the lane is composition-internal, out of the committed
-/// OpenAPI.
-fn internal_session_routes() -> Router<PlaneState> {
-    Router::new()
-        // Reads (member-scoped; `no-store`).
-        .route(
-            "/internal/v1/workspaces/{ws}/skills/{skill}/current",
-            get(routes::internal::read_current),
-        )
-        .route(
-            "/internal/v1/workspaces/{ws}/skills/{skill}/versions/{version_id}",
-            get(routes::internal::read_version),
-        )
-        .route(
-            "/internal/v1/workspaces/{ws}/skills/{skill}/bundles/{object_id}",
-            get(routes::internal::read_object),
-        )
-        .route(
-            "/internal/v1/workspaces/{ws}/skills/{skill}/proposals",
-            get(routes::internal::list_proposals),
-        )
-        .route(
-            "/internal/v1/workspaces/{ws}/skills/{skill}/proposals/{version_id}",
-            get(routes::internal::read_proposal),
-        )
-        // Genesis / session-approval writes.
-        .route(
-            "/internal/v1/workspaces",
-            post(routes::internal::create_workspace),
-        )
-        .route(
-            "/internal/v1/device-sessions/{user_code}/approve",
-            post(routes::internal::approve_session),
-        )
-        .route(
-            "/internal/v1/device-sessions/{user_code}/approve-standup",
-            post(routes::internal::approve_standup),
-        )
-        // Roster / policy / review writes.
-        .route(
-            "/internal/v1/workspaces/{ws}/roster/remove",
-            post(routes::internal::remove_member),
-        )
-        .route(
-            "/internal/v1/workspaces/{ws}/skills/{skill}/proposals/{version_id}/approve",
-            post(routes::internal::approve_proposal),
-        )
-        .route(
-            "/internal/v1/workspaces/{ws}/skills/{skill}/proposals/{version_id}/reject",
-            post(routes::internal::reject_proposal),
-        )
-        .route(
-            "/internal/v1/workspaces/{ws}/skills/{skill}/reverts",
-            post(routes::internal::revert),
-        )
-        // The skill-lifecycle ceremonies (owner acts) — keyed on the IMMUTABLE skill id, never the
-        // mutable catalog name (the composing surface resolves name→id in its own loader, so a
-        // concurrent rename is a harmless miss).
-        .route(
-            "/internal/v1/workspaces/{ws}/skills/{skill}/archive",
-            post(routes::internal::archive_skill),
-        )
-        .route(
-            "/internal/v1/workspaces/{ws}/skills/{skill}/unarchive",
-            post(routes::internal::unarchive_skill),
-        )
-        .route(
-            "/internal/v1/workspaces/{ws}/skills/{skill}/delete",
-            post(routes::internal::delete_skill),
-        )
-        .route(
-            "/internal/v1/workspaces/{ws}/skills/{skill}/purge",
-            post(routes::internal::purge_version),
-        )
-        .route(
-            "/internal/v1/workspaces/{ws}/skills/{skill}/rename",
-            post(routes::internal::rename_skill),
-        )
-        // The PRE-IDENTITY passcode mint: returns the code ONCE to the composing surface, whose mail seam
-        // delivers it (bearer-gated only — no acting principal exists before the passcode proves one).
-        .route(
-            "/internal/v1/enroll/passcode",
-            post(routes::internal::mint_passcode),
-        )
+/// The liveness probe — unauthenticated, constant, no state touched.
+async fn healthz() -> &'static str {
+    "ok"
 }
 
-/// Request-level tracing, wired into [`router`] so every composition gets it (no new dependency): ONE
-/// `request` span per request carrying the method + the matched ROUTE TEMPLATE, and one completion `info`
-/// event recording the status + latency. Handlers — and the error mapper's `tracing::error!` authority-fault
-/// chains ([`crate::wire::error`]) — run inside the span, so a 500's server-side diagnostics correlate with
-/// exactly one request line in the JSON logs.
+/// The uniform JSON 404 every unmatched path answers (no path echo, no existence signal).
+async fn uniform_not_found() -> Response {
+    routes::internal::LaneError::not_found().into_response()
+}
+
+/// The internal-lane bearer gate (see [`router`]).
+async fn internal_bearer_gate(
+    State(state): State<PlaneState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if !state.internal_token_configured() {
+        return routes::internal::LaneError::not_found().into_response();
+    }
+    match bearer_token(req.headers()) {
+        Some(token) if state.internal_token_matches(&token) => next.run(req).await,
+        _ => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "code": "UNAUTHORIZED" })),
+        )
+            .into_response(),
+    }
+}
+
+/// Extract `Authorization: Bearer <token>` (case-insensitive scheme; `None` on anything else).
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = token.trim();
+    (!token.is_empty()).then(|| token.to_owned())
+}
+
+/// Request-level tracing: ONE `request` span per request carrying the method + the matched ROUTE
+/// TEMPLATE, and one completion `info` event recording the status + latency. Handlers — and the
+/// error mapper's `tracing::error!` fault chains — run inside the span, so a 500's server-side
+/// diagnostics correlate with exactly one request line in the JSON logs.
 ///
-/// The span records the route TEMPLATE, never the raw path: a raw path carries
-/// the invite token on `/i/{token}`, and a credential
-/// never reaches the logs (the same posture as storing only credential sha256s; the workspace
-/// credential itself rides the Authorization header, which is never logged). A request that matched no
-/// route has no template and logs the constant `(unmatched)` — same reasoning: a mistyped
-/// token-bearing URL must not land in the logs either.
+/// The span records the route TEMPLATE, never the raw path (the bearer rides only the never-logged
+/// Authorization header, but templates keep the logs free of any caller-composed string). A request
+/// that matched no route logs the constant `(unmatched)`.
 async fn trace_requests(req: Request, next: Next) -> Response {
     let method = req.method().clone();
     let route = req
@@ -217,55 +155,4 @@ async fn trace_requests(req: Request, next: Next) -> Response {
     let status = response.status().as_u16();
     span.in_scope(|| tracing::info!(status, latency_ms, "request served"));
     response
-}
-
-/// The enrollment + governance route group (sharing the 64 KiB belt). Factored out so the feature-gated OIDC
-/// routes fold in cleanly under `#[cfg(feature = "enroll-oidc")]`.
-fn enroll_and_governance_routes() -> Router<PlaneState> {
-    let router = Router::new()
-        // Enrollment (grant/passcode-auth; the redeem presents the grant + device key, no signature).
-        .route(
-            "/v1/device/authorize",
-            post(routes::enroll::start_device_auth),
-        )
-        .route("/v1/device/token", post(routes::enroll::poll_device_auth))
-        .route(
-            "/v1/enroll/verify/{user_code}",
-            get(routes::enroll::read_verification_context),
-        )
-        // The passcode START (`POST /v1/enroll/passcode`) is served by the composing surface since the mail
-        // unification — it mints through the internal lane and mails through its own seam; only the confirm
-        // stays here (`routes::door::start_passcode` pins the start's public wire).
-        .route(
-            "/v1/enroll/passcode/confirm",
-            post(routes::enroll::complete_passcode),
-        )
-        .route("/v1/admin-claim", post(routes::enroll::admin_claim))
-        // The LOGIN redeem (a login-intent grant → one credential per confirmed seat); grant-in-body, no
-        // Authorization header, like the redeem.
-        .route("/v1/login", post(routes::login::login))
-        // `/v1/workspaces/{ws}/devices`: POST redeems (enrollment), DELETE revokes (governance).
-        .route(
-            "/v1/workspaces/{ws}/devices",
-            post(routes::enroll::redeem).delete(routes::governance::revoke_device),
-        )
-        // Governance (device-credential authenticated; owner/admin).
-        // `/v1/workspaces/{ws}/roster/{email}`: PUT sets a role, DELETE removes the principal.
-        .route(
-            "/v1/workspaces/{ws}/roster/{email}",
-            put(routes::governance::roster_set).delete(routes::governance::roster_remove),
-        )
-        // The SELF-HOST operator policy toggle (admin bearer token; 404-invisible when unconfigured).
-        .route(
-            "/v1/workspaces/{ws}/policy/review-required",
-            put(routes::policy::set_review_required),
-        );
-
-    // The OIDC connector routes — only present under the default-off feature.
-    #[cfg(feature = "enroll-oidc")]
-    let router = router
-        .route("/v1/enroll/oidc/start", post(routes::oidc::start))
-        .route("/v1/enroll/oidc/callback", post(routes::oidc::callback));
-
-    router
 }

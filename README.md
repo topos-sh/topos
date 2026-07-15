@@ -27,13 +27,16 @@ curl -fsSL https://topos.sh/install.sh | sh
 
 ```sh
 topos add ~/.claude/skills/pr-describe   # adopt it (offline; no account)
-topos publish pr-describe                # sign in when prompted; prints your workspace address
+topos follow https://topos.sh/acme       # enroll this device in your workspace; approve in the browser
+topos publish pr-describe                # move `current` to your draft; prints the share line
 ```
 
-The first publish stands up your workspace on the hosted plane (sign in when prompted) and prints its
-**address** (`https://topos.sh/<name>`) — the share line teammates paste to follow. To pin the exact bytes
-being shipped, add a `@<digest>` suffix (`topos publish pr-describe@<digest>`, where `topos list --json`
-prints each digest) — the publish then refuses on any mismatch.
+Create your workspace in the browser (at [topos.sh](https://topos.sh), or self-host — see below), then
+`topos follow <address>` enrolls this device (approve in the browser; it completes on its own). `publish`
+needs an enrolled device — un-enrolled, it refuses and tells you to `follow` your workspace address first.
+Each publish prints the workspace **address** (`https://topos.sh/<name>`) teammates paste to follow. To pin
+the exact bytes being shipped, add a `@<digest>` suffix (`topos publish pr-describe@<digest>`, where
+`topos list --json` prints each digest) — the publish then refuses on any mismatch.
 
 **Follow your team's skills** — from a teammate's machine:
 
@@ -200,18 +203,18 @@ A behavior you follow is code and prose that runs inside your agent, so integrit
 point of the tool. A bundle's identity is a **byte-exact sha256** over every file (different bytes are never
 "the same"); a version you pin **is** that hash, so what you pin is exactly what you get; and **nothing lands
 that was not disclosed and pinned**. Trust sits at the level a team already extends to its git host and CI:
-every request is an authenticated principal, every mutation of shared state is attributed and audit-logged,
-and access is database policy — a revocation takes effect immediately. Assurance is **visibility** — a fleet
+every request is authenticated (a signed-in person or an enrolled device), every mutation of shared state is
+attributed and audit-logged, and access is database policy — a revocation takes effect immediately. Assurance is **visibility** — a fleet
 dashboard and one-command revert — rather than client-side cryptography (there is no pointer signing or key
 pinning; optional signing can layer on later without a redesign). What Topos does *not* do is judge whether
 an approved behavior is safe to run — it guarantees disclosure and integrity, not a sandbox or a second
 permission system.
 
 The design behind this — trust boundaries, the consent + sync model — is in
-[`ARCHITECTURE.md`](ARCHITECTURE.md); to run a plane safely, see [Self-hosting](#self-hosting-the-plane). To
+[`ARCHITECTURE.md`](ARCHITECTURE.md); to run it safely, see [Self-hosting](#self-hosting). To
 report a vulnerability, see [`SECURITY.md`](SECURITY.md).
 
-## Self-hosting the plane
+## Self-hosting
 
 The bundled compose file runs the WHOLE product — the web app (the one public surface), the vault (the
 Rust plane, internal-network only, no published port), and Postgres:
@@ -221,58 +224,89 @@ docker compose up --build     # the app on http://localhost:3000; the vault stay
 ```
 
 The app serves everything a team touches: sign-in and the dashboard, the review UI, the admin surfaces,
-the shareable workspace addresses, and the device API itself (`/api/v1/…` — agents and the `topos` CLI
-dial the app, which serves the directory row ops under a scoped database role and forwards byte,
-enrollment, and governance ops to the vault). Nothing else needs to be reachable from outside.
+the shareable workspace addresses, and the device API itself (`/api/v1/…` — agents and the `topos` CLI dial
+the app). The app owns identity and the whole directory in its own database schema; only the byte and
+pointer operations of a publish forward to the vault over an internal network lane. Nothing else needs to
+be reachable from outside.
 
-### Stand up the first workspace
+### First run: claim the workspace
 
-A brand-new deployment has no workspace yet. Open `http://localhost:3000` in a browser and claim it
-(the first-run ownership claim), or mint the first identity in-band:
+The first boot mints your workspace and prints **one** setup link to the app logs:
 
-```sh
-docker compose exec plane topos-plane mint-claim --workspace w_acme --display-name "Acme"
+```
+→ Finish setup: http://localhost:3000/claim?code=…
 ```
 
-This prints a one-time `/i/` claim link (a bearer owner capability — store it like a secret). A single
-`topos follow <claim-link>` stands the workspace up and seats that device as its first owner, who can then
-`publish` and invite teammates (`topos invite <emails…>` seats them; they join by the workspace address —
-following an address opens the app's sign-in + device-approval pages, email+password by default, no SMTP
-needed).
+Open it in a browser and create the first account (email + password) — that seats you as the workspace
+**owner**. (In CI or an automated deploy, preset the code with `TOPOS_SETUP_CODE` to skip reading the logs;
+`TOPOS_SETUP_LINK_FILE` also mirrors the line to a file.) The link dies on first use, and the code is only
+ever stored as its hash.
+
+From there you `publish` (after `topos follow <your-address>` enrolls a device) and grow the team:
+
+- **Invite teammates** once SMTP is armed (see below): `topos invite <emails…>`, or the roster page. Each
+  person signs up through the invite mail, then runs `topos follow <workspace-address>` and approves the new
+  device at `<origin>/verify` (behind their password). Approval mints that device's one credential; updates
+  then land at session start.
+- **No SMTP?** Registration stays closed by design — the claim owner is the only account. Flip
+  `registration = 'open'` on the workspace policy page to let anyone with the address sign up (off by
+  default), or arm SMTP to invite.
 
 ### Configuration
 
 `docker compose up` works out of the box for a local try-out. For a real (non-localhost) deployment, set:
 
-- `TOPOS_PUBLIC_URL` — the public `https://…` origin (behind your reverse proxy). The workspace
-  addresses, the sign-in/verification pages, and the API base the protocol card teaches clients all ride
-  it.
-- `TOPOS_WEB_AUTH_SECRET` and `TOPOS_INTERNAL_TOKEN` — the app's session secret and the app↔vault
-  internal bearer. The compose file ships loud `change-me` defaults; replace both.
-- `TOPOS_PLANE_DB_PASSWORD` / `TOPOS_WEB_DB_PASSWORD` — the two database roles' passwords (the plane
-  owns the schema; the web role holds column-grain grants and writes policy rows only through the
-  guarded SQL functions).
-- `TOPOS_PLANE_ADMIN_TOKEN` *(optional)* — enables the review-required gate's operator route.
-- `TOPOS_MAIL_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` / `_FROM` *(optional)* — bring your own SMTP relay
-  to turn the app's outbound mail on (set all five): invite notices really send, and emailed-passcode
-  enrollment becomes available (advertise it with `TOPOS_PLANE_ENROLLMENT_METHOD=passcode`). Unset, mail
-  is off and everything still works — invites share the workspace address, enrollment approves in the app.
+- `TOPOS_PUBLIC_URL` — the public `https://…` origin (behind your reverse proxy). The workspace addresses,
+  the sign-in/verification pages, the printed setup link, and the API base the protocol card teaches clients
+  all ride it.
+- `TOPOS_WEB_AUTH_SECRET` and `TOPOS_INTERNAL_TOKEN` — the app's session-signing secret (≥ 32 chars) and
+  the app↔vault internal bearer. The compose file ships loud `change-me` defaults; replace both.
+- `TOPOS_PLANE_DB_PASSWORD` / `TOPOS_WEB_DB_PASSWORD` — the two database roles' passwords. There is one role
+  per application, each owning its own schema: the vault owns `plane` (byte custody), the app owns `web`
+  (identity + the directory) and reads `plane` read-only.
+- `TOPOS_WORKSPACE_NAME` — the first workspace's address slug (renameable later in the product; defaults to
+  `team`). `TOPOS_SETUP_CODE` presets the claim code for CI/IaC; `TOPOS_SETUP_LINK_FILE` mirrors the printed
+  setup line to a file.
+- `TOPOS_MAIL_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` / `_FROM` *(optional)* — bring your own SMTP relay,
+  all five or none. Armed, outbound mail turns on: invites really send (and the invited sign-up verifies
+  through the mailbox before its seat binds), and password-reset mail works. Unset, mail is off and the core
+  loop still works — sign-in, publishing, and the claim ceremony need no mail. A mail-less solo owner who
+  forgets their password runs the one-shot `web/scripts/mint-recovery-code.mjs` in the container to print a
+  recovery code.
 
 The bundled `docker-compose.yml` is an annotated starting point (common vars with defaults; optional
-features commented out). For the vault's full reference run `topos-plane --help`; the app's variables
-are documented in [`web/CLAUDE.md`](web/CLAUDE.md).
+features commented out). For the vault's full reference run `topos-plane --help`; the app's variables are
+documented in [`web/CLAUDE.md`](web/CLAUDE.md).
 
 Client-side: `TOPOS_DEBUG=1` prints each error's full source chain to stderr (the chain always lands in
 `~/.topos/log.jsonl`); `TOPOS_HOME` overrides the `~/.topos` root.
 
+### Backups
+
+Two volumes hold all durable state, and the **database is the source of truth for everything except bytes**:
+
+- **The Postgres volume** carries identity, the directory, policy, proposals, receipts, and audit — back it
+  up with `pg_dump` (or a volume snapshot). This is the one to guard.
+- **The vault's `plane-data` volume** is only the git object store and the large-object store — the
+  content-addressed bytes of every version. Snapshot it too, ideally **before** the database so no pointer
+  can name a byte the snapshot missed.
+
+Nothing else lives on disk — there are no secret files to back up beside the volumes.
+
+### Bring your own Postgres
+
+To point at a managed/external database instead of the bundled `db`, first create the two roles, the two
+schemas, the search paths, and the cross-lane grants — `scripts/compose-init-db.sh` is the exact recipe,
+runnable once against your server. Then set each service's `DATABASE_URL` (the vault connects as
+`topos_plane`, the app as `topos_web`) and start with `--no-deps` so the bundled `db` stays down. A
+networked Postgres should append `?sslmode=require`. Each application migrates its own schema on startup.
+
 ### TLS
 
 The app serves plain HTTP and is designed to sit behind a TLS-terminating reverse proxy (Caddy, nginx,
-Traefik, or your platform's load balancer). Point the proxy at `http://web:3000` (the app is the only
-public service), set `TOPOS_PUBLIC_URL` to your public `https://…` origin, and let the proxy own
-certificates. The vault never needs a public route. (The vault's optional, default-off built-in ACME
-listener still exists but is experimental and now redundant in the composed stack — the reverse proxy is
-the supported path.)
+Traefik, or your platform's load balancer). Point the proxy at `http://web:3000` (the app is the only public
+service), set `TOPOS_PUBLIC_URL` to your public `https://…` origin, and let the proxy own certificates. The
+vault never needs a public route.
 
 ## Build & contribute
 
@@ -296,8 +330,8 @@ The web app is a separate TypeScript workspace under [`web/`](web/) (React Route
 
 ```sh
 cd web && bun install
-bun run check      # biome + typecheck + the boundary/token/contract gates
-bun test           # vitest (needs a Postgres; see web/CLAUDE.md)
+bun run check      # biome + typecheck + the boundary/email/token/contract gates
+bun run test       # vitest (needs a Postgres; see web/CLAUDE.md — not `bun test`, bun's own runner)
 bun run test:e2e   # playwright
 ```
 

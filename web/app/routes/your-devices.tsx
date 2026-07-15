@@ -1,15 +1,13 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Form, useActionData, useLoaderData, useNavigation } from "react-router";
 import { relativeTime } from "@/components/format";
-import { buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
+import { buttonClasses, Card, PageHeader } from "@/components/ui";
 import { actorFromSession, notFound, requireSession } from "@/lib/auth/guards.server";
-import type { AdminOutcome } from "@/lib/db/audit.server";
 import {
+  type AccountDevice,
   devicesFor,
-  recordSelfDeviceRevoke,
   type SignOutOutcome,
   signOutDevice,
-  type WorkspaceDevices,
 } from "@/lib/db/queries.devices.server";
 
 export function meta() {
@@ -17,23 +15,25 @@ export function meta() {
 }
 
 /**
- * The account-level device list — every device enrolled to the signed-in person across every
- * workspace they hold a confirmed seat in. An unverified session is not an actor (membership and
- * every device row key on a verified email), so it gets the house 404, never the page.
+ * The account-level device list — every device enrolled to the signed-in person, one flat list
+ * (a device is a possession of ONE user; there is no per-workspace grouping to render). The
+ * page needs only a session-minted UserActor: the read is self-scoped by construction.
  */
 export async function loader({ request }: LoaderFunctionArgs) {
   const actor = actorFromSession(await requireSession(request));
   if (!actor) {
     notFound();
   }
-  return { workspaces: await devicesFor(actor) };
+  return { devices: await devicesFor(actor) };
 }
 
 /**
- * Self sign-out — the GitHub-sessions "sign this device out" pattern. It is NOT step-up gated: the
- * destructive-ceremony gates protect OTHER people's access, and this is the person's own escape
- * hatch. The action still RE-GUARDS (session -> actor -> the DAL fn, itself re-gated by the
- * database's owner-or-self matrix) and records one admin_event whatever the outcome.
+ * Self sign-out — the GitHub-sessions "sign this device out" pattern. It is NOT step-up gated:
+ * the destructive-ceremony gates protect OTHER people's access, and this is the person's own
+ * escape hatch — self-only by construction (the DAL's WHERE clause matches only the actor's
+ * own device rows, so a foreign id answers the same as an unknown one). Final: the database
+ * trigger refuses any un-revoke; re-enrolling is the recovery. The audit row lands inside the
+ * DAL's own transaction.
  */
 export async function action({ request }: ActionFunctionArgs) {
   const actor = actorFromSession(await requireSession(request));
@@ -44,59 +44,53 @@ export async function action({ request }: ActionFunctionArgs) {
   if (String(formData.get("intent") ?? "") !== "sign-out") {
     return data({ status: "error" as const }, { status: 400 });
   }
-  const workspaceId = String(formData.get("workspace_id") ?? "");
-  const deviceKeyId = String(formData.get("device_key_id") ?? "");
-
+  const deviceId = String(formData.get("device_id") ?? "");
   let status: SignOutOutcome | "error";
-  let auditOutcome: AdminOutcome;
   try {
-    status = await signOutDevice(actor, workspaceId, deviceKeyId);
-    auditOutcome = status === "revoked" ? "ok" : "denied";
+    status = await signOutDevice(actor, deviceId);
   } catch {
     status = "error";
-    auditOutcome = "error";
   }
-  await recordSelfDeviceRevoke(actor, workspaceId, deviceKeyId, auditOutcome);
   return data({ status });
 }
 
 /** The human copy for each non-success sign-out outcome (a self sign-out normally just succeeds). */
 const SIGN_OUT_ERROR: Record<string, string> = {
   unknown_device: "That device is no longer enrolled — nothing to sign out.",
-  self_required: "You can only sign out your own devices.",
-  owner_or_self_required: "You can only sign out your own devices.",
-  member_required: "You are no longer a member of that workspace.",
   error: "The server could not sign that device out. Try again.",
 };
 
 export default function YourDevices() {
-  const { workspaces } = useLoaderData<typeof loader>();
+  const { devices } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const error =
     actionData && actionData.status !== "revoked" ? SIGN_OUT_ERROR[actionData.status] : undefined;
   return (
     <div className="space-y-8">
-      <PageHeader
-        title="Your devices"
-        meta="Devices enrolled to your account across every workspace you belong to."
-      />
+      <PageHeader title="Your devices" meta="Devices enrolled to your account." />
       {error !== undefined && (
         <p role="alert" className="text-red-700 text-sm">
           {error}
         </p>
       )}
-      {workspaces.length === 0 ? (
+      {devices.length === 0 ? (
         <NoDevices />
       ) : (
-        workspaces.map((ws) => <WorkspaceSection key={ws.workspaceId} group={ws} />)
+        <Card>
+          <ul className="divide-y divide-line-soft">
+            {devices.map((device) => (
+              <DeviceRow key={device.deviceId} device={device} />
+            ))}
+          </ul>
+        </Card>
       )}
     </div>
   );
 }
 
 /**
- * Signed in, but no device enrolled in any workspace the person belongs to (or no confirmed seat at
- * all). Honest and instructive: enrolling a device is the agent's `follow` move.
+ * Signed in, but no device enrolled yet. Honest and instructive: enrolling a device is the
+ * agent's `follow` move.
  */
 function NoDevices() {
   return (
@@ -115,80 +109,46 @@ function NoDevices() {
   );
 }
 
-/** One workspace's devices, headed by its display name and address. */
-function WorkspaceSection({ group }: { group: WorkspaceDevices }) {
-  return (
-    <section aria-labelledby={`devices-${group.workspaceId}`} className="space-y-3">
-      <SectionHeading>
-        <span id={`devices-${group.workspaceId}`}>
-          {group.displayName}{" "}
-          <span className="ml-1 font-mono text-faint normal-case">{group.address}</span>
-        </span>
-      </SectionHeading>
-      <Card>
-        <ul className="divide-y divide-line-soft">
-          {group.devices.map((device) => (
-            <DeviceRow
-              key={device.deviceKeyId}
-              workspaceId={group.workspaceId}
-              deviceKeyId={device.deviceKeyId}
-              revoked={device.revoked}
-              lastReportAtMs={device.lastReportAtMs}
-            />
-          ))}
-        </ul>
-      </Card>
-    </section>
-  );
-}
-
 /**
- * One device row. An active device carries its enrolled/last-report line and a "Sign out" button
- * (no step-up — signing out your own device is the escape hatch, not a destructive ceremony over
- * someone else's access). A signed-out device is greyed and carries the re-enroll hint instead.
+ * One device row. An active device carries its name, enrollment, and last-seen line plus a
+ * "Sign out" button (no step-up — signing out your own device is the escape hatch, not a
+ * destructive ceremony over someone else's access). A signed-out device is greyed and carries
+ * the re-enroll hint instead.
  */
-function DeviceRow({
-  workspaceId,
-  deviceKeyId,
-  revoked,
-  lastReportAtMs,
-}: {
-  workspaceId: string;
-  deviceKeyId: string;
-  revoked: boolean;
-  lastReportAtMs: number | null;
-}) {
+function DeviceRow({ device }: { device: AccountDevice }) {
   const navigation = useNavigation();
   const submittingThis =
     navigation.state !== "idle" &&
     navigation.formData?.get("intent") === "sign-out" &&
-    navigation.formData?.get("device_key_id") === deviceKeyId;
-  const reported =
-    lastReportAtMs === null
-      ? "never reported"
-      : `last reported ${relativeTime(new Date(lastReportAtMs))}`;
+    navigation.formData?.get("device_id") === device.deviceId;
+  const seen =
+    device.lastSeenAtMs === null
+      ? "never seen"
+      : `last seen ${relativeTime(new Date(device.lastSeenAtMs))}`;
   return (
     <li
       className={`flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3 ${
-        revoked ? "opacity-55" : ""
+        device.revoked ? "opacity-55" : ""
       }`}
     >
       <div className="min-w-0 space-y-1">
-        <code className="block break-all font-mono text-ink text-sm">{deviceKeyId}</code>
-        {revoked ? (
+        <p className="text-ink text-sm">{device.displayName}</p>
+        <code className="block break-all font-mono text-faint text-xs">{device.deviceId}</code>
+        {device.revoked ? (
           <p className="text-dim text-xs">
             signed out — re-enroll to use this device again:{" "}
             <code className="rounded bg-panel2 px-1.5 py-0.5 font-mono">topos auth login</code>
           </p>
         ) : (
-          <p className="text-faint text-xs">enrolled · {reported}</p>
+          <p className="text-faint text-xs">
+            enrolled {relativeTime(new Date(device.createdAtMs))} · {seen}
+          </p>
         )}
       </div>
-      {!revoked && (
+      {!device.revoked && (
         <Form method="post">
           <input type="hidden" name="intent" value="sign-out" />
-          <input type="hidden" name="workspace_id" value={workspaceId} />
-          <input type="hidden" name="device_key_id" value={deviceKeyId} />
+          <input type="hidden" name="device_id" value={device.deviceId} />
           <button type="submit" className={buttonClasses("danger")} disabled={submittingThis}>
             {submittingThis ? "Signing out…" : "Sign out"}
           </button>

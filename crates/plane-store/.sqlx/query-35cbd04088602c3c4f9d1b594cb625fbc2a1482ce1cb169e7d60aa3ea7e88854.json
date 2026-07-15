@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM upload WHERE workspace_id = $1 AND bundle_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "35cbd04088602c3c4f9d1b594cb625fbc2a1482ce1cb169e7d60aa3ea7e88854"
+}

@@ -7,15 +7,14 @@ import type { MailMessage } from "@/lib/mail/transport.server";
  * production every product mail lands here as one JSON line (`{at, kind, to, subject, text,
  * html?}`): the exact message production would hand the transport, so a human tester watches a
  * single file to see everything the app "sent". The per-flow credential files
- * (`.magic-links.jsonl`, `.passcode-emails.jsonl`, `.invite-emails.jsonl`) stand unchanged —
- * each flow's reader parses its OWN file; this one is the superset view, read by humans, never
- * parsed back into a flow.
+ * (`.magic-links.jsonl`, `.invite-emails.jsonl`) stand unchanged — each flow's reader parses
+ * its OWN file; this one is the superset view, read by humans, never parsed back into a flow.
  */
 
 export const DEV_OUTBOX_FILE = ".outbox.jsonl";
 
 /** Which product flow produced the mail — a display/filter tag, never branched on. */
-export type DevMailKind = "magic-link" | "passcode" | "invite";
+export type DevMailKind = "magic-link" | "invite" | "auth-verify" | "auth-reset";
 
 /** Append one full rendered mail to the accumulating dev outbox (non-production callers only). */
 export async function recordDevMail(kind: DevMailKind, message: MailMessage): Promise<void> {

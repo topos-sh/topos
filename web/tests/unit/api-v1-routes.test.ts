@@ -1,84 +1,88 @@
-import { Client } from "pg";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { action as channelsLoader } from "@/routes/api.v1.channel-membership";
+import { action as catchAllAction, loader as catchAllLoader } from "@/routes/api.v1.$";
+import {
+  action as channelMembershipAction,
+  loader as channelMembershipWrongMethod,
+} from "@/routes/api.v1.channel-membership";
 import { action as channelProtAction } from "@/routes/api.v1.channel-protection";
-import { loader as channelIndexLoader } from "@/routes/api.v1.channels";
+import { loader as channelsLoader, action as channelsWrongMethod } from "@/routes/api.v1.channels";
 import { action as curationAction } from "@/routes/api.v1.curation";
+import { loader as deliveryLoader, action as deliveryWrongMethod } from "@/routes/api.v1.delivery";
+import { action as deviceAuthorizeAction } from "@/routes/api.v1.device-authorize";
+import { action as deviceTokenAction } from "@/routes/api.v1.device-token";
 import { action as exclusionsAction } from "@/routes/api.v1.exclusions";
-import { action as followsAction } from "@/routes/api.v1.follows";
+import { action as followsAction, loader as followsWrongMethod } from "@/routes/api.v1.follows";
 import { action as invitationsAction } from "@/routes/api.v1.invitations";
 import { loader as meLoader, action as meWrongMethod } from "@/routes/api.v1.me";
 import { action as noticesAction } from "@/routes/api.v1.notices-ack";
-import { loader as reportWrongMethod } from "@/routes/api.v1.report";
+import { action as reportAction, loader as reportWrongMethod } from "@/routes/api.v1.report";
+import { loader as skillCurrentLoader } from "@/routes/api.v1.skill-current";
 import { action as skillProtAction } from "@/routes/api.v1.skill-protection";
 import { loader as reachLoader } from "@/routes/api.v1.skill-reach";
-import { applyPlaneDdl } from "../helpers/plane-ddl";
-import { installTestEnv } from "./helpers/test-env";
+import { loader as skillsIndexLoader } from "@/routes/api.v1.skills-index";
+import {
+  createScratchDb,
+  placeBundle,
+  type ScratchDb,
+  seatUser,
+  seedBundle,
+  seedChannel,
+  seedUser,
+} from "./helpers/scratch-db";
 
 /**
- * The device-lane member row-op routes, driven end to end against a REAL scratch Postgres stood up
- * from the in-repo authority migrations — AS the scoped `topos_web` role, so 0019's grants (the row
- * reads, the guarded `topos_*` EXECUTE, the column-grain DML) are exercised exactly as production
- * runs them. Migrations apply AS `topos_plane` (the owner) so the grant block fires; rows are seeded
- * by a superuser client (bypassing grants); the ROUTE loaders/actions are then invoked directly with
- * constructed Requests, proving the WIRE BYTES field-for-field.
+ * The SERVED device-lane routes end to end against a REAL scratch Postgres — no vault. The
+ * identities are minted through the REAL ceremonies (setup claim → seats → the gh-style device
+ * flow's approve → the promoted bearer credential), so `requireDeviceActor` resolves exactly as
+ * production does; the route loaders/actions are then invoked directly with constructed
+ * Requests, proving the WIRE BYTES field-for-field. The belt is off (`TOPOS_WEB_RATELIMIT=off`
+ * — the env default is "on"; api-belt.test.ts owns the belt itself).
  *
- * The two byte-decorated reads (`/proposals`, `/skills/{skill}/log`) are NOT here — they read git
- * commit author/message from the vault's byte custody and stay on the vault's splat forwarder.
+ * The publish family (publish/propose/reviews/reverts) and the byte-decorated reads
+ * (skill-log/object/version, the proposals lists) call the VAULT over HTTP and are not
+ * unit-testable without one — the e2e stack owns them. `skill-current`'s pointer read is ALSO
+ * an HTTP custody read (reads.server.ts `custodyCurrent`), so this suite runs a minimal
+ * in-process stub vault serving that ONE GET — enough to prove the route's WireCurrentRecord
+ * shape and its ETag/304 conditional arm.
  */
 
-const ROOT_URL =
-  process.env.TEST_DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/postgres";
-const SCRATCH = `web_devlane_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
-
-function urlFor(role: string, secret: string, db: string): string {
-  const u = new URL(ROOT_URL);
-  u.username = role;
-  u.password = secret;
-  u.pathname = `/${db}`;
-  return u.toString();
-}
-const scratchName = SCRATCH;
-// Passwords match the rest of the suite (`plane`/`web`) — the roles are cluster-global, so a
-// divergent convention here would clash with the Rust e2e / db-setup on a shared local Postgres.
-const planeUrl = () => urlFor("topos_plane", "plane", scratchName);
-const webUrl = () => urlFor("topos_web", "web", scratchName);
-const superScratchUrl = () => {
-  const u = new URL(ROOT_URL);
-  u.pathname = `/${scratchName}`;
-  return u.toString();
-};
-
-const WS = "w_dev";
+const SETUP_CODE = "devlane-setup-code-0000";
 const ORIGIN = "http://x";
-const NOW_ISO = "2026-07-01T00:00:00Z";
+const V_ALPHA = "a1".repeat(32);
+const V_BETA = "b1".repeat(32);
+const V_ARCH = "c1".repeat(32);
 
-// One long-lived superuser client on the scratch DB for seeding + out-of-band probes.
-let admin: Client;
+let db: ScratchDb;
+let wsId = "";
+let stub: Server;
+/** The stub vault's current-pointer answers, keyed `${ws}/${bundle}`. */
+const stubCurrent = new Map<string, { version_id: string; generation: number }>();
 
-async function rootExec(sql: string): Promise<void> {
-  const c = new Client({ connectionString: ROOT_URL });
-  await c.connect();
-  try {
-    await c.query(sql);
-  } finally {
-    await c.end();
-  }
-}
+const CREDS = {
+  owner: "",
+  rev: "",
+  mem: "",
+  stranger: "",
+  revoked: "",
+};
+let memDeviceId = "";
+let noticeId = "";
 
-// ── request driving ──────────────────────────────────────────────────────────────────────────────
+// ── request driving ──────────────────────────────────────────────────────────────────────────
 
 type RouteHandler = (a: {
   request: Request;
   params: Record<string, string | undefined>;
-}) => Promise<Response>;
+}) => Promise<Response> | Response;
 
 function req(
   method: string,
   path: string,
-  opts: { cred?: string; body?: unknown; rawBody?: string } = {},
+  opts: { cred?: string; body?: unknown; rawBody?: string; headers?: Record<string, string> } = {},
 ): Request {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { ...opts.headers };
   if (opts.cred !== undefined) {
     headers.authorization = `Bearer ${opts.cred}`;
   }
@@ -94,12 +98,12 @@ function req(
 }
 
 async function drive(
-  h: RouteHandler,
+  h: unknown,
   request: Request,
-  params: Record<string, string | undefined>,
+  params: Record<string, string | undefined> = {},
 ): Promise<Response> {
   try {
-    return await h({ request, params });
+    return await (h as RouteHandler)({ request, params });
   } catch (e) {
     if (e instanceof Response) {
       return e;
@@ -108,7 +112,7 @@ async function drive(
   }
 }
 
-// ── expected wire bodies ─────────────────────────────────────────────────────────────────────────
+// ── expected wire bodies ─────────────────────────────────────────────────────────────────────
 
 const NOT_FOUND_BODY = {
   schema_version: 1,
@@ -181,193 +185,187 @@ function deniedBody(command: string, code: string) {
   };
 }
 
-async function deliverySkillIds(person: string, device: string): Promise<string[]> {
-  const { rows } = await admin.query<{ body: { skills?: { skill_id: string }[] } }>(
-    "SELECT topos_delivery($1, $2, $3) AS body",
-    [WS, person, device],
-  );
-  return (rows[0]?.body.skills ?? []).map((s) => s.skill_id).sort();
+async function expectUniform404(res: Response): Promise<void> {
+  expect(res.status).toBe(404);
+  expect(await res.json()).toEqual(NOT_FOUND_BODY);
 }
 
-// ── fixture ──────────────────────────────────────────────────────────────────────────────────────
+/** The member's delivered skill ids, through the REAL delivery route. */
+async function deliveredSkillIds(cred: string): Promise<string[]> {
+  const res = await drive(
+    deliveryLoader,
+    req("GET", `/api/v1/workspaces/${wsId}/delivery`, { cred }),
+    {
+      ws: wsId,
+    },
+  );
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as { skills: { skill_id: string }[] };
+  return body.skills.map((s) => s.skill_id).sort();
+}
 
-const PUBKEY = Buffer.alloc(32, 7);
+// ── fixture ──────────────────────────────────────────────────────────────────────────────────
 
-async function seed(): Promise<void> {
-  const q = (sql: string, params: unknown[] = []) => admin.query(sql, params);
-  await q(
-    `INSERT INTO plane.workspace (workspace_id, display_name, verified_domain_status, deployment_mode, created_at, name)
-     VALUES ($1, 'Acme', 'unverified', 'cloud', $2, 'acme')`,
-    [WS, NOW_ISO],
-  );
-  await q(
-    `INSERT INTO plane.workspace_policy (workspace_id, review_required, invite_policy, staleness_window_ms)
-     VALUES ($1, 0, 'members', 604800000)`,
-    [WS],
-  );
-  // Seats: an owner (no inviter), a reviewer, a member (both invited by the owner).
-  const seat = (principal: string, role: string, invitedBy: string | null) =>
-    q(
-      `INSERT INTO plane.workspace_member (workspace_id, principal, role, status, invited_by, added_at)
-       VALUES ($1, $2, $3, 'confirmed', $4, $5)`,
-      [WS, principal, role, invitedBy, NOW_ISO],
-    );
-  await seat("owner@acme.com", "owner", null);
-  await seat("rev@acme.com", "reviewer", "owner@acme.com");
-  await seat("mem@acme.com", "member", "owner@acme.com");
-  // Devices — the credential's sha256 is computed IN SQL (this tier holds no hashing code).
-  const device = (dk: string, principal: string, cred: string, revoked = 0) =>
-    q(
-      `INSERT INTO plane.device_registry (workspace_id, device_key_id, public_key, principal, revoked, credential_sha256)
-       VALUES ($1, $2, $3, $4, $5, sha256(convert_to($6, 'UTF8')))`,
-      [WS, dk, PUBKEY, principal, revoked, cred],
-    );
-  await device("dev-owner", "owner@acme.com", "cred-owner");
-  await device("dev-rev", "rev@acme.com", "cred-rev");
-  await device("dev-mem", "mem@acme.com", "cred-mem");
-  await device("dev-revoked", "mem@acme.com", "cred-revoked", 1);
-  // A device whose principal holds NO seat — the non-member 404 probe.
-  await device("dev-stranger", "stranger@acme.com", "cred-stranger");
-  // Catalog: two active skills (each with a current pointer) + one archived (freed base name).
-  const catalog = (id: string, name: string, status: string, baseName: string | null) =>
-    q(
-      `INSERT INTO plane.catalog (workspace_id, skill_id, name, display_name, status, base_name, created_at)
-       VALUES ($1, $2, $3, NULL, $4, $5, $6)`,
-      [WS, id, name, status, baseName, NOW_ISO],
-    );
-  const current = async (id: string, hex: string) => {
-    const commit = Buffer.from(hex, "hex");
-    await q(
-      "INSERT INTO plane.skill_commit (workspace_id, commit_id, skill_id, bundle_digest) VALUES ($1, $2, $3, NULL)",
-      [WS, commit, id],
-    );
-    await q(
-      "INSERT INTO plane.current (workspace_id, skill_id, commit_id, epoch, seq, updated_at) VALUES ($1, $2, $3, 1, 1, 1700000000000)",
-      [WS, id, commit],
-    );
-  };
-  await catalog("s_a", "alpha", "active", null);
-  await current("s_a", "a1".repeat(32));
-  await catalog("s_b", "beta", "active", null);
-  await current("s_b", "b1".repeat(32));
-  await catalog("s_arch", "oldname-arch", "archived", "oldname");
-  // Channels: the structural everyone, an open channel `eng` (member seated, `alpha` placed), an
-  // empty open `ops`, and a curated `locked`.
-  const channel = (id: string, name: string, mode: string, builtin: number) =>
-    q(
-      `INSERT INTO plane.channels (workspace_id, channel_id, name, mode, builtin, created_by, created_at)
-       VALUES ($1, $2, $3, $4, $5, 'owner@acme.com', $6)`,
-      [WS, id, name, mode, builtin, NOW_ISO],
-    );
-  await channel("everyone", "everyone", "open", 1);
-  await channel("eng", "eng", "open", 0);
-  await channel("ops", "ops", "open", 0);
-  await channel("locked", "locked", "curated", 0);
-  await q(
-    `INSERT INTO plane.channel_skills (workspace_id, channel_id, skill_id, added_by, added_at)
-     VALUES ($1, 'eng', 's_a', 'owner@acme.com', $2)`,
-    [WS, NOW_ISO],
-  );
-  await q(
-    `INSERT INTO plane.channel_members (workspace_id, channel_id, principal, added_by, added_at)
-     VALUES ($1, 'eng', 'mem@acme.com', 'owner@acme.com', $2)`,
-    [WS, NOW_ISO],
-  );
-  // Owner directly follows alpha (so its reach counts two people, two devices).
-  await q(
-    `INSERT INTO plane.skill_follows (workspace_id, principal, skill_id, created_at)
-     VALUES ($1, 'owner@acme.com', 's_a', $2)`,
-    [WS, NOW_ISO],
-  );
-  // A notice for the member, unacked.
-  await q(
-    `INSERT INTO plane.notices (workspace_id, id, principal, kind, skill_id, actor, outcome, created_at, acked_at)
-     VALUES ($1, 'ntc-1', 'mem@acme.com', 'verdict', 's_a', 'rev@acme.com', 'approve', $2, NULL)`,
-    [WS, NOW_ISO],
-  );
+/** The full device ceremony: start → approve (as `userId`) → poll; the device_code IS the credential. */
+async function mintCredential(
+  userId: string,
+  display: string,
+  requestedName: string,
+): Promise<{ credential: string; deviceId: string }> {
+  const identity = await import("@/lib/db/identity.server");
+  const flow = await identity.startDeviceAuth(requestedName);
+  await identity.approveDeviceAuth(flow.userCode, { userId, display }, wsId);
+  const granted = await identity.pollDeviceAuth(flow.deviceCode);
+  if (granted.status !== "granted") {
+    throw new Error(`device mint failed: ${granted.status}`);
+  }
+  return { credential: flow.deviceCode, deviceId: granted.deviceId };
 }
 
 beforeAll(async () => {
-  await rootExec(`CREATE DATABASE ${scratchName}`);
-  // Roles are cluster-global — create if absent, then ENFORCE the password every run. A bare
-  // `create-if-absent` would leave a stale password in place when the role already exists from
-  // another suite (or an earlier run) with a different one, and the app pool then can't
-  // authenticate. A transaction-scoped advisory lock serializes the mutation so two suites
-  // ALTERing the same `pg_authid` tuple at once don't raise "tuple concurrently updated".
-  await rootExec(`DO $$ BEGIN
-    PERFORM pg_advisory_xact_lock(hashtext('topos_role_setup'));
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'topos_plane')
-      THEN ALTER ROLE topos_plane LOGIN PASSWORD 'plane';
-      ELSE CREATE ROLE topos_plane LOGIN PASSWORD 'plane'; END IF;
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'topos_web')
-      THEN ALTER ROLE topos_web LOGIN PASSWORD 'web';
-      ELSE CREATE ROLE topos_web LOGIN PASSWORD 'web'; END IF;
-  END $$;`);
-  await rootExec(`ALTER DATABASE ${scratchName} OWNER TO topos_plane`);
-  await rootExec(`ALTER DATABASE ${scratchName} SET search_path TO plane, public`);
-  // Apply the migrations AS topos_plane so 0019's grant block fires (current_user = topos_plane).
-  await applyPlaneDdl(planeUrl());
+  // The stub vault: ONE GET — the current-pointer read skill-current forwards to.
+  stub = createServer((request, response) => {
+    const match = request.url?.match(
+      /^\/internal\/v1\/workspaces\/([^/]+)\/bundles\/([^/]+)\/current$/,
+    );
+    const hit = match ? stubCurrent.get(`${match[1]}/${match[2]}`) : undefined;
+    if (request.method === "GET" && hit !== undefined) {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          ...hit,
+          moved_at_ms: 1700000000000,
+          moved_by_display: "seed",
+          bundle_digest: "d".repeat(64),
+        }),
+      );
+      return;
+    }
+    response.writeHead(404, { "content-type": "application/json" });
+    response.end(JSON.stringify({ code: "NOT_FOUND" }));
+  });
+  await new Promise<void>((resolve) => stub.listen(0, "127.0.0.1", resolve));
+  const port = (stub.address() as AddressInfo).port;
 
-  admin = new Client({ connectionString: superScratchUrl() });
-  await admin.connect();
-  await seed();
+  db = await createScratchDb("web_devlane", {
+    TOPOS_SETUP_CODE: SETUP_CODE,
+    TOPOS_WEB_RATELIMIT: "off",
+    PLANE_INTERNAL_URL: `http://127.0.0.1:${port}`,
+  });
+  const identity = await import("@/lib/db/identity.server");
+  await identity.ensureSetup(ORIGIN);
+  wsId = (await identity.theWorkspace())?.id ?? "";
 
-  // The app pool connects AS topos_web (the scoped role) — the belt off for determinism.
-  installTestEnv({ DATABASE_URL: webUrl(), TOPOS_WEB_RATELIMIT: "off" });
-});
+  // Seats through the REAL ceremonies where one exists: the claim mints the first owner.
+  await seedUser(db, "u_owner", "Owner", "owner@example.com");
+  await seedUser(db, "u_rev", "Reviewer", "rev@example.com");
+  await seedUser(db, "u_mem", "Member", "mem@example.com");
+  await seedUser(db, "u_stranger", "Stranger", "stranger@example.com");
+  const claimed = await identity.consumeClaim(SETUP_CODE, "u_owner", "Owner");
+  if (claimed === null) {
+    throw new Error("claim seed failed");
+  }
+  await seatUser(db, wsId, "u_rev", "reviewer", "u_owner");
+  await seatUser(db, wsId, "u_mem", "member", "u_owner");
+
+  // Devices via the gh-style flow — REAL credentials, one revoked, one seatless.
+  CREDS.owner = (await mintCredential("u_owner", "Owner", "owner-laptop")).credential;
+  CREDS.rev = (await mintCredential("u_rev", "Reviewer", "rev-laptop")).credential;
+  const mem = await mintCredential("u_mem", "Member", "mem-laptop");
+  CREDS.mem = mem.credential;
+  memDeviceId = mem.deviceId;
+  CREDS.stranger = (await mintCredential("u_stranger", "Stranger", "stranger-box")).credential;
+  const doomed = await mintCredential("u_mem", "Member", "mem-old-laptop");
+  await identity.revokeOwnDevice({ userId: "u_mem", display: "Member" }, doomed.deviceId, wsId);
+  CREDS.revoked = doomed.credential;
+
+  // Catalog: alpha (in `eng`), beta (nowhere yet), one archived, one pointer-less.
+  await seedBundle(db, wsId, "s_alpha", "alpha", { versionId: V_ALPHA });
+  await seedBundle(db, wsId, "s_beta", "beta", { versionId: V_BETA });
+  await seedBundle(db, wsId, "s_arch", "oldname-archived-2026-07-01", {
+    status: "archived",
+    baseName: "oldname",
+    versionId: V_ARCH,
+  });
+  await seedBundle(db, wsId, "s_gamma", "gamma", { withPointer: false });
+  stubCurrent.set(`${wsId}/s_alpha`, { version_id: V_ALPHA, generation: 1 });
+
+  // Channels: eng (member seated, alpha placed), empty ops, curated locked.
+  await seedChannel(db, wsId, "c_eng", "eng");
+  await seedChannel(db, wsId, "c_ops", "ops");
+  await seedChannel(db, wsId, "c_locked", "locked", "curated");
+  await placeBundle(db, wsId, "c_eng", "s_alpha");
+  await db.q(
+    `INSERT INTO web.channel_member (channel_id, workspace_id, user_id, added_by)
+     VALUES ('c_eng', $1, 'u_mem', 'u_owner')`,
+    [wsId],
+  );
+  // The owner directly follows alpha (so its reach counts two people, two devices).
+  await db.q(
+    `INSERT INTO web.bundle_subscription (user_id, workspace_id, bundle_id, state)
+     VALUES ('u_owner', $1, 's_alpha', 'following')`,
+    [wsId],
+  );
+  // An unacked verdict notice for the member.
+  const noticeRows = await db.q<{ id: string }>(
+    `INSERT INTO web.notice (user_id, workspace_id, kind, payload)
+     VALUES ('u_mem', $1, 'verdict', '{"skill_id":"s_alpha","actor":"Reviewer","outcome":"approve"}'::jsonb)
+     RETURNING id`,
+    [wsId],
+  );
+  noticeId = String(noticeRows[0]?.id);
+}, 60000);
 
 afterAll(async () => {
-  await admin.end();
-  const { getPool } = await import("@/lib/db/index.server");
-  await getPool().end();
-  await rootExec(`DROP DATABASE IF EXISTS ${scratchName} WITH (FORCE)`);
+  await new Promise<void>((resolve, reject) => stub.close((e) => (e ? reject(e) : resolve())));
+  await db.drop();
 });
 
-// ── (a) describe reads: success bodies EQUAL the wire shapes ────────────────────────────────────────
+// ── (a) describe reads: success bodies EQUAL the wire shapes ─────────────────────────────────
 
 describe("describe reads", () => {
   it("GET /me — owner (no invited_by; the genesis seat has none)", async () => {
     const res = await drive(
-      meLoader as unknown as RouteHandler,
-      req("GET", `/api/v1/workspaces/${WS}/me`, { cred: "cred-owner" }),
-      { ws: WS },
+      meLoader,
+      req("GET", `/api/v1/workspaces/${wsId}/me`, { cred: CREDS.owner }),
+      { ws: wsId },
     );
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect(await res.json()).toEqual({
-      workspace_id: WS,
-      name: "acme",
-      display_name: "Acme",
-      address: "http://x/acme",
-      principal: "owner@acme.com",
+      workspace_id: wsId,
+      name: "team",
+      display_name: "team",
+      address: "http://x/team",
+      principal: "Owner",
       role: "owner",
       invite_policy: "members",
     });
   });
 
-  it("GET /me — member (invited_by present)", async () => {
+  it("GET /me — member (invited_by carries the inviter's login address)", async () => {
     const res = await drive(
-      meLoader as unknown as RouteHandler,
-      req("GET", `/api/v1/workspaces/${WS}/me`, { cred: "cred-mem" }),
-      { ws: WS },
+      meLoader,
+      req("GET", `/api/v1/workspaces/${wsId}/me`, { cred: CREDS.mem }),
+      { ws: wsId },
     );
     expect(await res.json()).toEqual({
-      workspace_id: WS,
-      name: "acme",
-      display_name: "Acme",
-      address: "http://x/acme",
-      principal: "mem@acme.com",
+      workspace_id: wsId,
+      name: "team",
+      display_name: "team",
+      address: "http://x/team",
+      principal: "Member",
       role: "member",
-      invited_by: "owner@acme.com",
+      invited_by: "owner@example.com",
       invite_policy: "members",
     });
   });
 
-  it("GET /channels — everyone + eng, name-sorted, membership + counts", async () => {
+  it("GET /channels — name-sorted, the default included, membership + counts + placed skills", async () => {
     const res = await drive(
-      channelIndexLoader as unknown as RouteHandler,
-      req("GET", `/api/v1/workspaces/${WS}/channels`, { cred: "cred-mem" }),
-      { ws: WS },
+      channelsLoader,
+      req("GET", `/api/v1/workspaces/${wsId}/channels`, { cred: CREDS.mem }),
+      { ws: wsId },
     );
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
@@ -378,7 +376,7 @@ describe("describe reads", () => {
           builtin: false,
           member: true,
           member_count: 1,
-          skills: [{ skill_id: "s_a", name: "alpha" }],
+          skills: [{ skill_id: "s_alpha", name: "alpha" }],
         },
         {
           name: "everyone",
@@ -401,32 +399,31 @@ describe("describe reads", () => {
     });
   });
 
-  it("GET /skills/{id}/reach — alpha reaches two people, two devices", async () => {
+  it("GET /skills/{skill}/reach — alpha reaches two people, two live devices", async () => {
     const res = await drive(
-      reachLoader as unknown as RouteHandler,
-      req("GET", `/api/v1/workspaces/${WS}/skills/s_a/reach`, { cred: "cred-mem" }),
-      { ws: WS, skill: "s_a" },
+      reachLoader,
+      req("GET", `/api/v1/workspaces/${wsId}/skills/s_alpha/reach`, { cred: CREDS.mem }),
+      { ws: wsId, skill: "s_alpha" },
     );
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ persons: 2, devices: 2 });
   });
 
-  it("GET /skills/{id}/reach — an unknown skill id is the uniform 404", async () => {
+  it("GET /skills/{skill}/reach — an unknown skill id is the uniform 404", async () => {
     const res = await drive(
-      reachLoader as unknown as RouteHandler,
-      req("GET", `/api/v1/workspaces/${WS}/skills/s_nope/reach`, { cred: "cred-mem" }),
-      { ws: WS, skill: "s_nope" },
+      reachLoader,
+      req("GET", `/api/v1/workspaces/${wsId}/skills/s_nope/reach`, { cred: CREDS.mem }),
+      { ws: wsId, skill: "s_nope" },
     );
-    expect(res.status).toBe(404);
-    expect(await res.json()).toEqual(NOT_FOUND_BODY);
+    await expectUniform404(res);
   });
 });
 
-// ── (b) the uniform 404 on EVERY route ──────────────────────────────────────────────────────────────
+// ── (b) the uniform 404 on EVERY route ───────────────────────────────────────────────────────
 
 interface RouteCase {
   name: string;
-  h: RouteHandler;
+  h: unknown;
   method: string;
   params: Record<string, string>;
   path: string;
@@ -434,106 +431,111 @@ interface RouteCase {
 }
 
 const ALL_ROUTES: RouteCase[] = [
+  { name: "me", h: meLoader, method: "GET", params: {}, path: "/me" },
+  { name: "delivery", h: deliveryLoader, method: "GET", params: {}, path: "/delivery" },
+  { name: "channels", h: channelsLoader, method: "GET", params: {}, path: "/channels" },
+  { name: "skills-index", h: skillsIndexLoader, method: "GET", params: {}, path: "/skills" },
   {
-    name: "me",
-    h: meLoader as unknown as RouteHandler,
+    name: "skill-current",
+    h: skillCurrentLoader,
     method: "GET",
-    params: { ws: WS },
-    path: `/api/v1/workspaces/${WS}/me`,
-  },
-  {
-    name: "channels",
-    h: channelIndexLoader as unknown as RouteHandler,
-    method: "GET",
-    params: { ws: WS },
-    path: `/api/v1/workspaces/${WS}/channels`,
+    params: { skill: "s_alpha" },
+    path: "/skills/s_alpha/current",
   },
   {
     name: "reach",
-    h: reachLoader as unknown as RouteHandler,
+    h: reachLoader,
     method: "GET",
-    params: { ws: WS, skill: "s_a" },
-    path: `/api/v1/workspaces/${WS}/skills/s_a/reach`,
+    params: { skill: "s_alpha" },
+    path: "/skills/s_alpha/reach",
+  },
+  {
+    name: "report",
+    h: reportAction,
+    method: "PUT",
+    params: {},
+    path: "/report",
+    body: { schema_version: 1, applied: [] },
   },
   {
     name: "notices",
-    h: noticesAction as unknown as RouteHandler,
+    h: noticesAction,
     method: "POST",
-    params: { ws: WS },
-    path: `/api/v1/workspaces/${WS}/notices/ack`,
-    body: { ids: ["ntc-1"] },
+    params: {},
+    path: "/notices/ack",
+    body: { ids: ["1"] },
   },
   {
     name: "invitations",
-    h: invitationsAction as unknown as RouteHandler,
+    h: invitationsAction,
     method: "POST",
-    params: { ws: WS },
-    path: `/api/v1/workspaces/${WS}/invitations`,
+    params: {},
+    path: "/invitations",
     body: { emails: ["x@y.z"] },
   },
   {
     name: "follow",
-    h: followsAction as unknown as RouteHandler,
+    h: followsAction,
     method: "PUT",
-    params: { ws: WS, skill: "s_a" },
-    path: `/api/v1/workspaces/${WS}/follows/s_a`,
+    params: { skill: "s_alpha" },
+    path: "/follows/s_alpha",
   },
   {
     name: "unfollow",
-    h: followsAction as unknown as RouteHandler,
+    h: followsAction,
     method: "DELETE",
-    params: { ws: WS, skill: "s_a" },
-    path: `/api/v1/workspaces/${WS}/follows/s_a`,
+    params: { skill: "s_alpha" },
+    path: "/follows/s_alpha",
   },
   {
     name: "exclude",
-    h: exclusionsAction as unknown as RouteHandler,
+    h: exclusionsAction,
     method: "PUT",
-    params: { ws: WS, skill: "s_a" },
-    path: `/api/v1/workspaces/${WS}/exclusions/s_a`,
+    params: { skill: "s_alpha" },
+    path: "/exclusions/s_alpha",
   },
   {
     name: "join",
-    h: channelsLoader as unknown as RouteHandler,
+    h: channelMembershipAction,
     method: "PUT",
-    params: { ws: WS, channel: "ops" },
-    path: `/api/v1/workspaces/${WS}/channels/ops/membership`,
+    params: { channel: "ops" },
+    path: "/channels/ops/membership",
   },
   {
     name: "leave",
-    h: channelsLoader as unknown as RouteHandler,
+    h: channelMembershipAction,
     method: "DELETE",
-    params: { ws: WS, channel: "ops" },
-    path: `/api/v1/workspaces/${WS}/channels/ops/membership`,
+    params: { channel: "ops" },
+    path: "/channels/ops/membership",
   },
   {
     name: "place",
-    h: curationAction as unknown as RouteHandler,
+    h: curationAction,
     method: "PUT",
-    params: { ws: WS, channel: "eng", skill: "s_a" },
-    path: `/api/v1/workspaces/${WS}/channels/eng/skills/s_a`,
+    params: { channel: "eng", skill: "s_alpha" },
+    path: "/channels/eng/skills/s_alpha",
   },
   {
     name: "unplace",
-    h: curationAction as unknown as RouteHandler,
+    h: curationAction,
     method: "DELETE",
-    params: { ws: WS, channel: "eng", skill: "s_a" },
-    path: `/api/v1/workspaces/${WS}/channels/eng/skills/s_a`,
+    params: { channel: "eng", skill: "s_alpha" },
+    path: "/channels/eng/skills/s_alpha",
   },
   {
     name: "skill-protect",
-    h: skillProtAction as unknown as RouteHandler,
+    h: skillProtAction,
     method: "PUT",
-    params: { ws: WS, skill: "s_a" },
-    path: `/api/v1/workspaces/${WS}/skills/s_a/protection`,
+    params: { skill: "s_alpha" },
+    path: "/skills/s_alpha/protection",
     body: { level: "reviewed" },
   },
   {
     name: "channel-protect",
-    h: channelProtAction as unknown as RouteHandler,
+    h: channelProtAction,
     method: "PUT",
-    params: { ws: WS, channel: "eng" },
-    path: `/api/v1/workspaces/${WS}/channels/eng/protection`,
+    params: { channel: "eng" },
+    path: "/channels/eng/protection",
     body: { level: "curated" },
   },
 ];
@@ -542,147 +544,96 @@ describe("the uniform 404 (indistinguishable from a missing credential)", () => 
   it.each(ALL_ROUTES)("$name — an unknown credential is the uniform 404", async (rc) => {
     const res = await drive(
       rc.h,
-      req(rc.method, rc.path, { cred: "cred-nope", body: rc.body }),
-      rc.params,
+      req(rc.method, `/api/v1/workspaces/${wsId}${rc.path}`, { cred: "cred-nope", body: rc.body }),
+      { ws: wsId, ...rc.params },
     );
-    expect(res.status).toBe(404);
-    expect(await res.json()).toEqual(NOT_FOUND_BODY);
+    await expectUniform404(res);
   });
 
   it("no Authorization header → 404 (a GET read)", async () => {
-    const res = await drive(
-      meLoader as unknown as RouteHandler,
-      req("GET", `/api/v1/workspaces/${WS}/me`),
-      { ws: WS },
-    );
-    expect(res.status).toBe(404);
-    expect(await res.json()).toEqual(NOT_FOUND_BODY);
+    const res = await drive(meLoader, req("GET", `/api/v1/workspaces/${wsId}/me`), { ws: wsId });
+    await expectUniform404(res);
   });
 
   it("a REVOKED device's credential → 404 (a write)", async () => {
     const res = await drive(
-      followsAction as unknown as RouteHandler,
-      req("PUT", `/api/v1/workspaces/${WS}/follows/s_a`, { cred: "cred-revoked" }),
-      { ws: WS, skill: "s_a" },
+      followsAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/follows/s_alpha`, { cred: CREDS.revoked }),
+      { ws: wsId, skill: "s_alpha" },
     );
-    expect(res.status).toBe(404);
-    expect(await res.json()).toEqual(NOT_FOUND_BODY);
+    await expectUniform404(res);
   });
 
-  it("a NON-member's credential → 404 (a read)", async () => {
+  it("a SEATLESS user's credential → 404 (a read)", async () => {
     const res = await drive(
-      meLoader as unknown as RouteHandler,
-      req("GET", `/api/v1/workspaces/${WS}/me`, { cred: "cred-stranger" }),
-      { ws: WS },
+      meLoader,
+      req("GET", `/api/v1/workspaces/${wsId}/me`, { cred: CREDS.stranger }),
+      { ws: wsId },
     );
-    expect(res.status).toBe(404);
-    expect(await res.json()).toEqual(NOT_FOUND_BODY);
+    await expectUniform404(res);
   });
 
-  it("an unsupported method on a served path → the uniform 404 (no method oracle)", async () => {
+  it("a valid credential against the WRONG workspace id → 404", async () => {
     const res = await drive(
-      followsAction as unknown as RouteHandler,
-      req("POST", `/api/v1/workspaces/${WS}/follows/s_a`, { cred: "cred-mem" }),
-      { ws: WS, skill: "s_a" },
+      meLoader,
+      req("GET", "/api/v1/workspaces/w_other/me", { cred: CREDS.mem }),
+      { ws: "w_other" },
     );
-    expect(res.status).toBe(404);
-    expect(await res.json()).toEqual(NOT_FOUND_BODY);
+    await expectUniform404(res);
+  });
+
+  it("an unsupported method on a served action → the uniform 404 (no method oracle)", async () => {
+    const res = await drive(
+      followsAction,
+      req("POST", `/api/v1/workspaces/${wsId}/follows/s_alpha`, { cred: CREDS.mem }),
+      { ws: wsId, skill: "s_alpha" },
+    );
+    await expectUniform404(res);
+  });
+
+  it("wrong-method exports answer the uniform 404, never react-router's 400/405", async () => {
+    // React-router routes a mutation on a loader-only route (and a GET on an action-only one)
+    // into the OTHER export — each pinned to the one envelope a miss speaks.
+    for (const wrongMethod of [
+      meWrongMethod,
+      deliveryWrongMethod,
+      channelsWrongMethod,
+      reportWrongMethod,
+      followsWrongMethod,
+      channelMembershipWrongMethod,
+    ]) {
+      await expectUniform404(wrongMethod());
+    }
+  });
+
+  it("the /api/v1 catch-all answers the uniform 404 on BOTH methods — no path echo", async () => {
+    await expectUniform404(await drive(catchAllLoader, req("GET", "/api/v1/anything/else"), {}));
+    await expectUniform404(
+      await drive(catchAllAction, req("POST", "/api/v1/anything/else", { body: {} }), {}),
+    );
+  });
+
+  it("follow on an unknown skill folds to the uniform 404 (never an existence oracle)", async () => {
+    const res = await drive(
+      followsAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/follows/s_nope`, { cred: CREDS.mem }),
+      { ws: wsId, skill: "s_nope" },
+    );
+    await expectUniform404(res);
   });
 });
 
-// ── (c) the 200-DENIED codes for the role-gated refusals ────────────────────────────────────────────
-
-describe("200 DENIED (a member's refusal names WHY, never a 403)", () => {
-  it("a member tightening a skill to `reviewed` → REVIEWER_ROLE_REQUIRED", async () => {
-    const res = await drive(
-      skillProtAction as unknown as RouteHandler,
-      req("PUT", `/api/v1/workspaces/${WS}/skills/s_a/protection`, {
-        cred: "cred-mem",
-        body: { level: "reviewed" },
-      }),
-      { ws: WS, skill: "s_a" },
-    );
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual(deniedBody("protect", "REVIEWER_ROLE_REQUIRED"));
-  });
-
-  it("a member loosening a skill to `open` → OWNER_ROLE_REQUIRED", async () => {
-    const res = await drive(
-      skillProtAction as unknown as RouteHandler,
-      req("PUT", `/api/v1/workspaces/${WS}/skills/s_a/protection`, {
-        cred: "cred-mem",
-        body: { level: "open" },
-      }),
-      { ws: WS, skill: "s_a" },
-    );
-    expect(await res.json()).toEqual(deniedBody("protect", "OWNER_ROLE_REQUIRED"));
-  });
-
-  it("joining the builtin `everyone` → CHANNEL_BUILTIN", async () => {
-    const res = await drive(
-      channelsLoader as unknown as RouteHandler,
-      req("PUT", `/api/v1/workspaces/${WS}/channels/everyone/membership`, { cred: "cred-mem" }),
-      { ws: WS, channel: "everyone" },
-    );
-    expect(await res.json()).toEqual(deniedBody("channel", "CHANNEL_BUILTIN"));
-  });
-
-  it("following an ARCHIVED skill → SKILL_NOT_ACTIVE", async () => {
-    const res = await drive(
-      followsAction as unknown as RouteHandler,
-      req("PUT", `/api/v1/workspaces/${WS}/follows/s_arch`, { cred: "cred-mem" }),
-      { ws: WS, skill: "s_arch" },
-    );
-    expect(await res.json()).toEqual(deniedBody("follow", "SKILL_NOT_ACTIVE"));
-  });
-
-  it("a member curating into a CURATED channel → CURATED_ROLE_REQUIRED", async () => {
-    const res = await drive(
-      curationAction as unknown as RouteHandler,
-      req("PUT", `/api/v1/workspaces/${WS}/channels/locked/skills/s_b`, { cred: "cred-mem" }),
-      { ws: WS, channel: "locked", skill: "s_b" },
-    );
-    expect(await res.json()).toEqual(deniedBody("channel", "CURATED_ROLE_REQUIRED"));
-  });
-
-  it("a new channel name that violates the charset → BAD_NAME", async () => {
-    const res = await drive(
-      curationAction as unknown as RouteHandler,
-      req("PUT", `/api/v1/workspaces/${WS}/channels/Bad_Name/skills/s_b`, { cred: "cred-mem" }),
-      { ws: WS, channel: "Bad_Name", skill: "s_b" },
-    );
-    expect(await res.json()).toEqual(deniedBody("channel", "BAD_NAME"));
-  });
-
-  it("inviting into an unknown channel → UNKNOWN_CHANNEL (nothing written)", async () => {
-    const res = await drive(
-      invitationsAction as unknown as RouteHandler,
-      req("POST", `/api/v1/workspaces/${WS}/invitations`, {
-        cred: "cred-owner",
-        body: { emails: ["z@acme.com"], channels: ["nope"] },
-      }),
-      { ws: WS },
-    );
-    expect(await res.json()).toEqual(deniedBody("invite", "UNKNOWN_CHANNEL"));
-    const { rows } = await admin.query(
-      "SELECT 1 FROM plane.workspace_member WHERE workspace_id = $1 AND principal = 'z@acme.com'",
-      [WS],
-    );
-    expect(rows).toHaveLength(0);
-  });
-});
-
-// ── (d) validation 400s (and the ordering: body-first vs level-after-auth) ─────────────────────────
+// ── (c) validation 400s (and the ordering: body-first vs level-before-auth) ─────────────────
 
 describe("validation 400s", () => {
   it("notices/ack — a non-JSON body is a 400 (before auth)", async () => {
     const res = await drive(
-      noticesAction as unknown as RouteHandler,
-      req("POST", `/api/v1/workspaces/${WS}/notices/ack`, {
+      noticesAction,
+      req("POST", `/api/v1/workspaces/${wsId}/notices/ack`, {
         cred: "cred-nope",
         rawBody: "{ not json",
       }),
-      { ws: WS },
+      { ws: wsId },
     );
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual(badRequestBody("malformed JSON body"));
@@ -690,22 +641,22 @@ describe("validation 400s", () => {
 
   it("notices/ack — a body missing `ids` is a 400", async () => {
     const res = await drive(
-      noticesAction as unknown as RouteHandler,
-      req("POST", `/api/v1/workspaces/${WS}/notices/ack`, { cred: "cred-mem", body: {} }),
-      { ws: WS },
+      noticesAction,
+      req("POST", `/api/v1/workspaces/${wsId}/notices/ack`, { cred: CREDS.mem, body: {} }),
+      { ws: wsId },
     );
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual(badRequestBody("malformed notices ack body"));
   });
 
-  it("protection — a wrong level is a 400 with a VALID credential (pinned message)", async () => {
+  it("skill protection — a wrong level is a 400 with a VALID credential (pinned message)", async () => {
     const res = await drive(
-      skillProtAction as unknown as RouteHandler,
-      req("PUT", `/api/v1/workspaces/${WS}/skills/s_a/protection`, {
-        cred: "cred-owner",
+      skillProtAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/skills/s_alpha/protection`, {
+        cred: CREDS.owner,
         body: { level: "bogus" },
       }),
-      { ws: WS, skill: "s_a" },
+      { ws: wsId, skill: "s_alpha" },
     );
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual(
@@ -713,14 +664,14 @@ describe("validation 400s", () => {
     );
   });
 
-  it("protection — a wrong level is a 400 EVEN with a bad credential (level check precedes auth, matching the vault; a bad level is never a membership signal)", async () => {
+  it("skill protection — a wrong level is a 400 EVEN with a bad credential (level check precedes auth; a bad level is never a membership signal)", async () => {
     const res = await drive(
-      skillProtAction as unknown as RouteHandler,
-      req("PUT", `/api/v1/workspaces/${WS}/skills/s_a/protection`, {
+      skillProtAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/skills/s_alpha/protection`, {
         cred: "cred-nope",
         body: { level: "bogus" },
       }),
-      { ws: WS, skill: "s_a" },
+      { ws: wsId, skill: "s_alpha" },
     );
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual(
@@ -728,14 +679,14 @@ describe("validation 400s", () => {
     );
   });
 
-  it("protection — a MALFORMED body with a bad credential is still 400 (body precedes auth)", async () => {
+  it("skill protection — a MALFORMED body with a bad credential is still 400 (body precedes auth)", async () => {
     const res = await drive(
-      skillProtAction as unknown as RouteHandler,
-      req("PUT", `/api/v1/workspaces/${WS}/skills/s_a/protection`, {
+      skillProtAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/skills/s_alpha/protection`, {
         cred: "cred-nope",
         rawBody: "{ not json",
       }),
-      { ws: WS, skill: "s_a" },
+      { ws: wsId, skill: "s_alpha" },
     );
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual(badRequestBody("malformed JSON body"));
@@ -743,12 +694,12 @@ describe("validation 400s", () => {
 
   it("channel protection — a wrong level is a 400 with the channel-specific message", async () => {
     const res = await drive(
-      channelProtAction as unknown as RouteHandler,
-      req("PUT", `/api/v1/workspaces/${WS}/channels/ops/protection`, {
-        cred: "cred-owner",
+      channelProtAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/channels/ops/protection`, {
+        cred: CREDS.owner,
         body: { level: "reviewed" },
       }),
-      { ws: WS, channel: "ops" },
+      { ws: wsId, channel: "ops" },
     );
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual(
@@ -756,217 +707,614 @@ describe("validation 400s", () => {
     );
   });
 
-  it("invitations — a malformed invitee email is a 400 (after auth)", async () => {
+  it("invitations — a body missing `emails` is a 400 (before auth)", async () => {
     const res = await drive(
-      invitationsAction as unknown as RouteHandler,
-      req("POST", `/api/v1/workspaces/${WS}/invitations`, {
-        cred: "cred-owner",
-        body: { emails: ["not a valid email"] },
-      }),
-      { ws: WS },
-    );
-    expect(res.status).toBe(400);
-    expect(await res.json()).toEqual(badRequestBody("malformed invitee email"));
-  });
-
-  it("invitations — a body missing `emails` is a 400", async () => {
-    const res = await drive(
-      invitationsAction as unknown as RouteHandler,
-      req("POST", `/api/v1/workspaces/${WS}/invitations`, {
-        cred: "cred-owner",
+      invitationsAction,
+      req("POST", `/api/v1/workspaces/${wsId}/invitations`, {
+        cred: "cred-nope",
         body: { channels: [] },
       }),
-      { ws: WS },
+      { ws: wsId },
     );
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual(badRequestBody("malformed invitation body: emails"));
   });
+
+  it("report — a malformed entry is a 400 naming the field (before auth)", async () => {
+    const res = await drive(
+      reportAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/report`, {
+        cred: "cred-nope",
+        body: { schema_version: 1, applied: [{ skill_id: "s_alpha", version_id: "short" }] },
+      }),
+      { ws: wsId },
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual(
+      badRequestBody("malformed report entry: version_id must be 64-char lowercase hex"),
+    );
+  });
+
+  it("report — a missing schema_version is a 400", async () => {
+    const res = await drive(
+      reportAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/report`, { cred: CREDS.mem, body: { applied: [] } }),
+      { ws: wsId },
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual(badRequestBody("malformed report body: schema_version"));
+  });
+
+  it("device flows — malformed bodies are 400s naming the op", async () => {
+    const authorize = await drive(
+      deviceAuthorizeAction,
+      req("POST", "/api/v1/device/authorize", { body: { requested_name: "" } }),
+      {},
+    );
+    expect(authorize.status).toBe(400);
+    expect(await authorize.json()).toEqual(badRequestBody("malformed device authorize body"));
+    const token = await drive(
+      deviceTokenAction,
+      req("POST", "/api/v1/device/token", { body: {} }),
+      {},
+    );
+    expect(token.status).toBe(400);
+    expect(await token.json()).toEqual(badRequestBody("malformed device token body"));
+  });
 });
 
-// ── (e) follow / exclude / unfollow actually mutate (delivery probe before/after) ──────────────────
+// ── (d) the 200-DENIED codes for the typed refusals ──────────────────────────────────────────
 
-describe("subscription writes mutate the delivered set", () => {
+describe("200 DENIED (a member's refusal names WHY, never a 403)", () => {
+  it("a member tightening a skill to `reviewed` → REVIEWER_ROLE_REQUIRED", async () => {
+    const res = await drive(
+      skillProtAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/skills/s_alpha/protection`, {
+        cred: CREDS.mem,
+        body: { level: "reviewed" },
+      }),
+      { ws: wsId, skill: "s_alpha" },
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(deniedBody("protect", "REVIEWER_ROLE_REQUIRED"));
+  });
+
+  it("a REVIEWER loosening a skill to `open` → OWNER_ROLE_REQUIRED (loosening is owner-grade)", async () => {
+    const res = await drive(
+      skillProtAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/skills/s_alpha/protection`, {
+        cred: CREDS.rev,
+        body: { level: "open" },
+      }),
+      { ws: wsId, skill: "s_alpha" },
+    );
+    expect(await res.json()).toEqual(deniedBody("protect", "OWNER_ROLE_REQUIRED"));
+  });
+
+  it("a member tightening a channel to `curated` → REVIEWER_ROLE_REQUIRED", async () => {
+    const res = await drive(
+      channelProtAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/channels/ops/protection`, {
+        cred: CREDS.mem,
+        body: { level: "curated" },
+      }),
+      { ws: wsId, channel: "ops" },
+    );
+    expect(await res.json()).toEqual(deniedBody("protect", "REVIEWER_ROLE_REQUIRED"));
+  });
+
+  it("following an ARCHIVED skill → SKILL_NOT_ACTIVE", async () => {
+    const res = await drive(
+      followsAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/follows/s_arch`, { cred: CREDS.mem }),
+      { ws: wsId, skill: "s_arch" },
+    );
+    expect(await res.json()).toEqual(deniedBody("follow", "SKILL_NOT_ACTIVE"));
+  });
+
+  it("a member curating into a CURATED channel → CURATED_ROLE_REQUIRED", async () => {
+    const res = await drive(
+      curationAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/channels/locked/skills/s_beta`, { cred: CREDS.mem }),
+      { ws: wsId, channel: "locked", skill: "s_beta" },
+    );
+    expect(await res.json()).toEqual(deniedBody("channel", "CURATED_ROLE_REQUIRED"));
+  });
+
+  it("a new channel name that violates the charset → BAD_NAME", async () => {
+    const res = await drive(
+      curationAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/channels/Bad_Name/skills/s_beta`, { cred: CREDS.mem }),
+      { ws: wsId, channel: "Bad_Name", skill: "s_beta" },
+    );
+    expect(await res.json()).toEqual(deniedBody("channel", "BAD_NAME"));
+  });
+
+  it("inviting on the unarmed default deployment → MAIL_NOT_CONFIGURED, nothing written", async () => {
+    // The test env carries no TOPOS_MAIL_SMTP_* — exactly a fresh self-host: the mailbox
+    // round-trip IS the invited sign-up's identity rung, so the op refuses typed.
+    const res = await drive(
+      invitationsAction,
+      req("POST", `/api/v1/workspaces/${wsId}/invitations`, {
+        cred: CREDS.owner,
+        body: { emails: ["new@acme.com"] },
+      }),
+      { ws: wsId },
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(deniedBody("invite", "MAIL_NOT_CONFIGURED"));
+    expect(await db.q(`SELECT 1 FROM web.invitation WHERE workspace_id = $1`, [wsId])).toHaveLength(
+      0,
+    );
+  });
+});
+
+// ── (e) delivery + the subscription writes that move it ─────────────────────────────────────
+
+describe("delivery", () => {
+  it("GET /delivery — the full body shape, no-store, one snapshot", async () => {
+    const res = await drive(
+      deliveryLoader,
+      req("GET", `/api/v1/workspaces/${wsId}/delivery`, { cred: CREDS.mem }),
+      { ws: wsId },
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.schema_version).toBe(1);
+    expect(body.workspace_id).toBe(wsId);
+    expect(body.staleness_window_ms).toBe(604800000);
+    expect(body.detached).toEqual([]);
+    expect(body.proposals_awaiting).toBe(0);
+    // `excluded` is omitted while empty (never serialized as []).
+    expect("excluded" in body).toBe(false);
+    const skills = body.skills as Record<string, unknown>[];
+    expect(skills).toHaveLength(1);
+    expect(skills[0]).toMatchObject({
+      skill_id: "s_alpha",
+      name: "alpha",
+      kind: "skill",
+      protection: "open",
+      version_id: V_ALPHA,
+      bundle_digest: "d".repeat(64),
+      generation: 1,
+      via: { channels: ["eng"], direct: false },
+    });
+    expect(typeof skills[0]?.updated_at).toBe("number");
+    const notices = body.notices as Record<string, unknown>[];
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({
+      id: noticeId,
+      kind: "verdict",
+      skill_id: "s_alpha",
+      skill_name: "alpha",
+      actor: "Reviewer",
+      outcome: "approve",
+    });
+  });
+
   it("follow → exclude → unfollow move `beta` in and out of the member's delivery", async () => {
-    // Baseline: the member gets alpha via the `eng` channel, not beta.
-    expect(await deliverySkillIds("mem@acme.com", "dev-mem")).toEqual(["s_a"]);
+    expect(await deliveredSkillIds(CREDS.mem)).toEqual(["s_alpha"]);
 
     const followed = await drive(
-      followsAction as unknown as RouteHandler,
-      req("PUT", `/api/v1/workspaces/${WS}/follows/s_b`, { cred: "cred-mem" }),
-      { ws: WS, skill: "s_b" },
+      followsAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/follows/s_beta`, { cred: CREDS.mem }),
+      { ws: wsId, skill: "s_beta" },
     );
     expect(await followed.json()).toEqual(okStatusBody("follow", "followed"));
-    expect(await deliverySkillIds("mem@acme.com", "dev-mem")).toEqual(["s_a", "s_b"]);
+    expect(await deliveredSkillIds(CREDS.mem)).toEqual(["s_alpha", "s_beta"]);
 
     const excluded = await drive(
-      exclusionsAction as unknown as RouteHandler,
-      req("PUT", `/api/v1/workspaces/${WS}/exclusions/s_b`, { cred: "cred-mem" }),
-      { ws: WS, skill: "s_b" },
+      exclusionsAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/exclusions/s_beta`, { cred: CREDS.mem }),
+      { ws: wsId, skill: "s_beta" },
     );
     expect(await excluded.json()).toEqual(okStatusBody("remove", "excluded"));
-    expect(await deliverySkillIds("mem@acme.com", "dev-mem")).toEqual(["s_a"]);
+    expect(await deliveredSkillIds(CREDS.mem)).toEqual(["s_alpha"]);
+    // The exclusion rides the delivery body for THIS device.
+    const withExclusion = await drive(
+      deliveryLoader,
+      req("GET", `/api/v1/workspaces/${wsId}/delivery`, { cred: CREDS.mem }),
+      { ws: wsId },
+    );
+    expect(((await withExclusion.json()) as { excluded?: string[] }).excluded).toEqual(["s_beta"]);
 
     const unfollowed = await drive(
-      followsAction as unknown as RouteHandler,
-      req("DELETE", `/api/v1/workspaces/${WS}/follows/s_b`, { cred: "cred-mem" }),
-      { ws: WS, skill: "s_b" },
+      followsAction,
+      req("DELETE", `/api/v1/workspaces/${wsId}/follows/s_beta`, { cred: CREDS.mem }),
+      { ws: wsId, skill: "s_beta" },
     );
     expect(await unfollowed.json()).toEqual(okStatusBody("unfollow", "unfollowed"));
-    expect(await deliverySkillIds("mem@acme.com", "dev-mem")).toEqual(["s_a"]);
+    expect(await deliveredSkillIds(CREDS.mem)).toEqual(["s_alpha"]);
   });
 });
 
-// ── (f) notices ack flips acked_at ──────────────────────────────────────────────────────────────────
+// ── (f) channel membership (the DEFAULT channel's opt-out arm included) ─────────────────────
 
-describe("notices ack", () => {
-  it("acks the caller's own notice (flips acked_at) and answers { status: acked }", async () => {
-    const before = await admin.query(
-      "SELECT acked_at FROM plane.notices WHERE workspace_id = $1 AND id = 'ntc-1'",
-      [WS],
-    );
-    expect(before.rows[0]?.acked_at).toBeNull();
-
-    const res = await drive(
-      noticesAction as unknown as RouteHandler,
-      req("POST", `/api/v1/workspaces/${WS}/notices/ack`, {
-        cred: "cred-mem",
-        body: { ids: ["ntc-1"] },
-      }),
-      { ws: WS },
-    );
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual(okStatusBody("notices", "acked"));
-
-    const after = await admin.query(
-      "SELECT acked_at FROM plane.notices WHERE workspace_id = $1 AND id = 'ntc-1'",
-      [WS],
-    );
-    expect(after.rows[0]?.acked_at).not.toBeNull();
-  });
-});
-
-// ── OK writes: the full round-trip envelopes ────────────────────────────────────────────────────────
-
-describe("OK write envelopes", () => {
-  it("invitations — a success carries the InvitationData (address + folded invited + honest mailed)", async () => {
-    const res = await drive(
-      invitationsAction as unknown as RouteHandler,
-      req("POST", `/api/v1/workspaces/${WS}/invitations`, {
-        cred: "cred-owner",
-        body: { emails: ["NEW@Acme.COM"] },
-      }),
-      { ws: WS },
-    );
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({
-      schema_version: 1,
-      command: "invite",
-      ok: true,
-      data: { address: "http://x/acme", invited: ["new@acme.com"], mailed: false },
-      warnings: [],
-      next_actions: [],
-    });
-    // The folded seat landed (invited, member).
-    const { rows } = await admin.query(
-      "SELECT status, role FROM plane.workspace_member WHERE workspace_id = $1 AND principal = 'new@acme.com'",
-      [WS],
-    );
-    expect(rows[0]).toEqual({ status: "invited", role: "member" });
-  });
-
-  it("channel membership — join, leave, then leave-again (not_member)", async () => {
+describe("channel membership", () => {
+  it("join, leave, then leave-again (not_member) on a named channel", async () => {
     const joined = await drive(
-      channelsLoader as unknown as RouteHandler,
-      req("PUT", `/api/v1/workspaces/${WS}/channels/ops/membership`, { cred: "cred-mem" }),
-      { ws: WS, channel: "ops" },
+      channelMembershipAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/channels/ops/membership`, { cred: CREDS.mem }),
+      { ws: wsId, channel: "ops" },
     );
     expect(await joined.json()).toEqual(okStatusBody("channel", "joined"));
     const left = await drive(
-      channelsLoader as unknown as RouteHandler,
-      req("DELETE", `/api/v1/workspaces/${WS}/channels/ops/membership`, { cred: "cred-mem" }),
-      { ws: WS, channel: "ops" },
+      channelMembershipAction,
+      req("DELETE", `/api/v1/workspaces/${wsId}/channels/ops/membership`, { cred: CREDS.mem }),
+      { ws: wsId, channel: "ops" },
     );
     expect(await left.json()).toEqual(okStatusBody("channel", "left"));
     const again = await drive(
-      channelsLoader as unknown as RouteHandler,
-      req("DELETE", `/api/v1/workspaces/${WS}/channels/ops/membership`, { cred: "cred-mem" }),
-      { ws: WS, channel: "ops" },
+      channelMembershipAction,
+      req("DELETE", `/api/v1/workspaces/${wsId}/channels/ops/membership`, { cred: CREDS.mem }),
+      { ws: wsId, channel: "ops" },
     );
     expect(await again.json()).toEqual(okStatusBody("channel", "not_member"));
   });
 
-  it("curation — create-on-first-use, place, remove, then remove-again (not_placed)", async () => {
+  it("the DEFAULT channel: leave inserts the opt-out row, join deletes it — no CHANNEL_BUILTIN", async () => {
+    const left = await drive(
+      channelMembershipAction,
+      req("DELETE", `/api/v1/workspaces/${wsId}/channels/everyone/membership`, { cred: CREDS.mem }),
+      { ws: wsId, channel: "everyone" },
+    );
+    expect(await left.json()).toEqual(okStatusBody("channel", "left"));
+    expect(await db.q(`SELECT 1 FROM web.channel_optout WHERE user_id = 'u_mem'`)).toHaveLength(1);
+
+    const joined = await drive(
+      channelMembershipAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/channels/everyone/membership`, { cred: CREDS.mem }),
+      { ws: wsId, channel: "everyone" },
+    );
+    expect(await joined.json()).toEqual(okStatusBody("channel", "joined"));
+    expect(await db.q(`SELECT 1 FROM web.channel_optout WHERE user_id = 'u_mem'`)).toHaveLength(0);
+  });
+
+  it("an unknown channel is the uniform 404", async () => {
+    const res = await drive(
+      channelMembershipAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/channels/nope/membership`, { cred: CREDS.mem }),
+      { ws: wsId, channel: "nope" },
+    );
+    await expectUniform404(res);
+  });
+});
+
+// ── (g) curation ─────────────────────────────────────────────────────────────────────────────
+
+describe("curation", () => {
+  it("create-on-first-use, place, remove, then remove-again (not_placed)", async () => {
     const created = await drive(
-      curationAction as unknown as RouteHandler,
-      req("PUT", `/api/v1/workspaces/${WS}/channels/team/skills/s_b`, { cred: "cred-mem" }),
-      { ws: WS, channel: "team", skill: "s_b" },
+      curationAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/channels/incubator/skills/s_beta`, {
+        cred: CREDS.mem,
+      }),
+      { ws: wsId, channel: "incubator", skill: "s_beta" },
     );
     expect(await created.json()).toEqual(okStatusBody("channel", "created"));
     const placed = await drive(
-      curationAction as unknown as RouteHandler,
-      req("PUT", `/api/v1/workspaces/${WS}/channels/team/skills/s_a`, { cred: "cred-mem" }),
-      { ws: WS, channel: "team", skill: "s_a" },
+      curationAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/channels/incubator/skills/s_alpha`, {
+        cred: CREDS.mem,
+      }),
+      { ws: wsId, channel: "incubator", skill: "s_alpha" },
     );
     expect(await placed.json()).toEqual(okStatusBody("channel", "placed"));
     const removed = await drive(
-      curationAction as unknown as RouteHandler,
-      req("DELETE", `/api/v1/workspaces/${WS}/channels/team/skills/s_a`, { cred: "cred-mem" }),
-      { ws: WS, channel: "team", skill: "s_a" },
+      curationAction,
+      req("DELETE", `/api/v1/workspaces/${wsId}/channels/incubator/skills/s_alpha`, {
+        cred: CREDS.mem,
+      }),
+      { ws: wsId, channel: "incubator", skill: "s_alpha" },
     );
     expect(await removed.json()).toEqual(okStatusBody("channel", "removed"));
     const notPlaced = await drive(
-      curationAction as unknown as RouteHandler,
-      req("DELETE", `/api/v1/workspaces/${WS}/channels/team/skills/s_a`, { cred: "cred-mem" }),
-      { ws: WS, channel: "team", skill: "s_a" },
+      curationAction,
+      req("DELETE", `/api/v1/workspaces/${wsId}/channels/incubator/skills/s_alpha`, {
+        cred: CREDS.mem,
+      }),
+      { ws: wsId, channel: "incubator", skill: "s_alpha" },
     );
     expect(await notPlaced.json()).toEqual(okStatusBody("channel", "not_placed"));
   });
 
-  it("protection — owner tightens a skill (set); reviewer may too", async () => {
+  it("a reviewer curates a CURATED channel; an inactive bundle refuses typed", async () => {
+    const placed = await drive(
+      curationAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/channels/locked/skills/s_beta`, { cred: CREDS.rev }),
+      { ws: wsId, channel: "locked", skill: "s_beta" },
+    );
+    expect(await placed.json()).toEqual(okStatusBody("channel", "placed"));
+    const archived = await drive(
+      curationAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/channels/ops/skills/s_arch`, { cred: CREDS.mem }),
+      { ws: wsId, channel: "ops", skill: "s_arch" },
+    );
+    expect(await archived.json()).toEqual(deniedBody("channel", "SKILL_NOT_ACTIVE"));
+  });
+});
+
+// ── (h) protections: the OK arms ─────────────────────────────────────────────────────────────
+
+describe("protection writes", () => {
+  it("owner and reviewer tighten a skill (set); the row flips", async () => {
     const owner = await drive(
-      skillProtAction as unknown as RouteHandler,
-      req("PUT", `/api/v1/workspaces/${WS}/skills/s_b/protection`, {
-        cred: "cred-owner",
+      skillProtAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/skills/s_beta/protection`, {
+        cred: CREDS.owner,
         body: { level: "reviewed" },
       }),
-      { ws: WS, skill: "s_b" },
+      { ws: wsId, skill: "s_beta" },
     );
     expect(await owner.json()).toEqual(okStatusBody("protect", "set"));
+    const rows = await db.q<{ protection: string }>(
+      `SELECT protection FROM web.bundle WHERE id = 's_beta'`,
+    );
+    expect(rows[0]?.protection).toBe("reviewed");
     const reviewer = await drive(
-      skillProtAction as unknown as RouteHandler,
-      req("PUT", `/api/v1/workspaces/${WS}/skills/s_b/protection`, {
-        cred: "cred-rev",
+      skillProtAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/skills/s_beta/protection`, {
+        cred: CREDS.rev,
         body: { level: "reviewed" },
       }),
-      { ws: WS, skill: "s_b" },
+      { ws: wsId, skill: "s_beta" },
     );
     expect(await reviewer.json()).toEqual(okStatusBody("protect", "set"));
-  });
-
-  it("channel protection — owner loosens a curated channel to open (set)", async () => {
-    const res = await drive(
-      channelProtAction as unknown as RouteHandler,
-      req("PUT", `/api/v1/workspaces/${WS}/channels/locked/protection`, {
-        cred: "cred-owner",
+    // Loosening back is the OWNER's act.
+    const loosened = await drive(
+      skillProtAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/skills/s_beta/protection`, {
+        cred: CREDS.owner,
         body: { level: "open" },
       }),
-      { ws: WS, channel: "locked" },
+      { ws: wsId, skill: "s_beta" },
+    );
+    expect(await loosened.json()).toEqual(okStatusBody("protect", "set"));
+  });
+
+  it("owner loosens the curated channel to open (set); the mode flips", async () => {
+    const res = await drive(
+      channelProtAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/channels/locked/protection`, {
+        cred: CREDS.owner,
+        body: { level: "open" },
+      }),
+      { ws: wsId, channel: "locked" },
     );
     expect(await res.json()).toEqual(okStatusBody("protect", "set"));
+    const rows = await db.q<{ mode: string }>(`SELECT mode FROM web.channel WHERE id = 'c_locked'`);
+    expect(rows[0]?.mode).toBe("open");
+    // Tighten it back (reviewer-grade) for any later reader.
+    const tightened = await drive(
+      channelProtAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/channels/locked/protection`, {
+        cred: CREDS.rev,
+        body: { level: "curated" },
+      }),
+      { ws: wsId, channel: "locked" },
+    );
+    expect(await tightened.json()).toEqual(okStatusBody("protect", "set"));
+  });
+});
+
+// ── (i) notices ack ──────────────────────────────────────────────────────────────────────────
+
+describe("notices ack", () => {
+  it("acks the caller's own notice (flips acked_at) and answers { status: acked }", async () => {
+    const before = await db.q<{ acked_at: string | null }>(
+      `SELECT acked_at FROM web.notice WHERE id = $1`,
+      [noticeId],
+    );
+    expect(before[0]?.acked_at).toBeNull();
+
+    const res = await drive(
+      noticesAction,
+      req("POST", `/api/v1/workspaces/${wsId}/notices/ack`, {
+        cred: CREDS.mem,
+        body: { ids: [noticeId] },
+      }),
+      { ws: wsId },
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(okStatusBody("notices", "acked"));
+
+    const after = await db.q<{ acked_at: string | null }>(
+      `SELECT acked_at FROM web.notice WHERE id = $1`,
+      [noticeId],
+    );
+    expect(after[0]?.acked_at).not.toBeNull();
+  });
+});
+
+// ── (j) the applied-state report ─────────────────────────────────────────────────────────────
+
+describe("report", () => {
+  it("PUT /report → 204; the upsert is ENTITLEMENT-FILTERED (client-asserted rows re-checked)", async () => {
+    const res = await drive(
+      reportAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/report`, {
+        cred: CREDS.mem,
+        body: {
+          schema_version: 1,
+          applied: [
+            { skill_id: "s_alpha", version_id: V_ALPHA },
+            // NOT delivered to the member (no channel, no follow) — the report must drop it.
+            { skill_id: "s_beta", version_id: V_BETA },
+          ],
+        },
+      }),
+      { ws: wsId },
+    );
+    expect(res.status).toBe(204);
+    const rows = await db.q<{ bundle_id: string; applied_version_id: string }>(
+      `SELECT bundle_id, applied_version_id FROM web.device_bundle_state WHERE device_id = $1 ORDER BY bundle_id`,
+      [memDeviceId],
+    );
+    expect(rows).toEqual([{ bundle_id: "s_alpha", applied_version_id: V_ALPHA }]);
+  });
+});
+
+// ── (k) the device flow's two unauthenticated doors ──────────────────────────────────────────
+
+describe("device authorize + token", () => {
+  it("authorize: an unknown workspace name is the uniform 404 (this install serves exactly one)", async () => {
+    const res = await drive(
+      deviceAuthorizeAction,
+      req("POST", "/api/v1/device/authorize", {
+        body: { requested_name: "ci-box", workspace: "acme" },
+      }),
+      {},
+    );
+    await expectUniform404(res);
   });
 
-  // The wrong-method half of each served route: react-router routes a GET to an action-only route
-  // (and a mutation to a loader-only route) into the OTHER export — which here answers the uniform
-  // 404, so a wrong-method probe is indistinguishable from a miss (never RR's 400/405 route-echo).
-  it("wrong method on an action route (GET /report) is the uniform 404", async () => {
-    const res = reportWrongMethod();
-    expect(res.status).toBe(404);
-    expect(await res.json()).toEqual(NOT_FOUND_BODY);
+  it("authorize → token: pending, then granted echoing the device_code as the credential", async () => {
+    const started = await drive(
+      deviceAuthorizeAction,
+      req("POST", "/api/v1/device/authorize", {
+        body: { requested_name: "ci-box", workspace: "team" },
+      }),
+      {},
+    );
+    expect(started.status).toBe(200);
+    const flow = (await started.json()) as Record<string, unknown>;
+    expect(Object.keys(flow).sort()).toEqual([
+      "device_code",
+      "expires_in_secs",
+      "interval_secs",
+      "user_code",
+      "verification_uri",
+      "verification_uri_complete",
+    ]);
+    expect(flow.verification_uri).toBe("http://x/verify");
+    expect(flow.verification_uri_complete).toBe(
+      `http://x/verify?code=${encodeURIComponent(flow.user_code as string)}`,
+    );
+    expect(flow.expires_in_secs).toBe(900);
+    expect(flow.interval_secs).toBe(5);
+
+    const pending = await drive(
+      deviceTokenAction,
+      req("POST", "/api/v1/device/token", { body: { device_code: flow.device_code } }),
+      {},
+    );
+    expect(await pending.json()).toEqual({ status: "pending" });
+
+    // The human approves at /verify (the ceremony's data layer stands in for the page).
+    const identity = await import("@/lib/db/identity.server");
+    const approved = await identity.approveDeviceAuth(
+      flow.user_code as string,
+      { userId: "u_owner", display: "Owner" },
+      wsId,
+    );
+    expect(approved).not.toBeNull();
+
+    const granted = await drive(
+      deviceTokenAction,
+      req("POST", "/api/v1/device/token", { body: { device_code: flow.device_code } }),
+      {},
+    );
+    expect(await granted.json()).toEqual({
+      status: "granted",
+      credential: flow.device_code,
+      device_id: approved?.deviceId,
+      workspace: { workspace_id: wsId, name: "team", display_name: "team" },
+    });
+
+    // The grant REPEATS (idempotent): a re-poll after a client crash re-delivers the same
+    // credential, since the credential IS the presented device code.
+    const again = await drive(
+      deviceTokenAction,
+      req("POST", "/api/v1/device/token", { body: { device_code: flow.device_code } }),
+      {},
+    );
+    expect(await again.json()).toEqual({
+      status: "granted",
+      credential: flow.device_code,
+      device_id: approved?.deviceId,
+      workspace: { workspace_id: wsId, name: "team", display_name: "team" },
+    });
+    const me = await drive(
+      meLoader,
+      req("GET", `/api/v1/workspaces/${wsId}/me`, { cred: flow.device_code as string }),
+      { ws: wsId },
+    );
+    expect(me.status).toBe(200);
+  });
+});
+
+// ── (l) the catalog reads ────────────────────────────────────────────────────────────────────
+
+describe("skills index", () => {
+  it("GET /skills — every pointered bundle (archived included, deleted/pointer-less not), id order", async () => {
+    const res = await drive(
+      skillsIndexLoader,
+      req("GET", `/api/v1/workspaces/${wsId}/skills`, { cred: CREDS.mem }),
+      { ws: wsId },
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    const body = (await res.json()) as { skills: Record<string, unknown>[] };
+    expect(body.skills.map((s) => s.skill_id)).toEqual(["s_alpha", "s_arch", "s_beta"]);
+    expect(body.skills[0]).toMatchObject({
+      skill_id: "s_alpha",
+      name: "alpha",
+      kind: "skill",
+      status: "active",
+      version_id: V_ALPHA,
+      bundle_digest: "d".repeat(64),
+      generation: 1,
+      open_proposals: 0,
+    });
+    expect(typeof body.skills[0]?.updated_at).toBe("number");
+    expect(body.skills[1]).toMatchObject({ skill_id: "s_arch", status: "archived" });
+  });
+});
+
+describe("skill current (the conditional-GET currency read)", () => {
+  it("200 with the WireCurrentRecord shape + the generation ETag, no-store", async () => {
+    const res = await drive(
+      skillCurrentLoader,
+      req("GET", `/api/v1/workspaces/${wsId}/skills/s_alpha/current`, { cred: CREDS.mem }),
+      { ws: wsId, skill: "s_alpha" },
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("etag")).toBe('"1"');
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(await res.json()).toEqual({
+      schema_version: 1,
+      scope: { workspace_id: wsId, skill_id: "s_alpha" },
+      record: { version_id: V_ALPHA, generation: 1 },
+    });
   });
 
-  it("wrong method on a loader route (mutation on /me) is the uniform 404", async () => {
-    const res = meWrongMethod();
-    expect(res.status).toBe(404);
-    expect(await res.json()).toEqual(NOT_FOUND_BODY);
+  it("a matching If-None-Match answers 304 with the same ETag and no body", async () => {
+    const res = await drive(
+      skillCurrentLoader,
+      req("GET", `/api/v1/workspaces/${wsId}/skills/s_alpha/current`, {
+        cred: CREDS.mem,
+        headers: { "if-none-match": '"1"' },
+      }),
+      { ws: wsId, skill: "s_alpha" },
+    );
+    expect(res.status).toBe(304);
+    expect(res.headers.get("etag")).toBe('"1"');
+    expect(await res.text()).toBe("");
+  });
+
+  it("a bundle with NO published version — and an unknown one — are the uniform 404", async () => {
+    const unpublished = await drive(
+      skillCurrentLoader,
+      req("GET", `/api/v1/workspaces/${wsId}/skills/s_gamma/current`, { cred: CREDS.mem }),
+      { ws: wsId, skill: "s_gamma" },
+    );
+    await expectUniform404(unpublished);
+    const unknown = await drive(
+      skillCurrentLoader,
+      req("GET", `/api/v1/workspaces/${wsId}/skills/s_nope/current`, { cred: CREDS.mem }),
+      { ws: wsId, skill: "s_nope" },
+    );
+    await expectUniform404(unknown);
   });
 });

@@ -13,9 +13,9 @@ use topos_core::identity::{self, Commit};
 use topos_gitstore::{ImportFile, Store};
 use topos_harness::DiscoveredPlacement;
 use topos_harness::registry::SkillScope;
+use topos_types::PERSISTED_SCHEMA_VERSION;
 use topos_types::persisted::{Lock, LockedFile, PlacementMap, SwapCapability, SyncState};
 use topos_types::results::{AddData, KeepAsYoursData, KeepReason, SkillOrigin, UntrackedEntry};
-use topos_types::{Generation, PERSISTED_SCHEMA_VERSION};
 
 use crate::ctx::Ctx;
 use crate::enroll;
@@ -142,7 +142,7 @@ pub(crate) fn add_with_name(
     // Write the docs (sync → map → lock), lock LAST as the commit marker.
     let version_hex = to_hex(&version_id);
     let digest_hex = to_hex(&bundle.bundle_digest);
-    let genesis = Generation { epoch: 0, seq: 0 };
+    let genesis: u64 = 0;
     doc::write_doc(
         ctx.fs,
         &sp.sync,

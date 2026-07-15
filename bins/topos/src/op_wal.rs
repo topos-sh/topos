@@ -117,7 +117,7 @@ mod tests {
     use crate::fs_seam::RealFs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use topos_types::{Generation, Receipt};
+    use topos_types::Receipt;
 
     struct Scratch(PathBuf);
     impl Scratch {
@@ -145,7 +145,7 @@ mod tests {
             op: OpKind::PublishDirect,
             candidate_commit: "a".repeat(64),
             bundle_digest: "b".repeat(64),
-            expected_generation: Generation { epoch: 1, seq: 1 },
+            expected_generation: 1,
             good: None,
             display_name: None,
             channel: None,

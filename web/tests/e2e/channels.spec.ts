@@ -1,234 +1,192 @@
 import { expect, test } from "@playwright/test";
-import { Client } from "pg";
-import { E2E_ADMIN_URL, E2E_PASSWORD } from "./env";
-import { gotoSettled, signIn } from "./sign-in";
+import { E2E_PASSWORD, MEMBER_EMAIL } from "./env";
+import { adminQuery, ensureBundle, theWorkspace } from "./seed";
+import { gotoSettled } from "./sign-in";
 
 /**
- * The channel surfaces: the index (list + counts), the detail (skills/members), and the two
- * owner existence-ceremonies (rename + delete, both step-up gated; delete also types the channel
- * name). Every assertion rides rows THIS spec seeds into the REAL directory (topos_e2e) — its OWN
- * workspace + owner, so it never collides with the roster/dashboard specs' seeds. auth.setup.ts
- * truncates the channel tables once at global setup; this spec's beforeAll seeds after, and the
- * suite runs serially so the mutating tests keep a deterministic order.
+ * The channel surfaces: the index (everyone first + counts), member-level create, the detail
+ * (skill references, members, the default channel's self-service stance over `channel_optout`),
+ * the two owner existence-ceremonies (rename + delete — step-up; delete also types the channel
+ * name), and the id-keyed audit history that outlives a rename and survives a delete in the
+ * ledger even though the page 404s by name.
  *
- * SEED SHAPE (0015's constraints: canonical lowercase principals, catalog rows for placed skills):
- *  - w_channels, address channels-e2e; a confirmed OWNER (the signed-in identity) + one confirmed
- *    MEMBER, so `everyone` counts 2 structurally.
- *  - `everyone` (structural, via topos_ensure_everyone) + three plain channels: `reviews` (2 skill
- *    refs, 1 member — the index/detail/rename subject), `audits` (1 ref, 1 member — the delete
- *    subject), `logs` (1 ref, 1 member — the history + deletion-trail subject).
- *  - two catalog skills (`deploy`, `release`) with NO current pointer, so their skill pages render
- *    the honest "nothing published yet" (no vault scope needed for this workspace).
+ * All rows live in the app's own `web` schema now. The suite's default identity is the claimed
+ * OWNER; serial so the mutating tests keep a deterministic order.
  */
 
-const CHANNELS_WS = "w_channels";
-const CHANNELS_ADDRESS = "channels-e2e";
-const OWNER_EMAIL = "channels-owner@example.com";
-const MEMBER_EMAIL = "channels-member@example.com";
+const GUILD = "e2e-guild";
+const RENAMED = "e2e-guild-renamed";
+const DOOMED = "e2e-doomed";
+const SKILL_ID = "s_e2e_chan";
+const SKILL_NAME = "chan-notes";
 
 test.describe.configure({ mode: "serial" });
 
-async function admin<T = Record<string, unknown>>(
-  sql: string,
-  params: unknown[] = [],
-): Promise<T[]> {
-  const db = new Client({ connectionString: E2E_ADMIN_URL });
-  await db.connect();
-  try {
-    const { rows } = await db.query(sql, params);
-    return rows as T[];
-  } finally {
-    await db.end();
-  }
-}
-
 test.beforeAll(async () => {
-  const db = new Client({ connectionString: E2E_ADMIN_URL });
-  await db.connect();
-  try {
-    // The guarded functions reference their tables unqualified; the superuser session's default
-    // search_path does not include `plane`, so set it for this seeding connection.
-    await db.query("SET search_path = plane, public");
-    // Idempotent for a local re-run: clear only THIS workspace's rows, then seed fresh.
-    // One statement per query: a parameterized (extended-protocol) query cannot carry
-    // multiple commands.
-    for (const table of [
-      "channel_events",
-      "channel_skills",
-      "channel_members",
-      "channels",
-      "catalog",
-      "workspace_member",
-      "workspace_policy",
-      "workspace",
-    ]) {
-      await db.query(`DELETE FROM plane.${table} WHERE workspace_id = $1`, [CHANNELS_WS]);
-    }
-    await db.query(
-      `INSERT INTO plane.workspace (workspace_id, display_name, verified_domain_status, deployment_mode, created_at, name)
-       VALUES ($1, 'Channels E2E', 'unverified', 'cloud', '2026-07-04T00:00:00Z', $2)`,
-      [CHANNELS_WS, CHANNELS_ADDRESS],
-    );
-    await db.query(
-      `INSERT INTO plane.workspace_policy (workspace_id, review_required) VALUES ($1, 0)`,
-      [CHANNELS_WS],
-    );
-    // A confirmed OWNER (the signed-in actor) + a confirmed MEMBER — everyone counts the two.
-    await db.query(
-      `INSERT INTO plane.workspace_member (workspace_id, principal, role, status, added_at) VALUES
-         ($1, $2, 'owner',  'confirmed', '2026-07-04T00:00:01Z'),
-         ($1, $3, 'member', 'confirmed', '2026-07-04T00:00:02Z')`,
-      [CHANNELS_WS, OWNER_EMAIL, MEMBER_EMAIL],
-    );
-    // Two catalog skills (no current pointer — the skill pages render "nothing published yet").
-    await db.query(
-      `INSERT INTO plane.catalog (workspace_id, skill_id, name, status, created_at) VALUES
-         ($1, 's_deploy',  'deploy',  'active', '2026-07-04T00:00:03Z'),
-         ($1, 's_release', 'release', 'active', '2026-07-04T00:00:04Z')`,
-      [CHANNELS_WS],
-    );
-    // The structural everyone channel, created the way genesis does.
-    await db.query(`SELECT plane.topos_ensure_everyone($1, '2026-07-04T00:00:05Z')`, [CHANNELS_WS]);
-    // Three plain channels + their references + memberships.
-    await db.query(
-      `INSERT INTO plane.channels (workspace_id, channel_id, name, mode, builtin, created_by, created_at) VALUES
-         ($1, 'reviews', 'reviews', 'open', 0, $2, '2026-07-04T00:00:06Z'),
-         ($1, 'audits',  'audits',  'open', 0, $2, '2026-07-04T00:00:07Z'),
-         ($1, 'logs',    'logs',    'open', 0, $2, '2026-07-04T00:00:08Z')`,
-      [CHANNELS_WS, OWNER_EMAIL],
-    );
-    await db.query(
-      `INSERT INTO plane.channel_skills (workspace_id, channel_id, skill_id, added_by, added_at) VALUES
-         ($1, 'reviews', 's_deploy',  $2, '2026-07-04T00:00:09Z'),
-         ($1, 'reviews', 's_release', $2, '2026-07-04T00:00:10Z'),
-         ($1, 'audits',  's_deploy',  $2, '2026-07-04T00:00:11Z'),
-         ($1, 'logs',    's_deploy',  $2, '2026-07-04T00:00:12Z')`,
-      [CHANNELS_WS, OWNER_EMAIL],
-    );
-    await db.query(
-      `INSERT INTO plane.channel_members (workspace_id, channel_id, principal, added_by, added_at) VALUES
-         ($1, 'reviews', $2, NULL, '2026-07-04T00:00:13Z'),
-         ($1, 'audits',  $2, NULL, '2026-07-04T00:00:14Z'),
-         ($1, 'logs',    $2, NULL, '2026-07-04T00:00:15Z')`,
-      [CHANNELS_WS, MEMBER_EMAIL],
-    );
-  } finally {
-    await db.end();
-  }
+  // Idempotent for a reused local database: this file's channels start absent.
+  await adminQuery(`delete from web.channel where name = any($1::text[])`, [
+    [GUILD, RENAMED, DOOMED],
+  ]);
+  await adminQuery(
+    `delete from web.channel_optout o using web."user" u
+     where u.id = o.user_id and u.email = $1`,
+    [MEMBER_EMAIL],
+  );
+  await ensureBundle({ id: SKILL_ID, name: SKILL_NAME });
 });
 
-test("the index lists everyone and a seeded channel with their counts", async ({ page }) => {
-  await signIn(page, OWNER_EMAIL);
-  await gotoSettled(page, `/workspaces/${CHANNELS_WS}/channels`);
+test("the index lists everyone first; a member creates a channel and lands on it", async ({
+  page,
+}) => {
+  const ws = await theWorkspace();
+  await gotoSettled(page, `/workspaces/${ws.id}/channels`);
 
-  // `everyone` is structural — its member count is the confirmed roster (2), marked as such.
+  // `everyone` is implicit membership — the roster minus opt-outs, marked as such.
   const everyone = page.getByRole("listitem").filter({ hasText: "everyone" });
   await expect(everyone).toBeVisible();
-  await expect(everyone.getByText("every confirmed member, structural")).toBeVisible();
-  await expect(everyone.getByText("2 members")).toBeVisible();
+  await expect(everyone.getByText("every member, minus opt-outs")).toBeVisible();
 
-  // A plain channel counts its own rows: two skill references, one member.
-  const reviews = page.getByRole("listitem").filter({ hasText: "reviews" });
-  await expect(reviews.getByText("2 skills")).toBeVisible();
-  await expect(reviews.getByText("1 member", { exact: true })).toBeVisible();
+  // Member-level create (the same grade as the CLI's create-on-first-use placement).
+  await page.getByLabel("Channel name").fill(GUILD);
+  await page.getByRole("button", { name: "Create channel" }).click();
+  await page.waitForURL(`**/channels/${GUILD}`);
+  await expect(page.getByRole("heading", { name: GUILD })).toBeVisible();
+
+  // A duplicate create is the honest name-taken refusal, never a 500.
+  await gotoSettled(page, `/workspaces/${ws.id}/channels`);
+  await page.getByLabel("Channel name").fill(GUILD);
+  await page.getByRole("button", { name: "Create channel" }).click();
+  await expect(page.getByRole("alert")).toContainText(`A channel named #${GUILD} already exists.`);
 });
 
-test("the detail shows the channel's skills and members", async ({ page }) => {
-  await signIn(page, OWNER_EMAIL);
-  await gotoSettled(page, `/workspaces/${CHANNELS_WS}/channels/reviews`);
+test("the detail lists the channel's skill references by catalog name", async ({ page }) => {
+  const ws = await theWorkspace();
+  // Curation arrangement: place the seeded bundle into the channel (a reference, not a copy).
+  await adminQuery(
+    `insert into web.channel_bundle (channel_id, workspace_id, bundle_id)
+     select c.id, c.workspace_id, $2 from web.channel c
+     where c.workspace_id = $1 and c.name = $3
+     on conflict do nothing`,
+    [ws.id, SKILL_ID, GUILD],
+  );
+  await gotoSettled(page, `/workspaces/${ws.id}/channels/${GUILD}`);
+  await expect(page.getByRole("link", { name: SKILL_NAME })).toBeVisible();
 
-  await expect(page.getByRole("heading", { name: "reviews" })).toBeVisible();
-  // The referenced skills link to their skill pages (by catalog name).
-  await expect(page.getByRole("link", { name: "deploy" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "release" })).toBeVisible();
-  // The person-scoped membership.
-  await expect(page.getByText(MEMBER_EMAIL)).toBeVisible();
+  // The index row now counts the reference.
+  await gotoSettled(page, `/workspaces/${ws.id}/channels`);
+  await expect(
+    page.getByRole("listitem").filter({ hasText: GUILD }).getByText("1 skill", { exact: true }),
+  ).toBeVisible();
 });
 
-test("rename is step-up gated: a wrong password fails and leaves the channel unchanged; the right password lands the new URL", async ({
+test("the default channel's stance is self-service: leave writes the opt-out, rejoin clears it", async ({
   page,
 }) => {
-  await signIn(page, OWNER_EMAIL);
-  await gotoSettled(page, `/workspaces/${CHANNELS_WS}/channels/reviews`);
+  const ws = await theWorkspace();
+  await gotoSettled(page, `/workspaces/${ws.id}/channels/everyone`);
+  await expect(page.getByText("You're in.", { exact: false })).toBeVisible();
 
-  // Wrong password: the ceremony refuses, nothing is written, the page stays on #reviews.
-  await page.getByLabel("New name").fill("reviews-renamed");
-  // Two ceremonies on this page share the password label; target the rename form's own field.
-  await page.locator("#rename-reviews-password").fill("wrong-password-9999");
+  // LEAVE — the member's own stance, deliberately step-up-less.
+  await page.getByRole("button", { name: "Leave everyone" }).click();
+  await expect(page.getByText("You've opted out", { exact: false })).toBeVisible();
+  const optedOut = await adminQuery<{ n: string }>(
+    `select count(*)::text as n from web.channel_optout o
+     join web."user" u on u.id = o.user_id where u.email = $1`,
+    [MEMBER_EMAIL],
+  );
+  expect(optedOut[0]?.n).toBe("1");
+
+  // REJOIN — deletes the opt-out row; delivery resumes on the next update.
+  await page.getByRole("button", { name: "Rejoin everyone" }).click();
+  await expect(page.getByText("You're in.", { exact: false })).toBeVisible();
+  const rejoined = await adminQuery<{ n: string }>(
+    `select count(*)::text as n from web.channel_optout o
+     join web."user" u on u.id = o.user_id where u.email = $1`,
+    [MEMBER_EMAIL],
+  );
+  expect(rejoined[0]?.n).toBe("0");
+
+  // The everyone channel offers NO existence ceremonies — structural, honestly stated.
+  await expect(page.getByText("The everyone channel is structural")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Rename channel" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Delete channel" })).toHaveCount(0);
+});
+
+test("rename is step-up gated: a wrong password refuses; the right one lands the new URL, id unchanged", async ({
+  page,
+}) => {
+  const ws = await theWorkspace();
+  const before = await adminQuery<{ id: string }>(
+    `select id from web.channel where workspace_id = $1 and name = $2`,
+    [ws.id, GUILD],
+  );
+  const channelId = before[0]?.id as string;
+
+  await gotoSettled(page, `/workspaces/${ws.id}/channels/${GUILD}`);
+  await page.getByLabel("New name").fill(RENAMED);
+  // Two ceremonies on this page carry password fields; target the rename form's own.
+  await page.locator(`#rename-${GUILD}-password`).fill("wrong-password-9999");
   await page.getByRole("button", { name: "Rename channel" }).click();
   await expect(page.getByRole("alert")).toContainText("Password check failed");
-  await expect(page.getByRole("heading", { name: "reviews" })).toBeVisible();
-  const stillReviews = await admin<{ name: string }>(
-    `SELECT name FROM plane.channels WHERE workspace_id = $1 AND channel_id = 'reviews'`,
-    [CHANNELS_WS],
+  const unchanged = await adminQuery<{ name: string }>(
+    `select name from web.channel where id = $1`,
+    [channelId],
   );
-  expect(stillReviews[0]?.name).toBe("reviews");
+  expect(unchanged[0]?.name).toBe(GUILD);
 
-  // Right password: the rename lands and redirects to the new channel URL.
-  await page.getByLabel("New name").fill("reviews-renamed");
-  await page.locator("#rename-reviews-password").fill(E2E_PASSWORD);
+  await page.getByLabel("New name").fill(RENAMED);
+  await page.locator(`#rename-${GUILD}-password`).fill(E2E_PASSWORD);
   await page.getByRole("button", { name: "Rename channel" }).click();
-  await page.waitForURL((u) => u.pathname.endsWith(`/channels/reviews-renamed`));
-  await expect(page.getByRole("heading", { name: "reviews-renamed" })).toBeVisible();
-  // The immutable channel_id never moved; only the display name did.
-  const renamed = await admin<{ name: string }>(
-    `SELECT name FROM plane.channels WHERE workspace_id = $1 AND channel_id = 'reviews'`,
-    [CHANNELS_WS],
+  await page.waitForURL((u) => u.pathname.endsWith(`/channels/${RENAMED}`));
+  await expect(page.getByRole("heading", { name: RENAMED })).toBeVisible();
+  // The immutable channel id never moved; only the name did — references and history survive.
+  const renamed = await adminQuery<{ name: string }>(`select name from web.channel where id = $1`, [
+    channelId,
+  ]);
+  expect(renamed[0]?.name).toBe(RENAMED);
+});
+
+test("delete types the channel name; the ledger keeps the trail though the page 404s by name", async ({
+  page,
+}) => {
+  const ws = await theWorkspace();
+  await gotoSettled(page, `/workspaces/${ws.id}/channels`);
+  await page.getByLabel("Channel name").fill(DOOMED);
+  await page.getByRole("button", { name: "Create channel" }).click();
+  await page.waitForURL(`**/channels/${DOOMED}`);
+  const created = await adminQuery<{ id: string }>(
+    `select id from web.channel where workspace_id = $1 and name = $2`,
+    [ws.id, DOOMED],
   );
-  expect(renamed[0]?.name).toBe("reviews-renamed");
-});
+  const channelId = created[0]?.id as string;
 
-test("delete types the channel name and drops it from the index; the referenced skill's page survives", async ({
-  page,
-}) => {
-  await signIn(page, OWNER_EMAIL);
-  await gotoSettled(page, `/workspaces/${CHANNELS_WS}/channels/audits`);
-
-  // The destructive ceremony: type the exact name + confirm with the password.
-  await page.getByPlaceholder("audits").fill("audits");
-  await page.locator("#delete-audits-password").fill(E2E_PASSWORD);
-  await page.getByRole("button", { name: "Delete channel" }).click();
-
-  // Redirected to the index, and the channel is gone from it.
-  await page.waitForURL((u) => u.pathname.endsWith(`/channels`));
-  await expect(page.getByRole("listitem").filter({ hasText: "audits" })).toHaveCount(0);
-
-  // The skill the channel referenced still exists — a deletion is an upstream withdrawal, not a
-  // catalog change. Its page renders (not the house 404).
-  await gotoSettled(page, `/workspaces/${CHANNELS_WS}/skills/deploy`);
-  await expect(page.getByRole("heading", { name: "deploy" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Not found" })).toHaveCount(0);
-});
-
-test("history shows the trigger-emitted events; a delete's trail survives in the audit though the page 404s", async ({
-  page,
-}) => {
-  await signIn(page, OWNER_EMAIL);
-
-  // Before deletion: the history page renders the seeded channel's trigger-emitted trail.
-  await gotoSettled(page, `/workspaces/${CHANNELS_WS}/channels/logs/history`);
+  // The UI create landed its audit row — the history page renders the id-keyed trail.
+  await gotoSettled(page, `/workspaces/${ws.id}/channels/${DOOMED}/history`);
   await expect(page.getByText("Channel created")).toBeVisible();
-  await expect(page.getByText("Skill added")).toBeVisible();
-  await expect(page.getByText("Member joined")).toBeVisible();
 
-  // Delete the channel through the UI.
-  await gotoSettled(page, `/workspaces/${CHANNELS_WS}/channels/logs`);
-  await page.getByPlaceholder("logs").fill("logs");
-  await page.locator("#delete-logs-password").fill(E2E_PASSWORD);
+  // The WRONG typed name (with the right password) is refused by the typed-name gate.
+  await gotoSettled(page, `/workspaces/${ws.id}/channels/${DOOMED}`);
+  await page.locator(`#delete-${DOOMED}-confirm`).fill("not-the-name");
+  await page.locator(`#delete-${DOOMED}-password`).fill(E2E_PASSWORD);
   await page.getByRole("button", { name: "Delete channel" }).click();
-  await page.waitForURL((u) => u.pathname.endsWith(`/channels`));
+  await expect(page.getByRole("alert")).toContainText(/Type the exact name/);
 
-  // The channel_events rows SURVIVE the deletion and carry the deletion trail...
-  const events = await admin<{ event: string }>(
-    `SELECT event FROM plane.channel_events WHERE workspace_id = $1 AND channel_id = 'logs'`,
-    [CHANNELS_WS],
+  // The EXACT name + the password land the delete; the index no longer lists it.
+  await page.locator(`#delete-${DOOMED}-confirm`).fill(DOOMED);
+  await page.locator(`#delete-${DOOMED}-password`).fill(E2E_PASSWORD);
+  await page.getByRole("button", { name: "Delete channel" }).click();
+  await page.waitForURL((u) => u.pathname.endsWith("/channels"));
+  await expect(page.getByRole("listitem").filter({ hasText: DOOMED })).toHaveCount(0);
+
+  // The append-only ledger keeps the deletion under the immutable id…
+  const trail = await adminQuery<{ kind: string }>(
+    `select kind from web.audit_event where subject = $1 order by id`,
+    [channelId],
   );
-  const kinds = events.map((e) => e.event);
-  expect(kinds).toContain("channel_deleted");
-  expect(kinds).toContain("skill_removed");
-  expect(kinds).toContain("member_left");
+  expect(trail.map((t) => t.kind)).toContain("channel_created");
+  expect(trail.map((t) => t.kind)).toContain("channel_deleted");
 
-  // ...but the history page 404s once the channel row is gone (it resolves by name).
-  await gotoSettled(page, `/workspaces/${CHANNELS_WS}/channels/logs/history`);
+  // …but history resolves by NAME, so the page is the uniform miss once the row is gone.
+  await gotoSettled(page, `/workspaces/${ws.id}/channels/${DOOMED}/history`);
   await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
 });

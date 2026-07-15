@@ -25,20 +25,25 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
     // Public, sessionless.
     index(file("landing.tsx")),
     route("login", file("login.tsx")),
-    route("verify/:userCode", file("verify.tsx")),
+    // The first-boot claim (the printed one-time link) + the mail-less recovery hatch.
+    route("claim", file("claim.tsx")),
+    route("recovery", file("recovery.tsx")),
+    // The ONE approve ceremony: a signed-in human confirms a device flow by its user code.
+    route("verify", file("verify.tsx")),
     route("healthz", file("healthz.ts")),
     route("install", file("install.ts")),
-    route("i/:token", file("claim-link.ts")),
     route("api/auth/*", file("api.auth.ts")),
-    // THE DEVICE LANE — `/api/v1` is the product's one public API, served here since the door
-    // cutover. Row ops run in this tier through the guarded `topos_*` functions under the
-    // scoped role (each route authenticates the workspace credential via `requireDeviceActor`);
-    // everything else — byte/pointer ops, enrollment, governance — falls through the static
-    // routes below onto the `api/v1/*` splat, which forwards VERBATIM to the vault on the
-    // internal network. Static segments outrank the splat, so each listed route wins its path.
-    // The REVIEW INBOX (`workspaces/:ws/proposals`) and the SKILL LOG (`…/skills/:skill/log`) are
-    // deliberately NOT served here: both decorate their rows with git commit messages — byte
-    // custody this tier does not hold — so they ride the splat to the vault like every byte op.
+    // THE DEVICE LANE — `/api/v1` is the product's one public API, TERMINATING here since the
+    // identity unification: the row ops run over this app's own schema, and the custody ops
+    // (publish/propose/revert/review + the byte reads) are app-authorized orchestration over
+    // the vault's internal custody lane. Static segments outrank the splat, which answers the
+    // uniform wire 404 for everything unlisted.
+    route("api/v1/device/authorize", file("api.v1.device-authorize.ts")),
+    route("api/v1/device/token", file("api.v1.device-token.ts")),
+    route("api/v1/publish", file("api.v1.publish.ts")),
+    route("api/v1/proposals", file("api.v1.propose.ts")),
+    route("api/v1/reverts", file("api.v1.reverts.ts")),
+    route("api/v1/reviews", file("api.v1.reviews.ts")),
     ...prefix("api/v1/workspaces/:ws", [
       route("me", file("api.v1.me.ts")),
       route("channels", file("api.v1.channels.ts")),
@@ -46,6 +51,9 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
       route("report", file("api.v1.report.ts")),
       route("notices/ack", file("api.v1.notices-ack.ts")),
       route("invitations", file("api.v1.invitations.ts")),
+      route("devices", file("api.v1.devices.ts")),
+      route("proposals", file("api.v1.ws-proposals.ts")),
+      route("skills", file("api.v1.skills-index.ts")),
       route("follows/:skill", file("api.v1.follows.ts")),
       route("exclusions/:skill", file("api.v1.exclusions.ts")),
       route("channels/:channel/membership", file("api.v1.channel-membership.ts")),
@@ -53,18 +61,13 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
       route("channels/:channel/protection", file("api.v1.channel-protection.ts")),
       route("skills/:skill/reach", file("api.v1.skill-reach.ts")),
       route("skills/:skill/protection", file("api.v1.skill-protection.ts")),
+      route("skills/:skill/current", file("api.v1.skill-current.ts")),
+      route("skills/:skill/log", file("api.v1.skill-log.ts")),
+      route("skills/:skill/proposals", file("api.v1.skill-proposals.ts")),
+      route("skills/:skill/versions/:versionId", file("api.v1.skill-version.ts")),
+      route("skills/:skill/bundles/:objectId", file("api.v1.skill-object.ts")),
     ]),
-    // The passcode START is served here since the mail unification — the one enrollment step
-    // with a mail side effect: mint over the vault's internal lane, mail through the app's ONE
-    // seam, answer the constant ack (the confirm keeps riding the splat to the vault, which
-    // pins this start's wire with a contract stub).
-    route("api/v1/enroll/passcode", file("api.v1.enroll.passcode.ts")),
     route("api/v1/*", file("api.v1.$.ts")),
-    // The claim resource ALSO lives under the API base — `{api_base_url}/i/<token>` — the same
-    // passthrough the origin-root `/i/` link serves, mounted twice. TIER PARITY: on the vault the
-    // API base IS the root, so `{base}/i/` always resolves there; this mount keeps that true when
-    // the app is the serving tier, and a claim link rooted at either base enrolls identically.
-    route("api/i/:token", file("claim-link.ts"), { id: "routes/claim-link-api" }),
     // Signed-in surface: one shell layout carries the session middleware + chrome.
     route("api/memberships", file("api.memberships.ts")),
     route("app", file("app-entry.tsx")),
@@ -72,7 +75,6 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
       route("settings/devices", file("your-devices.tsx")),
       ...prefix("workspaces", [
         index(file("workspaces-index.tsx")),
-        route("new", file("workspaces-new.tsx")),
         ...prefix(":ws", [
           index(file("workspace-dashboard.tsx")),
           route("settings", file("workspace-settings.tsx")),

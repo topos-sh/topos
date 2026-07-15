@@ -50,8 +50,8 @@ services:
       # layout (see the README's backups section) — an in-place tag bump against the old mount will not start.
       - pg-data:/var/lib/postgresql
       # First-boot ONLY (initdb runs it once, on a fresh volume, before accepting TCP): create the two
-      # roles + schema `plane` + the search_paths BEFORE the plane boots — migration 0019's web grants
-      # skip if topos_web is absent, so the roles must already exist.
+      # roles + both schemas + the search_paths + the cross-lane grants BEFORE either application
+      # boots. Each app then runs its own migration lineage as its own role.
       - ./scripts/compose-init-db.sh:/docker-entrypoint-initdb.d/10-topos-init.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-topos} -d ${POSTGRES_DB:-topos}"]
@@ -73,23 +73,14 @@ services:
       # Connects as topos_plane (owns schema `plane`, runs the migrations). A managed/networked Postgres
       # should append `?sslmode=require` — the plane speaks TLS to Postgres over rustls.
       DATABASE_URL: postgres://topos_plane:${TOPOS_PLANE_DB_PASSWORD:-plane}@db:5432/${POSTGRES_DB:-topos}
-      # The plane's PUBLIC-facing bases now all route THROUGH THE APP. The API base is the app origin + /api
-      # (the app fronts `/api`); the human verification pages + the `/i/` claim links live on the app origin.
-      TOPOS_PLANE_BASE_URL: ${TOPOS_PUBLIC_URL:-http://localhost:3000}/api
-      TOPOS_PLANE_VERIFY_BASE_URL: ${TOPOS_PUBLIC_URL:-http://localhost:3000}
-      TOPOS_PLANE_LINK_BASE_URL: ${TOPOS_PUBLIC_URL:-http://localhost:3000}
-      TOPOS_PLANE_MODE: self_host
-      # The internal session lane's shared bearer — the app is the only holder; with it unset the plane
-      # answers 404 on the whole /internal lane. Must match the web app's PLANE_INTERNAL_TOKEN below.
+      # The vault is pure byte custody with ONE caller: it needs no public base, no verification
+      # pages, no mode — just the database, the stores, and the internal lane's shared bearer.
+      # The app is the only holder; with it unset the vault answers 404 on the whole /internal
+      # lane. Must match the web app's PLANE_INTERNAL_TOKEN below.
       TOPOS_PLANE_INTERNAL_TOKEN: ${TOPOS_INTERNAL_TOKEN:-change-me-internal-token}
-      # Rate limiting OFF. The plane's limiter buckets per PEER IP, and in this topology its only peer is
-      # the web app — so an enabled bucket would throttle the ENTIRE fleet as if it were one client. The
-      # public belt belongs on the app (its own sign-in/step-up limiters) and/or the reverse proxy; the
-      # plane sits behind them on a trusted network.
-      TOPOS_PLANE_RATELIMIT: "off"
     volumes:
-      # The git-object + large-object stores and the 0600 enrollment secret (generated on
-      # first boot). Snapshot these BEFORE the database (see the README's backup order).
+      # The git-object + large-object stores. Snapshot these BEFORE the database (see the
+      # README's backup order).
       - plane-data:/data
 
   web:
@@ -105,8 +96,8 @@ services:
     ports:
       - "3000:3000"
     environment:
-      # Connects as topos_web (owns schema `web`, reads `plane`, writes it only through the guarded
-      # topos_* functions). Migrates its own `web` schema at first request.
+      # Connects as topos_web (owns schema `web` — identity, policy, product rows; reads `plane`
+      # read-only, grant-enforced). Migrates its own `web` schema at first request.
       DATABASE_URL: postgres://topos_web:${TOPOS_WEB_DB_PASSWORD:-web}@db:5432/${POSTGRES_DB:-topos}
       # The internal session lane — the plane, over the compose network, with the shared bearer.
       PLANE_INTERNAL_URL: http://plane:8787
@@ -126,10 +117,17 @@ services:
       # the public origin sessions are minted for. BETTER_AUTH_URL is the app's externally reachable origin.
       BETTER_AUTH_SECRET: ${TOPOS_WEB_AUTH_SECRET:-change-me-auth-secret-change-me-auth-secret}
       BETTER_AUTH_URL: ${TOPOS_PUBLIC_URL:-http://localhost:3000}
+      # The first-boot workspace: its address slug (renameable later in the product) and an
+      # optional preset setup code (CI/IaC). Unset, a fresh high-entropy claim code is minted on
+      # every boot while unclaimed and printed to the app logs; the optional link file mirrors
+      # that one line onto a volume path for operators without log access.
+      TOPOS_WORKSPACE_NAME: ${TOPOS_WORKSPACE_NAME:-}
+      TOPOS_SETUP_CODE: ${TOPOS_SETUP_CODE:-}
+      TOPOS_SETUP_LINK_FILE: ${TOPOS_SETUP_LINK_FILE:-}
       # Outbound mail — BRING YOUR OWN SMTP, all five or none (passed through empty = mail off,
-      # and everything still works: invites share the workspace address, enrollment approves in
-      # the app). Armed, invite notices really send and emailed-passcode enrollment becomes
-      # available (advertise it on the plane with TOPOS_PLANE_ENROLLMENT_METHOD=passcode).
+      # and the core loop still works: sign-in, publishing, the claim ceremony). Armed, mail
+      # becomes the identity rung for a MULTI-USER install: inviting requires it (the invited
+      # sign-up verifies through the mailbox), and password-reset mail exists.
       TOPOS_MAIL_SMTP_HOST: ${TOPOS_MAIL_SMTP_HOST:-}
       TOPOS_MAIL_SMTP_PORT: ${TOPOS_MAIL_SMTP_PORT:-}
       TOPOS_MAIL_SMTP_USER: ${TOPOS_MAIL_SMTP_USER:-}

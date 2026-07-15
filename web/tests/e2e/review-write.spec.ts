@@ -1,219 +1,260 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, test } from "@playwright/test";
+import { GUIDE_MD, SKILL_MD_V1, SKILL_MD_V2 } from "../fixtures/plane/data.mjs";
+import { MEMBER_EMAIL, PLANE_INTERNAL_TOKEN, PLANE_PORT } from "./env";
 import {
-  APPROVE_GENERATION,
-  APPROVE_SKILL,
-  CANDIDATE_ID,
-  R_APPROVE_CAND,
-  R_REJECT_CAND,
-  R_SELF_CAND,
-  R_STALE_CAND,
-  REJECT_GENERATION,
-  REJECT_SKILL,
-  REVIEW_WS,
-  REVIEWER_EMAIL,
-  SELF_GENERATION,
-  SELF_SKILL,
-  SKILL,
-  STALE_SKILL,
-  WS,
-} from "../fixtures/plane/data.mjs";
-import { PLANE_PORT } from "./env";
+  adminQuery,
+  custodyCalls,
+  ensureBundle,
+  ensureProposal,
+  ensureSeatedUser,
+  seedCustody,
+  theWorkspace,
+} from "./seed";
 import { gotoSettled, signIn } from "./sign-in";
 
 /**
- * The browser review decisions over the fixture vault — design's six flows: approve happy path,
- * the stale re-show, reject-with-reason, the four-eyes withhold (Approve gone, Withdraw live), the
- * member read-only posture, and the comment thread.
+ * The browser review decisions — APP-ORCHESTRATED now: the seat gate and four-eyes run against
+ * the app's own rows, the vault only CAS-moves the pointer, and the proposal row resolves in
+ * the same flow. Five proofs: the approve happy path (ONE exact pointer CAS on the wire, bound
+ * to the generation the rendered diff was computed against), the conflict re-show (a moved
+ * pointer refuses the stale approve WITHOUT any vault call — the fresh current read catches
+ * it), reject-with-reason (the row resolves, the candidate's bytes reclaim best-effort), the
+ * four-eyes withhold (Approve gone, Withdraw live), and the comment thread (inert bodies,
+ * idempotent replay).
  *
- * The fixture applies the vault's keep == read rule: once a candidate is rejected or its base
- * staled, its meta and blobs 404 (reclaimed) — so every post-decision re-render asserts the honest
- * DIFF-LESS card, never a "fresh diff" the vault could not serve.
- *
- * Identities: the DECIDING flows sign in as REVIEWER_EMAIL, whose confirmed REVIEWER seat on
- * w_review (PLANE_SEED) is both the page admission and the `canDecide` role — one skill per
- * mutating flow, so no test shares fixture state. The read-only + comments flows ride the suite's
- * default storage state (a confirmed plain MEMBER of ws-e2e).
- *
- * HARNESS DISCIPLINE: every assertion here is a fixture-fed surface (the detail read, the current
- * pointer, the recorded /__test/calls wire payloads) or web-tier comment state this spec created.
- * DB-fed mirrors — the sidebar open-proposal badge above all — are DELIBERATELY unasserted.
+ * The DECIDING flows sign in as a REVIEWER seat; one bundle per mutating flow, so no test
+ * shares custody state.
  */
 
+const REVIEWER = "review-writer@example.com";
+const REVIEWER_DISPLAY = "review-writer";
+
 test.describe.configure({ mode: "serial" });
+test.use({ storageState: { cookies: [], origins: [] } });
 
-/** The canonical (lowercase) UUID form the vault's op-id slot requires. */
-const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-interface RecordedReviewCall {
-  route: string;
-  method: string;
-  path: string;
-  ws: string;
-  skill: string;
-  versionId: string;
-  acting: string;
-  body: Record<string, unknown>;
+interface Arranged {
+  currentId: string;
+  candidateId: string;
+  url: string;
 }
 
-async function reviewCalls(
-  page: Page,
-  route: "review-approve" | "review-reject",
-  versionId: string,
-): Promise<RecordedReviewCall[]> {
-  const response = await page.request.get(`http://127.0.0.1:${PLANE_PORT}/__test/calls`);
-  const calls: RecordedReviewCall[] = await response.json();
-  return calls.filter((c) => c.route === route && c.versionId === versionId);
+/** Stand up one bundle: current v0, an open candidate v1, and the proposal row. */
+async function arrange(
+  bundleId: string,
+  name: string,
+  opts: { proposedByEmail: string; protection?: "reviewed" | null },
+): Promise<Arranged> {
+  const ws = await theWorkspace();
+  const proposer = (
+    await adminQuery<{ id: string }>(`select id from web."user" where email = $1`, [
+      opts.proposedByEmail,
+    ])
+  )[0]?.id as string;
+  await ensureBundle({ id: bundleId, name, protection: opts.protection ?? null });
+  const seeded = await seedCustody(
+    [
+      {
+        ws: ws.id,
+        bundle: bundleId,
+        versions: [
+          {
+            files: [
+              { path: "SKILL.md", content: SKILL_MD_V1 },
+              { path: "docs/guide.md", content: GUIDE_MD },
+            ],
+            message: "genesis",
+          },
+          {
+            files: [
+              { path: "SKILL.md", content: SKILL_MD_V2 },
+              { path: "docs/guide.md", content: GUIDE_MD },
+            ],
+            parent: 0,
+            author: "dev-device",
+            message: "tighten the steps",
+          },
+        ],
+        current: 0,
+      },
+    ],
+    { reset: false }, // additive: this file arranges several bundles side by side
+  );
+  const currentId = seeded[0]?.versions[0]?.version_id as string;
+  const candidateId = seeded[0]?.versions[1]?.version_id as string;
+  await adminQuery(`delete from web.proposal where bundle_id = $1`, [bundleId]);
+  await ensureProposal({
+    id: `p_${bundleId}`,
+    bundleId,
+    candidateVersionId: candidateId,
+    proposedBy: proposer,
+    status: "open",
+  });
+  return {
+    currentId,
+    candidateId,
+    url: `/workspaces/${ws.id}/skills/${name}/proposals/${candidateId}`,
+  };
 }
 
-const proposalUrl = (skill: string, versionId: string) =>
-  `/workspaces/${REVIEW_WS}/skills/${skill}/proposals/${versionId}`;
+test.beforeAll(async () => {
+  await ensureSeatedUser(REVIEWER, "reviewer");
+  await seedCustody([]); // one clean custody world for this file's bundles
+});
 
-test("approve happy path: one exact wire POST, then the accepted terminal state", async ({
+test("approve happy path: one exact pointer CAS, then the accepted terminal state", async ({
   page,
 }) => {
-  await signIn(page, REVIEWER_EMAIL);
-  await gotoSettled(page, proposalUrl(APPROVE_SKILL, R_APPROVE_CAND));
+  const a = await arrange("s_e2e_rw_approve", "rw-approve", { proposedByEmail: MEMBER_EMAIL });
+  await signIn(page, REVIEWER);
+  await gotoSettled(page, a.url);
 
-  await expect(page.getByText("Open — proposed against the team's current version.")).toBeVisible();
-  const approve = page.getByRole("button", { name: "Approve — make this current" });
-  await expect(approve).toBeVisible();
-  await approve.click();
+  await expect(
+    page.getByText("Open — awaiting a reviewer's decision", { exact: false }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Approve — make this current" }).click();
 
-  // The revalidated page renders the accepted terminal state from the same fixture reads the
-  // decision moved: banner + resolution panel, no forms, no CLI hand-off.
+  // The revalidated page renders the accepted terminal state from the same rows the decision
+  // moved: banner + resolution panel, no forms, no CLI hand-off.
   await expect(
     page.getByText("Accepted — this candidate is the team's current version."),
   ).toBeVisible();
-  await expect(
-    page.getByText("This candidate was approved and is the team's current version."),
-  ).toBeVisible();
-  await expect(page.getByText(`decided by ${REVIEWER_EMAIL}`, { exact: false })).toBeVisible();
+  await expect(page.getByText(`decided by ${REVIEWER_DISPLAY}`, { exact: false })).toBeVisible();
   await expect(page.getByRole("button", { name: "Approve — make this current" })).toHaveCount(0);
   await expect(page.getByText("Reject with a reason…")).toHaveCount(0);
   await expect(page.getByText("Prefer the CLI?")).toHaveCount(0);
 
-  // The exact wire payload: ONE POST, a canonical-UUID request_id, and the generation the rendered
-  // diff was computed against — nothing else in the body.
-  const calls = await reviewCalls(page, "review-approve", R_APPROVE_CAND);
+  // The exact wire: ONE pointer CAS, bound to the generation the rendered diff was computed
+  // against, attributed with the reviewer's display — nothing else in the body.
+  const calls = await custodyCalls({ route: "pointer", bundle: "s_e2e_rw_approve" });
   expect(calls).toHaveLength(1);
-  const call = calls[0] as RecordedReviewCall;
-  expect(call.method).toBe("POST");
-  expect(call.ws).toBe(REVIEW_WS);
-  expect(call.skill).toBe(APPROVE_SKILL);
-  expect(call.acting).toBe(REVIEWER_EMAIL);
-  expect(String(call.body.request_id)).toMatch(CANONICAL_UUID);
-  expect(call.body.expected_epoch).toBe(APPROVE_GENERATION.epoch);
-  expect(call.body.expected_seq).toBe(APPROVE_GENERATION.seq);
-  expect(Object.keys(call.body).sort()).toEqual(["expected_epoch", "expected_seq", "request_id"]);
+  const call = calls[0] as NonNullable<(typeof calls)[0]>;
+  expect(call.body.version_id).toBe(a.candidateId);
+  expect(call.body.expected_generation).toBe(1);
+  expect(call.body.attribution).toBe(REVIEWER_DISPLAY);
+  expect(Object.keys(call.body).sort()).toEqual([
+    "attribution",
+    "expected_generation",
+    "version_id",
+  ]);
+
+  // Both truths agree: the row resolved and the custody mirror moved.
+  const row = await adminQuery<{ status: string }>(
+    `select status from web.proposal where id = 'p_s_e2e_rw_approve'`,
+  );
+  expect(row[0]?.status).toBe("approved");
+  const pointer = await adminQuery<{ version_id: string; generation: string }>(
+    `select version_id, generation::text from plane.current_pointer where bundle_id = 's_e2e_rw_approve'`,
+  );
+  expect(pointer[0]?.version_id).toBe(a.candidateId);
+  expect(pointer[0]?.generation).toBe("2");
 });
 
-test("a conflicting approve re-shows the page stale: banner, diff-less card, no forms", async ({
+test("a moved pointer refuses the stale approve — the fresh current read, no vault CAS", async ({
   page,
 }) => {
-  await signIn(page, REVIEWER_EMAIL);
-  await gotoSettled(page, proposalUrl(STALE_SKILL, R_STALE_CAND));
+  const a = await arrange("s_e2e_rw_conflict", "rw-conflict", { proposedByEmail: MEMBER_EMAIL });
+  await signIn(page, REVIEWER);
+  await gotoSettled(page, a.url);
+  await expect(page.getByRole("button", { name: "Approve — make this current" })).toBeVisible();
 
-  const approve = page.getByRole("button", { name: "Approve — make this current" });
-  await expect(approve).toBeVisible();
-  await approve.click();
+  // The pointer moves UNDER the open page (a concurrent publish through the custody lane).
+  const ws = await theWorkspace();
+  const raced = await page.request.post(
+    `http://127.0.0.1:${PLANE_PORT}/internal/v1/workspaces/${ws.id}/bundles/s_e2e_rw_conflict/publish`,
+    {
+      headers: { authorization: `Bearer ${PLANE_INTERNAL_TOKEN}` },
+      data: {
+        files: [
+          {
+            path: "SKILL.md",
+            mode: "100644",
+            content_base64: Buffer.from(`${SKILL_MD_V1}raced\n`, "utf8").toString("base64"),
+          },
+        ],
+        parent: a.currentId,
+        attribution: "racer",
+        message: "raced publish",
+        expected_generation: 1,
+      },
+    },
+  );
+  expect(raced.ok()).toBe(true);
 
-  // The fixture's alwaysConflict answers `conflict` AND moves the pointer — the revalidated page
-  // derives `stale`: the moved-base banner, the honest diff-less card (the vault RECLAIMS a staled
-  // candidate's bytes — keep == read), and NO decision forms (a fresh propose is the path).
-  await expect(
-    page.getByText("it can no longer be approved as-is", { exact: false }),
-  ).toBeVisible();
-  await expect(
-    page.getByText("no longer readable — the server retains only current versions", {
-      exact: false,
-    }),
-  ).toBeVisible();
-  await expect(page.getByText("Step three: ship.")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Approve — make this current" })).toHaveCount(0);
-  await expect(page.getByText("Reject with a reason…")).toHaveCount(0);
-  // The CLI hand-off stays offered, collapsed, with the stale caveat inside.
-  const cliSummary = page.getByText("Prefer the CLI?");
-  await expect(cliSummary).toBeVisible();
-  await cliSummary.click();
-  await expect(
-    page.getByText("an approve will be refused as stale", { exact: false }),
-  ).toBeVisible();
-
-  // The refused POST was a real, recorded wire call — nothing was decided.
-  const calls = await reviewCalls(page, "review-approve", R_STALE_CAND);
-  expect(calls).toHaveLength(1);
+  await page.getByRole("button", { name: "Approve — make this current" }).click();
+  // The action re-read the live pointer, saw the diff's binding was stale, and refused —
+  // honestly, before any vault call.
+  await expect(page.getByRole("alert")).toContainText("current moved while you reviewed");
+  expect(await custodyCalls({ route: "pointer", bundle: "s_e2e_rw_conflict" })).toHaveLength(0);
 });
 
-test("reject needs a reason: blocked empty client-side, then the verbatim reason lands", async ({
+test("reject needs a reason: blocked empty client-side, then the verbatim reason lands and the bytes reclaim", async ({
   page,
 }) => {
   const REASON = "Steps two and three regress the canary gate — see run #482.";
-  await signIn(page, REVIEWER_EMAIL);
-  await gotoSettled(page, proposalUrl(REJECT_SKILL, R_REJECT_CAND));
+  const a = await arrange("s_e2e_rw_reject", "rw-reject", { proposedByEmail: MEMBER_EMAIL });
+  await signIn(page, REVIEWER);
+  await gotoSettled(page, a.url);
 
   // The reject leg hides behind its collapsible — opening it is the deliberate step.
   await page.getByText("Reject with a reason…").click();
   const rejectButton = page.getByRole("button", { name: "Reject proposal" });
   await expect(rejectButton).toBeVisible();
 
-  // An empty reason never leaves the browser: the textarea is `required`, so native constraint
-  // validation blocks the submit — no wire call is recorded.
+  // An empty reason never leaves the browser: native constraint validation blocks the submit.
   await rejectButton.click();
   const reasonField = page.locator('textarea[name="reason"]');
   await expect(reasonField).toHaveJSProperty("validity.valueMissing", true);
-  await page.waitForTimeout(250);
-  expect(await reviewCalls(page, "review-reject", R_REJECT_CAND)).toHaveLength(0);
+  expect(
+    (
+      await adminQuery<{ status: string }>(
+        `select status from web.proposal where id = 'p_s_e2e_rw_reject'`,
+      )
+    )[0]?.status,
+  ).toBe("open");
 
   await reasonField.fill(REASON);
   await rejectButton.click();
 
-  // The rejected terminal state, with the recorded reason displayed verbatim — and the honest
-  // diff-less card: the vault reclaims a rejected candidate's bytes (keep == read), so the
-  // re-render keeps the RECORD (banner, resolution, thread) and never a diff.
+  // The rejected terminal state, the reason verbatim.
   await expect(page.getByText("Rejected — the resolution below says why.")).toBeVisible();
-  await expect(
-    page.getByText("This candidate was rejected and never became current."),
-  ).toBeVisible();
-  await expect(page.getByText(`decided by ${REVIEWER_EMAIL}`, { exact: false })).toBeVisible();
+  await expect(page.getByText(`decided by ${REVIEWER_DISPLAY}`, { exact: false })).toBeVisible();
   await expect(page.getByText(REASON, { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Approve — make this current" })).toHaveCount(0);
+
+  // The row resolved with the verbatim reason…
+  const row = await adminQuery<{ status: string; resolved_reason: string }>(
+    `select status, resolved_reason from web.proposal where id = 'p_s_e2e_rw_reject'`,
+  );
+  expect(row[0]?.status).toBe("rejected");
+  expect(row[0]?.resolved_reason).toBe(REASON);
+
+  // …and the candidate's bytes reclaim BEST-EFFORT after the row commits (fire-and-forget, so
+  // poll the recorded purge; the record — row + resolution — already stands either way).
+  await expect
+    .poll(async () => (await custodyCalls({ route: "purge", bundle: "s_e2e_rw_reject" })).length)
+    .toBeGreaterThan(0);
+
+  // A reload now renders the honest diff-less card in place of the files (keep == read).
+  await gotoSettled(page, a.url);
   await expect(
     page.getByText("no longer readable — the server retains only current versions", {
       exact: false,
     }),
   ).toBeVisible();
-  await expect(page.getByText("Step three: ship.")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Approve — make this current" })).toHaveCount(0);
-  await expect(page.getByText("Reject with a reason…")).toHaveCount(0);
-
-  // The exact wire payload: ONE POST binding the PROPOSAL's base generation + the verbatim reason.
-  const calls = await reviewCalls(page, "review-reject", R_REJECT_CAND);
-  expect(calls).toHaveLength(1);
-  const call = calls[0] as RecordedReviewCall;
-  expect(call.method).toBe("POST");
-  expect(call.acting).toBe(REVIEWER_EMAIL);
-  expect(String(call.body.request_id)).toMatch(CANONICAL_UUID);
-  expect(call.body.expected_epoch).toBe(REJECT_GENERATION.epoch);
-  expect(call.body.expected_seq).toBe(REJECT_GENERATION.seq);
-  expect(call.body.reason).toBe(REASON);
-  expect(Object.keys(call.body).sort()).toEqual([
-    "expected_epoch",
-    "expected_seq",
-    "reason",
-    "request_id",
-  ]);
 });
 
-test("four-eyes: the proposer keeps withdraw — Approve withheld, the reject wire body lands", async ({
+test("four-eyes: the proposer keeps withdraw — Approve withheld, the closed record lands", async ({
   page,
 }) => {
   const REASON = "Withdrawing — a cleaner cut of this change is on the way.";
-  await signIn(page, REVIEWER_EMAIL);
-  await gotoSettled(page, proposalUrl(SELF_SKILL, R_SELF_CAND));
+  // The REVIEWER proposed this candidate and the bundle pins 'reviewed': approve is withheld.
+  const a = await arrange("s_e2e_rw_self", "rw-self", {
+    proposedByEmail: REVIEWER,
+    protection: "reviewed",
+  });
+  await signIn(page, REVIEWER);
+  await gotoSettled(page, a.url);
 
-  // Still pending — the viewer proposed it and review-required is on. The four-eyes gate applies to
-  // APPROVE only, so the decision panel renders with Approve withheld (the inline four-eyes line in
-  // its place) and the reject flow live, relabeled as a withdraw.
-  await expect(page.getByText("Open — proposed against the team's current version.")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Your proposal" })).toBeVisible();
   await expect(
     page.getByText("A different owner or reviewer must approve your own proposal.", {
@@ -222,79 +263,20 @@ test("four-eyes: the proposer keeps withdraw — Approve withheld, the reject wi
   ).toBeVisible();
   await expect(page.getByRole("button", { name: "Approve — make this current" })).toHaveCount(0);
   await expect(page.getByText("Reject with a reason…")).toHaveCount(0);
-  // The CLI hand-off stays offered (the same four-eyes rule holds on the device).
-  await expect(page.getByText("Prefer the CLI?")).toBeVisible();
-  // Approve was never callable: no approve POST exists for this candidate.
-  expect(await reviewCalls(page, "review-approve", R_SELF_CAND)).toHaveLength(0);
+  // Approve was never callable: no pointer CAS exists for this bundle.
+  expect(await custodyCalls({ route: "pointer", bundle: "s_e2e_rw_self" })).toHaveLength(0);
 
-  // Withdraw is LIVE: the collapsible opens on the mandatory reason, and submitting posts the SAME
-  // reject write the vault serves for a proposer.
+  // Withdraw is LIVE: the same resolve under the proposer's own name, verdict `withdrawn`.
   await page.getByText("Withdraw your proposal…").click();
-  const withdrawButton = page.getByRole("button", { name: "Withdraw proposal" });
-  await expect(withdrawButton).toBeVisible();
   await page.locator('textarea[name="reason"]').fill(REASON);
-  await withdrawButton.click();
+  await page.getByRole("button", { name: "Withdraw proposal" }).click();
 
-  // The rejected terminal state (a withdraw IS the stored reject), reason verbatim, and the
-  // diff-less card — the vault reclaims the withdrawn candidate's bytes.
-  await expect(page.getByText("Rejected — the resolution below says why.")).toBeVisible();
-  await expect(page.getByText(`decided by ${REVIEWER_EMAIL}`, { exact: false })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Closed without a decision" })).toBeVisible();
   await expect(page.getByText(REASON, { exact: true })).toBeVisible();
-  await expect(
-    page.getByText("no longer readable — the server retains only current versions", {
-      exact: false,
-    }),
-  ).toBeVisible();
-  await expect(page.getByRole("button", { name: "Withdraw proposal" })).toHaveCount(0);
-  await expect(page.getByText("Withdraw your proposal…")).toHaveCount(0);
-
-  // The exact wire payload: ONE reject POST binding the proposal's base generation + the verbatim
-  // reason — the proposer's withdraw is the reject write, nothing bespoke.
-  const calls = await reviewCalls(page, "review-reject", R_SELF_CAND);
-  expect(calls).toHaveLength(1);
-  const call = calls[0] as RecordedReviewCall;
-  expect(call.method).toBe("POST");
-  expect(call.ws).toBe(REVIEW_WS);
-  expect(call.skill).toBe(SELF_SKILL);
-  expect(call.acting).toBe(REVIEWER_EMAIL);
-  expect(String(call.body.request_id)).toMatch(CANONICAL_UUID);
-  expect(call.body.expected_epoch).toBe(SELF_GENERATION.epoch);
-  expect(call.body.expected_seq).toBe(SELF_GENERATION.seq);
-  expect(call.body.reason).toBe(REASON);
-  expect(Object.keys(call.body).sort()).toEqual([
-    "expected_epoch",
-    "expected_seq",
-    "reason",
-    "request_id",
-  ]);
-});
-
-test("a member seat reads only: the note and the exact collapsed CLI hand-off", async ({
-  page,
-}) => {
-  // The suite's DEFAULT identity: a confirmed plain MEMBER of ws-e2e (no signIn — the page's role
-  // comes from the guard's directory-roster read, not the fixture).
-  await gotoSettled(page, `/workspaces/${WS}/skills/${SKILL}/proposals/${CANDIDATE_ID}`);
-
-  await expect(
-    page.getByText("An owner or reviewer seat decides this proposal", { exact: false }),
-  ).toBeVisible();
-  await expect(page.getByRole("button", { name: "Approve — make this current" })).toHaveCount(0);
-  await expect(page.getByText("Reject with a reason…")).toHaveCount(0);
-
-  // The CLI hand-off: collapsed summary first, the full device commands only after opening.
-  const cliSummary = page.getByText("Prefer the CLI?");
-  await expect(cliSummary).toBeVisible();
-  const handoffHeading = page.getByRole("heading", { name: "Decide on an enrolled device" });
-  await expect(handoffHeading).not.toBeVisible();
-  await cliSummary.click();
-  await expect(handoffHeading).toBeVisible();
-  await expect(
-    page.getByText(`topos review ${SKILL}@${CANDIDATE_ID} --approve`, { exact: true }),
-  ).toBeVisible();
-  await expect(
-    page.getByText(`topos review ${SKILL}@${CANDIDATE_ID} --reject`, { exact: true }),
-  ).toBeVisible();
+  const row = await adminQuery<{ status: string }>(
+    `select status from web.proposal where id = 'p_s_e2e_rw_self'`,
+  );
+  expect(row[0]?.status).toBe("withdrawn");
 });
 
 test("comments: a member posts one; script bodies render inert; a replay lands no dupe", async ({
@@ -307,14 +289,17 @@ test("comments: a member posts one; script bodies render inert; a replay lands n
     void dialog.dismiss();
   });
 
-  await gotoSettled(page, `/workspaces/${WS}/skills/${SKILL}/proposals/${CANDIDATE_ID}`);
+  const a = await arrange("s_e2e_rw_comments", "rw-comments", { proposedByEmail: MEMBER_EMAIL });
+  await adminQuery(`delete from web.proposal_comment where bundle_id = 's_e2e_rw_comments'`);
+  await signIn(page, REVIEWER);
+  await gotoSettled(page, a.url);
   await expect(page.getByText("No comments yet", { exact: false })).toBeVisible();
 
   // Post — and capture the action POST so the replay below reuses the SAME comment id.
   await page.locator('textarea[name="body"]').fill(BODY);
   const [actionRequest] = await Promise.all([
     page.waitForRequest(
-      (r) => r.method() === "POST" && r.url().includes(`/proposals/${CANDIDATE_ID}`),
+      (r) => r.method() === "POST" && r.url().includes(`/proposals/${a.candidateId}`),
     ),
     page.getByRole("button", { name: "Comment", exact: true }).click(),
   ]);
@@ -327,7 +312,7 @@ test("comments: a member posts one; script bodies render inert; a replay lands n
   const html = await page.content();
   expect(html).not.toContain('<script>alert("comment-xss")');
 
-  // Replay the captured POST byte-for-byte: the same render-minted comment_id is the idempotency
+  // Replay the captured POST byte-for-byte: the render-minted comment_id is the idempotency
   // key, so the retry lands in the same row — ONE comment, not two.
   const headers = await actionRequest.allHeaders();
   delete headers["content-length"];

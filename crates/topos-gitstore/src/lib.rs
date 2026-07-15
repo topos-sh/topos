@@ -11,7 +11,7 @@
 //! sha256, computed by the kernel:
 //! - `blob_id      = sha256(raw file bytes)`            (the byte-exact unit; no Git-LFS pointer files)
 //! - `bundle_digest = sha256(canonical manifest)`        (the unit of consent — [`topos_core::digest`])
-//! - `version_id    = sha256(canonical commit frame)`    (the user-facing `<name>@<version_id>` pin — [`topos_core::identity`])
+//! - `version_id    = sha256(canonical commit frame)`    (the human-facing `<name>@<version_id>` pin — [`topos_core::identity`])
 //!
 //! The `version_id -> git commit` map **is** a ref name (`refs/topos/versions/<version_id_hex>`) — no
 //! second index to keep crash-safe. [`Store::commit`] re-derives the `version_id` from its arguments

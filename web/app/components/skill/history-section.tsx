@@ -1,13 +1,12 @@
 import { Link } from "react-router";
-import { firstLine, shortDevice } from "@/components/format";
+import { firstLine } from "@/components/format";
 import { RevertControl } from "@/components/skill/revert-control";
 import { Card, Chip, SectionHeading, ShortId } from "@/components/ui";
 
 /**
- * One row of first-parent history, shaped by the route loader from the server's immutable version
- * metadata (the loader owns the walk + the per-row revert `request_id` mint — a universal render
- * can't mint UUIDs per row without a hydration mismatch). Commit messages and device ids render as
- * text nodes only.
+ * One row of first-parent history, shaped by the route loader from the vault's immutable
+ * version metadata. `author` is the pass-through display attribution recorded at ingest;
+ * commit messages and authors render as text nodes only.
  */
 export interface HistoryStepView {
   versionId: string;
@@ -16,16 +15,14 @@ export interface HistoryStepView {
   /** The COMPLETE parent set (2 entries marks a merge); the spine follows parents[0]. */
   parents: string[];
   fileCount: number;
-  /** The loader-minted request id for THIS row's revert (idempotent-replay key). */
-  revertRequestId: string;
 }
 
 /**
  * The History tab's data, resolved entirely in the loader: either nothing has published to this
  * skill yet (`published: false`, no `current` base, so no history), or the first-parent walk plus
  * the live current generation every roll-back binds. A CAS on `current` means every non-head row
- * shares the same `(epoch, seq)` target; `canRevert` is owner|reviewer-only (the server's
- * in-transaction gate is the authority — this is the matching web lock).
+ * shares the same generation target; `canRevert` is owner|reviewer-only (the action's guard is
+ * the authority — this is the matching render lock).
  */
 export type HistorySectionData =
   | { published: false }
@@ -35,8 +32,7 @@ export type HistorySectionData =
       head: string;
       canRevert: boolean;
       /** The live current generation the page rendered against (the revert's CAS binding). */
-      expectedEpoch: string;
-      expectedSeq: string;
+      expectedGeneration: string;
       steps: HistoryStepView[];
       /** The next first-parent id to resume from (`?from=`), or null at genesis / on truncation. */
       cursor: string | null;
@@ -45,9 +41,10 @@ export type HistorySectionData =
     };
 
 /**
- * First-parent history over the server's immutable version metadata — the loader walked it and
- * hands the page here (`skill` is the catalog NAME; every link is name-keyed). A skill with nothing
- * published yet renders an honest empty state; a mid-walk failure ended in a truncation row.
+ * First-parent history over the vault's immutable version metadata — the loader walked it and
+ * hands the page here (`skill` is the catalog NAME; every link is name-keyed). A skill with
+ * nothing published yet renders an honest empty state; a mid-walk failure ended in a truncation
+ * row.
  */
 export function HistorySection({
   ws,
@@ -87,9 +84,7 @@ export function HistorySection({
                 >
                   <ShortId value={step.versionId} />
                 </Link>
-                <span className="font-mono text-xs text-faint">
-                  device {shortDevice(step.author)}
-                </span>
+                <span className="font-mono text-xs text-faint">{step.author}</span>
                 <span className="min-w-0 flex-1 truncate text-sm text-dim">
                   {firstLine(step.message)}
                 </span>
@@ -113,9 +108,7 @@ export function HistorySection({
                   <div className="w-full">
                     <RevertControl
                       good={step.versionId}
-                      requestId={step.revertRequestId}
-                      expectedEpoch={data.expectedEpoch}
-                      expectedSeq={data.expectedSeq}
+                      expectedGeneration={data.expectedGeneration}
                     />
                   </div>
                 )}

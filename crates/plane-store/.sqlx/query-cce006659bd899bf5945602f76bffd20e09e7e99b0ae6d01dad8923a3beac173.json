@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT version_id AS \"version_id!\", author_display AS \"author_display!\",\n                      (extract(epoch FROM created_at) * 1000.0)::bigint AS \"created_at_ms!\",\n                      (extract(epoch FROM purged_at) * 1000.0)::bigint AS \"purged_at_ms\"\n               FROM version\n               WHERE workspace_id = $1 AND bundle_id = $2 AND version_id = ANY($3)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "version_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "author_display!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "created_at_ms!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "purged_at_ms",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "cce006659bd899bf5945602f76bffd20e09e7e99b0ae6d01dad8923a3beac173"
+}

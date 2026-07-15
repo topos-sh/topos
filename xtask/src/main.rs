@@ -95,14 +95,29 @@ fn schemas() -> Vec<(&'static str, String)> {
             "wire-reach",
             emit(schemars::schema_for!(topos_types::requests::WireReach)),
         ),
+        // The gh-style device-auth flow (the app serves it; the CLI speaks it).
         (
-            "login-data",
-            emit(schemars::schema_for!(topos_types::requests::LoginData)),
+            "device-auth-start-request",
+            emit(schemars::schema_for!(
+                topos_types::requests::DeviceAuthStartRequest
+            )),
         ),
         (
-            "login-redeem-request",
+            "device-auth-start-response",
             emit(schemars::schema_for!(
-                topos_types::requests::LoginRedeemRequest
+                topos_types::requests::DeviceAuthStartResponse
+            )),
+        ),
+        (
+            "device-auth-poll-request",
+            emit(schemars::schema_for!(
+                topos_types::requests::DeviceAuthPollRequest
+            )),
+        ),
+        (
+            "device-auth-poll-response",
+            emit(schemars::schema_for!(
+                topos_types::requests::DeviceAuthPollResponse
             )),
         ),
         (
@@ -370,20 +385,17 @@ fn gen_schema(check: bool) -> Result<()> {
 /// Golden `--json` fixtures — representative envelopes built FROM the typed shapes (so they cannot
 /// drift from the contract) and committed as the agent-facing examples + the positive L1 oracle.
 fn fixtures() -> Vec<(&'static str, String)> {
-    use topos_types::bootstrap::{DeploymentMode, VerifiedDomainStatus};
     use topos_types::persisted::ConflictPathKind;
     use topos_types::requests::{WireDelivery, WireDeliverySkill, WireNotice, WireVia};
     use topos_types::results::{
         AddData, ChannelAction, ChannelData, ChannelItem, ChannelItemOutcome, ConflictPathReport,
-        DiffData, DiffSource, FollowData, FollowOffer, InviteReadData, ListData, LogData,
-        MergeReport, Offer, ProtectData, PublishData, PublishDescribeData, PublishGate,
-        PublishPending, PublishPendingStatus, PullAction, PullData, PullSkill, RemoveData,
-        RemoveItem, RemoveKind, ReviewIndexData, ReviewIndexEntry, SkillEntry, UnfollowData,
-        WorkspaceSyncReport,
+        DiffData, DiffSource, EnrollmentPending, FollowData, FollowOffer, InviteReadData, ListData,
+        LogData, MergeReport, Offer, ProtectData, PublishDescribeData, PublishGate, PullAction,
+        PullData, PullSkill, RemoveData, RemoveItem, RemoveKind, ReviewIndexData, ReviewIndexEntry,
+        SkillEntry, UnfollowData, WorkspaceSyncReport,
     };
     use topos_types::{
-        ActionCode, Affected, Generation, JsonEnvelope, NextAction, Receipt, TerminalOutcome,
-        WireError,
+        ActionCode, Affected, JsonEnvelope, NextAction, Receipt, TerminalOutcome, WireError,
     };
 
     let argv = |parts: &[&str]| parts.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
@@ -450,8 +462,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             skills: vec![PullSkill {
                 skill: "pr-describe".to_owned(),
                 workspace_id: Some("w_acme".to_owned()),
-                observed: Generation { epoch: 1, seq: 42 },
-                applied: Generation { epoch: 1, seq: 42 },
+                observed: 42,
+                applied: 42,
                 action: PullAction::UpToDate,
                 offer: None,
                 conflict: None,
@@ -478,8 +490,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             skills: vec![PullSkill {
                 skill: "pr-describe".to_owned(),
                 workspace_id: Some("w_acme".to_owned()),
-                observed: Generation { epoch: 1, seq: 7 },
-                applied: Generation { epoch: 1, seq: 7 },
+                observed: 7,
+                applied: 7,
                 action: PullAction::Merged,
                 offer: None,
                 conflict: None,
@@ -513,8 +525,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             skills: vec![PullSkill {
                 skill: "pr-describe".to_owned(),
                 workspace_id: Some("w_acme".to_owned()),
-                observed: Generation { epoch: 1, seq: 7 },
-                applied: Generation { epoch: 1, seq: 7 },
+                observed: 7,
+                applied: 7,
                 action: PullAction::Conflicted,
                 offer: None,
                 conflict: None,
@@ -644,7 +656,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             bundle_digest: Some(
                 "89e6c98d92887913cadf06b2adb97f26cde4849b89e6c98d92887913cadf06b2".to_owned(),
             ),
-            expected_generation: Some(Generation { epoch: 1, seq: 42 }),
+            expected_generation: Some(42),
             current_generation: None,
             created_at: "2026-06-25T00:00:00Z".to_owned(),
             details: Some(serde_json::json!({ "downgraded": true })),
@@ -672,8 +684,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             skill_id: Some("s_prdescribe".to_owned()),
             version_id: None,
             bundle_digest: None,
-            expected_generation: Some(Generation { epoch: 1, seq: 42 }),
-            current_generation: Some(Generation { epoch: 1, seq: 43 }),
+            expected_generation: Some(42),
+            current_generation: Some(43),
             created_at: "2026-06-25T00:00:00Z".to_owned(),
             details: None,
         }),
@@ -687,8 +699,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 skill: Some("pr-describe".to_owned()),
                 ..Default::default()
             },
-            expected_generation: Some(Generation { epoch: 1, seq: 42 }),
-            current_generation: Some(Generation { epoch: 1, seq: 43 }),
+            expected_generation: Some(42),
+            current_generation: Some(43),
             context: serde_json::json!({}),
             next_actions: vec![NextAction {
                 code: ActionCode::RebaseAndRetry,
@@ -697,66 +709,34 @@ fn fixtures() -> Vec<(&'static str, String)> {
         }),
     };
 
-    // An UN-ENROLLED direct publish on the hosted plane: the workspace-standup PENDING envelope. Still
-    // `ok = true` — nothing failed, a human sign-in is simply required; the `ENROLL_RESUME` next-action
-    // carries THE SAME publish command (re-invoking it is the resume).
-    let publish_pending = JsonEnvelope {
-        schema_version: 1,
-        command: "publish".to_owned(),
-        ok: true,
-        data: serde_json::to_value(PublishData {
-            skill_id: "topos_t00".to_owned(),
-            // Honest at pending: nothing was published, so there is no version and no generation yet.
-            version_id: None,
-            bundle_digest: fx_digest.to_owned(),
-            current_generation: None,
-            share_line: None,
-            pending: Some(PublishPending {
-                status: PublishPendingStatus::SigninRequired,
-                verification_uri_complete: "https://topos.sh/verify/hxk3v9q2m8w4t6r5".to_owned(),
-                user_code: "hxk3v9q2m8w4t6r5".to_owned(),
-                device_fingerprint: "e4aaf52f5c391ce9".to_owned(),
-                expires_at: Some("2026-06-25T00:15:00Z".to_owned()),
-            }),
-            standup: None,
-            added: None,
-        })
-        .expect("PublishData serializes"),
-        warnings: vec![],
-        next_actions: vec![NextAction {
-            code: ActionCode::from("ENROLL_RESUME".to_owned()),
-            argv: argv(&[
-                "topos",
-                "publish",
-                &format!("pr-describe@{fx_digest}"),
-                "--json",
-            ]),
-        }],
-        receipt: None,
-        error: None,
-    };
-
-    // A one-shot `follow <claim-link>` (the self-host admin-claim door): enrolled in ONE invocation —
-    // no pending block, no offered skills (a claim stands up membership, not bytes).
-    let follow_claim_ok = JsonEnvelope {
+    // A PENDING `follow <workspace-address>` — the gh-style device flow awaits the browser approval:
+    // still `ok = true` (nothing failed, a human approval is simply required); the `ENROLL_RESUME`
+    // next-action re-invokes `follow` (re-invoking IS the resume, at the disclosed interval).
+    let follow_pending = JsonEnvelope {
         schema_version: 1,
         command: "follow".to_owned(),
         ok: true,
         data: serde_json::to_value(FollowData {
-            workspace_id: "w_demo".to_owned(),
-            enrolled: true,
+            // No workspace ID exists before approval — the requested ADDRESS name rides the slot.
+            workspace_id: "acme".to_owned(),
+            enrolled: false,
             skills: vec![],
-            deployment_mode: Some(DeploymentMode::SelfHost),
-            workspace_display_name: Some("Demo Team".to_owned()),
-            verified_domain: None,
-            verified_domain_status: Some(topos_types::bootstrap::VerifiedDomainStatus::Unverified),
-            plane_base_url: Some("https://plane.demo.test".to_owned()),
-            pending: None,
+            workspace_display_name: None,
+            plane_base_url: Some("https://topos.sh/api".to_owned()),
+            pending: Some(EnrollmentPending {
+                verification_uri_complete: "https://topos.sh/devices?code=WXYZ-1234".to_owned(),
+                user_code: "WXYZ-1234".to_owned(),
+                expires_at: Some("2026-06-25T00:15:00Z".to_owned()),
+                interval_secs: Some(5),
+            }),
             currency: None,
         })
         .expect("FollowData serializes"),
         warnings: vec![],
-        next_actions: vec![],
+        next_actions: vec![NextAction {
+            code: ActionCode::from("ENROLL_RESUME".to_owned()),
+            argv: argv(&["topos", "follow", "--json"]),
+        }],
         receipt: None,
         error: None,
     };
@@ -777,7 +757,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 protection: "open".to_owned(),
                 version_id: "a".repeat(64),
                 bundle_digest: "b".repeat(64),
-                generation: Generation { epoch: 1, seq: 42 },
+                generation: 42,
                 updated_at: 1_700_000_000_000,
                 via: WireVia {
                     channels: vec!["everyone".to_owned()],
@@ -792,7 +772,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 protection: "reviewed".to_owned(),
                 version_id: "c".repeat(64),
                 bundle_digest: "d".repeat(64),
-                generation: Generation { epoch: 2, seq: 3 },
+                generation: 23,
                 updated_at: 1_700_000_100_000,
                 via: WireVia {
                     channels: vec!["ops".to_owned(), "everyone".to_owned()],
@@ -840,11 +820,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     bundle_digest: "b".repeat(64),
                 },
             }],
-            deployment_mode: Some(DeploymentMode::Cloud),
             workspace_display_name: Some("Acme".to_owned()),
-            verified_domain: Some("acme.com".to_owned()),
-            verified_domain_status: Some(VerifiedDomainStatus::Verified),
-            plane_base_url: Some("https://api.topos.sh".to_owned()),
+            plane_base_url: Some("https://topos.sh".to_owned()),
             pending: None,
             currency: None,
         })
@@ -1070,8 +1047,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             skills: vec![PullSkill {
                 skill: "deploy".to_owned(),
                 workspace_id: Some("w_acme".to_owned()),
-                observed: Generation { epoch: 1, seq: 12 },
-                applied: Generation { epoch: 1, seq: 12 },
+                observed: 12,
+                applied: 12,
                 action: PullAction::UpToDate,
                 offer: None,
                 conflict: None,
@@ -1115,8 +1092,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ("json/log.ok", emit_json(&log_ok)),
         ("json/publish.downgraded", emit_json(&publish_downgraded)),
         ("json/publish.conflict", emit_json(&publish_conflict)),
-        ("json/publish.pending", emit_json(&publish_pending)),
-        ("json/follow.claim.ok", emit_json(&follow_claim_ok)),
+        ("json/follow.pending", emit_json(&follow_pending)),
         ("json/follow.describe", emit_json(&follow_describe)),
         ("json/delivery.ok", emit_json(&delivery_ok)),
         ("json/remove.describe", emit_json(&remove_describe)),
@@ -1625,31 +1601,6 @@ fn lints_opt_in(toml: &str) -> bool {
     false
 }
 
-/// Fail if any banned crate is reachable in `pkg`'s PRODUCTION (default-features) normal dependency tree —
-/// the graph a real `cargo build -p {pkg}` resolves. This is the gate for a "default-off" claim about a
-/// feature-gated dependency, which [`assert_excludes`] structurally cannot express (it deliberately runs
-/// `--all-features`, where the gated dep is always present).
-fn assert_production_excludes(pkg: &str, banned: &[&str]) -> Result<()> {
-    let tree: BTreeSet<String> = production_dep_lines(pkg)?
-        .iter()
-        .filter_map(|line| line.split_whitespace().next())
-        .map(str::to_owned)
-        .collect();
-    let hits: Vec<&str> = banned
-        .iter()
-        .copied()
-        .filter(|b| tree.contains(*b))
-        .collect();
-    if hits.is_empty() {
-        println!("ok: the production (default-features) `{pkg}` carries none of {banned:?}");
-        Ok(())
-    } else {
-        bail!(
-            "default-off violated: the production (default-features) build of `{pkg}` resolves {hits:?}"
-        );
-    }
-}
-
 /// The Dockerfile's builder image and `rust-toolchain.toml` must pin the SAME toolchain — otherwise a
 /// toolchain bump silently leaves the self-host image building on the old compiler. The Dockerfile tag may
 /// be the minor-series alias of the toolchain's full version (`rust:1.96-…` for channel `1.96.0`).
@@ -1791,42 +1742,76 @@ fn check_arch() -> Result<()> {
         "topos-gitstore",
         &["tokio", "axum", "sqlx", "ureq", "hyper"],
     )?;
-    // The workspace manifest's documented claim, enforced: a DEFAULT `cargo build -p topos-plane` pulls in
-    // NEITHER oauth2 nor openidconnect (nor their reqwest HTTP-client stack) — only `--features enroll-oidc`
-    // does. A production-tree check, not `--all-features` (where the gated deps are always present).
-    assert_production_excludes("topos-plane", &["oauth2", "openidconnect", "reqwest"])?;
+    // The vault is pure byte custody: the identity-era stacks cannot even be NAMED by its graph —
+    // no OIDC/OAuth client, no HTTP client, no mailer (all `--all-features` checks; the features
+    // that once gated them are deleted outright). (`hmac`/`zeroize` stay resolvable only as sqlx's
+    // own SCRAM/TLS internals — the vault code names neither.)
+    assert_excludes(
+        "topos-plane",
+        &["oauth2", "openidconnect", "reqwest", "lettre"],
+    )?;
+    // plane-store shed the credential-mint machinery with the directory: no op-id UUIDs, no
+    // signer, no mailer, no OAuth/OIDC client. (`base64`/`hmac` stay resolvable only as sqlx's own
+    // wire internals — the vault code names neither.)
+    assert_excludes(
+        "plane-store",
+        &["uuid", "ed25519-dalek", "lettre", "oauth2", "openidconnect"],
+    )?;
     // No member silently escapes the shared lint floor (incl. unsafe_code = forbid).
     check_member_lints()?;
     // The self-host image and the workspace must build on the same pinned compiler.
     check_toolchain_pins()?;
-    // Custody never reaches into the directory: not by module path, not by SQL table.
+    // The vault names no app-schema table in any SQL string.
     check_seam()?;
-    // Custody speaks bundles: no `skill` vocabulary below the words-change boundary.
+    // Custody speaks bundles: no `skill` vocabulary anywhere in the vault.
     check_custody_vocabulary()?;
+    // The vault is identity-free: no identity vocabulary anywhere in it.
+    check_identity_vocabulary()?;
     Ok(())
 }
 
-/// The words-change boundary gate: the custody layer speaks BUNDLES — the word `skill` (any case,
-/// any position: identifiers, strings, comments) must not appear in `crates/topos-gitstore/src/`
-/// or `crates/plane-store/src/custody/`. This is the automated form of the repo's documented grep
-/// (`grep -rni 'skill' crates/topos-gitstore/src/ crates/plane-store/src/custody/` → zero hits).
-/// The `db/custody/` SQL twins are deliberately OUTSIDE the gate: their query strings must name
-/// the frozen table/column spellings (`skill_commit`, `skill_id`), which are storage vocabulary,
-/// not custody vocabulary.
-fn check_custody_vocabulary() -> Result<()> {
+/// The directories the two VOCABULARY gates scan — the whole vault: plane-store (source AND
+/// migrations) + the gitstore byte layer. EVERY file, not just `.rs` (a stray non-Rust file cannot
+/// slip vocabulary past the gate).
+fn vault_vocabulary_dirs() -> Vec<PathBuf> {
     let root = workspace_root();
-    let gated_dirs = [
+    vec![
+        root.join("crates/plane-store/src"),
+        root.join("crates/plane-store/migrations"),
         root.join("crates/topos-gitstore/src"),
-        root.join("crates/plane-store/src/custody"),
-    ];
+    ]
+}
+
+/// The words-change boundary gate: the vault speaks BUNDLES — the word `skill` (any case, any
+/// position: identifiers, strings, comments) must not appear anywhere in it. The old storage-
+/// spelling exemption (`db/custody`'s frozen `skill_*` table names) died with the old schema: the
+/// custody tables speak bundles too, so the gate now covers plane-store WHOLE, migrations included.
+fn check_custody_vocabulary() -> Result<()> {
+    let violations = scan_custody_vocabulary(&vault_vocabulary_dirs())?;
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "custody speaks bundles — `skill` vocabulary in the vault:\n  {}",
+            violations.join("\n  ")
+        );
+    }
+}
+
+/// The scan half of [`check_custody_vocabulary`], parameterized over its roots so the red test can
+/// point it at a violating temp tree.
+fn scan_custody_vocabulary(dirs: &[PathBuf]) -> Result<Vec<String>> {
+    let root = workspace_root();
     let mut violations = Vec::new();
-    for dir in &gated_dirs {
-        // EVERY file, not just `.rs` — the documented grep covers the whole tree, so a stray
-        // non-Rust file cannot slip vocabulary past the automated form.
+    for dir in dirs {
         for file in files_under(dir, "vocabulary gate")? {
             let text =
                 fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-            let shown = file.strip_prefix(&root).unwrap_or(&file).display();
+            let shown = file
+                .strip_prefix(&root)
+                .unwrap_or(&file)
+                .display()
+                .to_string();
             for (n, line) in text.lines().enumerate() {
                 if line.to_ascii_lowercase().contains("skill") {
                     violations.push(format!("{shown}:{}: {}", n + 1, line.trim()));
@@ -1834,130 +1819,197 @@ fn check_custody_vocabulary() -> Result<()> {
             }
         }
     }
+    Ok(violations)
+}
+
+/// The IDENTITY vocabulary gate: the vault is identity-free BY VOCABULARY, not just by schema —
+/// none of the identity stems may appear anywhere in it (identifiers, strings, comments; matched
+/// case-insensitively as word-ish parts, so `EnrollmentGrant`, `enroll_secret`, and a prose
+/// "enrollment" all trip it, while `reclaimed` — which merely CONTAINS `claim` — does not).
+///
+/// The allowlist is deliberately SHORT and explicit — genuine non-identity uses only (git plumbing,
+/// a Postgres GUC). Prefer renaming code to allowlisting it: the GC's old `claim` vocabulary was
+/// renamed to `acquire` rather than allowlisted.
+const IDENTITY_STEMS: [&str; 10] = [
+    "email",
+    "principal",
+    "invit", // invite / invites / invited / invitation(s)
+    "claim",
+    "enroll",
+    "passcode",
+    "session",
+    "roster",
+    "seat",
+    "user",
+];
+
+/// `(file-path suffix, full lowercase token)` pairs the identity gate allows. Each entry is a
+/// genuine non-identity use that cannot be renamed away:
+/// - the gitstore writes git COMMITTER signatures, and git's signature format requires an email
+///   field (constant plumbing bytes, never a person);
+/// - the pool applies the Postgres `idle_in_transaction_session_timeout` GUC — a server-defined
+///   identifier ("session" here is a database connection, not a login).
+const IDENTITY_ALLOWLIST: [(&str, &str); 5] = [
+    ("crates/topos-gitstore/src/store.rs", "email"),
+    (
+        "crates/topos-gitstore/src/store.rs",
+        "topos_committer_email",
+    ),
+    ("crates/topos-gitstore/src/tests.rs", "email"),
+    (
+        "crates/plane-store/src/db/mod.rs",
+        "idle_in_transaction_session_timeout",
+    ),
+    (
+        "crates/plane-store/src/authority.rs",
+        "idle_in_transaction_session_timeout",
+    ),
+];
+
+fn check_identity_vocabulary() -> Result<()> {
+    let violations = scan_identity_vocabulary(&vault_vocabulary_dirs())?;
     if violations.is_empty() {
         Ok(())
     } else {
         bail!(
-            "custody speaks bundles — `skill` vocabulary below the words-change boundary:\n  {}",
+            "the vault is identity-free — identity vocabulary found:\n  {}",
             violations.join("\n  ")
         );
     }
 }
 
-/// The vault/directory seam gate: `plane-store`'s CUSTODY modules (bytes, versions, pointers, GC —
-/// `src/custody/` + `src/db/custody/`) must consume access decisions ONLY through the witness trait the
-/// directory implements — never by importing a directory module, and never by querying a directory table.
-/// Two scans over the custody sources:
-/// 1. no `directory` MODULE PATH reference (`crate::directory`, `db::directory`, `super::directory`);
-/// 2. no directory TABLE named after FROM / JOIN / INTO / UPDATE in any SQL string (word-boundary match,
-///    so custody's ubiquitous `workspace_id` columns never trip the bare `workspace` ban).
-///
-/// The reverse direction is deliberately unchecked: the directory MAY call custody (a review approve
-/// terminates in the shared pointer-move transaction — that is the row/byte rule, not a violation).
-fn check_seam() -> Result<()> {
-    // Both the module-group paths AND the crate-root forwarding aliases (lib.rs re-exports the
-    // directory modules at the crate root for the facade/tests) — an alias path would otherwise
-    // slip a custody→directory import past the group check.
-    const DIRECTORY_PATHS: [&str; 12] = [
-        "crate::directory",
-        "db::directory",
-        "super::directory",
-        "crate::catalog",
-        "crate::channels",
-        "crate::delivery",
-        "crate::enroll",
-        "crate::governance",
-        "crate::session_read",
-        "crate::session_review",
-        "crate::session_roster",
-        "crate::secret",
-    ];
-    const DIRECTORY_TABLES: [&str; 25] = [
-        "workspace",
-        "workspace_member",
-        "workspace_policy",
-        "roster",
-        "device_registry",
-        "read_token",
-        "invites",
-        "invite_skill",
-        "enrollment_grants",
-        "enrollment_grant_skill",
-        "device_auth_sessions",
-        "passcodes",
-        "admin_claim",
-        "workspace_events",
-        "genesis_requests",
-        "catalog",
-        "channels",
-        "channel_skills",
-        "channel_members",
-        "channel_events",
-        "skill_follows",
-        "skill_unfollows",
-        "device_exclusions",
-        "notices",
-        "device_skill_state",
-    ];
-    const SQL_INTRODUCERS: [&str; 4] = ["from", "join", "into", "update"];
+/// The scan half of [`check_identity_vocabulary`], parameterized over its roots so the red test can
+/// point it at a violating temp tree. Tokenizes each line into `[A-Za-z0-9_]+` runs, splits each
+/// token on `_`, lowercases, and flags any part that STARTS WITH an identity stem — unless the
+/// whole token is allowlisted for that file.
+fn scan_identity_vocabulary(dirs: &[PathBuf]) -> Result<Vec<String>> {
     let root = workspace_root();
-    let custody_dirs = [
-        root.join("crates/plane-store/src/custody"),
-        root.join("crates/plane-store/src/db/custody"),
-    ];
     let mut violations = Vec::new();
-    for dir in &custody_dirs {
-        for file in rust_files_under(dir)? {
+    for dir in dirs {
+        for file in files_under(dir, "identity vocabulary gate")? {
             let text =
                 fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-            let shown = file.strip_prefix(&root).unwrap_or(&file).display();
-            // The module-path check is per-line (a `use`/path reference is always one line), so it can
-            // report a line number.
+            let shown = file
+                .strip_prefix(&root)
+                .unwrap_or(&file)
+                .display()
+                .to_string();
+            // The allowlist keys on a path SUFFIX so the scan works from any checkout root (and on
+            // the red test's temp tree, which allowlists nothing).
+            let path_str = file.to_string_lossy().replace('\\', "/");
             for (n, line) in text.lines().enumerate() {
-                for needle in DIRECTORY_PATHS {
-                    if line.contains(needle) {
-                        violations.push(format!("{shown}:{}: `{needle}`", n + 1));
+                for token in line
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .filter(|t| !t.is_empty())
+                {
+                    let token_lower = token.to_ascii_lowercase();
+                    let allowlisted = IDENTITY_ALLOWLIST
+                        .iter()
+                        .any(|(suffix, tok)| path_str.ends_with(suffix) && token_lower == *tok);
+                    if allowlisted {
+                        continue;
+                    }
+                    let hit = token_lower
+                        .split('_')
+                        .any(|part| IDENTITY_STEMS.iter().any(|stem| part.starts_with(stem)));
+                    if hit {
+                        violations.push(format!("{shown}:{}: `{token}`", n + 1));
                     }
                 }
             }
-            // The SQL-table check tokenizes the WHOLE file as one whitespace-normalized stream, so an
-            // introducer and its table split across lines (`FROM\n  workspace_member`) can NEVER evade
-            // the gate that enforces the row/byte boundary — comment-stripping is unnecessary since a
-            // directory table named in a comment is itself a seam smell worth failing on.
+        }
+    }
+    Ok(violations)
+}
+
+/// The schema-boundary gate: the vault's SQL names NO app-schema table. The directory left this
+/// crate for the app's own schema, so the old witness-seam scan is repurposed: every table of the
+/// app schema (and the retired plane spellings) is banned after a FROM / JOIN / INTO / UPDATE token
+/// in ANY file under `crates/plane-store/src` — only the vault's own tables (`version`,
+/// `current_pointer`, `upload`, `version_object`, `version_digest`, `object_presence`,
+/// `promotion_lease`, `promotion_lease_object`, `tombstones`) may follow one.
+fn check_seam() -> Result<()> {
+    let root = workspace_root();
+    let violations = scan_seam(&[root.join("crates/plane-store/src")])?;
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "the vault names an app-schema table in SQL:\n  {}",
+            violations.join("\n  ")
+        );
+    }
+}
+
+/// The app-schema tables (plus retired plane-era spellings) the vault must never touch. `version`
+/// and `upload` are deliberately ABSENT — they are the vault's own tables.
+const APP_SCHEMA_TABLES: [&str; 26] = [
+    "user",
+    "session",
+    "account",
+    "verification",
+    "device",
+    "device_auth_session",
+    "workspace",
+    "seat",
+    "invitation",
+    "bundle",
+    "bundle_name_hint",
+    "channel",
+    "channel_member",
+    "channel_optout",
+    "channel_bundle",
+    "bundle_subscription",
+    "bundle_detachment",
+    "device_exclusion",
+    "device_bundle_state",
+    "notice",
+    "proposal",
+    "approval",
+    "proposal_comment",
+    "audit_event",
+    "op_receipt",
+    "op_receipts",
+];
+
+/// The scan half of [`check_seam`], parameterized over its roots so the red test can point it at a
+/// violating temp tree. Tokenizes the WHOLE file as one whitespace-normalized stream, so an
+/// introducer and its table split across lines (`FROM\n  workspace`) can never evade the gate.
+fn scan_seam(dirs: &[PathBuf]) -> Result<Vec<String>> {
+    const SQL_INTRODUCERS: [&str; 4] = ["from", "join", "into", "update"];
+    let root = workspace_root();
+    let mut violations = Vec::new();
+    for dir in dirs {
+        for file in files_under(dir, "seam check")? {
+            if file.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let text =
+                fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
+            let shown = file
+                .strip_prefix(&root)
+                .unwrap_or(&file)
+                .display()
+                .to_string();
             let tokens: Vec<&str> = text
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
                 .filter(|t| !t.is_empty())
                 .collect();
             for pair in tokens.windows(2) {
                 let introducer = pair[0].to_ascii_lowercase();
+                let following = pair[1].to_ascii_lowercase();
                 if SQL_INTRODUCERS.contains(&introducer.as_str())
-                    && DIRECTORY_TABLES.contains(&pair[1])
+                    && APP_SCHEMA_TABLES.contains(&following.as_str())
                 {
                     violations.push(format!(
-                        "{shown}: SQL `{} {}` names a directory table",
+                        "{shown}: SQL `{} {}` names an app-schema table",
                         pair[0], pair[1]
                     ));
                 }
             }
         }
     }
-    if violations.is_empty() {
-        Ok(())
-    } else {
-        bail!(
-            "custody reaches into the directory (the witness trait is the only allowed seam):\n  {}",
-            violations.join("\n  ")
-        );
-    }
-}
-
-/// Every `.rs` file under `dir`, recursively (deterministic order). An absent dir is a gate failure —
-/// the seam check must never silently pass because the tree moved out from under it.
-fn rust_files_under(dir: &Path) -> Result<Vec<PathBuf>> {
-    Ok(files_under(dir, "seam check")?
-        .into_iter()
-        .filter(|p| p.extension().is_some_and(|e| e == "rs"))
-        .collect())
+    Ok(violations)
 }
 
 /// Every regular file under `dir`, recursively (deterministic order). An absent dir is a gate
@@ -2051,7 +2103,7 @@ fn ci() -> Result<()> {
             Box::new(|| gen_fixtures(true)),
         ),
         (
-            "cli-reference drift gate (docs/cli.md)",
+            "contract drift gate (cli reference)",
             Box::new(|| gen_cli_ref(true)),
         ),
         ("architectural layering", Box::new(check_arch)),
@@ -2088,4 +2140,139 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a throwaway tree of files for a gate scan (RAII cleanup).
+    struct TempTree {
+        root: PathBuf,
+    }
+
+    impl TempTree {
+        fn new(tag: &str, files: &[(&str, &str)]) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "topos-xtask-{tag}-{}-{:x}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            for (path, content) in files {
+                let full = root.join(path);
+                fs::create_dir_all(full.parent().expect("a parent")).expect("mkdir");
+                fs::write(&full, content).expect("write");
+            }
+            Self { root }
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// RED test: the custody vocabulary gate FIRES on a `skill` spelling (any case, any file kind)
+    /// — and stays quiet on a clean tree. The real-tree run is `check_custody_vocabulary` in
+    /// check-arch; this proves the scan itself has teeth.
+    #[test]
+    fn custody_vocabulary_gate_fires_on_skill_vocabulary() {
+        let dirty = TempTree::new(
+            "custody-dirty",
+            &[
+                ("src/a.rs", "// a Skill is a bundle\nfn skill_id() {}\n"),
+                ("migrations/0001.sql", "CREATE TABLE bundles (id text);\n"),
+            ],
+        );
+        let hits =
+            scan_custody_vocabulary(&[dirty.root.join("src"), dirty.root.join("migrations")])
+                .expect("scan runs");
+        assert_eq!(hits.len(), 2, "both skill lines fire: {hits:?}");
+
+        let clean = TempTree::new(
+            "custody-clean",
+            &[("src/a.rs", "// a bundle is a bundle\nfn bundle_id() {}\n")],
+        );
+        let hits = scan_custody_vocabulary(&[clean.root.join("src")]).expect("scan runs");
+        assert!(hits.is_empty(), "a clean tree passes: {hits:?}");
+    }
+
+    /// RED test: the identity vocabulary gate FIRES on identity stems (word-ish: identifier parts
+    /// and prose alike, any case, derived forms included) — while `reclaimed`, which merely
+    /// CONTAINS `claim`, stays clean, and an allowlisted token passes only in its allowlisted file.
+    #[test]
+    fn identity_vocabulary_gate_fires_wordish_and_honors_the_allowlist() {
+        let dirty = TempTree::new(
+            "identity-dirty",
+            &[(
+                "src/a.rs",
+                "struct EnrollmentGrant;\nfn seat_user(email: &str) {}\n// the invitation session\n",
+            )],
+        );
+        let hits = scan_identity_vocabulary(&[dirty.root.join("src")]).expect("scan runs");
+        // EnrollmentGrant (enroll…) + seat_user (seat, user) + email + invitation + session.
+        assert!(hits.len() >= 5, "the identity stems fire: {hits:?}");
+
+        let clean = TempTree::new(
+            "identity-clean",
+            &[(
+                "src/a.rs",
+                "// the reclaimed bytes are acquired by the sweep\nfn acquire_for_delete() {}\n",
+            )],
+        );
+        let hits = scan_identity_vocabulary(&[clean.root.join("src")]).expect("scan runs");
+        assert!(
+            hits.is_empty(),
+            "`reclaimed`/`acquire` never trip the claim stem: {hits:?}"
+        );
+
+        // The allowlist keys on (file suffix, token): the same token OUTSIDE its allowlisted file fires.
+        let misplaced = TempTree::new(
+            "identity-misplaced",
+            &[(
+                "src/other.rs",
+                "const T: &str = \"idle_in_transaction_session_timeout\";\n",
+            )],
+        );
+        let hits = scan_identity_vocabulary(&[misplaced.root.join("src")]).expect("scan runs");
+        assert_eq!(hits.len(), 1, "an un-allowlisted file fires: {hits:?}");
+    }
+
+    /// RED test: the seam gate FIRES when SQL names an app-schema table after FROM/JOIN/INTO/UPDATE
+    /// (across lines too) — while the vault's own tables stay clean.
+    #[test]
+    fn seam_gate_fires_on_app_schema_tables() {
+        let dirty = TempTree::new(
+            "seam-dirty",
+            &[(
+                "src/a.rs",
+                "const Q: &str = \"SELECT 1 FROM\n  workspace WHERE id = $1\";\n",
+            )],
+        );
+        let hits = scan_seam(&[dirty.root.join("src")]).expect("scan runs");
+        assert_eq!(hits.len(), 1, "the split-line app table fires: {hits:?}");
+
+        let clean = TempTree::new(
+            "seam-clean",
+            &[(
+                "src/a.rs",
+                "const Q: &str = \"SELECT 1 FROM version JOIN version_object USING (version_id)\";\n",
+            )],
+        );
+        let hits = scan_seam(&[clean.root.join("src")]).expect("scan runs");
+        assert!(hits.is_empty(), "the vault's own tables pass: {hits:?}");
+    }
+
+    /// The REAL tree stays clean under all three gates (the same calls check-arch runs).
+    #[test]
+    fn the_real_tree_passes_the_gates() {
+        check_custody_vocabulary().expect("custody vocabulary clean");
+        check_identity_vocabulary().expect("identity vocabulary clean");
+        check_seam().expect("seam clean");
+    }
 }

@@ -6,14 +6,12 @@
   "properties": {
     "current_generation": {
       "description": "The pointer's new generation when an approval moved `current`.",
-      "anyOf": [
-        {
-          "$ref": "#/$defs/Generation"
-        },
-        {
-          "type": "null"
-        }
-      ]
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
     },
     "decision": {
       "$ref": "#/$defs/ReviewDecision"
@@ -28,26 +26,6 @@
     "decision"
   ],
   "$defs": {
-    "Generation": {
-      "description": "The internal anti-replay counter `(epoch, seq)`. NEVER rendered to a user; the\nagent consumes `expected`/`current` on a CONFLICT.",
-      "type": "object",
-      "properties": {
-        "epoch": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "epoch",
-        "seq"
-      ]
-    },
     "ReviewDecision": {
       "description": "A review verdict — `approve` promotes, `reject` carries a reason back, `withdraw` is the author\nretracting their own open proposal. **INFERRED.**",
       "type": "string",

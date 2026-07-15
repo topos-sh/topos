@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use topos_types::PERSISTED_SCHEMA_VERSION;
 use topos_types::persisted::{Lock, LockedFile, OpRecord, PlacementMap, SwapCapability, SyncState};
-use topos_types::{Generation, PERSISTED_SCHEMA_VERSION};
 
 use crate::atomic::{atomic_write, load_versioned, temp_path};
 use crate::error::ClientError;
@@ -79,15 +79,9 @@ fn sample_map(tag: u8) -> PlacementMap {
 fn sample_sync(tag: u8) -> SyncState {
     SyncState {
         schema_version: 1,
-        observed: Generation {
-            epoch: 0,
-            seq: u64::from(tag),
-        },
+        observed: u64::from(tag),
         observed_version_id: hex(tag),
-        applied: Generation {
-            epoch: 0,
-            seq: u64::from(tag),
-        },
+        applied: u64::from(tag),
         base_commit: hex(tag),
         work_hash: hex(tag),
         held: false,
@@ -308,7 +302,7 @@ fn migration_dispatch_is_fail_closed() {
         op: topos_types::persisted::OpKind::PublishDirect,
         candidate_commit: hex(1),
         bundle_digest: hex(2),
-        expected_generation: Generation { epoch: 1, seq: 1 },
+        expected_generation: 1,
         good: None,
         // A present name must survive the crash-safe doc round-trip (it rides a publish WAL).
         display_name: Some("deploy-helper".to_owned()),

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "FollowData",
-  "description": "`follow` (enrollment + first-receive). Each offered skill is a TOFU offer, never auto-landed.\n**INFERRED** (additive-only). The enrollment-disclosure fields (`deployment_mode` /\n`workspace_display_name` / `verified_domain*`) and the two-call `pending` arm were added as the\nenrollment surface landed; all are optional, so an old consumer ignores them.",
+  "description": "`follow` (enrollment + first-receive). Each offered skill is a TOFU offer, never auto-landed.\n**INFERRED** (additive-only). All disclosure fields are optional, so an old consumer ignores\nthem.",
   "type": "object",
   "properties": {
     "currency": {
@@ -9,17 +9,6 @@
       "anyOf": [
         {
           "$ref": "#/$defs/TriggerReport"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "deployment_mode": {
-      "description": "The workspace's deployment posture (disclosed from the bootstrap).",
-      "anyOf": [
-        {
-          "$ref": "#/$defs/DeploymentMode"
         },
         {
           "type": "null"
@@ -41,7 +30,7 @@
       ]
     },
     "plane_base_url": {
-      "description": "The plane API base URL this machine enrolls against (disclosed from the bootstrap — a share link\nmay ride another host, e.g. a hosted team's web origin; this is where the device actually dials).",
+      "description": "The API base URL this machine enrolled against (disclosed from the protocol card — a share\naddress may ride another host; this is where the device actually dials).",
       "type": [
         "string",
         "null"
@@ -54,26 +43,8 @@
         "$ref": "#/$defs/FollowOffer"
       }
     },
-    "verified_domain": {
-      "description": "The workspace's org-domain claim, if any (disclosed from the bootstrap).",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "verified_domain_status": {
-      "description": "The workspace's domain-verification state (disclosed from the bootstrap).",
-      "anyOf": [
-        {
-          "$ref": "#/$defs/VerifiedDomainStatus"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
     "workspace_display_name": {
-      "description": "The workspace display name (disclosed from the bootstrap).",
+      "description": "The workspace display name (disclosed at enrollment).",
       "type": [
         "string",
         "null"
@@ -98,29 +69,10 @@
         "explicit_pull_only"
       ]
     },
-    "DeploymentMode": {
-      "description": "A plane's deployment posture — a CLOSED set. `cloud` requires a confirmed identity step at enrollment;\n`self_host` grants membership straight from a valid grant.",
-      "oneOf": [
-        {
-          "description": "The hosted plane: enrollment requires a confirmed, already-rostered identity.",
-          "type": "string",
-          "const": "cloud"
-        },
-        {
-          "description": "A self-hosted plane: enrollment grants membership from a valid grant (no human identity step).",
-          "type": "string",
-          "const": "self_host"
-        }
-      ]
-    },
     "EnrollmentPending": {
       "description": "A pending device-authorization a `follow` surfaced — the human visits `verification_uri_complete` (which\nembeds the `user_code`), then the client re-polls. **INFERRED.**",
       "type": "object",
       "properties": {
-        "device_fingerprint": {
-          "description": "16-hex fingerprint of this device's public key; a human cross-checks it against the verification page.",
-          "type": "string"
-        },
         "expires_at": {
           "description": "The session expiry as an RFC-3339 string, if it expires.",
           "type": [
@@ -128,8 +80,17 @@
             "null"
           ]
         },
+        "interval_secs": {
+          "description": "The minimum poll interval, in seconds — a headless agent re-invokes no faster than this.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
         "user_code": {
-          "description": "The opaque session code embedded in `verification_uri_complete` (the human clicks the URL — it is\nnot typed).",
+          "description": "The short human-facing code embedded in `verification_uri_complete` (a cross-check against the\napproval page — the human clicks the URL; the code is never typed as a secret).",
           "type": "string"
         },
         "verification_uri_complete": {
@@ -139,8 +100,7 @@
       },
       "required": [
         "verification_uri_complete",
-        "user_code",
-        "device_fingerprint"
+        "user_code"
       ]
     },
     "FollowOffer": {
@@ -235,26 +195,6 @@
           "description": "An equivalent command exists without our marker — adopt-or-leave, never blind-append.",
           "type": "string",
           "const": "already_present_unmanaged"
-        }
-      ]
-    },
-    "VerifiedDomainStatus": {
-      "description": "A workspace's domain-verification state — snake_case on the wire.",
-      "oneOf": [
-        {
-          "description": "No domain claim, or unverified.",
-          "type": "string",
-          "const": "unverified"
-        },
-        {
-          "description": "A claim is pending verification.",
-          "type": "string",
-          "const": "pending"
-        },
-        {
-          "description": "The domain is verified.",
-          "type": "string",
-          "const": "verified"
         }
       ]
     }

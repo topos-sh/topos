@@ -1,39 +1,37 @@
 //! `auth` — the sign-in maintenance group: `login` / `logout` / `status`.
 //!
-//! **`login [server]`** runs the LOGIN device flow (default server `https://topos.sh`,
-//! `TOPOS_PLANE_URL` override, or the enrolled plane): card fetch → re-root onto the declared API
-//! base → the one-plane-per-install guard (the wrong-server refusal names the `TOPOS_HOME`
-//! second-install hatch) → `device/authorize` with `intent = "login"` → the shared WAL/poll/resume
-//! idiom → `POST /v1/login`, which re-mints ONE workspace credential per confirmed seat. A DIFFERENT
-//! account than `user.json`'s principal requires `--yes` to replace the stored credentials
-//! wholesale; a same-account re-login is an idempotent re-mint.
+//! **`login [server]`** re-runs the SAME device-authorization flow `follow <address>` uses, minus the
+//! follow intent: card fetch (default server `https://topos.sh`, `TOPOS_PLANE_URL` override, or the
+//! enrolled plane) → re-root onto the declared API base → the one-plane-per-install guard (the
+//! wrong-server refusal names the `TOPOS_HOME` second-install hatch) → `POST /v1/device/authorize`
+//! toward an enrolled workspace's ADDRESS → the shared WAL/poll/resume idiom → on the granted poll,
+//! REPLACE this install's ONE device credential wholesale (a device holds exactly one; the identity
+//! is whoever approved in the browser).
 //!
 //! **`logout`** is two-phase: describe, then `--yes` best-effort revokes THIS device in every
-//! enrolled workspace (the governance revoke with the device's own key id as the target) and
+//! enrolled workspace (`DELETE /v1/workspaces/{ws}/devices` naming the stored device id) and
 //! deletes `identity/credentials.json`. Skills, follows, and drafts stay; `user.json` keeps the
-//! principal for the re-login UX — no credentials IS the signed-out state.
+//! memberships for the re-login UX — no credential IS the signed-out state.
 //!
-//! **`status`** is side-effect-free: whoami, per-workspace credential health (a `GET /me` probe —
-//! the uniform 404 reads "no access — revoked or removed"), hook health, reporting posture
+//! **`status`** is side-effect-free: whoami, per-workspace access health (a member-scoped `me`
+//! probe — the uniform 404 reads "no access — revoked or removed"), hook health, reporting posture
 //! (`state/sync_status.json`), and the server base.
 
 use serde::Serialize;
 
 use crate::ctx::Ctx;
-use crate::device_signer::DeviceSigner;
-use crate::enroll::{self, CredentialEntry, Membership};
+use crate::enroll;
 use crate::error::ClientError;
-use crate::plane::{Card, GovernanceSource, LoginRedeem, TokenPoll};
+use crate::plane::{DeviceAuthPoll, GovernanceSource};
 use crate::sync_status;
 
 use super::follow::{
-    DirectoryConnect, EnrollConnect, complete_uri, device_fingerprint, machine_name,
-    resolve_api_base, wrong_server_refusal,
+    DirectoryConnect, EnrollConnect, guard_one_plane, machine_name, persist_enrollment,
+    resolve_api_base,
 };
 use topos_types::PERSISTED_SCHEMA_VERSION;
-use topos_types::bootstrap::VerifiedDomainStatus;
 
-/// Builds the governance transport (the logout self-revoke) for a base URL, with fresh credentials.
+/// Builds the governance transport (the logout self-revoke) for a base URL, with a fresh credential.
 pub(crate) type GovernanceConnect<'a> =
     dyn Fn(&str) -> Box<dyn crate::plane::GovernanceSource> + 'a;
 
@@ -43,7 +41,8 @@ pub(crate) struct AuthConnectors<'a> {
     pub enroll: &'a EnrollConnect<'a>,
     pub directory: &'a DirectoryConnect<'a>,
     pub governance: &'a GovernanceConnect<'a>,
-    /// The default WEB origin (`TOPOS_PLANE_URL`, else the hosted default) a fresh install dials.
+    /// The default WEB origin (`TOPOS_PLANE_URL`, else the hosted default) a login dials when no
+    /// server is named and none is pinned.
     pub web_origin: String,
 }
 
@@ -51,33 +50,19 @@ pub(crate) struct AuthConnectors<'a> {
 // login
 // =================================================================================================
 
-/// One workspace seat a login reported.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct AuthLoginMembership {
-    pub workspace_id: String,
-    /// The workspace's ADDRESS name.
-    pub name: String,
-    pub display_name: String,
-    pub role: String,
-    /// Whether a fresh credential was minted for this device here.
-    pub minted: bool,
-    /// Why not, when it wasn't (e.g. this device is revoked there).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub blocked: Option<String>,
-}
-
 /// The completed login's `--json` data.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct AuthLoginData {
     /// The API base the login ran against (now the pinned plane).
     pub server: String,
-    /// The proven principal.
-    pub principal: String,
-    /// The principal the login REPLACED (`--yes` on a different account); absent otherwise.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub replaced_principal: Option<String>,
-    /// One entry per confirmed seat (minted or blocked).
-    pub memberships: Vec<AuthLoginMembership>,
+    /// The workspace the approval ran through (the credential it minted serves EVERY workspace the
+    /// approving person's seats reach).
+    pub workspace_id: String,
+    /// The workspace's ADDRESS name.
+    pub workspace_name: String,
+    pub workspace_display_name: String,
+    /// The registered device id (non-secret — the self-revoke handle).
+    pub device_id: String,
 }
 
 /// A pending login's disclosure (the device-flow wait).
@@ -86,7 +71,8 @@ pub(crate) struct AuthLoginPending {
     pub server: String,
     pub verification_uri_complete: String,
     pub user_code: String,
-    pub device_fingerprint: String,
+    /// The minimum poll interval, in seconds.
+    pub interval_secs: u64,
 }
 
 /// The login outcome: still waiting on the browser, or done.
@@ -96,48 +82,46 @@ pub(crate) enum AuthLoginOutcome {
     Done(AuthLoginData),
 }
 
-/// `auth login [server]` — begin (no WAL) or resume (a pending login WAL) the sign-in.
+/// `auth login [server]` — begin (no WAL) or resume (a pending login WAL) the sign-in. The flow needs
+/// a workspace ADDRESS to authorize toward; it comes from the enrolled memberships (`--workspace`
+/// picks one when several are joined) — a never-enrolled install joins with `follow <address>`
+/// instead (which is the same flow WITH a follow intent).
 ///
 /// # Errors
 /// [`ClientError::PlacementUnsupported`] for a different server than the enrolled plane (the
-/// wrong-server refusal); [`ClientError::ConfirmFirst`] when a different account needs `--yes`;
-/// [`ClientError::Enrollment`] for a denied/expired/refused session or another in-flight enrollment;
-/// otherwise transport / io failures.
+/// wrong-server refusal); [`ClientError::Enrollment`] for a never-enrolled install, a denied/expired
+/// flow, or another verb's in-flight enrollment; otherwise transport / io failures.
 pub(crate) fn login(
     ctx: &Ctx<'_>,
     connectors: &AuthConnectors<'_>,
     server: Option<&str>,
-    yes: bool,
+    workspace: Option<&str>,
 ) -> Result<AuthLoginOutcome, ClientError> {
-    // A pending WAL first: a live LOGIN session resumes; any other in-flight enrollment owns the
-    // shared WAL slot (typed guidance, never a clobbered secret).
+    // A pending WAL first: a live LOGIN flow resumes; a follow-owned flow refuses toward `follow`
+    // (typed guidance, never a clobbered secret).
     if let Some(wal) = enroll::read_wal(ctx.fs, &ctx.layout)? {
-        return match wal.state {
-            enroll::EnrollPhase::AuthorizingLogin {
-                base_url,
-                device_code,
-                user_code,
-                verification_uri_complete,
-                ..
-            } => resume_login(
-                ctx,
-                connectors,
-                yes,
-                &base_url,
-                &device_code,
-                &user_code,
-                verification_uri_complete,
-            ),
-            enroll::EnrollPhase::AuthorizingStandup { .. } => Err(ClientError::Enrollment(
-                "a workspace standup is in progress; re-run the `topos publish …` command that \
-                 started it first"
-                    .into(),
-            )),
-            _ => Err(ClientError::Enrollment(
+        return match wal.intent {
+            enroll::EnrollIntentDoc::Login => resume_login(ctx, connectors, &wal),
+            enroll::EnrollIntentDoc::Follow { .. } => Err(ClientError::Enrollment(
                 "an enrollment is in progress; re-run `topos follow` to finish it first".into(),
             )),
         };
     }
+
+    // The flow authorizes toward a workspace ADDRESS — an enrolled membership supplies it. A fresh
+    // install has none: `follow <address>` is the join door (the same flow with a follow intent).
+    let user = enroll::read_user(ctx.fs, &ctx.layout)?.unwrap_or_default();
+    let membership =
+        user.resolve_write_workspace(workspace).map_err(|e| {
+            match e {
+        ClientError::Enrollment(_) => ClientError::Enrollment(
+            "this install has not joined a workspace yet — sign in by joining one: `topos follow \
+             <workspace-address>`"
+                .into(),
+        ),
+        other => other,
+    }
+        })?;
 
     // Begin: resolve the server origin, card-fetch it for the API base, guard one-plane.
     let origin = server
@@ -147,208 +131,77 @@ pub(crate) fn login(
             None => None,
         })
         .unwrap_or_else(|| connectors.web_origin.trim_end_matches('/').to_owned());
-    let base_url = match (connectors.enroll)(&origin).fetch_card(&origin)? {
-        Card::Protocol(card) => resolve_api_base(&origin, &card.api_base_url)?,
-        Card::Claim(_) => {
-            return Err(ClientError::Enrollment(
-                "this address answered a claim bootstrap — pass the /i/ claim link to `topos \
-                 follow` instead of signing in"
-                    .into(),
-            ));
-        }
-    };
-    if let Some(instance) = enroll::read_instance(ctx.fs, &ctx.layout)?
-        && instance.base_url != base_url
-    {
-        return Err(wrong_server_refusal(&instance.base_url));
-    }
+    let card = (connectors.enroll)(&origin).fetch_card(&origin)?;
+    let base_url = resolve_api_base(&origin, &card.api_base_url)?;
+    guard_one_plane(ctx, &base_url)?;
 
-    let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-    let auth = (connectors.enroll)(&base_url)
-        .device_authorize_login(signer.public_key(), &machine_name(&signer))?;
-    let complete = auth
-        .verification_uri_complete
-        .clone()
-        .unwrap_or_else(|| complete_uri(&auth.verification_uri, &auth.user_code));
+    let start =
+        (connectors.enroll)(&base_url).device_auth_start(&membership.name, &machine_name())?;
     let now = i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX);
-    let expires_at =
-        now.saturating_add(i64::try_from(auth.expires_in.saturating_mul(1000)).unwrap_or(i64::MAX));
-    enroll::write_wal(
-        ctx.fs,
-        &ctx.layout,
-        &enroll::PendingEnrollment {
-            schema_version: PERSISTED_SCHEMA_VERSION,
-            state: enroll::EnrollPhase::AuthorizingLogin {
-                base_url: base_url.clone(),
-                device_code: auth.device_code.clone(),
-                user_code: auth.user_code.clone(),
-                verification_uri_complete: complete.clone(),
-                expires_at_millis: expires_at,
-            },
-        },
-    )?;
+    let expires_at = now.saturating_add(
+        i64::try_from(start.expires_in_secs.saturating_mul(1000)).unwrap_or(i64::MAX),
+    );
+    let wal = enroll::PendingEnrollment {
+        schema_version: PERSISTED_SCHEMA_VERSION,
+        base_url: base_url.clone(),
+        workspace_name: membership.name.clone(),
+        intent: enroll::EnrollIntentDoc::Login,
+        device_code: start.device_code,
+        user_code: start.user_code.clone(),
+        verification_uri_complete: start.verification_uri_complete.clone(),
+        interval_secs: start.interval_secs,
+        expires_at_millis: expires_at,
+    };
+    enroll::write_wal(ctx.fs, &ctx.layout, &wal)?;
     Ok(AuthLoginOutcome::Pending(AuthLoginPending {
         server: base_url,
-        verification_uri_complete: complete,
-        user_code: auth.user_code,
-        device_fingerprint: device_fingerprint(&signer),
+        verification_uri_complete: start.verification_uri_complete,
+        user_code: start.user_code,
+        interval_secs: start.interval_secs,
     }))
 }
 
-/// Resume a live login WAL: poll once; granted ⇒ redeem at `POST /v1/login` and finalize.
+/// Resume a live login WAL: poll once; granted ⇒ the poll carries the device's ONE credential —
+/// persist it (replacing the stored one wholesale) and report.
 fn resume_login(
     ctx: &Ctx<'_>,
     connectors: &AuthConnectors<'_>,
-    yes: bool,
-    base_url: &str,
-    device_code: &str,
-    user_code: &str,
-    verification_uri_complete: String,
+    wal: &enroll::PendingEnrollment,
 ) -> Result<AuthLoginOutcome, ClientError> {
-    let enroll_src = (connectors.enroll)(base_url);
-    match enroll_src.poll_token(device_code)? {
-        TokenPoll::Pending | TokenPoll::SlowDown => {
-            let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-            Ok(AuthLoginOutcome::Pending(AuthLoginPending {
-                server: base_url.to_owned(),
-                verification_uri_complete,
-                user_code: user_code.to_owned(),
-                device_fingerprint: device_fingerprint(&signer),
+    let enroll_src = (connectors.enroll)(&wal.base_url);
+    match enroll_src.device_auth_poll(&wal.device_code)? {
+        DeviceAuthPoll::Pending => Ok(AuthLoginOutcome::Pending(AuthLoginPending {
+            server: wal.base_url.clone(),
+            verification_uri_complete: wal.verification_uri_complete.clone(),
+            user_code: wal.user_code.clone(),
+            interval_secs: wal.interval_secs,
+        })),
+        DeviceAuthPoll::Denied => {
+            enroll::delete_wal(ctx.fs, &ctx.layout)?;
+            Err(ClientError::Enrollment(
+                "the sign-in was denied at the approval page".into(),
+            ))
+        }
+        DeviceAuthPoll::Expired => {
+            enroll::delete_wal(ctx.fs, &ctx.layout)?;
+            Err(ClientError::Enrollment(
+                "the sign-in flow expired; start over with `topos auth login`".into(),
+            ))
+        }
+        DeviceAuthPoll::Granted(grant) => {
+            // The same persist the follow door runs (instance / the ONE credential / the membership /
+            // the WAL delete / the currency trigger) — a login shares every durable step, it just
+            // continues into no follow intent.
+            persist_enrollment(ctx, &wal.base_url, &grant)?;
+            Ok(AuthLoginOutcome::Done(AuthLoginData {
+                server: wal.base_url.clone(),
+                workspace_id: grant.workspace.workspace_id,
+                workspace_name: grant.workspace.name,
+                workspace_display_name: grant.workspace.display_name,
+                device_id: grant.device_id,
             }))
         }
-        TokenPoll::Denied => {
-            enroll::delete_wal(ctx.fs, &ctx.layout)?;
-            Err(ClientError::Enrollment(
-                "the sign-in was denied at the verification page".into(),
-            ))
-        }
-        TokenPoll::Expired => {
-            enroll::delete_wal(ctx.fs, &ctx.layout)?;
-            Err(ClientError::Enrollment(
-                "the sign-in session expired; start over with `topos auth login`".into(),
-            ))
-        }
-        TokenPoll::Granted(granted) => {
-            let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
-            let redeem = enroll_src.login_redeem(granted.grant.as_str(), signer.public_key())?;
-            finalize_login(ctx, base_url, redeem, yes)
-        }
     }
-}
-
-/// The login promote: the different-account gate, then the sidecar writes (instance / credentials /
-/// user) and the WAL delete.
-fn finalize_login(
-    ctx: &Ctx<'_>,
-    base_url: &str,
-    redeem: LoginRedeem,
-    yes: bool,
-) -> Result<AuthLoginOutcome, ClientError> {
-    let prior = enroll::read_user(ctx.fs, &ctx.layout)?;
-    let prior_principal = prior.as_ref().and_then(|u| u.principal.clone());
-    let switching = prior_principal
-        .as_deref()
-        .is_some_and(|p| p != redeem.principal);
-    if switching && !yes {
-        // The grant is spent either way — the session settled; only the WRITES are gated. The WAL
-        // is cleared so the re-run starts a fresh sign-in rather than re-polling a dead session.
-        enroll::delete_wal(ctx.fs, &ctx.layout)?;
-        return Err(ClientError::ConfirmFirst(format!(
-            "this install is signed in as {} — signing in as {} replaces every stored workspace \
-             credential; re-run `topos auth login --yes` to switch accounts (skills and drafts \
-             stay)",
-            prior_principal.as_deref().unwrap_or("(unknown)"),
-            redeem.principal
-        )));
-    }
-
-    // 1) instance.json — pin the plane (idempotent bytes when already pinned to this base).
-    let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.unwrap_or(enroll::Instance {
-        schema_version: PERSISTED_SCHEMA_VERSION,
-        base_url: base_url.to_owned(),
-        deployment_mode: topos_types::bootstrap::DeploymentMode::SelfHost,
-        enrollment_method: "device_code".to_owned(),
-    });
-    enroll::write_instance(ctx.fs, &ctx.layout, &instance)?;
-
-    // 2) credentials.json — the minted seats. An account SWITCH replaces the set wholesale (the old
-    //    account's credentials must not linger); a same-account re-login upserts per workspace (a
-    //    seat the login did not name — e.g. a blocked one — keeps its old credential).
-    let minted: Vec<CredentialEntry> = redeem
-        .seats
-        .iter()
-        .filter_map(|s| {
-            s.credential.as_ref().map(|c| CredentialEntry {
-                workspace_id: s.workspace_id.clone(),
-                credential: c.clone(),
-            })
-        })
-        .collect();
-    if switching {
-        enroll::replace_credentials(ctx.fs, &ctx.layout, minted)?;
-    } else {
-        for e in &minted {
-            enroll::write_credential(ctx.fs, &ctx.layout, &e.workspace_id, &e.credential)?;
-        }
-    }
-
-    // 3) user.json — the proven principal + one membership per confirmed seat. A switch REPLACES
-    //    the membership list (the seats are the new account's whole truth); a re-login upserts.
-    let now = i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX);
-    let mut user = if switching {
-        enroll::UserDoc {
-            schema_version: PERSISTED_SCHEMA_VERSION,
-            email: None,
-            principal: None,
-            workspaces: Vec::new(),
-        }
-    } else {
-        prior.unwrap_or(enroll::UserDoc {
-            schema_version: PERSISTED_SCHEMA_VERSION,
-            email: None,
-            principal: None,
-            workspaces: Vec::new(),
-        })
-    };
-    user.schema_version = PERSISTED_SCHEMA_VERSION;
-    user.principal = Some(redeem.principal.clone());
-    if redeem.principal.contains('@') {
-        user.email = Some(redeem.principal.clone());
-    }
-    for seat in &redeem.seats {
-        enroll::upsert_membership(
-            &mut user,
-            Membership {
-                workspace_id: seat.workspace_id.clone(),
-                display_name: Some(seat.display_name.clone()),
-                roles: vec![seat.role.clone()],
-                verified_domain: None,
-                verified_domain_status: VerifiedDomainStatus::Unverified,
-                invite_rooted: false,
-                enrolled_at: now,
-            },
-        );
-    }
-    enroll::write_user(ctx.fs, &ctx.layout, &user)?;
-    enroll::delete_wal(ctx.fs, &ctx.layout)?;
-
-    Ok(AuthLoginOutcome::Done(AuthLoginData {
-        server: base_url.to_owned(),
-        principal: redeem.principal,
-        replaced_principal: switching.then_some(prior_principal).flatten(),
-        memberships: redeem
-            .seats
-            .into_iter()
-            .map(|s| AuthLoginMembership {
-                minted: s.credential.is_some(),
-                workspace_id: s.workspace_id,
-                name: s.name,
-                display_name: s.display_name,
-                role: s.role,
-                blocked: s.blocked,
-            })
-            .collect(),
-    }))
 }
 
 // =================================================================================================
@@ -360,7 +213,7 @@ fn finalize_login(
 pub(crate) struct AuthLogoutDescribe {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub principal: Option<String>,
-    /// The workspaces whose credential would be deleted (this device revoked there, best-effort).
+    /// The workspaces this device would be revoked in (best-effort) before the credential deletes.
     pub workspaces: Vec<String>,
     /// What stays: skills, follows, drafts — signing out never touches a byte.
     pub keeps_note: String,
@@ -394,7 +247,7 @@ const LOGOUT_KEEPS: &str =
     "skills, follows, and drafts stay on this machine; `topos auth login` signs back in";
 
 /// `auth logout` — describe, then `--yes`: best-effort self device-revoke per enrolled workspace,
-/// then delete the stored credentials. Idempotent: signed-out already is a clean success.
+/// then delete the stored credential. Idempotent: signed-out already is a clean success.
 ///
 /// # Errors
 /// An io/doc failure reading or deleting the credential doc (the revokes themselves are
@@ -406,12 +259,12 @@ pub(crate) fn logout(
 ) -> Result<AuthLogoutOutcome, ClientError> {
     let user = enroll::read_user(ctx.fs, &ctx.layout)?;
     let creds = enroll::read_credentials(ctx.fs, &ctx.layout)?;
-    let workspaces: Vec<String> = creds
+    let workspaces: Vec<String> = user
         .as_ref()
-        .map(|c| {
-            c.credentials
+        .map(|u| {
+            u.workspaces
                 .iter()
-                .map(|e| e.workspace_id.clone())
+                .map(|m| m.workspace_id.clone())
                 .collect()
         })
         .unwrap_or_default();
@@ -420,7 +273,12 @@ pub(crate) fn logout(
         return Ok(AuthLogoutOutcome::Described {
             describe: AuthLogoutDescribe {
                 principal: user.and_then(|u| u.principal),
-                workspaces,
+                // No credential ⇒ nothing to revoke anywhere (already signed out).
+                workspaces: if creds.is_some() {
+                    workspaces
+                } else {
+                    Vec::new()
+                },
                 keeps_note: LOGOUT_KEEPS.to_owned(),
             },
             yes_argv: vec![
@@ -433,27 +291,25 @@ pub(crate) fn logout(
     }
 
     // Best-effort self-revoke per enrolled workspace, BEFORE the credential is deleted (the revoke
-    // authenticates with it). A failure never blocks the local sign-out.
+    // authenticates with it and names the stored device id as its target). A failure never blocks
+    // the local sign-out.
     let mut revoked = Vec::new();
     let mut revoke_failed = Vec::new();
-    if !workspaces.is_empty()
-        && let Some(instance) = enroll::read_instance(ctx.fs, &ctx.layout)?
-    {
-        let signer = DeviceSigner::load_or_generate(ctx.fs, &ctx.layout)?;
+    if let (Some(creds), Some(instance)) = (&creds, enroll::read_instance(ctx.fs, &ctx.layout)?) {
         let governance: Box<dyn GovernanceSource> = (connectors.governance)(&instance.base_url);
         for ws in &workspaces {
             let op_id = uuid::Uuid::from_bytes(ctx.ids.new_op_id())
                 .hyphenated()
                 .to_string();
-            match governance.revoke_device(ws, signer.device_key_id(), &op_id) {
+            match governance.revoke_device(ws, &creds.device_id, &op_id) {
                 Ok(()) => revoked.push(ws.clone()),
                 Err(_) => revoke_failed.push(ws.clone()),
             }
         }
     }
 
-    // Delete the credentials — the signed-out state IS their absence. `user.json` keeps the
-    // principal (the re-login UX); follows/skills/drafts are untouched.
+    // Delete the credential — the signed-out state IS its absence. `user.json` keeps the memberships
+    // (the re-login UX); follows/skills/drafts are untouched.
     let path = ctx.layout.credentials_path();
     let credentials_deleted = if ctx.fs.exists(&path) {
         let _guard = ctx.fs.lock_exclusive(&ctx.layout.identity_lock_file())?;
@@ -475,13 +331,13 @@ pub(crate) fn logout(
 // status
 // =================================================================================================
 
-/// One workspace's credential health.
+/// One workspace's access health.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct AuthWorkspaceStatus {
     pub workspace_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    /// Whether a credential is stored for this workspace.
+    /// Whether the device credential is stored (one credential serves every workspace).
     pub credential: bool,
     /// The probe verdict: `healthy` / `no access — revoked or removed` / `unreachable` /
     /// `no credential`.
@@ -512,9 +368,10 @@ pub(crate) struct AuthStatusData {
     pub server: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub principal: Option<String>,
+    /// The registered device id (non-secret), when signed in.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub email: Option<String>,
-    /// Whether any workspace credential is stored (the signed-in state).
+    pub device_id: Option<String>,
+    /// Whether the device credential is stored (the signed-in state).
     pub signed_in: bool,
     pub workspaces: Vec<AuthWorkspaceStatus>,
     /// Whether the session-start currency hook is armed in the harness config.
@@ -522,7 +379,8 @@ pub(crate) struct AuthStatusData {
     pub reporting: Vec<AuthReportingStatus>,
 }
 
-/// `auth status` — whoami + per-workspace credential probes + hook health + reporting posture.
+/// `auth status` — whoami + per-workspace access probes + hook health + reporting posture. The probe
+/// is the member-scoped `me` read under the ONE device credential.
 ///
 /// # Errors
 /// An io/doc failure reading the local documents (the probes themselves degrade per workspace).
@@ -532,20 +390,23 @@ pub(crate) fn status(
 ) -> Result<AuthStatusData, ClientError> {
     let instance = enroll::read_instance(ctx.fs, &ctx.layout)?;
     let user = enroll::read_user(ctx.fs, &ctx.layout)?;
-    let creds: std::collections::HashSet<String> = enroll::read_credentials(ctx.fs, &ctx.layout)?
-        .map(|c| c.credentials.into_iter().map(|e| e.workspace_id).collect())
-        .unwrap_or_default();
+    let creds = enroll::read_credentials(ctx.fs, &ctx.layout)?;
+    let signed_in = creds.is_some();
 
+    let mut probed_principal = None;
     let mut workspaces = Vec::new();
     if let (Some(instance), Some(user)) = (&instance, &user) {
         let directory = (connectors.directory)(&instance.base_url);
         for m in &user.workspaces {
-            let has_cred = creds.contains(&m.workspace_id);
-            let (health, role) = if !has_cred {
+            let (health, role) = if !signed_in {
                 ("no credential".to_owned(), None)
             } else {
                 match directory.me(&m.workspace_id) {
-                    Ok(me) => ("healthy".to_owned(), Some(me.role)),
+                    Ok(me) => {
+                        // The healthy probe is also the freshest identity disclosure.
+                        probed_principal.get_or_insert(me.principal);
+                        ("healthy".to_owned(), Some(me.role))
+                    }
                     // The uniform 404: this device (or the person) lost the workspace.
                     Err(ClientError::TargetNotFound { .. }) => {
                         ("no access — revoked or removed".to_owned(), None)
@@ -555,8 +416,8 @@ pub(crate) fn status(
             };
             workspaces.push(AuthWorkspaceStatus {
                 workspace_id: m.workspace_id.clone(),
-                display_name: m.display_name.clone(),
-                credential: has_cred,
+                display_name: Some(m.display_name.clone()),
+                credential: signed_in,
                 health,
                 role,
             });
@@ -579,9 +440,9 @@ pub(crate) fn status(
 
     Ok(AuthStatusData {
         server: instance.map(|i| i.base_url),
-        principal: user.as_ref().and_then(|u| u.principal.clone()),
-        email: user.as_ref().and_then(|u| u.email.clone()),
-        signed_in: !creds.is_empty(),
+        principal: probed_principal.or(user.as_ref().and_then(|u| u.principal.clone())),
+        device_id: creds.map(|c| c.device_id),
+        signed_in,
         workspaces,
         // The same probe `list`'s enrollment header uses: the adapter holds a config entry iff the
         // trigger is armed.

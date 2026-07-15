@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT version_id AS \"version_id!\", generation AS \"generation!\",\n                      moved_by_display AS \"moved_by!\",\n                      (extract(epoch FROM moved_at) * 1000.0)::bigint AS \"moved_at_ms!\"\n               FROM current_pointer WHERE workspace_id = $1 AND bundle_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "version_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "generation!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "moved_by!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "moved_at_ms!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "48b95dd8784c9143b4e6845569ecee3d1ce114ca97afe4a85d68696e06b89d24"
+}

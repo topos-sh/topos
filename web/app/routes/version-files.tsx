@@ -6,7 +6,7 @@ import { ShortId } from "@/components/ui";
 import { notFound, requireMember } from "@/lib/auth/guards.server";
 import { loadVersionFilesData } from "@/lib/browse/version-files.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
-import { sessionCurrent } from "@/lib/plane/reads.server";
+import { custodyCurrent } from "@/lib/plane/reads.server";
 
 const HEX64 = /^[0-9a-f]{64}$/;
 
@@ -22,10 +22,11 @@ export function meta({ params }: { params: { skill?: string; versionId?: string 
  * and decides the "current" badge.
  *
  * Because this page can address any historical version, "current" is NOT the DB catalog row — it
- * is a LIVE comparison against the vault's pointer (`sessionCurrent`), which VersionFiles renders
+ * is a LIVE comparison against the vault's pointer (`custodyCurrent`), which VersionFiles renders
  * as `currentChip`. Guard order mirrors the review page: requireMember first, a cheap shape check
  * on the version id, then the DB catalog probe (an unknown NAME is the uniform 404). Every vault
- * read rides the member-session lane on the guard-minted actor and keys on the immutable `skillId`.
+ * read rides the internal custody lane and keys on the immutable `skillId` — authorization
+ * already happened in the guard.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const ws = params.ws as string;
@@ -42,9 +43,9 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 
   const [versionFiles, current] = await Promise.all([
     loadVersionFilesData(actor, row.skillId, versionId),
-    sessionCurrent(actor.email, ws, row.skillId),
+    custodyCurrent(ws, row.skillId),
   ]);
-  const isCurrent = current.ok && current.data.record.version_id === versionId;
+  const isCurrent = current.ok && current.data.version_id === versionId;
 
   return { ws, skill, versionId, isCurrent, versionFiles };
 }

@@ -17,9 +17,10 @@ interface ReviewActionData {
 }
 
 /**
- * The variant relabels the SAME write for the proposer's own proposal: the four-eyes gate
- * withholds approve only, so withdrawing is a reject under the proposer's own email — same
- * action, same wire body, reason still mandatory. The intent posted is `reject` or `withdraw`.
+ * The variant relabels the flow for the proposer's own proposal: the four-eyes gate withholds
+ * approve only, so withdrawing stays live — the same row resolve under the proposer's own
+ * name, verdict `withdrawn`, reason still mandatory. The intent posted is `reject` or
+ * `withdraw`.
  */
 const COPY = {
   reject: {
@@ -41,29 +42,17 @@ const COPY = {
 /**
  * The reject leg, folded into a collapsible so the reason is deliberate, never a stray click:
  * opening it reveals the MANDATORY reason textarea (the server records and discloses it on the
- * review surfaces). Posts `intent=reject` (or `withdraw`) to the review route's action. The hidden
- * `request_id` is loader-minted; the hidden `expected_epoch`/`seq` bind the PROPOSAL's base
- * generation — a reject moves no pointer, so it keys the row, not the live current; `version_id`
- * names the candidate. The typed reason echoes back on a non-success so nothing is lost; a
- * successful post resets the field.
+ * review surfaces). Posts `intent=reject` (or `withdraw`) to the review route's action;
+ * `version_id` names the candidate — a reject moves no pointer, so no generation rides it. The
+ * typed reason echoes back on a non-success so nothing is lost; a successful post resets the
+ * field.
  */
 export function RejectDialog({
-  ws: _ws,
-  skill: _skill,
   versionId,
-  requestId,
-  baseEpoch,
-  baseSeq,
   variant = "reject",
 }: {
-  /** Carried for the panel's API shape; the route action reads ws/skill from its own params. */
-  ws: string;
-  skill: string;
   versionId: string;
-  requestId: string;
-  baseEpoch: string;
-  baseSeq: string;
-  /** "withdraw" relabels the flow for the proposer's own proposal — the write is identical. */
+  /** "withdraw" relabels the flow for the proposer's own proposal — the resolve is the same row. */
   variant?: "reject" | "withdraw";
 }) {
   const fetcher = useFetcher<ReviewActionData>();
@@ -88,9 +77,6 @@ export function RejectDialog({
       <fetcher.Form ref={formRef} method="post" className="mt-3 flex flex-col gap-2">
         <input type="hidden" name="intent" value={variant === "withdraw" ? "withdraw" : "reject"} />
         <input type="hidden" name="version_id" value={versionId} />
-        <input type="hidden" name="request_id" value={requestId} />
-        <input type="hidden" name="expected_epoch" value={baseEpoch} />
-        <input type="hidden" name="expected_seq" value={baseSeq} />
         <label className="block">
           <span className="mb-1 block font-medium text-sm text-dim">{copy.label}</span>
           <textarea
@@ -138,8 +124,7 @@ export function RejectDialog({
       )}
       {state?.status === "error" && (
         <p className="mt-2 text-red-600 text-sm" role="alert">
-          That didn&apos;t go through — nothing was decided. A retry is safe: it resumes this same
-          request.
+          That didn&apos;t go through — nothing was decided. A retry is safe.
         </p>
       )}
     </details>

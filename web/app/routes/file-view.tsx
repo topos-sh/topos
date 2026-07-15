@@ -8,7 +8,7 @@ import { notFound, requireMember } from "@/lib/auth/guards.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
 import { classifyBytes, decodeTextVerbatim } from "@/lib/diff/classify";
 import { MAX_BLOB_BYTES, MAX_HIGHLIGHT_BYTES } from "@/lib/diff/model";
-import { sessionBundleCapped, sessionVersionMeta } from "@/lib/plane/reads.server";
+import { custodyObjectCapped, custodyVersionMeta } from "@/lib/plane/reads.server";
 import { renderCodeHTML } from "@/lib/view/highlight.server";
 import { languageForPath } from "@/lib/view/language";
 import { renderMarkdownHTML } from "@/lib/view/markdown.server";
@@ -53,7 +53,8 @@ type FileContent =
  * mirrors the review page (requireMember → id shape → catalog probe). The path is rebuilt from the
  * splat and used ONLY as a manifest lookup key — never as a filesystem path — so there is no
  * traversal surface: a "../x" simply fails to match a manifest entry and 404s. The blob rides the
- * member-session lane under the per-file byte cap, and each failure mode degrades to an honest card.
+ * internal custody lane under the per-file byte cap, and each failure mode degrades to an honest
+ * card.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const ws = params.ws as string;
@@ -71,7 +72,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     notFound();
   }
 
-  const meta = await sessionVersionMeta(actor.email, ws, row.skillId, versionId);
+  const meta = await custodyVersionMeta(ws, row.skillId, versionId);
   if (!meta.ok) {
     return { kind: "meta_missing" as const, ws, skill, versionId };
   }
@@ -97,13 +98,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   const fileBasePath = `/workspaces/${ws}/skills/${skill}/versions/${versionId}/files/${encodedPath}`;
   const executable = file.mode === "100755";
 
-  const blob = await sessionBundleCapped(
-    actor.email,
-    ws,
-    row.skillId,
-    file.object_id,
-    MAX_BLOB_BYTES,
-  );
+  const blob = await custodyObjectCapped(ws, row.skillId, file.object_id, MAX_BLOB_BYTES);
 
   let sizeBytes: number | undefined;
   let showToggle = false;

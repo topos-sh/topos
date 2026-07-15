@@ -3,7 +3,8 @@ import { expect, test } from "@playwright/test";
 /**
  * The public landing page at "/". Runs ANONYMOUSLY (empty storage state): the landing is the one
  * signed-in-shell-free page, and `/install` is excluded from the login bounce, so these tests
- * prove the exclusion holds and the auth boundary bounces everything else.
+ * prove the exclusion holds and the auth boundary bounces everything else. Marketing copy is
+ * deliberately UNASSERTED (it moves independently of the app) — structure and behavior only.
  */
 
 test.use({
@@ -25,16 +26,13 @@ test.describe("the public landing page", () => {
     expect(body).not.toContain("<html");
   });
 
-  test("serves anonymously at / with the hero, nav, and no login bounce", async ({ page }) => {
+  test("serves anonymously at / with a hero and no login bounce", async ({ page }) => {
     await page.goto("/");
     await expect(page).toHaveURL(/\/$/);
     await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
-    // "Sign in" points at the app entry, which routes signed-in visitors on and bounces the
-    // signed-out to /login.
-    await expect(page.getByRole("link", { name: "Sign in" }).first()).toHaveAttribute(
-      "href",
-      "/app",
-    );
+    // The nav links into the app entry, which routes signed-in visitors on and bounces the
+    // signed-out to /login (asserted by href, never by marketing label).
+    await expect(page.locator('a[href="/app"]').first()).toBeVisible();
   });
 
   test("signed-out visits to the app bounce to login", async ({ page }) => {

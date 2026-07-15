@@ -1,10 +1,11 @@
 import { redirect } from "react-router";
 
 /**
- * A historical URL shape kept honest: `/create` permanently redirects to the resource route
- * `/workspaces/new`. Resource-oriented routes nest under their collection; this old verb path
- * 301s to its replacement.
+ * A historical URL shape kept honest: `/create` permanently redirects to `/workspaces`. This
+ * install serves ONE boot-minted workspace, so there is no create page to point at — the
+ * collection route resolves a visitor to their seat (or the honest miss); a hosted deployment
+ * that offers creation appends its own route for it.
  */
 export function loader(): Response {
-  return redirect("/workspaces/new", 301);
+  return redirect("/workspaces", 301);
 }

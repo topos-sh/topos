@@ -3,22 +3,22 @@
  * (`node tests/e2e/db-setup.mjs`). It provisions a SEPARATE database `topos_e2e` on the same
  * Postgres server the unit lane's `topos_test` uses, so the two never collide.
  *
- * What it does, idempotently:
- *  1. CREATE DATABASE topos_e2e (once), with the connect/create grants + per-database search_path
- *     the two app roles need.
- *  2. Into `plane`: apply the in-repo plane SQL migrations AS `topos_plane` (ownership + the init's
- *     default-privileges chain match production boot), then mirror the grant shape the unit
- *     database already holds — broad SELECT + the guarded-function DML edges (topos_web writes the
- *     authority tables ONLY through the `topos_*` SECURITY-INVOKER functions).
- *  3. Into `web`: run the app's OWN drizzle migrator (scripts/migrate.mjs) — it creates schema web,
- *     the web-tier tables, and the `web.__drizzle_migrations` LEDGER. Recording the ledger is the
- *     point: the app's first-request migration then sees it and no-ops, so pre-seeding here never
- *     collides with the running app's `CREATE TABLE`s.
- *
- * The plane migrations run ONLY on a fresh `plane` schema (they are append-only); the grants + the
- * web migrator are both safe to re-run.
+ * What it does, idempotently, mirroring scripts/compose-init-db.sh (the production first-boot
+ * provisioning — ONE ROLE PER APPLICATION, each owning its schema and running its own
+ * migration lineage):
+ *  1. CREATE the two app roles + DATABASE topos_e2e (once), the connect/create grants, the
+ *     per-database role search_paths (web, plane / plane), the two schemas each owned by its
+ *     role, and the ALTER DEFAULT PRIVILEGES chain that keeps the app's read-only view of
+ *     custody state current across future plane migrations.
+ *  2. Into `plane`: apply the vault's in-repo SQL migrations AS `topos_plane` (ownership + the
+ *     default-privileges chain match production boot). Fresh lineage: the applied set reads
+ *     from the `plane._sqlx_migrations` ledger alone.
+ *  3. Into `web`: run the app's OWN drizzle migrator (scripts/migrate.mjs) — it creates the
+ *     web-tier tables and the `web.__drizzle_migrations` LEDGER. Recording the ledger is the
+ *     point: the app's first-request migration then sees it and no-ops.
  */
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -39,14 +39,6 @@ const ADMIN_URL =
   process.env.E2E_ADMIN_URL ?? "postgres://postgres:postgres@localhost:5439/topos_e2e";
 const WEB_URL = process.env.DATABASE_URL ?? "postgres://topos_web:web@localhost:5439/topos_e2e";
 const DB_NAME = "topos_e2e";
-
-/* The topos_web grant shape (broad SELECT + the guarded-function DML edges, UPDATE at COLUMN
- * grain) now lives IN the plane migrations — 0019 onward carry the grants next to the schema
- * they bound, so applying the migrations AS topos_plane below grants the web role too. The one
- * ordering rule that leaves here: BOTH roles must exist BEFORE the migrations run (0019 skips
- * the web grants when the role is absent, and a deployment that creates the role afterward
- * without re-granting fails CLOSED — the web tier cannot read). `ensureDatabase` creates the
- * roles first for exactly that reason; compose initdb and production provisioning do the same. */
 
 function planeMigrationFiles() {
   return readdirSync(MIGRATIONS_DIR)
@@ -73,16 +65,15 @@ async function ensureDatabase() {
     if (rows.length === 0) {
       await client.query(`CREATE DATABASE ${DB_NAME}`);
     }
-    // Idempotent: only the two app roles connect; topos_web may create (the drizzle migrator runs
-    // CREATE SCHEMA IF NOT EXISTS web, and Postgres checks CREATE-on-database before honoring it).
+    // Idempotent, exactly like compose-init-db.sh: only the two app roles connect; topos_web may
+    // create (the drizzle migrator runs CREATE SCHEMA IF NOT EXISTS web, and Postgres checks
+    // CREATE-on-database before honoring it).
     await client.query(`REVOKE ALL ON DATABASE ${DB_NAME} FROM PUBLIC`);
     await client.query(`GRANT CONNECT ON DATABASE ${DB_NAME} TO topos_plane`);
     await client.query(`GRANT CONNECT ON DATABASE ${DB_NAME} TO topos_web`);
     await client.query(`GRANT CREATE ON DATABASE ${DB_NAME} TO topos_web`);
-    // topos_web keeps its own unqualified tables in `web` (first), but the DAL invokes the guarded
-    // `topos_*` authority functions unqualified — so `plane` must be on the path too. The plane
-    // model tables are addressed schema-qualified (Drizzle pgSchema("plane")), so nothing there is
-    // ambiguous. Per-database only: the unit lane's `topos_test` search_path is untouched.
+    // Role-level search_path, per database (probed by LOGGING IN as the role — SET ROLE does not
+    // adopt it): the app's own tables lead, the custody mirror follows.
     await client.query(`ALTER ROLE topos_web IN DATABASE ${DB_NAME} SET search_path = web, plane`);
     await client.query(`ALTER ROLE topos_plane IN DATABASE ${DB_NAME} SET search_path = plane`);
   } finally {
@@ -94,22 +85,47 @@ async function bootstrapPlane() {
   const db = new Client({ connectionString: ADMIN_URL });
   await db.connect();
   try {
-    // CREATE SCHEMA runs BEFORE any SET ROLE (topos_plane holds no CREATE on the database, so a
-    // SET-ROLE'd CREATE SCHEMA fails 42501 even with IF NOT EXISTS). AUTHORIZATION keeps a freshly
-    // created schema owned like the production init's.
+    // Schemas are born superuser-side with AUTHORIZATION (the owning role holds no CREATE on the
+    // database), exactly like the compose init.
     await db.query("CREATE SCHEMA IF NOT EXISTS plane AUTHORIZATION topos_plane");
+    await db.query("CREATE SCHEMA IF NOT EXISTS web AUTHORIZATION topos_web");
+    // The app's read-only view of custody state: every table a plane migration adds arrives
+    // already SELECT-granted to the web role.
+    await db.query("GRANT USAGE ON SCHEMA plane TO topos_web");
+    await db.query(
+      "ALTER DEFAULT PRIVILEGES FOR ROLE topos_plane IN SCHEMA plane GRANT SELECT ON TABLES TO topos_web",
+    );
 
     // Apply the PENDING plane migrations AS topos_plane (SET ROLE does not re-read the role
-    // search_path, so set it explicitly). A fresh schema applies them all; an existing dev
-    // database picks up only what landed since (compared by leading migration number against
-    // the sqlx ledger, so a re-run never re-executes an applied file). Each file is one
-    // simple-protocol query (dollar-quoted bodies + all).
+    // search_path, so set it explicitly). Fresh lineage: the applied set reads from the sqlx
+    // ledger alone — no marker probes, no pre-ledger fallback. This bootstrap RECORDS what it
+    // applies in that same ledger (sqlx's own shape, real SHA-384 checksums), so it is
+    // idempotent across the CI double invocation (standalone, then again as playwright's
+    // globalSetup) and the vault's own migrator would see the set as applied.
     await db.query("SET ROLE topos_plane");
     await db.query("SET search_path = plane");
+    await db.query(`CREATE TABLE IF NOT EXISTS _sqlx_migrations (
+      version BIGINT PRIMARY KEY,
+      description TEXT NOT NULL,
+      installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
+      success BOOLEAN NOT NULL,
+      checksum BYTEA NOT NULL,
+      execution_time BIGINT NOT NULL
+    )`);
     const applied = await appliedMigrationVersions(db);
     for (const file of planeMigrationFiles()) {
       if (!applied.has(migrationVersion(file))) {
-        await db.query(readFileSync(join(MIGRATIONS_DIR, file), "utf8"));
+        const source = readFileSync(join(MIGRATIONS_DIR, file), "utf8");
+        await db.query(source);
+        await db.query(
+          `INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time)
+           VALUES ($1, $2, true, $3, 0)`,
+          [
+            migrationVersion(file),
+            file.replace(/^\d+_/, "").replace(/\.sql$/, ""),
+            createHash("sha384").update(source).digest(),
+          ],
+        );
       }
     }
     await db.query("RESET ROLE");
@@ -124,11 +140,9 @@ function migrationVersion(file) {
 }
 
 /**
- * The versions already applied, from wherever the ledger is. The plane binary's migrator writes
- * `_sqlx_migrations`; THIS bootstrap predates it on a fresh schema (no ledger, nothing applied).
- * Databases this file bootstrapped before the pending-migrations rework carry no ledger either —
- * for those, fall back to "which migration's tables/functions exist" via a probe of the LAST
- * fully-applied file's marker object. Simplest honest probe: the highest numbered marker below.
+ * The versions already applied, from the `plane._sqlx_migrations` ledger the vault's own
+ * migrator writes. No ledger = a fresh schema = apply everything (this bootstrap may predate
+ * the vault's first boot on a shared dev database — the vault's migrator then no-ops).
  */
 async function appliedMigrationVersions(db) {
   const ledger = await db.query("SELECT to_regclass('_sqlx_migrations') AS t");
@@ -136,46 +150,12 @@ async function appliedMigrationVersions(db) {
     const { rows } = await db.query("SELECT version FROM _sqlx_migrations");
     return new Set(rows.map((r) => Number(r.version)));
   }
-  const probe = await db.query("SELECT to_regclass('workspace') AS t");
-  if (probe.rows[0]?.t === null) {
-    return new Set(); // virgin schema — apply everything
-  }
-  // Pre-ledger bootstrap: probe the marker objects that tell the applied prefix apart. Each
-  // entry is [version, EXISTS-probe]; extend when a new migration lands in this fallback era
-  // (post-0019 databases always carry the marker function below or were ledger-migrated).
-  const markers = [
-    [19, "SELECT to_regproc('topos_delivery') IS NOT NULL AS ok"],
-    [
-      20,
-      "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('catalog') AND attname = 'kind' AND NOT attisdropped) AS ok",
-    ],
-    // 0021 re-keys the exclusion mint on the acting caller: the 5-arg signature IS the marker.
-    [
-      21,
-      "SELECT to_regprocedure('topos_exclude_device(text,text,text,text,text)') IS NOT NULL AS ok",
-    ],
-    // 0022 only replaces topos_channel_place's body (same signature), so probe a body fact the
-    // 0015 original lacks: the rewritten create-loop names the channels_pkey constraint.
-    [
-      22,
-      "SELECT EXISTS (SELECT 1 FROM pg_proc WHERE oid = to_regprocedure('topos_channel_place(text,text,text,text,text)') AND prosrc LIKE '%channels_pkey%') AS ok",
-    ],
-  ];
-  const applied = new Set();
-  for (let v = 1; v <= 18; v += 1) {
-    applied.add(v); // this fallback only exists for databases bootstrapped at 0018
-  }
-  for (const [version, sql] of markers) {
-    const { rows } = await db.query(sql);
-    if (rows[0]?.ok === true) {
-      applied.add(version);
-    }
-  }
-  return applied;
+  return new Set();
 }
 
-/** Run the app's OWN drizzle migrator against topos_e2e (creates schema web + tables + ledger). The
- * running app's first-request migration then finds the ledger and no-ops. */
+/** Run the app's OWN drizzle migrator against topos_e2e (creates the tables + the
+ * `web.__drizzle_migrations` ledger). The running app's first-request migration then finds the
+ * ledger and no-ops. */
 function bootstrapWeb() {
   execFileSync("node", [join(WEB_ROOT, "scripts", "migrate.mjs")], {
     env: { ...process.env, DATABASE_URL: WEB_URL },

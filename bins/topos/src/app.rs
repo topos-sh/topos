@@ -1,7 +1,6 @@
 //! The composition root for the binary: parse argv, wire the real seams, run recovery, dispatch a verb,
 //! and emit either the `--json` envelope (stdout) or thin TTY text.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -18,10 +17,9 @@ use crate::fs_seam::{FsOps, RealFs};
 use crate::git_source::GitTarballSource;
 use crate::ids::{Clock, RealClock, RealIds};
 use crate::plane::{
-    ContributeSource, DirectorySource, EnrollSource, GovernanceSource, PlaneSource,
-    ReconcileTransport,
+    ContributeSource, DirectorySource, EnrollSource, GovernanceSource, ReconcileTransport,
 };
-use crate::plane_http::{FileFollow, SkillCred, UreqDeviceClient, UreqPlane};
+use crate::plane_http::{FileFollow, UreqDeviceClient, UreqPlane};
 use crate::sidecar::{Layout, recover};
 use crate::{enroll, identity, logfile, ops, render};
 
@@ -81,21 +79,14 @@ pub fn run() -> ExitCode {
     // (and on first use, mint) the device identity — `uninstall` must never create or require it before
     // tearing the home down.
     let device_id = match &command {
-        // `follow` also loads (and on first use mints) the device identity: the device-key signer it drives
-        // requires `host.json` to exist, and the skill path authors a draft snapshot through the pull engine.
-        // `publish` authors the candidate commit and `revert` the forward-revert commit, so both load (and
-        // on first use mint) the device id. `auth login` registers the device key at its redeem.
+        // `follow` also loads (and on first use mints) the device identity: its skill path authors a
+        // draft snapshot through the pull engine. `publish` authors the candidate commit and `revert`
+        // the forward-revert commit, so both load (and on first use mint) the device id.
         Command::Add { .. }
         | Command::Update { .. }
         | Command::Follow { .. }
         | Command::Publish { .. }
         | Command::Revert { .. } => match identity::load_or_create_device_id(&fs, &layout) {
-            Ok(d) => d,
-            Err(e) => return emit_err(json, cmd_name, &e, &diag),
-        },
-        Command::Auth {
-            cmd: AuthCmd::Login { .. },
-        } => match identity::load_or_create_device_id(&fs, &layout) {
             Ok(d) => d,
             Err(e) => return emit_err(json, cmd_name, &e, &diag),
         },
@@ -112,30 +103,29 @@ pub fn run() -> ExitCode {
         follow,
     };
 
-    // The credentialed device connectors — the write + governance routes present the workspace Bearer
-    // credential, looked up per request by `workspace_id`. Built as closures so `credentials.json` is
-    // re-read FRESH on each build: a standup publish writes it mid-invocation (during promotion), and the
-    // continued publish must see the freshly-minted credential.
+    // The credentialed device connectors — every credentialed route presents the device's ONE Bearer
+    // credential. Built as closures so `credentials.json` is re-read FRESH on each build: a `follow
+    // <address>` mints it mid-invocation (at the granted poll), and the continued describe/apply must
+    // see the freshly-minted credential.
     let connect_governance = |base_url: &str| -> Box<dyn GovernanceSource> {
         Box::new(UreqDeviceClient::new(
             base_url.to_owned(),
-            load_workspace_credentials(ctx.fs, &ctx.layout),
+            load_device_credential(ctx.fs, &ctx.layout),
         ))
     };
     let connect_contribute = |base_url: &str| -> Box<dyn ContributeSource> {
         Box::new(UreqDeviceClient::new(
             base_url.to_owned(),
-            load_workspace_credentials(ctx.fs, &ctx.layout),
+            load_device_credential(ctx.fs, &ctx.layout),
         ))
     };
     // The DIRECTORY connector (describe reads + subscription/curation/notice row ops) and the
     // RECONCILE connector (delivery + fleet report + the per-skill read lane on one object) — both
-    // re-read the on-disk credentials fresh per build, for the same mid-invocation reason as above
-    // (a `follow <address>` enrolls, then describes, in ONE invocation).
+    // re-read the on-disk credential fresh per build, for the same mid-invocation reason as above.
     let connect_directory = |base_url: &str| -> Box<dyn DirectorySource> {
         Box::new(UreqDeviceClient::new(
             base_url.to_owned(),
-            load_workspace_credentials(ctx.fs, &ctx.layout),
+            load_device_credential(ctx.fs, &ctx.layout),
         ))
     };
     let connect_delivery = |base_url: &str| -> Box<dyn ReconcileTransport> {
@@ -146,22 +136,21 @@ pub fn run() -> ExitCode {
                 schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
                 follows: Vec::new(),
             });
-        let credentials = enroll::read_credentials(ctx.fs, &ctx.layout)
+        let workspaces: Vec<String> = enroll::read_user(ctx.fs, &ctx.layout)
             .ok()
             .flatten()
-            .unwrap_or_else(|| enroll::Credentials {
-                schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
-                credentials: Vec::new(),
-            });
+            .map(|u| u.workspaces.into_iter().map(|m| m.workspace_id).collect())
+            .unwrap_or_default();
         Box::new(
             UreqPlane::new(
                 base_url.to_owned(),
-                enroll::skill_creds(&follows, &credentials),
+                load_device_credential(ctx.fs, &ctx.layout),
+                enroll::skill_workspaces(&follows),
             )
-            .with_workspace_credentials(credentials.into_map()),
+            .with_workspaces(workspaces),
         )
     };
-    // The default WEB origin the token-less doors dial on a fresh install (`follow <bare-ws>`,
+    // The default WEB origin the enrollment doors dial on a fresh install (`follow <bare-ws>`,
     // `auth login`): the env override, else the hosted web origin (the card re-roots onto the API).
     let web_origin = resolve_web_origin(std::env::var("TOPOS_PLANE_URL").ok());
 
@@ -249,15 +238,10 @@ pub fn run() -> ExitCode {
             wait,
         } => {
             // The transports are built per-base-URL (known only after the op parses the target /
-            // the card / the WAL): the shared creds-free `ureq` enroll connector, the read transport
-            // for the offer disclosure, the directory (describe + rows) and the reconcile transport.
-            let plane_connect =
-                |base_url: &str, creds: HashMap<String, SkillCred>| -> Box<dyn PlaneSource> {
-                    Box::new(UreqPlane::new(base_url.to_owned(), creds))
-                };
+            // the card / the WAL): the shared creds-free `ureq` enroll connector, the directory
+            // (describe + rows) and the reconcile transport.
             let connectors = ops::FollowConnectors {
                 enroll: &connect_enroll,
-                plane: &plane_connect,
                 directory: &connect_directory,
                 delivery: &connect_delivery,
                 web_origin: web_origin.clone(),
@@ -341,7 +325,7 @@ pub fn run() -> ExitCode {
             let catalog_client;
             let scope = if let Some((base_url, memberships)) = remote_inputs {
                 catalog_client =
-                    UreqDeviceClient::new(base_url, load_workspace_credentials(&fs, &ctx.layout));
+                    UreqDeviceClient::new(base_url, load_device_credential(&fs, &ctx.layout));
                 Some(ops::RemoteScope {
                     catalog: &catalog_client,
                     memberships,
@@ -370,14 +354,12 @@ pub fn run() -> ExitCode {
             propose,
             message,
             yes,
-            wait,
         } => {
             // Discovery roots for the auto-add pre-step (a `publish` of an untracked local source adopts it
             // first) — the SAME roots `add`/`list` use; `None` degrades name/dir resolution the same way.
             let roots = list_discovery(false);
             // A bare ENROLLED publish DESCRIBES what shipping would do (nothing lands on the plane); `--yes`
-            // applies. An un-enrolled publish keeps the standup flow (the sign-in IS its interactive gate),
-            // so the describe is gated on enrollment — the standup / genesis / WAL paths stay byte-identical.
+            // applies. An un-enrolled publish refuses typed inside the op (enroll with `follow` first).
             if !yes && enrollment.is_some() {
                 let connectors = ops::PublishDescribeConnectors {
                     directory: &connect_directory,
@@ -410,39 +392,16 @@ pub fn run() -> ExitCode {
                 yes_argv.push("--yes".to_owned());
                 return finish_publish_describe(json, cmd_name, described, yes_argv, &diag);
             }
-            // The standup branch dials the SAME resolved web origin as the other token-less doors
-            // (`follow <bare-ws>`, `auth login`) — the door card-fetches it and re-roots onto the
-            // declared API base. Used ONLY when un-enrolled (an enrolled publish reads its plane
-            // from instance.json).
-            let standup = ops::StandupConnectors {
-                enroll: &connect_enroll,
-                base_url: web_origin.clone(),
-            };
-            let publish_once = |t: &str| {
-                ops::publish(
-                    &ctx,
-                    &connect_contribute,
-                    &standup,
-                    roots.as_ref(),
-                    t,
-                    propose,
-                    to.as_deref(),
-                    workspace.as_deref(),
-                    message.as_deref(),
-                )
-            };
-            let first = publish_once(&target);
-            // If the standup went PENDING, re-bind the disclosed digest so drift during the sign-in wait is
-            // refused by the re-poll's consent gate (see `standup_repoll_target`).
-            let repoll_target = standup_repoll_target(&target, &first);
-            // Block on a pending standup sign-in until it settles (auto-creating the workspace + publishing
-            // in the same command), unless this is a headless `--json` run without `--wait` (which must not
-            // hang — it returns the pending state + the `ENROLL_RESUME` next-action, as before).
-            let policy = WaitPolicy::resolve(json, wait, &clock);
-            let result =
-                block_on_pending(&clock, &policy, first, publish_pending_disclosure, || {
-                    publish_once(&repoll_target)
-                });
+            let result = ops::publish(
+                &ctx,
+                &connect_contribute,
+                roots.as_ref(),
+                &target,
+                propose,
+                to.as_deref(),
+                workspace.as_deref(),
+                message.as_deref(),
+            );
             finish_publish(json, cmd_name, result, &diag)
         }
         Command::Review {
@@ -646,7 +605,7 @@ pub fn run() -> ExitCode {
             let connect_auth_governance = |base_url: &str| -> Box<dyn GovernanceSource> {
                 Box::new(UreqDeviceClient::new(
                     base_url.to_owned(),
-                    load_workspace_credentials(ctx.fs, &ctx.layout),
+                    load_device_credential(ctx.fs, &ctx.layout),
                 ))
             };
             let connectors = ops::AuthConnectors {
@@ -656,19 +615,25 @@ pub fn run() -> ExitCode {
                 web_origin: web_origin.clone(),
             };
             match cmd {
-                AuthCmd::Login {
-                    server_url,
-                    yes,
-                    wait,
-                } => {
-                    let first = ops::login(&ctx, &connectors, server_url.as_deref(), yes);
-                    // The same blocking idiom as `follow`/`publish`: interactive (or `--wait`) runs
-                    // re-poll until the browser sign-in settles; a headless `--json` run without
-                    // `--wait` returns the pending state and never hangs.
+                AuthCmd::Login { server_url, wait } => {
+                    let first = ops::login(
+                        &ctx,
+                        &connectors,
+                        server_url.as_deref(),
+                        workspace.as_deref(),
+                    );
+                    // The same blocking idiom as `follow`: interactive (or `--wait`) runs re-poll
+                    // until the browser approval settles; a headless `--json` run without `--wait`
+                    // returns the pending state and never hangs.
                     let policy = WaitPolicy::resolve(json, wait, &clock);
                     let result =
                         block_on_pending(&clock, &policy, first, login_pending_disclosure, || {
-                            ops::login(&ctx, &connectors, server_url.as_deref(), yes)
+                            ops::login(
+                                &ctx,
+                                &connectors,
+                                server_url.as_deref(),
+                                workspace.as_deref(),
+                            )
                         });
                     finish_login(json, cmd_name, result, &diag)
                 }
@@ -708,23 +673,22 @@ fn channel_seam(args: &[String]) -> ClientError {
     }
 }
 
-/// The ENROLLMENT connector: `UreqDeviceClient` with an EMPTY credential map — the device-flow routes are
-/// unauthenticated (they mint the credential the write/governance connectors then present). The governance
-/// and contribute connectors are closures in [`run`] (they must re-read `credentials.json` fresh so a
-/// standup that just promoted mid-invocation is seen).
+/// The ENROLLMENT connector: `UreqDeviceClient` with NO credential — the device-flow routes are
+/// unauthenticated (they mint the credential the other connectors then present). The credentialed
+/// connectors are closures in [`run`] (they must re-read `credentials.json` fresh so an enrollment
+/// that just persisted mid-invocation is seen).
 fn connect_enroll(base_url: &str) -> Box<dyn EnrollSource> {
-    Box::new(UreqDeviceClient::new(base_url.to_owned(), HashMap::new()))
+    Box::new(UreqDeviceClient::new(base_url.to_owned(), None))
 }
 
-/// Load the per-workspace credential map (`workspace_id → credential`) from `credentials.json`. Best-effort
-/// (absent / corrupt ⇒ empty): a corrupt doc already failed the startup [`load_enrollment`] closed, and a
-/// missing credential surfaces downstream as a clear "not enrolled in this workspace" at POST time.
-fn load_workspace_credentials(fs: &dyn FsOps, layout: &Layout) -> HashMap<String, String> {
+/// Load the device's ONE Bearer credential from `credentials.json`. Best-effort (absent / corrupt ⇒
+/// `None`): a corrupt doc already failed the startup [`load_enrollment`] closed, and a missing
+/// credential surfaces downstream as a clear "not enrolled" at request time.
+fn load_device_credential(fs: &dyn FsOps, layout: &Layout) -> Option<String> {
     enroll::read_credentials(fs, layout)
         .ok()
         .flatten()
-        .map(enroll::Credentials::into_map)
-        .unwrap_or_default()
+        .map(|c| c.credential)
 }
 
 /// The real release source for `topos upgrade` — the `ureq` GitHub transport. No base URL / creds: the
@@ -843,7 +807,7 @@ fn list_remote_inputs(
             u.workspaces
                 .into_iter()
                 .map(|m| {
-                    let label = m.display_name.unwrap_or_else(|| m.workspace_id.clone());
+                    let label = m.display_name;
                     (m.workspace_id, label)
                 })
                 .collect()
@@ -1404,19 +1368,30 @@ fn finish_logout(
     }
 }
 
-/// The poll cadence while a human opens the browser and approves: re-poll the device-authorization grant
-/// this often. There is no separate client timeout by default — the device code's own expiry makes the
-/// plane return a terminal Expired/Denied that surfaces as `Err`, ending the loop (a numeric `--wait`
-/// deadline can end it sooner, still pending).
-const DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(3);
+/// The FALLBACK poll cadence while a human opens the browser and approves — used when a pending
+/// disclosure carries no server interval. There is no separate client timeout by default — the device
+/// code's own expiry makes the server return a terminal Expired/Denied that surfaces as `Err`, ending
+/// the loop (a numeric `--wait` deadline can end it sooner, still pending).
+const DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-/// A pending device-authorization's human-facing disclosure — the clickable URL (the RFC-8628
-/// `verification_uri_complete`, which embeds the code) plus the anti-phishing fingerprint. Extracted from
-/// either verb's pending outcome so [`block_on_pending`] can print it once, generically. No bare code line:
-/// the code rides inside the URL (clicked, never typed).
+/// A pending device-authorization's human-facing disclosure — the clickable URL (the
+/// `verification_uri_complete`, which embeds the code) plus the short cross-check code and the
+/// server's minimum poll interval. Extracted from either verb's pending outcome so
+/// [`block_on_pending`] can print it once, generically.
 struct PendingDisclosure {
     verification_uri_complete: String,
-    device_fingerprint: String,
+    user_code: String,
+    /// The server's minimum poll interval, when disclosed (else the fallback cadence).
+    interval_secs: Option<u64>,
+}
+
+impl PendingDisclosure {
+    /// The cadence to re-poll at — the server's interval when disclosed, else the fallback.
+    fn poll_interval(&self) -> Duration {
+        self.interval_secs
+            .map(Duration::from_secs)
+            .unwrap_or(DEVICE_POLL_INTERVAL)
+    }
 }
 
 /// The pending disclosure for a `follow` outcome (None ⇒ not a pending device-auth).
@@ -1424,7 +1399,8 @@ fn follow_pending_disclosure(out: &ops::FollowOutcome) -> Option<PendingDisclosu
     match out {
         ops::FollowOutcome::Data { data, .. } => data.pending.as_ref().map(|p| PendingDisclosure {
             verification_uri_complete: p.verification_uri_complete.clone(),
-            device_fingerprint: p.device_fingerprint.clone(),
+            user_code: p.user_code.clone(),
+            interval_secs: p.interval_secs,
         }),
         _ => None,
     }
@@ -1435,44 +1411,10 @@ fn login_pending_disclosure(out: &ops::AuthLoginOutcome) -> Option<PendingDisclo
     match out {
         ops::AuthLoginOutcome::Pending(p) => Some(PendingDisclosure {
             verification_uri_complete: p.verification_uri_complete.clone(),
-            device_fingerprint: p.device_fingerprint.clone(),
+            user_code: p.user_code.clone(),
+            interval_secs: Some(p.interval_secs),
         }),
         ops::AuthLoginOutcome::Done(_) => None,
-    }
-}
-
-/// The pending disclosure for a `publish` outcome (only the un-enrolled standup branch is ever pending).
-fn publish_pending_disclosure(out: &ops::PublishOutcome) -> Option<PendingDisclosure> {
-    match out {
-        ops::PublishOutcome::Pending { data, .. } => {
-            data.pending.as_ref().map(|p| PendingDisclosure {
-                verification_uri_complete: p.verification_uri_complete.clone(),
-                device_fingerprint: p.device_fingerprint.clone(),
-            })
-        }
-        _ => None,
-    }
-}
-
-/// The target a standup re-poll must use. If the first outcome went PENDING, reuse the canonical pinned
-/// target the ops layer already built into `resume_argv` (`<skill>@<digest>` with the SAME `<skill>` parse
-/// `publish` uses and the disclosed digest baked in), so the re-poll's consent gate refuses bytes that
-/// drift during the sign-in wait — never silently shipped, and never mis-parsing a skill name that itself
-/// contains `@`. `resume_argv` is `[topos, publish, <target>, --json]`; take the element after `publish`.
-/// A non-pending first result (already published, or an error), or an unexpected argv shape, keeps the
-/// original target (the block returns a non-pending first result untouched anyway).
-fn standup_repoll_target(
-    original: &str,
-    first: &Result<ops::PublishOutcome, ClientError>,
-) -> String {
-    match first {
-        Ok(ops::PublishOutcome::Pending { resume_argv, .. }) => resume_argv
-            .iter()
-            .skip_while(|a| a.as_str() != "publish")
-            .nth(1)
-            .cloned()
-            .unwrap_or_else(|| original.to_owned()),
-        _ => original.to_owned(),
     }
 }
 
@@ -1529,14 +1471,14 @@ fn block_on_pending<T>(
         return first;
     };
 
-    // The waiting disclosure on STDERR (stdout stays the clean final envelope/TTY). No bare code line —
-    // the code rides inside the URL; the fingerprint is the one thing to eyeball against the page.
+    // The waiting disclosure on STDERR (stdout stays the clean final envelope/TTY): the clickable URL
+    // plus the short code the human cross-checks against the approval page.
     eprintln!(
-        "Open this URL to approve:\n  {}\n  fingerprint: {} (confirm it matches the page)",
-        disc.verification_uri_complete,
-        render::group_fingerprint(&disc.device_fingerprint),
+        "Open this URL to approve:\n  {}\n  code: {} (confirm it matches the page)",
+        disc.verification_uri_complete, disc.user_code,
     );
     eprintln!("Waiting for approval…");
+    let interval = disc.poll_interval();
 
     // `last` is the most recent pending result, handed back verbatim if a numeric `--wait` deadline passes
     // (starts as `first`, so `--wait 0` returns immediately without polling again).
@@ -1552,9 +1494,10 @@ fn block_on_pending<T>(
         }
         // Sleep the poll interval, but never past the deadline.
         let nap = match policy.deadline_millis {
-            Some(d) => Duration::from_millis(d.saturating_sub(clock.now_unix_millis()))
-                .min(DEVICE_POLL_INTERVAL),
-            None => DEVICE_POLL_INTERVAL,
+            Some(d) => {
+                Duration::from_millis(d.saturating_sub(clock.now_unix_millis())).min(interval)
+            }
+            None => interval,
         };
         std::thread::sleep(nap);
         let next = repoll();
@@ -1594,11 +1537,10 @@ fn finish_publish_describe(
     }
 }
 
-/// `publish`'s finisher — the verb yields a direct publish ([`PublishData`]), an opened proposal
-/// ([`ProposeData`]), or a PENDING standup sign-in (an `ok` envelope whose `ENROLL_RESUME` next-action
-/// carries this same command's argv); each renders through its own `--json` payload / TTY line. A typed
-/// failure (APPROVAL_REQUIRED / CONFLICT / DENIED / …) flows through [`emit_err`], which attaches the
-/// right `next_actions`.
+/// `publish`'s finisher — the verb yields a direct publish ([`PublishData`]) or an opened proposal
+/// ([`ProposeData`]); each renders through its own `--json` payload / TTY line. A typed failure
+/// (CONFLICT / DENIED / not-enrolled / …) flows through [`emit_err`], which attaches the right
+/// `next_actions`.
 fn finish_publish(
     json: bool,
     command: &str,
@@ -1621,17 +1563,6 @@ fn finish_publish(
                 println!("{}", render::to_json(&render::ok_envelope(command, value)));
             } else {
                 println!("{}", render::propose_tty(&data));
-            }
-            ExitCode::SUCCESS
-        }
-        Ok(ops::PublishOutcome::Pending { data, resume_argv }) => {
-            if json {
-                let value = serde_json::to_value(&data).unwrap_or_default();
-                let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions = render::publish_pending_next_actions(resume_argv);
-                println!("{}", render::to_json(&envelope));
-            } else {
-                println!("{}", render::publish_pending_tty(&data, &resume_argv));
             }
             ExitCode::SUCCESS
         }
@@ -1786,14 +1717,14 @@ struct Enrollment {
 
 /// Load the enrollment docs read-only. Returns `Some` whenever `instance.json` is present — enrollment is
 /// what writes it, so its presence IS the enrolled state; `follows.json` is optional (an empty membership
-/// door, or every follow since flipped off by `unfollow`). The read transport joins the follow-state with
-/// the per-workspace credentials (`credentials.json`) — a followed skill whose workspace has no stored
-/// credential is simply skipped (never a read without a credential). The transport stays wired even with
-/// zero active follows: the write verbs (publish/revert/review) still need the plane base, and an enrolled
-/// author with nothing followed is a normal state. The bare `pull` stays an honest no-op either way (the
-/// sweep skips a `following == false` entry, and renders "No followed skills." over an empty set). A corrupt
-/// / newer-schema doc (incl. a permissive `credentials.json`) fails closed (propagated), never silently
-/// degraded to inert.
+/// door, or every follow since flipped off by `unfollow`). The read transport carries the ONE device
+/// credential (`credentials.json`) plus the follow-state's skill → workspace map — a signed-out install
+/// (no credential) reads nothing (never a request without a credential). The transport stays wired even
+/// with zero active follows: the write verbs (publish/revert/review) still need the plane base, and an
+/// enrolled author with nothing followed is a normal state. The bare `pull` stays an honest no-op either
+/// way (the sweep skips a `following == false` entry, and renders "No followed skills." over an empty
+/// set). A corrupt / newer-schema doc (incl. a permissive `credentials.json`) fails closed (propagated),
+/// never silently degraded to inert.
 fn load_enrollment(fs: &dyn FsOps, layout: &Layout) -> Result<Option<Enrollment>, ClientError> {
     let Some(instance) = enroll::read_instance(fs, layout)? else {
         return Ok(None);
@@ -1802,16 +1733,16 @@ fn load_enrollment(fs: &dyn FsOps, layout: &Layout) -> Result<Option<Enrollment>
         schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
         follows: Vec::new(),
     });
-    let credentials =
-        enroll::read_credentials(fs, layout)?.unwrap_or_else(|| enroll::Credentials {
-            schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
-            credentials: Vec::new(),
-        });
+    let credential = enroll::read_credentials(fs, layout)?.map(|c| c.credential);
+    let workspaces: Vec<String> = enroll::read_user(fs, layout)?
+        .map(|u| u.workspaces.into_iter().map(|m| m.workspace_id).collect())
+        .unwrap_or_default();
     let plane = UreqPlane::new(
         instance.base_url,
-        enroll::skill_creds(&follows, &credentials),
+        credential,
+        enroll::skill_workspaces(&follows),
     )
-    .with_workspace_credentials(credentials.into_map());
+    .with_workspaces(workspaces);
     let follow = FileFollow::new(enroll::follow_contexts(&follows));
     Ok(Some(Enrollment { plane, follow }))
 }
@@ -1861,65 +1792,8 @@ fn list_discovery(tracked: bool) -> Option<ops::DiscoveryRoots> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_WEB_ORIGIN, build_pull_scope, resolve_web_origin, standup_repoll_target};
-    use crate::ops::{PublishOutcome, PullScope, TargetMode, VersionRef};
-
-    /// A standup PENDING outcome whose ops-built `resume_argv` pins `resume_target`, as
-    /// `standup_repoll_target` sees it.
-    fn pending_publish(resume_target: &str) -> Result<PublishOutcome, crate::error::ClientError> {
-        use topos_types::results::{PublishData, PublishPending, PublishPendingStatus};
-        Ok(PublishOutcome::Pending {
-            data: PublishData {
-                skill_id: "sk_x".to_owned(),
-                version_id: None,
-                bundle_digest: "d1".to_owned(),
-                current_generation: None,
-                share_line: None,
-                pending: Some(PublishPending {
-                    status: PublishPendingStatus::SigninRequired,
-                    verification_uri_complete: "https://topos.sh/verify/tok".to_owned(),
-                    user_code: "tok".to_owned(),
-                    device_fingerprint: "abcd".to_owned(),
-                    expires_at: None,
-                }),
-                standup: None,
-                added: None,
-            },
-            resume_argv: vec![
-                "topos".to_owned(),
-                "publish".to_owned(),
-                resume_target.to_owned(),
-                "--json".to_owned(),
-            ],
-        })
-    }
-
-    #[test]
-    fn standup_repoll_reuses_the_canonical_pinned_resume_target() {
-        // The re-poll target is the ops-built pinned target from `resume_argv` verbatim — its `<digest>`
-        // pin makes the consent gate refuse byte-drift during the sign-in wait, never silently shipping it.
-        assert_eq!(
-            standup_repoll_target("docs", &pending_publish("docs@d1")),
-            "docs@d1"
-        );
-        // A skill NAME that itself contains `@` (a harness-qualified name) is preserved verbatim — not
-        // truncated at the first `@` (the ops layer parsed the digest off the tail, so `resume_argv` already
-        // holds the right target).
-        assert_eq!(
-            standup_repoll_target("docs@claude-code", &pending_publish("docs@claude-code@d1")),
-            "docs@claude-code@d1"
-        );
-        // A non-pending first result has nothing to re-bind (the block returns it as-is).
-        let published = pending_publish("docs@d1").map(|o| match o {
-            PublishOutcome::Pending { mut data, .. } => {
-                data.pending = None;
-                data.version_id = Some("v".repeat(64));
-                PublishOutcome::Published(data)
-            }
-            other => other,
-        });
-        assert_eq!(standup_repoll_target("docs", &published), "docs");
-    }
+    use super::{DEFAULT_WEB_ORIGIN, build_pull_scope, resolve_web_origin};
+    use crate::ops::{PullScope, TargetMode, VersionRef};
 
     #[test]
     fn web_origin_env_override_beats_the_compiled_default() {
