@@ -86,7 +86,7 @@ test("approve is step-up gated: a wrong password mints nothing; the right one mi
   await page.getByRole("button", { name: "Approve “e2e-laptop”" }).click();
   await expect(page.getByRole("heading", { name: "Device connected" })).toBeVisible();
 
-  // The poll delivers the grant ONCE: the presented device_code IS the promoted credential.
+  // The poll delivers the grant: the presented device_code IS the promoted credential.
   const granted = await pollDeviceFlow(page, flow.device_code);
   expect(granted.status).toBe("granted");
   expect(granted.credential).toBe(flow.device_code);
@@ -101,8 +101,11 @@ test("approve is step-up gated: a wrong password mints nothing; the right one mi
   expect(rows[0]?.display_name).toBe("e2e-laptop");
   expect(rows[0]?.email).toBe(MEMBER_EMAIL);
 
-  // Terminal answers are delivered once — the flow row died as it was reported.
-  expect((await pollDeviceFlow(page, flow.device_code)).status).toBe("expired");
+  // The grant REPEATS (idempotent): a re-poll after a crash re-delivers the same credential, so
+  // a client that crashed before persisting recovers by polling again.
+  const rePoll = await pollDeviceFlow(page, flow.device_code);
+  expect(rePoll.status).toBe("granted");
+  expect(rePoll.credential).toBe(flow.device_code);
 });
 
 test("deny destroys the pending request and mints nothing — no step-up needed", async ({
@@ -115,9 +118,10 @@ test("deny destroys the pending request and mints nothing — no step-up needed"
   await page.getByRole("button", { name: "Deny — this isn’t my device" }).click();
   await expect(page.getByRole("heading", { name: "Request denied" })).toBeVisible();
 
-  // The device learns the denial on its next poll — once; after that the code names nothing.
+  // The device learns the denial on its next poll — repeatably (terminal answers are delivered
+  // idempotently until the expiry sweep reaps the row).
   expect((await pollDeviceFlow(page, flow.device_code)).status).toBe("denied");
-  expect((await pollDeviceFlow(page, flow.device_code)).status).toBe("expired");
+  expect((await pollDeviceFlow(page, flow.device_code)).status).toBe("denied");
 
   // Nothing was minted for the denied request.
   const rows = await adminQuery<{ n: string }>(
