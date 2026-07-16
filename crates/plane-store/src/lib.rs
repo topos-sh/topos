@@ -58,7 +58,7 @@ pub use authority::{Authority, DEFAULT_LOG_LIMIT, PoolConfig};
 pub use commit::{BundleDeleteReport, CommittedVersion, PointerState, PurgeReport};
 pub use error::{AuthorityError, LivePointer, Result};
 pub use id::{BundleId, CommitId, IdError, ObjectId, OpId, WorkspaceId, validate_attribution};
-pub use read::{CurrentInfo, LogEntry, VersionFile, VersionMeta};
+pub use read::{CurrentInfo, LogEntry, VersionFile, VersionMeta, WorkspaceStorage};
 pub use upload::{CandidateUpload, UploadedFile};
 
 /// The embedded Postgres migration set, exposed for out-of-crate test harnesses (the loopback e2e

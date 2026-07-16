@@ -72,6 +72,7 @@ pub fn router(state: PlaneState) -> Router {
             "/internal/v1/workspaces/{ws}",
             delete(routes::internal::delete_workspace),
         )
+        .route("/internal/v1/storage", get(routes::internal::read_storage))
         .layer(DefaultBodyLimit::max(SMALL_BODY_LIMIT));
 
     // The ONE bearer gate in front of the whole internal lane: unconfigured ⇒ the uniform 404

@@ -9,7 +9,7 @@ use crate::commit::{BundleDeleteReport, CommittedVersion, PointerState, PurgeRep
 use crate::db::Db;
 use crate::error::{AuthorityError, Result};
 use crate::id::{BundleId, CommitId, ObjectId, OpId, WorkspaceId};
-use crate::read::{CurrentInfo, LogEntry, VersionMeta};
+use crate::read::{CurrentInfo, LogEntry, VersionMeta, WorkspaceStorage};
 use crate::upload::CandidateUpload;
 
 /// The default size at/above which a file blob is offloaded to the large-object store (≈ 1 MiB). Git
@@ -353,6 +353,18 @@ impl Authority {
         limit: usize,
     ) -> Result<Vec<LogEntry>> {
         crate::read::log(self, ws, bundle, limit).await
+    }
+
+    /// Every workspace's stored byte total, ordered by workspace id — the operational accounting
+    /// read (opaque workspace ids in, numbers out; the caller joins them to whatever they mean).
+    /// Counts `present` objects ONLY: `deleting`/`absent`/`unavailable` bytes are not custody the
+    /// product should bill or display. A workspace holding no present object is absent.
+    ///
+    /// # Errors
+    /// [`AuthorityError::Integrity`] on a malformed stored row; [`AuthorityError::Internal`] on a
+    /// database fault.
+    pub async fn storage_stats(&self) -> Result<Vec<WorkspaceStorage>> {
+        crate::read::storage_stats(self).await
     }
 
     // ── maintenance (the composing server schedules these) ───────────────────────────────────────

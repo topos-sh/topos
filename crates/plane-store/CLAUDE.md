@@ -30,7 +30,8 @@ validates SHAPE (charset/length), never meaning.
   generation-fenced pointer CAS, the purge, and the bundle/workspace row reclaims.
 - `custody/read.rs` / `db/custody/read.rs` — the verified reads: the pointer record, one object's
   bytes (never by bare hash — only through a bundle whose live version reaches it; verify-on-read),
-  a version's metadata + file listing, the first-parent log, the whole-bundle render.
+  a version's metadata + file listing, the first-parent log, the whole-bundle render, and the
+  per-workspace storage stat (`present` bytes summed — accounting only, no byte touched).
 - `custody/gc.rs` — the three-step mark-then-acquire GC, the recovery sweep, the quarantine janitor
   (public ops `run_gc`/`run_recovery`/`run_janitor` the composing server MUST schedule; this library
   holds no scheduler). Clock convention: epoch **milliseconds** everywhere.

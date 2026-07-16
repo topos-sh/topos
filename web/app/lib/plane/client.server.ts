@@ -33,6 +33,8 @@ export const ALLOWED_ROUTES = [
   // Byte-purge one version (tombstone; the hash stays) / drop a whole bundle's custody.
   "POST /internal/v1/workspaces/{ws}/bundles/{bundle}/versions/{version_id}/purge",
   "DELETE /internal/v1/workspaces/{ws}/bundles/{bundle}",
+  // Per-workspace stored-byte totals ('present' custody only) — operational accounting.
+  "GET /internal/v1/storage",
 ] as const;
 
 export type AllowedRoute = (typeof ALLOWED_ROUTES)[number];

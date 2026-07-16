@@ -49,6 +49,14 @@ pub struct VersionMeta {
     pub files: Vec<VersionFile>,
 }
 
+/// One workspace's stored byte total — the sum of its `present` object sizes (see
+/// [`Authority::storage_stats`]).
+#[derive(Debug, Clone)]
+pub struct WorkspaceStorage {
+    pub workspace_id: WorkspaceId,
+    pub stored_bytes: u64,
+}
+
 /// One hop of the first-parent log.
 #[derive(Debug, Clone)]
 pub struct LogEntry {
@@ -157,6 +165,23 @@ pub(crate) async fn read_object(
         return Err(AuthorityError::NotFound);
     }
     fetched
+}
+
+/// Every workspace's stored byte total, ordered by workspace id (deterministic). Counts `present`
+/// rows ONLY — `deleting`/`absent`/`unavailable` bytes are not custody the product should bill or
+/// display (they are either mid-reclaim, already gone, or denylisted forever). A workspace holding
+/// no present object is absent from the list.
+pub(crate) async fn storage_stats(authority: &Authority) -> Result<Vec<WorkspaceStorage>> {
+    Ok(authority
+        .db()
+        .storage_stats()
+        .await?
+        .into_iter()
+        .map(|(workspace_id, stored_bytes)| WorkspaceStorage {
+            workspace_id,
+            stored_bytes,
+        })
+        .collect())
 }
 
 /// Read a version's metadata + file listing (no blob bytes). A purged version reads NotFound — its
