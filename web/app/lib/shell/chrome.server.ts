@@ -2,6 +2,7 @@ import { composition } from "@/composition.server";
 import { requireMember, type UserActor } from "@/lib/auth/guards.server";
 import { channelsOf } from "@/lib/db/queries.channels.server";
 import { membershipsFor, skillIndexOf, type WorkspaceMembership } from "@/lib/db/queries.server";
+import { destinationPathname } from "@/lib/destination-path";
 import { workspaceAddress } from "@/lib/ws-url.server";
 import type { NavContext } from "@/topos-web/nav";
 
@@ -68,29 +69,13 @@ export interface ChromeData {
 }
 
 /**
- * The DESTINATION pathname of a request, document or data. React Router's client-side
- * navigations fetch their loaders from `<destination>.data` (single fetch; `/_root.data` spells
- * `/` itself) — same loaders, a different URL — so the raw pathname of a client arrival at a
- * workspace dashboard reads `/acme.data`, not `/acme`. Anything deriving state from the path
- * must see the destination, so the suffix is stripped here; a workspace slug
- * (`^[a-z0-9][a-z0-9-]*$`) can never collide with it. Exported for the regression test.
- */
-export function destinationPathname(request: Request): string {
-  const { pathname } = new URL(request.url);
-  if (!pathname.endsWith(".data")) {
-    return pathname;
-  }
-  const stripped = pathname.slice(0, -".data".length);
-  return stripped === "/_root" ? "/" : stripped;
-}
-
-/**
- * The active workspace SEAT for the request's destination path: single → the one seat (the URL
- * carries no segment); multi → the seat whose `address` equals the first path segment
- * (memberships already carry the slug, so no DB probe on an arbitrary segment). Returns the
- * seat, or null off-workspace. Exported for the regression test — a `.data` loader URL must
- * resolve the same seat its destination does, or every client-side navigation into a workspace
- * dashboard strips the panel down to logo + account.
+ * The active workspace SEAT for the request's destination path (`destinationPathname` — the
+ * raw pathname of a client-side arrival reads `/acme.data`, not `/acme`): single → the one
+ * seat (the URL carries no segment); multi → the seat whose `address` equals the first path
+ * segment (memberships already carry the slug, so no DB probe on an arbitrary segment).
+ * Returns the seat, or null off-workspace. Exported for the regression test — a `.data`
+ * loader URL must resolve the same seat its destination does, or every client-side navigation
+ * into a workspace dashboard strips the panel down to logo + account.
  */
 export function activeMembership(
   request: Request,

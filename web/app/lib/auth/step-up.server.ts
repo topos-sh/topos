@@ -1,5 +1,6 @@
 import { serverEnv } from "@/env.server";
 import { consumeStepUpConfirmation, mintStepUpConfirmation } from "@/lib/db/identity.server";
+import { destinationPathname } from "@/lib/destination-path";
 import { sendStepUpMail } from "@/lib/mail/auth-mail.server";
 import { mailDelivery } from "@/lib/mail/transport.server";
 import { followBase } from "@/lib/plane/follow-base.server";
@@ -90,7 +91,10 @@ export async function beginStepUpConfirmation(
   if (!mailDelivery().canSend) {
     return { ok: false, error: STEP_UP_NO_METHOD };
   }
-  const returnTo = safeNextPath(new URL(request.url).pathname);
+  // The DESTINATION path, never the raw single-fetch URL: a client-side ceremony submit
+  // posts to `<page>.data`, and a mailed link built from that raw pathname would open the
+  // data endpoint as a document (raw payload bytes, dead ceremony).
+  const returnTo = safeNextPath(destinationPathname(request));
   const token = await mintStepUpConfirmation(userId, returnTo);
   const link = `${followBase(request)}${returnTo}?${STEP_UP_TOKEN_QUERY}=${encodeURIComponent(token)}`;
   try {
@@ -136,7 +140,7 @@ export async function requireStepUp(request: Request, formData: FormData): Promi
   // valid only for THIS ceremony page (the mint scoped it to the page it was requested on).
   const token = String(formData.get(STEP_UP_TOKEN_FIELD) ?? "");
   if (token.length > 0) {
-    const scope = safeNextPath(new URL(request.url).pathname);
+    const scope = safeNextPath(destinationPathname(request));
     const ok = await consumeStepUpConfirmation(userId, scope, token);
     return ok ? { ok: true } : { ok: false, error: STEP_UP_TOKEN_FAILED };
   }

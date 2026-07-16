@@ -112,7 +112,8 @@ export async function fleetOf(actor: MemberActor): Promise<Fleet> {
   const deviceRows = await db.execute(sql`
     SELECT DISTINCT d.id, d.display_name, d.user_id, d.revoked_at,
            (extract(epoch from d.last_seen_at) * 1000)::bigint AS last_seen_ms,
-           u.name AS owner_display, u.email AS owner_email,
+           -- The display rule (app/lib/person-display.ts): a blank name falls back to the email.
+           COALESCE(NULLIF(btrim(u.name), ''), u.email) AS owner_display, u.email AS owner_email,
            (s.user_id IS NOT NULL) AS seated
     FROM web.device d
     JOIN web."user" u ON u.id = d.user_id

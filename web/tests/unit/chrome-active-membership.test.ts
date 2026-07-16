@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import type { WorkspaceMembership } from "@/lib/db/queries.server";
-import { activeMembership, destinationPathname } from "@/lib/shell/chrome.server";
+import { destinationPathname } from "@/lib/destination-path";
+import { activeMembership } from "@/lib/shell/chrome.server";
 
 /**
- * The chrome loader's active-seat derivation against React Router's TWO request shapes: the
- * document URL (`/acme`) and the client-side single-fetch data URL (`/acme.data`; `/_root.data`
- * for `/` itself). REGRESSION: the derivation once split the RAW pathname, so a client-side
+ * The chrome loader's active-seat derivation against React Router's request shapes: the
+ * document URL (`/acme`), the client-side single-fetch data URL (`/acme.data`), and the
+ * trailing-slash spelling (`/acme/_.data`; `/` itself is `/_.data`).
+ * REGRESSION: the derivation once split the RAW pathname, so a client-side
  * arrival at a workspace dashboard parsed its first segment as `acme.data`, matched no seat,
  * and the panel rendered only logo + account — after every in-app workspace creation
  * (`/new → /:ws`) and every dropdown switch. Deep destinations (`/acme/settings.data`) never
@@ -50,8 +52,11 @@ describe("destinationPathname", () => {
     expect(destinationPathname(req("/acme.data?_routes=routes%2Fshell"))).toBe("/acme");
   });
 
-  it("reads /_root.data as / itself", () => {
-    expect(destinationPathname(req("/_root.data"))).toBe("/");
+  it("reads the trailing-slash spelling `<path>/_.data` as the framework does", () => {
+    // react-router's singleFetchUrl: a trailing-slash destination appends `_.data`; `/` itself
+    // becomes `/_.data`. Mirrors getNormalizedPath (lib/server-runtime/urls.ts).
+    expect(destinationPathname(req("/_.data"))).toBe("/");
+    expect(destinationPathname(req("/acme/_.data"))).toBe("/acme/");
   });
 });
 
@@ -67,12 +72,13 @@ describe("activeMembership (multi tenancy)", () => {
     expect(activeMembership(req("/beta.data"), seats)?.address).toBe("beta");
   });
 
-  it("still resolves deep .data destinations", () => {
+  it("still resolves deep and trailing-slash .data destinations", () => {
     expect(activeMembership(req("/acme/settings.data"), seats)?.address).toBe("acme");
+    expect(activeMembership(req("/acme/_.data"), seats)?.address).toBe("acme");
   });
 
   it("is null off-workspace — the multi root and unknown slugs", () => {
-    expect(activeMembership(req("/_root.data"), seats)).toBeNull();
+    expect(activeMembership(req("/_.data"), seats)).toBeNull();
     expect(activeMembership(req("/"), seats)).toBeNull();
     expect(activeMembership(req("/nowhere.data"), seats)).toBeNull();
     expect(activeMembership(req("/account/devices.data"), seats)).toBeNull();
@@ -83,7 +89,7 @@ describe("activeMembership (single tenancy)", () => {
   it("returns the sole seat regardless of the path shape", () => {
     tenancy.mode = "single";
     try {
-      expect(activeMembership(req("/_root.data"), seats)?.address).toBe("acme");
+      expect(activeMembership(req("/_.data"), seats)?.address).toBe("acme");
       expect(activeMembership(req("/members.data"), seats)?.address).toBe("acme");
       expect(activeMembership(req("/"), [])).toBeNull();
     } finally {

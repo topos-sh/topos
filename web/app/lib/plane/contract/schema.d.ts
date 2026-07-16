@@ -729,6 +729,11 @@ export interface components {
              * @description The pointer's new generation after the move.
              */
             current_generation: number;
+            /**
+             * @description The skill's NAME — the handle humans speak and the TTY success line leads with
+             *     (`Published <name>@…`); the opaque `skill_id` above stays the machine key.
+             */
+            name: string;
             skill_id: string;
             /** @description The new commit (the shipped `version_id`). */
             version_id: string;

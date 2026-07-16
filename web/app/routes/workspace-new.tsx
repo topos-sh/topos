@@ -14,6 +14,7 @@ import { buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui
 import { actorFromSession, notFound, requireSession, safeNextPath } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
 import { createWorkspace, workspaceNameAvailable } from "@/lib/db/workspace-create.server";
+import { destinationPathname } from "@/lib/destination-path";
 import { followBase } from "@/lib/plane/follow-base.server";
 import { isWorkspaceNameShape, toWorkspaceSlug, WORKSPACE_NAME_MAX } from "@/lib/workspace-name";
 import { wsPathServer } from "@/lib/ws-url.server";
@@ -53,7 +54,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
   // sign-in returns here to finish creating.
   const actor = actorFromSession(await getAuth().api.getSession({ headers: request.headers }));
   if (actor === null) {
-    const here = `${url.pathname}${url.search}`;
+    // The DESTINATION path, never the raw single-fetch URL: a client-side arrival loads this
+    // loader from `/new.data`, and a `next` built from that raw pathname would land the
+    // post-login browser on the data endpoint as a document.
+    const here = `${destinationPathname(request)}${url.search}`;
     throw redirect(`/login?next=${encodeURIComponent(here)}`);
   }
   // The live-availability probe: the debounced fetcher hits this same route with `?check=`.

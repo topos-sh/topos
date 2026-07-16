@@ -1046,8 +1046,7 @@ export async function laneLogOf(
     .select({
       versionId: proposal.candidateVersionId,
       status: proposal.status,
-      proposerEmail: user.email,
-      proposerName: user.name,
+      proposerDisplay: personDisplayLeftSql(user),
       resolvedBy: proposal.resolvedBy,
       resolvedReason: proposal.resolvedReason,
       resolvedAt: proposal.resolvedAt,
@@ -1062,7 +1061,7 @@ export async function laneLogOf(
     proposals: proposalRows.map((p) => ({
       versionId: p.versionId,
       status: p.status,
-      proposer: p.proposerEmail ?? p.proposerName ?? "former member",
+      proposer: p.proposerDisplay ?? "former member",
       resolvedBy: p.resolvedBy,
       resolvedReason: p.resolvedReason,
       resolvedAt: p.resolvedAt,

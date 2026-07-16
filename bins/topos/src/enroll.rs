@@ -420,9 +420,20 @@ impl UserDoc {
     }
 
     /// The joined workspace ADDRESS names, in stored order — the guidance messages speak these
-    /// (what a human types at `follow`), never the opaque ids.
+    /// (what a human types at `follow`), never the opaque ids. Defensive: a membership whose
+    /// stored name is somehow empty falls back to its id, so the guidance never renders a blank
+    /// choice (the granted workspace context always carries a real address name today).
     fn workspace_names(&self) -> Vec<&str> {
-        self.workspaces.iter().map(|m| m.name.as_str()).collect()
+        self.workspaces
+            .iter()
+            .map(|m| {
+                if m.name.is_empty() {
+                    m.workspace_id.as_str()
+                } else {
+                    m.name.as_str()
+                }
+            })
+            .collect()
     }
 }
 
