@@ -9,10 +9,11 @@
  */
 
 /**
- * Every top-level STATIC path segment the OSS route table can register in either tenancy mode,
- * alphabetical and exhaustive. A vitest red-test derives the real segment set from
- * `ossRoutes()` (both modes) and fails when this list and the table drift — add a route, update
- * this list, or CI stays red.
+ * Every top-level STATIC path segment the OSS route table registers in MULTI tenancy —
+ * alphabetical and exhaustive. These are exactly the segments that shadow a `/:ws` workspace
+ * slug (single tenancy mounts more statics at the origin root, but no slug exists there to
+ * shadow). A vitest red-test derives the real multi-mode segment set from `ossRoutes()` and
+ * fails when this list and the table drift — add a route, update this list, or CI stays red.
  */
 export const OSS_TOP_LEVEL_SEGMENTS: readonly string[] = [
   "account",
