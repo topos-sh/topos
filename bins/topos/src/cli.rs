@@ -112,9 +112,10 @@ pub(crate) enum Command {
         /// Apply without the describe step. Parses today; the two-phase describe lands later.
         #[arg(long)]
         yes: bool,
-        /// Resolve a diverged draft via the escape: commit YOUR bytes on top of `current`, dropping the
-        /// merge (the dropped changes are disclosed). Requires exactly one `<skill>` target.
-        #[arg(long = "onto-current", hide = true)]
+        /// Resolve a diverged draft the OTHER way: commit YOUR bytes straight onto `current`, DROPPING
+        /// the pending three-way merge (the changes it would have merged are disclosed first). Requires
+        /// exactly one `<skill>` target. Use when you want your version to win outright.
+        #[arg(long = "onto-current")]
         onto_current: bool,
         /// Emit nothing on stdout (the session-start hook's stdout is injected into the session). Errors
         /// still go to stderr with a non-zero exit. Overrides `--json`.
@@ -411,7 +412,8 @@ mod tests {
     }
 
     #[test]
-    fn update_onto_current_is_hidden_but_parses() {
+    fn update_onto_current_parses() {
+        // Now a DISCLOSED escape (no longer `hide`), still parses as before.
         let out = Cli::try_parse_from(["topos", "update", "docs", "--onto-current"]).unwrap();
         assert!(matches!(
             out.command,

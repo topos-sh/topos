@@ -65,6 +65,7 @@ Check for and apply updates to followed skills — the harness currency entry po
 | `--skill` | `<NAME>` |  | Update only this skill (repeatable). Lands with the full resolution grammar |
 | `--reset` |  |  | Reset a followed skill to `current`, dropping local edits. Lands with the loss-led describe |
 | `--yes` |  |  | Apply without the describe step. Parses today; the two-phase describe lands later |
+| `--onto-current` |  |  | Resolve a diverged draft the OTHER way: commit YOUR bytes straight onto `current`, DROPPING the pending three-way merge (the changes it would have merged are disclosed first). Requires exactly one `<skill>` target. Use when you want your version to win outright |
 | `--quiet` |  |  | Emit nothing on stdout (the session-start hook's stdout is injected into the session). Errors still go to stderr with a non-zero exit. Overrides `--json` |
 
 
