@@ -203,10 +203,6 @@ pub(crate) enum ClientError {
     /// the draft must be resolved first. Refused before any build / WAL / send (the publish guard).
     #[error("publish is blocked: resolve the merge conflict in this skill first")]
     PublishBlocked { skill: String },
-    /// A `revert` needs `--yes` to proceed (a degenerate/no-op revert — e.g. `--to` names the version
-    /// that is ALREADY `current`). Re-run with `--yes`, or pick a different good version.
-    #[error("revert needs --yes: {reason}")]
-    ConfirmRequired { reason: String },
     /// A crashed prior write for this skill is still in-flight and DIFFERS from the command just issued
     /// (a different digest / mode / target). Settle it first (re-run the original command, which replays
     /// its `op_id`), then re-issue this change — never silently replay a different intent.
@@ -375,7 +371,6 @@ impl ClientError {
             // A review verdict on a no-longer-open proposal — an open code, its own domain refusal.
             ClientError::ReviewNotOpen(_) => "REVIEW_NOT_OPEN",
             ClientError::PublishBlocked { .. } => "PUBLISH_BLOCKED",
-            ClientError::ConfirmRequired { .. } => "CONFIRM_REQUIRED",
             ClientError::PendingOp { .. } => "PENDING_OP",
             ClientError::WorkspaceSelection(_) => "WORKSPACE_SELECTION",
             ClientError::PlaneRejected(_) => "PLANE_REJECTED",

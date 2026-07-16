@@ -440,10 +440,11 @@ pub fn run() -> ExitCode {
             );
             finish_review(json, cmd_name, result, &diag)
         }
-        Command::Revert { skill, to, yes } => finish(
+        Command::Revert { skill, to, yes } => finish_revert(
             json,
             cmd_name,
-            // `--yes` replaces the old `--confirm` (same acknowledge-the-no-op semantics).
+            // Two-phase: bare DESCRIBES the forward move (nothing written); `--yes` applies it and also
+            // acknowledges a byte-level no-op.
             ops::revert(
                 &ctx,
                 &connect_contribute,
@@ -452,7 +453,6 @@ pub fn run() -> ExitCode {
                 yes,
                 workspace.as_deref(),
             ),
-            render::revert_tty,
             &diag,
         ),
         Command::Log { skill } => {
@@ -1301,6 +1301,47 @@ fn finish_protect(
                 println!("{}", render::to_json(&render::ok_envelope(command, value)));
             } else {
                 println!("{}", render::protect_applied_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
+/// `revert`'s finisher — the two-phase describe, the byte-level no-op, or the applied forward move.
+fn finish_revert(
+    json: bool,
+    command: &str,
+    result: Result<ops::RevertOutcome, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(ops::RevertOutcome::Describe { data, yes_argv }) => {
+            if json {
+                let value = serde_json::json!({ "describe": data });
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::revert_describe_tty(&data, &yes_argv));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::RevertOutcome::NoOp(data)) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                println!("{}", render::revert_noop_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::RevertOutcome::Applied(data)) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                println!("{}", render::revert_tty(&data));
             }
             ExitCode::SUCCESS
         }

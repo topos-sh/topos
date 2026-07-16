@@ -613,6 +613,27 @@ pub struct RevertData {
     pub current_generation: u64,
 }
 
+/// `revert <skill> --to <good>` (bare, no `--yes`) — the two-phase DESCRIBE of the forward move: what
+/// moves, the generation, and whether good's bytes already equal current's (a byte-level no-op). Nothing
+/// is written on the describe. **INFERRED.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct RevertDescribeData {
+    pub skill: String,
+    pub skill_id: String,
+    /// The version `current` holds now (what the forward move restores away from).
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub current_version_id: String,
+    /// The good version named by `--to` — the bytes the forward move restores.
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub reverted_to: String,
+    /// The live `current` generation the forward move would advance from.
+    pub current_generation: u64,
+    /// Whether good's bytes ALREADY equal current's (compared by verified bundle digest, not commit id):
+    /// a repeated identical revert is a byte-level no-op that moves nothing.
+    pub is_noop: bool,
+}
+
 /// `review` (`--approve` / `--reject` a proposal). Approve is a compare-and-set on the base; a stale
 /// base returns `CONFLICT`. **INFERRED.**
 #[derive(Debug, Clone, Serialize, Deserialize)]

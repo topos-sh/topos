@@ -2185,3 +2185,217 @@ fn pull_fsyncs_a_present_but_unrecorded_parent() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// revert — the two-phase describe + the byte-level no-op. A forward revert mints a NEW commit id
+// over IDENTICAL bytes, so repeated identical reverts must be caught by comparing TREE digests
+// (not commit ids), else they mint generation after generation.
+// ---------------------------------------------------------------------------------------------
+
+/// The fixed forward-revert message. MIRRORS `ops::contribute::REVERT_MESSAGE` (that const is private
+/// to the ops module); the forward commit id folds it in, so the served pointer names the same id.
+const REVERT_MSG: &str = "topos: revert";
+
+/// A contribute transport that COUNTS the writes it receives and answers a fixed receipt. The
+/// two-phase describe and the no-op must never reach it (zero POSTs).
+struct RecordingContribute {
+    posts: std::rc::Rc<std::cell::Cell<usize>>,
+    receipt: crate::plane::WriteReceipt,
+}
+impl crate::plane::ContributeSource for RecordingContribute {
+    fn publish(
+        &self,
+        _b: topos_types::requests::PublishRequest,
+    ) -> Result<crate::plane::WriteReceipt, crate::error::ClientError> {
+        unreachable!("revert never publishes")
+    }
+    fn propose(
+        &self,
+        _b: topos_types::requests::ProposeRequest,
+    ) -> Result<crate::plane::WriteReceipt, crate::error::ClientError> {
+        unreachable!("revert never proposes")
+    }
+    fn revert(
+        &self,
+        _b: topos_types::requests::RevertRequest,
+    ) -> Result<crate::plane::WriteReceipt, crate::error::ClientError> {
+        self.posts.set(self.posts.get() + 1);
+        Ok(self.receipt.clone())
+    }
+    fn review(
+        &self,
+        _b: topos_types::requests::ReviewRequest,
+    ) -> Result<crate::plane::WriteReceipt, crate::error::ClientError> {
+        unreachable!("revert never reviews")
+    }
+}
+
+/// The tree (bundle) digest of a version's files — the value the no-op compares.
+fn tree_of(v: &Version) -> [u8; 32] {
+    let entries: Vec<ManifestEntry> = v
+        .fetched
+        .files
+        .iter()
+        .map(|f| ManifestEntry {
+            path: f.path.clone(),
+            mode: f.mode,
+            content_sha256: digest::sha256(&f.bytes),
+        })
+        .collect();
+    digest::bundle_digest(&entries).unwrap()
+}
+
+/// Write the enrolled `instance.json` `revert` reads (the follow-state comes from the [`FixtureFollow`]
+/// the caller hands `ctx`, not from disk).
+fn seed_instance(rig: &Rig) {
+    crate::enroll::write_instance(
+        &rig.fs,
+        &rig.layout(),
+        &crate::enroll::Instance {
+            schema_version: 1,
+            base_url: "https://topos.example/api".to_owned(),
+        },
+    )
+    .unwrap();
+}
+
+/// An OK revert receipt naming `record` as the moved-to pointer (the server echoes the forward id).
+fn ok_revert_receipt(record: WireCurrentRecord) -> crate::plane::WriteReceipt {
+    crate::plane::WriteReceipt {
+        receipt: Some(topos_types::Receipt {
+            schema_version: 1,
+            op_id: "op-rv".to_owned(),
+            command: "reverts".to_owned(),
+            outcome: topos_types::TerminalOutcome::Ok,
+            workspace_id: WS.to_owned(),
+            skill_id: Some(record.scope.skill_id.clone()),
+            version_id: Some(record.record.version_id.clone()),
+            bundle_digest: None,
+            expected_generation: None,
+            current_generation: Some(record.record.generation),
+            created_at: "2026-07-16T00:00:00Z".to_owned(),
+            details: None,
+        }),
+        error: None,
+        wire_record: Some(record),
+    }
+}
+
+#[test]
+fn revert_bare_describes_without_writing_then_yes_applies() {
+    let rig = Rig::new("rv-2phase");
+    let (id, name, _genesis) = rig.adopt(&[("SKILL.md", FileMode::Regular, b"base\n")]);
+    seed_instance(&rig);
+    let foll = follow(&id, FollowMode::Auto);
+
+    // good (tree A) and current (tree B, DIFFERENT) — both served by the plane.
+    let good = mk_version(
+        &[],
+        &[("SKILL.md", FileMode::Regular, b"good bytes\n")],
+        "auth",
+        "m-good",
+    );
+    let current = mk_version(
+        &[],
+        &[("SKILL.md", FileMode::Regular, b"current bytes\n")],
+        "auth",
+        "m-current",
+    );
+    let mut plane = FixturePlane::default();
+    plane.set_current(&id, served(WS, &id, current.id, 5));
+    plane.add_version(&id, &good);
+    plane.add_version(&id, &current);
+
+    // The forward commit id the client computes + the server would echo (I-COMMIT-PARITY).
+    let forward = identity::commit_id(&Commit {
+        parents: &[current.id],
+        tree: tree_of(&good),
+        author: DEVICE,
+        message: REVERT_MSG,
+    })
+    .unwrap();
+    let posts = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let receipt = ok_revert_receipt(served(WS, &id, forward, 6));
+    let connect = {
+        let posts = posts.clone();
+        move |_b: &str| -> Box<dyn crate::plane::ContributeSource> {
+            Box::new(RecordingContribute {
+                posts: posts.clone(),
+                receipt: receipt.clone(),
+            })
+        }
+    };
+    let good_hex = to_hex(&good.id);
+    let ctx = rig.ctx(&plane, &foll);
+
+    // Bare = DESCRIBE: nothing written — no POST, no op-WAL.
+    let described = ops::revert(&ctx, &connect, &name, &good_hex, false, None).unwrap();
+    assert!(matches!(described, ops::RevertOutcome::Describe { .. }));
+    assert_eq!(posts.get(), 0, "a describe POSTs nothing");
+    assert!(
+        crate::op_wal::find_pending_for_skill(
+            &rig.fs,
+            &rig.layout(),
+            WS,
+            &id,
+            &[topos_types::persisted::OpKind::Revert],
+        )
+        .unwrap()
+        .is_none(),
+        "a describe writes no op-WAL"
+    );
+
+    // `--yes` = apply: exactly one POST; the forward move lands.
+    let applied = ops::revert(&ctx, &connect, &name, &good_hex, true, None).unwrap();
+    match applied {
+        ops::RevertOutcome::Applied(data) => {
+            assert_eq!(data.reverted_to, good_hex);
+            assert_eq!(data.new_version_id, to_hex(&forward));
+        }
+        other => panic!("--yes applies, got {other:?}"),
+    }
+    assert_eq!(posts.get(), 1, "--yes POSTs exactly once");
+}
+
+#[test]
+fn revert_over_identical_bytes_is_a_no_op_under_differing_commit_ids() {
+    let rig = Rig::new("rv-noop");
+    let (id, name, _genesis) = rig.adopt(&[("SKILL.md", FileMode::Regular, b"base\n")]);
+    seed_instance(&rig);
+    let foll = follow(&id, FollowMode::Auto);
+
+    // good and current share the SAME tree but DIFFERENT commit ids — current is a forward revert over
+    // good's bytes, exactly the state one revert leaves behind (the repeated-revert bug's trigger).
+    let files: &[(&str, FileMode, &[u8])] = &[("SKILL.md", FileMode::Regular, b"shared bytes\n")];
+    let good = mk_version(&[], files, "auth", "m-good");
+    let current = mk_version(&[good.id], files, DEVICE, REVERT_MSG);
+    assert_ne!(good.id, current.id, "the ids differ");
+    assert_eq!(tree_of(&good), tree_of(&current), "the bytes are identical");
+
+    let mut plane = FixturePlane::default();
+    plane.set_current(&id, served(WS, &id, current.id, 6));
+    plane.add_version(&id, &good);
+    plane.add_version(&id, &current);
+
+    let posts = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let receipt = ok_revert_receipt(served(WS, &id, current.id, 6));
+    let connect = {
+        let posts = posts.clone();
+        move |_b: &str| -> Box<dyn crate::plane::ContributeSource> {
+            Box::new(RecordingContribute {
+                posts: posts.clone(),
+                receipt: receipt.clone(),
+            })
+        }
+    };
+    let good_hex = to_hex(&good.id);
+    let ctx = rig.ctx(&plane, &foll);
+
+    // Both bare and `--yes` are a typed no-op that mints no forward commit and POSTs nothing — the
+    // pre-fix id compare (good.id != current.id) would have minted one.
+    let bare = ops::revert(&ctx, &connect, &name, &good_hex, false, None).unwrap();
+    assert!(matches!(&bare, ops::RevertOutcome::NoOp(d) if d.is_noop), "bare: {bare:?}");
+    let yes = ops::revert(&ctx, &connect, &name, &good_hex, true, None).unwrap();
+    assert!(matches!(yes, ops::RevertOutcome::NoOp(_)), "--yes acknowledges the no-op");
+    assert_eq!(posts.get(), 0, "a no-op POSTs nothing on either path");
+}

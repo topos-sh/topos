@@ -252,8 +252,8 @@ pub(crate) enum Command {
         /// the bad version.
         #[arg(long = "to")]
         to: String,
-        /// Acknowledge a no-op revert (the `--to` version is already `current`). Parses today; the
-        /// two-phase describe lands later.
+        /// Apply the described revert; also acknowledges a no-op (good's bytes already are `current`).
+        /// Bare = describe only.
         #[arg(long)]
         yes: bool,
     },

@@ -1442,6 +1442,32 @@ pub(crate) fn revert_tty(data: &RevertData) -> String {
     )
 }
 
+/// The bare `revert` DESCRIBE's TTY — what the forward move would do (nothing has changed yet).
+pub(crate) fn revert_describe_tty(
+    data: &topos_types::results::RevertDescribeData,
+    yes_argv: &[String],
+) -> String {
+    format!(
+        "Revert {} — move current @{} forward to restore @{} (from generation {}).\n  a forward \
+         move restoring older bytes; nothing deleted\nNothing has changed yet — apply with:\n  {}",
+        data.skill,
+        short(&data.current_version_id),
+        short(&data.reverted_to),
+        data.current_generation,
+        argv_line(yes_argv),
+    )
+}
+
+/// The byte-level no-op's TTY — good's bytes already ARE current, so reverting changes nothing.
+pub(crate) fn revert_noop_tty(data: &topos_types::results::RevertDescribeData) -> String {
+    format!(
+        "'{}' is already at these bytes — @{} matches current (@{}). Reverting would change nothing.",
+        data.skill,
+        short(&data.reverted_to),
+        short(&data.current_version_id),
+    )
+}
+
 /// The bare `review` inbox/outbox TTY — author-message FIRST, grouped by workspace, inbox before outbox.
 pub(crate) fn review_inbox_tty(data: &topos_types::results::ReviewIndexData) -> String {
     use topos_types::results::ReviewIndexEntry;

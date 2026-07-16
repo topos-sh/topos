@@ -193,7 +193,7 @@ Undo a release for the TEAM: move `current` to the older version named by `--to`
 |---|---|---|---|
 | `<SKILL>` |  |  | The skill to revert |
 | `--to` | `<TO>` |  | The GOOD version id (64-char hex, or a unique ≥8-char prefix) to restore — the destination, NOT the bad version |
-| `--yes` |  |  | Acknowledge a no-op revert (the `--to` version is already `current`). Parses today; the two-phase describe lands later |
+| `--yes` |  |  | Apply the described revert; also acknowledges a no-op (good's bytes already are `current`). Bare = describe only |
 
 
 ### `topos channel`

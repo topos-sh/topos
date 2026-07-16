@@ -10,7 +10,7 @@
 use topos_core::digest::to_hex;
 use topos_core::identity::{self, Commit};
 use topos_types::persisted::{OpKind, OpRecord};
-use topos_types::results::RevertData;
+use topos_types::results::{RevertData, RevertDescribeData};
 use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
 use super::contribute::{self, ContributeConnect, REVERT_MESSAGE};
@@ -21,20 +21,40 @@ use crate::error::ClientError;
 use crate::plane::WriteReceipt;
 use crate::{op_wal, sidecar};
 
-/// Move `current` forward to the GOOD version named by `--to`.
+/// The verb's outcome — the two-phase pair plus the byte-level no-op.
+#[derive(Debug)]
+pub(crate) enum RevertOutcome {
+    /// Bare `revert --to` (bytes differ) — the forward-move DESCRIBE; `--yes` applies it.
+    Describe {
+        data: RevertDescribeData,
+        yes_argv: Vec<String>,
+    },
+    /// good's bytes ALREADY equal current's — nothing to move. Bare says "nothing would change";
+    /// `--yes` acknowledges it (a typed success). No forward commit, no POST either way.
+    NoOp(RevertDescribeData),
+    /// The forward move landed (`--yes`, or a WAL replay resuming an in-flight revert).
+    Applied(RevertData),
+}
+
+/// Move `current` forward to the GOOD version named by `--to`, two-phase. A bare invocation DESCRIBES
+/// the forward move (nothing written); `--yes` applies it. A byte-level no-op — good's bytes already
+/// equal current's, detected by comparing verified bundle DIGESTS, not commit ids (a forward revert mints
+/// a NEW id over IDENTICAL bytes, so an id compare would mint generation after generation) — moves
+/// nothing on either path. A pending revert WAL always RESUMES to apply (re-invoking IS the resume),
+/// regardless of `--yes`.
 ///
 /// # Errors
-/// [`ClientError::Enrollment`] if not enrolled; [`ClientError::ConfirmRequired`] for a no-op revert without
-/// `--confirm`; [`ClientError::Conflict`] / [`ClientError::Denied`] on the plane's verdict; an integrity
+/// [`ClientError::Enrollment`] if not enrolled; [`ClientError::PendingOp`] if a DIFFERENT revert is
+/// in flight; [`ClientError::Conflict`] / [`ClientError::Denied`] on the plane's verdict; an integrity
 /// error if the good version does not reproduce its id; a transport failure otherwise.
 pub(crate) fn revert(
     ctx: &Ctx<'_>,
     connect: &ContributeConnect<'_>,
     skill_name: &str,
     to: &str,
-    confirm: bool,
+    yes: bool,
     workspace: Option<&str>,
-) -> Result<RevertData, ClientError> {
+) -> Result<RevertOutcome, ClientError> {
     // Argv is validated FIRST (a malformed hash is a usage error however un-enrolled the machine is).
     // `--to` is the sole source of the good destination — it accepts the full 64-hex id OR a short prefix
     // (resolved below against the skill's recorded history, once the skill is known).
@@ -83,7 +103,8 @@ pub(crate) fn revert(
         &kinds,
     )? {
         // Replay a crashed prior revert ONLY if it targets the SAME good version as this command; a
-        // different `--to` must settle the in-flight revert first.
+        // different `--to` must settle the in-flight revert first. A matching pending revert always
+        // RESUMES to apply — re-invoking IS the resume, regardless of `--yes`.
         Some(pending) => {
             if pending.good.as_deref() != Some(good_hex.as_str()) {
                 return Err(ClientError::PendingOp {
@@ -101,13 +122,45 @@ pub(crate) fn revert(
             // builds + signature-checks the forward commit against its live parent before the CAS.
             let (current_commit, expected) =
                 contribute::fresh_current(ctx, id.as_str(), &workspace_id)?;
-            if good_commit == current_commit && !confirm {
-                return Err(ClientError::ConfirmRequired {
-                    reason: "the --to version is already current; reverting is a no-op".to_owned(),
+            // No-op detection by TREE digest, NOT commit id: after one revert, `current` is a forward
+            // commit with a NEW id over IDENTICAL bytes, so an id compare would mint generation after
+            // generation. Compare the good and current versions' VERIFIED bundle digests instead — the
+            // good version's tree is also the forward commit's tree, so it is computed here either way.
+            let good_digest = contribute::verified_version_digest(ctx, id.as_str(), good_commit)?;
+            let current_digest =
+                contribute::verified_version_digest(ctx, id.as_str(), current_commit)?;
+            let describe = RevertDescribeData {
+                skill: skill_name.to_owned(),
+                skill_id: id.to_string(),
+                current_version_id: to_hex(&current_commit),
+                reverted_to: good_hex.clone(),
+                current_generation: expected,
+                is_noop: good_digest == current_digest,
+            };
+            if describe.is_noop {
+                // A byte-level no-op — good's bytes already ARE current. No forward commit is minted and
+                // no write is POSTed on either path (bare says "nothing would change"; `--yes`
+                // acknowledges it as a typed success).
+                return Ok(RevertOutcome::NoOp(describe));
+            }
+            if !yes {
+                // Bare = DESCRIBE: nothing is written (no op-WAL, no POST). The `next_actions` carry the
+                // paste-ready `--yes` apply.
+                let yes_argv = vec![
+                    "topos".to_owned(),
+                    "revert".to_owned(),
+                    skill_name.to_owned(),
+                    "--to".to_owned(),
+                    good_hex.clone(),
+                    "--yes".to_owned(),
+                ];
+                return Ok(RevertOutcome::Describe {
+                    data: describe,
+                    yes_argv,
                 });
             }
-            // The good version's tree digest = the forward commit's tree (re-derived from bytes + verified).
-            let good_digest = contribute::verified_version_digest(ctx, id.as_str(), good_commit)?;
+            // `--yes` = build the forward commit + op record (the apply path). `good_digest` is the
+            // forward commit's tree (re-derived from the verified bytes above).
             let forward = identity::commit_id(&Commit {
                 parents: &[current_commit],
                 tree: good_digest,
@@ -134,7 +187,7 @@ pub(crate) fn revert(
     };
 
     let receipt = contribute::run_write(ctx, &*transport, &sp, &rec, None)?;
-    map_outcome(ctx, &sp, &rec, &receipt, skill_name, &good_hex)
+    map_outcome(ctx, &sp, &rec, &receipt, skill_name, &good_hex).map(RevertOutcome::Applied)
 }
 
 fn map_outcome(

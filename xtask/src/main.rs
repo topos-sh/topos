@@ -174,6 +174,12 @@ fn schemas() -> Vec<(&'static str, String)> {
             emit(schemars::schema_for!(topos_types::results::RevertData)),
         ),
         (
+            "revert-describe-data",
+            emit(schemars::schema_for!(
+                topos_types::results::RevertDescribeData
+            )),
+        ),
+        (
             "review-data",
             emit(schemars::schema_for!(topos_types::results::ReviewData)),
         ),
