@@ -24,12 +24,17 @@ export const meta: MetaFunction = () => [{ title: "Sign in · Topos" }];
  *   - email + password — the no-dependency default rung; it leads when magic link is absent, so
  *     a vanilla OSS build (no magic link, no social) renders exactly today's password-first page.
  *
- * Sign-UP here is the invited/open-knob path (the claim ceremony has its own page), and
- * REGISTRATION IS NEVER OPEN by default: every refusal — uninvited, expired, already taken —
+ * Sign-UP follows the composition's registration policy, surfaced as ONE plain flag
+ * (`registrationOpen`). GATED (the OSS default): sign-up is the invited/open-knob path (the
+ * claim ceremony has its own page), and every refusal — uninvited, expired, already taken —
  * answers the ONE constant refusal string, carried through the loader so the client bundle never
  * imports the server module that owns it. The gate runs under EVERY rung (magic link and social
- * included), so no rung can reopen sign-up. With mail armed, a successful sign-up waits on the
- * mailbox round-trip (the seat binds after verification); mail-less, it signs in directly.
+ * included), so no rung can reopen sign-up. OPEN (a hosted composition): the sign-up motion
+ * exists on every composed rung — the magic-link lead serves sign-up too (a new address gets an
+ * account on link consumption; the create hook stays the gate), social buttons sign up
+ * naturally, and the copy drops the invited-only framing. With mail armed, a successful
+ * password sign-up waits on the mailbox round-trip (an invited seat binds after verification);
+ * mail-less, it signs in directly.
  */
 export async function loader({ request }: LoaderFunctionArgs) {
   const url = new URL(request.url);
@@ -41,6 +46,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     socialProviders: Object.keys(auth.socialProviders ?? {}),
     emailAndPassword: auth.emailAndPassword,
     mailArmed: mailDelivery().canSend,
+    registrationOpen: composition.registration === "open",
     signupRefusal: REGISTRATION_REFUSED,
   };
 }
@@ -63,8 +69,15 @@ function socialLabel(id: string): string {
 }
 
 export default function LoginPage() {
-  const { next, magicLink, socialProviders, emailAndPassword, mailArmed, signupRefusal } =
-    useLoaderData<typeof loader>();
+  const {
+    next,
+    magicLink,
+    socialProviders,
+    emailAndPassword,
+    mailArmed,
+    registrationOpen,
+    signupRefusal,
+  } = useLoaderData<typeof loader>();
   const navigate = useNavigate();
 
   const [mode, setMode] = useState<Mode>("signin");
@@ -103,10 +116,16 @@ export default function LoginPage() {
           });
     if (authError) {
       setPending(false);
-      // The sign-up refusal is CONSTANT whatever failed — an uninvited address, an expired
-      // invitation, and a taken email all read the same, so the form enumerates nothing.
+      // GATED, the sign-up refusal is CONSTANT whatever failed — an uninvited address, an
+      // expired invitation, and a taken email all read the same, so the form enumerates
+      // nothing. OPEN, sign-up isn't invitation-framed: a failure gets a plain retry line
+      // (still one constant string — nothing is enumerated either way).
       setError(
-        mode === "signin" ? "Couldn’t sign in. Check your email and password." : signupRefusal,
+        mode === "signin"
+          ? "Couldn’t sign in. Check your email and password."
+          : registrationOpen
+            ? "Couldn’t create the account. Check the details and try again."
+            : signupRefusal,
       );
       return;
     }
@@ -166,7 +185,10 @@ export default function LoginPage() {
     return (
       <Shell>
         <p className="text-sm text-dim" role="status">
-          Check your mailbox to verify your address — your seat binds after verification.
+          {registrationOpen
+            ? // Open registration isn't invitation-framed — a seat may or may not be waiting.
+              "Check your mailbox to verify your address."
+            : "Check your mailbox to verify your address — your seat binds after verification."}
         </p>
       </Shell>
     );
@@ -181,7 +203,11 @@ export default function LoginPage() {
         {signup
           ? "Use your work email and a password."
           : showMagic
-            ? "We’ll email you a sign-in link — no password needed."
+            ? registrationOpen
+              ? // Open registration: the magic lead is "continue with email" — consuming the
+                // link signs a known address in and creates an account for a new one.
+                "We’ll email you a link — it signs you in, or creates your account if you’re new."
+              : "We’ll email you a sign-in link — no password needed."
             : emailAndPassword
               ? "Sign in with your email and password."
               : "Continue with one of the options below."}
@@ -191,7 +217,7 @@ export default function LoginPage() {
         <form onSubmit={submitMagicLink} className="mt-6 space-y-3">
           <EmailField value={email} onChange={setEmail} />
           <button type="submit" className={PRIMARY_BTN}>
-            Email me a sign-in link
+            {registrationOpen ? "Continue with email" : "Email me a sign-in link"}
           </button>
         </form>
       ) : !emailAndPassword ? null : (
@@ -272,7 +298,11 @@ export default function LoginPage() {
           }}
           className="mt-4 block w-full text-center text-sm text-dim underline-offset-2 hover:text-ink hover:underline"
         >
-          {passwordRevealed ? "Email me a sign-in link instead" : "Sign in with a password instead"}
+          {passwordRevealed
+            ? registrationOpen
+              ? "Continue with email instead"
+              : "Email me a sign-in link instead"
+            : "Sign in with a password instead"}
         </button>
       )}
 

@@ -9,6 +9,7 @@ import { StalenessWindowPanel } from "@/components/policy/staleness-window-panel
 import { SettingsTabs } from "@/components/settings-tabs";
 import { StepUpMethodProvider } from "@/components/step-up";
 import { buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
+import { composition } from "@/composition.server";
 import { requireMember, requireWorkspaceOwner, workspaceInScope } from "@/lib/auth/guards.server";
 import { requireStepUp, stepUpMethod } from "@/lib/auth/step-up.server";
 import { type AuditEventRow, lastAuditEventOfKind, recordAdminEvent } from "@/lib/db/audit.server";
@@ -40,6 +41,10 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   const actor = await requireMember(request, ws);
   // Management is a confirmed OWNER seat — the actor's role IS the seat table's.
   const isOwner = actor.role === "owner";
+  // The registration knob governs sign-up only where the install IS the workspace (single
+  // tenancy). In multi tenancy account creation is a server-global act the composition owns,
+  // so the per-workspace knob governs nothing and its panel does not render.
+  const registrationGoverns = composition.tenancy === "single";
   // The knobs are plain columns on the ONE workspace row; the column DEFAULTs are the canonical
   // fallbacks, so a fresh install shows the true defaults, never a blank. The "last set by"
   // lines read the audit ledger — the same rows the setters land in their own transactions.
@@ -48,10 +53,13 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     lastAuditEventOfKind(actor, "policy_review_default"),
     lastAuditEventOfKind(actor, "policy_invite"),
     lastAuditEventOfKind(actor, "policy_staleness"),
-    lastAuditEventOfKind(actor, "policy_registration"),
+    registrationGoverns
+      ? lastAuditEventOfKind(actor, "policy_registration")
+      : Promise.resolve(undefined),
   ]);
   return {
     isOwner,
+    registrationGoverns,
     slug: workspace.name,
     shareAddress: workspaceAddress(request, workspace.name),
     stepUpMethod: await stepUpMethod(actor.userId),
@@ -96,7 +104,9 @@ export async function action({ request, params }: ActionFunctionArgs) {
   if (intent === "set-staleness-window") {
     return stalenessWindowIntent(request, ws, formData);
   }
-  if (intent === "set-registration") {
+  // In multi tenancy the per-workspace registration knob governs nothing, so the intent does
+  // not exist there: it answers exactly what any unknown intent answers.
+  if (intent === "set-registration" && composition.tenancy === "single") {
     return registrationIntent(request, ws, formData);
   }
   return data({ intent: "unknown" as const, status: "error" as const }, { status: 400 });
@@ -213,6 +223,7 @@ async function registrationIntent(request: Request, ws: string, formData: FormDa
 export default function WorkspaceSettings() {
   const {
     isOwner,
+    registrationGoverns,
     slug,
     shareAddress,
     stepUpMethod,
@@ -249,11 +260,13 @@ export default function WorkspaceSettings() {
           stalenessWindowMs={stalenessWindowMs}
           lastSet={lastSet.staleness}
         />
-        <RegistrationPanel
-          isOwner={isOwner}
-          registration={registration}
-          lastSet={lastSet.registration}
-        />
+        {registrationGoverns && (
+          <RegistrationPanel
+            isOwner={isOwner}
+            registration={registration}
+            lastSet={lastSet.registration}
+          />
+        )}
       </div>
     </StepUpMethodProvider>
   );
