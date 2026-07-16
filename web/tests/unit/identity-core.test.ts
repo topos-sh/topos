@@ -133,14 +133,17 @@ describe("the device flow", () => {
     const identity = await import("@/lib/db/identity.server");
     const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
       ?.user_id as string;
-    const flow = await identity.startDeviceAuth("laptop");
+    // The single-tenant resolve ignores the recorded slug ('' is the origin-addressed form).
+    const flow = await identity.startDeviceAuth("laptop", "");
     expect((await identity.pollDeviceAuth(flow.deviceCode)).status).toBe("pending");
-    expect(await identity.pendingDeviceAuth(flow.userCode)).toEqual({ requestedName: "laptop" });
-    const approved = await identity.approveDeviceAuth(
-      flow.userCode,
-      { userId: owner, display: "Owner" },
-      wsId,
-    );
+    expect(await identity.pendingDeviceAuth(flow.userCode)).toEqual({
+      requestedName: "laptop",
+      requestedWorkspace: "",
+    });
+    const approved = await identity.approveDeviceAuth(flow.userCode, {
+      userId: owner,
+      display: "Owner",
+    });
     expect(approved?.requestedName).toBe("laptop");
     const granted = await identity.pollDeviceAuth(flow.deviceCode);
     expect(granted.status).toBe("granted");
@@ -160,20 +163,40 @@ describe("the device flow", () => {
     const identity = await import("@/lib/db/identity.server");
     const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
       ?.user_id as string;
-    const flow = await identity.startDeviceAuth("stolen-box");
+    const flow = await identity.startDeviceAuth("stolen-box", "");
+    expect(await identity.denyDeviceAuth(flow.userCode, { userId: owner, display: "O" })).toBe(
+      true,
+    );
     expect(
-      await identity.denyDeviceAuth(flow.userCode, { userId: owner, display: "O" }, wsId),
-    ).toBe(true);
-    expect(
-      await identity.approveDeviceAuth(flow.userCode, { userId: owner, display: "O" }, wsId),
+      await identity.approveDeviceAuth(flow.userCode, { userId: owner, display: "O" }),
     ).toBeNull();
     expect((await identity.pollDeviceAuth(flow.deviceCode)).status).toBe("denied");
     expect((await identity.pollDeviceAuth(flow.deviceCode)).status).toBe("denied");
   });
 
+  it("a SEATLESS approver gets null (and cannot deny); a seated one then completes the flow", async () => {
+    const identity = await import("@/lib/db/identity.server");
+    const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
+      ?.user_id as string;
+    await seedUser("u_seatless", "Seatless", "seatless@example.com");
+    const flow = await identity.startDeviceAuth("drifter-box", "");
+    // Approval requires a seat in the flow's workspace — a seatless person's approve AND deny
+    // both land the same uniform refusal, and neither consumes the pending flow.
+    expect(
+      await identity.approveDeviceAuth(flow.userCode, { userId: "u_seatless", display: "S" }),
+    ).toBeNull();
+    expect(
+      await identity.denyDeviceAuth(flow.userCode, { userId: "u_seatless", display: "S" }),
+    ).toBe(false);
+    expect((await identity.pollDeviceAuth(flow.deviceCode)).status).toBe("pending");
+    expect(
+      await identity.approveDeviceAuth(flow.userCode, { userId: owner, display: "O" }),
+    ).not.toBeNull();
+  });
+
   it("an expired pending flow reports expired; the sweep reaps past-TTL rows", async () => {
     const identity = await import("@/lib/db/identity.server");
-    const flow = await identity.startDeviceAuth("slow-machine");
+    const flow = await identity.startDeviceAuth("slow-machine", "");
     await q(`UPDATE web.device_auth_session SET expires_at = now() - interval '1 minute'`);
     expect((await identity.pollDeviceAuth(flow.deviceCode)).status).toBe("expired");
     // The row lingers until a sweep (read does not delete); the sweep then reaps it.
@@ -188,8 +211,8 @@ describe("revoke finality", () => {
     const identity = await import("@/lib/db/identity.server");
     const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
       ?.user_id as string;
-    const flow = await identity.startDeviceAuth("short-lived");
-    await identity.approveDeviceAuth(flow.userCode, { userId: owner, display: "O" }, wsId);
+    const flow = await identity.startDeviceAuth("short-lived", "");
+    await identity.approveDeviceAuth(flow.userCode, { userId: owner, display: "O" });
     const granted = await identity.pollDeviceAuth(flow.deviceCode);
     expect(granted.status).toBe("granted");
     const deviceId = granted.status === "granted" ? granted.deviceId : "";
@@ -236,8 +259,8 @@ describe("the entitlement predicate + delivery", () => {
     const lane = await import("@/lib/db/queries.lane.server");
     await seedUser("u_ent", "Entitled", "entitled@example.com");
     await seatUser("u_ent", "member");
-    const flow = await identity.startDeviceAuth("ent-box");
-    await identity.approveDeviceAuth(flow.userCode, { userId: "u_ent", display: "E" }, wsId);
+    const flow = await identity.startDeviceAuth("ent-box", "");
+    await identity.approveDeviceAuth(flow.userCode, { userId: "u_ent", display: "E" });
     const granted = await identity.pollDeviceAuth(flow.deviceCode);
     const deviceId = granted.status === "granted" ? granted.deviceId : "";
     const actor = deviceActorFor("u_ent", deviceId, "member");

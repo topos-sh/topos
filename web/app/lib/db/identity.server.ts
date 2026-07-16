@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { eq, sql } from "drizzle-orm";
+import { composition } from "@/composition.server";
 import { serverEnv } from "@/env.server";
 import { type Db, getDb, isUniqueViolation } from "./index.server";
 import {
@@ -261,9 +262,14 @@ export const DEVICE_AUTH_EXPIRES_IN_SECS = DEVICE_AUTH_TTL_MS / 1000;
  * hash-only store still "deliver" the credential on the poll: the poller already holds it.
  * The short user_code is what a human types at /verify; the partial unique index keeps it
  * unambiguous among PENDING rows, so minting retries on that one conflict.
+ *
+ * `requestedWorkspace` is the workspace ADDRESS SLUG the authorize call named — recorded, not
+ * resolved: the flow's workspace is looked up (and the approver's seat in it required) at
+ * approval time, inside the approve/deny fence.
  */
 export async function startDeviceAuth(
   requestedName: string,
+  requestedWorkspace: string,
 ): Promise<{ deviceCode: string; userCode: string; expiresInSecs: number }> {
   const db = getDb();
   // Opportunistic reap: every new enrollment first clears expired ceremony rows (there is no
@@ -280,6 +286,7 @@ export async function startDeviceAuth(
         userCode,
         deviceCodeSha256: sql`${sha256OfText(deviceCode)}` as never,
         requestedName,
+        requestedWorkspace,
         expiresAt,
       });
       return { deviceCode, userCode, expiresInSecs: DEVICE_AUTH_EXPIRES_IN_SECS };
@@ -346,27 +353,72 @@ export async function sweepExpiredDeviceAuth(): Promise<number> {
 }
 
 /**
+ * Resolve a locked flow's workspace AND the acting person's seat in it, inside the caller's
+ * approve/deny transaction. The tenancy grammar decides the lookup: single-tenant flows
+ * resolve to the install's one workspace whatever slug they recorded; multi-tenant flows
+ * resolve the recorded slug by name — which may have been created AFTER the flow started
+ * (a CLI-first person creates the workspace mid-flow and returns to approve). A missing
+ * workspace or a seatless actor both resolve to null, and the caller answers the same
+ * uniform refusal — a non-member learns nothing, not even that the workspace exists.
+ */
+async function seatedFlowWorkspaceTx(
+  tx: Tx,
+  requestedWorkspace: string,
+  actorUserId: string,
+): Promise<{ workspaceId: string } | null> {
+  const rows =
+    composition.tenancy === "multi"
+      ? await tx.execute(
+          sql`SELECT id FROM ${workspace} WHERE name = ${requestedWorkspace} LIMIT 1`,
+        )
+      : await tx.execute(sql`SELECT id FROM ${workspace} LIMIT 1`);
+  const ws = rows.rows[0] as { id: string } | undefined;
+  if (!ws) {
+    return null;
+  }
+  const seats = await tx.execute(
+    sql`SELECT 1 FROM ${seat} WHERE workspace_id = ${ws.id} AND user_id = ${actorUserId}`,
+  );
+  if (seats.rows.length === 0) {
+    return null;
+  }
+  return { workspaceId: ws.id };
+}
+
+/**
  * FENCE 2 — the device-flow approve + mint, one FOR UPDATE transaction: lock the pending row
- * by user_code, re-check liveness under the lock, mint the device row (owned by the
- * approver, credential hash = the device_code hash), and flip the row to approved. The
+ * by user_code, re-check liveness under the lock, resolve the flow's workspace (by the
+ * recorded slug under the tenancy grammar) and require the approver's SEAT in it, mint the
+ * device row (owned by the approver, credential hash = the device_code hash), and flip the
+ * row to approved. An unresolvable workspace or a seatless approver returns null — the same
+ * answer an expired code gets, so the ceremony is no existence or membership oracle. The
  * step-up gate runs in the ROUTE before this is called — approval mints a credential that
  * acts as you.
  */
 export async function approveDeviceAuth(
   userCode: string,
   approver: { userId: string; display: string },
-  workspaceId: string,
 ): Promise<{ deviceId: string; requestedName: string } | null> {
   return await getDb().transaction(async (tx) => {
     const rows = await tx.execute(
-      sql`SELECT id, requested_name, device_code_sha256 FROM ${deviceAuthSession}
+      sql`SELECT id, requested_name, requested_workspace, device_code_sha256
+          FROM ${deviceAuthSession}
           WHERE user_code = ${userCode} AND status = 'pending' AND expires_at > now()
           FOR UPDATE`,
     );
     const row = rows.rows[0] as
-      | { id: string; requested_name: string; device_code_sha256: Buffer }
+      | {
+          id: string;
+          requested_name: string;
+          requested_workspace: string;
+          device_code_sha256: Buffer;
+        }
       | undefined;
     if (!row) {
+      return null;
+    }
+    const resolved = await seatedFlowWorkspaceTx(tx, row.requested_workspace, approver.userId);
+    if (resolved === null) {
       return null;
     }
     const deviceId = mintDeviceId();
@@ -382,7 +434,7 @@ export async function approveDeviceAuth(
           WHERE id = ${row.id}`,
     );
     await auditInTx(tx, {
-      workspaceId,
+      workspaceId: resolved.workspaceId,
       actor: { userId: approver.userId, display: approver.display },
       kind: "device_approved",
       subject: deviceId,
@@ -393,24 +445,34 @@ export async function approveDeviceAuth(
   });
 }
 
-/** The verify page's deny arm — same lock discipline, terminal 'denied'. */
+/**
+ * The verify page's deny arm — same lock discipline AND the same workspace + seat
+ * requirement as the approve (a person who cannot approve a flow cannot destroy it either;
+ * an unresolvable flow dies by its TTL), terminal 'denied'.
+ */
 export async function denyDeviceAuth(
   userCode: string,
   denier: { userId: string; display: string },
-  workspaceId: string,
 ): Promise<boolean> {
   return await getDb().transaction(async (tx) => {
     const rows = await tx.execute(
-      sql`UPDATE ${deviceAuthSession} SET status = 'denied'
+      sql`SELECT id, requested_name, requested_workspace FROM ${deviceAuthSession}
           WHERE user_code = ${userCode} AND status = 'pending' AND expires_at > now()
-          RETURNING requested_name`,
+          FOR UPDATE`,
     );
-    const row = rows.rows[0] as { requested_name: string } | undefined;
+    const row = rows.rows[0] as
+      | { id: string; requested_name: string; requested_workspace: string }
+      | undefined;
     if (!row) {
       return false;
     }
+    const resolved = await seatedFlowWorkspaceTx(tx, row.requested_workspace, denier.userId);
+    if (resolved === null) {
+      return false;
+    }
+    await tx.execute(sql`UPDATE ${deviceAuthSession} SET status = 'denied' WHERE id = ${row.id}`);
     await auditInTx(tx, {
-      workspaceId,
+      workspaceId: resolved.workspaceId,
       actor: { userId: denier.userId, display: denier.display },
       kind: "device_denied",
       subject: row.requested_name,
@@ -423,13 +485,15 @@ export async function denyDeviceAuth(
 /** The verify page's lookup: the pending request a typed user_code names (display only). */
 export async function pendingDeviceAuth(
   userCode: string,
-): Promise<{ requestedName: string } | null> {
+): Promise<{ requestedName: string; requestedWorkspace: string } | null> {
   const rows = await getDb().execute(
-    sql`SELECT requested_name FROM ${deviceAuthSession}
+    sql`SELECT requested_name, requested_workspace FROM ${deviceAuthSession}
         WHERE user_code = ${userCode} AND status = 'pending' AND expires_at > now()`,
   );
-  const row = rows.rows[0] as { requested_name: string } | undefined;
-  return row ? { requestedName: row.requested_name } : null;
+  const row = rows.rows[0] as { requested_name: string; requested_workspace: string } | undefined;
+  return row
+    ? { requestedName: row.requested_name, requestedWorkspace: row.requested_workspace }
+    : null;
 }
 
 // ── Step-up email confirmation (the password-less admin-ceremony rung) ──────────────────────

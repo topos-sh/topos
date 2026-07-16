@@ -46,9 +46,16 @@ transaction, FOR UPDATE-fenced or single-statement-atomic, audit row inside):
   enter AB12-CD34" and polls; the signed-in person approves with a **plain accept** — a live session
   plus the explicit approve click IS the whole ceremony (no step-up) — minting the device (owned by
   that person) + its ONE bearer credential (the device code is promoted to the credential — same
-  plaintext, same stored hash). The signed-out loader bounce carries the code as `next`, so a password
-  OR a magic-link sign-in both return to finish the approval. Revocation is self-service, immediate, and
-  FINAL (a DB trigger refuses any un-revoke).
+  plaintext, same stored hash). The flow row records the workspace ADDRESS SLUG the authorize call
+  named; multi tenancy shape-checks that slug only (an unauthenticated start is never a
+  workspace-existence oracle — the workspace may be created mid-flow), and approval resolves it under
+  the tenancy grammar and requires the approver's SEAT in the resolved workspace, inside the same
+  FOR-UPDATE fence — a missing workspace or a seatless approver gets the same uniform refusal an
+  expired code does. On a multi-tenant deployment a signed-in approver with zero seats anywhere is
+  first woven through workspace creation (`/verify` redirects to `/new` carrying itself as `next` +
+  the flow's slug as a `name` prefill). The signed-out loader bounce carries the code as `next`, so a
+  password OR a magic-link sign-in both return to finish the approval. Revocation is self-service,
+  immediate, and FINAL (a DB trigger refuses any un-revoke).
 - **Recovery** (`app/lib/auth/recovery.server.ts` + `scripts/mint-recovery-code.mjs`): reset mail when
   SMTP is armed; a mail-less solo owner runs the one-shot box-side script to print a single-use recovery
   code (machine control is the proof).
