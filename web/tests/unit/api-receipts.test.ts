@@ -128,6 +128,29 @@ describe("deniedEnvelope + errorReceiptEnvelope", () => {
     expect(bare.error.affected).toEqual({});
   });
 
+  it("a DENIED carries its receipt when handed one — outcome DENIED, the op_id echoed", () => {
+    // A write-family denial (four-eyes, role gate, key reuse) is still a write 200: the CLI
+    // contract is that it carries a receipt, so its op-WAL clears instead of wedging.
+    const receipt = buildReceipt({
+      opId: "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+      command: "review",
+      outcome: "DENIED",
+      workspaceId: "w_demo",
+      skillId: "s_prdescribe",
+      createdAt: "2026-06-25T00:00:00Z",
+    });
+    const envelope = deniedEnvelope("review", "FOUR_EYES_REQUIRED", "pr-describe", receipt) as {
+      ok: boolean;
+      receipt?: { outcome: string; op_id: string };
+      error: { code: string };
+    };
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.code).toBe("FOUR_EYES_REQUIRED");
+    expect(envelope.receipt).toEqual(receipt);
+    expect(envelope.receipt?.outcome).toBe("DENIED");
+    expect(envelope.receipt?.op_id).toBe("f47ac10b-58cc-4372-a567-0e02b2c3d479");
+  });
+
   it("errorReceiptEnvelope carries the receipt only when the op minted one", () => {
     const error = {
       code: "TARGET_PURGED",

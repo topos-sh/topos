@@ -8,8 +8,9 @@ import { custodyCurrent, custodyVersionMeta } from "@/lib/plane/reads.server";
 /**
  * `GET /api/v1/workspaces/{ws}/proposals` — the review inbox: every OPEN proposal in the
  * workspace, author-message first (the message reads from custody — the candidate's commit
- * frame). The caller splits inbox (others') from outbox (own) by `proposer`; `stale` derives
- * from custody (the candidate's first parent no longer `current`).
+ * frame). The caller splits inbox (others') from outbox (own) by the server-computed `yours`
+ * (user-id equality — never the display string, which email-vs-name skew would mislabel);
+ * `stale` derives from custody (the candidate's first parent no longer `current`).
  */
 export async function loader({ request, params }: LoaderFunctionArgs): Promise<Response> {
   const belted = checkBelt(request);
@@ -36,6 +37,9 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
       // A genesis-based candidate records no parent; the zero id is the honest "no base".
       base_version_id: base ?? "0".repeat(64),
       proposer: row.proposerEmail ?? row.proposerDisplay,
+      // The author-owned split is a user-id comparison — the one identity — never the display
+      // string (email-vs-name skew would mislabel the author's own proposal).
+      yours: row.proposedBy === actor.userId,
       message: meta.ok ? meta.data.message : "",
       created_at: row.createdAt.toISOString().replace(/\.\d{3}Z$/, "Z"),
       stale: base !== currentVersion,

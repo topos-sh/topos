@@ -69,7 +69,16 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     return envelopeResponse(replay.outcome);
   }
   if (replay.kind === "key_reuse") {
-    return envelopeResponse(deniedEnvelope("revert", "OP_ID_REUSED", undefined));
+    // Before target resolution: workspace is the actor's, the skill unknown — omit what we
+    // cannot honestly name. The write 200 still carries a receipt so the CLI's op-WAL clears.
+    const receipt = buildReceipt({
+      opId: head.opId,
+      command: "revert",
+      outcome: "DENIED",
+      workspaceId: actor.workspaceId,
+      createdAt: receiptNow(),
+    });
+    return envelopeResponse(deniedEnvelope("revert", "OP_ID_REUSED", undefined, receipt));
   }
 
   const createdAt = receiptNow();
@@ -77,13 +86,31 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   if (target === undefined) {
     return uniformNotFound();
   }
+  const receiptBase = {
+    opId: head.opId,
+    command: "revert",
+    workspaceId: actor.workspaceId,
+    skillId: target.bundleId,
+    expectedGeneration: head.expected,
+    createdAt,
+  };
   if (target.status !== "active") {
-    const envelope = deniedEnvelope("revert", "SKILL_NOT_ACTIVE", target.name);
+    const envelope = deniedEnvelope(
+      "revert",
+      "SKILL_NOT_ACTIVE",
+      target.name,
+      buildReceipt({ ...receiptBase, outcome: "DENIED" }),
+    );
     await inFinalTx((tx) => insertReceiptInTx(tx, actor, head.opId, raw, envelope));
     return envelopeResponse(envelope);
   }
   if (actor.role === "member") {
-    const envelope = deniedEnvelope("revert", "REVIEWER_ROLE_REQUIRED", target.name);
+    const envelope = deniedEnvelope(
+      "revert",
+      "REVIEWER_ROLE_REQUIRED",
+      target.name,
+      buildReceipt({ ...receiptBase, outcome: "DENIED" }),
+    );
     await inFinalTx((tx) => insertReceiptInTx(tx, actor, head.opId, raw, envelope));
     return envelopeResponse(envelope);
   }
@@ -99,14 +126,6 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     attribution: author,
     message,
   });
-  const receiptBase = {
-    opId: head.opId,
-    command: "revert",
-    workspaceId: actor.workspaceId,
-    skillId: target.bundleId,
-    expectedGeneration: head.expected,
-    createdAt,
-  };
   if (reverted.kind === "conflict") {
     const receipt = buildReceipt({
       ...receiptBase,
@@ -125,7 +144,12 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   }
   if (reverted.kind === "not_found" || reverted.kind === "target_purged") {
     const code = reverted.kind === "target_purged" ? "TARGET_PURGED" : "UNKNOWN_VERSION";
-    const envelope = deniedEnvelope("revert", code, target.name);
+    const envelope = deniedEnvelope(
+      "revert",
+      code,
+      target.name,
+      buildReceipt({ ...receiptBase, outcome: "DENIED" }),
+    );
     await inFinalTx((tx) => insertReceiptInTx(tx, actor, head.opId, raw, envelope));
     return envelopeResponse(envelope);
   }

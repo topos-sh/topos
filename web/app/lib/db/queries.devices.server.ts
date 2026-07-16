@@ -1,6 +1,6 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { UserActor } from "@/lib/auth/guards.server";
-import { revokeOwnDevice, theWorkspace } from "@/lib/db/identity.server";
+import { revokeOwnDevice } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
 import { device } from "@/lib/db/schema.app";
 
@@ -54,12 +54,7 @@ export type SignOutOutcome = "revoked" | "unknown_device";
  * as a miss).
  */
 export async function signOutDevice(actor: UserActor, deviceId: string): Promise<SignOutOutcome> {
-  const ws = await theWorkspace();
-  const revoked = await revokeOwnDevice(
-    { userId: actor.userId, display: actor.display },
-    deviceId,
-    ws?.id ?? "",
-  );
+  const revoked = await revokeOwnDevice({ userId: actor.userId, display: actor.display }, deviceId);
   if (revoked) {
     return "revoked";
   }

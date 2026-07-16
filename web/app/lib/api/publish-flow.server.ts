@@ -61,7 +61,16 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
   const skillName = target?.name;
 
   if (target !== undefined && target.status !== "active") {
-    const envelope = deniedEnvelope(command, "SKILL_NOT_ACTIVE", target.name);
+    const receipt = buildReceipt({
+      opId,
+      command,
+      outcome: "DENIED",
+      workspaceId: actor.workspaceId,
+      skillId: target.bundleId,
+      expectedGeneration: expected,
+      createdAt,
+    });
+    const envelope = deniedEnvelope(command, "SKILL_NOT_ACTIVE", target.name, receipt);
     await inFinalTx((tx) => insertReceiptInTx(tx, actor, opId, raw, envelope));
     return envelopeResponse(envelope);
   }

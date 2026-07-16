@@ -633,11 +633,16 @@ export async function deviceActor(
  * Self-service revocation — SELF-ONLY by design (a device is a possession; no owner arm
  * reaches into someone else's pocket), effective immediately and FINAL (the trigger refuses
  * any un-revoke).
+ *
+ * A device is workspace-LESS — a possession of ONE user, whose credential reaches every
+ * workspace that user holds a seat in. So the honest audit scope of a revocation is every one
+ * of the owner's seat workspaces (revocation is an event in each), NOT some single boot
+ * workspace the actor may hold no seat in. Zero seats ⇒ zero audit rows — no workspace's trail
+ * is touched. All in the SAME transaction as the row flip.
  */
 export async function revokeOwnDevice(
   actor: { userId: string; display: string },
   deviceId: string,
-  workspaceId: string,
 ): Promise<boolean> {
   return await getDb().transaction(async (tx) => {
     const rows = await tx.execute(
@@ -648,13 +653,18 @@ export async function revokeOwnDevice(
     if (rows.rows.length === 0) {
       return false;
     }
-    await auditInTx(tx, {
-      workspaceId,
-      actor: { userId: actor.userId, display: actor.display },
-      kind: "device_revoked",
-      subject: deviceId,
-      outcome: "ok",
-    });
+    const seats = await tx.execute(
+      sql`SELECT workspace_id FROM ${seat} WHERE user_id = ${actor.userId}`,
+    );
+    for (const row of seats.rows as { workspace_id: string }[]) {
+      await auditInTx(tx, {
+        workspaceId: row.workspace_id,
+        actor: { userId: actor.userId, display: actor.display },
+        kind: "device_revoked",
+        subject: deviceId,
+        outcome: "ok",
+      });
+    }
     return true;
   });
 }
