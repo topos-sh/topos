@@ -33,6 +33,9 @@ publicly reachable: no published port, no public router.
   - `GET …/current` · `GET …/versions/{version_id}` (meta + file listing) ·
     `GET …/objects/{object_id}` (verified bytes, octet-stream) · `GET …/log?limit=N`
     (the first-parent chain from current, capped).
+  - `GET /internal/v1/storage` — every workspace's stored byte total (`present` custody only,
+    ordered by workspace id): `{workspaces: [{workspace_id, stored_bytes}]}` — the operational
+    accounting read.
   - `POST …/versions/{version_id}/purge` (`{attribution}`) · `DELETE …/bundles/{bundle}` ·
     `DELETE /internal/v1/workspaces/{ws}`.
   - Errors: 400 `BAD_REQUEST`/`REJECTED`, the uniform 404 `NOT_FOUND`, 409 `CONFLICT` (carrying the

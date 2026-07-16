@@ -446,3 +446,44 @@ async fn shape_violations_answer_400_and_misses_the_uniform_404(pool: PgPool) {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(json(&body)["code"], "REJECTED");
 }
+
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn the_storage_stat_reports_per_workspace_present_totals(pool: PgPool) {
+    let fx = Fixture::new(pool, "storage");
+
+    // Empty custody answers an empty list, not an error.
+    let (status, body) = send(&fx.router, "GET", "/internal/v1/storage", Some(TOKEN), None).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(json(&body)["workspaces"], serde_json::json!([]));
+
+    // Publish into two workspaces; the stat sums each one's present bytes, ordered by workspace.
+    for (ws, content) in [("w1", &b"hello"[..]), ("w2", &b"0123456789"[..])] {
+        let (status, body) = send(
+            &fx.router,
+            "POST",
+            &format!("/internal/v1/workspaces/{ws}/bundles/b1/publish"),
+            Some(TOKEN),
+            Some(candidate_body(content, None)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    }
+    let (status, body) = send(&fx.router, "GET", "/internal/v1/storage", Some(TOKEN), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json(&body)["workspaces"],
+        serde_json::json!([
+            { "workspace_id": "w1", "stored_bytes": 5 },
+            { "workspace_id": "w2", "stored_bytes": 10 },
+        ])
+    );
+}
+
+#[sqlx::test(migrator = "plane_store::MIGRATOR")]
+async fn the_storage_stat_is_gated_like_its_siblings(pool: PgPool) {
+    // Unarmed lane: the uniform 404, whatever the credential says.
+    let fx = Fixture::unarmed(pool, "storage-gate");
+    let (status, body) = send(&fx.router, "GET", "/internal/v1/storage", Some(TOKEN), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(json(&body)["code"], "NOT_FOUND");
+}

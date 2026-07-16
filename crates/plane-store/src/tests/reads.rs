@@ -220,3 +220,55 @@ async fn render_version_reassembles_and_pins_the_digest(pool: PgPool) {
     assert_eq!(rendered.files[0].path, "GUIDE.md");
     assert_eq!(rendered.files[0].bytes, b"alpha");
 }
+
+#[sqlx::test]
+async fn storage_stats_sums_present_bytes_per_workspace(pool: PgPool) {
+    let fx = Fixture::new(pool.clone(), "storage");
+
+    // Empty custody: an empty list, not an error.
+    assert!(
+        fx.authority
+            .storage_stats()
+            .await
+            .expect("empty stats")
+            .is_empty()
+    );
+
+    // Seed two workspaces' presence rows across ALL four statuses. Raw `sqlx::query` (not
+    // `query!`), so the seed adds nothing to the committed `.sqlx` drift surface; each object id
+    // is a distinct 32-byte value.
+    let seed: &[(&str, u8, &str, i64)] = &[
+        ("w1", 1, "present", 100),
+        ("w1", 2, "present", 50),
+        ("w1", 3, "deleting", 7),
+        ("w1", 4, "absent", 11),
+        ("w1", 5, "unavailable", 13),
+        ("w2", 6, "present", 5),
+        ("w2", 7, "deleting", 1_000),
+        ("w2", 8, "absent", 1_000),
+        ("w2", 9, "unavailable", 1_000),
+    ];
+    for &(ws_id, tag, status, size) in seed {
+        sqlx::query(
+            "INSERT INTO object_presence \
+               (workspace_id, object_id, status, location, size, git_oid, status_updated_at) \
+             VALUES ($1, $2, $3, 'git', $4, NULL, 0)",
+        )
+        .bind(ws_id)
+        .bind(vec![tag; 32])
+        .bind(status)
+        .bind(size)
+        .execute(&pool)
+        .await
+        .expect("seed presence row");
+    }
+
+    // Only the `present` sizes count, summed per workspace, ordered by workspace id — and a
+    // workspace with no rows at all ("w3" was never seeded) is absent from the list.
+    let stats = fx.authority.storage_stats().await.expect("storage stats");
+    assert_eq!(stats.len(), 2);
+    assert_eq!(stats[0].workspace_id.as_str(), "w1");
+    assert_eq!(stats[0].stored_bytes, 150);
+    assert_eq!(stats[1].workspace_id.as_str(), "w2");
+    assert_eq!(stats[1].stored_bytes, 5);
+}
