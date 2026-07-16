@@ -2328,10 +2328,53 @@ fn revert_bare_describes_without_writing_then_yes_applies() {
     let good_hex = to_hex(&good.id);
     let ctx = rig.ctx(&plane, &foll);
 
-    // Bare = DESCRIBE: nothing written — no POST, no op-WAL.
+    // Bare = DESCRIBE: nothing written — no POST, no op-WAL. The paste-ready apply carries no
+    // `--workspace` when none was given.
     let described = ops::revert(&ctx, &connect, &name, &good_hex, false, None).unwrap();
-    assert!(matches!(described, ops::RevertOutcome::Describe { .. }));
+    match &described {
+        ops::RevertOutcome::Describe { yes_argv, .. } => {
+            assert_eq!(
+                yes_argv,
+                &vec![
+                    "topos".to_owned(),
+                    "revert".to_owned(),
+                    name.clone(),
+                    "--to".to_owned(),
+                    good_hex.clone(),
+                    "--yes".to_owned(),
+                ],
+            );
+        }
+        other => panic!("bare revert describes, got {other:?}"),
+    }
     assert_eq!(posts.get(), 0, "a describe POSTs nothing");
+
+    // A `--workspace` disambiguation is PRESERVED on the paste-ready apply (as the canonical id),
+    // so the suggested command re-resolves to exactly the skill described.
+    let described_ws = ops::revert(&ctx, &connect, &name, &good_hex, false, Some(WS)).unwrap();
+    match &described_ws {
+        ops::RevertOutcome::Describe { yes_argv, .. } => {
+            assert_eq!(
+                yes_argv,
+                &vec![
+                    "topos".to_owned(),
+                    "revert".to_owned(),
+                    name.clone(),
+                    "--to".to_owned(),
+                    good_hex.clone(),
+                    "--workspace".to_owned(),
+                    WS.to_owned(),
+                    "--yes".to_owned(),
+                ],
+            );
+        }
+        other => panic!("bare revert with --workspace describes, got {other:?}"),
+    }
+    assert_eq!(
+        posts.get(),
+        0,
+        "the workspace-scoped describe POSTs nothing either"
+    );
     assert!(
         crate::op_wal::find_pending_for_skill(
             &rig.fs,

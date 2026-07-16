@@ -53,6 +53,28 @@ pub fn run() -> ExitCode {
     // uninstall.
     let harness = adapter_for(HarnessId::ClaudeCode, &fs);
 
+    // `uninstall` dispatches BEFORE state recovery and enrollment loading: its whole point is to
+    // remove `~/.topos/` even when that state is corrupt — an unreadable/newer credentials doc or a
+    // torn sidecar must never block the one command that deletes them. It needs no sign-in, mints no
+    // identity, and touches no plane; the binary path is disclosed but never self-deleted (a package
+    // manager may own it).
+    if let Command::Uninstall { yes } = &command {
+        let inert_plane = crate::plane::InertPlane;
+        let inert_follow = crate::plane::InertFollow;
+        let ctx = Ctx {
+            fs: &fs,
+            ids: &ids,
+            clock: &clock,
+            device_id: String::new(),
+            layout: layout.clone(),
+            harness: harness.as_ref(),
+            plane: &inert_plane,
+            follow: &inert_follow,
+        };
+        let binary = std::env::current_exe().ok();
+        return finish_uninstall(json, cmd_name, ops::uninstall(&ctx, binary, *yes), &diag);
+    }
+
     // Recovery runs at the start of every command (it also abandons an expired, never-redeemed
     // enrollment WAL against the real wall clock).
     let now_millis = i64::try_from(clock.now_unix_millis()).unwrap_or(i64::MAX);
@@ -653,13 +675,9 @@ pub fn run() -> ExitCode {
                 ),
             }
         }
-        Command::Uninstall { yes } => {
-            // A MAINTENANCE command: it removes topos from this machine. It needs no sign-in and mints no
-            // identity (kept out of the device-id match above), and touches no plane. The binary path is
-            // disclosed but never self-deleted (a package manager may own it).
-            let binary = std::env::current_exe().ok();
-            finish_uninstall(json, cmd_name, ops::uninstall(&ctx, binary, yes), &diag)
-        }
+        // Dispatched BEFORE state recovery/enrollment loading above — corrupt local state must never
+        // block the command that removes it.
+        Command::Uninstall { .. } => unreachable!("uninstall dispatches before state recovery"),
         // `topos upgrade` is ambiguous — the disambiguation refusal points skills → `topos update`, the CLI
         // → `topos self-update`, so the retired spelling never silently does the wrong thing.
         Command::Upgrade => emit_err(json, cmd_name, &ClientError::UpgradeAmbiguous, &diag),

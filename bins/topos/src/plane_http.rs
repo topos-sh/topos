@@ -1343,13 +1343,15 @@ fn map_write_envelope(status: u16, bytes: &[u8]) -> Result<WriteReceipt, ClientE
             error,
             wire_record,
         }),
-        // A receipt-LESS envelope is a valid TERMINAL answer only when it is an `ok:false` denial that
+        // A receipt-LESS envelope is a valid TERMINAL answer only when it is an `ok:false` DENIED that
         // still parsed a flat `error` — an old server (or an already-stored wedged receipt a same-`op_id`
         // replay re-serves) that never attached a receipt to its DENIED. Mapping it to a settled receipt
-        // is the typed way out of a wedged op-WAL (`run_write` deletes it). An `ok:true` success with no
-        // receipt is genuinely corrupt (a success without its receipt), and stays `WireInvalid`.
+        // is the typed way out of a wedged op-WAL (`run_write` deletes it). The escape is DENIED-only:
+        // a receipt-less RETRYABLE_FAILURE / UNAVAILABLE / anything else stays `WireInvalid` (the WAL is
+        // kept — the op may yet land, and settling it would silently drop a retryable write). An
+        // `ok:true` success with no receipt is genuinely corrupt, and stays `WireInvalid` too.
         None => match (ok, error) {
-            (false, Some(e)) => Ok(WriteReceipt {
+            (false, Some(e)) if e.outcome == TerminalOutcome::Denied => Ok(WriteReceipt {
                 receipt: None,
                 error: Some(e),
                 wire_record,
@@ -1808,6 +1810,43 @@ mod tests {
             wr.error.as_ref().map(|e| e.code.as_str()),
             Some("FOUR_EYES_REQUIRED")
         );
+    }
+
+    #[test]
+    fn map_write_envelope_receiptless_non_denied_stays_wire_invalid() {
+        // The receipt-less escape is DENIED-ONLY. A receipt-less RETRYABLE_FAILURE (or any other
+        // outcome) must stay WireInvalid so `run_write` KEEPS the WAL — settling it would silently
+        // drop a retryable write whose op may yet land on the same op_id replay.
+        for outcome in [
+            TerminalOutcome::RetryableFailure,
+            TerminalOutcome::Unavailable,
+            TerminalOutcome::Conflict,
+            TerminalOutcome::PermanentFailure,
+        ] {
+            let err = WireError {
+                code: "RETRYABLE_FAILURE".to_owned(),
+                outcome,
+                retryable: true,
+                affected: topos_types::Affected::default(),
+                expected_generation: None,
+                current_generation: None,
+                context: serde_json::json!({}),
+                next_actions: Vec::new(),
+            };
+            let bytes = envelope_bytes(&JsonEnvelope {
+                schema_version: 1,
+                command: "reviews".to_owned(),
+                ok: false,
+                data: serde_json::json!({}),
+                warnings: Vec::new(),
+                next_actions: Vec::new(),
+                receipt: None,
+                error: Some(err),
+            });
+            let e = map_write_envelope(200, &bytes)
+                .expect_err("a receipt-less non-DENIED outcome is not a settled answer");
+            assert_eq!(e.code(), "CORRUPT_STATE", "{outcome:?}");
+        }
     }
 
     #[test]

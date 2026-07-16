@@ -147,15 +147,21 @@ pub(crate) fn revert(
             }
             if !yes {
                 // Bare = DESCRIBE: nothing is written (no op-WAL, no POST). The `next_actions` carry the
-                // paste-ready `--yes` apply.
-                let yes_argv = vec![
+                // paste-ready `--yes` apply. A `--workspace` disambiguation is PRESERVED on it (as the
+                // canonical id), so the suggested apply re-resolves to exactly the skill described —
+                // never ambiguously against whatever local state the re-run finds.
+                let mut yes_argv = vec![
                     "topos".to_owned(),
                     "revert".to_owned(),
                     skill_name.to_owned(),
                     "--to".to_owned(),
                     good_hex.clone(),
-                    "--yes".to_owned(),
                 ];
+                if workspace.is_some() {
+                    yes_argv.push("--workspace".to_owned());
+                    yes_argv.push(workspace_id.clone());
+                }
+                yes_argv.push("--yes".to_owned());
                 return Ok(RevertOutcome::Describe {
                     data: describe,
                     yes_argv,
