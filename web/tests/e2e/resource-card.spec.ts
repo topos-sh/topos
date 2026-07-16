@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { BASE_URL, WORKSPACE_ADDRESS } from "./env";
-import { adminQuery, theWorkspace } from "./seed";
+import { adminQuery, ensureBundle, theWorkspace } from "./seed";
 import { gotoSettled, signIn } from "./sign-in";
 
 /**
@@ -27,10 +27,15 @@ let originalDisplayName: string;
 test.beforeAll(async () => {
   originalDisplayName = (await theWorkspace()).displayName;
   await adminQuery(`update web.workspace set display_name = $1`, [WS_DISPLAY_NAME]);
+  // The member-face tests below assert a real skill's page renders (a catalog row is enough — the
+  // face is 200 the moment a skill NAME exists, published or not). Seed it so a fresh CI DB has it.
+  await ensureBundle({ id: "s_e2e_card_skill", name: "card-face-runbook" });
 });
 
 test.afterAll(async () => {
   await adminQuery(`update web.workspace set display_name = $1`, [originalDisplayName]);
+  // Remove the dedicated face skill so it never leaks into another spec's catalog assertions.
+  await adminQuery(`delete from web.bundle where id = $1`, ["s_e2e_card_skill"]);
 });
 
 test.describe("anonymous — the constant protocol card + teaser (no existence oracle)", () => {
@@ -115,7 +120,7 @@ test.describe("anonymous — the constant protocol card + teaser (no existence o
   test("browser (text/html): the skill FACE renders the constant teaser for real and missing names alike", async ({
     request,
   }) => {
-    const real = await request.get(`/skills/deploy-runbook`, {
+    const real = await request.get(`/skills/card-face-runbook`, {
       headers: { accept: "text/html" },
       maxRedirects: 0,
     });
@@ -204,7 +209,7 @@ test.describe("signed in — the browser faces resolve against the confirmed sea
     expect(channel.status()).toBe(200);
     expect(await channel.text()).not.toContain(TEASER_MARKER);
 
-    const skill = await page.request.get(`/skills/deploy-runbook`, {
+    const skill = await page.request.get(`/skills/card-face-runbook`, {
       headers: { accept: "text/html" },
       maxRedirects: 0,
     });
