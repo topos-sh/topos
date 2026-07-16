@@ -1202,7 +1202,7 @@ const SELF_SCOPED: [&str; 8] = [
 const TEAM_SCOPED: [&str; 6] = [
     "publish", "review", "revert", "channel", "protect", "invite",
 ];
-const MAINTENANCE: [&str; 2] = ["self-update", "auth"];
+const MAINTENANCE: [&str; 3] = ["self-update", "auth", "uninstall"];
 
 fn docs_dir() -> PathBuf {
     workspace_root().join("docs")

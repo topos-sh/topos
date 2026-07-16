@@ -35,6 +35,7 @@ mod review;
 mod self_update;
 pub(crate) mod sync_engine;
 mod unfollow;
+mod uninstall;
 
 pub(crate) use add::{
     AddRemoteOpts, KeepAsYoursOutcome, add, add_remote, add_with_name, keep_as_yours,
@@ -75,6 +76,7 @@ pub(crate) use revert::{RevertOutcome, revert};
 pub(crate) use review::{ReviewConnectors, ReviewOutcome, ReviewVerdict, review_dispatch};
 pub(crate) use self_update::{SelfUpdateAction, SelfUpdateOpts, SelfUpdateOutcome, self_update};
 pub(crate) use unfollow::{UnfollowConnectors, UnfollowOutcome, unfollow};
+pub(crate) use uninstall::{UninstallApplied, UninstallDescribe, UninstallOutcome, uninstall};
 
 use topos_core::digest::to_hex;
 use topos_gitstore::Store;

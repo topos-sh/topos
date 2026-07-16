@@ -653,6 +653,13 @@ pub fn run() -> ExitCode {
                 ),
             }
         }
+        Command::Uninstall { yes } => {
+            // A MAINTENANCE command: it removes topos from this machine. It needs no sign-in and mints no
+            // identity (kept out of the device-id match above), and touches no plane. The binary path is
+            // disclosed but never self-deleted (a package manager may own it).
+            let binary = std::env::current_exe().ok();
+            finish_uninstall(json, cmd_name, ops::uninstall(&ctx, binary, yes), &diag)
+        }
         // `topos upgrade` is ambiguous — the disambiguation refusal points skills → `topos update`, the CLI
         // → `topos self-update`, so the retired spelling never silently does the wrong thing.
         Command::Upgrade => emit_err(json, cmd_name, &ClientError::UpgradeAmbiguous, &diag),
@@ -1301,6 +1308,38 @@ fn finish_protect(
                 println!("{}", render::to_json(&render::ok_envelope(command, value)));
             } else {
                 println!("{}", render::protect_applied_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
+/// `uninstall`'s finisher — the two-phase pair (describe / applied).
+fn finish_uninstall(
+    json: bool,
+    command: &str,
+    result: Result<ops::UninstallOutcome, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(ops::UninstallOutcome::Described { describe, yes_argv }) => {
+            if json {
+                let value = serde_json::json!({ "describe": describe });
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::uninstall_describe_tty(&describe, &yes_argv));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::UninstallOutcome::Applied(applied)) => {
+            if json {
+                let value = serde_json::to_value(&applied).unwrap_or_default();
+                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                println!("{}", render::uninstall_applied_tty(&applied));
             }
             ExitCode::SUCCESS
         }

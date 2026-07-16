@@ -398,10 +398,15 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
         s.push_str(&format!("warning: {w}\n"));
     }
     if let Some(footprint) = &data.footprint {
+        // The count is the header; then each path, so a `--footprint` read reports WHAT topos owns (not
+        // just how many) — the set `uninstall` deletes.
         s.push_str(&format!(
             "Footprint: {} paths under the topos home\n",
             footprint.len()
         ));
+        for p in footprint {
+            s.push_str(&format!("  {p}\n"));
+        }
     }
     s.trim_end().to_owned()
 }
@@ -1068,6 +1073,71 @@ pub(crate) fn logout_describe_tty(
         "\nNothing has changed yet — apply with:\n  {}",
         argv_line(yes_argv)
     ));
+    s
+}
+
+/// The `uninstall` DESCRIBE's TTY — everything `--yes` would remove (nothing has changed yet).
+pub(crate) fn uninstall_describe_tty(
+    d: &crate::ops::UninstallDescribe,
+    yes_argv: &[String],
+) -> String {
+    let mut s = String::from("Uninstalling topos would:");
+    if d.hook_paths.is_empty() {
+        s.push_str("\n  · scrub the session-start currency hook: none is armed");
+    } else {
+        s.push_str(&format!(
+            "\n  · scrub the session-start currency hook from: {}",
+            d.hook_paths.join(", ")
+        ));
+    }
+    if d.sidecar_present {
+        s.push_str(&format!(
+            "\n  · delete the sidecar tree {} (the signed-in credential lives there and goes with it)",
+            d.sidecar_path
+        ));
+    } else {
+        s.push_str(&format!(
+            "\n  · nothing to delete at {} (no sidecar tree here)",
+            d.sidecar_path
+        ));
+    }
+    s.push_str("\n  · leave every SKILL FILE in your agent dirs untouched — uninstall deletes no skill bytes");
+    if let Some(bin) = &d.binary_path {
+        s.push_str(&format!(
+            "\nThe `topos` binary at {bin} is NOT removed — delete it with the installer you used (or `rm {bin}`)."
+        ));
+    }
+    s.push_str(&format!(
+        "\nNothing has changed yet — apply with:\n  {}",
+        argv_line(yes_argv)
+    ));
+    s
+}
+
+/// The applied `uninstall`'s TTY — what was removed, the hook scrub surfaced honestly.
+pub(crate) fn uninstall_applied_tty(d: &crate::ops::UninstallApplied) -> String {
+    let mut s = String::from("Uninstalled topos.");
+    let hook_line = match (d.hook.state, d.hook.touched_path.as_deref()) {
+        (TriggerState::Degraded, _) => {
+            "\n  · couldn't edit the harness config — remove the topos currency hook manually".to_owned()
+        }
+        (TriggerState::AlreadyPresentUnmanaged, _) => {
+            "\n  · left your hand-rolled currency hook untouched".to_owned()
+        }
+        (_, Some(path)) => format!("\n  · scrubbed the currency hook from {path}"),
+        (_, None) => "\n  · no currency hook was installed — nothing to scrub".to_owned(),
+    };
+    s.push_str(&hook_line);
+    if d.sidecar_removed {
+        s.push_str("\n  · deleted the ~/.topos sidecar tree (credential included)");
+    } else {
+        s.push_str("\n  · no sidecar tree to delete");
+    }
+    if let Some(bin) = &d.binary_path {
+        s.push_str(&format!(
+            "\nThe `topos` binary at {bin} was left in place — remove it with your installer (or `rm {bin}`)."
+        ));
+    }
     s
 }
 
@@ -2183,6 +2253,29 @@ mod tests {
         assert!(
             text.contains("warning: could not read the catalog for workspace Beta"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn list_footprint_prints_each_path_not_just_a_count() {
+        // `--footprint` reports WHAT topos owns (the set `uninstall` deletes), not merely how many.
+        let out = ListOutcome {
+            data: ListData {
+                footprint: Some(vec![
+                    "/home/x/.topos/identity".to_owned(),
+                    "/home/x/.topos/skills/topos_s00".to_owned(),
+                ]),
+                ..ListData::default()
+            },
+            enrollment: None,
+            warnings: Vec::new(),
+        };
+        let text = list_tty(&out);
+        assert!(text.contains("Footprint: 2 paths under the topos home"), "{text}");
+        assert!(text.contains("/home/x/.topos/identity"), "each path is listed: {text}");
+        assert!(
+            text.contains("/home/x/.topos/skills/topos_s00"),
+            "each path is listed: {text}"
         );
     }
 

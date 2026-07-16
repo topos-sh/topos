@@ -311,6 +311,16 @@ pub(crate) enum Command {
         #[command(subcommand)]
         cmd: AuthCmd,
     },
+    /// Remove topos from this machine — two-phase (bare describes what goes; `--yes` applies). Scrubs
+    /// the session-start currency hook from the harness config and deletes the `~/.topos/` sidecar tree
+    /// (the signed-in credential lives there and goes with it). SKILL FILES IN AGENT DIRS ARE LEFT
+    /// UNTOUCHED — uninstall never deletes a skill byte. The `topos` binary is NOT self-deleted; remove
+    /// it with the installer you used (or `rm` its printed path). Needs no sign-in.
+    Uninstall {
+        /// Apply the described uninstall (the one-shot consent). Bare = describe only.
+        #[arg(long)]
+        yes: bool,
+    },
 
     // ---- Hidden aliases ----
     /// Hidden: `topos upgrade` is ambiguous — it maps to a disambiguation refusal (skills → `topos update`,
@@ -371,6 +381,7 @@ impl Command {
             Command::Invite { .. } => "invite",
             Command::SelfUpdate { .. } => "self-update",
             Command::Auth { .. } => "auth",
+            Command::Uninstall { .. } => "uninstall",
             Command::Upgrade => "upgrade",
         }
     }

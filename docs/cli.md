@@ -300,6 +300,19 @@ topos auth status
 Show who you are, per-workspace access health, hook health, and reporting posture. Side-effect-free
 
 
+### `topos uninstall`
+
+```
+topos uninstall [OPTIONS]
+```
+
+Remove topos from this machine — two-phase (bare describes what goes; `--yes` applies). Scrubs the session-start currency hook from the harness config and deletes the `~/.topos/` sidecar tree (the signed-in credential lives there and goes with it). SKILL FILES IN AGENT DIRS ARE LEFT UNTOUCHED — uninstall never deletes a skill byte. The `topos` binary is NOT self-deleted; remove it with the installer you used (or `rm` its printed path). Needs no sign-in
+
+| Argument / flag | Value | Default | Description |
+|---|---|---|---|
+| `--yes` |  |  | Apply the described uninstall (the one-shot consent). Bare = describe only |
+
+
 ## Renamed verbs
 
 - `topos pull` is a hidden alias of `topos update` (armed session-start hooks in the field still invoke `pull`); the `--json` envelope always reads `update`.

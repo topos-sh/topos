@@ -59,7 +59,11 @@ renderer over the SAME typed outcomes (one value, two presentations).
   topos holds an entry in), `diff`
   (draft↔current via the gitstore `unified_diff` renderer), `log` (local actions + git history), `pull
   [<skill>[@<hash>]] [--quiet]` (the session-start currency entry point — see the sync engine below),
-  `uninstall` (**scrub the currency hook**, then remove the binary + `~/.topos/`, touch no skill bytes).
+  `uninstall [--yes]` (the two-phase MAINTENANCE teardown: bare describes; `--yes` **scrubs the currency
+  hook** via the adapter's `remove_currency_trigger` then deletes the `~/.topos/` sidecar tree — the
+  signed-in credential goes with it — leaving every SKILL FILE in the agent dirs untouched; the `topos`
+  binary is NOT self-deleted, only its path disclosed with a remove-it-yourself note; needs no sign-in,
+  mints no identity).
 - **The resolution grammar** (`resolve`) — the ONE grammar every verb turns an argv token through:
   full addresses (`https://topos.sh/acme[/channels|skills/<name>]`), qualified paths
   (`acme/channels/eng` — three segments with the literal middle), bare names, the `<name>@<agent>`
