@@ -53,6 +53,11 @@
           "description": "The proposed version's commit id (64-char lowercase hex) — the review target handle.",
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
+        },
+        "yours": {
+          "description": "Whether the CALLER authored this proposal — the server computes it from the resolved user id\n(never email equality). The client's inbox uses it to split the outbox (yours) from the inbox\n(others') and to offer the author `--withdraw` instead of `--approve`. A producer predating the\nfield omits it, so it defaults to `false` and the client falls back to comparing principals.",
+          "type": "boolean",
+          "default": false
         }
       },
       "required": [

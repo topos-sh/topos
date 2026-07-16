@@ -811,6 +811,9 @@ pub struct ReviewDescribeData {
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub base_version_id: String,
     pub stale: bool,
+    /// Whether the CALLER authored this proposal — when `true` the describe offers `--withdraw` (a
+    /// four-eyes author cannot approve their own version) and the renderer says "your proposal".
+    pub yours: bool,
     /// The unified diff of the proposal against current (`current..<proposal>`).
     pub diff: String,
 }

@@ -27,6 +27,10 @@
     },
     "stale": {
       "type": "boolean"
+    },
+    "yours": {
+      "description": "Whether the CALLER authored this proposal — when `true` the describe offers `--withdraw` (a\nfour-eyes author cannot approve their own version) and the renderer says \"your proposal\".",
+      "type": "boolean"
     }
   },
   "required": [
@@ -36,6 +40,7 @@
     "message",
     "base_version_id",
     "stale",
+    "yours",
     "diff"
   ]
 }

@@ -114,9 +114,13 @@ fn review_inbox(
                 created_at: p.created_at,
                 stale: p.stale,
             };
-            let mine = me_principal
-                .as_deref()
-                .is_some_and(|me| me == enroll::canonical_principal(&p.proposer));
+            // The server-computed `yours` (from the resolved user id) is authoritative; the
+            // principal comparison is the COMPAT fallback for a server predating the field (labeling
+            // only, never authorization — the plane re-decides every verdict).
+            let mine = p.yours
+                || me_principal
+                    .as_deref()
+                    .is_some_and(|me| me == enroll::canonical_principal(&p.proposer));
             if mine {
                 outbox.push(entry);
             } else {
@@ -174,6 +178,16 @@ fn review_describe(
             )));
         }
     };
+    // Whose proposal is this? The server-computed `yours` is authoritative (resolved user id, never
+    // email equality); the principal comparison is the COMPAT fallback for a server predating the field.
+    let me_principal = enroll::read_user(ctx.fs, &ctx.layout)?
+        .and_then(|u| u.principal)
+        .map(|p| enroll::canonical_principal(&p));
+    let yours = proposal.yours
+        || me_principal
+            .as_deref()
+            .is_some_and(|me| me == enroll::canonical_principal(&proposal.proposer));
+
     // The diff against current — the same plane-diff machinery `diff` runs (`current..<proposal>`).
     let diff = super::diff(
         ctx,
@@ -182,22 +196,7 @@ fn review_describe(
     )?
     .diff;
     let handle = format!("{}@{}", skill_name, proposal.version_id);
-    let next_argvs = vec![
-        vec![
-            "topos".to_owned(),
-            "review".to_owned(),
-            handle.clone(),
-            "--approve".to_owned(),
-        ],
-        vec![
-            "topos".to_owned(),
-            "review".to_owned(),
-            handle.clone(),
-            "--reject".to_owned(),
-            "-m".to_owned(),
-            "<reason>".to_owned(),
-        ],
-    ];
+    let next_argvs = verdict_next_argvs(&handle, yours);
     Ok(ReviewOutcome::Describe {
         data: Box::new(ReviewDescribeData {
             proposal: handle,
@@ -206,6 +205,7 @@ fn review_describe(
             message: proposal.message,
             base_version_id: proposal.base_version_id,
             stale: proposal.stale,
+            yours,
             diff,
         }),
         next_argvs,
@@ -583,12 +583,49 @@ fn skill_of(target: &str) -> String {
         .unwrap_or_else(|| target.to_owned())
 }
 
+/// The paste-ready verdict next-actions a describe offers for `handle`. A four-eyes author cannot
+/// approve their OWN version, so a `yours` proposal offers ONLY `--withdraw`; anyone else's offers the
+/// reviewer's `--approve` and `--reject -m <reason>`.
+fn verdict_next_argvs(handle: &str, yours: bool) -> Vec<Vec<String>> {
+    let argv = |verb: &[&str]| -> Vec<String> {
+        std::iter::once("topos")
+            .chain(std::iter::once("review"))
+            .chain(std::iter::once(handle))
+            .chain(verb.iter().copied())
+            .map(str::to_owned)
+            .collect()
+    };
+    if yours {
+        vec![argv(&["--withdraw"])]
+    } else {
+        vec![argv(&["--approve"]), argv(&["--reject", "-m", "<reason>"])]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use topos_types::{Affected, Receipt, TerminalOutcome, WireError};
 
-    use super::{denied_review_error, permanent_failure_error, split_target};
+    use super::{denied_review_error, permanent_failure_error, split_target, verdict_next_argvs};
     use crate::plane::WriteReceipt;
+
+    #[test]
+    fn a_yours_describe_offers_withdraw_and_never_approve() {
+        // A four-eyes author can only withdraw their OWN proposal — the describe offers `--withdraw`,
+        // never `--approve`; anyone else's offers approve / reject-with-reason.
+        let handle = format!("deploy@{}", "a".repeat(64));
+        let yours = verdict_next_argvs(&handle, true);
+        let flat: Vec<&str> = yours.iter().flatten().map(String::as_str).collect();
+        assert!(flat.contains(&"--withdraw"), "{flat:?}");
+        assert!(!flat.contains(&"--approve"), "{flat:?}");
+        assert!(!flat.contains(&"--reject"), "{flat:?}");
+
+        let theirs = verdict_next_argvs(&handle, false);
+        let flat: Vec<&str> = theirs.iter().flatten().map(String::as_str).collect();
+        assert!(flat.contains(&"--approve"), "{flat:?}");
+        assert!(flat.contains(&"--reject"), "{flat:?}");
+        assert!(!flat.contains(&"--withdraw"), "{flat:?}");
+    }
 
     /// A synthesized terminal PERMANENT_FAILURE write receipt as the plane's wire mapper builds one:
     /// `details_code` present ⇒ the distinguishing `details.code` (mirrored onto the flat error), else

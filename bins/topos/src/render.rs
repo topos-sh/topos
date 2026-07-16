@@ -1491,11 +1491,16 @@ pub(crate) fn review_describe_tty(
     data: &topos_types::results::ReviewDescribeData,
     next_argvs: &[Vec<String>],
 ) -> String {
+    let by = if data.yours {
+        format!("{} (your proposal)", data.proposer)
+    } else {
+        data.proposer.clone()
+    };
     let mut s = format!(
         "{}\n  proposal {}\n  by {}  on base {}{}",
         data.message,
         data.proposal,
-        data.proposer,
+        by,
         short(&data.base_version_id),
         if data.stale {
             "  [STALE — current moved; the author should re-propose]"
@@ -1509,7 +1514,12 @@ pub(crate) fn review_describe_tty(
         s.push_str("\n\n");
         s.push_str(data.diff.trim_end_matches('\n'));
     }
-    s.push_str("\nDecide with:");
+    // A four-eyes author only ever withdraws their own version; a reviewer decides.
+    s.push_str(if data.yours {
+        "\nWithdraw with:"
+    } else {
+        "\nDecide with:"
+    });
     for argv in next_argvs {
         s.push_str(&format!("\n  {}", argv_line(argv)));
     }

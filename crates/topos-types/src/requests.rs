@@ -848,6 +848,12 @@ pub struct WireProposalEntry {
     pub created_at: String,
     /// Whether `current` has moved since the proposal's base (a stale proposal needs a re-propose).
     pub stale: bool,
+    /// Whether the CALLER authored this proposal — the server computes it from the resolved user id
+    /// (never email equality). The client's inbox uses it to split the outbox (yours) from the inbox
+    /// (others') and to offer the author `--withdraw` instead of `--approve`. A producer predating the
+    /// field omits it, so it defaults to `false` and the client falls back to comparing principals.
+    #[serde(default)]
+    pub yours: bool,
 }
 
 /// `GET /v1/workspaces/{ws}/proposals` response — every OPEN proposal in the workspace, author-message

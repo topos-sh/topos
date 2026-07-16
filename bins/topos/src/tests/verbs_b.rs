@@ -251,6 +251,23 @@ fn proposal(
         message: msg.to_owned(),
         created_at: "2026-07-12T00:00:00Z".to_owned(),
         stale: false,
+        // Default off — the split tests set it explicitly where they exercise the server signal.
+        yours: false,
+    }
+}
+
+/// A proposal the server marked as the CALLER's own (`yours: true`) — even when its `proposer`
+/// display string differs from the local principal (a renamed email / a display name).
+fn proposal_yours(
+    skill_id: &str,
+    name: &str,
+    hash: &str,
+    proposer: &str,
+    msg: &str,
+) -> WireProposalEntry {
+    WireProposalEntry {
+        yours: true,
+        ..proposal(skill_id, name, hash, proposer, msg)
     }
 }
 
@@ -837,6 +854,44 @@ fn review_inbox_splits_others_from_yours_by_principal() {
             assert_eq!(data.inbox[0].message, "improve docs");
             assert_eq!(data.outbox.len(), 1, "alice's own proposal is the outbox");
             assert_eq!(data.outbox[0].proposer, "alice@acme.com");
+        }
+        _ => panic!("a bare review is the inbox"),
+    }
+}
+
+#[test]
+fn review_inbox_prefers_the_server_yours_flag_over_the_principal_string() {
+    // The server marks a proposal `yours: true` from the resolved user id — the client must put it in the
+    // OUTBOX even when its `proposer` DISPLAY string differs from the local principal (a renamed login, a
+    // display name). The principal comparison stays only as the old-server compat fallback.
+    let rig = Rig::new("rv-yours");
+    rig.seed_enrolled("alice@acme.com");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let mut fake = FakeDir::new(log);
+    let mine = "a".repeat(64);
+    let theirs = "d".repeat(64);
+    fake.proposals = vec![
+        proposal("s_docs", "docs", &theirs, "bob@acme.com", "improve docs"),
+        // `proposer` is a DIFFERENT string than the local principal, but the server says it is yours.
+        proposal_yours("s_deploy", "deploy", &mine, "Alice (she/her)", "my change"),
+    ];
+    let dir = dir_connect(&fake);
+    let contribute = |_b: &str| -> Box<dyn ContributeSource> { Box::new(NullContribute) };
+    let connectors = ops::ReviewConnectors {
+        directory: &dir,
+        contribute: &contribute,
+    };
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+
+    let out = ops::review_dispatch(&ctx, &connectors, None, None, None).unwrap();
+    match out {
+        ops::ReviewOutcome::Inbox(data) => {
+            assert_eq!(data.inbox.len(), 1, "only bob's proposal is to review");
+            assert_eq!(data.inbox[0].proposer, "bob@acme.com");
+            assert_eq!(data.outbox.len(), 1, "the server-marked-yours proposal is the outbox");
+            assert_eq!(data.outbox[0].proposer, "Alice (she/her)");
         }
         _ => panic!("a bare review is the inbox"),
     }
