@@ -56,6 +56,10 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
     // The person-scoped device list is top-level in BOTH modes (a device is a possession of ONE
     // user, not a workspace resource).
     route("account/devices", file("your-devices.tsx")),
+    // Self-serve workspace creation + onboarding — MULTI ONLY, top-level like account/devices (a
+    // person, not a workspace, is its subject). Single-tenant mints its one workspace at boot, so
+    // there is nothing to create and `/new` falls through to the house 404.
+    ...(tenancy === "multi" ? [route("new", file("workspace-new.tsx"))] : []),
     ...memberWorkspaceChildren(tenancy, file),
   ];
 

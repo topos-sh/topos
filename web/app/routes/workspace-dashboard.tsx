@@ -138,7 +138,7 @@ function DashboardPage({
       />
 
       {index.length === 0 ? (
-        <NoSkills />
+        <NoSkills shareAddress={shareAddress} />
       ) : (
         <section aria-labelledby="skill-index-heading" className="space-y-3">
           <div className="flex items-center justify-between gap-3">
