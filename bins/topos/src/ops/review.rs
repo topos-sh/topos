@@ -414,13 +414,7 @@ fn map_outcome(
             skill: skill_of(target),
             current: receipt.error.as_ref().and_then(|e| e.current_generation),
         }),
-        TerminalOutcome::Denied => Err(ClientError::Denied(
-            receipt
-                .error
-                .as_ref()
-                .map(|e| e.code.clone())
-                .unwrap_or_else(|| "DENIED".to_owned()),
-        )),
+        TerminalOutcome::Denied => Err(denied_review_error(receipt, target)),
         // A terminal PERMANENT_FAILURE on a review verdict is USUALLY the target proposal no longer being
         // OPEN at the live `current` — but OP_ID_REUSED shares the outcome and must NOT be folded into it,
         // so classify by the receipt's distinguishing code first.
@@ -447,14 +441,38 @@ fn permanent_failure_error(receipt: &WriteReceipt, target: &str) -> ClientError 
     }
 }
 
+/// Classify a terminal DENIED on a review verdict — the plane's fine code selects an HONEST refusal:
+/// - `FOUR_EYES_REQUIRED`: the caller proposed this version and cannot also approve it — a typed
+///   [`ClientError::Denied`] whose message NAMES four-eyes (it surfaces inside `render::safe_message`'s
+///   `Denied` arm), so the human reads why, not a bare code. The wire code stays `DENIED`.
+/// - `NO_OPEN_PROPOSAL`: a decided/closed proposal is a terminal outcome — the SAME honest
+///   [`review_not_open`] refusal the undistinguished `PERMANENT_FAILURE` arm renders.
+/// - anything else: the raw wire code, wrapped in [`ClientError::Denied`] for the agent to branch on.
+fn denied_review_error(receipt: &WriteReceipt, target: &str) -> ClientError {
+    match terminal_code(receipt).as_deref() {
+        Some("FOUR_EYES_REQUIRED") => ClientError::Denied(
+            "four-eyes review: you proposed this version — a second reviewer must approve it".to_owned(),
+        ),
+        Some("NO_OPEN_PROPOSAL") => review_not_open(target),
+        _ => ClientError::Denied(
+            receipt
+                .error
+                .as_ref()
+                .map(|e| e.code.clone())
+                .unwrap_or_else(|| "DENIED".to_owned()),
+        ),
+    }
+}
+
 /// The distinguishing machine code a terminal receipt carries, if any: the plane stamps it into the
 /// receipt's `details.code` and mirrors it onto the flat wire error's `code`. `None`/an undistinguished
-/// outcome-default code (e.g. `PERMANENT_FAILURE`) means no richer code was set.
+/// outcome-default code (e.g. `PERMANENT_FAILURE`) means no richer code was set. Reads the flat error's
+/// code when no receipt was attached (a receipt-less DENIED — an old server / a wedged stored receipt).
 fn terminal_code(receipt: &WriteReceipt) -> Option<String> {
     receipt
         .receipt
-        .details
         .as_ref()
+        .and_then(|r| r.details.as_ref())
         .and_then(|d| d.get("code"))
         .and_then(|c| c.as_str())
         .map(str::to_owned)
@@ -569,7 +587,7 @@ fn skill_of(target: &str) -> String {
 mod tests {
     use topos_types::{Affected, Receipt, TerminalOutcome, WireError};
 
-    use super::{permanent_failure_error, split_target};
+    use super::{denied_review_error, permanent_failure_error, split_target};
     use crate::plane::WriteReceipt;
 
     /// A synthesized terminal PERMANENT_FAILURE write receipt as the plane's wire mapper builds one:
@@ -578,7 +596,7 @@ mod tests {
     fn permanent_receipt(details_code: Option<&str>) -> WriteReceipt {
         let code = details_code.unwrap_or("PERMANENT_FAILURE").to_owned();
         WriteReceipt {
-            receipt: Receipt {
+            receipt: Some(Receipt {
                 schema_version: 1,
                 op_id: "op-1".into(),
                 command: "review".into(),
@@ -591,7 +609,7 @@ mod tests {
                 current_generation: None,
                 created_at: "2026-07-13T00:00:00Z".into(),
                 details: details_code.map(|c| serde_json::json!({ "code": c })),
-            },
+            }),
             error: Some(WireError {
                 code,
                 outcome: TerminalOutcome::PermanentFailure,
@@ -604,6 +622,53 @@ mod tests {
             }),
             wire_record: None,
         }
+    }
+
+    /// A terminal DENIED write receipt carrying the given wire code — the shape `denied_review_error`
+    /// classifies. `receipt: None` models the receipt-LESS DENIED an old server (or a wedged stored
+    /// receipt) serves, whose only signal is the flat error's code.
+    fn denied_receipt(code: &str) -> WriteReceipt {
+        WriteReceipt {
+            receipt: None,
+            error: Some(WireError {
+                code: code.to_owned(),
+                outcome: TerminalOutcome::Denied,
+                retryable: false,
+                affected: Affected::default(),
+                expected_generation: None,
+                current_generation: None,
+                context: serde_json::json!({}),
+                next_actions: Vec::new(),
+            }),
+            wire_record: None,
+        }
+    }
+
+    #[test]
+    fn a_denied_no_open_proposal_is_the_review_not_open_domain_refusal() {
+        // The server DENIED a verdict on a no-longer-open proposal with the distinguishing NO_OPEN_PROPOSAL
+        // code — a decided/closed proposal is a terminal outcome, rendered as the SAME honest refusal the
+        // PermanentFailure "not open" arm uses (never a bare "the plane denied this operation (…)").
+        let err = denied_review_error(&denied_receipt("NO_OPEN_PROPOSAL"), "release-notes@abc123def456");
+        assert_eq!(err.code(), "REVIEW_NOT_OPEN");
+        let msg = crate::render::safe_message(&err);
+        assert!(msg.contains("release-notes@abc123def456"), "{msg}");
+        assert!(msg.contains("already be resolved"), "{msg}");
+        assert!(msg.contains("topos review"), "{msg}");
+    }
+
+    #[test]
+    fn a_denied_four_eyes_names_four_eyes_and_stays_denied() {
+        // A four-eyes self-approve DENIED renders an HONEST sentence naming four-eyes (surfacing through
+        // safe_message's Denied arm), and keeps the DENIED wire code for the agent to branch on.
+        let err = denied_review_error(&denied_receipt("FOUR_EYES_REQUIRED"), "release-notes@abc123def456");
+        assert_eq!(err.code(), "DENIED");
+        assert_eq!(err.outcome(), TerminalOutcome::Denied);
+        let msg = crate::render::safe_message(&err);
+        assert!(msg.contains("four-eyes"), "{msg}");
+        assert!(msg.contains("second reviewer"), "{msg}");
+        // The raw code is not what surfaces on the four-eyes case — the human reads the sentence.
+        assert!(!msg.contains("FOUR_EYES_REQUIRED"), "{msg}");
     }
 
     #[test]

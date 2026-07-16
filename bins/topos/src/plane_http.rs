@@ -1325,20 +1325,40 @@ fn map_write_envelope(status: u16, bytes: &[u8]) -> Result<WriteReceipt, ClientE
             ClientError::Plane(format!("contribute write: HTTP {status}"))
         });
     }
-    let env: JsonEnvelope = serde_json::from_slice(bytes)
+    let JsonEnvelope {
+        ok,
+        data,
+        receipt,
+        error,
+        ..
+    } = serde_json::from_slice(bytes)
         .map_err(|e| ClientError::WireInvalid(format!("write envelope is malformed: {e}")))?;
-    let receipt = env
-        .receipt
-        .ok_or_else(|| ClientError::WireInvalid("a write 200 carried no receipt".to_owned()))?;
     // The pointer record is present ONLY when a pointer actually moved. NEEDS_REVIEW, an OK `review
     // --reject` (the plane returns OK with no record → data `{}`), and every failure carry `{}`; parse
     // leniently so a valid reject is never wrongly rejected as Corrupt.
-    let wire_record = serde_json::from_value::<WireCurrentRecord>(env.data).ok();
-    Ok(WriteReceipt {
-        receipt,
-        error: env.error,
-        wire_record,
-    })
+    let wire_record = serde_json::from_value::<WireCurrentRecord>(data).ok();
+    match receipt {
+        Some(receipt) => Ok(WriteReceipt {
+            receipt: Some(receipt),
+            error,
+            wire_record,
+        }),
+        // A receipt-LESS envelope is a valid TERMINAL answer only when it is an `ok:false` denial that
+        // still parsed a flat `error` — an old server (or an already-stored wedged receipt a same-`op_id`
+        // replay re-serves) that never attached a receipt to its DENIED. Mapping it to a settled receipt
+        // is the typed way out of a wedged op-WAL (`run_write` deletes it). An `ok:true` success with no
+        // receipt is genuinely corrupt (a success without its receipt), and stays `WireInvalid`.
+        None => match (ok, error) {
+            (false, Some(e)) => Ok(WriteReceipt {
+                receipt: None,
+                error: Some(e),
+                wire_record,
+            }),
+            _ => Err(ClientError::WireInvalid(
+                "a write 200 carried no receipt".to_owned(),
+            )),
+        },
+    }
 }
 
 // =================================================================================================
@@ -1740,10 +1760,45 @@ mod tests {
             "an OK move carries the current pointer"
         );
         assert_eq!(
-            wr.receipt.bundle_digest.as_deref(),
+            wr.receipt.as_ref().expect("an OK move carries a receipt").bundle_digest.as_deref(),
             Some("b".repeat(64).as_str())
         );
         assert!(wr.error.is_none());
+    }
+
+    #[test]
+    fn map_write_envelope_receiptless_denied_is_a_terminal_receipt_not_wire_invalid() {
+        // An `ok:false` DENIED envelope that carries a parseable flat `error` but NO receipt (an old server,
+        // or an already-stored wedged receipt a same-op_id replay re-serves) is a valid TERMINAL answer —
+        // NOT WireInvalid. Mapping it to a receipt-less `WriteReceipt` is what lets `run_write` settle
+        // (delete) a wedged op-WAL instead of replaying the receipt-less body forever.
+        let err = WireError {
+            code: "FOUR_EYES_REQUIRED".to_owned(),
+            outcome: TerminalOutcome::Denied,
+            retryable: false,
+            affected: topos_types::Affected::default(),
+            expected_generation: None,
+            current_generation: None,
+            context: serde_json::json!({}),
+            next_actions: Vec::new(),
+        };
+        let bytes = envelope_bytes(&JsonEnvelope {
+            schema_version: 1,
+            command: "reviews".to_owned(),
+            ok: false,
+            data: serde_json::json!({}),
+            warnings: Vec::new(),
+            next_actions: Vec::new(),
+            receipt: None,
+            error: Some(err),
+        });
+        let wr = map_write_envelope(200, &bytes).expect("a receipt-less DENIED is a terminal receipt");
+        assert!(wr.receipt.is_none(), "no receipt was attached");
+        assert_eq!(wr.outcome(), TerminalOutcome::Denied, "outcome reads the flat error");
+        assert_eq!(
+            wr.error.as_ref().map(|e| e.code.as_str()),
+            Some("FOUR_EYES_REQUIRED")
+        );
     }
 
     #[test]

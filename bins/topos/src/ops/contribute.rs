@@ -567,7 +567,7 @@ mod tests {
     }
     fn ok_receipt(op_id: &str) -> WriteReceipt {
         WriteReceipt {
-            receipt: Receipt {
+            receipt: Some(Receipt {
                 schema_version: 1,
                 op_id: op_id.to_owned(),
                 command: "review-approve".to_owned(),
@@ -580,8 +580,28 @@ mod tests {
                 current_generation: Some(2),
                 created_at: "2026-06-30T00:00:00Z".to_owned(),
                 details: None,
-            },
+            }),
             error: None,
+            wire_record: None,
+        }
+    }
+
+    /// A receipt-LESS DENIED write receipt — the terminal answer an old server (or an already-stored
+    /// wedged receipt a same-`op_id` replay re-serves) gives: no receipt, only the flat error. It is a
+    /// terminal `Ok(WriteReceipt)`, so `run_write` must SETTLE (delete) the op-WAL on it.
+    fn denied_receiptless() -> WriteReceipt {
+        WriteReceipt {
+            receipt: None,
+            error: Some(topos_types::WireError {
+                code: "FOUR_EYES_REQUIRED".to_owned(),
+                outcome: TerminalOutcome::Denied,
+                retryable: false,
+                affected: topos_types::Affected::default(),
+                expected_generation: None,
+                current_generation: None,
+                context: serde_json::json!({}),
+                next_actions: Vec::new(),
+            }),
             wire_record: None,
         }
     }
@@ -684,6 +704,73 @@ mod tests {
             *fake.calls.borrow(),
             vec![op_id.clone(), op_id],
             "BOTH sends carried the identical op_id (no double-advance — the server replays the receipt)"
+        );
+    }
+
+    // ── a receipt-less DENIED settles the WAL (the wedge escape) ──
+
+    struct FakeDenied;
+    impl ContributeSource for FakeDenied {
+        fn publish(&self, _b: PublishRequest) -> Result<WriteReceipt, ClientError> {
+            Ok(denied_receiptless())
+        }
+        fn propose(&self, _b: ProposeRequest) -> Result<WriteReceipt, ClientError> {
+            Ok(denied_receiptless())
+        }
+        fn revert(&self, _b: RevertRequest) -> Result<WriteReceipt, ClientError> {
+            Ok(denied_receiptless())
+        }
+        fn review(&self, _b: ReviewRequest) -> Result<WriteReceipt, ClientError> {
+            Ok(denied_receiptless())
+        }
+    }
+
+    #[test]
+    fn run_write_settles_the_wal_on_a_receiptless_denied() {
+        // The wedge escape: a terminal receipt-LESS DENIED (an old server / a stored wedged receipt) is an
+        // `Ok(WriteReceipt)`, so `run_write` DELETES the op-WAL — a later write on this skill is no longer
+        // frozen behind `PENDING_OP`, and no same-op_id replay re-serves the receipt-less body forever.
+        let scratch = Scratch::new();
+        let fs = RealFs;
+        let ids = SeqIds::new("s");
+        let clock = FixedClock(1);
+        let harness = NullHarness;
+        let inert_p = InertPlane;
+        let inert_f = InertFollow;
+        let layout = crate::sidecar::Layout::new(&scratch.0);
+        let ctx = Ctx {
+            fs: &fs,
+            ids: &ids,
+            clock: &clock,
+            device_id: "d_author".to_owned(),
+            layout: layout.clone(),
+            harness: &harness,
+            plane: &inert_p,
+            follow: &inert_f,
+        };
+        let sp = layout.published(&crate::id::SkillId::parse("s_deploy").unwrap());
+        let op_id = "d0000000-0000-4000-8000-000000000001".to_owned();
+        let rec = OpRecord {
+            schema_version: 1,
+            op_id: op_id.clone(),
+            workspace_id: "w_acme".to_owned(),
+            skill_id: "s_deploy".to_owned(),
+            op: OpKind::ReviewApprove,
+            candidate_commit: "a".repeat(64),
+            bundle_digest: "b".repeat(64),
+            expected_generation: 1,
+            good: None,
+            display_name: None,
+            channel: None,
+            last_receipt: None,
+        };
+
+        let receipt = run_write(&ctx, &FakeDenied, &sp, &rec, None).expect("a terminal DENIED is Ok");
+        assert_eq!(receipt.outcome(), TerminalOutcome::Denied);
+        assert!(receipt.receipt.is_none(), "the wedged answer carried no receipt");
+        assert!(
+            crate::op_wal::read(&fs, &layout, &op_id).unwrap().is_none(),
+            "run_write settles (deletes) the WAL on a terminal receipt-less DENIED"
         );
     }
 }

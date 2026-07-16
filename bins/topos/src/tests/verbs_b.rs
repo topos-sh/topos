@@ -994,7 +994,7 @@ impl ContributeSource for OkReview {
     }
     fn review(&self, _b: ReviewRequest) -> Result<WriteReceipt, ClientError> {
         Ok(WriteReceipt {
-            receipt: Receipt {
+            receipt: Some(Receipt {
                 schema_version: 1,
                 op_id: "op-1".into(),
                 command: "review".into(),
@@ -1007,7 +1007,7 @@ impl ContributeSource for OkReview {
                 current_generation: None,
                 created_at: "2026-07-13T00:00:00Z".into(),
                 details: None,
-            },
+            }),
             error: None,
             wire_record: None,
         })

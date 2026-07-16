@@ -590,12 +590,18 @@ pub(crate) trait GovernanceSource {
 /// non-200 / malformed-body fault is a [`ClientError`].
 #[derive(Debug, Clone)]
 pub(crate) struct WriteReceipt {
-    /// The canonical all-outcome receipt (present on every write 200). `outcome` is the branch
+    /// The canonical all-outcome receipt, present whenever the plane attached one — `outcome` is the branch
     /// discriminant; `version_id` + `bundle_digest` + `current_generation` build the verb's `--json` data.
-    pub receipt: Receipt,
+    /// `None` ONLY on a receipt-LESS DENIED envelope (an old server that never attached a receipt, or an
+    /// already-stored wedged receipt a same-`op_id` replay re-serves): there the flat `error` is the
+    /// terminal answer and [`outcome`](Self::outcome) reads `error.outcome`. Every `ok:true` outcome carries
+    /// `Some` (`map_write_envelope` keeps a receipt-less success as `WireInvalid`), so the OK verb paths may
+    /// require it. A receipt-less DENIED is still an `Ok(WriteReceipt)`, so `run_write` SETTLES (deletes) the
+    /// op-WAL on it — the typed way out for an install wedged behind a stored receipt-less envelope.
+    pub receipt: Option<Receipt>,
     /// The flat wire error on a non-OK outcome (CONFLICT / APPROVAL_REQUIRED / DENIED) — the fine `code`,
     /// the live `current_generation` (the CONFLICT rebase target), and the typed `next_actions`. `None` on
-    /// OK / NEEDS_REVIEW.
+    /// OK / NEEDS_REVIEW; the sole carrier of the outcome on a receipt-less DENIED.
     pub error: Option<WireError>,
     /// The served `current` pointer — `Some` ONLY when a pointer actually moved (publish / revert /
     /// review-approve OK). `None` for NEEDS_REVIEW, an OK `review --reject` (moves nothing → data `{}`), and
@@ -604,9 +610,18 @@ pub(crate) struct WriteReceipt {
 }
 
 impl WriteReceipt {
-    /// The terminal outcome the verb branches on.
+    /// The terminal outcome the verb branches on — the receipt's `outcome` when present, else the flat
+    /// wire error's (the receipt-less DENIED case). A body carrying neither is impossible past
+    /// `map_write_envelope` (a receipt-less non-denial is `WireInvalid`); the permanent-failure default is
+    /// a defensive floor, never reached in practice.
     pub(crate) fn outcome(&self) -> TerminalOutcome {
-        self.receipt.outcome
+        match &self.receipt {
+            Some(r) => r.outcome,
+            None => self
+                .error
+                .as_ref()
+                .map_or(TerminalOutcome::PermanentFailure, |e| e.outcome),
+        }
     }
 }
 
