@@ -280,7 +280,7 @@ beforeAll(async () => {
   CREDS.stranger = (await mintCredential("u_stranger", "Stranger", "stranger-box")).credential;
   await db.q(`DELETE FROM web.seat WHERE workspace_id = $1 AND user_id = 'u_stranger'`, [wsId]);
   const doomed = await mintCredential("u_mem", "Member", "mem-old-laptop");
-  await identity.revokeOwnDevice({ userId: "u_mem", display: "Member" }, doomed.deviceId, wsId);
+  await identity.revokeOwnDevice({ userId: "u_mem", display: "Member" }, doomed.deviceId);
   CREDS.revoked = doomed.credential;
 
   // Catalog: alpha (in `eng`), beta (nowhere yet), one archived, one pointer-less.

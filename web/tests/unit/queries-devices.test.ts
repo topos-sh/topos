@@ -90,4 +90,32 @@ describe("signOutDevice (self-only, final, idempotent)", () => {
     );
     expect(rows[0]?.revoked_at).toBeNull();
   });
+
+  it("the revocation audit lands in the OWNER's seat workspace, never the boot workspace", async () => {
+    const queries = await q();
+    // A SECOND workspace B (claimed), and a user seated ONLY in B — never in the boot ws A.
+    await db.q(
+      `INSERT INTO web.workspace (id, name, display_name, claimed_at)
+       VALUES ('w_fixd_b', 'wsb-fixd', 'WS B', now())`,
+    );
+    await seedUser(db, "u_cy", "Cy", "cy@example.com");
+    await seatUser(db, "w_fixd_b", "u_cy", "member");
+    await seedDevice(db, "dk_cy", "u_cy", "cy-laptop");
+
+    expect(await queries.signOutDevice(asUser("u_cy", "Cy"), "dk_cy")).toBe("revoked");
+
+    // The device_revoked row lands in B (the owner's only seat) — NOT in the boot workspace A,
+    // where the actor holds no seat. Zero rows there is the whole point of the fix.
+    const inB = await db.q(
+      `SELECT 1 FROM web.audit_event
+       WHERE kind = 'device_revoked' AND subject = 'dk_cy' AND workspace_id = 'w_fixd_b'`,
+    );
+    expect(inB).toHaveLength(1);
+    const inA = await db.q(
+      `SELECT 1 FROM web.audit_event
+       WHERE kind = 'device_revoked' AND subject = 'dk_cy' AND workspace_id = $1`,
+      [wsId],
+    );
+    expect(inA).toHaveLength(0);
+  });
 });

@@ -216,9 +216,7 @@ describe("revoke finality", () => {
     const granted = await identity.pollDeviceAuth(flow.deviceCode);
     expect(granted.status).toBe("granted");
     const deviceId = granted.status === "granted" ? granted.deviceId : "";
-    expect(await identity.revokeOwnDevice({ userId: owner, display: "O" }, deviceId, wsId)).toBe(
-      true,
-    );
+    expect(await identity.revokeOwnDevice({ userId: owner, display: "O" }, deviceId)).toBe(true);
     // The credential dies with the row flip …
     expect(await identity.deviceActor(wsId, flow.deviceCode)).toBeNull();
     // … and the flip is one-way: the database itself refuses the resurrection.
