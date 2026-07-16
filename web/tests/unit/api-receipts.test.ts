@@ -99,7 +99,21 @@ describe("conflictEnvelope against publish.conflict.json", () => {
 
 describe("deniedEnvelope + errorReceiptEnvelope", () => {
   it("a DENIED names its code and rides the access-recovery actions on both halves", () => {
-    const envelope = deniedEnvelope("publish", "REVIEWER_ROLE_REQUIRED", "pr-describe") as {
+    // The receipt parameter is REQUIRED by the type now — a receipt-less DENIED is the op-WAL
+    // wedge class, structurally closed at the signature.
+    const receipt = buildReceipt({
+      opId: "f47ac10b-58cc-4372-a567-0e02b2c3d478",
+      command: "publish",
+      outcome: "DENIED",
+      workspaceId: "w1",
+      createdAt: "2026-07-16T00:00:00Z",
+    });
+    const envelope = deniedEnvelope(
+      "publish",
+      "REVIEWER_ROLE_REQUIRED",
+      "pr-describe",
+      receipt,
+    ) as {
       ok: boolean;
       next_actions: unknown;
       receipt?: unknown;
@@ -119,10 +133,9 @@ describe("deniedEnvelope + errorReceiptEnvelope", () => {
       context: {},
       next_actions: actions,
     });
-    // No receipt handed in ⇒ no receipt key (omitted, never null).
-    expect("receipt" in envelope).toBe(false);
+    expect(envelope.receipt).toEqual(receipt);
     // No skill name ⇒ `affected` stays {}.
-    const bare = deniedEnvelope("publish", "OP_KEY_REUSED", undefined) as {
+    const bare = deniedEnvelope("publish", "OP_KEY_REUSED", undefined, receipt) as {
       error: { affected: unknown };
     };
     expect(bare.error.affected).toEqual({});

@@ -73,6 +73,19 @@ pub(crate) fn uninstall(
     let sidecar_present = ctx.fs.exists(home);
     let binary = binary_path.map(|p| p.to_string_lossy().into_owned());
 
+    // The destructive remove is FENCED on the tree actually LOOKING like a topos sidecar: any of
+    // the layout's own entries present, or an empty directory. A NON-empty directory carrying none
+    // of them is almost certainly a mispointed `TOPOS_HOME` (e.g. `TOPOS_HOME=$HOME`), and deleting
+    // it would be an unbounded loss — refused typed on BOTH phases, so the describe never promises
+    // a remove the apply would refuse.
+    if sidecar_present && !looks_like_sidecar(ctx, home) {
+        return Err(ClientError::InvalidArgument(format!(
+            "`{sidecar_path}` does not look like a topos sidecar (none of skills/, identity/, \
+             ops/, state/, locks/, or log.jsonl inside) — refusing to delete it. If TOPOS_HOME is \
+             set, point it at the real topos home"
+        )));
+    }
+
     if !yes {
         return Ok(UninstallOutcome::Described {
             describe: UninstallDescribe {
@@ -105,6 +118,24 @@ pub(crate) fn uninstall(
         sidecar_removed,
         binary_path: binary,
     }))
+}
+
+/// Whether `home` looks like a topos sidecar: any of the layout's own entries present, or an
+/// EMPTY directory (a fresh/never-used home — harmless to remove either way). A read failure
+/// counts as "does not look like one" (fail closed — never delete what could not be inspected).
+fn looks_like_sidecar(ctx: &Ctx<'_>, home: &std::path::Path) -> bool {
+    let markers = [
+        ctx.layout.skills_dir(),
+        ctx.layout.identity_dir(),
+        ctx.layout.ops_dir(),
+        ctx.layout.state_dir(),
+        ctx.layout.locks_dir(),
+        ctx.layout.log_path(),
+    ];
+    if markers.iter().any(|m| ctx.fs.exists(m)) {
+        return true;
+    }
+    matches!(ctx.fs.read_dir(home), Ok(entries) if entries.is_empty())
 }
 
 #[cfg(test)]
@@ -306,5 +337,42 @@ mod tests {
             }
             UninstallOutcome::Described { .. } => panic!("--yes applies"),
         }
+    }
+
+    #[test]
+    fn a_home_that_does_not_look_like_a_sidecar_is_refused_on_both_phases() {
+        // A mispointed TOPOS_HOME (e.g. `TOPOS_HOME=$HOME`): the directory EXISTS and is non-empty
+        // but carries none of the sidecar's own entries. Deleting it would be an unbounded loss —
+        // both the describe and the apply refuse typed, and nothing is touched.
+        let home = Scratch::new();
+        std::fs::write(home.0.join("precious.txt"), b"not topos data").unwrap();
+
+        let fs = RealFs;
+        let ids = SeqIds::new("s");
+        let clock = FixedClock(1);
+        let harness = FakeHarness {
+            config: home.0.join("harness-settings.json"),
+            removed: Cell::new(0),
+        };
+        let plane = InertPlane;
+        let follow = InertFollow;
+        let ctx = ctx_with(&fs, &ids, &clock, &harness, &plane, &follow, &home.0);
+
+        for yes in [false, true] {
+            let err = uninstall(&ctx, None, yes).expect_err("the fence refuses");
+            assert_eq!(err.code(), "INVALID_ARGUMENT", "yes={yes}");
+            let msg = crate::render::safe_message(&err);
+            assert!(msg.contains("does not look like a topos sidecar"), "{msg}");
+            assert!(msg.contains("TOPOS_HOME"), "{msg}");
+        }
+        assert!(
+            home.0.join("precious.txt").exists(),
+            "nothing was deleted behind the fence"
+        );
+        assert_eq!(
+            harness.removed.get(),
+            0,
+            "the hook was never scrubbed either"
+        );
     }
 }

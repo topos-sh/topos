@@ -160,12 +160,14 @@ export function conflictEnvelope(args: {
   );
 }
 
-/** A typed DENIED envelope (role gates, lifecycle refusals, key reuse). */
+/** A typed DENIED envelope (role gates, lifecycle refusals, key reuse). The receipt is REQUIRED
+ * by the type — the wire contract says every write 200 carries one, and an optional parameter is
+ * how a receipt-less DENIED (the op-WAL wedge class) slips back in at a future call site. */
 export function deniedEnvelope(
   command: string,
   code: string,
   skillName: string | undefined,
-  receipt?: ReceiptShape,
+  receipt: ReceiptShape,
 ): Record<string, unknown> {
   const nextActions: NextAction[] = [
     { code: "REQUEST_ACCESS", argv: [] },

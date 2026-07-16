@@ -3936,8 +3936,11 @@
             "description": "The proposed version's commit id (64-char lowercase hex) — the review target handle."
           },
           "yours": {
-            "type": "boolean",
-            "description": "Whether the CALLER authored this proposal — the server computes it from the resolved user id\n(never email equality). The client's inbox uses it to split the outbox (yours) from the inbox\n(others') and to offer the author `--withdraw` instead of `--approve`. A producer predating the\nfield omits it, so it defaults to `false` and the client falls back to comparing principals."
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the CALLER authored this proposal — the server computes it from the resolved user id\n(never email equality). The client's inbox uses it to split the outbox (yours) from the inbox\n(others') and to offer the author `--withdraw` instead of `--approve`. `Some` is AUTHORITATIVE\neither way (a served `false` is a served \"not yours\" — never overridden client-side); only a\nproducer predating the field omits it (`None`), and only then does the client fall back to\ncomparing principals."
           }
         }
       },

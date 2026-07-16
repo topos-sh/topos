@@ -114,13 +114,16 @@ fn review_inbox(
                 created_at: p.created_at,
                 stale: p.stale,
             };
-            // The server-computed `yours` (from the resolved user id) is authoritative; the
-            // principal comparison is the COMPAT fallback for a server predating the field (labeling
-            // only, never authorization — the plane re-decides every verdict).
-            let mine = p.yours
-                || me_principal
+            // The server-computed `yours` (from the resolved user id) is authoritative in BOTH
+            // directions — a served `false` is never overridden by the principal comparison (emails
+            // are mutable and re-registrable, so a stale principal could mislabel someone else's
+            // proposal as yours). The comparison is the COMPAT fallback ONLY when the server predates
+            // the field (labeling only, never authorization — the plane re-decides every verdict).
+            let mine = p.yours.unwrap_or_else(|| {
+                me_principal
                     .as_deref()
-                    .is_some_and(|me| me == enroll::canonical_principal(&p.proposer));
+                    .is_some_and(|me| me == enroll::canonical_principal(&p.proposer))
+            });
             if mine {
                 outbox.push(entry);
             } else {
@@ -178,15 +181,17 @@ fn review_describe(
             )));
         }
     };
-    // Whose proposal is this? The server-computed `yours` is authoritative (resolved user id, never
-    // email equality); the principal comparison is the COMPAT fallback for a server predating the field.
+    // Whose proposal is this? The server-computed `yours` is authoritative in BOTH directions
+    // (resolved user id, never email equality) — a served `false` is never overridden; the principal
+    // comparison is the COMPAT fallback ONLY for a server predating the field.
     let me_principal = enroll::read_user(ctx.fs, &ctx.layout)?
         .and_then(|u| u.principal)
         .map(|p| enroll::canonical_principal(&p));
-    let yours = proposal.yours
-        || me_principal
+    let yours = proposal.yours.unwrap_or_else(|| {
+        me_principal
             .as_deref()
-            .is_some_and(|me| me == enroll::canonical_principal(&proposal.proposer));
+            .is_some_and(|me| me == enroll::canonical_principal(&proposal.proposer))
+    });
 
     // The diff against current — the same plane-diff machinery `diff` runs (`current..<proposal>`).
     let diff = super::diff(

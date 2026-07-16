@@ -850,10 +850,12 @@ pub struct WireProposalEntry {
     pub stale: bool,
     /// Whether the CALLER authored this proposal — the server computes it from the resolved user id
     /// (never email equality). The client's inbox uses it to split the outbox (yours) from the inbox
-    /// (others') and to offer the author `--withdraw` instead of `--approve`. A producer predating the
-    /// field omits it, so it defaults to `false` and the client falls back to comparing principals.
-    #[serde(default)]
-    pub yours: bool,
+    /// (others') and to offer the author `--withdraw` instead of `--approve`. `Some` is AUTHORITATIVE
+    /// either way (a served `false` is a served "not yours" — never overridden client-side); only a
+    /// producer predating the field omits it (`None`), and only then does the client fall back to
+    /// comparing principals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yours: Option<bool>,
 }
 
 /// `GET /v1/workspaces/{ws}/proposals` response — every OPEN proposal in the workspace, author-message

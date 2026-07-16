@@ -251,8 +251,9 @@ fn proposal(
         message: msg.to_owned(),
         created_at: "2026-07-12T00:00:00Z".to_owned(),
         stale: false,
-        // Default off — the split tests set it explicitly where they exercise the server signal.
-        yours: false,
+        // Default OMITTED — models a server predating the field, so these fixtures exercise the
+        // principal-comparison COMPAT fallback; the split tests set `Some(..)` explicitly.
+        yours: None,
     }
 }
 
@@ -266,7 +267,7 @@ fn proposal_yours(
     msg: &str,
 ) -> WireProposalEntry {
     WireProposalEntry {
-        yours: true,
+        yours: Some(true),
         ..proposal(skill_id, name, hash, proposer, msg)
     }
 }
@@ -896,6 +897,48 @@ fn review_inbox_prefers_the_server_yours_flag_over_the_principal_string() {
                 "the server-marked-yours proposal is the outbox"
             );
             assert_eq!(data.outbox[0].proposer, "Alice (she/her)");
+        }
+        _ => panic!("a bare review is the inbox"),
+    }
+}
+
+#[test]
+fn review_inbox_never_overrides_a_served_yours_false_with_the_principal_match() {
+    // The served `yours` is authoritative in BOTH directions. Emails are mutable and
+    // re-registrable: someone ELSE may now hold this install's old enrolled login as their
+    // address, so their proposal's `proposer` string EQUALS the stored principal — but the server
+    // (resolved user id) says `yours: false`. The proposal must land in the INBOX (approve/reject
+    // offered), never mislabel into the outbox on the stale string match.
+    let rig = Rig::new("rv-yoursfalse");
+    rig.seed_enrolled("alice@acme.com");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let mut fake = FakeDir::new(log);
+    let theirs = "e".repeat(64);
+    fake.proposals = vec![WireProposalEntry {
+        yours: Some(false),
+        ..proposal(
+            "s_docs",
+            "docs",
+            &theirs,
+            "alice@acme.com", // the re-registered address — string-equal to the principal
+            "someone else's change",
+        )
+    }];
+    let dir = dir_connect(&fake);
+    let contribute = |_b: &str| -> Box<dyn ContributeSource> { Box::new(NullContribute) };
+    let connectors = ops::ReviewConnectors {
+        directory: &dir,
+        contribute: &contribute,
+    };
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+
+    let out = ops::review_dispatch(&ctx, &connectors, None, None, None).unwrap();
+    match out {
+        ops::ReviewOutcome::Inbox(data) => {
+            assert!(data.outbox.is_empty(), "a served false is never overridden");
+            assert_eq!(data.inbox.len(), 1, "it is someone else's to review");
         }
         _ => panic!("a bare review is the inbox"),
     }
