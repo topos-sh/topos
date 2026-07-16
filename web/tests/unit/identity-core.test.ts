@@ -363,67 +363,82 @@ describe("seat removal", () => {
 });
 
 describe("registrationDecision", () => {
-  it("the truth table", async () => {
+  it("the FULL decision table — both policies × both tenancies × ceremony × knob × invitation × mail", async () => {
     const { registrationDecision } = await import("@/lib/auth/registration.server");
-    const cases: [Parameters<typeof registrationDecision>[0], "allow" | "refuse"][] = [
-      [
-        {
-          inClaimCeremony: true,
-          registrationKnob: null,
-          pendingInvitation: false,
-          mailArmed: false,
-        },
-        "allow",
-      ],
-      [
-        {
-          inClaimCeremony: false,
-          registrationKnob: "open",
-          pendingInvitation: false,
-          mailArmed: false,
-        },
-        "allow",
-      ],
-      [
-        {
-          inClaimCeremony: false,
-          registrationKnob: "invite_only",
-          pendingInvitation: true,
-          mailArmed: true,
-        },
-        "allow",
-      ],
-      // An invitation WITHOUT armed mail admits nothing — the mailbox round-trip is the proof.
-      [
-        {
-          inClaimCeremony: false,
-          registrationKnob: "invite_only",
-          pendingInvitation: true,
-          mailArmed: false,
-        },
-        "refuse",
-      ],
-      [
-        {
-          inClaimCeremony: false,
-          registrationKnob: "invite_only",
-          pendingInvitation: false,
-          mailArmed: true,
-        },
-        "refuse",
-      ],
-      [
-        {
-          inClaimCeremony: false,
-          registrationKnob: null,
-          pendingInvitation: false,
-          mailArmed: false,
-        },
-        "refuse",
-      ],
-    ];
-    for (const [facts, expected] of cases) {
-      expect(registrationDecision(facts)).toBe(expected);
+    const bools = [false, true] as const;
+    let checked = 0;
+    for (const policy of ["gated", "open"] as const) {
+      for (const tenancy of ["single", "multi"] as const) {
+        for (const inClaimCeremony of bools) {
+          for (const registrationKnob of ["invite_only", "open", null] as const) {
+            for (const pendingInvitation of bools) {
+              for (const mailArmed of bools) {
+                // The spec, restated independently of the implementation: an `open`
+                // composition admits everything; gated admits the claim ceremony, the
+                // SINGLE-tenant workspace knob (a workspace-scoped knob never opens a
+                // multi-tenant server), or a pending invitation WITH armed mail (the
+                // mailbox round-trip is the proof).
+                const expected =
+                  policy === "open" ||
+                  inClaimCeremony ||
+                  (tenancy === "single" && registrationKnob === "open") ||
+                  (pendingInvitation && mailArmed)
+                    ? "allow"
+                    : "refuse";
+                expect(
+                  registrationDecision({
+                    policy,
+                    tenancy,
+                    inClaimCeremony,
+                    registrationKnob,
+                    pendingInvitation,
+                    mailArmed,
+                  }),
+                ).toBe(expected);
+                checked++;
+              }
+            }
+          }
+        }
+      }
     }
+    expect(checked).toBe(96);
+  });
+
+  it("pins the load-bearing rows", async () => {
+    const { registrationDecision } = await import("@/lib/auth/registration.server");
+    // The workspace `open` knob NEVER opens a multi-tenant server.
+    expect(
+      registrationDecision({
+        policy: "gated",
+        tenancy: "multi",
+        inClaimCeremony: false,
+        registrationKnob: "open",
+        pendingInvitation: false,
+        mailArmed: true,
+      }),
+    ).toBe("refuse");
+    // An invitation WITHOUT armed mail admits nothing — the mailbox round-trip is the proof.
+    expect(
+      registrationDecision({
+        policy: "gated",
+        tenancy: "single",
+        inClaimCeremony: false,
+        registrationKnob: "invite_only",
+        pendingInvitation: true,
+        mailArmed: false,
+      }),
+    ).toBe("refuse");
+    // The open composition admits with every other fact false — and reads nothing.
+    expect(
+      registrationDecision({
+        policy: "open",
+        tenancy: "multi",
+        inClaimCeremony: false,
+        registrationKnob: null,
+        pendingInvitation: false,
+        mailArmed: false,
+      }),
+    ).toBe("allow");
   });
 });

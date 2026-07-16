@@ -4,8 +4,9 @@ import { installTestEnv } from "./helpers/test-env";
 /**
  * The login loader maps the COMPOSITION's auth rungs into plain client flags — no server config
  * reaches the bundle, and no tenancy branch enters the decision. The rungs come from
- * `composition.auth`, mocked here so a single import exercises every shape (the OSS build composes
- * only email+password). `next` rides through `safeNextPath` (real), same-app only.
+ * `composition.auth` and the sign-up posture from `composition.registration`, mocked here so a
+ * single import exercises every shape (the OSS build composes only email+password, gated).
+ * `next` rides through `safeNextPath` (real), same-app only.
  */
 
 let authConfig: {
@@ -13,11 +14,15 @@ let authConfig: {
   magicLink?: unknown;
   socialProviders?: Record<string, unknown>;
 } = { emailAndPassword: true };
+let registrationPolicy: "gated" | "open" = "gated";
 
 vi.mock("@/composition.server", () => ({
   composition: {
     get auth() {
       return authConfig;
+    },
+    get registration() {
+      return registrationPolicy;
     },
   },
 }));
@@ -64,6 +69,21 @@ describe("the login loader's rung flags", () => {
     const data = await call("http://localhost/login");
     expect(data.emailAndPassword).toBe(false);
     expect(data.magicLink).toBe(true);
+  });
+
+  it("the gated composition (the OSS default) carries registrationOpen=false", async () => {
+    authConfig = { emailAndPassword: true };
+    registrationPolicy = "gated";
+    const data = await call("http://localhost/login");
+    expect(data.registrationOpen).toBe(false);
+  });
+
+  it("an open composition carries registrationOpen=true — one plain flag, no policy object", async () => {
+    authConfig = { emailAndPassword: true };
+    registrationPolicy = "open";
+    const data = await call("http://localhost/login");
+    expect(data.registrationOpen).toBe(true);
+    registrationPolicy = "gated";
   });
 
   it("validates `next` to a same-app path; an off-origin value is rejected", async () => {
