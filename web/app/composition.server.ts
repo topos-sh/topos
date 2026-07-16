@@ -23,11 +23,29 @@ import { type NavEntry, ossNav } from "./topos-web/nav";
  */
 export type Tenancy = "single" | "multi";
 
+/**
+ * Who may create an account here — COMPOSITION-owned, so a deployment (not a runtime knob alone)
+ * decides its posture:
+ * - `gated` — the OSS default truth-table: the claim ceremony, a pending invitation on armed
+ *   SMTP, or the per-workspace `registration = 'open'` knob (single-tenant only — a workspace
+ *   knob never opens a multi-tenant server). Everything else gets the one constant refusal.
+ * - `open` — anyone signs up through any rung (a hosted product's posture). Sign-up alone still
+ *   grants no seat and admits nothing.
+ */
+export type RegistrationPolicy = "gated" | "open";
+
 export interface WebComposition {
   auth: AuthProviderConfig;
   entitlements: EntitlementsProvider;
   nav: NavEntry[];
   tenancy: Tenancy;
+  registration: RegistrationPolicy;
+  /**
+   * Top-level path segments THIS deployment additionally reserves as workspace names, unioned
+   * with the OSS route table's own statics + the future-reserve list (`topos-web/segments.ts`).
+   * A superset build lists its private top-level routes here so no workspace name occludes them.
+   */
+  reservedWorkspaceNames: readonly string[];
 }
 
 /**
@@ -50,4 +68,6 @@ export const composition: WebComposition = {
   entitlements: allowAllEntitlements,
   nav: ossNav,
   tenancy: "single",
+  registration: "gated",
+  reservedWorkspaceNames: [],
 };

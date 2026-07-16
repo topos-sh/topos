@@ -28,23 +28,10 @@ export interface OssRoutesOptions {
   tenancy?: "single" | "multi";
 }
 
-/**
- * Every top-level STATIC path segment this table can register in either mode, alphabetical and
- * exhaustive (derived right next to the table so the two can't drift). In MULTI mode these shadow
- * the `/:ws` workspace slugs, so a downstream workspace creator MUST refuse a workspace name that
- * equals any of these — otherwise the name would be unreachable behind its static route.
- */
-export const OSS_TOP_LEVEL_SEGMENTS: readonly string[] = [
-  "account",
-  "api",
-  "app",
-  "claim",
-  "healthz",
-  "install",
-  "login",
-  "recovery",
-  "verify",
-];
+// Every top-level STATIC segment this table registers lives in `segments.ts` (a dev-free module,
+// so consumers of the constant never drag this file's `@react-router/dev` import into a server
+// bundle). A vitest red-test keeps the list and this table in lockstep — add a route here, update
+// `OSS_TOP_LEVEL_SEGMENTS` there, or CI stays red.
 
 export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
   const dir = options.dir ?? "";
