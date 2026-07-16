@@ -14,7 +14,10 @@ import {
  * E2E: the app runs against the fixture vault (tests/fixtures/plane/server.mjs) with a synthetic
  * env. `globalSetup` (tests/e2e/db-setup.mjs) provisions the `topos_e2e` database + the plane
  * schema; the `setup` project then signs a member in through the REAL email+password flow and
- * seeds the directory rows (tests/e2e/auth.setup.ts).
+ * seeds the directory rows (tests/e2e/auth.setup.ts). NB the webServers launch BEFORE
+ * globalSetup (Playwright plugin order), and the app now migrates EAGERLY at boot — so the
+ * database must exist before the server starts; the `test:e2e` script chains the (idempotent)
+ * db-setup ahead of `playwright test` for exactly that.
  *
  * The app server is `react-router dev` (the reliable dev choice — a build+start would need the
  * client assets copied alongside). The DB must be reachable at DATABASE_URL (a local Postgres;
@@ -67,7 +70,7 @@ export default defineConfig({
     {
       // The PRODUCTION build, served — deterministic startup (the dev server's on-demand compile
       // has no ready signal a headless runner can wait on), and the e2e exercises the same bundle
-      // a deployment runs. Migrations apply lazily on the first request (the healthz probe).
+      // a deployment runs. Migrations apply eagerly at process start, before the port binds.
       command: `bun run build && bun run start`,
       // Probe by explicit IPv4 loopback — a runner's `localhost` may resolve to ::1 while the
       // server binds only the IPv4 side; the browser's BASE_URL stays hostname-based.

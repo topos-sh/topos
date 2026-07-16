@@ -660,6 +660,7 @@ fn map_outcome(
             let new_gen = contribute::apply_publish_ok(ctx, sp, lock, map, rec, record)?;
             Ok(PublishOutcome::Published(PublishData {
                 skill_id: rec.skill_id.clone(),
+                name: skill_name.to_owned(),
                 version_id: rec.candidate_commit.clone(),
                 bundle_digest: rec.bundle_digest.clone(),
                 current_generation: new_gen,

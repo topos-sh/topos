@@ -83,7 +83,11 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 export default function WorkspaceDashboard() {
   const data = useLoaderData<typeof loader>();
   if (data.face === "landing") {
-    return <LandingPage awaitingOwner={data.awaitingOwner} setupLine={data.setupLine} />;
+    // The landing face exists only in SINGLE tenancy (the multi anonymous view is the teaser
+    // above), so the CTAs must not promise workspace creation — there is none to reach.
+    return (
+      <LandingPage awaitingOwner={data.awaitingOwner} setupLine={data.setupLine} tenancy="single" />
+    );
   }
   if (data.face === "teaser") {
     return <ResourcePage />;

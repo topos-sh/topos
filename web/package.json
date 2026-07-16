@@ -28,7 +28,7 @@
     "db:migrate": "node scripts/migrate.mjs",
     "check": "biome ci --error-on-warnings . && node scripts/check-design-tokens.mjs && node scripts/check-boundary.mjs && node scripts/check-email-authz.mjs && node scripts/gen-plane-types.mjs --check && react-router typegen && tsc --noEmit",
     "test": "vitest run",
-    "test:e2e": "playwright test"
+    "test:e2e": "node tests/e2e/db-setup.mjs && playwright test"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.2.7",

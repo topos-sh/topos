@@ -611,7 +611,9 @@ export async function deviceActor(
           AND d.revoked_at IS NULL
           AND u.id = d.user_id
           AND s.user_id = d.user_id AND s.workspace_id = ${workspaceId}
-        RETURNING d.id AS device_id, d.user_id, u.name AS user_display, s.role`,
+        RETURNING d.id AS device_id, d.user_id,
+          -- The display rule (app/lib/person-display.ts): a blank name falls back to the email.
+          COALESCE(NULLIF(btrim(u.name), ''), u.email) AS user_display, s.role`,
   );
   const row = rows.rows[0] as
     | { device_id: string; user_id: string; user_display: string; role: DeviceActorRow["role"] }

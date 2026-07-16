@@ -536,6 +536,9 @@ pub struct LogData {
 )]
 pub struct PublishData {
     pub skill_id: String,
+    /// The skill's NAME — the handle humans speak and the TTY success line leads with
+    /// (`Published <name>@…`); the opaque `skill_id` above stays the machine key.
+    pub name: String,
     /// The new commit (the shipped `version_id`).
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub version_id: String,
@@ -936,6 +939,7 @@ mod tests {
     fn publish_data_carries_the_move_and_omits_an_absent_added_note() {
         let done = PublishData {
             skill_id: "topos_t00".to_owned(),
+            name: "pr-describe".to_owned(),
             version_id: "a".repeat(64),
             bundle_digest: "c".repeat(64),
             current_generation: 1,

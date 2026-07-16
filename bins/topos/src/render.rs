@@ -1404,9 +1404,11 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
         out.push_str(&added_line(added));
         out.push('\n');
     }
+    // Lead with the NAME — the handle the person publishes by; the opaque skill_id stays a
+    // `--json` key, never the human line.
     out.push_str(&format!(
         "Published {}@{} (digest {}) — current is now generation {}.",
-        data.skill_id,
+        data.name,
         short(&data.version_id),
         short(&data.bundle_digest),
         data.current_generation,
@@ -1776,13 +1778,13 @@ fn short(hex: &str) -> &str {
 mod tests {
     use topos_types::persisted::ConflictPathKind;
     use topos_types::results::{
-        Conflict, ConflictPathReport, ListData, LogData, MergeReport, Offer, PullAction, PullData,
-        PullSkill, SkillEntry,
+        Conflict, ConflictPathReport, ListData, LogData, MergeReport, Offer, PublishData,
+        PullAction, PullData, PullSkill, SkillEntry,
     };
 
     use crate::ops::{FollowNote, ListEnrollment, ListOutcome};
 
-    use super::{follow_tty, list_tty, log_tty, pull_tty};
+    use super::{follow_tty, list_tty, log_tty, publish_tty, pull_tty};
 
     fn row(name: &str, action: PullAction) -> PullSkill {
         PullSkill {
@@ -1807,6 +1809,23 @@ mod tests {
             conflicts,
             drop_diff: None,
         }
+    }
+
+    #[test]
+    fn publish_tty_leads_with_the_skill_name_never_the_opaque_id() {
+        let line = publish_tty(&PublishData {
+            skill_id: "topos_a1b2c3".to_owned(),
+            name: "smoke-notes".to_owned(),
+            version_id: "a".repeat(64),
+            bundle_digest: "c".repeat(64),
+            current_generation: 3,
+            added: None,
+        });
+        assert!(line.starts_with("Published smoke-notes@"), "{line}");
+        assert!(
+            !line.contains("topos_a1b2c3"),
+            "the internal bundle id must never surface on the TTY line: {line}"
+        );
     }
 
     #[test]

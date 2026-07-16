@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Compose smoke test: the web app is the ONE public surface, the vault is internal-only, and a
 # FRESH VOLUME boots the whole first-run story. A green run proves the images build, the real
-# initdb provisions both roles/schemas/grants, both boot-time migration lineages run (the app's
-# drizzle lineage at first request, the vault's sqlx lineage at its boot), the vault publishes
+# initdb provisions both roles/schemas/grants, both boot-time migration lineages run (each app's
+# lineage at its own boot, before it serves), the vault publishes
 # NO host port, the constant protocol card answers on any path, the boot ceremony prints the
 # setup line, and the CLAIM CEREMONY seats a first owner whose signed-in dashboard reads
 # custody state across the schema boundary — the cross-lane SELECT grant, proven on the real
@@ -53,23 +53,19 @@ if [ "$health" != "200" ]; then
 fi
 echo "PASS: /healthz 200 — the app is up and its database is reachable."
 
-# ── a browser DOCUMENT render of the root (boot migrator + the setup ceremony) ───────────────────────
-# The first document request runs the app's drizzle lineage and the boot ceremony (workspace +
-# default channel + the printed claim link). Retried: a fresh-volume boot may race the vault's
-# first migrate — recovery, not a restart, must get the page green.
-echo "== rendering / as a browser document (boot migrations + setup ceremony) =="
-landing=""
-for _ in $(seq 1 30); do
-  landing="$(curl -s -o /dev/null -w '%{http_code}' -H 'Accept: text/html' http://localhost:3000/ || true)"
-  [ "$landing" = "200" ] && break
-  sleep 2
-done
+# ── a browser DOCUMENT render of the root (eager boot migrations + the setup ceremony) ───────────────
+# The app migrates its schema AT BOOT, before it serves — so once /healthz answered above, the
+# VERY FIRST document request must render 200 (this request also runs the boot ceremony:
+# workspace + default channel + the printed claim link). ONE attempt, deliberately: a retry
+# here would mask a regression back to lazy first-request migration.
+echo "== rendering / as a browser document (first request after boot — no retry) =="
+landing="$(curl -s -o /dev/null -w '%{http_code}' -H 'Accept: text/html' http://localhost:3000/ || true)"
 if [ "$landing" != "200" ]; then
-  echo "FAIL: / never rendered 200 as a document (last: '$landing')"
+  echo "FAIL: the FIRST document render of / answered '$landing', wanted 200 (eager boot migrations)"
   compose logs --no-color web | tail -60
   exit 1
 fi
-echo "PASS: the landing document renders."
+echo "PASS: the first landing document renders 200."
 
 # ── the boot ceremony printed the ONE setup line ─────────────────────────────────────────────────────
 echo "== asserting the setup line was printed to the app logs =="
@@ -136,7 +132,8 @@ echo "PASS: the consumed code is dead (uniform miss)."
 # ── the signed-in surface reads CUSTODY STATE across the schema boundary ─────────────────────────────
 # The dashboard's catalog join reads the vault's plane tables read-only — this is the
 # cross-lane SELECT grant (and the vault's own migration lineage) proven through the real
-# stack. Retried for the same fresh-volume race as the first render.
+# stack. Retried: the WEB app never waits on the vault, so a fresh-volume boot may still be
+# racing the vault's own first migrate here.
 echo "== loading the signed-in workspace surface (cross-schema custody reads) =="
 dash=""
 for _ in $(seq 1 15); do

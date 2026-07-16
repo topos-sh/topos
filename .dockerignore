@@ -1,6 +1,11 @@
 # Keep the build context small + reproducible: the compiled artifacts and VCS metadata never belong in it.
+# `**/target` (not just the root) — a nested worktree under .claude/worktrees/ carries its own
+# target/ tree, and a single unanchored entry keeps every one of them out of the context.
 target/
+**/target
 .git/
+# Agent worktrees/session state — never build inputs.
+.claude/
 # Node/bun installs + web build output — the web image runs `bun install` + `bun run build` fresh, so a
 # host tree must never clobber the freshly-installed deps or leak a stale build into the image.
 node_modules

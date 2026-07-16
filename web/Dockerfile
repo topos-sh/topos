@@ -64,11 +64,10 @@ RUN useradd --system --uid 10001 --create-home --home-dir /home/topos topos
 
 # react-router-serve needs exactly: the build output (server + client), the installed deps,
 # package.json (`"type": "module"` + the `start` script), and the DRIZZLE MIGRATIONS — the boot
-# migrator (app/lib/db/migrate.server.ts) resolves `<cwd>/drizzle` at the first document render
-# and fails LOUDLY when it is absent, so an image without that folder serves a working API but
-# 500s every page on a fresh database (the compose smoke renders a document to pin this). The
-# installer bytes ride along at the mirrored sibling path the ENV points at. No app source, no
-# config file is needed at runtime.
+# migrator (app/lib/db/migrate.server.ts) runs at process start, resolves `<cwd>/drizzle`, and
+# fails LOUDLY when it is absent, so an image without that folder never comes up (the compose
+# smoke renders a document to pin this). The installer bytes ride along at the mirrored sibling
+# path the ENV points at. No app source, no config file is needed at runtime.
 COPY --from=builder --chown=10001:10001 /app/web/build ./build
 COPY --from=builder --chown=10001:10001 /app/web/node_modules ./node_modules
 COPY --from=builder --chown=10001:10001 /app/web/package.json ./package.json
@@ -78,7 +77,7 @@ COPY --from=builder --chown=10001:10001 /app/scripts/install.sh /app/scripts/ins
 USER topos
 EXPOSE 3000
 # Serve under Node (same command the `start` script runs, invoked directly on the CJS bin so it never needs
-# bun or a PATH shim). The web schema migrates itself at first request (app/lib/db/migrate.server.ts) — the
-# entrypoint only serves. First requests may error for the seconds before the plane finishes its own
-# migrations; the compose smoke retries.
+# bun or a PATH shim). The web schema migrates itself EAGERLY at process start (the server entry runs
+# app/lib/db/migrate.server.ts at module load, before the port is bound), so the FIRST request already
+# sees a migrated database — the entrypoint only serves.
 CMD ["node", "node_modules/@react-router/serve/bin.cjs", "./build/server/index.js"]

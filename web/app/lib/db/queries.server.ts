@@ -3,6 +3,7 @@ import { alias } from "drizzle-orm/pg-core";
 import type { MemberActor, OwnerActor, UserActor } from "@/lib/auth/guards.server";
 import { auditInTx } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
+import { personDisplayLeftSql } from "@/lib/db/person-display.server";
 import { bundle, proposal, proposalComment, seat, workspace } from "@/lib/db/schema.app";
 import { user } from "@/lib/db/schema.auth";
 import { planeCurrentPointer, planeVersionDigest } from "@/lib/db/schema.custody";
@@ -235,8 +236,8 @@ function proposalDisplaySelect() {
   return getDb()
     .select({
       row: proposal,
-      proposedByDisplay: proposerUser.name,
-      resolvedByDisplay: resolverUser.name,
+      proposedByDisplay: personDisplayLeftSql(proposerUser),
+      resolvedByDisplay: personDisplayLeftSql(resolverUser),
     })
     .from(proposal)
     .leftJoin(proposerUser, eq(proposerUser.id, proposal.proposedBy))

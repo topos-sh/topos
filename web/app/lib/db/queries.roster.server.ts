@@ -2,6 +2,7 @@ import { and, asc, eq, sql } from "drizzle-orm";
 import type { MemberActor } from "@/lib/auth/guards.server";
 import { auditInTx, mintInvitationId } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
+import { personDisplaySql } from "@/lib/db/person-display.server";
 import { invitation, seat } from "@/lib/db/schema.app";
 import { user } from "@/lib/db/schema.auth";
 
@@ -34,7 +35,7 @@ export async function rosterOf(actor: MemberActor): Promise<RosterSeat[]> {
   const rows = await getDb()
     .select({
       userId: seat.userId,
-      display: user.name,
+      display: personDisplaySql(user),
       email: user.email,
       role: seat.role,
       invitedBy: seat.invitedBy,

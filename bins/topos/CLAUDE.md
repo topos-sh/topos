@@ -335,9 +335,15 @@ are asserted byte-equal in tests.
     the gate outcome (`open` → lands directly / `reviewed` → a proposal), the placements (`--to`, or
     `everyone` for a new skill), the audience (reach), the share line, the undo path, and the origin-demotion
     note; a no-op (the draft equals current) is a typed `NO_CHANGES`. The scan is local-first; the network is
-    read only after it; the genesis / WAL apply paths stay byte-identical. `add -s/-a` accept MULTIPLE
+    read only after it; the genesis / WAL apply paths stay byte-identical. The TTY success line leads with
+    the skill NAME (`Published <name>@…` — `PublishData.name`; the opaque `skill_id` stays a `--json` key).
+    `add -s/-a` accept MULTIPLE
     values (a remote import loops per skill × harness); `'*'` and the keep-as-yours re-adopt stay marked
     seams.
+  - **The global `--workspace` selector** accepts the workspace's ADDRESS name as well as the opaque id —
+    canonicalized ONCE at argv entry (`enroll::canonicalize_workspace_flag`, name → joined id, best-effort)
+    so every consumer keeps id semantics; the selection/refusal guidance lists the joined ADDRESS names,
+    never bare `w_…` ids.
 
 ## Planned (lands later)
 

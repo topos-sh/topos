@@ -20,7 +20,11 @@ happened here). Every `/api/v1` miss answers the ONE uniform wire 404 (`api.v1.$
 echo, no existence oracle); a rate belt wears the frozen 429.
 
 **One identity, app-owned directory.** There is ONE identity: a person's `user.id` (Better Auth). Email
-is a login name and a mutable attribute — NOTHING authorizes by email equality. Every seat, device,
+is a login name and a mutable attribute — NOTHING authorizes by email equality. A person's
+human-facing DISPLAY is one rule, written twice in lockstep: the profile name, else the email (a
+magic-link sign-up is born with `name = ''`, and a blank never surfaces as a label) —
+`app/lib/person-display.ts` for TS compositions, `app/lib/db/person-display.server.ts` for the SQL
+selects (member lists, attribution, the device-lane actor). Every seat, device,
 subscription, notice, and audit row references a `user.id`. The whole directory lives in schema `web`:
 the Better Auth tables (`user`/`session`/`account`/`verification`), **seats** (workspace membership +
 role), devices + the device-auth flow rows, invitations, the bundle catalog (each row carrying a `kind`
@@ -35,8 +39,13 @@ the role gate carried by the actor's type.
 
 **The identity ceremonies** (`app/lib/db/identity.server.ts` — the concurrency-critical writes, each one
 transaction, FOR UPDATE-fenced or single-statement-atomic, audit row inside):
+- **Boot** — the `web` schema migrates EAGERLY at process start (a top-level await in
+  `entry.server.tsx`; loaders run BEFORE `handleRequest`, so an in-request gate can never protect
+  the first request): a virgin database serves its FIRST request 200, and a broken one crashes the
+  boot loudly instead of serving unmigrated.
 - **First boot** (`ensureSetup`) mints the workspace + its default `everyone` channel on a virgin
-  database, and while unclaimed (re)mints the claim code and prints ONE line to the logs
+  database (first-request-once — it needs the request origin for the printed link), and while
+  unclaimed (re)mints the claim code and prints ONE line to the logs
   (`→ Finish setup: <origin>/claim?code=…`; `TOPOS_SETUP_CODE` presets it, `TOPOS_SETUP_LINK_FILE`
   mirrors it to a file). Only the code's SHA-256 is stored.
 - **The claim** (`claim.tsx` → `consumeClaim`): one atomic UPDATE consumes the code and seats the first
@@ -159,7 +168,10 @@ real address, since the app never authors a bundle; Channels links to the create
 footer (the registry's non-`workspace` sections + Sign out). The Skills/Channels/nav sections render only
 when a workspace is in scope; every list is loader-derived, so the panel — living in the layout — never
 reads a child route's `:ws` param (it builds links from the loader-supplied address through
-`app/lib/ws-path.ts`).
+`app/lib/ws-path.ts`). The chrome loader derives the active seat from the request's DESTINATION
+path — React Router's client navigations fetch loaders from `<path>.data`, and that suffix is
+normalized before the seat match (`destinationPathname`), so a client-side arrival at a workspace
+dashboard keeps the full panel.
 
 **Stack.** React Router 8 in framework mode (SSR, Vite, bun) · React 19 · Better Auth on Drizzle /
 Postgres · Tailwind 4 with the Klein token set (`DESIGN.md` is the source of truth; the `--color-*` table

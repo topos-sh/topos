@@ -1,6 +1,7 @@
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { MemberActor } from "@/lib/auth/guards.server";
 import { getDb } from "@/lib/db/index.server";
+import { personDisplayLeftSql } from "@/lib/db/person-display.server";
 import {
   bundle,
   bundleDetachment,
@@ -249,7 +250,7 @@ export async function detachedCopiesOf(actor: MemberActor): Promise<DetachedCopy
   const rows = await getDb()
     .select({
       userId: bundleDetachment.userId,
-      display: user.name,
+      display: personDisplayLeftSql(user),
       bundleId: bundleDetachment.bundleId,
       bundleName: bundle.name,
       cause: bundleDetachment.cause,

@@ -65,20 +65,28 @@ Sentry.init({
 export const handleError = Sentry.createSentryHandleError({ logErrors: true });
 
 /**
- * Migrations + the setup ceremony at boot, first-request-once. React Router's serve process
- * has NO boot hook (no `instrumentation.register` equivalent), so both run on the first
- * request through a module-level promise every later request reuses — deterministic and
- * idempotent. Awaited at the top of handleRequest so the DB schema AND the boot-minted
- * workspace (with its printed claim link, while unclaimed) exist before any loader reads. A
- * failure crashes the request loudly (and every subsequent one, since the rejected promise is
- * cached): the orchestrator restarts the process rather than serving half-initialized.
+ * Migrations run EAGERLY, at module load — BEFORE any request is served. In production,
+ * react-router-serve imports the server build before it listens, so the container migrates at
+ * boot and fails LOUDLY there (the orchestrator restarts it rather than serving unmigrated);
+ * in dev, the request handler imports this module before any loader runs. They must NOT wait
+ * for handleRequest: React Router runs a document's loaders FIRST and calls handleRequest with
+ * their results, so a first-request gate down there always lost the race — a virgin database's
+ * first request 500'd (`relation "web.workspace" does not exist`) before the gate ever ran.
  */
-let migrationsPromise: Promise<void> | undefined;
-function ensureMigrations(request: Request): Promise<void> {
-  migrationsPromise ??= runMigrations().then(() =>
-    ensureSetup(new URL(request.url).origin, composition.tenancy),
-  );
-  return migrationsPromise;
+await runMigrations();
+
+/**
+ * The setup ceremony stays first-request-once: it needs the REQUEST origin for the printed
+ * claim link (`TOPOS_PUBLIC_URL` is deliberately un-defaulted — a LAN visitor's own origin must
+ * be able to carry the link), and a pre-setup loader read is safe — the schema above exists,
+ * and every single-tenant loader treats a workspace-less database as "awaiting its owner". A
+ * failure crashes the request loudly (and every subsequent one, since the rejected promise is
+ * cached).
+ */
+let setupPromise: Promise<void> | undefined;
+function ensureSetupOnce(request: Request): Promise<void> {
+  setupPromise ??= ensureSetup(new URL(request.url).origin, composition.tenancy);
+  return setupPromise;
 }
 
 export const streamTimeout = 5_000;
@@ -114,7 +122,7 @@ export default async function handleRequest(
     return card;
   }
 
-  await ensureMigrations(request);
+  await ensureSetupOnce(request);
 
   return new Promise((resolve, reject) => {
     let shellRendered = false;

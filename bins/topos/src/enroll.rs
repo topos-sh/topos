@@ -378,13 +378,16 @@ impl UserDoc {
 
     /// The single workspace an ambient write op (a genesis publish, an invite) acts in.
     ///
-    /// - `explicit = Some(ws)` → that membership, or a clear error if this install has not joined it;
+    /// - `explicit = Some(ws)` → that membership — matched by the opaque id OR the address NAME
+    ///   (the slug a human joined by; an exact id match wins) — or a clear error if this install
+    ///   has not joined it;
     /// - `explicit = None` → the sole membership if there is exactly one; a [`ClientError::WorkspaceSelection`]
-    ///   telling the agent to pass `--workspace <id>` (listing the joined ids) if there is more than one;
-    ///   a [`ClientError::Enrollment`] "not enrolled" if there are none.
+    ///   telling the agent to pass `--workspace <name>` (listing the joined names) if there is more
+    ///   than one; a [`ClientError::Enrollment`] "not enrolled" if there are none.
     ///
     /// # Errors
-    /// As above — never a silent guess when the choice is ambiguous.
+    /// As above — never a silent guess when the choice is ambiguous. The guidance messages speak
+    /// the joined ADDRESS names (what a human types), never bare `w_…` ids.
     pub(crate) fn resolve_write_workspace(
         &self,
         explicit: Option<&str>,
@@ -396,29 +399,56 @@ impl UserDoc {
             ));
         }
         match explicit {
-            Some(ws) => self.membership(ws).ok_or_else(|| {
-                ClientError::WorkspaceSelection(format!(
-                    "this install has not joined workspace '{ws}'; joined workspaces: {}",
-                    self.workspace_ids().join(", ")
-                ))
-            }),
+            Some(ws) => self
+                .membership(ws)
+                .or_else(|| self.workspaces.iter().find(|m| m.name == ws))
+                .ok_or_else(|| {
+                    ClientError::WorkspaceSelection(format!(
+                        "this install has not joined workspace '{ws}'; joined workspaces: {}",
+                        self.workspace_names().join(", ")
+                    ))
+                }),
             None => match self.workspaces.as_slice() {
                 [only] => Ok(only),
                 _ => Err(ClientError::WorkspaceSelection(format!(
-                    "this install follows skills in multiple workspaces ({}); pass `--workspace <id>` \
+                    "this install follows skills in multiple workspaces ({}); pass `--workspace <name>` \
                      to choose one",
-                    self.workspace_ids().join(", ")
+                    self.workspace_names().join(", ")
                 ))),
             },
         }
     }
 
-    /// The joined workspace ids, in stored order — for the ambiguity guidance message.
-    fn workspace_ids(&self) -> Vec<&str> {
-        self.workspaces
-            .iter()
-            .map(|m| m.workspace_id.as_str())
-            .collect()
+    /// The joined workspace ADDRESS names, in stored order — the guidance messages speak these
+    /// (what a human types at `follow`), never the opaque ids.
+    fn workspace_names(&self) -> Vec<&str> {
+        self.workspaces.iter().map(|m| m.name.as_str()).collect()
+    }
+}
+
+/// The canonical form of the global `--workspace` flag: the person may pass the OPAQUE id or the
+/// workspace's ADDRESS name (the slug they joined by). When the given value is not a joined id
+/// but IS a joined membership's name, it maps to that membership's id — so every downstream
+/// consumer (the write-workspace selection, the skill-scoping filters over follow-state) keeps
+/// plain id semantics. Anything else passes through untouched: the acting verb's own resolution
+/// owns the refusal, with its joined-names guidance. Best-effort by design — an absent or
+/// unreadable user doc changes nothing (the verb's own enrollment error stays the authoritative
+/// refusal).
+pub(crate) fn canonicalize_workspace_flag(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    flag: Option<String>,
+) -> Option<String> {
+    let given = flag?;
+    let Ok(Some(user)) = read_user(fs, layout) else {
+        return Some(given);
+    };
+    if user.membership(&given).is_some() {
+        return Some(given); // Already a joined id — the id always wins.
+    }
+    match user.workspaces.iter().find(|m| m.name == given) {
+        Some(m) => Some(m.workspace_id.clone()),
+        None => Some(given),
     }
 }
 
@@ -995,7 +1025,8 @@ mod tests {
             one.resolve_write_workspace(None).unwrap().workspace_id,
             "w_a"
         );
-        // >1 without an explicit choice → a workspace-selection error naming `--workspace` + the ids.
+        // >1 without an explicit choice → a workspace-selection error naming `--workspace` + the
+        // joined ADDRESS names (what a human types), never the opaque ids.
         let two = user_with(vec![
             sample_membership("w_a", "A"),
             sample_membership("w_b", "B"),
@@ -1004,21 +1035,66 @@ mod tests {
         assert!(matches!(err, ClientError::WorkspaceSelection(_)));
         let msg = err.to_string();
         assert!(
-            msg.contains("--workspace") && msg.contains("w_a") && msg.contains("w_b"),
+            msg.contains("--workspace") && msg.contains("w_a-name") && msg.contains("w_b-name"),
             "{msg}"
         );
-        // >1 WITH a valid explicit → that one.
+        // >1 WITH a valid explicit → that one; the ADDRESS name selects the same seat the id does.
         assert_eq!(
             two.resolve_write_workspace(Some("w_b"))
                 .unwrap()
                 .workspace_id,
             "w_b"
         );
-        // An explicit id this install never joined → a workspace-selection error.
-        assert!(matches!(
-            two.resolve_write_workspace(Some("w_c")),
-            Err(ClientError::WorkspaceSelection(_))
-        ));
+        assert_eq!(
+            two.resolve_write_workspace(Some("w_b-name"))
+                .unwrap()
+                .workspace_id,
+            "w_b"
+        );
+        // An explicit value this install never joined (neither id nor name) → a workspace-selection
+        // error whose guidance lists the joined ADDRESS names.
+        let miss = two.resolve_write_workspace(Some("w_c")).unwrap_err();
+        assert!(matches!(miss, ClientError::WorkspaceSelection(_)));
+        let miss_msg = miss.to_string();
+        assert!(
+            miss_msg.contains("w_a-name") && miss_msg.contains("w_b-name"),
+            "the not-joined guidance must list address names: {miss_msg}"
+        );
+    }
+
+    #[test]
+    fn canonicalize_workspace_flag_maps_a_joined_name_to_its_id_and_passes_the_rest() {
+        let fs = crate::fs_seam::RealFs;
+        let layout = Layout::new(&scratch("ws-flag"));
+        // No user doc yet: everything passes through untouched (best-effort by design).
+        assert_eq!(canonicalize_workspace_flag(&fs, &layout, None), None);
+        assert_eq!(
+            canonicalize_workspace_flag(&fs, &layout, Some("acme".into())),
+            Some("acme".to_owned())
+        );
+        write_user(
+            &fs,
+            &layout,
+            &user_with(vec![
+                sample_membership("w_a", "A"),
+                sample_membership("w_b", "B"),
+            ]),
+        )
+        .unwrap();
+        // A joined ADDRESS name canonicalizes to its id; a joined id stays itself; an unknown
+        // value passes through for the acting verb's own refusal.
+        assert_eq!(
+            canonicalize_workspace_flag(&fs, &layout, Some("w_a-name".into())),
+            Some("w_a".to_owned())
+        );
+        assert_eq!(
+            canonicalize_workspace_flag(&fs, &layout, Some("w_b".into())),
+            Some("w_b".to_owned())
+        );
+        assert_eq!(
+            canonicalize_workspace_flag(&fs, &layout, Some("elsewhere".into())),
+            Some("elsewhere".to_owned())
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@ import { data, redirect } from "react-router";
 import { composition } from "@/composition.server";
 import { bearerToken, uniformNotFound } from "@/lib/api/wire.server";
 import { deviceActor, seatOf, theWorkspace, workspaceByName } from "@/lib/db/identity.server";
+import { personDisplay } from "@/lib/person-display";
 import { getAuth } from "./server";
 
 /** The workspace row a scoped page resolves — the non-null result of the tenancy lookup. */
@@ -125,8 +126,7 @@ export function actorFromSession(session: SessionData | null | undefined): UserA
   if (!session?.user.id) {
     return null;
   }
-  const display =
-    session.user.name.trim().length > 0 ? session.user.name : (session.user.email ?? "unknown");
+  const display = personDisplay(session.user.name, session.user.email ?? "unknown");
   return { userId: session.user.id, display } as UserActor;
 }
 

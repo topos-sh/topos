@@ -27,9 +27,10 @@ pub(crate) struct Cli {
     pub(crate) json: bool,
 
     /// Act in a specific workspace when this install follows skills from more than one on the same plane.
-    /// Selects the workspace for the ambient team verbs (a genesis `publish`, `invite`) and disambiguates
-    /// a skill name shared across workspaces. Optional — with a single workspace it is inferred.
-    #[arg(long, global = true, value_name = "ID")]
+    /// Accepts the workspace's address NAME (what you joined by) or its opaque id. Selects the workspace
+    /// for the ambient team verbs (a genesis `publish`, `invite`) and disambiguates a skill name shared
+    /// across workspaces. Optional — with a single workspace it is inferred.
+    #[arg(long, global = true, value_name = "WORKSPACE")]
     pub(crate) workspace: Option<String>,
 
     #[command(subcommand)]
@@ -162,7 +163,7 @@ pub(crate) enum Command {
         /// Narrow to one or more skills by name (errors if a name is ambiguous).
         name: Vec<String>,
         /// Also list skills available in the workspace(s) you follow (the remote catalog), annotated
-        /// with your follow-state. Requires enrollment; `--workspace <id>` narrows.
+        /// with your follow-state. Requires enrollment; `--workspace` (name or id) narrows.
         #[arg(long)]
         remote: bool,
         /// Show only locally-tracked skills — skip discovery of untracked harness-dir skills.

@@ -27,8 +27,9 @@ use crate::{enroll, identity, logfile, ops, render};
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
     let json = cli.json;
-    // The global `--workspace <id>` — which workspace the ambient write verbs act in (and the filter that
+    // The global `--workspace` — which workspace the ambient write verbs act in (and the filter that
     // disambiguates a skill name shared across workspaces). Optional; inferred with a single workspace.
+    // Canonicalized below (name → id) once the layout exists, so every consumer keeps id semantics.
     let workspace = cli.workspace;
     let command = cli.command;
     let cmd_name = command.name();
@@ -37,6 +38,9 @@ pub fn run() -> ExitCode {
     let ids = RealIds;
     let clock = RealClock;
     let layout = Layout::new(&resolve_home());
+    // `--workspace` accepts the ADDRESS name as well as the opaque id — canonicalized ONCE here
+    // (name → joined id, best-effort), so every downstream consumer keeps id semantics.
+    let workspace = enroll::canonicalize_workspace_flag(&fs, &layout, workspace);
     // The error-side diagnostics channel: every failure that reaches a finisher below lands its full
     // detail in the append-only log the redacted user surfaces point at.
     let diag = Diag {

@@ -65,7 +65,8 @@ pub(crate) struct RemoteScope<'a> {
     /// Every workspace this install has joined, as `(workspace_id, display_label)` (from `user.json`) — the
     /// catalog targets.
     pub memberships: Vec<(String, String)>,
-    /// The global `--workspace <id>` filter (narrows to one joined workspace); `None` = every joined one.
+    /// The global `--workspace` filter, pre-canonicalized to an id (narrows to one joined workspace);
+    /// `None` = every joined one.
     pub only: Option<String>,
 }
 

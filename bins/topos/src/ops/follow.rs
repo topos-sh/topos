@@ -58,7 +58,7 @@ const GENESIS: u64 = 0;
 pub(crate) struct FollowOpts {
     /// `--manual` ⇒ confirm-each adoption (else auto).
     pub manual: bool,
-    /// The global `--workspace <id>` filter — disambiguates a positional skill NAME shared across the
+    /// The global `--workspace` filter, pre-canonicalized to an id — disambiguates a positional skill NAME shared across the
     /// workspaces this install follows on the same plane. Ignored by the enrollment motions.
     pub workspace: Option<String>,
     /// `--yes` — apply the described subscription (the one-shot consent). Bare = describe only.

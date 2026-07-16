@@ -213,9 +213,10 @@ pub(crate) enum ClientError {
     #[error("an in-flight write for '{skill}' must settle first: {detail}")]
     PendingOp { skill: String, detail: String },
     /// A verb that must act in ONE workspace could not choose one: this install has joined multiple
-    /// workspaces and none was named (pass `--workspace <id>`), or a named `--workspace` id is not one
-    /// this install has joined. The message is usage guidance shown VERBATIM — it names the joined
-    /// workspaces (or the missing id); a workspace id is a path-safe identifier, never a secret.
+    /// workspaces and none was named (pass `--workspace <name>`), or a named `--workspace` (address
+    /// name or opaque id) is not one this install has joined. The message is usage guidance shown
+    /// VERBATIM — it names the joined workspace ADDRESSES; an address slug or workspace id is a
+    /// path-safe identifier, never a secret.
     #[error("{0}")]
     WorkspaceSelection(String),
     /// A definitive, NON-retryable rejection from the plane on a non-2xx status (a 4xx other than 429 — the

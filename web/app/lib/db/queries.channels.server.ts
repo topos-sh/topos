@@ -3,6 +3,7 @@ import type { MemberActor, OwnerActor } from "@/lib/auth/guards.server";
 import { detachExactInTx, entitledIdsInTx, reattachInTx } from "@/lib/db/detach.server";
 import { auditInTx, mintChannelId } from "@/lib/db/identity.server";
 import { getDb, isUniqueViolation } from "@/lib/db/index.server";
+import { personDisplaySql } from "@/lib/db/person-display.server";
 import {
   bundle,
   channel,
@@ -214,7 +215,7 @@ export async function channelDetail(
       : getDb()
           .select({
             userId: channelMember.userId,
-            display: user.name,
+            display: personDisplaySql(user),
             addedBy: channelMember.addedBy,
             addedAt: channelMember.createdAt,
           })

@@ -68,18 +68,38 @@ export interface ChromeData {
 }
 
 /**
- * The active workspace SEAT for the current path: single → the one seat (the URL carries no
- * segment); multi → the seat whose `address` equals the first path segment (memberships already
- * carry the slug, so no DB probe on an arbitrary segment). Returns the seat, or null off-workspace.
+ * The DESTINATION pathname of a request, document or data. React Router's client-side
+ * navigations fetch their loaders from `<destination>.data` (single fetch; `/_root.data` spells
+ * `/` itself) — same loaders, a different URL — so the raw pathname of a client arrival at a
+ * workspace dashboard reads `/acme.data`, not `/acme`. Anything deriving state from the path
+ * must see the destination, so the suffix is stripped here; a workspace slug
+ * (`^[a-z0-9][a-z0-9-]*$`) can never collide with it. Exported for the regression test.
  */
-function activeMembership(
-  pathname: string,
+export function destinationPathname(request: Request): string {
+  const { pathname } = new URL(request.url);
+  if (!pathname.endsWith(".data")) {
+    return pathname;
+  }
+  const stripped = pathname.slice(0, -".data".length);
+  return stripped === "/_root" ? "/" : stripped;
+}
+
+/**
+ * The active workspace SEAT for the request's destination path: single → the one seat (the URL
+ * carries no segment); multi → the seat whose `address` equals the first path segment
+ * (memberships already carry the slug, so no DB probe on an arbitrary segment). Returns the
+ * seat, or null off-workspace. Exported for the regression test — a `.data` loader URL must
+ * resolve the same seat its destination does, or every client-side navigation into a workspace
+ * dashboard strips the panel down to logo + account.
+ */
+export function activeMembership(
+  request: Request,
   memberships: WorkspaceMembership[],
 ): WorkspaceMembership | null {
   if (composition.tenancy === "single") {
     return memberships[0] ?? null;
   }
-  const first = pathname.split("/")[1] ?? "";
+  const first = destinationPathname(request).split("/")[1] ?? "";
   return memberships.find((m) => m.address === first) ?? null;
 }
 
@@ -88,7 +108,7 @@ function activeMembership(
  * layouts. */
 export async function loadChrome(request: Request, actor: UserActor): Promise<ChromeData> {
   const memberships = await membershipsFor(actor);
-  const active = activeMembership(new URL(request.url).pathname, memberships);
+  const active = activeMembership(request, memberships);
   const wsBase =
     active === null ? null : composition.tenancy === "multi" ? `/${active.address}` : "";
   const ctx: NavContext = {

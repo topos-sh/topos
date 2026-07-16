@@ -26,6 +26,10 @@
       "format": "uint64",
       "minimum": 0
     },
+    "name": {
+      "description": "The skill's NAME — the handle humans speak and the TTY success line leads with\n(`Published <name>@…`); the opaque `skill_id` above stays the machine key.",
+      "type": "string"
+    },
     "skill_id": {
       "type": "string"
     },
@@ -37,6 +41,7 @@
   },
   "required": [
     "skill_id",
+    "name",
     "version_id",
     "bundle_digest",
     "current_generation"

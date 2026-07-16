@@ -13,7 +13,10 @@ import { TerminalDemo } from "@/components/landing/terminal-demo";
  * anonymous view) and the multi-tenant top-level `landing.tsx` route render the same page. The
  * claim band (`awaitingOwner`) is single-tenant only — a multi-tenant deployment always passes
  * `awaitingOwner={false}` and never mints a boot workspace to claim. Sign-in affordances (the nav
- * "Sign in", the header/footer CTAs) lead into the product.
+ * "Sign in", the header/footer CTAs) lead into the product — and they speak the deployment's
+ * TENANCY honestly: only a multi-tenant deployment creates workspaces, so its CTAs say "Create a
+ * workspace"; a single-tenant install's say "Sign in" (its one workspace was minted at boot, and
+ * ownership arrives through the claim band above, never a create flow).
  */
 
 const INSTALL = "curl -fsSL https://topos.sh/install | sh";
@@ -111,9 +114,12 @@ function ClaimBlock({ setupLine }: { setupLine: string }) {
 export function LandingPage({
   awaitingOwner,
   setupLine,
+  tenancy,
 }: {
   awaitingOwner: boolean;
   setupLine: string;
+  /** The deployment's address grammar — decides whether the CTAs may promise workspace creation. */
+  tenancy: "single" | "multi";
 }) {
   return (
     <div className="min-h-dvh text-[15px] leading-[1.6]">
@@ -135,14 +141,17 @@ export function LandingPage({
             <a href={GITHUB} className="transition-colors hover:text-ink max-sm:hidden">
               GitHub
             </a>
-            <Link to="/app" className="transition-colors hover:text-ink max-sm:hidden">
-              Sign in
-            </Link>
+            {tenancy === "multi" && (
+              // In single tenancy the accent button below IS the sign-in — one affordance, no twin.
+              <Link to="/app" className="transition-colors hover:text-ink max-sm:hidden">
+                Sign in
+              </Link>
+            )}
             <Link
               to="/login"
               className="rounded-md bg-accent px-3.5 py-2 font-mono text-[12.5px] text-on-accent transition-colors hover:bg-accent-deep focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 active:scale-[0.98]"
             >
-              Create a workspace
+              {tenancy === "multi" ? "Create a workspace" : "Sign in"}
             </Link>
           </div>
         </div>
@@ -176,7 +185,7 @@ export function LandingPage({
             <p className="mt-3 text-[13px] text-faint">
               No terminal?{" "}
               <Link to="/login" className={ULINK}>
-                Create a workspace →
+                {tenancy === "multi" ? "Create a workspace →" : "Sign in →"}
               </Link>
             </p>
           </div>

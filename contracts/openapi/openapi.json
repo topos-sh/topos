@@ -2925,6 +2925,7 @@
         "description": "`publish` (a direct publish that moves `current`). Under a `reviewed` bundle a direct publish is\nDOWNGRADED to a proposal (see [`ProposeData`]); an un-enrolled publish is refused typed (enroll with\n`topos follow <workspace-address>` first). **INFERRED.**",
         "required": [
           "skill_id",
+          "name",
           "version_id",
           "bundle_digest",
           "current_generation"
@@ -2950,6 +2951,10 @@
             "format": "int64",
             "description": "The pointer's new generation after the move.",
             "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "The skill's NAME — the handle humans speak and the TTY success line leads with\n(`Published <name>@…`); the opaque `skill_id` above stays the machine key."
           },
           "skill_id": {
             "type": "string"

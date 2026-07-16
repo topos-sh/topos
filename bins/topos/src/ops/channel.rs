@@ -232,7 +232,7 @@ fn single_workspace(resolutions: &[Resolution]) -> Result<String, ClientError> {
             Some(w) if w != this => {
                 return Err(ClientError::InvalidArgument(
                     "those skills live in different workspaces — a channel belongs to one workspace; \
-                     run one `channel` command per workspace (`--workspace <id>` narrows the set)"
+                     run one `channel` command per workspace (`--workspace <name>` narrows the set)"
                         .into(),
                 ));
             }

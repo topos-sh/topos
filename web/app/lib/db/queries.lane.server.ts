@@ -14,6 +14,7 @@ import {
   mintInvitationId,
 } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
+import { personDisplayLeftSql } from "@/lib/db/person-display.server";
 import { foldInviteEmail, INVITATION_TTL_MS } from "@/lib/db/queries.roster.server";
 import {
   bundle,
@@ -1090,7 +1091,7 @@ export async function openProposalsIndex(actor: DeviceActor): Promise<
       bundleName: bundle.name,
       versionId: proposal.candidateVersionId,
       proposedBy: proposal.proposedBy,
-      proposerName: user.name,
+      proposerName: personDisplayLeftSql(user),
       proposerEmail: user.email,
       createdAt: proposal.createdAt,
     })

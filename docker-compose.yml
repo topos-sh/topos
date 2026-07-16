@@ -97,7 +97,7 @@ services:
       - "3000:3000"
     environment:
       # Connects as topos_web (owns schema `web` — identity, policy, product rows; reads `plane`
-      # read-only, grant-enforced). Migrates its own `web` schema at first request.
+      # read-only, grant-enforced). Migrates its own `web` schema at container start, before serving.
       DATABASE_URL: postgres://topos_web:${TOPOS_WEB_DB_PASSWORD:-web}@db:5432/${POSTGRES_DB:-topos}
       # The internal session lane — the plane, over the compose network, with the shared bearer.
       PLANE_INTERNAL_URL: http://plane:8787

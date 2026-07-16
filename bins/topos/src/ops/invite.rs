@@ -70,7 +70,7 @@ pub(crate) fn invite(
         ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
     })?;
     // Pick the workspace (the invitation's scope) from the enrolled `user.json` memberships:
-    // `--workspace <id>` when the install has joined several, else the sole one. `instance.json` carries
+    // `--workspace` (name or id) when the install has joined several, else the sole one. `instance.json` carries
     // the plane but no workspace, so a present-instance-but-no-user state is a partial enrollment we guide
     // the user to complete rather than guess at.
     let user = enroll::read_user(ctx.fs, &ctx.layout)?.ok_or_else(|| {

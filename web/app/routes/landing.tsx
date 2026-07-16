@@ -22,5 +22,6 @@ export const meta: MetaFunction = () => [
 ];
 
 export default function Landing() {
-  return <LandingPage awaitingOwner={false} setupLine="" />;
+  // This route mounts ONLY in multi tenancy (routes.ts), where workspace creation is real.
+  return <LandingPage awaitingOwner={false} setupLine="" tenancy="multi" />;
 }

@@ -10,6 +10,7 @@ import { getDb } from "@/lib/db/index.server";
 import { account } from "@/lib/db/schema.auth";
 import { sendResetMail, sendVerificationMail } from "@/lib/mail/auth-mail.server";
 import { mailDelivery } from "@/lib/mail/transport.server";
+import { personDisplay } from "@/lib/person-display";
 import { assertRegistrationAllowed } from "./registration.server";
 
 /**
@@ -81,7 +82,7 @@ function buildAuth() {
               await sendVerificationMail(user.email, url);
             },
             afterEmailVerification: async (user: { id: string; email: string; name: string }) => {
-              await bindInvitedSeats(user.id, user.email, user.name || user.email);
+              await bindInvitedSeats(user.id, user.email, personDisplay(user.name, user.email));
             },
           },
         }

@@ -11,7 +11,7 @@ These work before or after any verb.
 | Flag | Value | Description |
 |---|---|---|
 | `--json` |  | Emit one JSON document on stdout (the agent surface) instead of human text. Never prompts |
-| `--workspace` | `<ID>` | Act in a specific workspace when this install follows skills from more than one on the same plane. Selects the workspace for the ambient team verbs (a genesis `publish`, `invite`) and disambiguates a skill name shared across workspaces. Optional — with a single workspace it is inferred |
+| `--workspace` | `<WORKSPACE>` | Act in a specific workspace when this install follows skills from more than one on the same plane. Accepts the workspace's address NAME (what you joined by) or its opaque id. Selects the workspace for the ambient team verbs (a genesis `publish`, `invite`) and disambiguates a skill name shared across workspaces. Optional — with a single workspace it is inferred |
 
 ## Self-scoped verbs
 
@@ -111,7 +111,7 @@ Inventory the skills on this machine. By default also discovers **untracked** sk
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
 | `[NAME]...` |  |  | Narrow to one or more skills by name (errors if a name is ambiguous) |
-| `--remote` |  |  | Also list skills available in the workspace(s) you follow (the remote catalog), annotated with your follow-state. Requires enrollment; `--workspace <id>` narrows |
+| `--remote` |  |  | Also list skills available in the workspace(s) you follow (the remote catalog), annotated with your follow-state. Requires enrollment; `--workspace` (name or id) narrows |
 | `--tracked` |  |  | Show only locally-tracked skills — skip discovery of untracked harness-dir skills |
 | `--footprint` |  |  | Also report the paths topos owns outside skill directories |
 | `--channel` | `<NAME>` |  | Narrow to one channel's skills (repeatable). Lands with the full resolution grammar |
