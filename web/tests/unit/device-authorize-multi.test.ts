@@ -168,3 +168,38 @@ describe("approval resolves the slug and requires a seat", () => {
     expect((await identity.pollDeviceAuth(flow.deviceCode)).status).toBe("granted");
   });
 });
+
+describe("the granted poll's workspace decoration", () => {
+  it("names the FLOW'S workspace, not the first workspace row", async () => {
+    // Two workspaces exist (acme was seeded first — the arbitrary LIMIT-1 row); the flow is
+    // granted against workspace B, and the token route's decoration must name B: the CLI
+    // records what it enrolled into from this one field (it keys every subsequent request's
+    // {ws} segment and its local enrollment state on it).
+    const identity = await import("@/lib/db/identity.server");
+    const { action } = await import("@/routes/api.v1.device-token");
+    await seedWorkspace("w_beta", "beta-team");
+    await seatUser(db, "w_beta", "u_in", "member");
+    const flow = await identity.startDeviceAuth("beta-box", "beta-team");
+    const approved = await identity.approveDeviceAuth(flow.userCode, {
+      userId: "u_in",
+      display: "Insider",
+    });
+    expect(approved).not.toBeNull();
+
+    const res = await (action as RouteAction)({
+      request: new Request(`${ORIGIN}/api/v1/device/token`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ device_code: flow.deviceCode }),
+      }),
+      params: {},
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      status: "granted",
+      credential: flow.deviceCode,
+      device_id: approved?.deviceId,
+      workspace: { workspace_id: "w_beta", name: "beta-team", display_name: "beta-team" },
+    });
+  });
+});

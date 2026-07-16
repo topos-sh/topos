@@ -304,7 +304,13 @@ export type DevicePollResult =
   | { status: "pending" }
   | { status: "denied" }
   | { status: "expired" }
-  | { status: "granted"; deviceId: string };
+  | {
+      status: "granted";
+      deviceId: string;
+      /** The flow's recorded workspace ADDRESS SLUG — what the token route's `workspace`
+       * decoration resolves under the tenancy grammar ('' = the single-tenant origin form). */
+      requestedWorkspace: string;
+    };
 
 /**
  * The CLI's poll, keyed by the device_code hash. IDEMPOTENT by design: a terminal answer
@@ -317,12 +323,12 @@ export type DevicePollResult =
  */
 export async function pollDeviceAuth(deviceCode: string): Promise<DevicePollResult> {
   const rows = await getDb().execute(
-    sql`SELECT status, device_id, expires_at < now() AS expired
+    sql`SELECT status, device_id, requested_workspace, expires_at < now() AS expired
         FROM ${deviceAuthSession}
         WHERE device_code_sha256 = ${sha256OfText(deviceCode)}`,
   );
   const row = rows.rows[0] as
-    | { status: string; device_id: string | null; expired: boolean }
+    | { status: string; device_id: string | null; requested_workspace: string; expired: boolean }
     | undefined;
   if (!row) {
     return { status: "expired" };
@@ -333,7 +339,11 @@ export async function pollDeviceAuth(deviceCode: string): Promise<DevicePollResu
   if (row.status === "approved" && row.device_id !== null) {
     // A granted flow stays granted for its whole TTL — the approve already minted the device,
     // so this is a permanent fact until the sweep reaps the ceremony row.
-    return { status: "granted", deviceId: row.device_id };
+    return {
+      status: "granted",
+      deviceId: row.device_id,
+      requestedWorkspace: row.requested_workspace,
+    };
   }
   // pending — expired pending is terminal (the human never approved in time).
   return row.expired ? { status: "expired" } : { status: "pending" };
