@@ -9,7 +9,7 @@ resource addresses/protocol card, and the `/api/v1` device lane over its own `we
 of an in-process vault (`topos_plane::router` — pure byte custody, the bearer-gated `/internal/v1`
 lane, no public face). Identity is ONE `user.id`: the harness claims the boot-minted workspace,
 signs people in with cookie sessions, and approves every device flow at the real `/verify` ceremony
-(step-up password included) — the same HTTP a browser would send. SMTP stays UNSET in every suite:
+(a plain signed-in accept — no step-up) — the same HTTP a browser would send. SMTP stays UNSET in every suite:
 the whole enrolled loop must work with zero mail delivery. Per-crate unit + generative tests live in
 their crates; this directory is for what only a cross-crate composed run can prove.
 
@@ -32,7 +32,7 @@ their crates; this directory is for what only a cross-crate composed run can pro
   - **HTTP ceremonies** (`Session` — a manual-cookie-jar `ureq` browser stand-in): `claim_owner`
     (GET+POST `/claim` with the preset code → the signed-in first owner), `sign_in`/`sign_up`
     (better-auth's own REST rungs, Origin header included), `approve_device`/`deny_device` (the
-    `/verify` action with the step-up password field), `enroll_begin_and_approve` (the CLI's
+    `/verify` action — a plain signed-in accept, no step-up field), `enroll_begin_and_approve` (the CLI's
     `follow` call 1 + the human approval — the caller resumes), and `mint_device` (a probe
     credential over the real device flow, for wire-level lane calls the CLI has no verb for);
   - **the raw device lane** (`device_get`/`device_put`/`device_delete`/`device_post_json` —

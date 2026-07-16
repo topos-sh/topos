@@ -6,9 +6,11 @@ import type { LastSetLine } from "@/components/policy/last-set-line";
 import { RegistrationPanel } from "@/components/policy/registration-panel";
 import { ReviewRequiredPanel } from "@/components/policy/review-required-panel";
 import { StalenessWindowPanel } from "@/components/policy/staleness-window-panel";
+import { SettingsTabs } from "@/components/settings-tabs";
+import { StepUpMethodProvider } from "@/components/step-up";
 import { buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
-import { notFound, requireMember, requireWorkspaceOwner } from "@/lib/auth/guards.server";
-import { requireStepUp } from "@/lib/auth/step-up.server";
+import { requireMember, requireWorkspaceOwner, workspaceInScope } from "@/lib/auth/guards.server";
+import { requireStepUp, stepUpMethod } from "@/lib/auth/step-up.server";
 import { type AuditEventRow, lastAuditEventOfKind, recordAdminEvent } from "@/lib/db/audit.server";
 import {
   setInvitePolicy,
@@ -16,8 +18,9 @@ import {
   setStalenessWindow,
   workspacePolicyOf,
 } from "@/lib/db/queries.policy.server";
-import { setReviewDefault, workspaceById } from "@/lib/db/queries.server";
-import { followBase } from "@/lib/plane/follow-base.server";
+import { setReviewDefault } from "@/lib/db/queries.server";
+import { useWsPath } from "@/lib/ws-path";
+import { workspaceAddress } from "@/lib/ws-url.server";
 
 export function meta({ params }: { params: { ws?: string } }) {
   return [{ title: `Settings · ${params.ws ?? "Workspace"}` }];
@@ -32,30 +35,26 @@ function lastSetOf(row: AuditEventRow | undefined): LastSetLine | null {
 }
 
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const ws = params.ws;
-  if (!ws) {
-    notFound();
-  }
+  const workspace = await workspaceInScope(params);
+  const ws = workspace.id;
   const actor = await requireMember(request, ws);
   // Management is a confirmed OWNER seat — the actor's role IS the seat table's.
   const isOwner = actor.role === "owner";
   // The knobs are plain columns on the ONE workspace row; the column DEFAULTs are the canonical
   // fallbacks, so a fresh install shows the true defaults, never a blank. The "last set by"
   // lines read the audit ledger — the same rows the setters land in their own transactions.
-  const [policy, workspace, lastReview, lastInvite, lastStaleness, lastRegistration] =
-    await Promise.all([
-      workspacePolicyOf(actor),
-      workspaceById(actor, ws),
-      lastAuditEventOfKind(actor, "policy_review_default"),
-      lastAuditEventOfKind(actor, "policy_invite"),
-      lastAuditEventOfKind(actor, "policy_staleness"),
-      lastAuditEventOfKind(actor, "policy_registration"),
-    ]);
+  const [policy, lastReview, lastInvite, lastStaleness, lastRegistration] = await Promise.all([
+    workspacePolicyOf(actor),
+    lastAuditEventOfKind(actor, "policy_review_default"),
+    lastAuditEventOfKind(actor, "policy_invite"),
+    lastAuditEventOfKind(actor, "policy_staleness"),
+    lastAuditEventOfKind(actor, "policy_registration"),
+  ]);
   return {
-    ws,
     isOwner,
-    address: workspace?.name ?? ws,
-    origin: followBase(request),
+    slug: workspace.name,
+    shareAddress: workspaceAddress(request, workspace.name),
+    stepUpMethod: await stepUpMethod(actor.userId),
     reviewRequired: policy.protectionDefault === "reviewed",
     invitePolicy: policy.invitePolicy,
     stalenessWindowMs: policy.stalenessWindowMs,
@@ -76,13 +75,16 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
  * step-up writes NOTHING and still records the refused attempt under the knob's own audit kind
  * (outcome `denied`, detail `step_up` — the "last set by" lines read `ok` rows only, so refusals
  * never pollute them); a passing one writes, and the setter lands the `ok` audit row in its own
- * transaction. Membership admin lives on its own page (/workspaces/:ws/members).
+ * transaction. Membership admin lives on its own page (the members route).
  */
 export async function action({ request, params }: ActionFunctionArgs) {
-  const ws = params.ws;
-  if (!ws) {
-    notFound();
-  }
+  const workspace = await workspaceInScope(params);
+  const ws = workspace.id;
+  // The membership FLOOR, hoisted above the intent dispatch: every intent below requires at
+  // least a member (most re-check owner/reviewer themselves), and the unmatched-intent 400 must
+  // never answer a non-member — in multi tenancy `:ws` is a guessable public name slug, so a
+  // 400-vs-404 split would be a workspace-existence oracle the GET faces deliberately close.
+  await requireMember(request, workspace.id);
   const formData = await request.formData();
   const intent = String(formData.get("intent") ?? "");
   if (intent === "set-review-required") {
@@ -210,51 +212,56 @@ async function registrationIntent(request: Request, ws: string, formData: FormDa
 
 export default function WorkspaceSettings() {
   const {
-    ws,
     isOwner,
-    address,
-    origin,
+    slug,
+    shareAddress,
+    stepUpMethod,
     reviewRequired,
     invitePolicy,
     stalenessWindowMs,
     registration,
     lastSet,
   } = useLoaderData<typeof loader>();
+  const wsPath = useWsPath();
   return (
-    <div className="space-y-8">
-      <PageHeader
-        title="Settings"
-        meta={<code className="font-mono">{address}</code>}
-        actions={
-          <Link to={`/workspaces/${ws}`} className={buttonClasses("quiet")}>
-            Back to workspace
-          </Link>
-        }
-      />
-      <MembersPointer ws={ws} />
-      <AddressSection address={address} origin={origin} />
-      <ReviewRequiredPanel
-        isOwner={isOwner}
-        reviewRequired={reviewRequired}
-        lastSet={lastSet.review}
-      />
-      <InvitePolicyPanel isOwner={isOwner} invitePolicy={invitePolicy} lastSet={lastSet.invite} />
-      <StalenessWindowPanel
-        isOwner={isOwner}
-        stalenessWindowMs={stalenessWindowMs}
-        lastSet={lastSet.staleness}
-      />
-      <RegistrationPanel
-        isOwner={isOwner}
-        registration={registration}
-        lastSet={lastSet.registration}
-      />
-    </div>
+    <StepUpMethodProvider method={stepUpMethod}>
+      <div className="space-y-8">
+        <PageHeader
+          title="Settings"
+          meta={<code className="font-mono">{slug}</code>}
+          actions={
+            <Link to={wsPath("")} className={buttonClasses("quiet")}>
+              Back to workspace
+            </Link>
+          }
+        />
+        <SettingsTabs active="general" />
+        <MembersPointer />
+        <AddressSection address={shareAddress} />
+        <ReviewRequiredPanel
+          isOwner={isOwner}
+          reviewRequired={reviewRequired}
+          lastSet={lastSet.review}
+        />
+        <InvitePolicyPanel isOwner={isOwner} invitePolicy={invitePolicy} lastSet={lastSet.invite} />
+        <StalenessWindowPanel
+          isOwner={isOwner}
+          stalenessWindowMs={stalenessWindowMs}
+          lastSet={lastSet.staleness}
+        />
+        <RegistrationPanel
+          isOwner={isOwner}
+          registration={registration}
+          lastSet={lastSet.registration}
+        />
+      </div>
+    </StepUpMethodProvider>
   );
 }
 
 /** Membership admin lives on its own page — settings points at it rather than duplicating it. */
-function MembersPointer({ ws }: { ws: string }) {
+function MembersPointer() {
+  const wsPath = useWsPath();
   return (
     <section aria-labelledby="members-pointer-heading" className="space-y-3">
       <SectionHeading>
@@ -264,7 +271,7 @@ function MembersPointer({ ws }: { ws: string }) {
         <p className="text-dim text-sm">
           Invitations, roles, and removals live on the members page.
         </p>
-        <Link to={`/workspaces/${ws}/members`} className={buttonClasses("quiet")}>
+        <Link to={wsPath("members")} className={buttonClasses("quiet")}>
           Manage members
         </Link>
       </Card>
@@ -274,9 +281,9 @@ function MembersPointer({ ws }: { ws: string }) {
 
 /**
  * The workspace address — its own pane section. Sharing and joining speak this address:
- * `topos follow <origin>/<address>`.
+ * `topos follow <address>`.
  */
-function AddressSection({ address, origin }: { address: string; origin: string }) {
+function AddressSection({ address }: { address: string }) {
   return (
     <section aria-labelledby="address-heading" className="space-y-3">
       <SectionHeading>
@@ -286,7 +293,7 @@ function AddressSection({ address, origin }: { address: string; origin: string }
         <p className="text-dim text-sm">
           Hand this to a teammate or another of your own devices — following it joins the workspace.
         </p>
-        <AddressBlock address={address} origin={origin} />
+        <AddressBlock address={address} />
       </Card>
     </section>
   );

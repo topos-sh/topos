@@ -29,7 +29,7 @@ let base: string;
 
 test.beforeAll(async () => {
   const ws = await theWorkspace();
-  base = `/workspaces/${ws.id}/skills/${SKILL}`;
+  base = `/skills/${SKILL}`;
   await ensureBundle({ id: SKILL_ID, name: SKILL });
   const seeded = await seedCustody([
     {

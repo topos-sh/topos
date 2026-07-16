@@ -12,10 +12,10 @@ import { theWorkspace } from "./seed";
  */
 
 test("the app entry carries a seated member straight to the workspace", async ({ page }) => {
-  const ws = await theWorkspace();
+  await theWorkspace();
   await page.goto("/app");
   // Blocking SSR redirects are HTTP hops: the seated member lands on /workspaces/<ws> without
   // ever committing /workspaces itself.
-  await page.waitForURL(`**/workspaces/${ws.id}`);
+  await page.waitForURL(`**/`);
   await expect(page.getByRole("banner")).toBeVisible();
 });

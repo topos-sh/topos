@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { BASE_URL, E2E_PASSWORD, MEMBER_EMAIL, WORKSPACE_ADDRESS } from "./env";
+import { BASE_URL, E2E_PASSWORD, MEMBER_EMAIL } from "./env";
 import { adminQuery, ensureSeatedUser, latestMail, theWorkspace } from "./seed";
 import { gotoSettled, signIn } from "./sign-in";
 
@@ -17,7 +17,8 @@ import { gotoSettled, signIn } from "./sign-in";
 const MEMBER_ONE = "roster-m1@example.com";
 const MEMBER_TWO = "roster-m2@example.com";
 const INVITED = "dana-roster@example.com";
-const FOLLOW_LINE = `topos follow ${BASE_URL}/${WORKSPACE_ADDRESS}`;
+// Single-tenant grammar: the install's ORIGIN is the workspace address — no slug suffix.
+const FOLLOW_LINE = `topos follow ${BASE_URL}`;
 
 test.describe.configure({ mode: "serial" });
 
@@ -40,8 +41,8 @@ async function seatRole(email: string): Promise<string | undefined> {
 test("the members page: the roster rows, the address block, and the sole owner's honest lockout", async ({
   page,
 }) => {
-  const ws = await theWorkspace();
-  await gotoSettled(page, `/workspaces/${ws.id}/members`);
+  await theWorkspace();
+  await gotoSettled(page, `/members`);
   await expect(page.getByRole("heading", { name: "Members", level: 1 })).toBeVisible();
 
   // The owner's own row: role chip + "(you)", and NO controls — the sole owner can be neither
@@ -65,8 +66,8 @@ test("the members page: the roster rows, the address block, and the sole owner's
 test("invite lands an invitation row + the notice mail; revoke needs owner step-up", async ({
   page,
 }) => {
-  const ws = await theWorkspace();
-  await gotoSettled(page, `/workspaces/${ws.id}/members`);
+  await theWorkspace();
+  await gotoSettled(page, `/members`);
 
   // INVITE — member-level, no step-up (non-destructive; the invitation seats nobody).
   await page.getByLabel("Invite by email").fill(INVITED);
@@ -117,8 +118,8 @@ test("invite lands an invitation row + the notice mail; revoke needs owner step-
 test("role change: a wrong password refuses, the right one promotes; the chip + row reflect it", async ({
   page,
 }) => {
-  const ws = await theWorkspace();
-  await gotoSettled(page, `/workspaces/${ws.id}/members`);
+  await theWorkspace();
+  await gotoSettled(page, `/members`);
 
   const row = page.getByRole("listitem").filter({ hasText: MEMBER_ONE });
   await row.getByRole("button", { name: "Change role" }).click();
@@ -142,8 +143,8 @@ test("role change: a wrong password refuses, the right one promotes; the chip + 
 test("remove is an owner step-up ceremony; the seat is deleted in one fenced act", async ({
   page,
 }) => {
-  const ws = await theWorkspace();
-  await gotoSettled(page, `/workspaces/${ws.id}/members`);
+  await theWorkspace();
+  await gotoSettled(page, `/members`);
 
   const row = page.getByRole("listitem").filter({ hasText: MEMBER_TWO });
   await row.getByRole("button", { name: "Remove" }).click();
@@ -156,8 +157,8 @@ test("remove is an owner step-up ceremony; the seat is deleted in one fenced act
 });
 
 test("the sole owner cannot leave — transfer ownership first", async ({ page }) => {
-  const ws = await theWorkspace();
-  await gotoSettled(page, `/workspaces/${ws.id}/members`);
+  await theWorkspace();
+  await gotoSettled(page, `/members`);
 
   await page.getByRole("button", { name: "Leave this workspace" }).click();
   await page.getByLabel("Confirm with your password").fill(E2E_PASSWORD);
@@ -169,13 +170,13 @@ test("the sole owner cannot leave — transfer ownership first", async ({ page }
 });
 
 test("a member leaves their own seat; the honest seatless miss follows", async ({ browser }) => {
-  const ws = await theWorkspace();
+  await theWorkspace();
   const context = await browser.newContext({ storageState: { cookies: [], origins: [] } });
   const page = await context.newPage();
   try {
     // MEMBER_ONE was promoted to reviewer above — any member may leave themselves.
     await signIn(page, MEMBER_ONE);
-    await gotoSettled(page, `/workspaces/${ws.id}/members`);
+    await gotoSettled(page, `/members`);
     // A non-owner reads the roster but gets no owner controls.
     await expect(page.getByRole("button", { name: "Change role" })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Remove", exact: true })).toHaveCount(0);
@@ -184,9 +185,9 @@ test("a member leaves their own seat; the honest seatless miss follows", async (
     await page.getByLabel("Confirm with your password").fill(E2E_PASSWORD);
     await page.getByRole("button", { name: "Leave workspace" }).click();
 
-    // The action redirects to the index; seatless renders the honest miss pane.
-    await page.waitForURL("**/workspaces");
-    await expect(page.getByRole("heading", { name: "No seat here" })).toBeVisible();
+    // The action redirects to the door resolver; a now-seatless person gets the house 404.
+    await page.waitForURL("**/app");
+    await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
     expect(await seatRole(MEMBER_ONE)).toBeUndefined();
   } finally {
     await context.close();

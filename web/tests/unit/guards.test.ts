@@ -70,32 +70,32 @@ describe("safeNextPath", () => {
   });
 
   it("falls back to the dashboard when next is absent", () => {
-    expect(safeNextPath(undefined)).toBe("/workspaces");
-    expect(safeNextPath("")).toBe("/workspaces");
+    expect(safeNextPath(undefined)).toBe("/app");
+    expect(safeNextPath("")).toBe("/app");
   });
 
   it("rejects absolute URLs and protocol-relative //host", () => {
-    expect(safeNextPath("https://evil.com")).toBe("/workspaces");
-    expect(safeNextPath("//evil.com")).toBe("/workspaces");
-    expect(safeNextPath("//evil")).toBe("/workspaces");
+    expect(safeNextPath("https://evil.com")).toBe("/app");
+    expect(safeNextPath("//evil.com")).toBe("/app");
+    expect(safeNextPath("//evil")).toBe("/app");
   });
 
   it("rejects the backslash smuggle (WHATWG treats \\ as /)", () => {
-    expect(safeNextPath("/\\evil.com")).toBe("/workspaces");
-    expect(safeNextPath("/\\evil")).toBe("/workspaces");
-    expect(safeNextPath("\\/evil")).toBe("/workspaces");
+    expect(safeNextPath("/\\evil.com")).toBe("/app");
+    expect(safeNextPath("/\\evil")).toBe("/app");
+    expect(safeNextPath("\\/evil")).toBe("/app");
   });
 
   it("rejects percent-escapes a redirect layer could decode off-origin", () => {
-    expect(safeNextPath("/%5Cevil.com")).toBe("/workspaces");
-    expect(safeNextPath("/%5Cevil")).toBe("/workspaces");
-    expect(safeNextPath("/%2F%5Cevil.com")).toBe("/workspaces");
+    expect(safeNextPath("/%5Cevil.com")).toBe("/app");
+    expect(safeNextPath("/%5Cevil")).toBe("/app");
+    expect(safeNextPath("/%2F%5Cevil.com")).toBe("/app");
   });
 
   it("rejects ASCII control characters (WHATWG URL parsing strips them before parsing)", () => {
-    expect(safeNextPath("/\t//evil.com")).toBe("/workspaces");
-    expect(safeNextPath("/\n//evil.com")).toBe("/workspaces");
-    expect(safeNextPath("/a\x00b")).toBe("/workspaces");
-    expect(safeNextPath("/a\x7fb")).toBe("/workspaces");
+    expect(safeNextPath("/\t//evil.com")).toBe("/app");
+    expect(safeNextPath("/\n//evil.com")).toBe("/app");
+    expect(safeNextPath("/a\x00b")).toBe("/app");
+    expect(safeNextPath("/a\x7fb")).toBe("/app");
   });
 });

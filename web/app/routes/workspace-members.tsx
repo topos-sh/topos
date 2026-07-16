@@ -9,9 +9,10 @@ import {
 } from "@/components/members/pending-invitations";
 import { RemoveMemberForm } from "@/components/members/remove-member-form";
 import { RoleForm } from "@/components/members/role-form";
+import { StepUpMethodProvider } from "@/components/step-up";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading } from "@/components/ui";
-import { notFound, requireMember, requireWorkspaceOwner } from "@/lib/auth/guards.server";
-import { requireStepUp } from "@/lib/auth/step-up.server";
+import { requireMember, requireWorkspaceOwner, workspaceInScope } from "@/lib/auth/guards.server";
+import { requireStepUp, stepUpMethod } from "@/lib/auth/step-up.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import { removeSeat, type SeatMutationRefusal, setSeatRole } from "@/lib/db/identity.server";
 import { workspacePolicyOf } from "@/lib/db/queries.policy.server";
@@ -26,7 +27,8 @@ import {
 import { workspaceById } from "@/lib/db/queries.server";
 import { sendInviteEmail } from "@/lib/mail/invite-mail.server";
 import { mailDelivery } from "@/lib/mail/transport.server";
-import { followBase } from "@/lib/plane/follow-base.server";
+import { useWsPath } from "@/lib/ws-path";
+import { workspaceAddress } from "@/lib/ws-url.server";
 
 export function meta({ params }: { params: { ws?: string } }) {
   return [{ title: `Members · ${params.ws ?? "Workspace"}` }];
@@ -50,15 +52,11 @@ function lapseLabel(expiresAt: Date | null, now: number): string {
 }
 
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const ws = params.ws;
-  if (!ws) {
-    notFound();
-  }
-  const actor = await requireMember(request, ws);
+  const workspace = await workspaceInScope(params);
+  const actor = await requireMember(request, workspace.id);
   const isOwner = actor.role === "owner";
-  const [roster, workspace, pending, policy] = await Promise.all([
+  const [roster, pending, policy] = await Promise.all([
     rosterOf(actor),
-    workspaceById(actor, ws),
     pendingInvitationsOf(actor),
     workspacePolicyOf(actor),
   ]);
@@ -72,15 +70,15 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     lapse: lapseLabel(inv.expiresAt, now),
   }));
   return {
-    ws,
     isOwner,
     selfUserId: actor.userId,
     roster,
     invitations,
     mailArmed: mailDelivery().canSend,
     invitePolicy: policy.invitePolicy,
-    address: workspace?.name ?? ws,
-    origin: followBase(request),
+    slug: workspace.name,
+    shareAddress: workspaceAddress(request, workspace.name),
+    stepUpMethod: await stepUpMethod(actor.userId),
   };
 }
 
@@ -95,10 +93,13 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
  * attempts the data layer never sees — refused step-ups, mangled forms, faults.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
-  const ws = params.ws;
-  if (!ws) {
-    notFound();
-  }
+  const workspace = await workspaceInScope(params);
+  const ws = workspace.id;
+  // The membership FLOOR, hoisted above the intent dispatch: every intent below requires at
+  // least a member (most re-check owner/reviewer themselves), and the unmatched-intent 400 must
+  // never answer a non-member — in multi tenancy `:ws` is a guessable public name slug, so a
+  // 400-vs-404 split would be a workspace-existence oracle the GET faces deliberately close.
+  await requireMember(request, workspace.id);
   const formData = await request.formData();
   const intent = String(formData.get("intent") ?? "");
   if (intent === "invite") {
@@ -163,7 +164,7 @@ async function inviteIntent(request: Request, ws: string, formData: FormData) {
   // The notice mail, per address. A send fault never loses the invitation — the row stands and
   // re-inviting resends — but the reply says honestly when nothing went out.
   const workspace = await workspaceById(actor, ws);
-  const address = `${followBase(request)}/${workspace?.name ?? ws}`;
+  const address = workspaceAddress(request, workspace?.name ?? ws);
   const workspaceName = workspace?.displayName ?? ws;
   let emailSent = true;
   try {
@@ -338,46 +339,59 @@ async function leaveIntent(request: Request, ws: string, formData: FormData) {
   if (outcome === "last_owner") {
     return { intent: "leave" as const, status: "sole_owner" as const };
   }
-  // ok, or missing (the seat is already gone — a race): either way the person is out. Home.
-  throw redirect("/workspaces");
+  // ok, or missing (the seat is already gone — a race): either way the person is out. The door
+  // resolver decides where a now-seatless person lands (the house 404 on this single-tenant install).
+  throw redirect("/app");
 }
 
 export default function WorkspaceMembers() {
-  const { ws, isOwner, selfUserId, roster, invitations, mailArmed, invitePolicy, address, origin } =
-    useLoaderData<typeof loader>();
+  const {
+    isOwner,
+    selfUserId,
+    roster,
+    invitations,
+    mailArmed,
+    invitePolicy,
+    slug,
+    shareAddress,
+    stepUpMethod,
+  } = useLoaderData<typeof loader>();
+  const wsPath = useWsPath();
   return (
-    <div className="space-y-8">
-      <PageHeader
-        title="Members"
-        meta={<code className="font-mono">{address}</code>}
-        actions={
-          <Link to={`/workspaces/${ws}`} className={buttonClasses("quiet")}>
-            Back to workspace
-          </Link>
-        }
-      />
-      <MembersSection
-        roster={roster}
-        isOwner={isOwner}
-        selfUserId={selfUserId}
-        mailArmed={mailArmed}
-        invitePolicy={invitePolicy}
-      />
-      <PendingInvitations invitations={invitations} isOwner={isOwner} />
-      <section aria-labelledby="share-heading" className="space-y-3">
-        <SectionHeading>
-          <span id="share-heading">Workspace address</span>
-        </SectionHeading>
-        <Card className="space-y-3 px-4 py-3">
-          <p className="text-dim text-sm">
-            Hand this to a teammate or another of your own devices — following it joins the
-            workspace.
-          </p>
-          <AddressBlock address={address} origin={origin} />
-        </Card>
-      </section>
-      <LeaveWorkspaceForm />
-    </div>
+    <StepUpMethodProvider method={stepUpMethod}>
+      <div className="space-y-8">
+        <PageHeader
+          title="Members"
+          meta={<code className="font-mono">{slug}</code>}
+          actions={
+            <Link to={wsPath("")} className={buttonClasses("quiet")}>
+              Back to workspace
+            </Link>
+          }
+        />
+        <MembersSection
+          roster={roster}
+          isOwner={isOwner}
+          selfUserId={selfUserId}
+          mailArmed={mailArmed}
+          invitePolicy={invitePolicy}
+        />
+        <PendingInvitations invitations={invitations} isOwner={isOwner} />
+        <section aria-labelledby="share-heading" className="space-y-3">
+          <SectionHeading>
+            <span id="share-heading">Workspace address</span>
+          </SectionHeading>
+          <Card className="space-y-3 px-4 py-3">
+            <p className="text-dim text-sm">
+              Hand this to a teammate or another of your own devices — following it joins the
+              workspace.
+            </p>
+            <AddressBlock address={shareAddress} />
+          </Card>
+        </section>
+        <LeaveWorkspaceForm />
+      </div>
+    </StepUpMethodProvider>
   );
 }
 

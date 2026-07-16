@@ -141,7 +141,7 @@ echo "== loading the signed-in workspace surface (cross-schema custody reads) ==
 dash=""
 for _ in $(seq 1 15); do
   dash="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIES" -L -H 'Accept: text/html' \
-    http://localhost:3000/workspaces || true)"
+    http://localhost:3000/ || true)"
   [ "$dash" = "200" ] && break
   sleep 2
 done

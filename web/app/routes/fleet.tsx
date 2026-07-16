@@ -1,8 +1,9 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { Link, useLoaderData } from "react-router";
 import { relativeTime, shortDevice } from "@/components/format";
+import { SettingsTabs } from "@/components/settings-tabs";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading, ShortId } from "@/components/ui";
-import { notFound, requireMember } from "@/lib/auth/guards.server";
+import { requireMember, workspaceInScope } from "@/lib/auth/guards.server";
 import {
   type DetachedCopyRow,
   detachedCopiesOf,
@@ -13,46 +14,47 @@ import {
   type FleetSkillStatus,
   fleetOf,
 } from "@/lib/db/queries.fleet.server";
+import { useWsPath } from "@/lib/ws-path";
 
 export function meta({ params }: { params: { ws?: string } }) {
-  return [{ title: `Fleet · ${params.ws ?? "Workspace"}` }];
+  return [{ title: `Devices · ${params.ws ?? "Workspace"}` }];
 }
 
 /**
- * The fleet page is a visibility surface, read-only by design: it enumerates every device that
- * touches the workspace and the version each one last reported, and it NAMES its blind spots
- * (stale devices, detached copies, per-device exclusions, removed members' devices) instead of
- * omitting them. It carries NO revoke arm — a device is a possession, revocation is self-only,
- * and the one place a device signs out is the owner's own /settings/devices page.
+ * The workspace Devices page (the Settings section's Devices tab) is a visibility surface,
+ * read-only by design: it enumerates every device that touches the WORKSPACE and the version each
+ * one last reported, and it NAMES its blind spots (stale devices, detached copies, per-device
+ * exclusions, removed members' devices) instead of omitting them. It is the workspace-wide view —
+ * distinct from your own "Your devices" list, where a device is signed out. It carries NO revoke
+ * arm here: a device is a possession, revocation is self-only.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const ws = params.ws;
-  if (!ws) {
-    notFound();
-  }
-  const actor = await requireMember(request, ws);
+  const workspace = await workspaceInScope(params);
+  const actor = await requireMember(request, workspace.id);
   const [fleet, detached] = await Promise.all([fleetOf(actor), detachedCopiesOf(actor)]);
-  return { ws, fleet, detached };
+  return { fleet, detached };
 }
 
 export default function FleetPage() {
-  const { ws, fleet, detached } = useLoaderData<typeof loader>();
+  const { fleet, detached } = useLoaderData<typeof loader>();
+  const wsPath = useWsPath();
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Fleet"
+        title="Devices"
         meta={<FleetMeta fleet={fleet} />}
         actions={
           <>
-            <Link to="/settings/devices" className={buttonClasses("quiet")}>
+            <Link to="/account/devices" className={buttonClasses("quiet")}>
               Your devices
             </Link>
-            <Link to={`/workspaces/${ws}`} className={buttonClasses("quiet")}>
+            <Link to={wsPath("")} className={buttonClasses("quiet")}>
               Back to workspace
             </Link>
           </>
         }
       />
+      <SettingsTabs active="devices" />
       <IntroCopy wholeFleet={fleet.wholeFleet} />
       <FleetBody fleet={fleet} />
       {detached.length > 0 && <DetachedCopies rows={detached} />}
@@ -434,7 +436,7 @@ function BlindSpots() {
         <p>
           Signing a device out is SELF-service — a device is a possession, and its owner does it
           from{" "}
-          <Link to="/settings/devices" className="text-ink underline decoration-hairline">
+          <Link to="/account/devices" className="text-ink underline decoration-hairline">
             your devices
           </Link>
           . This page watches; it doesn&apos;t reach into pockets.

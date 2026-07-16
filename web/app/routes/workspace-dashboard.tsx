@@ -1,52 +1,115 @@
-import type { LoaderFunctionArgs } from "react-router";
+import type { LoaderFunctionArgs, MetaFunction } from "react-router";
 import { Link, useLoaderData } from "react-router";
 import { NoSkills } from "@/components/empty-states";
 import { relativeTime } from "@/components/format";
+import { LandingPage } from "@/components/landing/landing-page";
 import { AddressBlock } from "@/components/members/address-block";
+import { ResourcePage } from "@/components/resource-page";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading, ShortId } from "@/components/ui";
-import { notFound, requireMember } from "@/lib/auth/guards.server";
+import { composition } from "@/composition.server";
+import { serverEnv } from "@/env.server";
+import { actorFromSession, requireMember, workspaceInScope } from "@/lib/auth/guards.server";
+import { getAuth } from "@/lib/auth/server";
+import { theWorkspace } from "@/lib/db/identity.server";
 import { rosterOf } from "@/lib/db/queries.roster.server";
-import { type SkillIndexRow, skillIndexOf, workspaceById } from "@/lib/db/queries.server";
-import { followBase } from "@/lib/plane/follow-base.server";
+import { type SkillIndexRow, skillIndexOf } from "@/lib/db/queries.server";
+import { useWsPath } from "@/lib/ws-path";
+import { workspaceAddress } from "@/lib/ws-url.server";
 
-export function meta({ params }: { params: { ws?: string } }) {
-  return [{ title: `${params.ws ?? "Workspace"} · Topos` }];
-}
+export const meta: MetaFunction<typeof loader> = ({ loaderData }) => {
+  if (loaderData?.face === "page") {
+    return [{ title: `${loaderData.name} · Topos` }];
+  }
+  if (loaderData?.face === "landing") {
+    return [
+      { title: "Topos: align the behavior of every agent in your team" },
+      {
+        name: "description",
+        content:
+          "Your agents share skills, keep them current, and improve them together: one teammate’s fix upgrades every agent on the team.",
+      },
+    ];
+  }
+  return [{ title: "A Topos resource address" }];
+};
 
 /**
- * The workspace "channel" — the content pane. DB-first: the catalog IS the directory's own tables
- * read in place, so a CLI publish lands its rows and the next page load shows them, nothing else
- * required. No per-row vault call: every row renders from the shared database read.
+ * The workspace ROOT face — resource address and canonical dashboard as ONE route (`/` in single
+ * tenancy, `/:ws` in multi). Per-request admission, same table as the retired resource-* routes:
+ *  - a non-browser DOCUMENT fetch gets the CONSTANT protocol card (the server entry, before this
+ *    loader runs — no existence signal leaks);
+ *  - an anonymous browser gets the constant teaser — the LANDING page in single tenancy (with the
+ *    first-run claim band while unclaimed), the constant resource teaser in multi;
+ *  - a signed-in member gets the dashboard WITH the app chrome (face-shell);
+ *  - anyone else — a signed-in non-member, an unknown multi slug — the house 404.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const ws = params.ws;
-  if (!ws) {
-    notFound();
+  const session = await getAuth().api.getSession({ headers: request.headers });
+  const actor = actorFromSession(session);
+  if (actor === null) {
+    // Anonymous browser: the constant teaser. In single tenancy the origin root IS the landing
+    // page, with the one sessionless boolean probe — has this install been claimed yet.
+    if (composition.tenancy === "multi") {
+      return { face: "teaser" as const };
+    }
+    const workspace = await theWorkspace();
+    const awaitingOwner = workspace === null || workspace.claimedAt === null;
+    const origin = (serverEnv().TOPOS_PUBLIC_URL ?? new URL(request.url).origin).replace(
+      /\/+$/,
+      "",
+    );
+    return { face: "landing" as const, awaitingOwner, setupLine: `${origin}/claim?code=…` };
   }
-  const actor = await requireMember(request, ws);
-  const [workspace, index, roster] = await Promise.all([
-    // The app's own workspace row — `?? ws` is the honest fallback when it has none.
-    workspaceById(actor, ws),
-    skillIndexOf(actor, ws),
+
+  // Signed in: resolve the workspace in scope, then the member gate (a non-member 404s here).
+  const workspace = await workspaceInScope(params);
+  const memberActor = await requireMember(request, workspace.id);
+  const [index, roster] = await Promise.all([
+    skillIndexOf(memberActor, workspace.id),
     // Direct seat rows: a seat IS membership, so the count is the roster's length.
-    rosterOf(actor),
+    rosterOf(memberActor),
   ]);
-  const name = workspace?.displayName ?? ws;
-  // The address slug — what joining and sharing speak (`topos follow <origin>/<address>`).
-  const address = workspace?.name ?? ws;
-  const memberCount = roster.length;
   return {
-    ws,
-    name,
-    address,
-    origin: followBase(request),
+    face: "page" as const,
+    name: workspace.displayName,
+    // The address slug — what the meta line shows; the AddressBlock gets the full shareable address.
+    slug: workspace.name,
+    shareAddress: workspaceAddress(request, workspace.name),
     index,
-    memberCount,
+    memberCount: roster.length,
   };
 }
 
 export default function WorkspaceDashboard() {
-  const { ws, name, address, origin, index, memberCount } = useLoaderData<typeof loader>();
+  const data = useLoaderData<typeof loader>();
+  if (data.face === "landing") {
+    return <LandingPage awaitingOwner={data.awaitingOwner} setupLine={data.setupLine} />;
+  }
+  if (data.face === "teaser") {
+    return <ResourcePage />;
+  }
+  return <DashboardPage {...data} />;
+}
+
+/**
+ * The workspace dashboard — the content pane. DB-first: the catalog IS the directory's own tables
+ * read in place, so a CLI publish lands its rows and the next page load shows them, nothing else
+ * required. No per-row vault call: every row renders from the shared database read.
+ */
+function DashboardPage({
+  name,
+  slug,
+  shareAddress,
+  index,
+  memberCount,
+}: {
+  name: string;
+  slug: string;
+  shareAddress: string;
+  index: SkillIndexRow[];
+  memberCount: number;
+}) {
+  const wsPath = useWsPath();
   return (
     <div className="space-y-8">
       <PageHeader
@@ -60,7 +123,7 @@ export default function WorkspaceDashboard() {
         }
         meta={
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <code className="font-mono">{address}</code>
+            <code className="font-mono">{slug}</code>
             <span aria-hidden="true">·</span>
             <span>{index.length === 1 ? "1 skill" : `${index.length} skills`}</span>
             <span aria-hidden="true">·</span>
@@ -68,7 +131,7 @@ export default function WorkspaceDashboard() {
           </div>
         }
         actions={
-          <Link to={`/workspaces/${ws}/settings`} className={buttonClasses("quiet")}>
+          <Link to={wsPath("settings")} className={buttonClasses("quiet")}>
             Settings
           </Link>
         }
@@ -87,7 +150,7 @@ export default function WorkspaceDashboard() {
           <Card className="overflow-hidden">
             <ul>
               {index.map((row) => (
-                <CatalogRow key={row.skillId} ws={ws} row={row} />
+                <CatalogRow key={row.skillId} row={row} />
               ))}
             </ul>
           </Card>
@@ -102,7 +165,7 @@ export default function WorkspaceDashboard() {
           <p className="text-dim text-sm">
             Enroll another of your own devices — or hand an invited teammate the workspace address.
           </p>
-          <AddressBlock address={address} origin={origin} />
+          <AddressBlock address={shareAddress} />
         </Card>
       </section>
     </div>
@@ -116,11 +179,12 @@ export default function WorkspaceDashboard() {
  * `bundle_digest`. When nothing is published yet the pointer is absent — render that honestly
  * rather than assume one. The whole row is the click target, keyed on the catalog NAME.
  */
-function CatalogRow({ ws, row }: { ws: string; row: SkillIndexRow }) {
+function CatalogRow({ row }: { row: SkillIndexRow }) {
+  const wsPath = useWsPath();
   return (
     <li className="border-line-soft border-b last:border-b-0">
       <Link
-        to={`/workspaces/${ws}/skills/${row.name}`}
+        to={wsPath(`skills/${row.name}`)}
         className="flex flex-col gap-1 px-4 py-3 hover:bg-panel2 focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2"
       >
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">

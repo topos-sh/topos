@@ -92,7 +92,7 @@ async function arrange(
   return {
     currentId,
     candidateId,
-    url: `/workspaces/${ws.id}/skills/${name}/proposals/${candidateId}`,
+    url: `/skills/${name}/proposals/${candidateId}`,
   };
 }
 

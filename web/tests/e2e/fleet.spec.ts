@@ -131,9 +131,15 @@ test.afterAll(async () => {
 test("renders every device with the right freshness and per-copy status chips", async ({
   page,
 }) => {
-  const ws = await theWorkspace();
-  await gotoSettled(page, `/workspaces/${ws.id}/fleet`);
-  await expect(page.getByRole("heading", { name: "Fleet", exact: true })).toBeVisible();
+  await theWorkspace();
+  await gotoSettled(page, `/settings/devices`);
+  await expect(page.getByRole("heading", { name: "Devices", level: 1 })).toBeVisible();
+
+  // It is the Devices tab of the Settings section: the shared tab header names both tabs and
+  // marks Devices current.
+  const tabs = page.getByRole("navigation", { name: "Settings sections" });
+  await expect(tabs.getByRole("link", { name: "General" })).toBeVisible();
+  await expect(tabs.getByRole("link", { name: "Devices" })).toHaveAttribute("aria-current", "page");
 
   // The fresh device: release-guide current, handbook behind, a "fresh" liveness chip.
   const fresh = page.getByTestId(`fleet-device-${DEV_FRESH}`);
@@ -156,8 +162,8 @@ test("renders every device with the right freshness and per-copy status chips", 
 test("names its blind spots: removed-upstream devices and the standing detach records", async ({
   page,
 }) => {
-  const ws = await theWorkspace();
-  await gotoSettled(page, `/workspaces/${ws.id}/fleet`);
+  await theWorkspace();
+  await gotoSettled(page, `/settings/devices`);
 
   // The removed-upstream section names the departed person and their still-present copy.
   await expect(page.getByRole("heading", { name: "Removed upstream" })).toBeVisible();
@@ -181,8 +187,8 @@ test("names its blind spots: removed-upstream devices and the standing detach re
 test("read-only by design: no revoke arm anywhere — your-devices is the sign-out surface", async ({
   page,
 }) => {
-  const ws = await theWorkspace();
-  await gotoSettled(page, `/workspaces/${ws.id}/fleet`);
+  await theWorkspace();
+  await gotoSettled(page, `/settings/devices`);
   await expect(page.getByRole("button", { name: /revoke/i })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Sign out" })).toHaveCount(0);
   // The header action (the reading guide carries a second, lowercase link to the same place).

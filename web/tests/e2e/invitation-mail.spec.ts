@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { BASE_URL, E2E_PASSWORD, WORKSPACE_ADDRESS } from "./env";
+import { BASE_URL, E2E_PASSWORD } from "./env";
 import { adminQuery, latestMail, theWorkspace } from "./seed";
 
 /**
@@ -52,10 +52,10 @@ test("invite → verified sign-up → the seat binds and the member lands in the
   page,
   browser,
 }) => {
-  const ws = await theWorkspace();
+  await theWorkspace();
 
   // The OWNER (the suite's default identity) invites the fresh address from the members page.
-  await page.goto(`/workspaces/${ws.id}/members`);
+  await page.goto(`/members`);
   await page.getByLabel("Invite by email").fill(INVITEE);
   await page.getByRole("button", { name: "Invite", exact: true }).click();
   await expect(page.getByRole("status").filter({ hasText: `Invited ${INVITEE}` })).toBeVisible();
@@ -65,7 +65,8 @@ test("invite → verified sign-up → the seat binds and the member lands in the
 
   // The notice mail rode the transport carrying the workspace ADDRESS — never a tokened link.
   const notice = await latestMail("invite", INVITEE);
-  expect(notice.text).toContain(`topos follow ${BASE_URL}/${WORKSPACE_ADDRESS}`);
+  // Single-tenant grammar: the follow line carries the BARE origin (the install IS the workspace).
+  expect(notice.text).toContain(`topos follow ${BASE_URL}`);
 
   // The INVITEE signs up in their own browser. Registration is invite_only, so this succeeds
   // ONLY because the pending invitation + armed mail admit it.
@@ -97,7 +98,7 @@ test("invite → verified sign-up → the seat binds and the member lands in the
 
     // Verified ⇒ the pending invitation became a seat; the member resolves into the shell.
     await invitee.goto("/app");
-    await invitee.waitForURL(`**/workspaces/${ws.id}`);
+    await invitee.waitForURL(`**/`);
     await expect(invitee.getByRole("banner")).toBeVisible();
 
     const seat = await adminQuery<{ role: string }>(

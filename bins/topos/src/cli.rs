@@ -42,7 +42,9 @@ pub(crate) enum Command {
     // ---- Self-scoped (affect only you) ----
     /// Follow a workspace, channel, or skill — enroll if needed, then subscribe two-phase (a bare
     /// invocation DESCRIBES what would land; `--yes` applies). Targets: a workspace address
-    /// (`https://topos.sh/acme`, or a bare workspace name), a qualified path
+    /// (`https://topos.sh/acme`, or a bare workspace name), a bare SERVER address with no workspace
+    /// slug (`https://topos.example.com`, or the schemeless `topos.example.com`) — "the workspace
+    /// that origin addresses", the single-tenant install form, a qualified path
     /// (`acme/channels/eng`, `acme/skills/deploy`), or a bare channel/skill name. A first follow
     /// enrolls this device: open the printed approval URL in a browser, check the code matches, and
     /// approve — the device then holds ONE credential for everything your seats reach. `follow

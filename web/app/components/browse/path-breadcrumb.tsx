@@ -1,5 +1,6 @@
 import { Link } from "react-router";
 import { ShortId } from "@/components/ui";
+import { useWsPath } from "@/lib/ws-path";
 
 const CRUMB_LINK =
   "text-dim underline decoration-hairline transition-colors hover:text-ink " +
@@ -9,21 +10,20 @@ const CRUMB_LINK =
  * The file view's location line, all mono: skill → version (short id, linking back to the file
  * list) → the path, its parent segments faint and the file name in ink. Segments are display
  * text nodes only — the path itself is never a link target here, only a label. `skill` is the
- * catalog NAME (the URL key).
+ * catalog NAME (the URL key; the workspace prefix comes from `useWsPath`).
  */
 export function PathBreadcrumb({
-  ws,
   skill,
   versionId,
   segments,
 }: {
-  ws: string;
   skill: string;
   versionId: string;
   segments: readonly string[];
 }) {
-  const skillHref = `/workspaces/${ws}/skills/${skill}`;
-  const listingHref = `/workspaces/${ws}/skills/${skill}/versions/${versionId}`;
+  const wsPath = useWsPath();
+  const skillHref = wsPath(`skills/${skill}`);
+  const listingHref = wsPath(`skills/${skill}/versions/${versionId}`);
   return (
     <nav
       aria-label="Breadcrumb"

@@ -107,7 +107,7 @@ export async function action({ request }: ActionFunctionArgs) {
   for (const cookie of result.headers.getSetCookie()) {
     responseHeaders.append("set-cookie", cookie);
   }
-  throw redirect("/workspaces", { headers: responseHeaders });
+  throw redirect("/", { headers: responseHeaders });
 }
 
 const INPUT =

@@ -75,9 +75,9 @@ test.beforeAll(async () => {
 test("a reviewer rolls back: the confirm, one exact wire POST, the forward move lands", async ({
   page,
 }) => {
-  const ws = await theWorkspace();
+  await theWorkspace();
   await signIn(page, REVIEWER);
-  await gotoSettled(page, `/workspaces/${ws.id}/skills/${SKILL.name}/history`);
+  await gotoSettled(page, `/skills/${SKILL.name}/history`);
 
   // The non-current ancestor row carries the collapsible roll-back control; the head does not.
   const summary = page.getByText("Roll back to this version…");
@@ -115,7 +115,7 @@ test("a reviewer rolls back: the confirm, one exact wire POST, the forward move 
   expect(pointer[0]?.version_id).not.toBe(goodId);
 
   // The revalidated history walks from the NEW forward head.
-  await gotoSettled(page, `/workspaces/${ws.id}/skills/${SKILL.name}/history`);
+  await gotoSettled(page, `/skills/${SKILL.name}/history`);
   await expect(
     page
       .getByRole("region", { name: "History" })
@@ -124,9 +124,9 @@ test("a reviewer rolls back: the confirm, one exact wire POST, the forward move 
 });
 
 test("a plain member sees no roll-back control on a non-current row", async ({ page }) => {
-  const ws = await theWorkspace();
+  await theWorkspace();
   await signIn(page, MEMBER);
-  await gotoSettled(page, `/workspaces/${ws.id}/skills/${STALE.name}/history`);
+  await gotoSettled(page, `/skills/${STALE.name}/history`);
 
   const history = page.getByRole("region", { name: "History" });
   await expect(history.getByText(staleGoodId.slice(0, 12), { exact: true })).toBeVisible();
@@ -137,7 +137,7 @@ test("a plain member sees no roll-back control on a non-current row", async ({ p
 test("a stale generation renders the conflict note, nothing rolled back", async ({ page }) => {
   const ws = await theWorkspace();
   await signIn(page, REVIEWER);
-  await gotoSettled(page, `/workspaces/${ws.id}/skills/${STALE.name}/history`);
+  await gotoSettled(page, `/skills/${STALE.name}/history`);
   await page.getByText("Roll back to this version…").click();
 
   // The pointer moves UNDER the open page (a concurrent publish through the custody lane).

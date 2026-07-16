@@ -142,3 +142,19 @@ export async function verifySessionPassword(userId: string, password: string): P
   }
   return verifyPassword({ hash, password });
 }
+
+/**
+ * Whether a user has a password rung at all — a `credential` account row carrying a hash. This
+ * is what decides the step-up METHOD (step-up.server's `stepUpMethod`): a password-less account
+ * (magic-link/social-only) has no password to re-enter and confirms through the mail round-trip
+ * instead. Reads only presence — the hash itself never leaves the database.
+ */
+export async function hasCredentialPassword(userId: string): Promise<boolean> {
+  const rows = await getDb()
+    .select({ password: account.password })
+    .from(account)
+    .where(and(eq(account.userId, userId), eq(account.providerId, "credential")))
+    .limit(1);
+  const hash = rows[0]?.password;
+  return hash != null && hash.length > 0;
+}

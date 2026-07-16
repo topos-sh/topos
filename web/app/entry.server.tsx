@@ -4,6 +4,7 @@ import * as Sentry from "@sentry/react-router";
 import { renderToPipeableStream } from "react-dom/server";
 import type { EntryContext, RouterContextProvider } from "react-router";
 import { ServerRouter } from "react-router";
+import { composition } from "@/composition.server";
 import { canonicalOriginRedirect } from "@/lib/canonical.server";
 import { cardResponse } from "@/lib/card.server";
 import { ensureSetup } from "@/lib/db/identity.server";
@@ -74,7 +75,9 @@ export const handleError = Sentry.createSentryHandleError({ logErrors: true });
  */
 let migrationsPromise: Promise<void> | undefined;
 function ensureMigrations(request: Request): Promise<void> {
-  migrationsPromise ??= runMigrations().then(() => ensureSetup(new URL(request.url).origin));
+  migrationsPromise ??= runMigrations().then(() =>
+    ensureSetup(new URL(request.url).origin, composition.tenancy),
+  );
   return migrationsPromise;
 }
 

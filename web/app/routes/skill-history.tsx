@@ -4,13 +4,15 @@ import { HistorySection, type HistorySectionData } from "@/components/skill/hist
 import { type PurgeActionData, PurgeSection } from "@/components/skill/purge-section";
 import { SkillHeader } from "@/components/skill/skill-header";
 import { SkillTabs } from "@/components/skill/skill-tabs";
+import { StepUpMethodProvider } from "@/components/step-up";
 import {
   notFound,
   requireMember,
   requireReviewer,
   requireWorkspaceOwner,
+  workspaceInScope,
 } from "@/lib/auth/guards.server";
-import { requireStepUp, requireTypedName } from "@/lib/auth/step-up.server";
+import { requireStepUp, requireTypedName, stepUpMethod } from "@/lib/auth/step-up.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import { purgeVersion } from "@/lib/db/queries.lifecycle.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
@@ -20,6 +22,8 @@ import { walkHistory } from "@/lib/plane/history.server";
 import { purgeDeniedCopy } from "@/lib/plane/lifecycle-copy";
 import { custodyVersionMeta } from "@/lib/plane/reads.server";
 import { allowRevertWrite } from "@/lib/rate-limit.server";
+import { useWsPath } from "@/lib/ws-path";
+import { wsPathServer } from "@/lib/ws-url.server";
 
 const DEPTH = 10;
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -64,7 +68,8 @@ interface RevertActionData {
  * HEX64-gated here.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const ws = params.ws as string;
+  const workspace = await workspaceInScope(params);
+  const ws = workspace.id;
   const skill = params.skill as string;
   const actor = await requireMember(request, ws);
   const row = await skillIndexRow(actor, skill);
@@ -74,7 +79,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     const resolved = await resolveSkillName(actor, skill);
     if (resolved !== undefined && resolved.via === "hint" && resolved.status === "active") {
       throw redirect(
-        `/workspaces/${ws}/skills/${resolved.name}/history${new URL(request.url).search}`,
+        wsPathServer(workspace.name, `skills/${resolved.name}/history`) +
+          new URL(request.url).search,
       );
     }
     notFound();
@@ -111,7 +117,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   }
 
   return {
-    ws,
+    wsName: workspace.name,
     skill,
     currentShort: row.versionId !== null ? row.versionId.slice(0, 12) : "—",
     displayName: row.displayName,
@@ -120,6 +126,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     history,
     // The purge affordance is a workspace-OWNER ceremony; a plain member/reviewer never sees it.
     canPurge: actor.role === "owner",
+    stepUpMethod: await stepUpMethod(actor.userId),
   };
 }
 
@@ -131,8 +138,14 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
  * either — no explicit invalidation.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
-  const ws = params.ws as string;
+  const workspace = await workspaceInScope(params);
+  const ws = workspace.id;
   const skill = params.skill as string;
+  // The membership FLOOR, hoisted above the intent dispatch: every intent below requires at
+  // least a member (most re-check owner/reviewer themselves), and the unmatched-intent 400 must
+  // never answer a non-member — in multi tenancy `:ws` is a guessable public name slug, so a
+  // 400-vs-404 split would be a workspace-existence oracle the GET faces deliberately close.
+  await requireMember(request, workspace.id);
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");
   if (intent === "revert") {
@@ -299,24 +312,36 @@ async function purgeAction(request: Request, ws: string, skill: string, form: Fo
 }
 
 export default function SkillHistoryPage() {
-  const { ws, skill, currentShort, displayName, kind, openProposals, history, canPurge } =
-    useLoaderData<typeof loader>();
+  const {
+    wsName,
+    skill,
+    currentShort,
+    displayName,
+    kind,
+    openProposals,
+    history,
+    canPurge,
+    stepUpMethod,
+  } = useLoaderData<typeof loader>();
+  const wsPath = useWsPath();
   return (
-    <div className="space-y-6">
-      <SkillHeader
-        ws={ws}
-        skill={skill}
-        currentShort={currentShort}
-        displayName={displayName}
-        kind={kind}
-      />
-      <SkillTabs
-        basePath={`/workspaces/${ws}/skills/${skill}`}
-        active="history"
-        openProposals={openProposals}
-      />
-      <HistorySection ws={ws} skill={skill} data={history} />
-      <PurgeSection skill={skill} data={history} canPurge={canPurge} />
-    </div>
+    <StepUpMethodProvider method={stepUpMethod}>
+      <div className="space-y-6">
+        <SkillHeader
+          ws={wsName}
+          skill={skill}
+          currentShort={currentShort}
+          displayName={displayName}
+          kind={kind}
+        />
+        <SkillTabs
+          basePath={wsPath(`skills/${skill}`)}
+          active="history"
+          openProposals={openProposals}
+        />
+        <HistorySection skill={skill} data={history} />
+        <PurgeSection skill={skill} data={history} canPurge={canPurge} />
+      </div>
+    </StepUpMethodProvider>
   );
 }

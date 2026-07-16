@@ -3,6 +3,7 @@ import { relativeTime } from "@/components/format";
 import { CopyCommand } from "@/components/review/CopyCommand";
 import { Card, Chip, SectionHeading, ShortId } from "@/components/ui";
 import { buildDiffCommand } from "@/lib/diff/command";
+import { useWsPath } from "@/lib/ws-path";
 
 /** One proposal row as the route loader serializes it (dates as ISO strings). */
 export interface ProposalListItem {
@@ -21,14 +22,13 @@ export interface ProposalListItem {
  * The skill's review surface: the OPEN queue first (each row links into its review page), then
  * the resolved record — proposals are rows with a terminal status now, so the decisions stay
  * readable here instead of disappearing. Every person renders by display name (attribution,
- * never an authority key); `skill` is the catalog NAME and every link is name-keyed.
+ * never an authority key); `skill` is the catalog NAME and every link is name-keyed (the workspace
+ * prefix comes from `useWsPath`).
  */
 export function ProposalsSection({
-  ws,
   skill,
   proposals,
 }: {
-  ws: string;
   skill: string;
   proposals: ProposalListItem[];
 }) {
@@ -51,7 +51,7 @@ export function ProposalsSection({
           <Card>
             <ul>
               {open.map((proposal) => (
-                <OpenRow key={proposal.id} ws={ws} skill={skill} proposal={proposal} />
+                <OpenRow key={proposal.id} skill={skill} proposal={proposal} />
               ))}
             </ul>
           </Card>
@@ -65,7 +65,7 @@ export function ProposalsSection({
           <Card>
             <ul>
               {resolved.map((proposal) => (
-                <ResolvedRow key={proposal.id} ws={ws} skill={skill} proposal={proposal} />
+                <ResolvedRow key={proposal.id} skill={skill} proposal={proposal} />
               ))}
             </ul>
           </Card>
@@ -75,15 +75,8 @@ export function ProposalsSection({
   );
 }
 
-function OpenRow({
-  ws,
-  skill,
-  proposal,
-}: {
-  ws: string;
-  skill: string;
-  proposal: ProposalListItem;
-}) {
+function OpenRow({ skill, proposal }: { skill: string; proposal: ProposalListItem }) {
+  const wsPath = useWsPath();
   return (
     <li className="flex min-h-14 flex-wrap items-center gap-x-4 gap-y-1 border-line-soft border-b px-4 py-3 last:border-b-0">
       <span className="flex items-center gap-1.5 text-sm text-dim">
@@ -99,13 +92,13 @@ function OpenRow({
           label="Copy diff command"
         />
         <Link
-          to={`/workspaces/${ws}/skills/${skill}/versions/${proposal.candidateVersionId}`}
+          to={wsPath(`skills/${skill}/versions/${proposal.candidateVersionId}`)}
           className="inline-flex min-h-9 items-center rounded-md border border-line px-3 font-mono text-[13px] text-dim hover:bg-panel2 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
         >
           Files
         </Link>
         <Link
-          to={`/workspaces/${ws}/skills/${skill}/proposals/${proposal.candidateVersionId}`}
+          to={wsPath(`skills/${skill}/proposals/${proposal.candidateVersionId}`)}
           className="inline-flex min-h-9 items-center rounded-md border border-line px-3 font-mono text-[13px] text-dim hover:bg-panel2 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
         >
           Review
@@ -121,19 +114,12 @@ const RESOLVED_LABEL: Record<string, string> = {
   withdrawn: "withdrawn",
 };
 
-function ResolvedRow({
-  ws,
-  skill,
-  proposal,
-}: {
-  ws: string;
-  skill: string;
-  proposal: ProposalListItem;
-}) {
+function ResolvedRow({ skill, proposal }: { skill: string; proposal: ProposalListItem }) {
+  const wsPath = useWsPath();
   return (
     <li className="flex min-h-12 flex-wrap items-center gap-x-4 gap-y-1 border-line-soft border-b px-4 py-3 last:border-b-0">
       <Link
-        to={`/workspaces/${ws}/skills/${skill}/proposals/${proposal.candidateVersionId}`}
+        to={wsPath(`skills/${skill}/proposals/${proposal.candidateVersionId}`)}
         className="flex items-center gap-1.5 rounded text-sm text-dim focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
       >
         <ShortId value={proposal.candidateVersionId} />

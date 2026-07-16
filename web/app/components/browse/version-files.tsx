@@ -18,10 +18,9 @@ import type { ListingEntry } from "@/lib/view/tree";
  * it probed IS the current pointer, so this IS current by construction), the versions page passes
  * its own live current comparison. Placing the chip HERE (beside the device line) keeps the body a
  * single shape — both callers frame the content identically and only the boolean differs. `skill`
- * is the catalog NAME (the URL key).
+ * is the catalog NAME (the URL key; the workspace prefix comes from `useWsPath` in FileListing).
  */
 export function VersionFiles({
-  ws,
   skill,
   versionId,
   version,
@@ -31,7 +30,6 @@ export function VersionFiles({
   docName,
   docTooLarge = false,
 }: {
-  ws: string;
   skill: string;
   versionId: string;
   /** The version's immutable metadata; null when the server had no readable version for this id. */
@@ -76,7 +74,7 @@ export function VersionFiles({
         </div>
       </div>
 
-      <FileListing ws={ws} skill={skill} versionId={versionId} entries={entries} />
+      <FileListing skill={skill} versionId={versionId} entries={entries} />
 
       {docHtml !== undefined && docName !== undefined && (
         <section className="space-y-2">

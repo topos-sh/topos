@@ -544,7 +544,9 @@ struct EnrollIntent {
 
 /// Whether an UNRESOLVED parsed target is shaped like a workspace address this install could enroll
 /// toward. Only address shapes qualify — a bare word must be a valid ADDRESS name; anything else
-/// stays the uniform not-found.
+/// stays the uniform not-found. An ORIGIN address (empty `workspace`) enrolls toward "the workspace
+/// this origin itself addresses" (single-tenant installs) — the empty slug rides the wire body, and
+/// the granted poll carries the authoritative workspace back.
 fn enroll_intent(parsed: &ParsedTarget) -> Option<EnrollIntent> {
     match parsed {
         ParsedTarget::Address {
@@ -552,7 +554,13 @@ fn enroll_intent(parsed: &ParsedTarget) -> Option<EnrollIntent> {
             workspace,
             resource,
         } => {
-            if !resolve::is_workspace_name(workspace) {
+            // Empty = the origin's own workspace (only valid with an explicit host); a NAMED
+            // workspace must be a valid address slug.
+            if workspace.is_empty() {
+                if host.is_none() {
+                    return None;
+                }
+            } else if !resolve::is_workspace_name(workspace) {
                 return None;
             }
             let target = match resource {
@@ -606,7 +614,13 @@ fn begin_address(
             None => connectors.web_origin.trim_end_matches('/').to_owned(),
         },
     };
-    let card_url = format!("{origin}/{}", intent.workspace_name);
+    // The card is constant on every path, so an ORIGIN address (empty workspace) fetches it at the
+    // bare origin; a named workspace fetches it at its own address (still no existence signal).
+    let card_url = if intent.workspace_name.is_empty() {
+        origin.clone()
+    } else {
+        format!("{origin}/{}", intent.workspace_name)
+    };
     let card = (connectors.enroll)(&origin).fetch_card(&card_url)?;
     let base_url = resolve_api_base(&origin, &card.api_base_url)?;
     guard_one_plane(ctx, &base_url)?;
@@ -641,9 +655,16 @@ fn begin_address(
 /// The pending `FollowData` an enrollment surfaces (there is no workspace ID yet — the requested
 /// ADDRESS name rides the disclosure slot; the id arrives with the grant). The human opens
 /// `verification_uri_complete` and cross-checks the code; the agent re-invokes `follow` to poll.
+/// An ORIGIN enrollment has no requested name — the plane base stands in for the disclosure, so the
+/// slot never reads as an empty string.
 fn pending_followdata(wal: &enroll::PendingEnrollment) -> FollowData {
+    let requested = if wal.workspace_name.is_empty() {
+        wal.base_url.clone()
+    } else {
+        wal.workspace_name.clone()
+    };
     FollowData {
-        workspace_id: wal.workspace_name.clone(),
+        workspace_id: requested,
         enrolled: false,
         skills: Vec::new(),
         workspace_display_name: None,

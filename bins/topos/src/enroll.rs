@@ -648,12 +648,15 @@ pub(crate) fn write_wal(
 /// AND on a persisted workspace name outside the address grammar (the WAL is a durable copy of wire
 /// data; the name rides request BODIES only — never a path join — but a hand-edited traversal shape
 /// still fails the load closed, the same boundary discipline as every other persisted identifier).
+/// An EMPTY name is the legitimate ORIGIN enrollment (the workspace the origin itself addresses —
+/// single-tenant installs); the granted poll carries the authoritative workspace back.
 pub(crate) fn read_wal(
     fs: &dyn FsOps,
     layout: &Layout,
 ) -> Result<Option<PendingEnrollment>, ClientError> {
     let wal: Option<PendingEnrollment> = doc::read_doc_private(fs, &layout.enrollment_path())?;
     if let Some(w) = &wal
+        && !w.workspace_name.is_empty()
         && !crate::resolve::is_workspace_name(&w.workspace_name)
     {
         return Err(ClientError::Corrupt(

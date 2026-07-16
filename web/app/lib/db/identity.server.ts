@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { serverEnv } from "@/env.server";
 import { type Db, getDb, isUniqueViolation } from "./index.server";
 import {
@@ -121,7 +121,15 @@ let setupEnsuredThisBoot = false;
  * working); `TOPOS_SETUP_CODE` presets it for CI/IaC and is then stable across boots. Only
  * the SHA-256 is stored. Runs under an advisory lock so parallel first requests race safely.
  */
-export async function ensureSetup(requestOrigin: string): Promise<void> {
+export async function ensureSetup(
+  requestOrigin: string,
+  tenancy: "single" | "multi" = "single",
+): Promise<void> {
+  // MULTI tenancy mints no boot workspace and no claim code — workspaces are born through the
+  // superset's own creation surface, not the single-tenant genesis ceremony.
+  if (tenancy === "multi") {
+    return;
+  }
   if (setupEnsuredThisBoot) {
     return;
   }
@@ -183,6 +191,16 @@ export async function ensureSetup(requestOrigin: string): Promise<void> {
 /** The single-tenant read: the one workspace this install serves (null on a virgin DB). */
 export async function theWorkspace(): Promise<typeof workspace.$inferSelect | null> {
   const rows = await getDb().select().from(workspace).limit(1);
+  return rows[0] ?? null;
+}
+
+/**
+ * The multi-tenant read: the workspace a NAME slug names (null on a miss). The name is the unique
+ * address slug — the multi-tenant browser URL key. A miss resolves the same uniform 404 as a
+ * non-member, so this discloses no more than the member gate already does.
+ */
+export async function workspaceByName(name: string): Promise<typeof workspace.$inferSelect | null> {
+  const rows = await getDb().select().from(workspace).where(eq(workspace.name, name)).limit(1);
   return rows[0] ?? null;
 }
 
@@ -412,6 +430,64 @@ export async function pendingDeviceAuth(
   );
   const row = rows.rows[0] as { requested_name: string } | undefined;
   return row ? { requestedName: row.requested_name } : null;
+}
+
+// ── Step-up email confirmation (the password-less admin-ceremony rung) ──────────────────────
+
+const STEP_UP_TTL_MS = 10 * 60 * 1000;
+
+/** Namespaced per user AND per ceremony page, so a step-up token never collides with Better
+ * Auth's own verification rows (email verification, magic links, reset), a consume only ever
+ * touches this person's, and a token mailed for ONE ceremony page cannot be spent on another
+ * (the reach of an act and the grade of its ceremony stay matched — a link requested on the
+ * members page proves nothing toward a purge). `scope` is the ceremony page's pathname. */
+const stepUpIdentifier = (userId: string, scope: string) => `step-up:${userId}:${scope}`;
+
+/**
+ * Mint a single-use step-up confirmation token for a password-less account and store ONLY its
+ * hash (SHA-256 computed IN Postgres, hex-encoded into the text `verification.value`) under a
+ * per-user, per-ceremony-page identifier with a short TTL. The prior token for this user+page is
+ * dropped first, so at most one confirmation link is ever live per ceremony. Returns the
+ * plaintext — which only ever leaves as the mailed link. Randomness is this tier's; the digest
+ * is the database's.
+ */
+export async function mintStepUpConfirmation(userId: string, scope: string): Promise<string> {
+  const token = mintSecret();
+  const identifier = stepUpIdentifier(userId, scope);
+  const expiresAt = new Date(Date.now() + STEP_UP_TTL_MS);
+  await getDb().transaction(async (tx) => {
+    await tx.execute(sql`DELETE FROM web.verification WHERE identifier = ${identifier}`);
+    await tx.execute(
+      sql`INSERT INTO web.verification (id, identifier, value, expires_at)
+          VALUES (${`su_${randomBytes(16).toString("hex")}`}, ${identifier},
+                  encode(${sha256OfText(token)}, 'hex'), ${expiresAt})`,
+    );
+  });
+  return token;
+}
+
+/**
+ * Consume a presented step-up token: ONE atomic DELETE … RETURNING, so a token is usable at most
+ * once and only before expiry, and only under its own user's identifier for the SAME ceremony
+ * page it was minted on (a foreign token, or one minted for a different ceremony, misses).
+ * Single-use by construction — the row is gone the instant it matches.
+ */
+export async function consumeStepUpConfirmation(
+  userId: string,
+  scope: string,
+  token: string,
+): Promise<boolean> {
+  if (token.length === 0) {
+    return false;
+  }
+  const rows = await getDb().execute(
+    sql`DELETE FROM web.verification
+        WHERE identifier = ${stepUpIdentifier(userId, scope)}
+          AND value = encode(${sha256OfText(token)}, 'hex')
+          AND expires_at > now()
+        RETURNING id`,
+  );
+  return rows.rows.length > 0;
 }
 
 // ── The device lane's actor resolve ─────────────────────────────────────────────────────────

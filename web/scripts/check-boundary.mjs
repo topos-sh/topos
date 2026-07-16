@@ -221,15 +221,16 @@ const SESSIONLESS_ROUTES = new Set([
   "healthz",
   "install",
   "api.auth",
-  "redirect-create",
-  "redirect-link",
   "api.memberships",
-  // The resource addresses + the fallback: anonymous is a VALID state there (the constant
-  // protocol card / teaser — no existence oracle), so the guard family cannot front them;
-  // their signed-in arm resolves the session itself and keeps the house 404 posture.
-  "resource-workspace",
-  "resource-channel",
-  "resource-skill",
+  // The FACE layout tolerates anonymous (the constant teaser / landing renders with no session);
+  // its chrome loads only when a session is present, so it resolves the session itself rather than
+  // guarding. The three face MODULES (workspace-dashboard, skill-current, channel-detail) DO call
+  // require* on their signed-in arm, so they are NOT here.
+  "face-shell",
+  // The reserved-segment stub (multi-tenant `claim`): a loader that only answers the house 404.
+  "reserved",
+  // The fallback: anonymous is a VALID state (the constant protocol card / house 404 — no
+  // existence oracle), so the guard family cannot front it.
   "catch-all",
   // The device flow's unauthenticated start + poll: no credential EXISTS yet (approval mints
   // it); the belt is their gate and the flow rows are single-use, short-TTL.
@@ -292,6 +293,21 @@ for (const { rel, text } of files) {
       fail(rel, "a custom import.meta.env read — no client env is exposed to the browser");
       break;
     }
+  }
+}
+
+// 9. no `/workspaces`-rooted URL literal anywhere under app/ — the signed-in surface is
+// origin-rooted (single tenancy) or `/:ws`-slug-nested (multi), built through app/lib/ws-path.ts.
+// The device lane's `/v1/workspaces/…` / `/internal/v1/workspaces/…` / `/api/v1/workspaces/…`
+// spellings are unaffected: they don't START with `/workspaces` (a quote/backtick precedes the
+// prefix, not `/workspaces`). Zero allowlist entries.
+const WORKSPACES_URL_LITERAL = /["'`]\/workspaces/;
+for (const { rel, text } of files) {
+  if (WORKSPACES_URL_LITERAL.test(text)) {
+    fail(
+      rel,
+      "a `/workspaces`-rooted URL literal — build workspace paths through app/lib/ws-path.ts",
+    );
   }
 }
 

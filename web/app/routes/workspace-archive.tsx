@@ -1,9 +1,9 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Form, useActionData, useFetcher, useLoaderData, useNavigation } from "react-router";
-import { StepUpFields } from "@/components/step-up";
+import { StepUpFields, StepUpMethodProvider } from "@/components/step-up";
 import { buttonClasses, Card, PageHeader } from "@/components/ui";
-import { notFound, requireMember, requireWorkspaceOwner } from "@/lib/auth/guards.server";
-import { requireStepUp, requireTypedName } from "@/lib/auth/step-up.server";
+import { requireMember, requireWorkspaceOwner, workspaceInScope } from "@/lib/auth/guards.server";
+import { requireStepUp, requireTypedName, stepUpMethod } from "@/lib/auth/step-up.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import {
   archivedSkillById,
@@ -25,15 +25,13 @@ export function meta({ params }: { params: { ws?: string } }) {
  * hands the page the owner flag so a plain member sees the list without the action controls.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const ws = params.ws;
-  if (!ws) {
-    notFound();
-  }
-  const actor = await requireMember(request, ws);
+  const workspace = await workspaceInScope(params);
+  const actor = await requireMember(request, workspace.id);
   const archived = await archivedSkillsOf(actor);
   return {
-    ws,
+    wsName: workspace.name,
     isOwner: actor.role === "owner",
+    stepUpMethod: await stepUpMethod(actor.userId),
     archived: archived.map((row) => ({
       skillId: row.skillId,
       name: row.name,
@@ -57,10 +55,13 @@ type ArchiveActionData =
  * names that miss, faults.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
-  const ws = params.ws;
-  if (!ws) {
-    notFound();
-  }
+  const workspace = await workspaceInScope(params);
+  const ws = workspace.id;
+  // The membership FLOOR, hoisted above the intent dispatch: every intent below requires at
+  // least a member (most re-check owner/reviewer themselves), and the unmatched-intent 400 must
+  // never answer a non-member — in multi tenancy `:ws` is a guessable public name slug, so a
+  // 400-vs-404 split would be a workspace-existence oracle the GET faces deliberately close.
+  await requireMember(request, workspace.id);
   const formData = await request.formData();
   const intent = String(formData.get("intent") ?? "");
   if (intent === "unarchive") {
@@ -205,37 +206,39 @@ async function deleteIntent(request: Request, ws: string, formData: FormData) {
 }
 
 export default function WorkspaceArchive() {
-  const { ws, isOwner, archived } = useLoaderData<typeof loader>();
+  const { wsName, isOwner, archived, stepUpMethod } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const deleted =
     actionData?.op === "delete" && actionData.status === "deleted" ? actionData : null;
   return (
-    <div className="space-y-6">
-      <PageHeader title="Archived skills" meta={<code className="font-mono">{ws}</code>} />
-      {deleted !== null && (
-        <Card className="px-4 py-3">
-          <p className="text-dim text-sm" role="status">
-            Deleted <span className="font-mono text-ink">{deleted.name}</span>.{" "}
-            {deleted.bytesDropped
-              ? "Its bytes are reclaimed from the server; the row stays as a tombstone so history survives."
-              : "The row is tombstoned; the byte reclaim faulted and will be retried — running the delete again is safe."}
-          </p>
-        </Card>
-      )}
-      {archived.length === 0 ? (
-        <Card className="px-4 py-3">
-          <p className="text-dim text-sm">
-            Nothing archived. Retiring a skill from its settings page moves it here.
-          </p>
-        </Card>
-      ) : (
-        <ul className="space-y-3">
-          {archived.map((row) => (
-            <ArchivedRow key={row.skillId} row={row} isOwner={isOwner} />
-          ))}
-        </ul>
-      )}
-    </div>
+    <StepUpMethodProvider method={stepUpMethod}>
+      <div className="space-y-6">
+        <PageHeader title="Archived skills" meta={<code className="font-mono">{wsName}</code>} />
+        {deleted !== null && (
+          <Card className="px-4 py-3">
+            <p className="text-dim text-sm" role="status">
+              Deleted <span className="font-mono text-ink">{deleted.name}</span>.{" "}
+              {deleted.bytesDropped
+                ? "Its bytes are reclaimed from the server; the row stays as a tombstone so history survives."
+                : "The row is tombstoned; the byte reclaim faulted and will be retried — running the delete again is safe."}
+            </p>
+          </Card>
+        )}
+        {archived.length === 0 ? (
+          <Card className="px-4 py-3">
+            <p className="text-dim text-sm">
+              Nothing archived. Retiring a skill from its settings page moves it here.
+            </p>
+          </Card>
+        ) : (
+          <ul className="space-y-3">
+            {archived.map((row) => (
+              <ArchivedRow key={row.skillId} row={row} isOwner={isOwner} />
+            ))}
+          </ul>
+        )}
+      </div>
+    </StepUpMethodProvider>
   );
 }
 

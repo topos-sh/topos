@@ -10,11 +10,9 @@ import {
   useLoaderData,
   useNavigation,
 } from "react-router";
-import { StepUpFields } from "@/components/step-up";
 import { buttonClasses } from "@/components/ui";
 import { actorFromSession, notFound, requireSession } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
-import { requireStepUp } from "@/lib/auth/step-up.server";
 import {
   approveDeviceAuth,
   denyDeviceAuth,
@@ -27,12 +25,13 @@ export const meta: MetaFunction = () => [{ title: "Approve a device · Topos" }]
 /**
  * The ONE device-approve ceremony (the gh-style device flow's browser half). A device that
  * wants to act as you shows a short code and points here; a SIGNED-IN person types (or arrives
- * with) that code, sees what is asking, and approves or denies. Approval mints the device's
- * bearer credential — a credential that acts as you — so the approve arm is STEP-UP gated:
- * the password re-entry proves who is ACTING, seconds before the mint. Denying destroys a
- * pending request and mints nothing, so it needs no step-up.
+ * with) that code, sees what is asking, and approves or denies. A LIVE SESSION plus the explicit
+ * approve click IS the whole ceremony — approval mints the device's bearer credential (a
+ * credential that acts as you), and being signed in and choosing Approve is the proof of who is
+ * acting. Denying destroys a pending request and mints nothing.
  *
- * Signed out, the page bounces to /login carrying itself (code included) as the `next` path.
+ * Signed out, the page bounces to /login carrying itself (code included) as the `next` path —
+ * which a password OR a magic-link sign-in both honor, returning here to finish the approval.
  * An unknown or expired code is an honest in-page state, never a 404 — the person may have
  * mistyped and needs the form back.
  */
@@ -75,10 +74,7 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   if (intent === "approve") {
-    const stepUp = await requireStepUp(request, form);
-    if (!stepUp.ok) {
-      return data({ kind: "refused" as const, error: stepUp.error }, { status: 400 });
-    }
+    // No step-up: the live session + this explicit approve click is the whole ceremony.
     const approved = await approveDeviceAuth(
       userCode,
       { userId: actor.userId, display: actor.display },
@@ -197,13 +193,13 @@ function PendingRequest({ code, requestedName }: { code: string; requestedName: 
   return (
     <div className="flex flex-col gap-4 rounded-md border border-line-soft bg-ground p-4">
       <p className="text-ink text-sm">
-        Device <span className="font-medium">“{requestedName}”</span> wants to act as you. It gets a
-        credential that publishes, follows, and reads with your seat until you sign it out.
+        Device <span className="font-medium">“{requestedName}”</span> wants to act as you. Approving
+        gives it a credential that publishes, follows, and reads with your seat until you sign it
+        out from your devices.
       </p>
       <Form method="post" className="flex flex-col gap-3">
         <input type="hidden" name="intent" value="approve" />
         <input type="hidden" name="code" value={code} />
-        <StepUpFields idPrefix="verify" />
         <button
           type="submit"
           disabled={submitting}

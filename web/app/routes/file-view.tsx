@@ -4,7 +4,7 @@ import { PathBreadcrumb } from "@/components/browse/path-breadcrumb";
 import { BrowseEmpty, BrowseShell } from "@/components/browse/shell";
 import { ViewToggle } from "@/components/browse/view-toggle";
 import { Card, Chip } from "@/components/ui";
-import { notFound, requireMember } from "@/lib/auth/guards.server";
+import { notFound, requireMember, workspaceInScope } from "@/lib/auth/guards.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
 import { classifyBytes, decodeTextVerbatim } from "@/lib/diff/classify";
 import { MAX_BLOB_BYTES, MAX_HIGHLIGHT_BYTES } from "@/lib/diff/model";
@@ -12,6 +12,7 @@ import { custodyObjectCapped, custodyVersionMeta } from "@/lib/plane/reads.serve
 import { renderCodeHTML } from "@/lib/view/highlight.server";
 import { languageForPath } from "@/lib/view/language";
 import { renderMarkdownHTML } from "@/lib/view/markdown.server";
+import { wsPathServer } from "@/lib/ws-url.server";
 
 const HEX64 = /^[0-9a-f]{64}$/;
 
@@ -57,7 +58,8 @@ type FileContent =
  * card.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const ws = params.ws as string;
+  const workspace = await workspaceInScope(params);
+  const ws = workspace.id;
   const skill = params.skill as string;
   const versionId = params.versionId as string;
   const splat = params["*"] ?? "";
@@ -74,7 +76,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 
   const meta = await custodyVersionMeta(ws, row.skillId, versionId);
   if (!meta.ok) {
-    return { kind: "meta_missing" as const, ws, skill, versionId };
+    return { kind: "meta_missing" as const, skill, versionId };
   }
 
   // The path is a pure lookup key into the version manifest (never a filesystem path). Both delivery
@@ -95,7 +97,10 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   const filePath = file.path;
   const displaySegments = filePath.split("/");
   const encodedPath = displaySegments.map(encodeURIComponent).join("/");
-  const fileBasePath = `/workspaces/${ws}/skills/${skill}/versions/${versionId}/files/${encodedPath}`;
+  const fileBasePath = wsPathServer(
+    workspace.name,
+    `skills/${skill}/versions/${versionId}/files/${encodedPath}`,
+  );
   const executable = file.mode === "100755";
 
   const blob = await custodyObjectCapped(ws, row.skillId, file.object_id, MAX_BLOB_BYTES);
@@ -139,7 +144,6 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 
   return {
     kind: "file" as const,
-    ws,
     skill,
     versionId,
     displaySegments,
@@ -165,7 +169,6 @@ export default function FileViewPage() {
   }
 
   const {
-    ws,
     skill,
     versionId,
     displaySegments,
@@ -179,7 +182,7 @@ export default function FileViewPage() {
   return (
     <BrowseShell>
       <header className="space-y-2">
-        <PathBreadcrumb ws={ws} skill={skill} versionId={versionId} segments={displaySegments} />
+        <PathBreadcrumb skill={skill} versionId={versionId} segments={displaySegments} />
         {(sizeBytes !== undefined || executable) && (
           <p className="flex items-center gap-2 text-faint text-xs">
             {sizeBytes !== undefined && <span>{sizeBytes} bytes</span>}

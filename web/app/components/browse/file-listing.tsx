@@ -1,21 +1,21 @@
 import { Link } from "react-router";
 import { Card, Chip } from "@/components/ui";
 import type { ListingEntry } from "@/lib/view/tree";
+import { useWsPath } from "@/lib/ws-path";
 
 /**
  * A version's files as a flat, pre-ordered tree (dirs-first per level, lexicographic — the order
  * buildListing already fixed). Directory rows are inert labels; file rows are whole-row links
  * into the file view. Depth becomes a left indent (16px per level) via an inline padding —
  * Tailwind can't express a per-row dynamic step, and the value is a trusted small integer off
- * the manifest, never user bytes. `skill` is the catalog NAME (the URL key).
+ * the manifest, never user bytes. `skill` is the catalog NAME (the URL key; the workspace prefix
+ * comes from `useWsPath`).
  */
 export function FileListing({
-  ws,
   skill,
   versionId,
   entries,
 }: {
-  ws: string;
   skill: string;
   versionId: string;
   entries: readonly ListingEntry[];
@@ -31,7 +31,7 @@ export function FileListing({
     <Card>
       <ul>
         {entries.map((entry) => (
-          <ListingRow key={entry.path} ws={ws} skill={skill} versionId={versionId} entry={entry} />
+          <ListingRow key={entry.path} skill={skill} versionId={versionId} entry={entry} />
         ))}
       </ul>
     </Card>
@@ -39,16 +39,15 @@ export function FileListing({
 }
 
 function ListingRow({
-  ws,
   skill,
   versionId,
   entry,
 }: {
-  ws: string;
   skill: string;
   versionId: string;
   entry: ListingEntry;
 }) {
+  const wsPath = useWsPath();
   // A 16px base plus one 16px step per tree level.
   const indent = { paddingLeft: `${16 + entry.depth * 16}px` };
 
@@ -66,7 +65,7 @@ function ListingRow({
   // Re-encode each segment so a name with a URL-unsafe character round-trips through the
   // catch-all route unharmed.
   const encoded = entry.path.split("/").map(encodeURIComponent).join("/");
-  const href = `/workspaces/${ws}/skills/${skill}/versions/${versionId}/files/${encoded}`;
+  const href = wsPath(`skills/${skill}/versions/${versionId}/files/${encoded}`);
   return (
     <li className="border-line-soft border-b last:border-b-0">
       <Link

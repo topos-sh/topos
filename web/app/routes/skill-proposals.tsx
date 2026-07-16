@@ -3,9 +3,11 @@ import { redirect, useLoaderData } from "react-router";
 import { type ProposalListItem, ProposalsSection } from "@/components/skill/proposals-section";
 import { SkillHeader } from "@/components/skill/skill-header";
 import { SkillTabs } from "@/components/skill/skill-tabs";
-import { notFound, requireMember } from "@/lib/auth/guards.server";
+import { notFound, requireMember, workspaceInScope } from "@/lib/auth/guards.server";
 import { proposalsOf, skillIndexRow } from "@/lib/db/queries.server";
 import { resolveSkillName } from "@/lib/db/resolve.server";
+import { useWsPath } from "@/lib/ws-path";
+import { wsPathServer } from "@/lib/ws-url.server";
 
 export function meta({ params }: { params: { skill?: string } }) {
   return [{ title: `${params.skill ?? "skill"} · proposals · Topos` }];
@@ -22,15 +24,15 @@ export function meta({ params }: { params: { skill?: string } }) {
  * count) and the open list agree by construction — they read the same table.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const ws = params.ws as string;
+  const workspace = await workspaceInScope(params);
   const skill = params.skill as string;
-  const actor = await requireMember(request, ws);
+  const actor = await requireMember(request, workspace.id);
   const row = await skillIndexRow(actor, skill);
   if (row === undefined) {
     // A rename left an old name behind: follow the resolving hint to the live name; else 404.
     const resolved = await resolveSkillName(actor, skill);
     if (resolved !== undefined && resolved.via === "hint" && resolved.status === "active") {
-      throw redirect(`/workspaces/${ws}/skills/${resolved.name}/proposals`);
+      throw redirect(wsPathServer(workspace.name, `skills/${resolved.name}/proposals`));
     }
     notFound();
   }
@@ -48,7 +50,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   }));
 
   return {
-    ws,
+    wsName: workspace.name,
     skill,
     currentShort: row.versionId !== null ? row.versionId.slice(0, 12) : "—",
     displayName: row.displayName,
@@ -59,23 +61,24 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 }
 
 export default function SkillProposalsPage() {
-  const { ws, skill, currentShort, displayName, kind, openProposals, proposals } =
+  const { wsName, skill, currentShort, displayName, kind, openProposals, proposals } =
     useLoaderData<typeof loader>();
+  const wsPath = useWsPath();
   return (
     <div className="space-y-6">
       <SkillHeader
-        ws={ws}
+        ws={wsName}
         skill={skill}
         currentShort={currentShort}
         displayName={displayName}
         kind={kind}
       />
       <SkillTabs
-        basePath={`/workspaces/${ws}/skills/${skill}`}
+        basePath={wsPath(`skills/${skill}`)}
         active="proposals"
         openProposals={openProposals}
       />
-      <ProposalsSection ws={ws} skill={skill} proposals={proposals} />
+      <ProposalsSection skill={skill} proposals={proposals} />
     </div>
   );
 }

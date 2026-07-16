@@ -30,10 +30,17 @@ export async function signIn(page: Page, email: string): Promise<void> {
     });
     expect(signedIn.ok(), `sign-in failed for ${email}: ${await signedIn.text()}`).toBe(true);
   }
-  // Commit the app shell so a subsequent goto doesn't race the sign-in redirect chain.
+  // Commit the session so a subsequent goto doesn't race the sign-in redirect chain. A seated
+  // identity lands in the shell (banner); a SEATLESS one gets /app's house 404 — both are a
+  // settled, signed-in document.
   await page.goto("/app");
   await page.waitForURL((u) => !u.pathname.startsWith("/login") && !u.pathname.startsWith("/api"));
-  await expect(page.getByRole("banner")).toBeVisible();
+  await expect(
+    page
+      .getByRole("banner")
+      .or(page.getByRole("heading", { name: "Not found" }))
+      .first(),
+  ).toBeVisible();
 }
 
 /**

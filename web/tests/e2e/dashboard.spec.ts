@@ -83,9 +83,13 @@ test("HERO: a device publish lands the catalog row the dashboard renders — and
   );
   expect(bundleRow[0]?.name).toBe("release-checklist");
 
-  // The dashboard renders the row from the shared reads alone — pointer short id + digest.
-  await gotoSettled(page, `/workspaces/${ws.id}`);
-  const hero = page.getByRole("listitem").filter({ hasText: "Release Checklist" });
+  // The dashboard renders the row from the shared reads alone — pointer short id + digest. Scope to
+  // the content region: the left panel lists the catalog too, so an unscoped listitem double-matches.
+  await gotoSettled(page, `/`);
+  const hero = page
+    .getByRole("main")
+    .getByRole("listitem")
+    .filter({ hasText: "Release Checklist" });
   await expect(hero).toBeVisible();
   await expect(hero.getByText(versionId.slice(0, 12))).toBeVisible();
   await expect(
@@ -123,7 +127,7 @@ test("a wrong credential is the uniform wire 404 — no oracle on the door", asy
 test("the catalog stays honest: an open-proposal badge and a pointer-less row", async ({
   page,
 }) => {
-  const ws = await theWorkspace();
+  await theWorkspace();
   const owner = (
     await adminQuery<{ id: string }>(`select id from web."user" where email = $1`, [MEMBER_EMAIL])
   )[0]?.id as string;
@@ -140,9 +144,10 @@ test("the catalog stays honest: an open-proposal badge and a pointer-less row", 
   // A named identity that has never published: the row renders, honestly pointer-less.
   await ensureBundle({ id: "s_e2e_dash_bare", name: "dash-unpublished" });
 
-  await gotoSettled(page, `/workspaces/${ws.id}`);
-  const withProposal = page.getByRole("listitem").filter({ hasText: "dash-proposals" });
+  await gotoSettled(page, `/`);
+  const main = page.getByRole("main");
+  const withProposal = main.getByRole("listitem").filter({ hasText: "dash-proposals" });
   await expect(withProposal.getByText("1 proposal awaiting review")).toBeVisible();
-  const bare = page.getByRole("listitem").filter({ hasText: "dash-unpublished" });
+  const bare = main.getByRole("listitem").filter({ hasText: "dash-unpublished" });
   await expect(bare.getByText("Nothing published yet")).toBeVisible();
 });

@@ -36,7 +36,8 @@ test.describe("the public landing page", () => {
   });
 
   test("signed-out visits to the app bounce to login", async ({ page }) => {
-    await page.goto("/workspaces");
+    // A member page under the shell: the cookie middleware bounces a signed-out visitor to /login.
+    await page.goto("/members");
     await page.waitForURL((u) => u.pathname === "/login");
     await page.goto("/app");
     await page.waitForURL((u) => u.pathname === "/login");

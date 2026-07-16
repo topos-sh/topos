@@ -43,10 +43,12 @@ transaction, FOR UPDATE-fenced or single-statement-atomic, audit row inside):
   **owner** (email + password). Single-use by construction.
 - **The gh-style device flow** (`verify.tsx` + `api.v1.device-authorize`/`api.v1.device-token`;
   `startDeviceAuth`/`pollDeviceAuth`/`approveDeviceAuth`): the CLI prints "open `<origin>/verify` and
-  enter AB12-CD34" and polls; the signed-in person approves **behind step-up**, which mints the device
-  (owned by that person) + its ONE bearer credential (the device code is promoted to the credential —
-  same plaintext, same stored hash). Revocation is self-service, immediate, and FINAL (a DB trigger
-  refuses any un-revoke).
+  enter AB12-CD34" and polls; the signed-in person approves with a **plain accept** — a live session
+  plus the explicit approve click IS the whole ceremony (no step-up) — minting the device (owned by
+  that person) + its ONE bearer credential (the device code is promoted to the credential — same
+  plaintext, same stored hash). The signed-out loader bounce carries the code as `next`, so a password
+  OR a magic-link sign-in both return to finish the approval. Revocation is self-service, immediate, and
+  FINAL (a DB trigger refuses any un-revoke).
 - **Recovery** (`app/lib/auth/recovery.server.ts` + `scripts/mint-recovery-code.mjs`): reset mail when
   SMTP is armed; a mail-less solo owner runs the one-shot box-side script to print a single-use recovery
   code (machine control is the proof).
@@ -61,17 +63,24 @@ OR with a pending invitation on a deployment whose SMTP is armed (the invited se
 mailbox round-trip, via `bindInvitedSeats` on `afterEmailVerification`), OR under the off-by-default
 `registration = 'open'` knob. Everything else gets ONE constant, non-enumerating refusal.
 
-**Step-up** (`app/lib/auth/step-up.server.ts`). Every admin ceremony re-authenticates immediately before
-the act: the person re-enters their password inside the ceremony form (verified with Better Auth's own
-hasher against the SESSION's account — never a form-supplied identity; its own rate belt, armed by
-`APP_ENV`), and the destructive ceremonies (delete a skill, purge a version, delete a channel)
-additionally require typing the resource's exact name. Deliberately STATELESS — no sudo window. Every
-attempt lands an `admin_event` audit row, refused step-ups included. The grade of a ceremony and the
+**Step-up** (`app/lib/auth/step-up.server.ts`). Every admin ceremony (roster mutations, skill lifecycle,
+purge, channel existence-admin, policy setters) re-authenticates immediately before the act. The RUNG is
+the person's step-up METHOD (`stepUpMethod`, resolved once per ceremony page and carried to the shared
+`<StepUpFields>` via a context provider): an account with a password re-enters it (verified with Better
+Auth's own hasher against the SESSION's account — never a form-supplied identity), the OSS default since
+every account is born with one. A password-LESS account (a magic-link/social deployment) confirms through
+the MAIL round-trip instead: `beginStepUpConfirmation` mints a single-use token, stores ONLY its
+Postgres-computed hash in Better Auth's `verification` table under a `step-up:<userId>` identifier with a
+~10-minute TTL, and mails a link back to the SAME ceremony page carrying `?stepup=<token>`; the submit
+then consumes that token in ONE atomic `DELETE … RETURNING`. No password AND no armed mail ⇒ a typed
+refusal (set a password or arm SMTP), never a silent dead end. Deliberately STATELESS whichever rung —
+no sudo window; the token authorizes exactly the one submission that carries it, once. Its own rate belt,
+armed by `APP_ENV`. The destructive ceremonies additionally require typing the resource's exact name.
+Every attempt lands an `admin_event` audit row, refused step-ups included. The grade of a ceremony and the
 reach of its act stay matched IN THE DATABASE: the account page's step-up-LESS device sign-out is
 SELF-ONLY (a device is a possession; no owner arm reaches into someone else's pocket), fenced in
-`revokeOwnDevice`. **Known limit (v1):** step-up IS the password rung — a deployment configured with only
-magic-link or social sign-in has no password to re-enter; a second factor for password-less deployments
-is later work.
+`revokeOwnDevice`. The `/verify` device-approve is also step-up-LESS — a live session plus the explicit
+approve click is the whole ceremony there.
 
 **Mail — ONE transport, whole product.** `app/lib/mail/transport.server.ts` is the only module allowed to
 hold an SMTP client; every product mail rides it — the invite notice (`invite-mail.server.ts`), the
@@ -82,25 +91,51 @@ posture (and armed mail is the identity rung for a MULTI-USER install — inviti
 failure is COARSE — a body can carry a live credential, so no error ever echoes the message, the
 recipient, or the relay response.
 
-**Resource addresses + the protocol card.** `/{workspace}`, `/{workspace}/channels/{name}`, and
-`/{workspace}/skills/{name}` are the shareable addresses, plus the ORIGIN ROOT and a catch-all. A
-non-browser DOCUMENT fetch gets the CONSTANT protocol card (`app/lib/card.server.ts` — served whole from
-the server entry's `handleRequest`, byte-identical on every path incl. `/`, `api_base_url` = this
-origin's own `/api` mount where the device lane is served); an anonymous browser gets the constant
-landing page at `/`; a signed-in member resolves through their own confirmed seats into the workspace
-surface; everyone else gets the house 404. No face is an existence oracle. A browser on an ALIAS origin is
-301'd to the canonical one (`TOPOS_PUBLIC_URL`).
+**Two URL grammars, one route table (`app/lib/ws-path.ts` + `app/lib/ws-url.server.ts`).** The
+signed-in surface addresses workspaces by a TENANCY mode the composition passes to
+`ossRoutes({ tenancy })`: **single** (the OSS default) — the install IS its one workspace, so the whole
+surface is ORIGIN-ROOTED (`/`, `/members`, `/skills/:skill`) and a shareable address is the bare origin;
+**multi** (a downstream superset) — the same page modules mount under `/:ws`, where `:ws` is the
+workspace NAME slug (`workspace.name`), and an address is `<origin>/<name>`. No page hard-codes the
+grammar: `wsHref`/`useWsPath` build in-app links, `wsPathServer`/`workspaceAddress` build server-side
+redirects + the shareable address, and every workspace-scoped loader resolves through `workspaceInScope`
+(single → `theWorkspace()`, multi → look up by name) before the id-keyed guards run. The opaque
+`workspace.id` stays the wire/DB key but never appears in a browser URL.
+
+**Resource addresses + the protocol card.** The three shareable FACES — the workspace ROOT, a channel,
+and a skill — are each ONE route (resource address AND canonical page) under `face-shell.tsx`, plus a
+catch-all. A non-browser DOCUMENT fetch gets the CONSTANT protocol card (`app/lib/card.server.ts` —
+served whole from the server entry's `handleRequest`, byte-identical on every path incl. `/`,
+`api_base_url` = this origin's own `/api` mount where the device lane is served); an anonymous browser
+gets the constant teaser — the landing page at the single-tenant origin root, the constant resource
+teaser otherwise; a signed-in member gets the canonical page with the app chrome; everyone else (a
+signed-in non-member, an unknown slug) gets the house 404. No face is an existence oracle. A browser on
+an ALIAS origin is 301'd to the canonical one (`TOPOS_PUBLIC_URL`).
 
 **The signed-in surface:** a workspace dashboard, the skill browser, the rendered review UI (unified diff +
 Approve/Reject + comments + one-click revert), the verification page, the create/join flows, and the ADMIN
 surfaces — the roster page in full (invite / role change / remove / self-serve leave, sole-owner-fenced),
 the skill lifecycle ceremonies (archive / unarchive / delete / purge / rename-with-redirect), channel
-existence-admin + history, the workspace policy page (review default · invite policy · staleness window ·
-the `registration` knob), the fleet page (staleness + the named blind spots: detached copies,
-removed-upstream rows, stale devices), the "your devices" self-service list, and the first-run claim. It
-renders state read from its own `web` schema and, read-only, from the vault's `plane` schema; it holds no
-signing key, computes no digest, and initiates no device-signed write — publishing stays on the enrolled
-device.
+existence-admin + history, the **Settings** page — TABBED into **General** (the workspace policy: review
+default · invite policy · staleness window · the `registration` knob) and **Devices** (the workspace fleet
+view: staleness + the named blind spots — detached copies, removed-upstream rows, stale devices), both under
+one shared tab header (`app/components/settings-tabs.tsx`) at `settings` / `settings/devices`), the "your
+devices" self-service list, and the first-run claim. It renders state read from its own `web` schema and,
+read-only, from the vault's `plane` schema; it holds no signing key, computes no digest, and initiates no
+device-signed write — publishing stays on the enrolled device.
+
+**The left panel** (`app/components/shell/{shell-chrome,app-sidebar}.tsx`, data from
+`app/lib/shell/chrome.server.ts`) is one shadcn collapsible sidebar shared by both signed-in layouts: a
+header strip carrying the `topos_` wordmark beside the ONE collapse toggle (reachable in the icon-collapsed
+state), then the workspace identity (STATIC name in single tenancy, a seat DROPDOWN in multi), the
+workspace's **Skills** and **Channels** lists (each row a name linking to its face, each section header a
+`+ new` — Skills opens a **publish-from-your-agent** dialog of copyable lines composed for this workspace's
+real address, since the app never authors a bundle; Channels links to the create form), the workspace nav
+(Members · Settings, from the registry's `workspace` section) as plain bottom items, and an account menu
+footer (the registry's non-`workspace` sections + Sign out). The Skills/Channels/nav sections render only
+when a workspace is in scope; every list is loader-derived, so the panel — living in the layout — never
+reads a child route's `:ws` param (it builds links from the loader-supplied address through
+`app/lib/ws-path.ts`).
 
 **Stack.** React Router 8 in framework mode (SSR, Vite, bun) · React 19 · Better Auth on Drizzle /
 Postgres · Tailwind 4 with the Klein token set (`DESIGN.md` is the source of truth; the `--color-*` table
@@ -110,10 +145,12 @@ Playwright. Blocking SSR — every page ships one complete document; every DB/va
 fresh.
 
 **Composition — four additive seams.** The package (`@topos/web`) exports `./routes`, `./nav`,
-`./entitlements`, and `./auth-config`. A deployment's `app/routes.ts` is one line — `ossRoutes()`; a
-downstream superset build composes `[...ossRoutes({ dir }), ...ownRoutes]` and appends its own nav entries,
-entitlements provider, and auth rungs. Composition is **additive-only**. The OSS build is **single-tenant**
-— one workspace per install (`theWorkspace()`).
+`./entitlements`, and `./auth-config`. A deployment's `app/routes.ts` is one line — `ossRoutes()` (single
+by default); a downstream superset build composes `[...ossRoutes({ dir, tenancy }), ...ownRoutes]` and
+appends its own nav entries, entitlements provider, and auth rungs. Composition is **additive-only**. The
+OSS build is **single-tenant** — one workspace per install, origin-rooted (`theWorkspace()`); a superset
+passes `tenancy: "multi"` to mount the same modules under the `/:ws` name slug (no boot workspace is
+minted, and the first-run claim ceremony does not exist).
 
 **Auth + authorization (fail-closed).** The OSS default rung is **email+password with zero delivery
 dependency** — a self-hosted team signs in with no SMTP or OAuth. A session is evidence, never authority:

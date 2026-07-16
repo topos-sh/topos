@@ -522,7 +522,11 @@ export interface components {
              *     authority) and kept as the device's display name once approved.
              */
             requested_name: string;
-            /** @description The workspace ADDRESS slug the device asks to join (`topos.sh/<name>` minus the origin). */
+            /**
+             * @description The workspace ADDRESS slug the device asks to join (`topos.sh/<name>` minus the origin). An
+             *     EMPTY string names "the workspace the origin itself addresses" (single-tenant installs, where
+             *     the origin IS its one workspace); a non-empty value is the address slug as today.
+             */
             workspace: string;
         };
         /** @description `POST /v1/device/authorize` response — the device-authorization grant (RFC-8628-shaped names). */

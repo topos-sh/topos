@@ -10,7 +10,8 @@ type ActiveTab = "current" | "proposals" | "history";
  * reads pressed — ink text under a 2px accent underline; the rest stay quiet (dim) until hovered.
  * Both variants carry a `border-b-2` (accent vs transparent) so the row height never shifts as
  * the active tab moves. `openProposals` decorates the Proposals label with a small count.
- * `basePath` is the catalog-name-keyed skill URL (`/workspaces/:ws/skills/:name`).
+ * `basePath` is the catalog-name-keyed skill URL the caller built through `useWsPath` (origin-rooted
+ * in single tenancy, `/<slug>`-nested in multi).
  */
 export function SkillTabs({
   basePath,

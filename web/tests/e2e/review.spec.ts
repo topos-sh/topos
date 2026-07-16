@@ -88,7 +88,7 @@ test.beforeAll(async () => {
   candidateId = seeded[0]?.versions[1]?.version_id as string;
   candidateDigest = seeded[0]?.versions[1]?.bundle_digest as string;
   rejectedId = seeded[0]?.versions[2]?.version_id as string;
-  pageUrl = `/workspaces/${ws.id}/skills/${SKILL}/proposals/${candidateId}`;
+  pageUrl = `/skills/${SKILL}/proposals/${candidateId}`;
 
   await adminQuery(`delete from web.proposal where bundle_id = $1`, [SKILL_ID]);
   await ensureProposal({
@@ -175,9 +175,9 @@ test("adversarial contents render inert in the diff", async ({ page }) => {
 test("a rejected proposal renders the resolution panel and the diff-less card, no forms", async ({
   page,
 }) => {
-  const ws = await theWorkspace();
+  await theWorkspace();
   await signIn(page, READER);
-  await gotoSettled(page, `/workspaces/${ws.id}/skills/${SKILL}/proposals/${rejectedId}`);
+  await gotoSettled(page, `/skills/${SKILL}/proposals/${rejectedId}`);
 
   await expect(page.getByText("Rejected — the resolution below says why.")).toBeVisible();
   await expect(
@@ -202,10 +202,10 @@ test("a rejected proposal renders the resolution panel and the diff-less card, n
 });
 
 test("a never-proposed candidate URL is the uniform 404", async ({ page }) => {
-  const ws = await theWorkspace();
+  await theWorkspace();
   await signIn(page, READER);
   // currentId is a real, readable version — but no proposal row exists for it, so the proposal
   // URL misses uniformly (the version stays viewable under …/versions/).
-  await gotoSettled(page, `/workspaces/${ws.id}/skills/${SKILL}/proposals/${currentId}`);
+  await gotoSettled(page, `/skills/${SKILL}/proposals/${currentId}`);
   await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
 });

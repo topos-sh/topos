@@ -3,7 +3,7 @@ import { adminQuery, ensureSeatedUser, mintDevice } from "./seed";
 import { signIn } from "./sign-in";
 
 /**
- * The account-level device list (/settings/devices). A device is a POSSESSION of one user now:
+ * The account-level device list (/account/devices). A device is a POSSESSION of one user now:
  * the page lists the signed-in person's OWN rows — nobody else's, whatever workspace they share
  * — and offers a self sign-out (no step-up: signing out your own device is the escape hatch,
  * not a ceremony over someone else's access). Revocation is FINAL — a DB trigger refuses any
@@ -52,7 +52,7 @@ test("lists exactly the person's own devices; another user's device never render
   page,
 }) => {
   await signIn(page, OWNER_EMAIL);
-  await page.goto("/settings/devices");
+  await page.goto("/account/devices");
   await expect(page.getByRole("heading", { name: "Your devices" })).toBeVisible();
 
   // Both of the person's own devices render, with their ids and liveness lines.
@@ -73,7 +73,7 @@ test("self sign-out flips one device to the revoked treatment, persisting across
   page,
 }) => {
   await signIn(page, OWNER_EMAIL);
-  await page.goto("/settings/devices");
+  await page.goto("/account/devices");
 
   const rowA = page.getByRole("listitem").filter({ hasText: "alpha-macbook" });
   await rowA.getByRole("button", { name: "Sign out" }).click();

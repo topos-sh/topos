@@ -4,10 +4,18 @@ import { index, layout, prefix, type RouteConfigEntry, route } from "@react-rout
  * The product app's route table as DATA — the first of the four composition seams.
  *
  * A deployment's `app/routes.ts` is one line: `export default ossRoutes()`. A downstream
- * superset build composes `[...ossRoutes({ dir }), ...itsOwnRoutes]`, where `dir` re-roots
- * every module file onto the checkout that holds this app's source (route `file` paths are
- * resolved relative to the consuming app's `appDirectory`). Composition is ADDITIVE-ONLY:
- * a downstream build appends routes; it never patches, forks, or shadows an entry here.
+ * superset build composes `[...ossRoutes({ dir, tenancy }), ...itsOwnRoutes]`, where `dir`
+ * re-roots every module file onto the checkout that holds this app's source (route `file` paths
+ * are resolved relative to the consuming app's `appDirectory`). Composition is ADDITIVE-ONLY: a
+ * downstream build appends routes; it never patches, forks, or shadows an entry here.
+ *
+ * TWO URL grammars, ONE table, chosen by `tenancy`:
+ *  - `single` (the OSS default): the install IS the one workspace, so the whole signed-in surface
+ *    mounts at ORIGIN-ROOTED paths (`/`, `/members`, `/skills/:skill`). There is no "workspaces"
+ *    concept in a browser URL.
+ *  - `multi` (a downstream superset passes it): the same page modules mount under `/:ws`, where
+ *    `:ws` is the workspace NAME slug (`workspace.name` — unique, already the shareable address).
+ *    The opaque `workspace.id` stays the wire/DB key but never appears in a browser URL.
  *
  * Deliberately typegen-independent: these modules type their args with the generic
  * `LoaderFunctionArgs`/`ActionFunctionArgs`, never `./+types/*` imports, so the table works
@@ -16,28 +24,73 @@ import { index, layout, prefix, type RouteConfigEntry, route } from "@react-rout
 export interface OssRoutesOptions {
   /** Prefix prepended to every module file path (default: this app's own directory). */
   dir?: string;
+  /** How this deployment addresses workspaces — see the module doc. Default `single`. */
+  tenancy?: "single" | "multi";
 }
+
+/**
+ * Every top-level STATIC path segment this table can register in either mode, alphabetical and
+ * exhaustive (derived right next to the table so the two can't drift). In MULTI mode these shadow
+ * the `/:ws` workspace slugs, so a downstream workspace creator MUST refuse a workspace name that
+ * equals any of these — otherwise the name would be unreachable behind its static route.
+ */
+export const OSS_TOP_LEVEL_SEGMENTS: readonly string[] = [
+  "account",
+  "api",
+  "app",
+  "claim",
+  "healthz",
+  "install",
+  "login",
+  "recovery",
+  "verify",
+];
 
 export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
   const dir = options.dir ?? "";
+  const tenancy = options.tenancy ?? "single";
   const file = (p: string) => `${dir}routes/${p}`;
+
+  // The three shareable FACES (workspace root · a skill · a channel): resource address and
+  // canonical page are ONE route. They mount under face-shell.tsx (no login bounce — anonymous is
+  // a valid state that renders the constant teaser). In single mode the workspace root is the
+  // origin index; in multi it is `/:ws`.
+  const faceChildren: RouteConfigEntry[] = [
+    tenancy === "multi"
+      ? route(":ws", file("workspace-dashboard.tsx"))
+      : index(file("workspace-dashboard.tsx")),
+    route(faceSub(tenancy, "skills/:skill"), file("skill-current.tsx")),
+    route(faceSub(tenancy, "channels/:channel"), file("channel-detail.tsx")),
+  ];
+
+  // The member-only signed-in surface: every child mounts under shell.tsx (the login-bounce
+  // layout). Same modules in both modes; only the path prefix differs.
+  const memberChildren: RouteConfigEntry[] = [
+    // The person-scoped device list is top-level in BOTH modes (a device is a possession of ONE
+    // user, not a workspace resource).
+    route("account/devices", file("your-devices.tsx")),
+    ...memberWorkspaceChildren(tenancy, file),
+  ];
+
   return [
-    // Public, sessionless.
-    index(file("landing.tsx")),
+    // ── Public, sessionless ──────────────────────────────────────────────────────────────────
+    // The origin index: in single mode the workspace root is a FACE (mounted below); in multi it
+    // is the marketing landing page (never a claim band).
+    ...(tenancy === "multi" ? [index(file("landing.tsx"))] : []),
     route("login", file("login.tsx")),
-    // The first-boot claim (the printed one-time link) + the mail-less recovery hatch.
-    route("claim", file("claim.tsx")),
     route("recovery", file("recovery.tsx")),
+    // The first-boot claim is single-tenant only (multi mints no boot workspace). In multi,
+    // `claim` is a reserved top-level segment that answers the house 404, so the `:ws` face can't
+    // swallow it and it discloses nothing.
+    tenancy === "multi" ? route("claim", file("reserved.tsx")) : route("claim", file("claim.tsx")),
     // The ONE approve ceremony: a signed-in human confirms a device flow by its user code.
     route("verify", file("verify.tsx")),
     route("healthz", file("healthz.ts")),
     route("install", file("install.ts")),
     route("api/auth/*", file("api.auth.ts")),
     // THE DEVICE LANE — `/api/v1` is the product's one public API, TERMINATING here since the
-    // identity unification: the row ops run over this app's own schema, and the custody ops
-    // (publish/propose/revert/review + the byte reads) are app-authorized orchestration over
-    // the vault's internal custody lane. Static segments outrank the splat, which answers the
-    // uniform wire 404 for everything unlisted.
+    // identity unification. `:ws` here is the opaque workspace ID (the wire/DB key), unchanged in
+    // both tenancy modes. Static segments outrank the splat, which answers the uniform wire 404.
     route("api/v1/device/authorize", file("api.v1.device-authorize.ts")),
     route("api/v1/device/token", file("api.v1.device-token.ts")),
     route("api/v1/publish", file("api.v1.publish.ts")),
@@ -68,47 +121,45 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
       route("skills/:skill/bundles/:objectId", file("api.v1.skill-object.ts")),
     ]),
     route("api/v1/*", file("api.v1.$.ts")),
-    // Signed-in surface: one shell layout carries the session middleware + chrome.
     route("api/memberships", file("api.memberships.ts")),
+    // The door into the product (a bare `/app`), then the two signed-in layouts.
     route("app", file("app-entry.tsx")),
-    layout(file("shell.tsx"), [
-      route("settings/devices", file("your-devices.tsx")),
-      ...prefix("workspaces", [
-        index(file("workspaces-index.tsx")),
-        ...prefix(":ws", [
-          index(file("workspace-dashboard.tsx")),
-          route("settings", file("workspace-settings.tsx")),
-          route("members", file("workspace-members.tsx")),
-          route("archive", file("workspace-archive.tsx")),
-          route("fleet", file("fleet.tsx")),
-          ...prefix("channels", [
-            index(file("channels-index.tsx")),
-            route(":channel", file("channel-detail.tsx")),
-            route(":channel/history", file("channel-history.tsx")),
-          ]),
-          ...prefix("skills/:skill", [
-            index(file("skill-current.tsx")),
-            route("history", file("skill-history.tsx")),
-            route("proposals", file("skill-proposals.tsx")),
-            route("proposals/:versionId", file("proposal-review.tsx")),
-            route("settings", file("skill-settings.tsx")),
-            route("versions/:versionId", file("version-files.tsx")),
-            route("versions/:versionId/files/*", file("file-view.tsx")),
-          ]),
-        ]),
-      ]),
-    ]),
-    // Historical URL shapes kept honest: permanent redirects to the resource routes.
-    route("create", file("redirect-create.ts")),
-    route("link", file("redirect-link.ts")),
-    // RESOURCE ADDRESSES — `<origin>/<workspace>[...]` is what sharing and joining speak. The
-    // browser face is a page; every other fetcher gets the CONSTANT protocol card (no path
-    // echo, no existence oracle). Static routes above always outrank these dynamic segments.
-    route(":ws", file("resource-workspace.tsx")),
-    route(":ws/channels/:name", file("resource-channel.tsx")),
-    route(":ws/skills/:name", file("resource-skill.tsx")),
-    // Any unmatched path: the same constant card for a non-browser fetcher, the house 404 for
-    // a browser — path SHAPE decides the response, never existence.
+    layout(file("face-shell.tsx"), faceChildren),
+    layout(file("shell.tsx"), memberChildren),
+    // Any unmatched path: the same constant card for a non-browser fetcher (served from the entry
+    // before routing), the house 404 for a browser — path SHAPE decides the response.
     route("*", file("catch-all.tsx")),
   ];
+}
+
+/** Nest an in-workspace path under `/:ws` in multi mode; keep it origin-rooted in single. */
+function faceSub(tenancy: "single" | "multi", sub: string): string {
+  return tenancy === "multi" ? `:ws/${sub}` : sub;
+}
+
+/** The member-only pages, mounted origin-rooted (single) or under `/:ws` (multi). */
+function memberWorkspaceChildren(
+  tenancy: "single" | "multi",
+  file: (p: string) => string,
+): RouteConfigEntry[] {
+  const children: RouteConfigEntry[] = [
+    route("members", file("workspace-members.tsx")),
+    route("archive", file("workspace-archive.tsx")),
+    route("settings", file("workspace-settings.tsx")),
+    // The workspace's device view (staleness + blind spots) — a tab of the Settings page.
+    route("settings/devices", file("fleet.tsx")),
+    // The channel index + the create form (Rails-style /channels/new); the channel FACE and its
+    // history live elsewhere (face-shell / here).
+    route("channels", file("channels-index.tsx")),
+    route("channels/new", file("channel-new.tsx")),
+    route("channels/:channel/history", file("channel-history.tsx")),
+    // The skill subpages (the skill FACE itself is under face-shell). Member-only.
+    route("skills/:skill/history", file("skill-history.tsx")),
+    route("skills/:skill/proposals", file("skill-proposals.tsx")),
+    route("skills/:skill/proposals/:versionId", file("proposal-review.tsx")),
+    route("skills/:skill/settings", file("skill-settings.tsx")),
+    route("skills/:skill/versions/:versionId", file("version-files.tsx")),
+    route("skills/:skill/versions/:versionId/files/*", file("file-view.tsx")),
+  ];
+  return tenancy === "multi" ? prefix(":ws", children) : children;
 }

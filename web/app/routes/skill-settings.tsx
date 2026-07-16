@@ -1,10 +1,15 @@
 import { useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, redirect, useFetcher, useLoaderData } from "react-router";
-import { StepUpFields } from "@/components/step-up";
+import { StepUpFields, StepUpMethodProvider } from "@/components/step-up";
 import { buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
-import { notFound, requireWorkspaceOwner } from "@/lib/auth/guards.server";
-import { requireStepUp } from "@/lib/auth/step-up.server";
+import {
+  notFound,
+  requireMember,
+  requireWorkspaceOwner,
+  workspaceInScope,
+} from "@/lib/auth/guards.server";
+import { requireStepUp, stepUpMethod } from "@/lib/auth/step-up.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import {
   archiveBundle,
@@ -15,6 +20,7 @@ import { workspacePolicyOf } from "@/lib/db/queries.policy.server";
 import { bundleById, skillIndexRow } from "@/lib/db/queries.server";
 import { resolveSkillName } from "@/lib/db/resolve.server";
 import { isValidSkillName, renameDeniedCopy, SKILL_NAME_MAX } from "@/lib/plane/lifecycle-copy";
+import { wsPathServer } from "@/lib/ws-url.server";
 
 /** The verbatim boundary the archive ceremony must state — what archiving costs and what it keeps. */
 const ARCHIVE_BOUNDARY =
@@ -37,17 +43,17 @@ type ProtectionChoice = "inherit" | "open" | "reviewed";
  * house 404.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const ws = params.ws;
+  const workspace = await workspaceInScope(params);
   const skill = params.skill;
-  if (!ws || !skill) {
+  if (!skill) {
     notFound();
   }
-  const owner = await requireWorkspaceOwner(request, ws);
+  const owner = await requireWorkspaceOwner(request, workspace.id);
   const row = await skillIndexRow(owner, skill);
   if (row === undefined) {
     const resolved = await resolveSkillName(owner, skill);
     if (resolved !== undefined && resolved.via === "hint" && resolved.status === "active") {
-      throw redirect(`/workspaces/${ws}/skills/${resolved.name}/settings`);
+      throw redirect(wsPathServer(workspace.name, `skills/${resolved.name}/settings`));
     }
     notFound();
   }
@@ -57,10 +63,11 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   ]);
   const pinned = bundleRow?.protection ?? null;
   return {
-    ws,
+    wsName: workspace.name,
     skill: row.name,
     protection: (pinned ?? "inherit") as ProtectionChoice,
     protectionDefault: policy.protectionDefault,
+    stepUpMethod: await stepUpMethod(owner.userId),
   };
 }
 
@@ -77,18 +84,24 @@ interface SettingsFormError {
  * never see — refused step-ups, typed refusals, faults.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
-  const ws = params.ws;
+  const workspace = await workspaceInScope(params);
+  const ws = workspace.id;
   const skill = params.skill;
-  if (!ws || !skill) {
+  if (!skill) {
     notFound();
   }
+  // The membership FLOOR, hoisted above the intent dispatch: every intent below requires at
+  // least a member (most re-check owner/reviewer themselves), and the unmatched-intent 400 must
+  // never answer a non-member — in multi tenancy `:ws` is a guessable public name slug, so a
+  // 400-vs-404 split would be a workspace-existence oracle the GET faces deliberately close.
+  await requireMember(request, workspace.id);
   const formData = await request.formData();
   const intent = String(formData.get("intent") ?? "");
   if (intent === "rename") {
-    return renameIntent(request, ws, skill, formData);
+    return renameIntent(request, ws, workspace.name, skill, formData);
   }
   if (intent === "archive") {
-    return archiveIntent(request, ws, skill, formData);
+    return archiveIntent(request, ws, workspace.name, skill, formData);
   }
   if (intent === "set-protection") {
     return protectionIntent(request, ws, skill, formData);
@@ -96,7 +109,13 @@ export async function action({ request, params }: ActionFunctionArgs) {
   return data<SettingsFormError>({ form: "rename", message: "Unknown action." }, { status: 400 });
 }
 
-async function renameIntent(request: Request, ws: string, skill: string, formData: FormData) {
+async function renameIntent(
+  request: Request,
+  ws: string,
+  wsName: string,
+  skill: string,
+  formData: FormData,
+) {
   const owner = await requireWorkspaceOwner(request, ws);
   const stepUp = await requireStepUp(request, formData);
   if (!stepUp.ok) {
@@ -138,7 +157,7 @@ async function renameIntent(request: Request, ws: string, skill: string, formDat
     });
   }
   if (outcome.outcome === "renamed") {
-    throw redirect(`/workspaces/${ws}/skills/${outcome.name}/settings`);
+    throw redirect(wsPathServer(wsName, `skills/${outcome.name}/settings`));
   }
   await recordAdminEvent(owner, {
     kind: "skill_renamed",
@@ -149,7 +168,13 @@ async function renameIntent(request: Request, ws: string, skill: string, formDat
   return data<SettingsFormError>({ form: "rename", message: renameDeniedCopy(outcome.outcome) });
 }
 
-async function archiveIntent(request: Request, ws: string, skill: string, formData: FormData) {
+async function archiveIntent(
+  request: Request,
+  ws: string,
+  wsName: string,
+  skill: string,
+  formData: FormData,
+) {
   const owner = await requireWorkspaceOwner(request, ws);
   const stepUp = await requireStepUp(request, formData);
   if (!stepUp.ok) {
@@ -180,7 +205,7 @@ async function archiveIntent(request: Request, ws: string, skill: string, formDa
     });
   }
   if (outcome.outcome === "archived") {
-    throw redirect(`/workspaces/${ws}/archive`);
+    throw redirect(wsPathServer(wsName, "archive"));
   }
   await recordAdminEvent(owner, {
     kind: "skill_archived",
@@ -240,18 +265,24 @@ async function protectionIntent(request: Request, ws: string, skill: string, for
 }
 
 export default function SkillSettings() {
-  const { ws, skill, protection, protectionDefault } = useLoaderData<typeof loader>();
+  const { wsName, skill, protection, protectionDefault, stepUpMethod } =
+    useLoaderData<typeof loader>();
   return (
-    <div className="space-y-8">
-      <PageHeader title={`${skill} settings`} meta={<code className="font-mono">{ws}</code>} />
-      <ProtectionCeremony
-        skill={skill}
-        protection={protection}
-        protectionDefault={protectionDefault}
-      />
-      <RenameCeremony skill={skill} />
-      <ArchiveCeremony skill={skill} />
-    </div>
+    <StepUpMethodProvider method={stepUpMethod}>
+      <div className="space-y-8">
+        <PageHeader
+          title={`${skill} settings`}
+          meta={<code className="font-mono">{wsName}</code>}
+        />
+        <ProtectionCeremony
+          skill={skill}
+          protection={protection}
+          protectionDefault={protectionDefault}
+        />
+        <RenameCeremony skill={skill} />
+        <ArchiveCeremony skill={skill} />
+      </div>
+    </StepUpMethodProvider>
   );
 }
 

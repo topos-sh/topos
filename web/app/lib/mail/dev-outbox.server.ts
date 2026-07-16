@@ -14,7 +14,7 @@ import type { MailMessage } from "@/lib/mail/transport.server";
 export const DEV_OUTBOX_FILE = ".outbox.jsonl";
 
 /** Which product flow produced the mail — a display/filter tag, never branched on. */
-export type DevMailKind = "magic-link" | "invite" | "auth-verify" | "auth-reset";
+export type DevMailKind = "magic-link" | "invite" | "auth-verify" | "auth-reset" | "step-up";
 
 /** Append one full rendered mail to the accumulating dev outbox (non-production callers only). */
 export async function recordDevMail(kind: DevMailKind, message: MailMessage): Promise<void> {

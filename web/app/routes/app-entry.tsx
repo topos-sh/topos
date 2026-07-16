@@ -1,22 +1,30 @@
 import { type LoaderFunctionArgs, redirect } from "react-router";
-import { actorFromSession, requireSession } from "@/lib/auth/guards.server";
+import { actorFromSession, notFound, requireSession } from "@/lib/auth/guards.server";
 import { membershipsFor } from "@/lib/db/queries.server";
+import { wsPathServer } from "@/lib/ws-url.server";
 
 /**
- * The app entry point ("/app"). A signed-out visitor is sent to /login (requireSession is the
- * backstop); a signed-in visitor is sent on into the product. The marketing landing at "/"
- * stays the page everyone — signed in or out — sees; "/app" is the door into the product.
+ * The door into the product ("/app"). A signed-out visitor is sent to /login (requireSession is
+ * the backstop); a signed-in visitor is resolved to where they belong. The marketing landing at
+ * "/" stays the page everyone — signed in or out — sees; "/app" is the resolver.
  *
- * Single-tenant: a seat (there is at most one) goes straight to its dashboard; seatless lands
- * on /workspaces, whose loader renders the honest miss or bounces an unclaimed install home.
+ * A seated visitor is sent to the workspace surface under the deployment's grammar: single → the
+ * origin root ("/"); multi → `/<name-slug>`. A signed-in visitor with no seat gets the house 404 —
+ * there is no workspace to send them to.
  *
- * Loader-only: every path redirects, so this route never renders UI.
+ * Every path redirects or 404s, so the component below never paints — but it must EXIST: a route
+ * module without a component is a resource route, whose thrown 404 would serialize as a raw JSON
+ * body instead of bubbling to the root boundary's house 404.
  */
 export async function loader({ request }: LoaderFunctionArgs): Promise<Response> {
   const actor = actorFromSession(await requireSession(request));
   const seat = actor ? (await membershipsFor(actor))[0] : undefined;
   if (seat !== undefined) {
-    return redirect(`/workspaces/${seat.id}`);
+    return redirect(wsPathServer(seat.address));
   }
-  return redirect("/workspaces");
+  notFound();
+}
+
+export default function AppEntry() {
+  return null;
 }

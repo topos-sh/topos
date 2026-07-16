@@ -2,6 +2,7 @@ import { Link } from "react-router";
 import { firstLine } from "@/components/format";
 import { RevertControl } from "@/components/skill/revert-control";
 import { Card, Chip, SectionHeading, ShortId } from "@/components/ui";
+import { useWsPath } from "@/lib/ws-path";
 
 /**
  * One row of first-parent history, shaped by the route loader from the vault's immutable
@@ -42,20 +43,13 @@ export type HistorySectionData =
 
 /**
  * First-parent history over the vault's immutable version metadata — the loader walked it and
- * hands the page here (`skill` is the catalog NAME; every link is name-keyed). A skill with
- * nothing published yet renders an honest empty state; a mid-walk failure ended in a truncation
- * row.
+ * hands the page here (`skill` is the catalog NAME; every link is name-keyed, the workspace prefix
+ * from `useWsPath`). A skill with nothing published yet renders an honest empty state; a mid-walk
+ * failure ended in a truncation row.
  */
-export function HistorySection({
-  ws,
-  skill,
-  data,
-}: {
-  ws: string;
-  skill: string;
-  data: HistorySectionData;
-}) {
-  const basePath = `/workspaces/${ws}/skills/${skill}`;
+export function HistorySection({ skill, data }: { skill: string; data: HistorySectionData }) {
+  const wsPath = useWsPath();
+  const basePath = wsPath(`skills/${skill}`);
   // The version links point at the version file page (`…/versions/{id}`); the PAGING links
   // (second-parent, Show-older) carry the `?from=` cursor on the History tab route itself.
   const historyPath = `${basePath}/history`;

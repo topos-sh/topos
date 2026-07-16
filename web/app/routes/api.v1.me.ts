@@ -3,12 +3,13 @@ import { checkBelt } from "@/lib/api/belt.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
 import { requireDeviceActor } from "@/lib/auth/guards.server";
 import { laneMe } from "@/lib/db/queries.lane.server";
-import { followBase } from "@/lib/plane/follow-base.server";
+import { workspaceAddress } from "@/lib/ws-url.server";
 
 /**
  * `GET /api/v1/workspaces/{ws}/me` — the caller's own membership (identity + address + role +
- * inviter + invite policy). Per-member and hot — never cacheable. The share ADDRESS is
- * `<origin>/<name>`: the request origin IS that base (the app is the door). `invited_by` is
+ * inviter + invite policy). Per-member and hot — never cacheable. The share ADDRESS follows the
+ * deployment's grammar (bare origin in single tenancy, `<origin>/<name>` in multi) — the CLI
+ * follows exactly what it emits; the request origin IS the base (the app is the door). `invited_by` is
  * OMITTED for a genesis seat (never serialized as null); `principal` carries the acting
  * person's display identity (email is a login attribute, not an authority key).
  */
@@ -26,7 +27,7 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
     workspace_id: actor.workspaceId,
     name: row.name,
     display_name: row.displayName,
-    address: `${followBase(request)}/${row.name}`,
+    address: workspaceAddress(request, row.name),
     principal: actor.display,
     role: row.role,
     invite_policy: row.invitePolicy,

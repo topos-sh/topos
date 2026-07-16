@@ -87,14 +87,39 @@ test.describe("anonymous — the constant protocol card + teaser (no existence o
     expect(textReal).not.toContain(WS_DISPLAY_NAME);
   });
 
-  test("browser (text/html): both addresses render the SAME constant teaser, no name leak", async ({
+  test("browser (text/html): slug-shaped paths answer the SAME house 404, no name leak", async ({
     request,
   }) => {
+    // Single-tenant grammar: the ORIGIN is the workspace address, so a `/<slug>` path names
+    // nothing — the real slug and a made-up one must be indistinguishable (the house 404).
     const real = await request.get(`/${WORKSPACE_ADDRESS}`, {
       headers: { accept: "text/html" },
       maxRedirects: 0,
     });
     const missing = await request.get(`/${NONEXISTENT}`, {
+      headers: { accept: "text/html" },
+      maxRedirects: 0,
+    });
+    expect(real.status()).toBe(404);
+    expect(missing.status()).toBe(404);
+
+    const htmlReal = await real.text();
+    const htmlMissing = await missing.text();
+    expect(htmlReal).toContain("Not found");
+    expect(htmlMissing).toContain("Not found");
+    // The real workspace's name leaks into NEITHER (the miss is path-blind).
+    expect(htmlReal).not.toContain(WS_DISPLAY_NAME);
+    expect(htmlMissing).not.toContain(WS_DISPLAY_NAME);
+  });
+
+  test("browser (text/html): the skill FACE renders the constant teaser for real and missing names alike", async ({
+    request,
+  }) => {
+    const real = await request.get(`/skills/deploy-runbook`, {
+      headers: { accept: "text/html" },
+      maxRedirects: 0,
+    });
+    const missing = await request.get(`/skills/no-such-skill-zzz`, {
       headers: { accept: "text/html" },
       maxRedirects: 0,
     });
@@ -157,47 +182,57 @@ test.describe("anonymous — the constant protocol card + teaser (no existence o
 });
 
 test.describe("signed in — the browser faces resolve against the confirmed seat", () => {
-  test("a member browsing the workspace address lands on the workspace surface", async ({
-    page,
-  }) => {
-    // The suite's default identity holds the claimed owner seat on WORKSPACE_ADDRESS.
-    const ws = await theWorkspace();
-    await page.goto(`/${WORKSPACE_ADDRESS}`);
-    await page.waitForURL((u) => u.pathname === `/workspaces/${ws.id}`);
-    expect(page.url()).toContain(`/workspaces/${ws.id}`);
+  test("a member browsing the ORIGIN lands on the workspace dashboard", async ({ page }) => {
+    // The suite's default identity holds the claimed owner seat; the origin IS the address.
+    // The member SEES the display name the anonymous faces must never leak — the same string,
+    // opposite sides of the seat check.
+    await theWorkspace();
+    await page.goto(`/`);
+    await expect(
+      page.getByRole("main").getByText(WS_DISPLAY_NAME, { exact: false }).first(),
+    ).toBeVisible();
   });
 
-  test("the channel + skill address shapes redirect a member to the matching subpage", async ({
+  test("a member's channel + skill faces render directly at their origin-rooted addresses", async ({
     page,
   }) => {
-    const ws = await theWorkspace();
-    // A raw HTML fetch over the page's own session — assert the 302 target directly (the
-    // subpage it lands on may be empty; the REDIRECT is what these address shapes promise).
-    const channel = await page.request.get(`/${WORKSPACE_ADDRESS}/channels/everyone`, {
+    await theWorkspace();
+    const channel = await page.request.get(`/channels/everyone`, {
       headers: { accept: "text/html" },
       maxRedirects: 0,
     });
-    expect(channel.status()).toBe(302);
-    expect(channel.headers().location).toBe(`/workspaces/${ws.id}/channels/everyone`);
+    expect(channel.status()).toBe(200);
+    expect(await channel.text()).not.toContain(TEASER_MARKER);
 
-    const skill = await page.request.get(`/${WORKSPACE_ADDRESS}/skills/deploy-runbook`, {
+    const skill = await page.request.get(`/skills/deploy-runbook`, {
       headers: { accept: "text/html" },
       maxRedirects: 0,
     });
-    expect(skill.status()).toBe(302);
-    expect(skill.headers().location).toBe(`/workspaces/${ws.id}/skills/deploy-runbook`);
+    expect(skill.status()).toBe(200);
+    expect(await skill.text()).not.toContain(TEASER_MARKER);
+  });
+
+  test("a member at a stale slug-shaped path gets the house 404 (the origin is the address)", async ({
+    page,
+  }) => {
+    await theWorkspace();
+    const stale = await page.request.get(`/${WORKSPACE_ADDRESS}`, {
+      headers: { accept: "text/html" },
+      maxRedirects: 0,
+    });
+    expect(stale.status()).toBe(404);
   });
 
   test("a signed-in NON-member gets the house 404 (a miss is indistinguishable from a denial)", async ({
     browser,
   }) => {
-    // A fresh account with NO seat: the address resolves to nothing they may see, and the
+    // A fresh account with NO seat: the origin face resolves to nothing they may see, and the
     // loader's notFound() renders the uniform house 404.
     const context = await browser.newContext({ storageState: { cookies: [], origins: [] } });
     const page = await context.newPage();
     try {
       await signIn(page, "card-outsider@example.com");
-      await gotoSettled(page, `/${WORKSPACE_ADDRESS}`);
+      await gotoSettled(page, `/`);
       await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
     } finally {
       await context.close();

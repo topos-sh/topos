@@ -64,8 +64,8 @@ test.beforeAll(async () => {
 test("rename: a wrong step-up password writes nothing; the right one renames and the old name redirects", async ({
   page,
 }) => {
-  const ws = await theWorkspace();
-  await gotoSettled(page, `/workspaces/${ws.id}/skills/${SKILL.name}/settings`);
+  await theWorkspace();
+  await gotoSettled(page, `/skills/${SKILL.name}/settings`);
 
   // A WRONG password: the ceremony refuses at step-up — nothing is written.
   await page.locator("#rename-new-name").fill(RENAMED);
@@ -81,7 +81,7 @@ test("rename: a wrong step-up password writes nothing; the right one renames and
   await page.locator("#rename-new-name").fill(RENAMED);
   await page.locator("#rename-password").fill(E2E_PASSWORD);
   await page.getByRole("button", { name: "Rename skill" }).click();
-  await page.waitForURL(`**/workspaces/${ws.id}/skills/${RENAMED}/settings`);
+  await page.waitForURL(`**/skills/${RENAMED}/settings`);
   const row = await adminQuery<{ name: string }>(`select name from web.bundle where id = $1`, [
     SKILL.id,
   ]);
@@ -93,13 +93,13 @@ test("rename: a wrong step-up password writes nothing; the right one renames and
     [SKILL.name],
   );
   expect(hint[0]?.bundle_id).toBe(SKILL.id);
-  await gotoSettled(page, `/workspaces/${ws.id}/skills/${SKILL.name}`);
-  await page.waitForURL(`**/workspaces/${ws.id}/skills/${RENAMED}`);
+  await gotoSettled(page, `/skills/${SKILL.name}`);
+  await page.waitForURL(`**/skills/${RENAMED}`);
 });
 
 test("the protection pin: owner + step-up flips the bundle to reviewed", async ({ page }) => {
-  const ws = await theWorkspace();
-  await gotoSettled(page, `/workspaces/${ws.id}/skills/${RENAMED}/settings`);
+  await theWorkspace();
+  await gotoSettled(page, `/skills/${RENAMED}/settings`);
 
   await page.getByRole("radio", { name: /Reviewed — a member's publish/ }).check();
   // Three ceremonies on this page carry password fields; target the protection form's own.
@@ -121,12 +121,12 @@ test("the protection pin: owner + step-up flips the bundle to reviewed", async (
 test("archive retires the skill: the base name frees, the catalog drops it, the archive lists it", async ({
   page,
 }) => {
-  const ws = await theWorkspace();
-  await gotoSettled(page, `/workspaces/${ws.id}/skills/${RENAMED}/settings`);
+  await theWorkspace();
+  await gotoSettled(page, `/skills/${RENAMED}/settings`);
 
   await page.locator("#archive-password").fill(E2E_PASSWORD);
   await page.getByRole("button", { name: `Archive ${RENAMED}` }).click();
-  await page.waitForURL(`**/workspaces/${ws.id}/archive`);
+  await page.waitForURL(`**/archive`);
 
   const row = await adminQuery<{ status: string; name: string; base_name: string }>(
     `select status, name, base_name from web.bundle where id = $1`,
@@ -138,13 +138,13 @@ test("archive retires the skill: the base name frees, the catalog drops it, the 
 
   // The archive page lists it under the archived name; the dashboard no longer does.
   await expect(page.getByText(row[0]?.name as string).first()).toBeVisible();
-  await gotoSettled(page, `/workspaces/${ws.id}`);
+  await gotoSettled(page, `/`);
   await expect(page.getByRole("link", { name: RENAMED })).toHaveCount(0);
 });
 
 test("unarchive restores the base name exactly", async ({ page }) => {
-  const ws = await theWorkspace();
-  await gotoSettled(page, `/workspaces/${ws.id}/archive`);
+  await theWorkspace();
+  await gotoSettled(page, `/archive`);
 
   await page.getByText("Unarchive…", { exact: true }).click();
   await page.locator(`#unarchive-${SKILL.id}-password`).fill(E2E_PASSWORD);
@@ -164,12 +164,12 @@ test("unarchive restores the base name exactly", async ({ page }) => {
 test("delete is archive-first + typed-name gated; the tombstone stays, the bytes drop", async ({
   page,
 }) => {
-  const ws = await theWorkspace();
+  await theWorkspace();
   // Archive again — deletion is a step further than archive, never a shortcut around it.
-  await gotoSettled(page, `/workspaces/${ws.id}/skills/${RENAMED}/settings`);
+  await gotoSettled(page, `/skills/${RENAMED}/settings`);
   await page.locator("#archive-password").fill(E2E_PASSWORD);
   await page.getByRole("button", { name: `Archive ${RENAMED}` }).click();
-  await page.waitForURL(`**/workspaces/${ws.id}/archive`);
+  await page.waitForURL(`**/archive`);
   const archivedName = (
     await adminQuery<{ name: string }>(`select name from web.bundle where id = $1`, [SKILL.id])
   )[0]?.name as string;
@@ -208,8 +208,8 @@ test("delete is archive-first + typed-name gated; the tombstone stays, the bytes
 test("purge drops ONE past version's bytes; the hash stays a tombstone and history says so", async ({
   page,
 }) => {
-  const ws = await theWorkspace();
-  await gotoSettled(page, `/workspaces/${ws.id}/skills/${PURGE_SKILL.name}/history`);
+  await theWorkspace();
+  await gotoSettled(page, `/skills/${PURGE_SKILL.name}/history`);
 
   const purgeSection = page.getByRole("region", { name: "Purge version bytes" });
   await expect(purgeSection).toBeVisible();
@@ -238,10 +238,7 @@ test("purge drops ONE past version's bytes; the hash stays a tombstone and histo
   // immutable-content LRU (a hit can never be stale — retention is the vault's fact), but the
   // leaked bytes themselves are no longer served: the file view degrades to an honest card and
   // the secret never reaches the page.
-  await gotoSettled(
-    page,
-    `/workspaces/${ws.id}/skills/${PURGE_SKILL.name}/versions/${goodId}/files/SKILL.md`,
-  );
+  await gotoSettled(page, `/skills/${PURGE_SKILL.name}/versions/${goodId}/files/SKILL.md`);
   await expect(page.getByText(/couldn't be fetched|This version isn't available/)).toBeVisible();
   expect(await page.content()).not.toContain("leaked-secret");
 });

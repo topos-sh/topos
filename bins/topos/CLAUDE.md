@@ -76,13 +76,19 @@ renderer over the SAME typed outcomes (one value, two presentations).
   TWO-PHASE subscribe. Dispatched by shape (a pending WAL always wins — "re-invoking IS the resume";
   a KNOWN followed skill name wins over the address grammar; a retired `/i/` invite link refuses
   typed toward the workspace ADDRESS):
-  - **the ADDRESS flow** (`follow <workspace>`, `<server>/<ws>`, `acme/channels/eng`, bare
-    channel/skill names): an unresolved workspace-shaped single target fetches the constant
-    **protocol card** at the address (`Accept: application/json` → `WireProtocolCard`; no existence
-    signal), re-roots onto its declared `api_base_url` (same URL gate, https-never-downgrades),
-    guards one-plane-per-install (the wrong-server refusal NAMES the `TOPOS_HOME` second-install
-    hatch), starts the gh-style device flow (`POST /v1/device/authorize {requested_name:
-    "topos CLI (<hostname>)", workspace: <address-name>}`), and persists a ONE-phase `0600` WAL
+  - **the ADDRESS flow** (`follow <workspace>`, `<server>/<ws>`, a bare SERVER origin
+    `<server>` / `https://topos.example.com` / the schemeless `topos.example.com` — "the workspace
+    that origin addresses", the single-tenant install form, an empty `workspace` on the wire,
+    `acme/channels/eng`, bare channel/skill names; a schemeless DOTTED first segment reads as an
+    `https://` address, the dot disambiguating a host from a slug or an `owner/repo`): an unresolved
+    workspace-shaped single target fetches the constant
+    **protocol card** at the address — the bare ORIGIN when no slug was given (the card is constant
+    on every path, so no existence signal), re-roots onto its declared `api_base_url` (same URL gate,
+    https-never-downgrades), guards one-plane-per-install (the wrong-server refusal NAMES the
+    `TOPOS_HOME` second-install hatch), starts the gh-style device flow
+    (`POST /v1/device/authorize {requested_name: "topos CLI (<hostname>)", workspace:
+    <address-name-or-empty>}` — an empty workspace names the origin's own workspace), and persists a
+    ONE-phase `0600` WAL
     carrying the FOLLOW INTENT + the secret device code. A re-invoked `follow` polls
     `POST /v1/device/token` once: pending re-emits the server-built approval URL verbatim; denied /
     expired sweep the WAL typed; GRANTED carries the device's ONE bearer credential (the promoted

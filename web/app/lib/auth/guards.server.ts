@@ -1,7 +1,11 @@
 import { data, redirect } from "react-router";
+import { composition } from "@/composition.server";
 import { bearerToken, uniformNotFound } from "@/lib/api/wire.server";
-import { deviceActor, seatOf } from "@/lib/db/identity.server";
+import { deviceActor, seatOf, theWorkspace, workspaceByName } from "@/lib/db/identity.server";
 import { getAuth } from "./server";
+
+/** The workspace row a scoped page resolves — the non-null result of the tenancy lookup. */
+export type ScopedWorkspace = NonNullable<Awaited<ReturnType<typeof theWorkspace>>>;
 
 /**
  * Authorization lives HERE — called at the top of every signed-in loader and action. The
@@ -56,16 +60,16 @@ type Auth = ReturnType<typeof getAuth>;
  */
 export function safeNextPath(next: string | undefined): string {
   if (!next?.startsWith("/") || next.startsWith("//")) {
-    return "/workspaces";
+    return "/app";
   }
   if (next.includes("\\") || next.includes("%")) {
-    return "/workspaces";
+    return "/app";
   }
   // WHATWG URL parsing STRIPS ASCII control characters before parsing, so "/\t//evil.com"
   // would normalize off-origin in any consumer that resolves the value — reject them outright.
   // biome-ignore lint/suspicious/noControlCharactersInRegex: the control range IS the check.
   if (/[\x00-\x1f\x7f]/.test(next)) {
-    return "/workspaces";
+    return "/app";
   }
   return next;
 }
@@ -73,6 +77,33 @@ export function safeNextPath(next: string | undefined): string {
 /** The uniform miss: pages and loaders throw this, the root boundary renders it. */
 export function notFound(): never {
   throw data(null, { status: 404 });
+}
+
+/**
+ * The workspace a scoped page addresses, resolved through the deployment's tenancy grammar:
+ * SINGLE → the one boot-minted workspace (`params.ws` is absent — the URL is origin-rooted);
+ * MULTI → the workspace the `:ws` NAME slug names. Every workspace-scoped loader/action resolves
+ * through this and then keeps using the id-keyed guards/queries (`requireMember(actor,
+ * workspace.id)`). A miss is the uniform 404 — never a 403, never an existence oracle: an unknown
+ * slug and a non-member both land the same house 404.
+ */
+export async function workspaceInScope(params: { ws?: string }): Promise<ScopedWorkspace> {
+  if (composition.tenancy === "multi") {
+    const name = params.ws;
+    if (name === undefined || name.length === 0) {
+      notFound();
+    }
+    const ws = await workspaceByName(name);
+    if (ws === null) {
+      notFound();
+    }
+    return ws;
+  }
+  const ws = await theWorkspace();
+  if (ws === null) {
+    notFound();
+  }
+  return ws;
 }
 
 /** The signed-out bounce for loaders/actions. */

@@ -3,10 +3,11 @@ import { Link, useLoaderData } from "react-router";
 import { BrowseShell } from "@/components/browse/shell";
 import { VersionFiles } from "@/components/browse/version-files";
 import { ShortId } from "@/components/ui";
-import { notFound, requireMember } from "@/lib/auth/guards.server";
+import { notFound, requireMember, workspaceInScope } from "@/lib/auth/guards.server";
 import { loadVersionFilesData } from "@/lib/browse/version-files.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
 import { custodyCurrent } from "@/lib/plane/reads.server";
+import { useWsPath } from "@/lib/ws-path";
 
 const HEX64 = /^[0-9a-f]{64}$/;
 
@@ -29,7 +30,8 @@ export function meta({ params }: { params: { skill?: string; versionId?: string 
  * already happened in the guard.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const ws = params.ws as string;
+  const workspace = await workspaceInScope(params);
+  const ws = workspace.id;
   const skill = params.skill as string;
   const versionId = params.versionId as string;
   const actor = await requireMember(request, ws);
@@ -47,29 +49,24 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   ]);
   const isCurrent = current.ok && current.data.version_id === versionId;
 
-  return { ws, skill, versionId, isCurrent, versionFiles };
+  return { skill, versionId, isCurrent, versionFiles };
 }
 
 export default function VersionFilesPage() {
-  const { ws, skill, versionId, isCurrent, versionFiles } = useLoaderData<typeof loader>();
+  const { skill, versionId, isCurrent, versionFiles } = useLoaderData<typeof loader>();
+  const wsPath = useWsPath();
   return (
     <BrowseShell>
       <header className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <Link
-          to={`/workspaces/${ws}/skills/${skill}`}
+          to={wsPath(`skills/${skill}`)}
           className="rounded-sm font-display font-semibold text-ink text-lg tracking-[-0.02em] underline decoration-hairline underline-offset-4 transition-colors hover:decoration-ink focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
         >
           {skill}
         </Link>
         <ShortId value={versionId} />
       </header>
-      <VersionFiles
-        ws={ws}
-        skill={skill}
-        versionId={versionId}
-        currentChip={isCurrent}
-        {...versionFiles}
-      />
+      <VersionFiles skill={skill} versionId={versionId} currentChip={isCurrent} {...versionFiles} />
     </BrowseShell>
   );
 }

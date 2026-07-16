@@ -37,15 +37,14 @@ fn e2e_the_printed_claim_link_claims_once_then_the_door_is_a_uniform_miss() {
     let bare = anon.get("/claim");
     assert_eq!(bare.status, 404, "no code — the same miss");
 
-    // The claim: creates the first account, seats it as OWNER, lands signed in. The workspaces
-    // index resolves the one seat straight into its workspace (a redirect, not a picker).
+    // The claim: creates the first account, seats it as OWNER, lands signed in. Single-tenant: the
+    // origin root IS the workspace dashboard — the claimant reaches it directly (there is no
+    // `/workspaces` index or `/workspaces/<id>` shell anymore).
     let owner = stack.claim_owner(OWNER_EMAIL);
-    let index = owner.get("/workspaces");
-    assert_eq!(index.status, 302, "one seat — straight to its workspace");
-    let shell = owner.get(&format!("/workspaces/{}", stack.workspace_id));
+    let shell = owner.get("/");
     assert_eq!(
         shell.status, 200,
-        "the claimant reaches the workspace shell"
+        "the claimant reaches the origin-rooted workspace dashboard"
     );
     let owner_id = stack.user_id(OWNER_EMAIL);
     assert_eq!(
@@ -120,9 +119,10 @@ fn e2e_the_registration_knob_admits_an_uninvited_signup_only_after_the_ceremony(
         "the login page carries the constant refusal copy"
     );
 
-    // A WRONG step-up cannot flip the knob (the ceremony re-authenticates the actor).
+    // A WRONG step-up cannot flip the knob (the ceremony re-authenticates the actor). The settings
+    // page is origin-rooted in single-tenant mode, and its step-up rung is UNCHANGED.
     let bad = owner.post_form(
-        &format!("/workspaces/{}/settings", stack.workspace_id),
+        "/settings",
         &[
             ("intent", "set-registration"),
             ("registration", "open"),
@@ -138,7 +138,7 @@ fn e2e_the_registration_knob_admits_an_uninvited_signup_only_after_the_ceremony(
 
     // The REAL ceremony: owner session + step-up → the knob flips, the audit row lands.
     let flipped = owner.post_form(
-        &format!("/workspaces/{}/settings", stack.workspace_id),
+        "/settings",
         &[
             ("intent", "set-registration"),
             ("registration", "open"),

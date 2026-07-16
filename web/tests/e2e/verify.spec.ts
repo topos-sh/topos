@@ -1,12 +1,13 @@
 import { expect, type Page, test } from "@playwright/test";
-import { E2E_PASSWORD, MEMBER_EMAIL, WORKSPACE_ADDRESS } from "./env";
+import { MEMBER_EMAIL, WORKSPACE_ADDRESS } from "./env";
 import { adminQuery } from "./seed";
 
 /**
  * The gh-style DEVICE-APPROVE ceremony end to end: the CLI half is the real `/api/v1/device/*`
  * flow (start → poll), the browser half is /verify — a signed-in person resolves the short
- * user code, sees what is asking, and approves BEHIND STEP-UP (approval mints a credential
- * that acts as them) or denies without one. Terminal poll answers are delivered ONCE.
+ * user code, sees what is asking, and approves with a PLAIN ACCEPT (a live session plus the
+ * explicit click mints a credential that acts as them) or denies. Terminal poll answers are
+ * delivered ONCE.
  *
  * Runs with the suite's default storage state (the claimed owner) except the signed-out leg.
  */
@@ -63,7 +64,7 @@ test("an unknown code is an honest in-page state, never a 404", async ({ page })
   await expect(page.getByText("No pending request for this code")).toBeVisible();
 });
 
-test("approve is step-up gated: a wrong password mints nothing; the right one mints the credential the poll delivers", async ({
+test("approve is a plain signed-in accept: the click mints the credential the poll delivers", async ({
   page,
 }) => {
   const flow = await startDeviceFlow(page, "e2e-laptop");
@@ -75,14 +76,7 @@ test("approve is step-up gated: a wrong password mints nothing; the right one mi
   await expect(page.getByText("“e2e-laptop”", { exact: true })).toBeVisible();
   await expect(page.getByText("wants to act as you", { exact: false })).toBeVisible();
 
-  // A WRONG password refuses the mint; the device keeps polling `pending`.
-  await page.getByLabel("Confirm with your password").fill("not-the-password-999");
-  await page.getByRole("button", { name: "Approve “e2e-laptop”" }).click();
-  await expect(page.getByRole("alert")).toContainText("Password check failed");
-  expect((await pollDeviceFlow(page, flow.device_code)).status).toBe("pending");
-
-  // The RIGHT password mints the device and the page says so.
-  await page.getByLabel("Confirm with your password").fill(E2E_PASSWORD);
+  // A live session plus the explicit click is the whole ceremony — no step-up, no password.
   await page.getByRole("button", { name: "Approve “e2e-laptop”" }).click();
   await expect(page.getByRole("heading", { name: "Device connected" })).toBeVisible();
 

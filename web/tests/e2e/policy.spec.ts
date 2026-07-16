@@ -45,8 +45,8 @@ test.afterAll(async () => {
 test("the review gate demands step-up; the switch flips only with the right password", async ({
   page,
 }) => {
-  const ws = await theWorkspace();
-  await gotoSettled(page, `/workspaces/${ws.id}/settings`);
+  await theWorkspace();
+  await gotoSettled(page, `/settings`);
 
   const gate = page.getByRole("switch");
   await expect(gate).toBeVisible();
@@ -68,14 +68,14 @@ test("the review gate demands step-up; the switch flips only with the right pass
   await page.getByLabel("Confirm with your password").fill(E2E_PASSWORD);
   await page.getByRole("button", { name: "Require review" }).click();
   await expect.poll(async () => knob("protection_default")).toBe("reviewed");
-  await gotoSettled(page, `/workspaces/${ws.id}/settings`);
+  await gotoSettled(page, `/settings`);
   await expect(page.getByRole("switch")).toHaveAttribute("aria-checked", "true");
   await expect(page.getByText(/Last set: ON, by reviewer/)).toBeVisible();
 });
 
 test("the invite policy flips to owners-only behind step-up and persists", async ({ page }) => {
-  const ws = await theWorkspace();
-  await gotoSettled(page, `/workspaces/${ws.id}/settings`);
+  await theWorkspace();
+  await gotoSettled(page, `/settings`);
 
   await expect(page.getByRole("radio", { name: "Any member can invite" })).toBeChecked();
   await page.getByRole("radio", { name: "Only owners can invite" }).check();
@@ -83,14 +83,14 @@ test("the invite policy flips to owners-only behind step-up and persists", async
   await page.getByRole("button", { name: "Save invite policy" }).click();
 
   await expect.poll(async () => knob("invite_policy")).toBe("owners");
-  await gotoSettled(page, `/workspaces/${ws.id}/settings`);
+  await gotoSettled(page, `/settings`);
   await expect(page.getByRole("radio", { name: "Only owners can invite" })).toBeChecked();
   await expect(page.getByText(/Last set: owners only, by reviewer/)).toBeVisible();
 });
 
 test("the staleness window converts days to milliseconds and persists", async ({ page }) => {
-  const ws = await theWorkspace();
-  await gotoSettled(page, `/workspaces/${ws.id}/settings`);
+  await theWorkspace();
+  await gotoSettled(page, `/settings`);
 
   const days = page.getByLabel("Staleness window (days)");
   await expect(days).toHaveValue("7"); // the 7-day column default
@@ -100,13 +100,13 @@ test("the staleness window converts days to milliseconds and persists", async ({
   await page.getByRole("button", { name: "Save staleness window" }).click();
 
   await expect.poll(async () => knob("staleness_window_ms")).toBe(FOURTEEN_DAYS_MS);
-  await gotoSettled(page, `/workspaces/${ws.id}/settings`);
+  await gotoSettled(page, `/settings`);
   await expect(page.getByLabel("Staleness window (days)")).toHaveValue("14");
 });
 
 test("the registration knob closes sign-up behind step-up", async ({ page }) => {
-  const ws = await theWorkspace();
-  await gotoSettled(page, `/workspaces/${ws.id}/settings`);
+  await theWorkspace();
+  await gotoSettled(page, `/settings`);
 
   // The suite runs registration-open (auth.setup); close it through the ceremony.
   await page
@@ -116,7 +116,7 @@ test("the registration knob closes sign-up behind step-up", async ({ page }) => 
   await page.getByRole("button", { name: "Require an invitation" }).click();
 
   await expect.poll(async () => knob("registration")).toBe("invite_only");
-  await gotoSettled(page, `/workspaces/${ws.id}/settings`);
+  await gotoSettled(page, `/settings`);
   await expect(
     page.getByRole("radio", { name: "Invite-only — sign-up requires a pending invitation" }),
   ).toBeChecked();
@@ -124,13 +124,13 @@ test("the registration knob closes sign-up behind step-up", async ({ page }) => 
 });
 
 test("a non-owner member sees the policy values read-only — no controls", async ({ browser }) => {
-  const ws = await theWorkspace();
+  await theWorkspace();
   await ensureSeatedUser("policy-member@example.com", "member");
   const context = await browser.newContext({ storageState: { cookies: [], origins: [] } });
   const page = await context.newPage();
   try {
     await signIn(page, "policy-member@example.com");
-    await gotoSettled(page, `/workspaces/${ws.id}/settings`);
+    await gotoSettled(page, `/settings`);
     await expect(page.getByRole("heading", { name: "Settings", level: 1 })).toBeVisible();
     await expect(page.getByRole("switch")).toHaveCount(0);
     await expect(page.getByRole("radio")).toHaveCount(0);

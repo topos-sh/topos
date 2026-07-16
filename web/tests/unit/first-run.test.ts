@@ -62,6 +62,15 @@ afterAll(async () => {
 });
 
 describe("the first-boot setup ceremony", () => {
+  it("multi tenancy skips the boot mint — no workspace, no claim code", async () => {
+    // A virgin database: multi tenancy mints NOTHING (workspaces are born through the superset's
+    // own creation surface, not the single-tenant genesis ceremony), so the single-tenant read
+    // stays null and no claim link is printed. Runs first, while the DB is still virgin.
+    const identity = await import("@/lib/db/identity.server");
+    await identity.ensureSetup("http://localhost:3000", "multi");
+    expect(await identity.theWorkspace()).toBeNull();
+  });
+
   it("theWorkspace() is null on a virgin database, then the boot-minted, unclaimed row", async () => {
     const identity = await import("@/lib/db/identity.server");
     expect(await identity.theWorkspace()).toBeNull();

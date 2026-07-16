@@ -542,7 +542,9 @@ pub struct DeviceAuthStartRequest {
     /// A human-readable device name shown on the approval page (a confused-deputy guard, not
     /// authority) and kept as the device's display name once approved.
     pub requested_name: String,
-    /// The workspace ADDRESS slug the device asks to join (`topos.sh/<name>` minus the origin).
+    /// The workspace ADDRESS slug the device asks to join (`topos.sh/<name>` minus the origin). An
+    /// EMPTY string names "the workspace the origin itself addresses" (single-tenant installs, where
+    /// the origin IS its one workspace); a non-empty value is the address slug as today.
     pub workspace: String,
 }
 

@@ -28,6 +28,13 @@ import { user } from "@/lib/db/schema.auth";
 
 /** The channel-name rule (the old birth mint's bound, kept). */
 const CHANNEL_NAME = /^[a-z0-9][a-z0-9-]*$/;
+
+/**
+ * Names a channel can never take: URL segments the channel surface itself claims. `new` is the
+ * create form's own route (`channels/new`), which React Router ranks above the dynamic
+ * `channels/:channel` face — a channel named `new` would be creatable but its page unreachable.
+ */
+const CHANNEL_RESERVED = new Set(["new"]);
 const CHANNEL_NAME_MAX = 64;
 
 /** One channel as the index renders it: identity + mode + the two counts. */
@@ -265,7 +272,7 @@ export async function createChannel(
   actor: MemberActor,
   name: string,
 ): Promise<ChannelCreateOutcome> {
-  if (!CHANNEL_NAME.test(name) || name.length > CHANNEL_NAME_MAX) {
+  if (!CHANNEL_NAME.test(name) || name.length > CHANNEL_NAME_MAX || CHANNEL_RESERVED.has(name)) {
     return { outcome: "bad_name" };
   }
   const channelId = mintChannelId();
@@ -313,7 +320,11 @@ export async function renameChannel(
   channelId: string,
   newName: string,
 ): Promise<ChannelRenameOutcome> {
-  if (!CHANNEL_NAME.test(newName) || newName.length > CHANNEL_NAME_MAX) {
+  if (
+    !CHANNEL_NAME.test(newName) ||
+    newName.length > CHANNEL_NAME_MAX ||
+    CHANNEL_RESERVED.has(newName)
+  ) {
     return "bad_name";
   }
   try {

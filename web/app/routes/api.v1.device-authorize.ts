@@ -1,4 +1,5 @@
 import type { ActionFunctionArgs } from "react-router";
+import { composition } from "@/composition.server";
 import { checkBelt } from "@/lib/api/belt.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
 import {
@@ -10,9 +11,13 @@ import { followBase } from "@/lib/plane/follow-base.server";
 
 /**
  * `POST /api/v1/device/authorize` — begin the gh-style device flow toward a workspace named by
- * its address slug (`DeviceAuthStartRequest` → `DeviceAuthStartResponse`). Whether the name
- * exists is never disclosed beyond this install's own: the app serves exactly ONE workspace,
- * so a name that is not it answers the uniform 404 — the same body a wrong path gets.
+ * its address slug (`DeviceAuthStartRequest` → `DeviceAuthStartResponse`). An EMPTY `workspace`
+ * names "the workspace this origin itself addresses" — honored only in single-tenant mode (the
+ * origin IS its one workspace); in multi tenancy there is no origin-scoped default, so an empty
+ * name is the uniform miss. A NON-empty name must equal this install's workspace in BOTH modes
+ * (multi-tenant enrollment beyond the one workspace stays deferred). Whether the name exists is
+ * never disclosed beyond this install's own: a name that is not it answers the uniform 404 — the
+ * same body a wrong path gets.
  *
  * No credential yet: this is the flow's unauthenticated start (the belt is its only gate). The
  * response's `device_code` is the polling secret — and, on approval, the device's ONE bearer
@@ -52,7 +57,13 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     return badRequest("malformed device authorize body");
   }
   const ws = await theWorkspace();
-  if (ws === null || ws.name !== body.workspace) {
+  if (ws === null) {
+    return uniformNotFound();
+  }
+  // An empty workspace addresses "the origin's own workspace" — single-tenant only. A non-empty
+  // name must equal this install's workspace in both modes.
+  const originAddressed = body.workspace === "" && composition.tenancy === "single";
+  if (!originAddressed && ws.name !== body.workspace) {
     return uniformNotFound();
   }
   const flow = await startDeviceAuth(body.requested_name.trim());

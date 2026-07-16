@@ -133,6 +133,10 @@ describe("createChannel", () => {
     expect(await queries.createChannel(asMember(wsId, "u_ana"), "a".repeat(65))).toEqual({
       outcome: "bad_name",
     });
+    // `new` is the create form's own URL segment — a channel by that name would be unreachable.
+    expect(await queries.createChannel(asMember(wsId, "u_ana"), "new")).toEqual({
+      outcome: "bad_name",
+    });
   });
 
   // (Drizzle wraps the pg error — the unique-violation probe reads the code through `.cause`.)
@@ -153,6 +157,7 @@ describe("renameChannel (id-keyed, owner)", () => {
       "builtin",
     );
     expect(await queries.renameChannel(owner, engId, "Bad_Name")).toBe("bad_name");
+    expect(await queries.renameChannel(owner, engId, "new")).toBe("bad_name");
     expect(await queries.renameChannel(owner, engId, "unknown-yet")).toBe("renamed");
     // The rename is visible under the NEW name; the old one no longer resolves.
     expect(await queries.channelKeyByName(asMember(wsId, "u_ana"), "unknown-yet")).toMatchObject({

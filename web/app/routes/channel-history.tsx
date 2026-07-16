@@ -2,9 +2,10 @@ import type { LoaderFunctionArgs } from "react-router";
 import { Link, useLoaderData } from "react-router";
 import { relativeTime } from "@/components/format";
 import { buttonClasses, Card, Chip, PageHeader } from "@/components/ui";
-import { notFound, requireMember } from "@/lib/auth/guards.server";
+import { notFound, requireMember, workspaceInScope } from "@/lib/auth/guards.server";
 import { type AuditEventRow, auditEventsForSubject } from "@/lib/db/audit.server";
 import { channelKeyByName } from "@/lib/db/queries.channels.server";
+import { useWsPath } from "@/lib/ws-path";
 
 export function meta({ params }: { params: { channel?: string } }) {
   return [{ title: `History · #${params.channel ?? "channel"}` }];
@@ -21,22 +22,23 @@ export function meta({ params }: { params: { channel?: string } }) {
  * re-surfaced here after the row disappears.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const ws = params.ws;
+  const workspace = await workspaceInScope(params);
   const channel = params.channel;
-  if (!ws || !channel) {
+  if (!channel) {
     notFound();
   }
-  const actor = await requireMember(request, ws);
+  const actor = await requireMember(request, workspace.id);
   const key = await channelKeyByName(actor, channel);
   if (key === undefined) {
     notFound();
   }
   const window = await auditEventsForSubject(actor, key.channelId);
-  return { ws, channel, channelName: key.name, events: window.events, hasMore: window.hasMore };
+  return { channel, channelName: key.name, events: window.events, hasMore: window.hasMore };
 }
 
 export default function ChannelHistory() {
-  const { ws, channel, channelName, events, hasMore } = useLoaderData<typeof loader>();
+  const { channel, channelName, events, hasMore } = useLoaderData<typeof loader>();
+  const wsPath = useWsPath();
   return (
     <div className="space-y-8">
       <PageHeader
@@ -49,7 +51,7 @@ export default function ChannelHistory() {
           </>
         }
         actions={
-          <Link to={`/workspaces/${ws}/channels/${channel}`} className={buttonClasses("quiet")}>
+          <Link to={wsPath(`channels/${channel}`)} className={buttonClasses("quiet")}>
             Back to channel
           </Link>
         }

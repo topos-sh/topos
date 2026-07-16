@@ -156,8 +156,9 @@ fn e2e_seat_removal_ends_delivery_in_the_same_request() {
     // The owner REMOVES the seat through the app's members ceremony (step-up gated). The detach
     // records + the seat delete land in ONE transaction — delivery ends in this request.
     let member_id = stack.user_id(MEMBER_EMAIL);
+    // The members page is origin-rooted in single-tenant mode; its step-up rung is UNCHANGED.
     let removed = owner.post_form(
-        &format!("/workspaces/{}/members", stack.workspace_id),
+        "/members",
         &[
             ("intent", "remove"),
             ("user_id", &member_id),

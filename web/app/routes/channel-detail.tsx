@@ -1,10 +1,18 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Link, redirect, useFetcher, useLoaderData } from "react-router";
 import { relativeTime } from "@/components/format";
-import { StepUpFields } from "@/components/step-up";
+import { ResourcePage } from "@/components/resource-page";
+import { StepUpFields, StepUpMethodProvider } from "@/components/step-up";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading } from "@/components/ui";
-import { notFound, requireMember, requireWorkspaceOwner } from "@/lib/auth/guards.server";
-import { requireStepUp, requireTypedName } from "@/lib/auth/step-up.server";
+import {
+  actorFromSession,
+  notFound,
+  requireMember,
+  requireWorkspaceOwner,
+  workspaceInScope,
+} from "@/lib/auth/guards.server";
+import { getAuth } from "@/lib/auth/server";
+import { requireStepUp, requireTypedName, stepUpMethod } from "@/lib/auth/step-up.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import {
   type ChannelDeleteOutcome,
@@ -17,24 +25,42 @@ import {
   optOutDefaultChannel,
   renameChannel,
 } from "@/lib/db/queries.channels.server";
+import { useWsPath } from "@/lib/ws-path";
+import { wsPathServer } from "@/lib/ws-url.server";
 
 export function meta({ params }: { params: { channel?: string } }) {
   return [{ title: `#${params.channel ?? "channel"}` }];
 }
 
+/**
+ * The channel FACE — resource address and canonical channel page as ONE route. Admission mirrors
+ * the other faces: anonymous browser → the constant teaser; a signed-in member → the channel page
+ * WITH chrome; a signed-in non-member (or unknown workspace slug) → the house 404.
+ */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const ws = params.ws;
+  const session = await getAuth().api.getSession({ headers: request.headers });
+  const actor = actorFromSession(session);
+  if (actor === null) {
+    return { face: "teaser" as const };
+  }
+  const workspace = await workspaceInScope(params);
+  const memberActor = await requireMember(request, workspace.id);
   const channel = params.channel;
-  if (!ws || !channel) {
+  if (!channel) {
     notFound();
   }
-  const actor = await requireMember(request, ws);
-  const detail = await channelDetail(actor, channel);
+  const detail = await channelDetail(memberActor, channel);
   // A miss is the uniform 404 — never a 403, never a "channel exists but…" oracle.
   if (detail === undefined) {
     notFound();
   }
-  return { ws, channel, detail, isOwner: actor.role === "owner" };
+  return {
+    face: "page" as const,
+    channel,
+    detail,
+    isOwner: memberActor.role === "owner",
+    stepUpMethod: await stepUpMethod(memberActor.userId),
+  };
 }
 
 /** The typed reply each ceremony returns on a NON-redirect (a landed owner act redirects away). */
@@ -52,11 +78,17 @@ type ChannelActionData =
  * its own transaction; the route records the attempts it never sees.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
-  const ws = params.ws;
+  const workspace = await workspaceInScope(params);
+  const ws = workspace.id;
   const channel = params.channel;
-  if (!ws || !channel) {
+  if (!channel) {
     notFound();
   }
+  // The membership FLOOR, hoisted above the intent dispatch: every intent below requires at
+  // least a member (most re-check owner/reviewer themselves), and the unmatched-intent 400 must
+  // never answer a non-member — in multi tenancy `:ws` is a guessable public name slug, so a
+  // 400-vs-404 split would be a workspace-existence oracle the GET faces deliberately close.
+  await requireMember(request, workspace.id);
   const formData = await request.formData();
   const intent = String(formData.get("intent") ?? "");
   // The owner ceremonies key on the IMMUTABLE channel_id the page was LOADED with (a hidden
@@ -64,10 +96,10 @@ export async function action({ request, params }: ActionFunctionArgs) {
   // name; the id keeps a stale form acting on the channel the owner was actually looking at.
   const channelId = String(formData.get("channel_id") ?? "");
   if (intent === "rename-channel") {
-    return renameChannelIntent(request, ws, channelId, formData);
+    return renameChannelIntent(request, ws, workspace.name, channelId, formData);
   }
   if (intent === "delete-channel") {
-    return deleteChannelIntent(request, ws, channelId, formData);
+    return deleteChannelIntent(request, ws, workspace.name, channelId, formData);
   }
   if (intent === "leave-default") {
     return leaveDefaultIntent(request, ws);
@@ -109,6 +141,7 @@ function deleteErrorCopy(outcome: ChannelDeleteOutcome): string {
 async function renameChannelIntent(
   request: Request,
   ws: string,
+  wsName: string,
   channelId: string,
   formData: FormData,
 ) {
@@ -139,7 +172,7 @@ async function renameChannelIntent(
     );
   }
   if (outcome === "renamed") {
-    return redirect(`/workspaces/${ws}/channels/${newName}`);
+    return redirect(wsPathServer(wsName, `channels/${newName}`));
   }
   await recordAdminEvent(owner, {
     kind: "channel_renamed",
@@ -161,6 +194,7 @@ async function renameChannelIntent(
 async function deleteChannelIntent(
   request: Request,
   ws: string,
+  wsName: string,
   channelId: string,
   formData: FormData,
 ) {
@@ -209,7 +243,7 @@ async function deleteChannelIntent(
     );
   }
   if (outcome === "deleted") {
-    return redirect(`/workspaces/${ws}/channels`);
+    return redirect(wsPathServer(wsName, "channels"));
   }
   await recordAdminEvent(owner, {
     kind: "channel_deleted",
@@ -254,7 +288,23 @@ async function rejoinDefaultIntent(request: Request, ws: string) {
 }
 
 export default function ChannelDetail() {
-  const { ws, channel, detail, isOwner } = useLoaderData<typeof loader>();
+  const data = useLoaderData<typeof loader>();
+  if (data.face === "teaser") {
+    return <ResourcePage />;
+  }
+  return (
+    <StepUpMethodProvider method={data.stepUpMethod}>
+      <ChannelDetailPage {...data} />
+    </StepUpMethodProvider>
+  );
+}
+
+function ChannelDetailPage({
+  channel,
+  detail,
+  isOwner,
+}: Extract<Awaited<ReturnType<typeof loader>>, { face: "page" }>) {
+  const wsPath = useWsPath();
   return (
     <div className="space-y-8">
       <PageHeader
@@ -274,20 +324,17 @@ export default function ChannelDetail() {
         }
         actions={
           <>
-            <Link
-              to={`/workspaces/${ws}/channels/${detail.name}/history`}
-              className={buttonClasses("quiet")}
-            >
+            <Link to={wsPath(`channels/${detail.name}/history`)} className={buttonClasses("quiet")}>
               History
             </Link>
-            <Link to={`/workspaces/${ws}/channels`} className={buttonClasses("quiet")}>
+            <Link to={wsPath("channels")} className={buttonClasses("quiet")}>
               All channels
             </Link>
           </>
         }
       />
 
-      <SkillsSection ws={ws} skills={detail.skills} />
+      <SkillsSection skills={detail.skills} />
       <MembersSection detail={detail} />
 
       {isOwner &&
@@ -307,7 +354,8 @@ export default function ChannelDetail() {
 }
 
 /** The skill references the channel delivers — each a link to its skill page (by catalog name). */
-function SkillsSection({ ws, skills }: { ws: string; skills: ChannelDetailData["skills"] }) {
+function SkillsSection({ skills }: { skills: ChannelDetailData["skills"] }) {
+  const wsPath = useWsPath();
   return (
     <section aria-labelledby="skills-heading" className="space-y-3">
       <SectionHeading>
@@ -322,7 +370,7 @@ function SkillsSection({ ws, skills }: { ws: string; skills: ChannelDetailData["
               <li key={skill.skillId} className="border-line-soft border-b last:border-b-0">
                 {skill.status === "active" ? (
                   <Link
-                    to={`/workspaces/${ws}/skills/${skill.name}`}
+                    to={wsPath(`skills/${skill.name}`)}
                     className="flex items-center gap-2 px-4 py-3 hover:bg-panel2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
                   >
                     <span className="min-w-0 truncate font-medium text-ink text-sm">

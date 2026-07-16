@@ -1,51 +1,66 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { redirect, useLoaderData } from "react-router";
 import { VersionFiles } from "@/components/browse/version-files";
+import { ResourcePage } from "@/components/resource-page";
 import { SkillHeader } from "@/components/skill/skill-header";
 import { SkillTabs } from "@/components/skill/skill-tabs";
 import { Card } from "@/components/ui";
-import { notFound, requireMember } from "@/lib/auth/guards.server";
+import {
+  actorFromSession,
+  notFound,
+  requireMember,
+  workspaceInScope,
+} from "@/lib/auth/guards.server";
+import { getAuth } from "@/lib/auth/server";
 import { loadVersionFilesData } from "@/lib/browse/version-files.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
 import { resolveSkillName } from "@/lib/db/resolve.server";
+import { useWsPath } from "@/lib/ws-path";
+import { wsPathServer } from "@/lib/ws-url.server";
 
 export function meta({ params }: { params: { skill?: string } }) {
   return [{ title: `${params.skill ?? "skill"} · Topos` }];
 }
 
 /**
- * The skill's Current tab — the DEFAULT view, showing the current version's files + doc preview
- * inline. Proposals and History are sibling routes (see SkillTabs); making the tabs real routes
- * rather than client state means each is a shareable URL that renders as one complete document
- * under blocking SSR.
+ * The skill FACE — resource address and canonical Current tab as ONE route. Admission mirrors the
+ * workspace face: a non-browser document fetch got the protocol card already; an anonymous browser
+ * gets the constant teaser; a signed-in member gets the skill page WITH chrome; a signed-in
+ * non-member (or unknown workspace slug) gets the house 404.
  *
- * The catalog row this page probes IS the directory's identity surface: the NAME exists the moment
- * a skill is minted, and the `current` pointer joins in when a publish has landed one. A skill
- * whose NAME is unknown here is the uniform 404; a known name that has NEVER published (`versionId`
- * is null) renders honestly — the header and tabs stand, and the body says nothing is published
- * yet, rather than inventing a pointer. When a current version exists we hand VersionFiles the
- * fully-resolved body with `currentChip` set (by construction this IS current). Authorization
- * (requireMember) runs before any data read; the same probe is the uniform 404.
+ * The Current tab is the DEFAULT skill view: the current version's files + doc preview inline.
+ * Proposals and History are sibling MEMBER-only routes (see SkillTabs). The catalog row this page
+ * probes IS the directory's identity surface: the NAME exists the moment a skill is minted, and the
+ * `current` pointer joins in when a publish has landed one. A known name that has NEVER published
+ * (`versionId` null) renders honestly; an unknown NAME is the uniform 404 (a rename hint redirects).
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const ws = params.ws as string;
+  const session = await getAuth().api.getSession({ headers: request.headers });
+  const actor = actorFromSession(session);
+  if (actor === null) {
+    return { face: "teaser" as const };
+  }
+  const workspace = await workspaceInScope(params);
+  const memberActor = await requireMember(request, workspace.id);
   const skill = params.skill as string;
-  const actor = await requireMember(request, ws);
-  const row = await skillIndexRow(actor, skill);
+  const row = await skillIndexRow(memberActor, skill);
   if (row === undefined) {
     // A rename left an old name behind: follow the resolving hint to the live name; else 404.
-    const resolved = await resolveSkillName(actor, skill);
+    const resolved = await resolveSkillName(memberActor, skill);
     if (resolved !== undefined && resolved.via === "hint" && resolved.status === "active") {
-      throw redirect(`/workspaces/${ws}/skills/${resolved.name}`);
+      throw redirect(wsPathServer(workspace.name, `skills/${resolved.name}`));
     }
     notFound();
   }
 
   const versionFiles =
-    row.versionId !== null ? await loadVersionFilesData(actor, row.skillId, row.versionId) : null;
+    row.versionId !== null
+      ? await loadVersionFilesData(memberActor, row.skillId, row.versionId)
+      : null;
 
   return {
-    ws,
+    face: "page" as const,
+    wsName: workspace.name,
     skill,
     currentShort: row.versionId !== null ? row.versionId.slice(0, 12) : "—",
     displayName: row.displayName,
@@ -57,24 +72,40 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 }
 
 export default function SkillCurrentPage() {
-  const { ws, skill, currentShort, displayName, kind, openProposals, versionId, versionFiles } =
-    useLoaderData<typeof loader>();
+  const data = useLoaderData<typeof loader>();
+  if (data.face === "teaser") {
+    return <ResourcePage />;
+  }
+  return <SkillCurrentContent {...data} />;
+}
+
+function SkillCurrentContent({
+  wsName,
+  skill,
+  currentShort,
+  displayName,
+  kind,
+  openProposals,
+  versionId,
+  versionFiles,
+}: Extract<Awaited<ReturnType<typeof loader>>, { face: "page" }>) {
+  const wsPath = useWsPath();
   return (
     <div className="space-y-6">
       <SkillHeader
-        ws={ws}
+        ws={wsName}
         skill={skill}
         currentShort={currentShort}
         displayName={displayName}
         kind={kind}
       />
       <SkillTabs
-        basePath={`/workspaces/${ws}/skills/${skill}`}
+        basePath={wsPath(`skills/${skill}`)}
         active="current"
         openProposals={openProposals}
       />
       {versionId !== null && versionFiles !== null ? (
-        <VersionFiles ws={ws} skill={skill} versionId={versionId} currentChip {...versionFiles} />
+        <VersionFiles skill={skill} versionId={versionId} currentChip {...versionFiles} />
       ) : (
         <Card className="px-4 py-3">
           <p className="text-dim text-sm">

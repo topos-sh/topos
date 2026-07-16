@@ -614,17 +614,11 @@ impl Stack {
         )
     }
 
-    /// Approve a pending device flow AS the sessioned person: the `/verify` ceremony's approve arm,
-    /// step-up gated (the password re-entry seconds before the mint).
+    /// Approve a pending device flow AS the sessioned person: the `/verify` ceremony's approve arm.
+    /// This is a PLAIN signed-in accept — a live session plus the explicit approve click is the whole
+    /// ceremony (no step-up password; the password rung stays on the admin/settings ceremonies).
     pub(crate) fn approve_device(&self, session: &Session, user_code: &str) {
-        let answer = session.post_form(
-            "/verify",
-            &[
-                ("intent", "approve"),
-                ("code", user_code),
-                ("stepup_password", PASSWORD),
-            ],
-        );
+        let answer = session.post_form("/verify", &[("intent", "approve"), ("code", user_code)]);
         assert_eq!(answer.status, 200, "the approve lands: {}", answer.body);
         assert!(
             answer.body.contains("connected"),

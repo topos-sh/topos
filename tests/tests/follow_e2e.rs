@@ -79,16 +79,36 @@ fn e2e_real_follow_enrolls_describes_and_lands_the_first_skill() {
     assert!(markdown.contains("A Topos resource address"));
     assert!(markdown.contains("releases/latest/download/install.sh"));
 
-    // The card is BYTE-IDENTICAL on every path — the address, the origin root, and a path that
-    // names nothing (no face is an existence oracle).
+    // The card is BYTE-IDENTICAL to a NON-browser fetch on every path — the origin root, a skill
+    // face, and the retired `/workspaces/...` grammar all answer the same constant card (no face is
+    // an existence oracle, and a stale bookmark of the old grammar discloses nothing).
     let at_root = http_body(&stack.origin, "application/json");
     let at_address = http_body(&address, "application/json");
+    let at_skill = http_body(&format!("{}/skills/x", stack.origin), "application/json");
+    let at_workspaces = http_body(
+        &format!("{}/workspaces/x", stack.origin),
+        "application/json",
+    );
     let at_miss = http_body(
         &format!("{}/no-such-thing/at-all", stack.origin),
         "application/json",
     );
     assert_eq!(at_root, at_address, "root face == address face");
+    assert_eq!(at_address, at_skill, "address face == skill-path face");
+    assert_eq!(
+        at_address, at_workspaces,
+        "address face == retired-grammar face"
+    );
     assert_eq!(at_address, at_miss, "address face == unmatched-path face");
+
+    // A BROWSER-shaped GET of the retired `/workspaces/...` grammar is the house 404 (there is no
+    // such page anymore — the signed-in surface is origin-rooted in single-tenant mode).
+    let browser_workspaces =
+        common::Session::new(&stack.origin).get(&format!("/workspaces/{}", stack.workspace_id));
+    assert_eq!(
+        browser_workspaces.status, 404,
+        "the retired `/workspaces/...` page is a browser 404"
+    );
 
     // The member: an account (the open-registration arrangement) + a seat, then the device flow.
     let member = stack.add_member(MEMBER_EMAIL, "member");
@@ -192,6 +212,100 @@ fn e2e_real_follow_enrolls_describes_and_lands_the_first_skill() {
     assert_eq!(skill_md.1 & 0o111, 0, "SKILL.md is not executable");
 
     // The row witness: the approval minted ONE device owned by the member.
+    let devices = stack.count(&format!(
+        "SELECT count(*) FROM web.device d JOIN web.\"user\" u ON u.id = d.user_id \
+         WHERE u.email = '{MEMBER_EMAIL}' AND d.revoked_at IS NULL"
+    ));
+    assert_eq!(devices, 1, "one live device for the member");
+}
+
+// ── follow by BARE ORIGIN (no workspace slug): the single-tenant address form ───────────────────────
+
+/// `topos follow <bare-origin>` — a server address with NO workspace slug ("the workspace this
+/// origin itself addresses"). The device-authorize goes out with an EMPTY workspace; the granted
+/// poll carries the AUTHORITATIVE workspace back, and everything persisted/described/applied uses
+/// THAT — never the empty request string. Then the reconcile lands the genesis byte-exact, proving
+/// the bare-origin form enrolls and delivers exactly like the slug form.
+#[test]
+fn e2e_follow_by_bare_origin_enrolls_describes_and_delivers() {
+    let (stack, _owner) = stack_with_genesis("bareorigin");
+    // The BARE origin — no `/acme` slug. In single-tenant mode the origin IS the one workspace.
+    let origin = stack.origin.clone();
+
+    let member = stack.add_member(MEMBER_EMAIL, "member");
+    let client = FollowHarness::new("bareorigin-member");
+
+    // Call 1 — `topos follow <bare-origin>`: card at the bare origin → re-root → device-authorize
+    // with an EMPTY workspace → the pending WAL.
+    let pending = client.follow(&origin).expect("follow call 1 (bare origin)");
+    assert!(!pending.enrolled, "call 1 only begins enrollment");
+    let handle = pending.pending.expect("the pending verification handle");
+    assert!(
+        handle.verification_uri_complete.starts_with(&stack.origin),
+        "the approval URL rides this origin: {}",
+        handle.verification_uri_complete
+    );
+    assert!(client.wal_exists(), "the pending WAL is written");
+
+    // The signed-in member approves (a plain accept — no step-up).
+    stack.approve_device(&member, &handle.user_code);
+
+    // Call 2 — re-invoke: poll granted → persist → DESCRIBE. The AUTHORITATIVE workspace (never the
+    // empty request string) is what got persisted and described.
+    let describe = client.resume_describe().expect("the resume describes");
+    assert!(describe.enrolled_now, "THIS invocation enrolled the device");
+    assert_eq!(
+        describe.workspace_id, stack.workspace_id,
+        "the granted authoritative workspace id is described, never the empty request"
+    );
+    assert_eq!(
+        describe.workspace_name, WS_NAME,
+        "the granted authoritative slug is described, never an empty string"
+    );
+    assert_eq!(
+        describe.installs.len(),
+        1,
+        "one install delivered by everyone: {:?}",
+        describe.installs
+    );
+    assert_eq!(describe.installs[0].name, SKILL);
+
+    // The persisted membership carries the AUTHORITATIVE workspace id (offline witness — never the
+    // empty request string that started the flow).
+    assert_eq!(
+        client.user_workspace().as_deref(),
+        Some(stack.workspace_id.as_str()),
+        "the persisted membership is the granted workspace, not the empty request"
+    );
+
+    // Call 3 — `topos follow <bare-origin> --yes`: the bare origin resolves to the already-enrolled
+    // workspace (NO second enrollment) and the reconcile lands `everyone`'s genesis this invocation.
+    let applied = client
+        .follow_apply(&origin)
+        .expect("the --yes apply (bare origin)");
+    assert!(!applied.enrolled_now, "already enrolled by call 2");
+    assert_eq!(
+        applied.installed.len(),
+        1,
+        "the genesis landed: {:?}",
+        applied.installed
+    );
+    assert_eq!(applied.installed[0].name, SKILL);
+    assert!(
+        applied.warnings.is_empty(),
+        "a clean apply: {:?}",
+        applied.warnings
+    );
+
+    // Delivery works — the placement holds the EXACT genesis bytes (incl. the exec bit).
+    let placed = &applied.installed[0].skill_id;
+    assert_eq!(
+        client.placement_files(placed),
+        expected(&genesis_files()),
+        "the genesis is placed byte-exact"
+    );
+
+    // Exactly one live device for the member, minted by the one approval.
     let devices = stack.count(&format!(
         "SELECT count(*) FROM web.device d JOIN web.\"user\" u ON u.id = d.user_id \
          WHERE u.email = '{MEMBER_EMAIL}' AND d.revoked_at IS NULL"

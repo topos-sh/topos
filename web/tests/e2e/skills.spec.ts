@@ -76,8 +76,8 @@ test.beforeAll(async () => {
 test("the skill page opens on the Current tab: file listing, doc preview, and the tab bar", async ({
   page,
 }) => {
-  const ws = await theWorkspace();
-  await gotoSettled(page, `/workspaces/${ws.id}/skills/${SKILL}`);
+  await theWorkspace();
+  await gotoSettled(page, `/skills/${SKILL}`);
 
   // The header is the skill's catalog name over the mono locator line.
   await expect(page.getByRole("heading", { name: SKILL })).toBeVisible();
@@ -96,8 +96,8 @@ test("the skill page opens on the Current tab: file listing, doc preview, and th
 });
 
 test("the Proposals tab lists the open candidate with a Review link", async ({ page }) => {
-  const ws = await theWorkspace();
-  await gotoSettled(page, `/workspaces/${ws.id}/skills/${SKILL}`);
+  await theWorkspace();
+  await gotoSettled(page, `/skills/${SKILL}`);
 
   await page
     .getByRole("navigation", { name: "Skill sections" })
@@ -111,8 +111,8 @@ test("the Proposals tab lists the open candidate with a Review link", async ({ p
 });
 
 test("the History tab walks first-parent from the current head", async ({ page }) => {
-  const ws = await theWorkspace();
-  await gotoSettled(page, `/workspaces/${ws.id}/skills/${SKILL}/history`);
+  await theWorkspace();
+  await gotoSettled(page, `/skills/${SKILL}/history`);
 
   // The walk starts at the seeded head and reaches genesis; the candidate never appears (it
   // is not on the first-parent chain from current).

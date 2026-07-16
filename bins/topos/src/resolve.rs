@@ -4,8 +4,13 @@
 //! - a full ADDRESS (`https://topos.sh/acme`, `https://topos.sh/acme/channels/eng`) — scheme + host,
 //!   the workspace name, and optionally a kind-scoped resource (the literal `channels`/`skills`
 //!   middle segment is what makes it a resource path);
+//! - an ORIGIN address (`https://topos.example.com`, or the schemeless dotted host
+//!   `topos.example.com`) — a server with NO workspace slug: "the workspace this origin itself
+//!   addresses" (single-tenant installs). The `Address`'s `workspace` is the empty string;
 //! - a QUALIFIED path (`acme/channels/eng`, `acme/skills/deploy`) — the same three segments without
-//!   a host (resolved on the enrolled plane);
+//!   a host (resolved on the enrolled plane). A schemeless token whose FIRST segment is host-shaped
+//!   (dotted — `topos.sh/acme`) is instead the full address `https://topos.sh/acme` (a workspace
+//!   slug can carry no dot, so the dot disambiguates a host from a slug or an `owner`);
 //! - a BARE word (`eng`) — a workspace, channel, or skill name (resolution decides);
 //! - the LOCAL domain (`deploy@cursor`) — an untracked harness-dir copy, never a plane resource;
 //! - the `add` LOOKALIKE (`owner/repo` — exactly TWO segments, where a qualified path is three with
@@ -52,7 +57,10 @@ impl ResourceKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ParsedTarget {
     /// A workspace address, optionally naming a kind-scoped resource. `host` is `Some` for a full
-    /// URL (the card-fetch origin, scheme included); `None` for a bare qualified path.
+    /// URL (the card-fetch origin, scheme included); `None` for a bare qualified path. An EMPTY
+    /// `workspace` is an ORIGIN address — "the workspace this origin itself addresses"
+    /// (single-tenant installs); it always carries `host: Some(_)` and `resource: None` (a resource
+    /// path names its workspace explicitly).
     Address {
         host: Option<String>,
         workspace: String,
@@ -72,8 +80,8 @@ pub(crate) enum ParsedTarget {
 ///
 /// # Errors
 /// [`ClientError::InvalidArgument`] for a path-shaped token that is neither a qualified path
-/// (`<workspace>/channels/<name>` / `<workspace>/skills/<name>`), a workspace address, nor an
-/// `owner/repo` lookalike — the usage message spells the accepted shapes.
+/// (`<workspace>/channels/<name>` / `<workspace>/skills/<name>`), a workspace address, an origin
+/// address, nor an `owner/repo` lookalike — the usage message spells the accepted shapes.
 pub(crate) fn parse_target(token: &str) -> Result<ParsedTarget, ClientError> {
     let token = token.trim();
     if token.is_empty() {
@@ -83,20 +91,41 @@ pub(crate) fn parse_target(token: &str) -> Result<ParsedTarget, ClientError> {
                 .into(),
         ));
     }
-    // A full URL: split the scheme+host origin off, then parse the path as a qualified shape.
+    // A full URL: split the scheme+host origin off, then parse the path as a qualified shape. A URL
+    // with NO path (or a bare trailing slash) is an ORIGIN address — the workspace this origin
+    // itself addresses (single-tenant installs).
     if let Some(scheme_end) = token.find("://") {
+        let scheme = &token[..scheme_end];
         let after = &token[scheme_end + 3..];
-        let Some(slash) = after.find('/') else {
-            return Err(ClientError::InvalidArgument(format!(
-                "'{token}' names a server, not a workspace — a workspace address is \
-                 <server>/<workspace> (e.g. https://topos.sh/acme)"
-            )));
+        let (host_part, path) = match after.split_once('/') {
+            Some((host, rest)) => (host, rest.trim_matches('/')),
+            None => (after, ""),
         };
-        let host = &token[..scheme_end + 3 + slash];
-        let path = after[slash + 1..].trim_matches('/');
-        return parse_address_path(Some(host.to_owned()), path, token);
+        if host_part.is_empty() {
+            return Err(ClientError::InvalidArgument(format!(
+                "'{token}' names no host — a workspace address is <server> or <server>/<workspace> \
+                 (e.g. https://topos.sh or https://topos.sh/acme)"
+            )));
+        }
+        let host = format!("{scheme}://{host_part}");
+        if path.is_empty() {
+            return Ok(ParsedTarget::Address {
+                host: Some(host),
+                workspace: String::new(),
+                resource: None,
+            });
+        }
+        return parse_address_path(Some(host), path, token);
     }
     if token.contains('/') {
+        // A schemeless token whose FIRST segment is host-shaped (dotted) is a full address with the
+        // default `https` scheme (`topos.sh/acme` == `https://topos.sh/acme`). GitHub `owner` names
+        // and workspace slugs both forbid dots, so the dot is what tells a host from either — the
+        // `owner/repo` lookalike below can never carry one.
+        let first = token.split('/').next().unwrap_or("");
+        if is_host_shaped(first) {
+            return parse_schemeless_host(token);
+        }
         let segments: Vec<&str> = token.split('/').filter(|s| !s.is_empty()).collect();
         // Exactly two plain segments read as `owner/repo` — the `add` lookalike (a qualified path is
         // THREE segments with a literal `channels`/`skills` middle, so the shapes never collide).
@@ -104,6 +133,13 @@ pub(crate) fn parse_target(token: &str) -> Result<ParsedTarget, ClientError> {
             return Ok(ParsedTarget::RepoLike(token.to_owned()));
         }
         return parse_address_path(None, token.trim_matches('/'), token);
+    }
+    // A schemeless BARE token that is host-shaped (dotted — `topos.example.com`, `host.tld:8787`)
+    // is an ORIGIN address with the default `https` scheme. A followed skill / channel / workspace
+    // name carries no dot, so this steals none of them (and the follow dispatch tries a KNOWN
+    // followed-skill name before ever reaching this grammar).
+    if is_host_shaped(token) {
+        return parse_schemeless_host(token);
     }
     // The local domain: `<name>@<agent>`. Callers that accept `<skill>@<digest>` strip the digest
     // BEFORE parsing (a digest suffix is a version reference, not an agent).
@@ -117,6 +153,58 @@ pub(crate) fn parse_target(token: &str) -> Result<ParsedTarget, ClientError> {
         });
     }
     Ok(ParsedTarget::Bare(token.to_owned()))
+}
+
+/// Parse a SCHEMELESS token whose leading host segment is host-shaped, as if `https://` had been
+/// typed (the default scheme). A bare host is an ORIGIN address; a host + path parses the path as a
+/// qualified shape. `token` is echoed verbatim in any usage error (never the synthesized URL).
+fn parse_schemeless_host(token: &str) -> Result<ParsedTarget, ClientError> {
+    match token.split_once('/') {
+        None => Ok(ParsedTarget::Address {
+            host: Some(format!("https://{token}")),
+            workspace: String::new(),
+            resource: None,
+        }),
+        Some((host, rest)) => {
+            let host = format!("https://{host}");
+            let path = rest.trim_matches('/');
+            if path.is_empty() {
+                Ok(ParsedTarget::Address {
+                    host: Some(host),
+                    workspace: String::new(),
+                    resource: None,
+                })
+            } else {
+                parse_address_path(Some(host), path, token)
+            }
+        }
+    }
+}
+
+/// Whether a schemeless leading segment is shaped like a network HOST rather than a workspace slug
+/// or a GitHub `owner` — the disambiguator is a DOT. [`is_workspace_name`] forbids dots and GitHub
+/// owner names cannot contain them, so a DOTTED first segment is unambiguously a host
+/// (`topos.sh`, `topos.example.com`, `10.0.0.1`, `host.tld:8787`); a dotless token
+/// (`acme`, `owner`) never is. A trailing `:port` is allowed when the port is all-digit; the host
+/// must be non-empty, LDH-charset (letters/digits/`.`/`-`), and not start or end with `.`/`-`.
+fn is_host_shaped(segment: &str) -> bool {
+    // Peel an optional `:port` — the port must be present and all-ASCII-digit to count.
+    let host = match segment.rsplit_once(':') {
+        Some((host, port)) => {
+            if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+                return false;
+            }
+            host
+        }
+        None => segment,
+    };
+    !host.is_empty()
+        && host.contains('.')
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        && !host.starts_with(['.', '-'])
+        && !host.ends_with(['.', '-'])
 }
 
 /// Parse the path half of an address (`<ws>`, `<ws>/channels/<name>`, `<ws>/skills/<name>`).
@@ -323,7 +411,28 @@ pub(crate) fn resolve_one(
             resource,
             ..
         } => {
-            // The workspace must be enrolled to resolve here (the verb's enroll flow owns the
+            // An ORIGIN address (empty slug) names "the workspace this origin addresses". On an
+            // enrolled install that is the SOLE membership (v0 is one plane per install); several
+            // memberships make it ambiguous (name the slug); none returns `Ok(None)` so the verb's
+            // enroll flow folds in. An origin address never carries a resource (the parser
+            // guarantees it), so it can only ever name the workspace itself.
+            if workspace.is_empty() {
+                if !scope.workspaces {
+                    return Ok(None);
+                }
+                return match universe {
+                    [] => Ok(None),
+                    [only] => Ok(Some(Resolution::Workspace {
+                        workspace_id: only.workspace_id.clone(),
+                        workspace_name: only.name.clone(),
+                    })),
+                    _ => Err(ClientError::AmbiguousTarget {
+                        name: "this origin".to_owned(),
+                        candidates: universe.iter().map(|w| w.name.clone()).collect(),
+                    }),
+                };
+            }
+            // A NAMED workspace must be enrolled to resolve here (the verb's enroll flow owns the
             // un-enrolled address BEFORE calling the resolver).
             let Some(ws) = universe.iter().find(|w| w.name == *workspace) else {
                 return Ok(None);
@@ -588,11 +697,107 @@ mod tests {
         );
         // A three-segment path WITHOUT the literal middle is a usage error, not a guess.
         assert!(parse_target("acme/things/eng").is_err());
-        // A URL with no path names a server, not a workspace.
-        assert!(parse_target("https://topos.sh").is_err());
         // `owner/channels` (two segments where the SECOND is a kind literal) is not a repo — it is
         // a malformed qualified path, refused with the usage shapes.
         assert!(parse_target("acme/channels").is_err());
+    }
+
+    #[test]
+    fn parse_classifies_origin_addresses() {
+        // A URL with NO path is an ORIGIN address: the workspace this origin itself addresses
+        // (single-tenant installs), an empty workspace slot.
+        assert_eq!(
+            parse_target("https://topos.example.com").unwrap(),
+            ParsedTarget::Address {
+                host: Some("https://topos.example.com".into()),
+                workspace: String::new(),
+                resource: None,
+            }
+        );
+        // A bare trailing slash is the same origin address, not a malformed path.
+        assert_eq!(
+            parse_target("https://topos.example.com/").unwrap(),
+            ParsedTarget::Address {
+                host: Some("https://topos.example.com".into()),
+                workspace: String::new(),
+                resource: None,
+            }
+        );
+        // An explicit http origin (loopback shapes) round-trips its scheme.
+        assert_eq!(
+            parse_target("http://127.0.0.1:8787").unwrap(),
+            ParsedTarget::Address {
+                host: Some("http://127.0.0.1:8787".into()),
+                workspace: String::new(),
+                resource: None,
+            }
+        );
+        // A SCHEMELESS dotted host is an origin address with the default https scheme.
+        assert_eq!(
+            parse_target("topos.example.com").unwrap(),
+            ParsedTarget::Address {
+                host: Some("https://topos.example.com".into()),
+                workspace: String::new(),
+                resource: None,
+            }
+        );
+        // A schemeless dotted host with a port qualifies too.
+        assert_eq!(
+            parse_target("topos.example.com:8443").unwrap(),
+            ParsedTarget::Address {
+                host: Some("https://topos.example.com:8443".into()),
+                workspace: String::new(),
+                resource: None,
+            }
+        );
+        // A URL with no host at all is a usage error.
+        assert!(parse_target("https://").is_err());
+    }
+
+    #[test]
+    fn schemeless_dotted_host_is_the_default_https_address() {
+        // A schemeless dotted host + workspace slug is the full `https://` address — NOT an
+        // `owner/repo` lookalike (a GitHub owner name can carry no dot).
+        assert_eq!(
+            parse_target("topos.sh/acme").unwrap(),
+            ParsedTarget::Address {
+                host: Some("https://topos.sh".into()),
+                workspace: "acme".into(),
+                resource: None,
+            }
+        );
+        assert_eq!(
+            parse_target("topos.sh/acme/skills/deploy").unwrap(),
+            ParsedTarget::Address {
+                host: Some("https://topos.sh".into()),
+                workspace: "acme".into(),
+                resource: Some((ResourceKind::Skill, "deploy".into())),
+            }
+        );
+        // A DOTLESS two-segment token stays the `owner/repo` lookalike (the dot is the only signal).
+        assert_eq!(
+            parse_target("vercel-labs/agent-skills").unwrap(),
+            ParsedTarget::RepoLike("vercel-labs/agent-skills".into())
+        );
+    }
+
+    #[test]
+    fn host_shape_gate() {
+        assert!(is_host_shaped("topos.sh"));
+        assert!(is_host_shaped("topos.example.com"));
+        assert!(is_host_shaped("10.0.0.1"));
+        assert!(is_host_shaped("host.tld:8787"));
+        // No dot → a slug or an owner, never a host.
+        assert!(!is_host_shaped("acme"));
+        assert!(!is_host_shaped("owner"));
+        // A local domain / userinfo char is not LDH → not a host.
+        assert!(!is_host_shaped("deploy@cursor"));
+        // A non-numeric or empty port disqualifies.
+        assert!(!is_host_shaped("host.tld:"));
+        assert!(!is_host_shaped("host.tld:https"));
+        // Leading / trailing dot or dash is malformed.
+        assert!(!is_host_shaped(".topos.sh"));
+        assert!(!is_host_shaped("topos.sh."));
     }
 
     #[test]
@@ -754,6 +959,34 @@ mod tests {
             )
             .unwrap()
             .is_none()
+        );
+    }
+
+    #[test]
+    fn origin_address_resolves_to_the_sole_membership() {
+        let u = universe();
+        let origin = parse_target("https://topos.sh").unwrap();
+        // Several memberships → ambiguous; name the slug.
+        let err = resolve_one(&u, &origin, KindScope::ALL).unwrap_err();
+        assert!(
+            matches!(err, ClientError::AmbiguousTarget { .. }),
+            "{err:?}"
+        );
+        // Exactly one → that workspace (the single-tenant install the origin form targets).
+        let one = vec![u[0].clone()];
+        let r = resolve_one(&one, &origin, KindScope::ALL)
+            .unwrap()
+            .expect("the origin resolves to the sole membership");
+        assert!(
+            matches!(r, Resolution::Workspace { ref workspace_id, .. } if workspace_id == "w_acme")
+        );
+        // None enrolled → Ok(None) (the verb's enroll flow folds in).
+        assert!(resolve_one(&[], &origin, KindScope::ALL).unwrap().is_none());
+        // Out of a workspace scope (a subscribable-only verb) an origin address is Ok(None).
+        assert!(
+            resolve_one(&one, &origin, KindScope::SUBSCRIBABLE)
+                .unwrap()
+                .is_none()
         );
     }
 
