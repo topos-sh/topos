@@ -20,8 +20,18 @@ vi.mock("@/composition.server", () => ({
     get reservedWorkspaceNames() {
       return reservedExtra;
     },
+    // The OSS allow-all shape by default; tests flip the two knobs below.
+    entitlements: {
+      forWorkspace: () =>
+        Promise.resolve({
+          allows: () => entitlementAllows,
+          limit: () => entitlementPerDay,
+        }),
+    },
   },
 }));
+let entitlementAllows = true;
+let entitlementPerDay: number | null = null;
 
 // The create form's loader resolves the session through the auth entry — stub a signed-in owner.
 vi.mock("@/lib/auth/server", () => ({
@@ -43,6 +53,7 @@ async function dal() {
 beforeAll(async () => {
   db = await createScratchDb("web_create");
   await seedUser(db, "u_owner", "Owner", "owner@example.com");
+  await seedUser(db, "u_other", "Other", "other@example.com");
 }, 60000);
 
 afterAll(async () => {
@@ -111,11 +122,55 @@ describe("createWorkspace", () => {
     expect(futureReserved).toStrictEqual(duplicate);
     expect(extraReserved).toStrictEqual(duplicate);
 
-    // A reserved name is refused BEFORE the transaction — no workspace row, no channel, no seat.
+    // A reserved name never reaches the insert — no workspace row, no channel, no seat. (It
+    // still pays the same one indexed name-read a taken name pays, so timing classifies
+    // nothing.)
     const leaked = await db.q(
       `SELECT 1 FROM web.workspace WHERE name IN ('api', 'docs', 'acme-reserved')`,
     );
     expect(leaked).toHaveLength(0);
+  });
+
+  it("trips the per-person rolling-day floor, counted from the audit trail", async () => {
+    const { createWorkspace } = await dal();
+    const owner = asUser("u_owner", "Owner");
+    // The composition caps at 2/day for the test; u_owner already created one above ("acme").
+    entitlementPerDay = 2;
+    try {
+      const second = await createWorkspace(owner, { name: "floor-two", displayName: "Two" });
+      expect(second.outcome).toBe("created");
+      const third = await createWorkspace(owner, { name: "floor-three", displayName: "Three" });
+      expect(third).toEqual({ outcome: "rate-limited" });
+      // The floor is per PERSON — another account still creates.
+      const other = await createWorkspace(asUser("u_other", "Other"), {
+        name: "floor-other",
+        displayName: "Other",
+      });
+      expect(other.outcome).toBe("created");
+    } finally {
+      entitlementPerDay = null;
+    }
+  });
+
+  it("answers `off` when the composition switches self-serve creation off", async () => {
+    const { createWorkspace } = await dal();
+    entitlementAllows = false;
+    try {
+      const result = await createWorkspace(asUser("u_owner", "Owner"), {
+        name: "switched-off",
+        displayName: "Off",
+      });
+      expect(result).toEqual({ outcome: "off" });
+    } finally {
+      entitlementAllows = true;
+    }
+  });
+
+  it("throws (typed, not a CHECK 500) when a caller bypasses shape validation", async () => {
+    const { createWorkspace } = await dal();
+    await expect(
+      createWorkspace(asUser("u_owner", "Owner"), { name: "Bad_Name", displayName: "Bad" }),
+    ).rejects.toThrow(/not a valid workspace address slug/);
   });
 });
 

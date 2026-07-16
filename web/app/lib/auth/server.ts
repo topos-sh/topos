@@ -19,10 +19,12 @@ import { assertRegistrationAllowed } from "./registration.server";
  * the app talks to the vault over the internal lane with its own bearer, and a session never
  * becomes a token that leaves this tier.
  *
- * REGISTRATION IS NEVER OPEN (lib/auth/registration.server.ts): the `user.create.before`
- * hook demands a proof — the claim ceremony, a pending invitation on an armed-mail
- * deployment, or the off-by-default `registration = 'open'` knob — under EVERY rung, so a
- * composition's extra providers cannot reopen sign-up.
+ * REGISTRATION IS COMPOSITION-OWNED (lib/auth/registration.server.ts): the
+ * `user.create.before` hook runs under EVERY rung, so no provider bypasses the policy. The
+ * OSS default is GATED — a proof is demanded (the claim ceremony, a pending invitation on an
+ * armed-mail deployment, or — single tenancy only — the off-by-default `registration =
+ * 'open'` knob). A composition that sets `registration: "open"` admits every sign-up; the
+ * hook still runs, it just allows.
  *
  * Mail is the identity rung for multi-user servers: with SMTP armed, sign-up sends a
  * verification mail, and the INVITED SEAT BINDS ONLY AFTER the mailbox round-trip

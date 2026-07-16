@@ -8,6 +8,7 @@ import {
   theWorkspace,
 } from "@/lib/db/identity.server";
 import { followBase } from "@/lib/plane/follow-base.server";
+import { isWorkspaceNameShape } from "@/lib/workspace-name";
 
 /**
  * `POST /api/v1/device/authorize` — begin the gh-style device flow toward a workspace named by
@@ -35,10 +36,6 @@ import { followBase } from "@/lib/plane/follow-base.server";
  */
 const BODY_CAP = 8 * 1024;
 const MAX_REQUESTED_NAME = 200;
-
-/** The workspace-name rule (the address-slug charset + the column's length cap). */
-const WORKSPACE_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
-const MAX_WORKSPACE_NAME = 100;
 
 export async function action({ request }: ActionFunctionArgs): Promise<Response> {
   const belted = checkBelt(request);
@@ -73,11 +70,7 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   let requestedWorkspace: string;
   if (composition.tenancy === "multi") {
     // Shape only — existence is deliberately NOT checked here (see the doc comment above).
-    if (
-      body.workspace.length === 0 ||
-      body.workspace.length > MAX_WORKSPACE_NAME ||
-      !WORKSPACE_NAME_RE.test(body.workspace)
-    ) {
+    if (body.workspace.length === 0 || !isWorkspaceNameShape(body.workspace)) {
       return uniformNotFound();
     }
     requestedWorkspace = body.workspace;

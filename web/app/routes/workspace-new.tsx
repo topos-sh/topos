@@ -33,6 +33,8 @@ export const meta: MetaFunction = () => [{ title: "Create your workspace · Topo
  */
 
 const ADDRESS_TAKEN = "That address is taken — try another.";
+const CREATE_RATE_LIMITED =
+  "You’ve created several workspaces recently — wait a while before creating another.";
 const NAME_REQUIRED = "Enter a name for your workspace (1–100 characters).";
 const SLUG_SHAPE =
   "The address uses lowercase letters, numbers, and hyphens (up to 100 characters).";
@@ -90,6 +92,14 @@ export async function action({ request }: ActionFunctionArgs) {
   if (result.outcome === "taken") {
     // A reserved slug and an already-taken one land the SAME refusal — one string, one status.
     return data<ActionData>({ error: ADDRESS_TAKEN, displayName, slug }, { status: 400 });
+  }
+  if (result.outcome === "off") {
+    // The composition switched self-serve creation off — the surface does not exist.
+    notFound();
+  }
+  if (result.outcome === "rate-limited") {
+    // Honest and disclosed, unlike `taken` — a floor is not a secret.
+    return data<ActionData>({ error: CREATE_RATE_LIMITED, displayName, slug }, { status: 429 });
   }
   throw redirect(next ?? wsPathServer(result.name));
 }

@@ -1,8 +1,7 @@
 import type { ActionFunctionArgs } from "react-router";
-import { composition } from "@/composition.server";
 import { checkBelt } from "@/lib/api/belt.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
-import { pollDeviceAuth, theWorkspace, workspaceByName } from "@/lib/db/identity.server";
+import { pollDeviceAuth, workspaceRowById } from "@/lib/db/identity.server";
 
 /**
  * `POST /api/v1/device/token` — poll the device flow (`DeviceAuthPollRequest` →
@@ -12,9 +11,11 @@ import { pollDeviceAuth, theWorkspace, workspaceByName } from "@/lib/db/identity
  * hash-only store still "delivers" it: the poller already holds it.
  *
  * The `workspace` decoration on a granted poll is THE FLOW'S workspace — the CLI records what
- * it enrolled into from this one field, so it resolves the flow row's recorded slug under the
- * same tenancy grammar the approval used (single → the install's one workspace; multi → lookup
- * by name), never an arbitrary row.
+ * it enrolled into from this one field. It reads the workspace id the APPROVAL persisted
+ * inside its fence, never a poll-time re-resolution of the mutable slug: a rename keeps the
+ * decoration pointing at the approved workspace, and a delete+recreate of the slug can never
+ * re-point a granted flow at a row the approval never covered. A workspace deleted inside the
+ * TTL omits the field (the same arm a virgin install answers).
  */
 const BODY_CAP = 8 * 1024;
 
@@ -45,9 +46,7 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     return Response.json({ status: result.status });
   }
   const ws =
-    composition.tenancy === "multi"
-      ? await workspaceByName(result.requestedWorkspace)
-      : await theWorkspace();
+    result.approvedWorkspaceId === null ? null : await workspaceRowById(result.approvedWorkspaceId);
   return Response.json({
     status: "granted",
     credential: deviceCode,

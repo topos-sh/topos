@@ -29,9 +29,9 @@ export const OSS_TOP_LEVEL_SEGMENTS: readonly string[] = [
 ];
 
 /**
- * Words the product may plausibly need at the top level later (founder-approved future-reserve
- * list, 2026-07-15) — reserved NOW so no workspace squats an address a future page needs.
- * Extend judiciously; removals free real names, so treat the list as append-only.
+ * Words the product may plausibly need at the top level later — reserved NOW so no workspace
+ * squats an address a future page needs. Curated; extend judiciously, and treat the list as
+ * append-only (a removal frees a real name).
  */
 export const FUTURE_RESERVED_SEGMENTS: readonly string[] = [
   "about",

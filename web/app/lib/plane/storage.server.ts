@@ -42,11 +42,15 @@ function parseStorageStats(body: unknown): Map<string, number> {
       workspace_id?: unknown;
       stored_bytes?: unknown;
     };
+    // The vault's totals are u64: past 2^53 JSON.parse already rounded the value, which is
+    // fine for an oversight display — accept any non-negative finite integer-valued number
+    // (display-grade precision) rather than refusing a workspace merely for being huge.
     if (
       typeof workspaceId !== "string" ||
       workspaceId.length === 0 ||
       typeof storedBytes !== "number" ||
-      !Number.isSafeInteger(storedBytes) ||
+      !Number.isFinite(storedBytes) ||
+      !Number.isInteger(storedBytes) ||
       storedBytes < 0
     ) {
       throw new Error("storage stats body is malformed");

@@ -202,4 +202,38 @@ describe("the granted poll's workspace decoration", () => {
       workspace: { workspace_id: "w_beta", name: "beta-team", display_name: "beta-team" },
     });
   });
+
+  it("reads the approval-persisted ID — a rename or delete+recreate never re-points a grant", async () => {
+    // The approval resolved and PERSISTED the workspace id inside its fence; the poll's
+    // decoration must follow that id (the current name comes along), not re-resolve the slug —
+    // a recreate under the old slug is a row the approval never covered.
+    const identity = await import("@/lib/db/identity.server");
+    const { action } = await import("@/routes/api.v1.device-token");
+    await seedWorkspace("w_gamma", "gamma-team");
+    await seatUser(db, "w_gamma", "u_in", "member");
+    const flow = await identity.startDeviceAuth("gamma-box", "gamma-team");
+    const approved = await identity.approveDeviceAuth(flow.userCode, {
+      userId: "u_in",
+      display: "Insider",
+    });
+    expect(approved).not.toBeNull();
+
+    // Rename the workspace, then squat the OLD slug with a brand-new workspace.
+    await db.q(`UPDATE web.workspace SET name = 'gamma-renamed' WHERE id = 'w_gamma'`);
+    await seedWorkspace("w_squat", "gamma-team");
+
+    const res = await (action as RouteAction)({
+      request: new Request(`${ORIGIN}/api/v1/device/token`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ device_code: flow.deviceCode }),
+      }),
+      params: {},
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { workspace: { workspace_id: string; name: string } };
+    // The APPROVED workspace, under its current name — never the squatter.
+    expect(body.workspace.workspace_id).toBe("w_gamma");
+    expect(body.workspace.name).toBe("gamma-renamed");
+  });
 });

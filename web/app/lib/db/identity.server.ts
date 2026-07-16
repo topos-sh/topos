@@ -205,6 +205,17 @@ export async function workspaceByName(name: string): Promise<typeof workspace.$i
   return rows[0] ?? null;
 }
 
+/**
+ * The ceremony-lane read: the workspace row an OPAQUE ID names (null on a miss). For callers
+ * whose authorization is the ceremony row itself — the granted device poll decorates from the
+ * approval-persisted id — so no actor scope applies (contrast the DAL's actor-first
+ * `workspaceById`).
+ */
+export async function workspaceRowById(id: string): Promise<typeof workspace.$inferSelect | null> {
+  const rows = await getDb().select().from(workspace).where(eq(workspace.id, id)).limit(1);
+  return rows[0] ?? null;
+}
+
 /** The claim page's GET probe: the workspace IF the presented code is live. Uniform miss otherwise. */
 export async function claimableWorkspace(
   code: string,
@@ -307,9 +318,10 @@ export type DevicePollResult =
   | {
       status: "granted";
       deviceId: string;
-      /** The flow's recorded workspace ADDRESS SLUG — what the token route's `workspace`
-       * decoration resolves under the tenancy grammar ('' = the single-tenant origin form). */
-      requestedWorkspace: string;
+      /** The workspace id the APPROVAL resolved (persisted inside its fence) — the token
+       * route's `workspace` decoration reads this immutable id, so a slug rename or a
+       * delete+recreate inside the TTL can never re-point a granted flow. */
+      approvedWorkspaceId: string | null;
     };
 
 /**
@@ -323,12 +335,17 @@ export type DevicePollResult =
  */
 export async function pollDeviceAuth(deviceCode: string): Promise<DevicePollResult> {
   const rows = await getDb().execute(
-    sql`SELECT status, device_id, requested_workspace, expires_at < now() AS expired
+    sql`SELECT status, device_id, approved_workspace_id, expires_at < now() AS expired
         FROM ${deviceAuthSession}
         WHERE device_code_sha256 = ${sha256OfText(deviceCode)}`,
   );
   const row = rows.rows[0] as
-    | { status: string; device_id: string | null; requested_workspace: string; expired: boolean }
+    | {
+        status: string;
+        device_id: string | null;
+        approved_workspace_id: string | null;
+        expired: boolean;
+      }
     | undefined;
   if (!row) {
     return { status: "expired" };
@@ -342,7 +359,7 @@ export async function pollDeviceAuth(deviceCode: string): Promise<DevicePollResu
     return {
       status: "granted",
       deviceId: row.device_id,
-      requestedWorkspace: row.requested_workspace,
+      approvedWorkspaceId: row.approved_workspace_id,
     };
   }
   // pending — expired pending is terminal (the human never approved in time).
@@ -386,8 +403,12 @@ async function seatedFlowWorkspaceTx(
   if (!ws) {
     return null;
   }
+  // FOR UPDATE: the seat is the authorization — lock it so a concurrent seat removal
+  // serializes with this ceremony instead of racing it (no approve/deny commits on a seat
+  // whose delete already committed).
   const seats = await tx.execute(
-    sql`SELECT 1 FROM ${seat} WHERE workspace_id = ${ws.id} AND user_id = ${actorUserId}`,
+    sql`SELECT 1 FROM ${seat} WHERE workspace_id = ${ws.id} AND user_id = ${actorUserId}
+        FOR UPDATE`,
   );
   if (seats.rows.length === 0) {
     return null;
@@ -440,7 +461,8 @@ export async function approveDeviceAuth(
     });
     await tx.execute(
       sql`UPDATE ${deviceAuthSession}
-          SET status = 'approved', approved_by = ${approver.userId}, device_id = ${deviceId}
+          SET status = 'approved', approved_by = ${approver.userId}, device_id = ${deviceId},
+              approved_workspace_id = ${resolved.workspaceId}
           WHERE id = ${row.id}`,
     );
     await auditInTx(tx, {
