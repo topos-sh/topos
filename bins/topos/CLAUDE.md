@@ -318,10 +318,12 @@ are asserted byte-equal in tests.
     without `--yes` describe (who gets seated, the channel pre-placements, the mail-or-paste note); `--yes`
     POSTs the folded-email invitation. (The `/i/`-link mint is retired — joining is `follow <address>`.)
   - **`review`** (`ops/review`) — a bare `review` is the review INBOX/OUTBOX across every enrolled workspace
-    (`GET /proposals` per ws; author-message FIRST; the outbox is your own proposals, matched on
-    `user.json`'s principal). A bare TARGET (`<skill>[@<hash>]`, a bare skill resolving to its one open
+    (`GET /proposals` per ws; author-message FIRST; the outbox is your own proposals, split by the
+    server-computed `yours` — user-id equality server-side; the `user.json` principal match stays only as
+    the compat fallback for an older server). A bare TARGET (`<skill>[@<hash>]`, a bare skill resolving to its one open
     proposal) DESCRIBES it — author, message, base, staleness, and the diff vs current (`current..<proposal>`
-    through the same plane-diff machinery `diff` runs) — with the verdict next-actions; a target + a verdict
+    through the same plane-diff machinery `diff` runs) — with the verdict next-actions (`--withdraw`, never
+    `--approve`, on your own proposal); a target + a verdict
     flag applies directly (the verdict IS the consent).
   - **`log`** (`ops/log`) — the local action log + git history now MERGE the plane's version/proposal history
     for a followed skill (`GET /skills/{skill}/log`): versions with purge tombstones ("purged by <who> <when>
