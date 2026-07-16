@@ -810,6 +810,11 @@ export interface components {
         RevertData: {
             /** Format: int64 */
             current_generation: number;
+            /**
+             * @description The skill's NAME — the handle humans speak and the TTY success line leads with
+             *     (`Reverted <name> …`); the opaque `skill_id` above stays the machine key.
+             */
+            name: string;
             /** @description The new forward-revert commit that carries those bytes. */
             new_version_id: string;
             /** @description The good version named by `--to` (the bytes being restored). */
@@ -1247,6 +1252,13 @@ export interface components {
             stale: boolean;
             /** @description The proposed version's commit id (64-char lowercase hex) — the review target handle. */
             version_id: string;
+            /**
+             * @description Whether the CALLER authored this proposal — the server computes it from the resolved user id
+             *     (never email equality). The client's inbox uses it to split the outbox (yours) from the inbox
+             *     (others') and to offer the author `--withdraw` instead of `--approve`. A producer predating the
+             *     field omits it, so it defaults to `false` and the client falls back to comparing principals.
+             */
+            yours?: boolean;
         };
         /**
          * @description `GET /v1/workspaces/{ws}/proposals` response — every OPEN proposal in the workspace, author-message
