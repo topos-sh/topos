@@ -145,9 +145,13 @@ export interface GenesisRegistration {
 /**
  * Register a NEW bundle at its genesis publish, inside the caller's final transaction: the
  * bundle row (name minted from the display name with suffix-on-collision — `name`, `name-2`,
- * `name-3`…), the `everyone` placement (a brand-new bundle always lands there), the optional
- * `--to` placement (gated by the channel's mode, its outcome riding the receipt details,
- * independent of the version gate), and the author's self-follow stance.
+ * `name-3`…), an EXCLUSIVE placement, and the author's self-follow stance. Placement is
+ * exclusive because `--to` is the targeting mechanism: with NO `--to` (or an explicit
+ * `--to everyone`) the bundle lands in the default `everyone` channel; with a real `--to`
+ * channel named it lands in THAT channel alone (gated by the channel's mode, its outcome riding
+ * the receipt details, independent of the version gate). A refused `--to` placement
+ * (`curated_role_required`) leaves the bundle in NO channel — the refusal rides the receipt and
+ * the author's self-follow still stands.
  */
 export async function registerGenesisBundleInTx(
   tx: Tx,
@@ -184,16 +188,21 @@ export async function registerGenesisBundleInTx(
       createdBy: actor.userId,
     })
     .onConflictDoNothing({ target: bundle.id });
-  const everyone = await tx
-    .select({ id: channel.id })
-    .from(channel)
-    .where(and(eq(channel.workspaceId, ws), eq(channel.isDefault, true)))
-    .limit(1);
-  if (everyone[0] !== undefined) {
-    await tx
-      .insert(channelBundle)
-      .values({ channelId: everyone[0].id, workspaceId: ws, bundleId, addedBy: actor.userId })
-      .onConflictDoNothing();
+  // EXCLUSIVE placement: the default `everyone` channel ONLY when no real `--to` was named
+  // (`--to` targets a subset; adding `everyone` too would deliver to the whole workspace anyway,
+  // defeating the targeting). A named `--to` places into that channel alone, below.
+  if (toChannel === null || toChannel === "everyone") {
+    const everyone = await tx
+      .select({ id: channel.id })
+      .from(channel)
+      .where(and(eq(channel.workspaceId, ws), eq(channel.isDefault, true)))
+      .limit(1);
+    if (everyone[0] !== undefined) {
+      await tx
+        .insert(channelBundle)
+        .values({ channelId: everyone[0].id, workspaceId: ws, bundleId, addedBy: actor.userId })
+        .onConflictDoNothing();
+    }
   }
   await tx
     .insert(bundleSubscription)
