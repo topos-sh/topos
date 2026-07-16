@@ -11,14 +11,11 @@ import {
   useNavigation,
 } from "react-router";
 import { buttonClasses } from "@/components/ui";
+import { composition } from "@/composition.server";
 import { actorFromSession, notFound, requireSession } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
-import {
-  approveDeviceAuth,
-  denyDeviceAuth,
-  pendingDeviceAuth,
-  theWorkspace,
-} from "@/lib/db/identity.server";
+import { approveDeviceAuth, denyDeviceAuth, pendingDeviceAuth } from "@/lib/db/identity.server";
+import { membershipsFor } from "@/lib/db/queries.server";
 
 export const meta: MetaFunction = () => [{ title: "Approve a device · Topos" }];
 
@@ -40,16 +37,30 @@ export const meta: MetaFunction = () => [{ title: "Approve a device · Topos" }]
  * The loader's own sign-in bounce (not requireSession, whose bounce drops the query): the
  * `next` path carries the code, so a person landing here from a mailed/printed link signs in
  * and returns to the resolved request.
+ *
+ * MULTI tenancy adds the workspace-creation weave: a signed-in person with ZERO seats anywhere
+ * cannot approve anything (approval requires a seat in the flow's workspace), so the loader
+ * routes them through workspace creation and back — `/new` carries this page (code included)
+ * as `next`, plus the flow's requested slug as a `name` prefill hint when one resolved. This
+ * is the CLI-first path: the enrollment started toward a workspace that is created mid-flow.
  */
 export async function loader({ request }: LoaderFunctionArgs) {
   const code = (new URL(request.url).searchParams.get("code") ?? "").trim();
   const actor = actorFromSession(await getAuth().api.getSession({ headers: request.headers }));
+  const self = `/verify${code === "" ? "" : `?code=${encodeURIComponent(code)}`}`;
   if (actor === null) {
-    const next = `/verify${code === "" ? "" : `?code=${encodeURIComponent(code)}`}`;
-    throw redirect(`/login?next=${encodeURIComponent(next)}`);
+    throw redirect(`/login?next=${encodeURIComponent(self)}`);
   }
   const pending = code === "" ? null : await pendingDeviceAuth(code);
-  return { code, pending };
+  const multi = composition.tenancy === "multi";
+  if (multi && (await membershipsFor(actor)).length === 0) {
+    const prefill =
+      pending !== null && pending.requestedWorkspace !== ""
+        ? `&name=${encodeURIComponent(pending.requestedWorkspace)}`
+        : "";
+    throw redirect(`/new?next=${encodeURIComponent(self)}${prefill}`);
+  }
+  return { code, pending, multi };
 }
 
 const REQUEST_GONE =
@@ -67,30 +78,25 @@ export async function action({ request }: ActionFunctionArgs) {
   if (userCode === "" || (intent !== "approve" && intent !== "deny")) {
     throw data(null, { status: 400 });
   }
-  // The single-tenant resolve: the one workspace scopes the ceremony's audit row.
-  const workspace = await theWorkspace();
-  if (workspace === null) {
-    notFound();
-  }
 
   if (intent === "approve") {
-    // No step-up: the live session + this explicit approve click is the whole ceremony.
-    const approved = await approveDeviceAuth(
-      userCode,
-      { userId: actor.userId, display: actor.display },
-      workspace.id,
-    );
+    // No step-up: the live session + this explicit approve click is the whole ceremony. The
+    // ceremony itself resolves the flow's workspace and requires the approver's seat in it —
+    // a refusal is indistinguishable from an expired code.
+    const approved = await approveDeviceAuth(userCode, {
+      userId: actor.userId,
+      display: actor.display,
+    });
     if (approved === null) {
       return data({ kind: "refused" as const, error: REQUEST_GONE }, { status: 400 });
     }
     return { kind: "approved" as const, name: approved.requestedName };
   }
 
-  const denied = await denyDeviceAuth(
-    userCode,
-    { userId: actor.userId, display: actor.display },
-    workspace.id,
-  );
+  const denied = await denyDeviceAuth(userCode, {
+    userId: actor.userId,
+    display: actor.display,
+  });
   if (!denied) {
     return data({ kind: "refused" as const, error: REQUEST_GONE }, { status: 400 });
   }
@@ -101,7 +107,7 @@ const INPUT =
   "block h-11 w-full rounded-md border border-line px-3 text-sm text-ink placeholder:text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25";
 
 export default function VerifyPage() {
-  const { code, pending } = useLoaderData<typeof loader>();
+  const { code, pending, multi } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
 
   if (actionData?.kind === "approved") {
@@ -144,7 +150,11 @@ export default function VerifyPage() {
         )}
         <CodeLookup code={code} />
         {pending !== null ? (
-          <PendingRequest code={code} requestedName={pending.requestedName} />
+          <PendingRequest
+            code={code}
+            requestedName={pending.requestedName}
+            workspaceLabel={multi ? pending.requestedWorkspace : null}
+          />
         ) : (
           code !== "" && (
             <p className="text-center text-dim text-sm" role="status">
@@ -185,17 +195,33 @@ function CodeLookup({ code }: { code: string }) {
 /**
  * The resolved request: what is asking, then the two arms. The approve form posts the RESOLVED
  * code as a hidden field — the approval applies to exactly the request shown, never to whatever
- * the lookup input holds at submit time.
+ * the lookup input holds at submit time. On a multi-tenant deployment the card also names the
+ * workspace the flow targets ("in <slug>") — the request's own claim, echoed so the approver
+ * sees where the credential will act before clicking.
  */
-function PendingRequest({ code, requestedName }: { code: string; requestedName: string }) {
+function PendingRequest({
+  code,
+  requestedName,
+  workspaceLabel,
+}: {
+  code: string;
+  requestedName: string;
+  workspaceLabel: string | null;
+}) {
   const navigation = useNavigation();
   const submitting = navigation.state !== "idle";
   return (
     <div className="flex flex-col gap-4 rounded-md border border-line-soft bg-ground p-4">
       <p className="text-ink text-sm">
-        Device <span className="font-medium">“{requestedName}”</span> wants to act as you. Approving
-        gives it a credential that publishes, follows, and reads with your seat until you sign it
-        out from your devices.
+        Device <span className="font-medium">“{requestedName}”</span> wants to act as you
+        {workspaceLabel !== null && workspaceLabel !== "" ? (
+          <>
+            {" "}
+            in <span className="font-medium">{workspaceLabel}</span>
+          </>
+        ) : null}
+        . Approving gives it a credential that publishes, follows, and reads with your seat until
+        you sign it out from your devices.
       </p>
       <Form method="post" className="flex flex-col gap-3">
         <input type="hidden" name="intent" value="approve" />

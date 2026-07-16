@@ -93,6 +93,12 @@ export const deviceAuthSession = webSchema.table(
     userCode: text("user_code").notNull(),
     deviceCodeSha256: bytea("device_code_sha256").notNull().unique(),
     requestedName: text("requested_name").notNull(),
+    /**
+     * The workspace ADDRESS SLUG the authorize call named ('' only as the single-tenant
+     * origin-addressed form). Stored, never resolved at mint time: the flow's workspace is
+     * looked up — and the approver's seat in it required — at approval, under the same lock.
+     */
+    requestedWorkspace: text("requested_workspace").default("").notNull(),
     status: text("status").default("pending").notNull(),
     approvedBy: text("approved_by").references(() => user.id, { onDelete: "set null" }),
     deviceId: text("device_id").references(() => device.id, { onDelete: "cascade" }),
