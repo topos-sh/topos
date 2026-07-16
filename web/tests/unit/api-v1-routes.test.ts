@@ -213,8 +213,8 @@ async function mintCredential(
   requestedName: string,
 ): Promise<{ credential: string; deviceId: string }> {
   const identity = await import("@/lib/db/identity.server");
-  const flow = await identity.startDeviceAuth(requestedName);
-  await identity.approveDeviceAuth(flow.userCode, { userId, display }, wsId);
+  const flow = await identity.startDeviceAuth(requestedName, "team");
+  await identity.approveDeviceAuth(flow.userCode, { userId, display });
   const granted = await identity.pollDeviceAuth(flow.deviceCode);
   if (granted.status !== "granted") {
     throw new Error(`device mint failed: ${granted.status}`);
@@ -268,13 +268,17 @@ beforeAll(async () => {
   await seatUser(db, wsId, "u_rev", "reviewer", "u_owner");
   await seatUser(db, wsId, "u_mem", "member", "u_owner");
 
-  // Devices via the gh-style flow — REAL credentials, one revoked, one seatless.
+  // Devices via the gh-style flow — REAL credentials, one revoked, one seatless. Approval
+  // requires a seat, so the stranger's credential is minted while seated and the seat is then
+  // removed — the real-world path to a live credential whose person lost admission.
   CREDS.owner = (await mintCredential("u_owner", "Owner", "owner-laptop")).credential;
   CREDS.rev = (await mintCredential("u_rev", "Reviewer", "rev-laptop")).credential;
   const mem = await mintCredential("u_mem", "Member", "mem-laptop");
   CREDS.mem = mem.credential;
   memDeviceId = mem.deviceId;
+  await seatUser(db, wsId, "u_stranger", "member", "u_owner");
   CREDS.stranger = (await mintCredential("u_stranger", "Stranger", "stranger-box")).credential;
+  await db.q(`DELETE FROM web.seat WHERE workspace_id = $1 AND user_id = 'u_stranger'`, [wsId]);
   const doomed = await mintCredential("u_mem", "Member", "mem-old-laptop");
   await identity.revokeOwnDevice({ userId: "u_mem", display: "Member" }, doomed.deviceId, wsId);
   CREDS.revoked = doomed.credential;
@@ -1169,6 +1173,23 @@ describe("device authorize + token", () => {
     await expectUniform404(res);
   });
 
+  it("authorize: an EMPTY workspace names the origin's own — the flow records the install's slug", async () => {
+    const res = await drive(
+      deviceAuthorizeAction,
+      req("POST", "/api/v1/device/authorize", {
+        body: { requested_name: "origin-box", workspace: "" },
+      }),
+      {},
+    );
+    expect(res.status).toBe(200);
+    const flow = (await res.json()) as { user_code: string };
+    const rows = await db.q<{ requested_workspace: string }>(
+      `SELECT requested_workspace FROM web.device_auth_session WHERE user_code = $1`,
+      [flow.user_code],
+    );
+    expect(rows[0]?.requested_workspace).toBe("team");
+  });
+
   it("authorize → token: pending, then granted echoing the device_code as the credential", async () => {
     const started = await drive(
       deviceAuthorizeAction,
@@ -1201,13 +1222,19 @@ describe("device authorize + token", () => {
     );
     expect(await pending.json()).toEqual({ status: "pending" });
 
+    // The matched non-empty name is recorded on the flow row verbatim.
+    const flowRows = await db.q<{ requested_workspace: string }>(
+      `SELECT requested_workspace FROM web.device_auth_session WHERE user_code = $1`,
+      [flow.user_code as string],
+    );
+    expect(flowRows[0]?.requested_workspace).toBe("team");
+
     // The human approves at /verify (the ceremony's data layer stands in for the page).
     const identity = await import("@/lib/db/identity.server");
-    const approved = await identity.approveDeviceAuth(
-      flow.user_code as string,
-      { userId: "u_owner", display: "Owner" },
-      wsId,
-    );
+    const approved = await identity.approveDeviceAuth(flow.user_code as string, {
+      userId: "u_owner",
+      display: "Owner",
+    });
     expect(approved).not.toBeNull();
 
     const granted = await drive(

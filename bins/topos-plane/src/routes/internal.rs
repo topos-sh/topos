@@ -323,6 +323,19 @@ pub(crate) struct PurgeResponse {
     reclaimed: usize,
 }
 
+/// One workspace's stored byte total (its `present` custody, summed).
+#[derive(Debug, Serialize)]
+pub(crate) struct WorkspaceStorageResponse {
+    workspace_id: String,
+    stored_bytes: u64,
+}
+
+/// `GET /internal/v1/storage` — every workspace's stored byte total, ordered by workspace id.
+#[derive(Debug, Serialize)]
+pub(crate) struct StorageResponse {
+    workspaces: Vec<WorkspaceStorageResponse>,
+}
+
 /// `DELETE …/bundles/{bundle}` — what the bundle reclaim did.
 #[derive(Debug, Serialize)]
 pub(crate) struct BundleDeleteResponse {
@@ -555,6 +568,24 @@ pub(crate) async fn read_log(
                 author_display: e.author_display,
                 created_at_ms: e.created_at_ms,
                 purged_at_ms: e.purged_at_ms,
+            })
+            .collect(),
+    }))
+}
+
+/// `GET /internal/v1/storage` — per-workspace stored byte totals, the operational accounting
+/// read (opaque workspace ids in, numbers out). Counts `present` objects only:
+/// `deleting`/`absent`/`unavailable` bytes are not custody the caller should bill or display.
+pub(crate) async fn read_storage(
+    State(state): State<PlaneState>,
+) -> LaneResult<Json<StorageResponse>> {
+    let stats = authority(&state).storage_stats().await?;
+    Ok(Json(StorageResponse {
+        workspaces: stats
+            .into_iter()
+            .map(|s| WorkspaceStorageResponse {
+                workspace_id: s.workspace_id.as_str().to_owned(),
+                stored_bytes: s.stored_bytes,
             })
             .collect(),
     }))

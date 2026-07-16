@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use crate::db::Db;
+use crate::db::custody::lifecycle::reparse_workspace;
 use crate::db::custody::pointer::{PointerRow, parse_stored_version};
 use crate::error::{AuthorityError, Result};
 use crate::id::{BundleId, CommitId, ObjectId, WorkspaceId};
@@ -165,6 +166,30 @@ impl Db {
         .map_err(AuthorityError::internal)?;
         rows.into_iter()
             .map(|r| super::lifecycle::object_id_from_row(r.object_id))
+            .collect()
+    }
+
+    /// Per-workspace stored byte totals — `SUM(size)` over the `present` rows alone, grouped by
+    /// workspace and ordered by workspace id (deterministic). `size` is operational bookkeeping
+    /// (accounting + size-routing), so this read is pure accounting: no byte is touched.
+    pub(crate) async fn storage_stats(&self) -> Result<Vec<(WorkspaceId, u64)>> {
+        let rows = sqlx::query!(
+            r#"SELECT workspace_id AS "workspace_id!", SUM(size)::bigint AS "stored_bytes!"
+               FROM object_presence
+               WHERE status = 'present'
+               GROUP BY workspace_id
+               ORDER BY workspace_id"#,
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(AuthorityError::internal)?;
+        rows.into_iter()
+            .map(|r| {
+                Ok((
+                    reparse_workspace(&r.workspace_id)?,
+                    u64::try_from(r.stored_bytes).map_err(AuthorityError::integrity)?,
+                ))
+            })
             .collect()
     }
 

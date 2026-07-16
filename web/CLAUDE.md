@@ -46,9 +46,16 @@ transaction, FOR UPDATE-fenced or single-statement-atomic, audit row inside):
   enter AB12-CD34" and polls; the signed-in person approves with a **plain accept** — a live session
   plus the explicit approve click IS the whole ceremony (no step-up) — minting the device (owned by
   that person) + its ONE bearer credential (the device code is promoted to the credential — same
-  plaintext, same stored hash). The signed-out loader bounce carries the code as `next`, so a password
-  OR a magic-link sign-in both return to finish the approval. Revocation is self-service, immediate, and
-  FINAL (a DB trigger refuses any un-revoke).
+  plaintext, same stored hash). The flow row records the workspace ADDRESS SLUG the authorize call
+  named; multi tenancy shape-checks that slug only (an unauthenticated start is never a
+  workspace-existence oracle — the workspace may be created mid-flow), and approval resolves it under
+  the tenancy grammar and requires the approver's SEAT in the resolved workspace, inside the same
+  FOR-UPDATE fence — a missing workspace or a seatless approver gets the same uniform refusal an
+  expired code does. On a multi-tenant deployment a signed-in approver with zero seats anywhere is
+  first woven through workspace creation (`/verify` redirects to `/new` carrying itself as `next` +
+  the flow's slug as a `name` prefill). The signed-out loader bounce carries the code as `next`, so a
+  password OR a magic-link sign-in both return to finish the approval. Revocation is self-service,
+  immediate, and FINAL (a DB trigger refuses any un-revoke).
 - **Recovery** (`app/lib/auth/recovery.server.ts` + `scripts/mint-recovery-code.mjs`): reset mail when
   SMTP is armed; a mail-less solo owner runs the one-shot box-side script to print a single-use recovery
   code (machine control is the proof).
@@ -57,11 +64,28 @@ Secrets are HASH-STORED, and the hashing happens IN Postgres (`sha256(convert_to
 Auth's own password hasher — this tier generates randomness (the two mints in `identity.server.ts` +
 `recovery.server.ts`) but computes no digest.
 
-**Registration is never open** (`app/lib/auth/registration.server.ts`, wired as Better Auth's
-`user.create.before` hook so no rung can bypass it): a sign-up succeeds only inside the claim ceremony,
-OR with a pending invitation on a deployment whose SMTP is armed (the invited seat binds only after the
-mailbox round-trip, via `bindInvitedSeats` on `afterEmailVerification`), OR under the off-by-default
-`registration = 'open'` knob. Everything else gets ONE constant, non-enumerating refusal.
+**Registration is composition-owned** (`app/lib/auth/registration.server.ts`, wired as Better Auth's
+`user.create.before` hook so no rung can bypass it; the policy is `composition.registration`). The OSS
+default is **`gated`**: a sign-up succeeds only inside the claim ceremony, OR with a pending invitation
+on a deployment whose SMTP is armed (the invited seat binds only after the mailbox round-trip, via
+`bindInvitedSeats` on `afterEmailVerification` — and only in the invitation's own workspace), OR — in
+SINGLE tenancy only — under the one workspace's off-by-default `registration = 'open'` knob (a
+workspace-scoped knob never opens a multi-tenant server, so the knob's settings panel and its intent
+exist only in single tenancy). Everything else gets ONE constant, non-enumerating refusal. A downstream
+composition may return **`open`** instead: every rung then admits sign-up (the magic-link lead becomes
+"continue with email", creating an account for a new address) — sign-up alone still grants no seat.
+
+**Self-serve workspace creation (multi tenancy only).** `/new` (`workspace-new.tsx`, mounted only when
+`tenancy: "multi"`) is both onboarding and the panel dropdown's "New workspace" form: display name →
+an editable address slug with live availability (`?check=` on the same route), then ONE transaction in
+`app/lib/db/workspace-create.server.ts` — the workspace row born CLAIMED + its implicit `everyone`
+channel + the creator's owner seat + the audit row. A reserved slug (the route table's multi-mode
+statics in `app/topos-web/segments.ts` ∪ the future-reserve list ∪ `composition.reservedWorkspaceNames`)
+refuses byte-identically to a taken name and is never enumerable through the form; a vitest red-test
+locks the segment list to the real route table. A seatless signed-in visitor is routed here (`/app` →
+`/new`; the `/verify` weave preserves the device code); the dashboard's empty state is the first-skill
+card — the same publish-from-your-agent instructions the panel's `+ new` skill dialog shows. In single
+tenancy `/new` does not mount (the house 404) and the seatless answer stays the 404.
 
 **Step-up** (`app/lib/auth/step-up.server.ts`). Every admin ceremony (roster mutations, skill lifecycle,
 purge, channel existence-admin, policy setters) re-authenticates immediately before the act. The RUNG is
@@ -150,7 +174,11 @@ by default); a downstream superset build composes `[...ossRoutes({ dir, tenancy 
 appends its own nav entries, entitlements provider, and auth rungs. Composition is **additive-only**. The
 OSS build is **single-tenant** — one workspace per install, origin-rooted (`theWorkspace()`); a superset
 passes `tenancy: "multi"` to mount the same modules under the `/:ws` name slug (no boot workspace is
-minted, and the first-run claim ceremony does not exist).
+minted, and the first-run claim ceremony does not exist). The composition root also owns the
+**registration policy** (`gated` — the OSS default — or `open`) and **`reservedWorkspaceNames`** (extra
+top-level segments a superset reserves so no workspace slug can occlude its own routes); the OSS statics
+themselves live in the dev-free `app/topos-web/segments.ts`, importable without dragging
+`@react-router/dev` into a server bundle.
 
 **Auth + authorization (fail-closed).** The OSS default rung is **email+password with zero delivery
 dependency** — a self-hosted team signs in with no SMTP or OAuth. A session is evidence, never authority:

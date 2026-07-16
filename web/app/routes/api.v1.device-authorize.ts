@@ -8,16 +8,26 @@ import {
   theWorkspace,
 } from "@/lib/db/identity.server";
 import { followBase } from "@/lib/plane/follow-base.server";
+import { isWorkspaceNameShape } from "@/lib/workspace-name";
 
 /**
  * `POST /api/v1/device/authorize` — begin the gh-style device flow toward a workspace named by
- * its address slug (`DeviceAuthStartRequest` → `DeviceAuthStartResponse`). An EMPTY `workspace`
- * names "the workspace this origin itself addresses" — honored only in single-tenant mode (the
- * origin IS its one workspace); in multi tenancy there is no origin-scoped default, so an empty
- * name is the uniform miss. A NON-empty name must equal this install's workspace in BOTH modes
- * (multi-tenant enrollment beyond the one workspace stays deferred). Whether the name exists is
- * never disclosed beyond this install's own: a name that is not it answers the uniform 404 — the
- * same body a wrong path gets.
+ * its address slug (`DeviceAuthStartRequest` → `DeviceAuthStartResponse`).
+ *
+ * SINGLE tenancy: an EMPTY `workspace` names "the workspace this origin itself addresses" (the
+ * origin IS its one workspace); a non-empty name must equal this install's workspace, and any
+ * other name answers the uniform 404 — the same body a wrong path gets. The flow row records
+ * the install's workspace name as the slug it targets.
+ *
+ * MULTI tenancy: there is no origin-scoped default, so an empty name stays the uniform miss. A
+ * non-empty name is validated for SHAPE ONLY (the workspace-name rule) — a shape-invalid name
+ * answers the uniform 404 (such a name can never exist), and a shape-valid one MINTS the flow
+ * with the slug recorded, WITHOUT any existence check. Deliberate and load-bearing: this start
+ * is unauthenticated, so it must not be a workspace-existence oracle — and a CLI-first stranger
+ * must be able to start an enrollment toward a workspace they will create mid-flow (the /verify
+ * weave routes a seatless approver through workspace creation and back). Resolution and
+ * authorization happen at APPROVAL, behind a session: the approve locks the flow, resolves the
+ * recorded slug, and requires the approver's seat in the resolved workspace.
  *
  * No credential yet: this is the flow's unauthenticated start (the belt is its only gate). The
  * response's `device_code` is the polling secret — and, on approval, the device's ONE bearer
@@ -56,17 +66,28 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   ) {
     return badRequest("malformed device authorize body");
   }
-  const ws = await theWorkspace();
-  if (ws === null) {
-    return uniformNotFound();
+
+  let requestedWorkspace: string;
+  if (composition.tenancy === "multi") {
+    // Shape only — existence is deliberately NOT checked here (see the doc comment above).
+    if (body.workspace.length === 0 || !isWorkspaceNameShape(body.workspace)) {
+      return uniformNotFound();
+    }
+    requestedWorkspace = body.workspace;
+  } else {
+    const ws = await theWorkspace();
+    if (ws === null) {
+      return uniformNotFound();
+    }
+    // An empty workspace addresses "the origin's own workspace" — single-tenant only. A
+    // non-empty name must equal this install's workspace.
+    if (body.workspace !== "" && ws.name !== body.workspace) {
+      return uniformNotFound();
+    }
+    requestedWorkspace = ws.name;
   }
-  // An empty workspace addresses "the origin's own workspace" — single-tenant only. A non-empty
-  // name must equal this install's workspace in both modes.
-  const originAddressed = body.workspace === "" && composition.tenancy === "single";
-  if (!originAddressed && ws.name !== body.workspace) {
-    return uniformNotFound();
-  }
-  const flow = await startDeviceAuth(body.requested_name.trim());
+
+  const flow = await startDeviceAuth(body.requested_name.trim(), requestedWorkspace);
   const origin = followBase(request);
   return Response.json({
     device_code: flow.deviceCode,

@@ -1,11 +1,19 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { sql } from "drizzle-orm";
+import { composition } from "@/composition.server";
+import { theWorkspace } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
 import { invitation } from "@/lib/db/schema.app";
 import { mailDelivery } from "@/lib/mail/transport.server";
 
 /**
- * REGISTRATION IS NEVER OPEN. Every account creation demands a proof:
+ * WHO MAY CREATE AN ACCOUNT is composition-owned (`composition.registration`):
+ *
+ * `open` — the hosted posture: every sign-up is admitted, with ZERO database reads. Sign-up
+ * alone still grants no seat and admits nothing; admission stays what it always was (an
+ * invitation, a claim, or a workspace's own membership ceremonies).
+ *
+ * `gated` — the OSS default: every account creation demands a proof:
  *   (a) the setup claim code (first user; machine control) — the claim ceremony runs its
  *       Better Auth sign-up inside [`withRegistrationCeremony`], which flips a request-scoped
  *       flag this module reads;
@@ -14,9 +22,17 @@ import { mailDelivery } from "@/lib/mail/transport.server";
  *       the deployment can actually verify it (unarmed SMTP ⇒ inviting is disabled AND a
  *       leftover invitation admits nothing — the old self-asserted-email impersonation hole
  *       stays closed);
- *   (c) the operator knob `workspace.registration = 'open'`, off by default.
+ *   (c) in SINGLE tenancy only, the operator knob `workspace.registration = 'open'` on THE
+ *       one workspace this install serves, off by default.
  * Everything else gets ONE constant, non-enumerating refusal — the same answer whether the
  * address is unknown, uninvited, expired, or already taken.
+ *
+ * TENANCY: in MULTI tenancy the per-workspace `registration` knob is NEVER consulted —
+ * account creation is a server-global act, and a knob scoped to one workspace must not open
+ * sign-up for the whole server. A gated multi-tenant sign-up is admitted only by a pending,
+ * unexpired invitation for the email in ANY workspace (the invitation row is itself
+ * workspace-bound proof) AND armed mail; the invited seat still binds only in the
+ * invitation's own workspace (`bindInvitedSeats`).
  *
  * Wired as Better Auth's `user.create.before` database hook: it runs under every sign-up
  * path (email+password, magic link, a composition's social rungs), so a future rung cannot
@@ -36,15 +52,23 @@ export const REGISTRATION_REFUSED =
 
 /** Pure decision, unit-testable: may THIS email register, given the observable facts? */
 export function registrationDecision(facts: {
+  policy: "gated" | "open";
+  tenancy: "single" | "multi";
   inClaimCeremony: boolean;
+  /** The single-tenant workspace's own knob; ALWAYS null in multi (never consulted there). */
   registrationKnob: "invite_only" | "open" | null;
   pendingInvitation: boolean;
   mailArmed: boolean;
 }): "allow" | "refuse" {
+  if (facts.policy === "open") {
+    return "allow";
+  }
   if (facts.inClaimCeremony) {
     return "allow";
   }
-  if (facts.registrationKnob === "open") {
+  // The workspace knob opens sign-up only where the install IS the workspace: a knob scoped
+  // to one workspace never opens a multi-tenant server.
+  if (facts.tenancy === "single" && facts.registrationKnob === "open") {
     return "allow";
   }
   if (facts.pendingInvitation && facts.mailArmed) {
@@ -54,30 +78,55 @@ export function registrationDecision(facts: {
 }
 
 /**
+ * Is there a pending, unexpired invitation for this (lowered) address? In single tenancy the
+ * check is scoped to THE one workspace's id — every invitation references it anyway, and the
+ * explicit scope keeps that true by construction. A null scope (multi tenancy) checks ANY
+ * workspace: the invitation row is workspace-bound proof, and the seat later binds only in
+ * its own workspace.
+ */
+async function hasPendingInvitation(
+  loweredEmail: string,
+  workspaceId: string | null,
+): Promise<boolean> {
+  const rows = await getDb().execute(
+    sql`SELECT 1 FROM ${invitation}
+        WHERE email = ${loweredEmail} AND status = 'pending'
+          AND (expires_at IS NULL OR expires_at > now())
+          ${workspaceId === null ? sql`` : sql`AND workspace_id = ${workspaceId}`}
+        LIMIT 1`,
+  );
+  return rows.rows.length > 0;
+}
+
+/**
  * The hook body: gather the facts, decide. Throwing here aborts the Better Auth sign-up;
  * the sign-up routes translate ANY failure into the constant refusal, so no path
  * distinguishes "taken" from "uninvited".
  */
 export async function assertRegistrationAllowed(email: string): Promise<void> {
+  // The two reads-free allows first — `registrationDecision` answers "allow" for both
+  // whatever the remaining facts are, so the early returns just skip the database.
+  if (composition.registration === "open") {
+    return;
+  }
   if (ceremonyContext.getStore()?.ceremony === "claim") {
     return;
   }
-  const db = getDb();
   const lowered = email.trim().toLowerCase();
-  const knobRows = await db.execute(sql`SELECT registration FROM web.workspace LIMIT 1`);
-  const knob =
-    (knobRows.rows[0] as { registration: "invite_only" | "open" } | undefined)?.registration ??
-    null;
-  const inviteRows = await db.execute(
-    sql`SELECT 1 FROM ${invitation}
-        WHERE email = ${lowered} AND status = 'pending'
-          AND (expires_at IS NULL OR expires_at > now())
-        LIMIT 1`,
-  );
+  const tenancy = composition.tenancy;
+  let registrationKnob: "invite_only" | "open" | null = null;
+  let invitationScope: string | null = null;
+  if (tenancy === "single") {
+    const ws = await theWorkspace();
+    registrationKnob = (ws?.registration as "invite_only" | "open" | undefined) ?? null;
+    invitationScope = ws?.id ?? null;
+  }
   const decision = registrationDecision({
+    policy: "gated",
+    tenancy,
     inClaimCeremony: false,
-    registrationKnob: knob,
-    pendingInvitation: inviteRows.rows.length > 0,
+    registrationKnob,
+    pendingInvitation: await hasPendingInvitation(lowered, invitationScope),
     mailArmed: mailDelivery().canSend,
   });
   if (decision === "refuse") {

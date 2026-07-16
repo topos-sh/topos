@@ -1,0 +1,1 @@
+ALTER TABLE "web"."device_auth_session" ADD COLUMN "requested_workspace" text DEFAULT '' NOT NULL;

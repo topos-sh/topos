@@ -1,0 +1,1 @@
+ALTER TABLE "web"."device_auth_session" ADD COLUMN "approved_workspace_id" text;

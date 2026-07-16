@@ -93,6 +93,18 @@ export const deviceAuthSession = webSchema.table(
     userCode: text("user_code").notNull(),
     deviceCodeSha256: bytea("device_code_sha256").notNull().unique(),
     requestedName: text("requested_name").notNull(),
+    /**
+     * The workspace ADDRESS SLUG the authorize call named ('' only as the single-tenant
+     * origin-addressed form). Stored, never resolved at mint time: the flow's workspace is
+     * looked up — and the approver's seat in it required — at approval, under the same lock.
+     */
+    requestedWorkspace: text("requested_workspace").default("").notNull(),
+    /**
+     * The RESOLVED workspace id, persisted by the approval inside its fence — the granted
+     * poll's `workspace` decoration reads THIS immutable id, never a re-resolution of the
+     * mutable slug (a rename or delete+recreate inside the TTL must not re-point the flow).
+     */
+    approvedWorkspaceId: text("approved_workspace_id"),
     status: text("status").default("pending").notNull(),
     approvedBy: text("approved_by").references(() => user.id, { onDelete: "set null" }),
     deviceId: text("device_id").references(() => device.id, { onDelete: "cascade" }),
