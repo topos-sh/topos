@@ -1,4 +1,5 @@
 import { and, asc, count, eq, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import type { DeviceActor } from "@/lib/auth/guards.server";
 import {
   detachExactInTx,
@@ -1042,18 +1043,23 @@ export async function laneLogOf(
   if (identity === undefined) {
     return null;
   }
+  // A second aliased `user` join resolves the RESOLVER's display (the proposer join already
+  // resolves the proposer) so the wire serves a person display, never a raw user id.
+  const resolver = alias(user, "resolver");
   const proposalRows = await getDb()
     .select({
       versionId: proposal.candidateVersionId,
       status: proposal.status,
       proposerDisplay: personDisplayLeftSql(user),
       resolvedBy: proposal.resolvedBy,
+      resolverDisplay: personDisplayLeftSql(resolver),
       resolvedReason: proposal.resolvedReason,
       resolvedAt: proposal.resolvedAt,
       createdAt: proposal.createdAt,
     })
     .from(proposal)
     .leftJoin(user, eq(user.id, proposal.proposedBy))
+    .leftJoin(resolver, eq(resolver.id, proposal.resolvedBy))
     .where(and(eq(proposal.workspaceId, actor.workspaceId), eq(proposal.bundleId, bundleId)))
     .orderBy(sql`${proposal.createdAt} DESC`);
   return {
@@ -1062,7 +1068,9 @@ export async function laneLogOf(
       versionId: p.versionId,
       status: p.status,
       proposer: p.proposerDisplay ?? "former member",
-      resolvedBy: p.resolvedBy,
+      // Unresolved (open) carries no resolver — stays null; a resolved row serves the display,
+      // falling back to "former member" when the resolver's user row is gone (mirrors proposer).
+      resolvedBy: p.resolvedBy === null ? null : (p.resolverDisplay ?? "former member"),
       resolvedReason: p.resolvedReason,
       resolvedAt: p.resolvedAt,
       createdAt: p.createdAt,
