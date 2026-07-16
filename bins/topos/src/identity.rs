@@ -58,6 +58,26 @@ pub(crate) fn load_or_create_device_id(
     Ok(persisted.device_id)
 }
 
+/// Read the LOCAL device id from `host.json` WITHOUT minting one — the read-only sibling of
+/// [`load_or_create_device_id`] for surfaces that only DISPLAY the local author (e.g. `log`, mapping its
+/// own device-authored versions to "you") and must never create identity as a side effect. `None` when
+/// no host identity exists yet.
+///
+/// # Errors
+/// As [`load_or_create_device_id`]'s read path (schema / parse / io), minus the mint.
+pub(crate) fn read_device_id(
+    fs: &dyn FsOps,
+    layout: &Layout,
+) -> Result<Option<String>, ClientError> {
+    match fs.read_opt(&layout.host_path())? {
+        Some(bytes) => {
+            let host: HostIdentity = load_versioned(&bytes, PERSISTED_SCHEMA_VERSION)?;
+            Ok(Some(host.device_id))
+        }
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

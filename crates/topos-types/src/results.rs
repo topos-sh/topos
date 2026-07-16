@@ -604,6 +604,9 @@ pub struct ProposeData {
 )]
 pub struct RevertData {
     pub skill_id: String,
+    /// The skill's NAME — the handle humans speak and the TTY success line leads with
+    /// (`Reverted <name> …`); the opaque `skill_id` above stays the machine key.
+    pub name: String,
     /// The good version named by `--to` (the bytes being restored).
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub reverted_to: String,

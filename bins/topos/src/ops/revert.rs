@@ -73,7 +73,9 @@ pub(crate) fn revert(
     // this is the STRICT resolve — a candidate with NO follow entry (a local-only skill that merely shares
     // the name) is dropped before the ambiguity count, and a non-followed target fails locally as "not a
     // followed skill" rather than an opaque plane rejection.
-    let (id, _lock) = resolve_followed_skill_in_workspace(ctx, skill_name, workspace)?;
+    let (id, lock) = resolve_followed_skill_in_workspace(ctx, skill_name, workspace)?;
+    // The resolved display NAME leads the describe + the success line (never the opaque id).
+    let name = lock.name;
     let workspace_id = workspace_of(ctx, id.as_str())?;
     let sp = ctx.layout.published(&id);
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
@@ -130,7 +132,7 @@ pub(crate) fn revert(
             let current_digest =
                 contribute::verified_version_digest(ctx, id.as_str(), current_commit)?;
             let describe = RevertDescribeData {
-                skill: skill_name.to_owned(),
+                skill: name.clone(),
                 skill_id: id.to_string(),
                 current_version_id: to_hex(&current_commit),
                 reverted_to: good_hex.clone(),
@@ -187,7 +189,7 @@ pub(crate) fn revert(
     };
 
     let receipt = contribute::run_write(ctx, &*transport, &sp, &rec, None)?;
-    map_outcome(ctx, &sp, &rec, &receipt, skill_name, &good_hex).map(RevertOutcome::Applied)
+    map_outcome(ctx, &sp, &rec, &receipt, &name, &good_hex).map(RevertOutcome::Applied)
 }
 
 fn map_outcome(
@@ -195,7 +197,7 @@ fn map_outcome(
     sp: &sidecar::SkillPaths,
     rec: &OpRecord,
     receipt: &WriteReceipt,
-    skill_name: &str,
+    name: &str,
     good_hex: &str,
 ) -> Result<RevertData, ClientError> {
     match receipt.outcome() {
@@ -206,13 +208,14 @@ fn map_outcome(
             let new_gen = contribute::apply_light_advance(ctx, sp, rec, record)?;
             Ok(RevertData {
                 skill_id: rec.skill_id.clone(),
+                name: name.to_owned(),
                 reverted_to: good_hex.to_owned(),
                 new_version_id: rec.candidate_commit.clone(),
                 current_generation: new_gen,
             })
         }
         TerminalOutcome::Conflict => Err(ClientError::Conflict {
-            skill: skill_name.to_owned(),
+            skill: name.to_owned(),
             current: receipt.error.as_ref().and_then(|e| e.current_generation),
         }),
         TerminalOutcome::Denied => Err(ClientError::Denied(

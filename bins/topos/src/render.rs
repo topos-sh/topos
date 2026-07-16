@@ -1435,7 +1435,7 @@ pub(crate) fn revert_tty(data: &RevertData) -> String {
     format!(
         "Reverted {} to {} as forward commit {} — current is now generation {}. Nothing was \
          deleted; move current forward again to redo.",
-        data.skill_id,
+        data.name,
         short(&data.reverted_to),
         short(&data.new_version_id),
         data.current_generation,

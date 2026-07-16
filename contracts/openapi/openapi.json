@@ -3095,6 +3095,7 @@
         "description": "`revert` (a **forward** git-revert restoring older bytes as a new, higher-generation version —\nnever a pointer rollback, never a delete). `--to` names the GOOD version. **INFERRED.**",
         "required": [
           "skill_id",
+          "name",
           "reverted_to",
           "new_version_id",
           "current_generation"
@@ -3104,6 +3105,10 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "The skill's NAME — the handle humans speak and the TTY success line leads with\n(`Reverted <name> …`); the opaque `skill_id` above stays the machine key."
           },
           "new_version_id": {
             "type": "string",
