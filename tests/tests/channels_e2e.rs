@@ -282,3 +282,64 @@ fn e2e_device_exclusion_and_the_follow_that_lifts_it() {
         entry.action
     );
 }
+
+// ── a genesis `--to <channel>` placement REPLACES the everyone default ──────────────────────────────
+
+#[test]
+fn e2e_publish_to_channel_replaces_the_everyone_default() {
+    let (stack, owner, member, client) = arranged("placement");
+    let member_probe = stack.mint_device(&member, "member probe");
+
+    // The owner's authoring CLI ships a NEW skill `--to eng`: the `--to` placement is the
+    // targeting mechanism, so the reference lands in #eng ALONE — never additionally in
+    // `everyone` (which would deliver it to the whole workspace and make `--to` meaningless).
+    let author = FollowHarness::new("placement-author");
+    stack.enroll_begin_and_approve(&author, &owner);
+    author.resume_apply().expect("the author enrolls");
+    author.adopt(TOOLS, &tools_files());
+    let digest = author.draft_digest(TOOLS);
+    match author
+        .publish_to(&format!("{TOOLS}@{digest}"), "eng", "tools for eng")
+        .expect("the channel-targeted genesis lands")
+    {
+        PublishResult::Published(_) => {}
+        other => panic!("a genesis lands directly, got {other:?}"),
+    }
+
+    let placements = |ch: &str| {
+        stack.count(&format!(
+            "SELECT count(*) FROM web.channel_bundle cb \
+             JOIN web.channel c ON c.id = cb.channel_id \
+             JOIN web.bundle b ON b.id = cb.bundle_id \
+             WHERE c.name = '{ch}' AND b.name = '{TOOLS}'"
+        ))
+    };
+    assert_eq!(placements("eng"), 1, "the --to placement landed in #eng");
+    assert_eq!(
+        placements("everyone"),
+        0,
+        "a --to genesis does NOT also land in everyone"
+    );
+
+    // The member (in `everyone`, not #eng) receives NOTHING on the next sweep.
+    let (data, warnings) = client.reconcile(true);
+    assert!(warnings.is_empty(), "a clean sweep: {warnings:?}");
+    assert!(
+        !data.skills.iter().any(|s| s.skill == TOOLS),
+        "not in #eng — the channel-scoped skill is not delivered: {:?}",
+        data.skills
+    );
+    assert!(client.placement_files(TOOLS).is_empty());
+
+    // Joining #eng delivers it byte-exact — placement was the only thing withholding it.
+    let joined = stack.device_put(
+        &member_probe.credential,
+        &format!(
+            "/v1/workspaces/{}/channels/eng/membership",
+            stack.workspace_id
+        ),
+    );
+    assert_eq!(joined.status, 200, "the join lands: {}", joined.body);
+    land(&client, TOOLS);
+    assert_eq!(client.placement_files(TOOLS), expected(&tools_files()));
+}

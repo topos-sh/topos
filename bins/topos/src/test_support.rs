@@ -1462,6 +1462,40 @@ impl FollowHarness {
             .and_then(revert_applied)
     }
 
+    /// Drive `revert` and expose WHICH two-phase arm answered — the e2e probe for the
+    /// describe / byte-level-no-op / applied split (the [`revert`](Self::revert) facade expects an
+    /// apply and treats the other arms as errors).
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string.
+    pub fn revert_probe(&self, skill: &str, to: &str, yes: bool) -> Result<RevertProbe, String> {
+        let contribute = self.contribute_connect();
+        self.with_enrolled_ctx(|ctx| ops::revert(ctx, &contribute, skill, to, yes, None))
+            .map_err(|e| e.to_string())
+            .map(|outcome| match outcome {
+                ops::RevertOutcome::Applied(data) => RevertProbe::Applied(data),
+                ops::RevertOutcome::NoOp(_) => RevertProbe::NoOp,
+                ops::RevertOutcome::Describe { .. } => RevertProbe::Described,
+            })
+    }
+
+    /// The op-WAL ids currently pending under this rig's home — empty means no in-flight (or
+    /// wedged) contribute op. The e2e wedge regressions assert on this after a refused verdict.
+    #[must_use]
+    pub fn pending_ops(&self) -> Vec<String> {
+        let dir = self.layout().ops_dir();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut ids: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| n.ends_with(".json"))
+            .collect();
+        ids.sort();
+        ids
+    }
+
     /// Drive `invite <emails>... [--channel <c>]... --yes` and return the FULL applied invitation:
     /// `(address, invited, mailed)` — `mailed` is the server's honest can-deliver flag (false on a
     /// plane with no SMTP relay; the inviter pastes the address by hand).
@@ -1775,7 +1809,7 @@ impl FollowHarness {
     /// # Errors
     /// The verb's typed error rendered to a string.
     pub fn publish(&self, standup_base_url: &str, approve: &str) -> Result<PublishResult, String> {
-        self.publish_impl(standup_base_url, approve, None, None)
+        self.publish_impl(standup_base_url, approve, false, None, None, None)
     }
 
     /// [`publish`](Self::publish) with a `-m <message>` — the author's commit message (it becomes the
@@ -1790,7 +1824,7 @@ impl FollowHarness {
         approve: &str,
         message: &str,
     ) -> Result<PublishResult, String> {
-        self.publish_impl(standup_base_url, approve, None, Some(message))
+        self.publish_impl(standup_base_url, approve, false, None, None, Some(message))
     }
 
     /// [`publish`](Self::publish) with an EXPLICIT `--workspace <id>` (the global flag) — disambiguates a
@@ -1805,13 +1839,45 @@ impl FollowHarness {
         approve: &str,
         workspace: &str,
     ) -> Result<PublishResult, String> {
-        self.publish_impl(standup_base_url, approve, Some(workspace), None)
+        self.publish_impl(
+            standup_base_url,
+            approve,
+            false,
+            None,
+            Some(workspace),
+            None,
+        )
+    }
+
+    /// [`publish`](Self::publish) with a `--to <channel>` placement — the channel-targeted genesis the
+    /// placement e2e drives (a `--to` placement REPLACES the `everyone` default for a brand-new skill).
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string.
+    pub fn publish_to(
+        &self,
+        approve: &str,
+        channel: &str,
+        message: &str,
+    ) -> Result<PublishResult, String> {
+        self.publish_impl("", approve, false, Some(channel), None, Some(message))
+    }
+
+    /// [`publish`](Self::publish) with `--propose` — the VOLUNTARY proposal (a reviewer+ author's
+    /// direct publish would land; this opens review anyway). The four-eyes e2e drives it.
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string.
+    pub fn propose_message(&self, approve: &str, message: &str) -> Result<PublishResult, String> {
+        self.publish_impl("", approve, true, None, None, Some(message))
     }
 
     fn publish_impl(
         &self,
         standup_base_url: &str,
         approve: &str,
+        propose: bool,
+        channel: Option<&str>,
         workspace: Option<&str>,
         message: Option<&str>,
     ) -> Result<PublishResult, String> {
@@ -1856,8 +1922,8 @@ impl FollowHarness {
                 &contribute,
                 None, // roots — the harness adopts the skill before publishing (no auto-add)
                 approve,
-                false,
-                None,
+                propose,
+                channel,
                 workspace,
                 message,
             )
@@ -2046,6 +2112,18 @@ pub enum PublishResult {
     Published(PublishData),
     /// `--propose` opened a proposal (NEEDS_REVIEW); `current` did NOT move.
     Proposed(ProposeData),
+}
+
+/// Which two-phase `revert` arm answered — the public face of the client's internal `RevertOutcome`
+/// for the e2e describe/no-op probes.
+#[derive(Debug)]
+pub enum RevertProbe {
+    /// `--yes` landed the forward move.
+    Applied(topos_types::results::RevertData),
+    /// The `--to` bytes already ARE current — nothing minted, nothing POSTed.
+    NoOp,
+    /// The bare describe — nothing written.
+    Described,
 }
 
 /// A follow step's DENIAL, surfaced exactly as the production `--json` envelope would carry it: the wire
