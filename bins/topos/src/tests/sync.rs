@@ -2394,8 +2394,14 @@ fn revert_over_identical_bytes_is_a_no_op_under_differing_commit_ids() {
     // Both bare and `--yes` are a typed no-op that mints no forward commit and POSTs nothing — the
     // pre-fix id compare (good.id != current.id) would have minted one.
     let bare = ops::revert(&ctx, &connect, &name, &good_hex, false, None).unwrap();
-    assert!(matches!(&bare, ops::RevertOutcome::NoOp(d) if d.is_noop), "bare: {bare:?}");
+    assert!(
+        matches!(&bare, ops::RevertOutcome::NoOp(d) if d.is_noop),
+        "bare: {bare:?}"
+    );
     let yes = ops::revert(&ctx, &connect, &name, &good_hex, true, None).unwrap();
-    assert!(matches!(yes, ops::RevertOutcome::NoOp(_)), "--yes acknowledges the no-op");
+    assert!(
+        matches!(yes, ops::RevertOutcome::NoOp(_)),
+        "--yes acknowledges the no-op"
+    );
     assert_eq!(posts.get(), 0, "a no-op POSTs nothing on either path");
 }

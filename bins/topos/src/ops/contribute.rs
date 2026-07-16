@@ -765,9 +765,13 @@ mod tests {
             last_receipt: None,
         };
 
-        let receipt = run_write(&ctx, &FakeDenied, &sp, &rec, None).expect("a terminal DENIED is Ok");
+        let receipt =
+            run_write(&ctx, &FakeDenied, &sp, &rec, None).expect("a terminal DENIED is Ok");
         assert_eq!(receipt.outcome(), TerminalOutcome::Denied);
-        assert!(receipt.receipt.is_none(), "the wedged answer carried no receipt");
+        assert!(
+            receipt.receipt.is_none(),
+            "the wedged answer carried no receipt"
+        );
         assert!(
             crate::op_wal::read(&fs, &layout, &op_id).unwrap().is_none(),
             "run_write settles (deletes) the WAL on a terminal receipt-less DENIED"

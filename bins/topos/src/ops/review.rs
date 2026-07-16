@@ -451,7 +451,8 @@ fn permanent_failure_error(receipt: &WriteReceipt, target: &str) -> ClientError 
 fn denied_review_error(receipt: &WriteReceipt, target: &str) -> ClientError {
     match terminal_code(receipt).as_deref() {
         Some("FOUR_EYES_REQUIRED") => ClientError::Denied(
-            "four-eyes review: you proposed this version — a second reviewer must approve it".to_owned(),
+            "four-eyes review: you proposed this version — a second reviewer must approve it"
+                .to_owned(),
         ),
         Some("NO_OPEN_PROPOSAL") => review_not_open(target),
         _ => ClientError::Denied(
@@ -686,7 +687,10 @@ mod tests {
         // The server DENIED a verdict on a no-longer-open proposal with the distinguishing NO_OPEN_PROPOSAL
         // code — a decided/closed proposal is a terminal outcome, rendered as the SAME honest refusal the
         // PermanentFailure "not open" arm uses (never a bare "the plane denied this operation (…)").
-        let err = denied_review_error(&denied_receipt("NO_OPEN_PROPOSAL"), "release-notes@abc123def456");
+        let err = denied_review_error(
+            &denied_receipt("NO_OPEN_PROPOSAL"),
+            "release-notes@abc123def456",
+        );
         assert_eq!(err.code(), "REVIEW_NOT_OPEN");
         let msg = crate::render::safe_message(&err);
         assert!(msg.contains("release-notes@abc123def456"), "{msg}");
@@ -698,7 +702,10 @@ mod tests {
     fn a_denied_four_eyes_names_four_eyes_and_stays_denied() {
         // A four-eyes self-approve DENIED renders an HONEST sentence naming four-eyes (surfacing through
         // safe_message's Denied arm), and keeps the DENIED wire code for the agent to branch on.
-        let err = denied_review_error(&denied_receipt("FOUR_EYES_REQUIRED"), "release-notes@abc123def456");
+        let err = denied_review_error(
+            &denied_receipt("FOUR_EYES_REQUIRED"),
+            "release-notes@abc123def456",
+        );
         assert_eq!(err.code(), "DENIED");
         assert_eq!(err.outcome(), TerminalOutcome::Denied);
         let msg = crate::render::safe_message(&err);

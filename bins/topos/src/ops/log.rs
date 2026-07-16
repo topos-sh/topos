@@ -208,8 +208,7 @@ mod tests {
         })];
         let plane_ids: HashSet<String> = std::iter::once(vid.clone()).collect();
 
-        let events =
-            assemble_log_events(Vec::new(), local, plane_versions, Vec::new(), &plane_ids);
+        let events = assemble_log_events(Vec::new(), local, plane_versions, Vec::new(), &plane_ids);
         let for_id: Vec<&Value> = events
             .iter()
             .filter(|e| e.get("version_id").and_then(Value::as_str) == Some(vid.as_str()))
@@ -220,7 +219,10 @@ mod tests {
             Some("plane"),
             "the plane event (display author) wins the dedupe"
         );
-        assert_eq!(for_id[0].get("author").and_then(Value::as_str), Some("Alice"));
+        assert_eq!(
+            for_id[0].get("author").and_then(Value::as_str),
+            Some("Alice")
+        );
     }
 
     #[test]
@@ -235,10 +237,7 @@ mod tests {
             &HashSet::new(),
         );
         assert_eq!(events.len(), 1, "the local-only version survives");
-        assert_eq!(
-            events[0].get("author").and_then(Value::as_str),
-            Some("you")
-        );
+        assert_eq!(events[0].get("author").and_then(Value::as_str), Some("you"));
     }
 
     #[test]

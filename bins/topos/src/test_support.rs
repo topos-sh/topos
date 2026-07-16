@@ -46,6 +46,21 @@ use crate::{doc, ops, scan};
 /// the plane never sees it (only the client's own genesis carries it), so any stable value works.
 const DEVICE_ID: &str = "d_hero";
 
+/// Extract the applied `RevertData` from the two-phase [`ops::RevertOutcome`] — the e2e facades drive
+/// `revert` with `confirm = true` (apply), so a describe / byte-level no-op is an unexpected result the
+/// facade surfaces as an error string.
+fn revert_applied(outcome: ops::RevertOutcome) -> Result<RevertData, String> {
+    match outcome {
+        ops::RevertOutcome::Applied(data) => Ok(data),
+        ops::RevertOutcome::NoOp(_) => {
+            Err("revert was a byte-level no-op (the --to bytes already are current)".to_owned())
+        }
+        ops::RevertOutcome::Describe { .. } => {
+            Err("revert returned a describe — pass --yes to apply".to_owned())
+        }
+    }
+}
+
 /// How a followed skill adopts a new `current` — the public face of the engine's internal `FollowMode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Follow {
@@ -1444,6 +1459,7 @@ impl FollowHarness {
         let contribute = self.contribute_connect();
         self.with_enrolled_ctx(|ctx| ops::revert(ctx, &contribute, skill, to, confirm, None))
             .map_err(|e| e.to_string())
+            .and_then(revert_applied)
     }
 
     /// Drive `invite <emails>... [--channel <c>]... --yes` and return the FULL applied invitation:
@@ -2368,6 +2384,7 @@ impl ContributeHarness {
         self.with_write_ctx(|ctx, contribute, _gov| {
             ops::revert(ctx, contribute, skill, to, confirm, None).map_err(|e| e.to_string())
         })
+        .and_then(revert_applied)
     }
 
     /// Drive `diff <skill> [<ref>]` (a plane ref fetches + re-verifies).

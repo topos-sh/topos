@@ -1760,7 +1760,11 @@ mod tests {
             "an OK move carries the current pointer"
         );
         assert_eq!(
-            wr.receipt.as_ref().expect("an OK move carries a receipt").bundle_digest.as_deref(),
+            wr.receipt
+                .as_ref()
+                .expect("an OK move carries a receipt")
+                .bundle_digest
+                .as_deref(),
             Some("b".repeat(64).as_str())
         );
         assert!(wr.error.is_none());
@@ -1792,9 +1796,14 @@ mod tests {
             receipt: None,
             error: Some(err),
         });
-        let wr = map_write_envelope(200, &bytes).expect("a receipt-less DENIED is a terminal receipt");
+        let wr =
+            map_write_envelope(200, &bytes).expect("a receipt-less DENIED is a terminal receipt");
         assert!(wr.receipt.is_none(), "no receipt was attached");
-        assert_eq!(wr.outcome(), TerminalOutcome::Denied, "outcome reads the flat error");
+        assert_eq!(
+            wr.outcome(),
+            TerminalOutcome::Denied,
+            "outcome reads the flat error"
+        );
         assert_eq!(
             wr.error.as_ref().map(|e| e.code.as_str()),
             Some("FOUR_EYES_REQUIRED")

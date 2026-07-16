@@ -890,7 +890,11 @@ fn review_inbox_prefers_the_server_yours_flag_over_the_principal_string() {
         ops::ReviewOutcome::Inbox(data) => {
             assert_eq!(data.inbox.len(), 1, "only bob's proposal is to review");
             assert_eq!(data.inbox[0].proposer, "bob@acme.com");
-            assert_eq!(data.outbox.len(), 1, "the server-marked-yours proposal is the outbox");
+            assert_eq!(
+                data.outbox.len(),
+                1,
+                "the server-marked-yours proposal is the outbox"
+            );
             assert_eq!(data.outbox[0].proposer, "Alice (she/her)");
         }
         _ => panic!("a bare review is the inbox"),

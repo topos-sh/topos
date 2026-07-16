@@ -1119,7 +1119,8 @@ pub(crate) fn uninstall_applied_tty(d: &crate::ops::UninstallApplied) -> String 
     let mut s = String::from("Uninstalled topos.");
     let hook_line = match (d.hook.state, d.hook.touched_path.as_deref()) {
         (TriggerState::Degraded, _) => {
-            "\n  · couldn't edit the harness config — remove the topos currency hook manually".to_owned()
+            "\n  · couldn't edit the harness config — remove the topos currency hook manually"
+                .to_owned()
         }
         (TriggerState::AlreadyPresentUnmanaged, _) => {
             "\n  · left your hand-rolled currency hook untouched".to_owned()
@@ -2271,8 +2272,14 @@ mod tests {
             warnings: Vec::new(),
         };
         let text = list_tty(&out);
-        assert!(text.contains("Footprint: 2 paths under the topos home"), "{text}");
-        assert!(text.contains("/home/x/.topos/identity"), "each path is listed: {text}");
+        assert!(
+            text.contains("Footprint: 2 paths under the topos home"),
+            "{text}"
+        );
+        assert!(
+            text.contains("/home/x/.topos/identity"),
+            "each path is listed: {text}"
+        );
         assert!(
             text.contains("/home/x/.topos/skills/topos_s00"),
             "each path is listed: {text}"

@@ -235,18 +235,30 @@ mod tests {
         let out = uninstall(&ctx, bin.clone(), false).unwrap();
         match out {
             UninstallOutcome::Described { describe, yes_argv } => {
-                assert_eq!(describe.hook_paths, vec![cfg.to_string_lossy().into_owned()]);
+                assert_eq!(
+                    describe.hook_paths,
+                    vec![cfg.to_string_lossy().into_owned()]
+                );
                 assert_eq!(describe.sidecar_path, home.0.to_string_lossy());
                 assert!(describe.sidecar_present);
-                assert_eq!(describe.binary_path.as_deref(), Some("/usr/local/bin/topos"));
+                assert_eq!(
+                    describe.binary_path.as_deref(),
+                    Some("/usr/local/bin/topos")
+                );
                 assert_eq!(yes_argv.last().map(String::as_str), Some("--yes"));
             }
             UninstallOutcome::Applied(_) => panic!("a bare uninstall describes"),
         }
         // A describe mutates nothing: the sidecar home stays, the hook was never scrubbed.
-        assert!(home.0.exists(), "the sidecar tree is untouched by a describe");
+        assert!(
+            home.0.exists(),
+            "the sidecar tree is untouched by a describe"
+        );
         assert_eq!(harness.removed.get(), 0, "a describe scrubs no hook");
-        assert!(skill_file.0.join("SKILL.md").exists(), "skill files untouched");
+        assert!(
+            skill_file.0.join("SKILL.md").exists(),
+            "skill files untouched"
+        );
     }
 
     #[test]
@@ -281,7 +293,10 @@ mod tests {
             UninstallOutcome::Described { .. } => panic!("--yes applies"),
         }
         assert!(!home.0.exists(), "the sidecar tree is gone");
-        assert!(skill_file.0.join("SKILL.md").exists(), "skill files untouched");
+        assert!(
+            skill_file.0.join("SKILL.md").exists(),
+            "skill files untouched"
+        );
 
         // A SECOND run is graceful: nothing to delete (the tree is already gone).
         let out = uninstall(&ctx, None, true).unwrap();
