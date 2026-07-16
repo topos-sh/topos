@@ -269,6 +269,14 @@ function WorkspaceIdentity({
                   </Link>
                 </DropdownMenuItem>
               ))}
+              {/* Multi-tenant only by construction — this dropdown renders nowhere else. */}
+              <DropdownMenuSeparator />
+              <DropdownMenuItem asChild>
+                <Link to="/new">
+                  <Plus />
+                  New workspace
+                </Link>
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </SidebarMenuItem>
