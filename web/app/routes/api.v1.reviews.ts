@@ -77,7 +77,16 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     return envelopeResponse(replay.outcome);
   }
   if (replay.kind === "key_reuse") {
-    return envelopeResponse(deniedEnvelope("review", "OP_ID_REUSED", undefined));
+    // Before target resolution: workspace is the actor's, the skill unknown — omit what we
+    // cannot honestly name. The write 200 still carries a receipt so the CLI's op-WAL clears.
+    const receipt = buildReceipt({
+      opId: head.opId,
+      command: "review",
+      outcome: "DENIED",
+      workspaceId: actor.workspaceId,
+      createdAt: receiptNow(),
+    });
+    return envelopeResponse(deniedEnvelope("review", "OP_ID_REUSED", undefined, receipt));
   }
 
   const createdAt = receiptNow();
@@ -96,7 +105,12 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   };
 
   if (decision !== "withdraw" && actor.role === "member") {
-    const envelope = deniedEnvelope("review", "REVIEWER_ROLE_REQUIRED", target.name);
+    const envelope = deniedEnvelope(
+      "review",
+      "REVIEWER_ROLE_REQUIRED",
+      target.name,
+      buildReceipt({ ...receiptBase, outcome: "DENIED" }),
+    );
     await inFinalTx((tx) => insertReceiptInTx(tx, actor, head.opId, raw, envelope));
     return envelopeResponse(envelope);
   }
@@ -105,12 +119,22 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     // Four-eyes under review-required: the proposer may not approve their own proposal.
     const row = await proposalByCandidate(actor, target.bundleId, proposalId);
     if (row === undefined || row.status !== "open") {
-      const envelope = deniedEnvelope("review", "NO_OPEN_PROPOSAL", target.name);
+      const envelope = deniedEnvelope(
+        "review",
+        "NO_OPEN_PROPOSAL",
+        target.name,
+        buildReceipt({ ...receiptBase, outcome: "DENIED" }),
+      );
       await inFinalTx((tx) => insertReceiptInTx(tx, actor, head.opId, raw, envelope));
       return envelopeResponse(envelope);
     }
     if (target.protection === "reviewed" && row.proposedBy === actor.userId) {
-      const envelope = deniedEnvelope("review", "FOUR_EYES_REQUIRED", target.name);
+      const envelope = deniedEnvelope(
+        "review",
+        "FOUR_EYES_REQUIRED",
+        target.name,
+        buildReceipt({ ...receiptBase, outcome: "DENIED" }),
+      );
       await inFinalTx((tx) => insertReceiptInTx(tx, actor, head.opId, raw, envelope));
       return envelopeResponse(envelope);
     }
@@ -121,7 +145,12 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     });
     if (moved.kind === "not_found") {
       // The candidate's bytes are gone (purged/reclaimed) — the proposal cannot promote.
-      const envelope = deniedEnvelope("review", "UNKNOWN_VERSION", target.name);
+      const envelope = deniedEnvelope(
+        "review",
+        "UNKNOWN_VERSION",
+        target.name,
+        buildReceipt({ ...receiptBase, outcome: "DENIED" }),
+      );
       await inFinalTx((tx) => insertReceiptInTx(tx, actor, head.opId, raw, envelope));
       return envelopeResponse(envelope);
     }
@@ -182,12 +211,22 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
           return built;
         }
       }
-      const built = deniedEnvelope("review", "NO_OPEN_PROPOSAL", target.name);
+      const built = deniedEnvelope(
+        "review",
+        "NO_OPEN_PROPOSAL",
+        target.name,
+        buildReceipt({ ...receiptBase, outcome: "DENIED" }),
+      );
       await insertReceiptInTx(tx, actor, head.opId, raw, built);
       return built;
     }
     if (decision === "withdraw" && locked.proposedBy !== actor.userId) {
-      const built = deniedEnvelope("review", "AUTHOR_ONLY", target.name);
+      const built = deniedEnvelope(
+        "review",
+        "AUTHOR_ONLY",
+        target.name,
+        buildReceipt({ ...receiptBase, outcome: "DENIED" }),
+      );
       await insertReceiptInTx(tx, actor, head.opId, raw, built);
       return built;
     }

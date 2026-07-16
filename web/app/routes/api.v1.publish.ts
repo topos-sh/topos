@@ -1,8 +1,8 @@
 import type { ActionFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
-import { parseCandidate, parsePublishHead } from "@/lib/api/candidate.server";
+import { parseCandidate, parsePublishHead, receiptNow } from "@/lib/api/candidate.server";
 import { publishFlow } from "@/lib/api/publish-flow.server";
-import { deniedEnvelope, envelopeResponse } from "@/lib/api/receipts.server";
+import { buildReceipt, deniedEnvelope, envelopeResponse } from "@/lib/api/receipts.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
 import { requireDeviceActor } from "@/lib/auth/guards.server";
 import { findReceipt } from "@/lib/db/queries.custody.server";
@@ -53,7 +53,16 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     return envelopeResponse(replay.outcome);
   }
   if (replay.kind === "key_reuse") {
-    return envelopeResponse(deniedEnvelope("publish", "OP_ID_REUSED", undefined));
+    // Before target resolution: workspace is the actor's, the skill unknown — omit what we
+    // cannot honestly name. The write 200 still carries a receipt so the CLI's op-WAL clears.
+    const receipt = buildReceipt({
+      opId: head.opId,
+      command: "publish",
+      outcome: "DENIED",
+      workspaceId: actor.workspaceId,
+      createdAt: receiptNow(),
+    });
+    return envelopeResponse(deniedEnvelope("publish", "OP_ID_REUSED", undefined, receipt));
   }
 
   return publishFlow({
