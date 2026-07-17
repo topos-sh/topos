@@ -565,7 +565,7 @@ fn tracked_placement_paths(ctx: &Ctx<'_>) -> Result<Vec<PathBuf>, ClientError> {
             continue;
         };
         let Some(map): Option<PlacementMap> =
-            doc::read_doc(ctx.fs, &ctx.layout.published(&id).map)?
+            doc::read_map(ctx.fs, &ctx.layout.published(&id).map)?
         else {
             continue;
         };
@@ -578,23 +578,26 @@ fn tracked_placement_paths(ctx: &Ctx<'_>) -> Result<Vec<PathBuf>, ClientError> {
     Ok(paths)
 }
 
-/// A skill carries a draft iff the live source bytes hash to a different `bundle_digest` than the lock
-/// pins. A missing/unscannable source is reported as no-draft (nothing to compare), never an error.
+/// A skill carries a draft iff ANY of its placements holds bytes hashing to a different
+/// `bundle_digest` than the lock pins (draft-anywhere: the edit may live in the shared dir or any
+/// native copy). A missing/unscannable source is reported as no-draft (nothing to compare), never an
+/// error.
 fn is_draft(ctx: &Ctx<'_>, map_path: &Path, lock: &Lock) -> Result<bool, ClientError> {
-    let Some(map): Option<PlacementMap> = doc::read_doc(ctx.fs, map_path)? else {
+    let Some(map): Option<PlacementMap> = doc::read_map(ctx.fs, map_path)? else {
         return Ok(false);
     };
-    let Some(placement) = map.placements.first() else {
-        return Ok(false);
-    };
-    let source = Path::new(placement);
-    if !source.exists() {
-        return Ok(false);
+    for placement in &map.placements {
+        let source = Path::new(placement);
+        if !source.exists() {
+            continue;
+        }
+        if let Ok(ScannedBundle { bundle_digest, .. }) = scan::scan(source)
+            && to_hex(&bundle_digest) != lock.bundle_digest
+        {
+            return Ok(true);
+        }
     }
-    match scan::scan(source) {
-        Ok(ScannedBundle { bundle_digest, .. }) => Ok(to_hex(&bundle_digest) != lock.bundle_digest),
-        Err(_) => Ok(false),
-    }
+    Ok(false)
 }
 
 /// The SOURCE / STATUS / CAUSE columns for one tracked row, from the offline signals: the follow entry
@@ -822,6 +825,8 @@ mod tests {
             review_required: false,
             following,
             excluded_here: false,
+            agents: Vec::new(),
+            excluded_agents: Vec::new(),
         }
     }
 
@@ -877,6 +882,7 @@ mod tests {
             harness: &harness,
             plane: &plane,
             follow: &follow,
+            roots: None,
         };
 
         let scope = RemoteScope {
@@ -949,6 +955,7 @@ mod tests {
             harness: &harness,
             plane: &plane,
             follow: &follow,
+            roots: None,
         };
 
         // `--workspace w_beta` → only w_beta's catalog is read.
@@ -1004,6 +1011,7 @@ mod tests {
             harness: &harness,
             plane: &plane,
             follow: &follow,
+            roots: None,
         };
         let scope = RemoteScope {
             catalog: &fake,
@@ -1044,6 +1052,7 @@ mod tests {
             harness,
             plane,
             follow,
+            roots: None,
         }
     }
 

@@ -251,6 +251,34 @@ pub(crate) fn add_tty(data: &AddData) -> String {
             (TriggerState::Inactive, _) => "",
         });
     }
+    out.push_str(&breadth_trigger_lines(&data.triggers));
+    out
+}
+
+/// The breadth arming sweep's receipt lines — one per OTHER detected agent, honest per row (an
+/// `Active` row names its live moment; a registered-but-ungated row names the consent still owed;
+/// a degraded row names the explicit-pull floor). Empty input renders nothing.
+pub(crate) fn breadth_trigger_lines(
+    triggers: &[topos_types::results::BreadthTriggerReport],
+) -> String {
+    if triggers.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\nOther detected agents:");
+    for t in triggers {
+        let phrase = match (t.state, t.currency_kind) {
+            (TriggerState::Active, CurrencyKind::SessionStart) => "armed (session start)",
+            (TriggerState::Active, CurrencyKind::Scheduled) => "armed (scheduled)",
+            (TriggerState::Active, _) => "armed",
+            (TriggerState::Inactive, _) => "registered",
+            (TriggerState::Degraded, _) => "couldn't arm — `topos update` still works",
+            (TriggerState::AlreadyPresentUnmanaged, _) => "left your existing trigger untouched",
+        };
+        out.push_str(&format!("\n  {}: {}", t.agent, phrase));
+        if let Some(note) = &t.note {
+            out.push_str(&format!(" — {note}"));
+        }
+    }
     out
 }
 
@@ -785,6 +813,7 @@ pub(crate) fn follow_tty(data: &FollowData, resumed: &[String]) -> String {
              team's current."
         ));
     }
+    s.push_str(&breadth_trigger_lines(&data.triggers));
     s
 }
 
@@ -1003,6 +1032,50 @@ pub(crate) fn unfollow_describe_tty(
     s
 }
 
+/// The `--agent` scope verbs' TTY (describe when `yes_argv` is `Some`, apply otherwise) — the
+/// placement plan per skill: what lands, what is cleaned (snapshot-first), what stays, and the
+/// standing "subscription untouched" constant.
+pub(crate) fn agent_scope_tty(
+    d: &crate::ops::AgentScopeData,
+    yes_argv: Option<&[String]>,
+) -> String {
+    let mut s = String::new();
+    let heading = match (d.action.as_str(), d.agents.is_empty()) {
+        ("exclude", _) => format!("Excluding agents on this device: {}", d.agents.join(", ")),
+        ("scope", true) => "Clearing the agent scope (back to every detected agent)".to_owned(),
+        _ => format!("Scoping placement to agents: {}", d.agents.join(", ")),
+    };
+    s.push_str(&heading);
+    for item in &d.items {
+        s.push_str(&format!("\n{}:", item.skill));
+        for dir in &item.added {
+            s.push_str(&format!("\n  + lands in {dir}"));
+        }
+        for dir in &item.cleaned {
+            s.push_str(&format!(
+                "\n  - removed from {dir} (any edit is snapshotted first)"
+            ));
+        }
+        for dir in &item.kept {
+            s.push_str(&format!("\n  = stays in {dir}"));
+        }
+        if item.added.is_empty() && item.cleaned.is_empty() && item.kept.is_empty() {
+            s.push_str("\n  no placement changes on this machine");
+        }
+        for note in &item.notes {
+            s.push_str(&format!("\n  note: {note}"));
+        }
+    }
+    s.push_str(&format!("\n{}", d.subscription_note));
+    if let Some(argv) = yes_argv {
+        s.push_str(&format!(
+            "\nNothing has changed yet — apply with:\n  {}",
+            argv_line(argv)
+        ));
+    }
+    s
+}
+
 /// The unfollow APPLY's TTY.
 pub(crate) fn unfollow_applied_tty(a: &crate::ops::UnfollowApplied) -> String {
     let mut s = String::new();
@@ -1126,6 +1199,21 @@ pub(crate) fn uninstall_applied_tty(d: &crate::ops::UninstallApplied) -> String 
         (_, None) => "\n  · no currency hook was installed — nothing to scrub".to_owned(),
     };
     s.push_str(&hook_line);
+    // The breadth scrub's rows — only agents with something to say (a real scrub, or a survival
+    // disclosure); clean no-ops never reach this receipt.
+    for t in &d.triggers {
+        let phrase = match t.state {
+            TriggerState::Degraded => {
+                "couldn't remove the trigger — it may still be registered there".to_owned()
+            }
+            TriggerState::AlreadyPresentUnmanaged => "left your own trigger untouched".to_owned(),
+            _ => match &t.touched_path {
+                Some(path) => format!("scrubbed the trigger from {path}"),
+                None => "trigger removed".to_owned(),
+            },
+        };
+        s.push_str(&format!("\n  · {}: {}", t.agent, phrase));
+    }
     if d.sidecar_removed {
         s.push_str("\n  · deleted the ~/.topos sidecar tree (credential included)");
     } else {
@@ -2391,6 +2479,7 @@ mod tests {
                 interval_secs: Some(5),
             }),
             currency: None,
+            triggers: Vec::new(),
         };
         let text = follow_tty(&data, &[]);
         // The clickable URL is surfaced, plus the SHORT code to cross-check against the approval page.

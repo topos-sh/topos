@@ -37,7 +37,7 @@ use crate::plane::{
 use crate::sync_status::{self, DeliveredSkill, WorkspaceSync};
 use crate::{doc, sidecar};
 
-use super::sync_engine::{self, Invocation, WorkState};
+use super::sync_engine::{self, Invocation};
 
 /// The never-received sentinel the first-receive baseline carries (and an upstream withdrawal
 /// restores, so a later re-delivery installs afresh instead of reading as already-current).
@@ -296,8 +296,16 @@ pub(crate) fn reset(
     }
     let mut items = Vec::with_capacity(resolved.len());
     for (id, lock) in &resolved {
-        // The draft delta vs current — the exact bytes a reset drops.
-        let drop_diff = super::diff(ctx, &lock.name, None)?.diff;
+        // The draft delta vs current — the exact bytes a reset drops. DIVERGENT copies cannot render
+        // one diff (that freeze is exactly what `--reset` is the named way out of), so the loss is
+        // disclosed as the frozen set instead of failing the reset.
+        let drop_diff = match super::diff(ctx, &lock.name, None) {
+            Ok(d) => d.diff,
+            Err(e @ ClientError::PlacementsDiverged { .. }) => {
+                format!("{e}\n(each copy is snapshotted into the local store before the reset)")
+            }
+            Err(e) => return Err(e),
+        };
         items.push(ResetData {
             skill: lock.name.clone(),
             workspace_id: super::followed_workspace(ctx, id.as_str()),
@@ -906,6 +914,8 @@ fn install_new_arrival(
             following: true,
             // A fresh delivery-driven arrival clears any prior per-device exclusion of this id.
             excluded_here: false,
+            agents: Vec::new(),
+            excluded_agents: Vec::new(),
         }],
     )?;
     let follow = FollowContext {
@@ -917,6 +927,8 @@ fn install_new_arrival(
         },
         review_required: ds.review_required,
         following: true,
+        agents: Vec::new(),
+        excluded_agents: Vec::new(),
     };
     let rec = delivered_record(ws, ds);
     let inv = if opts.accept_first_receive {
@@ -994,42 +1006,44 @@ pub(crate) fn snapshot_and_clean(
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
     let sync: Option<SyncState> = doc::read_doc(ctx.fs, &sp.sync)?;
     let lock: Option<Lock> = doc::read_doc(ctx.fs, &sp.lock)?;
-    let map: Option<PlacementMap> = doc::read_doc(ctx.fs, &sp.map)?;
+    let map: Option<PlacementMap> = doc::read_map(ctx.fs, &sp.map)?;
     if let (Some(lock), Some(map)) = (lock.as_ref(), map.as_ref()) {
-        match sync_engine::compute_work(ctx, map, lock)? {
-            // A draft delta is retained in the sidecar store BEFORE any byte leaves the agent
-            // dir — nothing is ever lost.
-            WorkState::Present {
-                eq_base: false,
-                scanned,
-                ..
-            } => {
-                sync_engine::snapshot_draft(ctx, &sp, lock, &scanned)?;
-            }
-            // Pristine (or absent) — nothing local to retain beyond what the store already has.
-            WorkState::Present { .. } | WorkState::Absent => {}
-            // UNSCANNABLE — the placement exists but cannot be read safely (a symlink/device
-            // node/non-UTF-8 name someone put there). We CANNOT snapshot what we cannot scan, so
-            // we must not delete it: FAIL CLOSED, exactly as the sync engine refuses to
-            // fast-forward over an unreadable placement. The skill freezes with a typed refusal
-            // instead of a silent, unrecoverable delete.
-            WorkState::Unscannable => {
-                return Err(ClientError::PlacementUnsupported {
-                    reason: match reason {
-                        WithdrawReason::Upstream => {
-                            "upstream withdrew this skill, but its placement cannot be read; \
-                             refusing to remove it — inspect or move the directory by hand"
-                        }
-                        WithdrawReason::RemoveExclusion => {
-                            "this skill's placement cannot be read; refusing to remove it — \
-                             inspect or move the directory by hand"
-                        }
+        // EVERY distinct edited copy is retained in the sidecar store BEFORE any byte leaves an
+        // agent dir — nothing is ever lost, whichever placement carried the edit. UNSCANNABLE
+        // placements FAIL CLOSED: we cannot snapshot what we cannot scan, so we must not delete it
+        // — the skill freezes with a typed refusal instead of a silent, unrecoverable delete.
+        let scans = crate::placement::scan_placements(ctx, map)?;
+        if scans
+            .iter()
+            .any(|s| matches!(s.status, crate::placement::ScanStatus::Unscannable))
+        {
+            return Err(ClientError::PlacementUnsupported {
+                reason: match reason {
+                    WithdrawReason::Upstream => {
+                        "upstream withdrew this skill, but its placement cannot be read; \
+                         refusing to remove it — inspect or move the directory by hand"
                     }
-                    .into(),
-                });
+                    WithdrawReason::RemoveExclusion => {
+                        "this skill's placement cannot be read; refusing to remove it — \
+                         inspect or move the directory by hand"
+                    }
+                }
+                .into(),
+            });
+        }
+        for (idx, _) in crate::placement::distinct_modified(&scans) {
+            if let crate::placement::ScanStatus::Modified { scanned } = &scans[idx].status {
+                sync_engine::snapshot_draft(ctx, &sp, lock, scanned)?;
             }
         }
-        for placement in &map.placements {
+        for (placement, scan) in map.placements.iter().zip(&scans) {
+            // A FOREIGN placement — recorded as a target but never materialized by topos, and
+            // since occupied by someone else's bytes (the user, or the harness itself) — is not
+            // ours to delete: it was never snapshotted and never ours. Leave it in place (the
+            // same rule the scope-change cleanup applies).
+            if matches!(scan.status, crate::placement::ScanStatus::Foreign) {
+                continue;
+            }
             let p = Path::new(placement);
             if ctx.fs.exists(p) {
                 ctx.fs.remove_dir_all(p)?;
@@ -1139,7 +1153,7 @@ fn applied_snapshot(
             continue;
         };
         let sp = ctx.layout.published(&sid);
-        let Some(map) = doc::read_doc::<PlacementMap>(ctx.fs, &sp.map)? else {
+        let Some(map) = doc::read_map(ctx.fs, &sp.map)? else {
             continue;
         };
         // A placement the sweep removed (or never laid) is not held, whatever the doc says.
@@ -1256,6 +1270,7 @@ pub(super) fn ctx_with_plane<'a>(ctx: &'a Ctx<'a>, plane: &'a dyn PlaneSource) -
         harness: ctx.harness,
         plane,
         follow: ctx.follow,
+        roots: ctx.roots.clone(),
     }
 }
 
@@ -1277,6 +1292,7 @@ pub(super) fn ctx_with_plane_and_follow<'a>(
         harness: ctx.harness,
         plane,
         follow,
+        roots: ctx.roots.clone(),
     }
 }
 

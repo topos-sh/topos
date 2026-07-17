@@ -150,6 +150,17 @@ pub(crate) enum ClientError {
     /// rather than risk clobbering or a torn write.
     #[error("the skill placement cannot be materialized safely: {reason}")]
     PlacementUnsupported { reason: String },
+    /// MORE than one of a skill's placements holds a DIFFERENT local edit — there is no single draft
+    /// to sync, diff, or publish, and nothing is overwritten (the typed freeze). The paths name every
+    /// edited copy; the way out is reconciling them by hand into one, or discarding the edits with
+    /// `update --reset` (every edited copy is snapshotted into the sidecar store first).
+    #[error(
+        "'{skill}' has divergent local edits in more than one placement ({}) — reconcile the copies \
+         by hand, or discard the edits with `topos update {skill} --reset` (each copy is snapshotted \
+         first)",
+        paths.join(", ")
+    )]
+    PlacementsDiverged { skill: String, paths: Vec<String> },
     /// The plane could not be read for an explicitly-targeted skill (unreachable, not served, or a
     /// malformed response). A bare currency sweep isolates such failures per skill instead of erroring.
     #[error("plane read failed: {0}")]
@@ -360,6 +371,7 @@ impl ClientError {
             ClientError::HarnessNotFound(_) => "HARNESS_NOT_FOUND",
             ClientError::PathNotName { .. } => "PATH_NOT_NAME",
             ClientError::PlacementUnsupported { .. } => "PLACEMENT_UNSUPPORTED",
+            ClientError::PlacementsDiverged { .. } => "PLACEMENTS_DIVERGED",
             ClientError::UnknownGoBackVersion { .. } => "UNKNOWN_GOBACK_VERSION",
             ClientError::Plane(_) => "PLANE_ERROR",
             ClientError::Enrollment(_) => "ENROLLMENT_FAILED",
@@ -431,6 +443,9 @@ impl ClientError {
             ClientError::Conflict { .. } => TerminalOutcome::Conflict,
             ClientError::Denied(_) | ClientError::EnrollDenied => TerminalOutcome::Denied,
             ClientError::PublishBlocked { .. } => TerminalOutcome::Diverged,
+            // Divergent per-placement edits are the same class as a diverged draft: local
+            // reconciliation (or the disclosed reset) resolves it, never a blind retry.
+            ClientError::PlacementsDiverged { .. } => TerminalOutcome::Diverged,
             // An in-flight op must be settled, then the command retried.
             ClientError::PendingOp { .. } => TerminalOutcome::RetryableFailure,
             // A definitive 4xx rejection — the op cannot succeed as-is.

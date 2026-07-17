@@ -64,12 +64,19 @@ fn sample_lock(tag: u8) -> Lock {
 
 fn sample_map(tag: u8) -> PlacementMap {
     PlacementMap {
-        schema_version: 1,
+        schema_version: 2,
         placements: vec![format!("/home/u/skills/s{tag}")],
         applied_commit: hex(tag),
         materialized_sha: hex(tag),
         pre_existing_sha: None,
         swap_capability: SwapCapability::Unsupported,
+        placement_state: vec![topos_types::persisted::PlacementState {
+            kind: topos_types::persisted::PlacementKind::Native,
+            agent: None,
+            materialized_sha: Some(hex(tag)),
+            pre_existing_sha: None,
+            swap_capability: SwapCapability::Unsupported,
+        }],
         harness: None,
         harness_layer: None,
         harness_slug: None,
@@ -98,12 +105,13 @@ fn hex(seed: u8) -> String {
 /// deserializes — across {lock, map, sync} × {fail before/after each step} × {pre-existing yes/no}.
 #[test]
 fn atomic_write_is_crash_safe_across_the_table() {
-    crash_table(sample_lock);
-    crash_table(sample_map);
-    crash_table(sample_sync);
+    crash_table(sample_lock, PERSISTED_SCHEMA_VERSION);
+    // map.json dispatches on its OWN schema ceiling (the per-placement v2 shape).
+    crash_table(sample_map, topos_types::PLACEMENT_MAP_SCHEMA_VERSION);
+    crash_table(sample_sync, PERSISTED_SCHEMA_VERSION);
 }
 
-fn crash_table<T: Serialize + DeserializeOwned>(make: impl Fn(u8) -> T) {
+fn crash_table<T: Serialize + DeserializeOwned>(make: impl Fn(u8) -> T, max: u32) {
     for fail_at in 1..=4 {
         for &pre in &[false, true] {
             let scratch = Scratch::new("aw");
@@ -137,8 +145,7 @@ fn crash_table<T: Serialize + DeserializeOwned>(make: impl Fn(u8) -> T) {
 
             // (a) whatever is on disk deserializes (no torn JSON).
             if let Some(bytes) = &now {
-                let _: T =
-                    load_versioned(bytes, PERSISTED_SCHEMA_VERSION).expect("target deserializes");
+                let _: T = load_versioned(bytes, max).expect("target deserializes");
             }
 
             // (c) the only artifact a faulted write leaves is the recognizable temp; clearing it and
@@ -150,7 +157,7 @@ fn crash_table<T: Serialize + DeserializeOwned>(make: impl Fn(u8) -> T) {
             atomic_write(&real, &target, &new_bytes).unwrap();
             let after = real.read_opt(&target).unwrap().unwrap();
             assert_eq!(after, new_bytes, "clean rewrite must reach the post state");
-            let _: T = load_versioned(&after, PERSISTED_SCHEMA_VERSION).unwrap();
+            let _: T = load_versioned(&after, max).unwrap();
         }
     }
 }
@@ -291,63 +298,57 @@ fn recover_never_deletes_on_unknown_schema() {
 /// The migration dispatch over {0, 1, 2, missing} × every persisted doc type.
 #[test]
 fn migration_dispatch_is_fail_closed() {
-    check_dispatch::<Lock>(sample_lock(1));
-    check_dispatch::<PlacementMap>(sample_map(1));
-    check_dispatch::<SyncState>(sample_sync(1));
-    check_dispatch::<OpRecord>(OpRecord {
-        schema_version: 1,
-        op_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479".into(),
-        workspace_id: "w_demo".into(),
-        skill_id: "s_demo".into(),
-        op: topos_types::persisted::OpKind::PublishDirect,
-        candidate_commit: hex(1),
-        bundle_digest: hex(2),
-        expected_generation: 1,
-        good: None,
-        // A present name must survive the crash-safe doc round-trip (it rides a publish WAL).
-        display_name: Some("deploy-helper".to_owned()),
-        channel: Some("ops".to_owned()),
-        last_receipt: None,
-    });
+    check_dispatch::<Lock>(sample_lock(1), PERSISTED_SCHEMA_VERSION);
+    // map.json's ceiling is its own (v2) — one-past-it fails closed the same way.
+    check_dispatch::<PlacementMap>(sample_map(1), topos_types::PLACEMENT_MAP_SCHEMA_VERSION);
+    check_dispatch::<SyncState>(sample_sync(1), PERSISTED_SCHEMA_VERSION);
+    check_dispatch::<OpRecord>(
+        OpRecord {
+            schema_version: 1,
+            op_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479".into(),
+            workspace_id: "w_demo".into(),
+            skill_id: "s_demo".into(),
+            op: topos_types::persisted::OpKind::PublishDirect,
+            candidate_commit: hex(1),
+            bundle_digest: hex(2),
+            expected_generation: 1,
+            good: None,
+            // A present name must survive the crash-safe doc round-trip (it rides a publish WAL).
+            display_name: Some("deploy-helper".to_owned()),
+            channel: Some("ops".to_owned()),
+            last_receipt: None,
+        },
+        PERSISTED_SCHEMA_VERSION,
+    );
 }
 
-fn check_dispatch<T: Serialize + DeserializeOwned + std::fmt::Debug>(valid: T) {
+fn check_dispatch<T: Serialize + DeserializeOwned + std::fmt::Debug>(valid: T, max: u32) {
     let base = serde_json::to_value(&valid).unwrap();
 
-    // schema_version = 1 -> parses.
+    // schema_version at the ceiling -> parses.
     let bytes = serde_json::to_vec(&base).unwrap();
-    assert!(load_versioned::<T>(&bytes, PERSISTED_SCHEMA_VERSION).is_ok());
+    assert!(load_versioned::<T>(&bytes, max).is_ok());
 
-    // = 2 -> newer -> fail closed (never handed to serde).
+    // one past the ceiling -> newer -> fail closed (never handed to serde).
     let mut newer = base.clone();
-    newer["schema_version"] = serde_json::json!(2);
-    let err = load_versioned::<T>(
-        &serde_json::to_vec(&newer).unwrap(),
-        PERSISTED_SCHEMA_VERSION,
-    )
-    .unwrap_err();
-    assert!(matches!(
-        err,
-        ClientError::UnknownSchemaVersion { found: 2, max: 1 }
-    ));
+    newer["schema_version"] = serde_json::json!(max + 1);
+    let err = load_versioned::<T>(&serde_json::to_vec(&newer).unwrap(), max).unwrap_err();
+    match err {
+        ClientError::UnknownSchemaVersion { found, max: m } => {
+            assert_eq!((found, m), (max + 1, max));
+        }
+        other => panic!("expected UnknownSchemaVersion, got {other:?}"),
+    }
 
     // = 0 -> below floor -> unsupported.
     let mut zero = base.clone();
     zero["schema_version"] = serde_json::json!(0);
-    let err = load_versioned::<T>(
-        &serde_json::to_vec(&zero).unwrap(),
-        PERSISTED_SCHEMA_VERSION,
-    )
-    .unwrap_err();
+    let err = load_versioned::<T>(&serde_json::to_vec(&zero).unwrap(), max).unwrap_err();
     assert!(matches!(err, ClientError::UnsupportedLegacy { found: 0 }));
 
     // missing schema_version -> corrupt (never silently accepted).
     let mut missing = base.clone();
     missing.as_object_mut().unwrap().remove("schema_version");
-    let err = load_versioned::<T>(
-        &serde_json::to_vec(&missing).unwrap(),
-        PERSISTED_SCHEMA_VERSION,
-    )
-    .unwrap_err();
+    let err = load_versioned::<T>(&serde_json::to_vec(&missing).unwrap(), max).unwrap_err();
     assert!(matches!(err, ClientError::Corrupt(_)));
 }

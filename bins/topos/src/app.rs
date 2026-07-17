@@ -70,9 +70,23 @@ pub fn run() -> ExitCode {
             harness: harness.as_ref(),
             plane: &inert_plane,
             follow: &inert_follow,
+            roots: None,
         };
         let binary = std::env::current_exe().ok();
-        return finish_uninstall(json, cmd_name, ops::uninstall(&ctx, binary, *yes), &diag);
+        // The breadth scrub rides the applied receipt: after the active adapter's hook scrub,
+        // every OTHER agent's trigger artifact is removed too (or its survival disclosed —
+        // OpenClaw's gateway may be down). Swept over the SUPPORTED set, not detection: an
+        // artifact must be scrubbed even when its harness's detect dir has since vanished.
+        let result = ops::uninstall(&ctx, binary, *yes).map(|outcome| match outcome {
+            ops::UninstallOutcome::Applied(mut applied) => {
+                if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+                    applied.triggers = ops::scrub_all(&home, harness.id().slug(), &fs, &fs);
+                }
+                ops::UninstallOutcome::Applied(applied)
+            }
+            other => other,
+        });
+        return finish_uninstall(json, cmd_name, result, &diag);
     }
 
     // Recovery runs at the start of every command (it also abandons an expired, never-redeemed
@@ -127,6 +141,13 @@ pub fn run() -> ExitCode {
         harness: harness.as_ref(),
         plane,
         follow,
+        // The machine roots the placement engine detects agents against — the same `$HOME` + cwd
+        // resolution untracked discovery uses. Absent `$HOME` degrades to the classic single-dir
+        // placement (the active adapter's), never an error.
+        roots: std::env::var_os("HOME").map(|h| crate::ctx::AgentRoots {
+            home: PathBuf::from(h),
+            cwd: std::env::current_dir().ok(),
+        }),
     };
 
     // The credentialed device connectors — every credentialed route presents the device's ONE Bearer
@@ -252,12 +273,22 @@ pub fn run() -> ExitCode {
                     Err(ClientError::InvalidArgument(msg))
                 }
             };
+            // The breadth arming sweep rides the adopt receipt: when the active adapter armed its
+            // own trigger (`currency`), every OTHER detected agent's trigger is armed here at the
+            // composition root — the one layer holding the real ports + `$HOME`.
+            let result = result.map(|mut data| {
+                if data.currency.is_some() {
+                    data.triggers = breadth_arm(&ctx.roots, harness.as_ref(), &fs);
+                }
+                data
+            });
             finish(json, cmd_name, result, render::add_tty, &diag)
         }
         Command::Follow {
             targets,
             channel,
             skill,
+            agent,
             yes,
             prefix_dirname,
             manual,
@@ -281,6 +312,7 @@ pub fn run() -> ExitCode {
                 prefix_dirname,
                 channels: channel.clone(),
                 skills: skill.clone(),
+                agents: agent.clone(),
             };
             let first = ops::follow(&ctx, &connectors, targets, mk_opts());
             // Block on a pending device-authorization until the human approves (so a person never re-invokes
@@ -293,14 +325,51 @@ pub fn run() -> ExitCode {
                 block_on_pending(&clock, &policy, first, follow_pending_disclosure, || {
                     ops::follow(&ctx, &connectors, Vec::new(), mk_opts())
                 });
+            // The breadth arming sweep rides the enrollment receipt: the promote armed the active
+            // adapter (`currency`); every OTHER detected agent's trigger is armed here at the
+            // composition root, and the per-agent outcomes ride the same payload honestly.
+            let result = result.map(|outcome| match outcome {
+                ops::FollowOutcome::Data { mut data, resumed } => {
+                    if data.currency.is_some() {
+                        data.triggers = breadth_arm(&ctx.roots, harness.as_ref(), &fs);
+                    }
+                    ops::FollowOutcome::Data { data, resumed }
+                }
+                other => other,
+            });
             finish_follow(json, cmd_name, result, &diag)
         }
         Command::Unfollow {
             targets,
             channel,
             skill,
+            agent,
             yes,
         } => {
+            // `unfollow --agent <slug>` is the per-agent exclusion — the SAME implementation
+            // `remove --agent` runs on a followed skill: offline placement policy (the subscription
+            // is untouched, no server call), so it dispatches before the networked detach path.
+            if !agent.is_empty() {
+                if !channel.is_empty() {
+                    let e = ClientError::InvalidArgument(
+                        "`--agent` scopes where a SKILL's bytes land — it cannot combine with \
+                         `--channel`"
+                            .into(),
+                    );
+                    return emit_err(json, cmd_name, &e, &diag);
+                }
+                let mut all_targets = targets.clone();
+                all_targets.extend(skill.iter().cloned());
+                let result = ops::exclude_agents(
+                    &ctx,
+                    "unfollow",
+                    &all_targets,
+                    &agent,
+                    workspace.as_deref(),
+                    yes,
+                );
+                return finish_agent_scope(json, cmd_name, result, &diag);
+            }
             let connectors = ops::UnfollowConnectors {
                 directory: &connect_directory,
                 delivery: &connect_delivery,
@@ -954,6 +1023,9 @@ fn finish_follow(
             }
             ExitCode::SUCCESS
         }
+        Ok(ops::FollowOutcome::Scope(outcome)) => {
+            finish_agent_scope(json, command, Ok(outcome), diag)
+        }
         Ok(ops::FollowOutcome::ReattachDescribed { reattach, yes_argv }) => {
             if json {
                 let value = serde_json::json!({ "reattach": reattach });
@@ -982,6 +1054,40 @@ fn finish_follow(
 }
 
 /// `unfollow`'s finisher — the two-phase pair (describe / applied).
+/// The `--agent` scope verbs' finisher (shared by `follow --agent`, `unfollow --agent`, and
+/// `remove --agent` on a followed skill) — the same describe/apply envelope shape as every other
+/// two-phase verb.
+fn finish_agent_scope(
+    json: bool,
+    command: &str,
+    result: Result<ops::AgentScopeOutcome, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(ops::AgentScopeOutcome::Described { data, yes_argv }) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::describe_next_actions(vec![yes_argv]);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::agent_scope_tty(&data, Some(&yes_argv)));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::AgentScopeOutcome::Applied(data)) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                println!("{}", render::agent_scope_tty(&data, None));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
 fn finish_unfollow(
     json: bool,
     command: &str,
@@ -1206,6 +1312,9 @@ fn finish_remove(
                 println!("{}", render::remove_applied_tty(&data));
             }
             ExitCode::SUCCESS
+        }
+        Ok(ops::RemoveOutcome::AgentScope(outcome)) => {
+            finish_agent_scope(json, command, Ok(outcome), diag)
         }
         Err(e) => emit_err(json, command, &e, diag),
     }
@@ -1903,6 +2012,21 @@ fn load_enrollment(fs: &dyn FsOps, layout: &Layout) -> Result<Option<Enrollment>
     .with_workspaces(workspaces);
     let follow = FileFollow::new(enroll::follow_contexts(&follows));
     Ok(Some(Enrollment { plane, follow }))
+}
+
+/// The breadth arming sweep, run at the composition root — the one layer holding the real ports
+/// (`RealFs` is both the `ConfigStore` and the `CommandRunner`) and the resolved machine roots.
+/// `None` roots (no `$HOME`) arms nothing: detection needs a home, and the active adapter's own
+/// trigger was already armed by the verb.
+fn breadth_arm(
+    roots: &Option<crate::ctx::AgentRoots>,
+    active: &dyn HarnessAdapter,
+    fs: &RealFs,
+) -> Vec<topos_types::results::BreadthTriggerReport> {
+    match roots {
+        Some(r) => ops::arm_detected(&r.home, r.cwd.as_deref(), active.id().slug(), fs, fs),
+        None => Vec::new(),
+    }
 }
 
 /// Build the harness adapter for `id`, borrowing the shared config-store seam plus the subprocess

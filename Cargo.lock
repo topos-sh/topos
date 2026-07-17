@@ -4171,8 +4171,10 @@ dependencies = [
  "sha2",
  "tar",
  "topos",
+ "topos-harness",
  "topos-plane",
  "topos-types",
+ "ureq",
  "utoipa",
 ]
 

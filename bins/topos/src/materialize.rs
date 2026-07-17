@@ -1,13 +1,14 @@
-//! The crash-safe byte-writing materializer: place a verified bundle's exact bytes onto a harness skill
-//! directory via a **namespace-atomic directory swap**, then advance the durable docs — so a crash at any
-//! boundary leaves the placement holding the OLD-or-NEW *complete* bytes, never a torn, mixed, or
-//! half-written tree.
+//! The crash-safe byte-writing materializer: place a verified bundle's exact bytes onto EVERY target
+//! placement via a **namespace-atomic directory swap** per dir, then advance the durable docs — so a
+//! crash at any boundary leaves each placement holding OLD-or-NEW *complete* bytes, never a torn,
+//! mixed, or half-written tree.
 //!
 //! `atomic.rs` (the single-*file* crash-safe write) is unchanged; this module owns the crash-safe
-//! *sequence* for a whole directory. The raw swap syscall is the [`FsOps::exchange_dir`] seam op.
+//! *sequence* for whole directories. The raw swap syscall is the [`FsOps::exchange_dir`] seam op.
 //!
 //! ## The order is the safety
 //!
+//! For EACH target placement, in map order:
 //! 1. Build a staging dir as a **sibling in the placement's PARENT** (guaranteed same filesystem) and
 //!    `fsync` every staged file AND every staging directory.
 //! 2. **Atomic swap** the staging dir with the placement dir ([`SwapCapability::AtomicExchange`]) — one
@@ -15,85 +16,92 @@
 //!    the logged [`SwapCapability::RenameDance`] with a brief *absent*, never *mixed*, window.)
 //! 3. `fsync` the parent so the swap is durable.
 //! 4. Drop the old bytes the swap parked at the staging path.
-//! 5. Commit the docs **map → lock → sync** ([`commit_docs`]); `applied` advances only at the final sync
-//!    write, strictly after the new bytes are durably on disk.
+//! 5. Record THAT placement's new per-placement state (`map.json` only) — the crash-progress marker,
+//!    so a re-run heals landed dirs (bytes already at target ⇒ record, no second swap) and swaps the
+//!    rest.
 //!
-//! A fault before step 5's sync write leaves `applied` naming the OLD generation while the bytes are NEW;
-//! the next pull re-derives the working hash, sees it already equals the target, and HEALS forward (the
-//! kernel `sync::refine_after_fetch` `AlreadyAtTarget` path) rather than mistaking the bytes for a draft.
-//! The per-skill writer flock (held by the caller, living OUTSIDE the swapped dir) serializes topos
-//! writers across the whole sequence.
+//! Then, once EVERY target holds the new bytes:
+//! 6. Commit the docs **map → lock → sync** ([`commit_docs`]); `applied` advances only at the final
+//!    sync write, strictly after the new bytes are durably on disk everywhere.
+//!
+//! A fault before step 6's sync write leaves `applied` naming the OLD generation while some (or all)
+//! placements hold NEW bytes; the next pull re-derives each dir's state, sees the landed dirs already
+//! equal the target, and HEALS forward (the kernel `sync::refine_after_fetch` `AlreadyAtTarget` path
+//! when every dir landed; the swap loop's skip arm otherwise) rather than mistaking the bytes for a
+//! draft. Before OVERWRITING a dir whose bytes differ from ITS recorded per-placement sha (an edit no
+//! snapshot has captured yet), the caller-supplied [`MaterializeReq::snapshot`] seam commits those
+//! bytes into the sidecar store — never a lost byte. The per-skill writer flock (held by the caller,
+//! living OUTSIDE the swapped dirs) serializes topos writers across the whole sequence.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use topos_core::digest::to_hex;
 use topos_gitstore::{FileMode, RenderedBundle};
-use topos_types::PERSISTED_SCHEMA_VERSION;
-use topos_types::persisted::{Lock, PlacementMap, SwapCapability, SyncState};
+use topos_types::persisted::{Lock, PlacementMap, PlacementState, SwapCapability, SyncState};
 
 use crate::doc;
 use crate::error::ClientError;
 use crate::fs_seam::{FsOps, PathKind};
+use crate::scan::{self, ScannedBundle};
 use crate::sidecar::SkillPaths;
 
-/// The placement-map fields the ENGINE computes (the materializer fills in `pre_existing_sha` +
-/// `swap_capability`, which it alone derives).
-#[derive(Debug, Clone)]
-pub(crate) struct NextMapCore {
-    pub placements: Vec<String>,
-    pub applied_commit: String,
-    pub materialized_sha: String,
-    pub harness: Option<topos_types::HarnessId>,
-    pub harness_layer: Option<String>,
-}
+/// The pre-overwrite snapshot seam's shape (see [`MaterializeReq::snapshot`]).
+pub(crate) type SnapshotFn<'a> = &'a dyn Fn(&ScannedBundle) -> Result<(), ClientError>;
 
 /// Everything the materializer needs for one apply. The engine has already fetched + `render_verified`'d
-/// `bundle` (so the bytes are authenticated) and computed the complete `next_lock` + `next_sync` target.
+/// `bundle` (so the bytes are authenticated), reconciled `next_map`'s placement set, and computed the
+/// complete `next_lock` + `next_sync` target.
 pub(crate) struct MaterializeReq<'a> {
     /// The stable skill id (names the staging / graveyard / probe siblings).
     pub skill_id: &'a str,
-    /// The placement directory (possibly a symlink; canonicalized to its real dir inside).
-    pub placement_dir: &'a Path,
+    /// Indices into `next_map.placements` this apply lands the bundle on — the MANAGED set (a recorded
+    /// placement outside the current plan is frozen: never written, never deleted).
+    pub target_indices: &'a [usize],
     /// The verified bytes to place.
     pub bundle: &'a RenderedBundle,
-    /// The durable prior map (the swap-capability cache + the `pre_existing_sha` derivation source).
-    pub prior_map: &'a PlacementMap,
-    /// The map fields the engine computed (the materializer adds `pre_existing_sha` + `swap_capability`).
-    pub next_map_core: NextMapCore,
+    /// The engine-computed next map: the reconciled placements + the PRIOR per-placement states (each
+    /// landed index's state is updated here) + the map-level `applied_commit`/`materialized_sha`
+    /// already advanced. The first placement's map-level mirrors are refreshed on write.
+    pub next_map: PlacementMap,
     /// The lock to write (built by the engine from the bundle — kept in step with the placed bytes).
     pub next_lock: &'a Lock,
     /// The complete target sync state (the engine computed `applied`/`base_commit`/`work_hash`/…).
     pub next_sync: &'a SyncState,
-    /// Where the three durable docs live.
+    /// Where the durable docs live.
     pub sp: &'a SkillPaths,
+    /// The pre-overwrite snapshot seam: invoked with the scan of a dir whose on-disk bytes differ from
+    /// BOTH its recorded per-placement sha and the bundle being placed (an edit nothing has captured) —
+    /// the never-a-lost-byte rail. `None` only where the caller has already snapshotted every copy
+    /// (reset / go-back / the merge, whose snapshot-on-touch runs first).
+    pub snapshot: Option<SnapshotFn<'a>>,
 }
 
 /// What the materializer actually did (so the engine can log / record the effective capability).
+/// Mirrors the FIRST landed placement (the map-level summary fields carry the same).
 #[derive(Debug, Clone)]
 pub(crate) struct MaterializeReport {
     pub swap_capability: SwapCapability,
     pub pre_existing_sha: Option<String>,
 }
 
-/// The sha of whatever was in the placement dir BEFORE topos first wrote into it — restored on
-/// uninstall. **Sticky:** once captured it never changes. On the first overwrite (`prior` has no
-/// `pre_existing_sha` yet but a directory was present) the prior `materialized_sha` *is* the user's
-/// original bytes (adopt-in-place wrote nothing into the dir, so the recorded sha equals what is there).
-/// A genuine first install into an absent dir has nothing pre-existing.
-///
-/// Shared by [`materialize`] and the engine's heal path so a crash-after-swap reconciliation cannot lose
-/// the first-overwrite capture. Computed from the DURABLE prior map, never from post-swap disk.
-pub(crate) fn derive_pre_existing_sha(
-    prior: &PlacementMap,
+/// The sha of whatever was in a placement dir BEFORE topos first wrote into it — restored on
+/// uninstall. **Sticky:** once captured it never changes. On the first overwrite (the state has no
+/// `pre_existing_sha` yet but a directory was present) the prior recorded `materialized_sha` *is* the
+/// user's original bytes (adopt-in-place wrote nothing into the dir, so the recorded sha equals what
+/// is there). A genuine first install into an absent dir has nothing pre-existing. Computed from the
+/// DURABLE prior state, never from post-swap disk.
+pub(crate) fn derive_pre_existing_state(
+    prior: &PlacementState,
     dir_was_present: bool,
 ) -> Option<String> {
-    if let Some(existing) = &prior.pre_existing_sha {
-        Some(existing.clone())
-    } else if dir_was_present {
-        Some(prior.materialized_sha.clone())
-    } else {
-        None
-    }
+    prior.pre_existing_sha.clone().or_else(|| {
+        if dir_was_present {
+            prior.materialized_sha.clone()
+        } else {
+            None
+        }
+    })
 }
 
 /// Write the three durable docs in the load-bearing order **map → lock → sync**.
@@ -102,10 +110,10 @@ pub(crate) fn derive_pre_existing_sha(
 /// unlike `add`, whose whole-directory publish rename makes its internal doc order crash-irrelevant).
 /// `sync.json` is the COMMIT POINT: `applied` advances only here, and only after the new bytes are durably
 /// swapped onto disk. `map` + `lock` are written FIRST so a crash between any two leaves `applied` still
-/// naming the OLD generation — the next pull re-derives the working hash, sees it equals the target, and
-/// HEALS forward instead of mistaking the new bytes for a draft. Were `sync` written first, a crash before
-/// `map` would leave `applied` current while `map.applied_commit` / `lock` stayed stale forever (uninstall
-/// and go-back would then restore the wrong bytes).
+/// naming the OLD generation — the next pull re-derives each placement's state, sees the landed dirs
+/// already equal the target, and HEALS forward instead of mistaking the new bytes for a draft. Were
+/// `sync` written first, a crash before `map` would leave `applied` current while `map` / `lock` stayed
+/// stale forever (uninstall and go-back would then restore the wrong bytes).
 ///
 /// Each individual write is itself crash-safe (atomic temp → fsync → rename → fsync-dir).
 pub(crate) fn commit_docs(
@@ -115,72 +123,129 @@ pub(crate) fn commit_docs(
     next_lock: &Lock,
     next_sync: &SyncState,
 ) -> Result<(), ClientError> {
-    doc::write_doc(fs, &sp.map, next_map)?;
+    doc::write_map(fs, &sp.map, next_map)?;
     doc::write_doc(fs, &sp.lock, next_lock)?;
     doc::write_doc(fs, &sp.sync, next_sync)?;
     Ok(())
 }
 
-/// Materialize `req.bundle`'s bytes onto the placement and commit the docs. Returns the effective
-/// capability + the recorded prior-bytes sha.
+/// Refresh the map-level summary fields from the FIRST placement's state (the v1-legible mirror).
+pub(crate) fn mirror_first_placement(map: &mut PlacementMap) {
+    if let Some(first) = map.placement_state.first() {
+        if let Some(sha) = &first.materialized_sha {
+            map.materialized_sha = sha.clone();
+        }
+        map.pre_existing_sha = first.pre_existing_sha.clone();
+        map.swap_capability = first.swap_capability;
+    }
+}
+
+/// Materialize `req.bundle`'s bytes onto every target placement and commit the docs. Returns the
+/// effective capability + the recorded prior-bytes sha of the first placement.
 ///
 /// # Errors
-/// [`ClientError::PlacementUnsupported`] if the placement is a non-directory, an unresolvable symlink, or
-/// on a filesystem with no safe swap; otherwise the underlying [`FsOps`] failure (which the crash gate
-/// injects). On any error `applied` has NOT advanced (the sync write is the last, all-or-nothing step).
+/// [`ClientError::PlacementUnsupported`] if a placement is a non-directory, an unresolvable symlink,
+/// an unscannable occupied dir, or on a filesystem with no safe swap; otherwise the underlying
+/// [`FsOps`] failure (which the crash gate injects). On any error `applied` has NOT advanced (the
+/// sync write is the last, all-or-nothing step); already-landed placements are recorded in the map,
+/// so a re-run converges without a second swap of those dirs.
 pub(crate) fn materialize(
     fs: &dyn FsOps,
     req: &MaterializeReq<'_>,
 ) -> Result<MaterializeReport, ClientError> {
-    let kind = fs.path_kind(req.placement_dir)?;
-    let target = resolve_target(fs, req.placement_dir, kind)?;
-    let parent = target.parent.clone();
+    let mut map = req.next_map.clone();
+    let target_hex = to_hex(&req.bundle.bundle_digest);
 
-    // Clear any leftover litter from a prior crashed apply of THIS skill (under the caller's flock).
-    cleanup_litter(fs, &parent, req.skill_id)?;
+    for &i in req.target_indices {
+        let placement_dir = PathBuf::from(&map.placements[i]);
+        let kind = fs.path_kind(&placement_dir)?;
+        let target = resolve_target(fs, &placement_dir, kind)?;
+        let parent = target.parent.clone();
 
-    // Trust the cached capability; probe only a genesis `Unsupported` placeholder.
-    let mut cap = req.prior_map.swap_capability;
-    if cap == SwapCapability::Unsupported {
-        cap = probe_capability(fs, &parent, req.skill_id)?;
-    }
+        // Clear any leftover litter from a prior crashed apply of THIS skill (under the caller's flock).
+        cleanup_litter(fs, &parent, req.skill_id)?;
 
-    // Build + fsync the staging dir (a same-filesystem sibling of the placement).
-    let staging = staging_path(&parent, req.skill_id);
-    build_staging(fs, &staging, req.bundle)?;
+        if target.dir_was_present {
+            // Pre-swap scan: heal a dir that already holds the target bytes (a crash after a prior
+            // swap, or an idempotent re-apply) with NO second swap; snapshot an uncaptured edit
+            // before it is overwritten (never a lost byte). An unscannable occupied dir is refused —
+            // we cannot prove what we would destroy.
+            match scan::scan(&target.dir) {
+                Ok(scanned) => {
+                    let on_disk = to_hex(&scanned.bundle_digest);
+                    if on_disk == target_hex {
+                        let prior = map.placement_state[i].clone();
+                        map.placement_state[i] = PlacementState {
+                            materialized_sha: Some(target_hex.clone()),
+                            pre_existing_sha: derive_pre_existing_state(&prior, true),
+                            ..prior
+                        };
+                        mirror_first_placement(&mut map);
+                        doc::write_map(fs, &sp_map(req), &map)?;
+                        continue;
+                    }
+                    let recorded = map.placement_state[i].materialized_sha.as_deref();
+                    if recorded != Some(on_disk.as_str())
+                        && let Some(snapshot) = req.snapshot
+                    {
+                        snapshot(&scanned)?;
+                    }
+                }
+                Err(_) => {
+                    return Err(ClientError::PlacementUnsupported {
+                        reason: format!(
+                            "the placement {} cannot be read; refusing to overwrite it",
+                            target.dir.display()
+                        ),
+                    });
+                }
+            }
+        }
 
-    // Derive the prior-bytes sha from the DURABLE prior map (never from post-swap disk).
-    let pre_existing_sha = derive_pre_existing_sha(req.prior_map, target.dir_was_present);
+        // Trust the cached per-placement capability; probe only a genesis `Unsupported` placeholder.
+        let mut cap = map.placement_state[i].swap_capability;
+        if cap == SwapCapability::Unsupported {
+            cap = probe_capability(fs, &parent, req.skill_id)?;
+        }
 
-    // Place the bytes.
-    if target.dir_was_present {
-        cap = place_update(fs, &staging, &target.dir, &parent, req.skill_id, cap)?;
-    } else {
-        // First install: an atomic create — no prior bytes to mix.
-        fs.rename_dir_noreplace(&staging, &target.dir)
-            .map_err(|e| ClientError::Io(format!("first-install rename: {e}")))?;
-        fs.fsync_dir(&parent)?;
+        // Build + fsync the staging dir (a same-filesystem sibling of the placement).
+        let staging = staging_path(&parent, req.skill_id);
+        build_staging(fs, &staging, req.bundle)?;
+
+        // Place the bytes.
+        if target.dir_was_present {
+            cap = place_update(fs, &staging, &target.dir, &parent, req.skill_id, cap)?;
+        } else {
+            // First install: an atomic create — no prior bytes to mix.
+            fs.rename_dir_noreplace(&staging, &target.dir)
+                .map_err(|e| ClientError::Io(format!("first-install rename: {e}")))?;
+            fs.fsync_dir(&parent)?;
+        }
+
+        // Record THIS placement's landing (map only — the crash-progress marker; `applied` waits).
+        let prior = map.placement_state[i].clone();
+        map.placement_state[i] = PlacementState {
+            materialized_sha: Some(target_hex.clone()),
+            pre_existing_sha: derive_pre_existing_state(&prior, target.dir_was_present),
+            swap_capability: cap,
+            ..prior
+        };
+        mirror_first_placement(&mut map);
+        doc::write_map(fs, &sp_map(req), &map)?;
     }
 
     // Commit map → lock → sync (the commit point; `applied` advances only here).
-    let next_map = PlacementMap {
-        schema_version: PERSISTED_SCHEMA_VERSION,
-        placements: req.next_map_core.placements.clone(),
-        applied_commit: req.next_map_core.applied_commit.clone(),
-        materialized_sha: req.next_map_core.materialized_sha.clone(),
-        pre_existing_sha: pre_existing_sha.clone(),
-        swap_capability: cap,
-        harness: req.next_map_core.harness,
-        harness_layer: req.next_map_core.harness_layer.clone(),
-        // A placed/followed skill is always adapter-backed, so its slug is the adapter's slug.
-        harness_slug: req.next_map_core.harness.map(|h| h.slug().to_owned()),
-    };
-    commit_docs(fs, req.sp, &next_map, req.next_lock, req.next_sync)?;
+    commit_docs(fs, req.sp, &map, req.next_lock, req.next_sync)?;
 
+    let first = map.placement_state.first();
     Ok(MaterializeReport {
-        swap_capability: cap,
-        pre_existing_sha,
+        swap_capability: first.map_or(SwapCapability::Unsupported, |s| s.swap_capability),
+        pre_existing_sha: first.and_then(|s| s.pre_existing_sha.clone()),
     })
+}
+
+fn sp_map(req: &MaterializeReq<'_>) -> PathBuf {
+    req.sp.map.clone()
 }
 
 /// The resolved placement target.
@@ -226,7 +291,9 @@ fn resolve_target(
         }
         Some(PathKind::Dir) | Some(PathKind::Symlink) => {
             // Canonicalize (resolving a symlink placement to its real directory) and operate THERE, so
-            // the swap replaces the directory's contents, never the symlink itself.
+            // the swap replaces the directory's contents, never the symlink itself. A DANGLING symlink
+            // is a first install into its resolved target's place — but with no resolvable target we
+            // refuse (the caller's classification already treats it as absent).
             let dir = std::fs::canonicalize(placement_dir)
                 .map_err(|e| ClientError::Io(format!("canonicalize placement: {e}")))?;
             if !dir.is_dir() {
@@ -421,11 +488,13 @@ mod tests {
     use super::*;
     use crate::atomic::load_versioned;
     use crate::fs_seam::{FaultFs, FsOps, RealFs};
+    use std::cell::RefCell;
     use std::path::Path;
     use std::sync::atomic::{AtomicU32, Ordering};
     use topos_core::digest::{self, FileMode, ManifestEntry};
     use topos_gitstore::RenderedFile;
-    use topos_types::persisted::LockedFile;
+    use topos_types::PLACEMENT_MAP_SCHEMA_VERSION;
+    use topos_types::persisted::{LockedFile, PlacementKind};
 
     struct Scratch(PathBuf);
     impl Scratch {
@@ -473,8 +542,7 @@ mod tests {
         digest::to_hex(&rendered(files).bundle_digest)
     }
 
-    /// Read a placement dir into a sorted (rel-path, bytes) list, or `None` if absent. `..tmp` files left
-    /// by a faulted atomic write are ignored (they are not part of the placed tree).
+    /// Read a placement dir into a sorted (rel-path, bytes) list, or `None` if absent.
     fn dir_snapshot(dir: &Path) -> Option<Vec<(String, Vec<u8>)>> {
         if !dir.exists() {
             return None;
@@ -550,14 +618,28 @@ mod tests {
         }
     }
 
-    fn prior_map(placement: &str, materialized: &str, cap: SwapCapability) -> PlacementMap {
+    /// A prior map over `dirs`, every placement recorded at `materialized` with capability `cap`.
+    fn prior_map(dirs: &[&Path], materialized: &str, cap: SwapCapability) -> PlacementMap {
         PlacementMap {
-            schema_version: 1,
-            placements: vec![placement.to_owned()],
+            schema_version: PLACEMENT_MAP_SCHEMA_VERSION,
+            placements: dirs
+                .iter()
+                .map(|d| d.to_string_lossy().into_owned())
+                .collect(),
             applied_commit: "0".repeat(64),
             materialized_sha: materialized.to_owned(),
             pre_existing_sha: None,
             swap_capability: cap,
+            placement_state: dirs
+                .iter()
+                .map(|_| PlacementState {
+                    kind: PlacementKind::Native,
+                    agent: None,
+                    materialized_sha: Some(materialized.to_owned()),
+                    pre_existing_sha: None,
+                    swap_capability: cap,
+                })
+                .collect(),
             harness: None,
             harness_layer: None,
             harness_slug: None,
@@ -595,30 +677,29 @@ mod tests {
         }
     }
 
+    /// A single-target request over `placement` (index 0 of a one-entry map).
     fn req<'a>(
         skill_id: &'a str,
-        placement: &'a Path,
+        indices: &'a [usize],
         bundle: &'a RenderedBundle,
-        prior: &'a PlacementMap,
+        prior: &PlacementMap,
         next_lock: &'a Lock,
         next_sync: &'a SyncState,
         sp: &'a SkillPaths,
     ) -> MaterializeReq<'a> {
         MaterializeReq {
             skill_id,
-            placement_dir: placement,
+            target_indices: indices,
             bundle,
-            prior_map: prior,
-            next_map_core: NextMapCore {
-                placements: vec![placement.to_string_lossy().into_owned()],
+            next_map: PlacementMap {
                 applied_commit: "1".repeat(64),
                 materialized_sha: digest_hex(NEW),
-                harness: None,
-                harness_layer: None,
+                ..prior.clone()
             },
             next_lock,
             next_sync,
             sp,
+            snapshot: None,
         }
     }
 
@@ -631,24 +712,13 @@ mod tests {
         let lock = lock_of("topos_first", NEW, &"1".repeat(64));
         let g = 1;
         let sync = sync_at(g, g, &"1".repeat(64), &digest_hex(NEW));
-        let prior = prior_map(
-            &placement.to_string_lossy(),
-            &"0".repeat(64),
-            SwapCapability::Unsupported,
-        );
+        let mut prior = prior_map(&[&placement], &"0".repeat(64), SwapCapability::Unsupported);
+        prior.placement_state[0].materialized_sha = None; // never placed
         let d = docs_under(&home.0, "topos_first");
 
         let report = materialize(
             &RealFs,
-            &req(
-                "topos_first",
-                &placement,
-                &bundle,
-                &prior,
-                &lock,
-                &sync,
-                &d.sp,
-            ),
+            &req("topos_first", &[0], &bundle, &prior, &lock, &sync, &d.sp),
         )
         .unwrap();
 
@@ -662,9 +732,14 @@ mod tests {
         assert_eq!(mode & 0o111, 0o111, "run.sh must stay executable");
         // First install has no pre-existing bytes.
         assert!(report.pre_existing_sha.is_none());
-        // Docs committed.
+        // Docs committed; the per-placement state records the landing.
         let written: SyncState = load_versioned(&std::fs::read(&d.sp.sync).unwrap(), 1).unwrap();
         assert_eq!(written.applied, g);
+        let m = crate::doc::read_map(&RealFs, &d.sp.map).unwrap().unwrap();
+        assert_eq!(
+            m.placement_state[0].materialized_sha.as_deref(),
+            Some(digest_hex(NEW).as_str())
+        );
     }
 
     #[test]
@@ -679,29 +754,18 @@ mod tests {
         install_old(&placement);
         let bundle = rendered(NEW);
         let lock = lock_of("topos_upd", NEW, &"1".repeat(64));
-        let g0 = 1;
-        let g1 = 2;
-        let sync = sync_at(g1, g1, &"1".repeat(64), &digest_hex(NEW));
+        let sync = sync_at(2, 2, &"1".repeat(64), &digest_hex(NEW));
         // prior map mimics `add`: pre_existing None, materialized = the adopted (old) bytes.
         let prior = prior_map(
-            &placement.to_string_lossy(),
+            &[&placement],
             &digest_hex(OLD),
             SwapCapability::AtomicExchange,
         );
-        let _ = g0;
         let d = docs_under(&home.0, "topos_upd");
 
         let report = materialize(
             &RealFs,
-            &req(
-                "topos_upd",
-                &placement,
-                &bundle,
-                &prior,
-                &lock,
-                &sync,
-                &d.sp,
-            ),
+            &req("topos_upd", &[0], &bundle, &prior, &lock, &sync, &d.sp),
         )
         .unwrap();
 
@@ -727,10 +791,9 @@ mod tests {
         std::fs::write(&placement, b"i am a file").unwrap(); // Other, not a dir
         let bundle = rendered(NEW);
         let lock = lock_of("topos_file", NEW, &"1".repeat(64));
-        let g = 1;
-        let sync = sync_at(g, g, &"1".repeat(64), &digest_hex(NEW));
+        let sync = sync_at(1, 1, &"1".repeat(64), &digest_hex(NEW));
         let prior = prior_map(
-            &placement.to_string_lossy(),
+            &[&placement],
             &"0".repeat(64),
             SwapCapability::AtomicExchange,
         );
@@ -738,15 +801,7 @@ mod tests {
 
         let err = materialize(
             &RealFs,
-            &req(
-                "topos_file",
-                &placement,
-                &bundle,
-                &prior,
-                &lock,
-                &sync,
-                &d.sp,
-            ),
+            &req("topos_file", &[0], &bundle, &prior, &lock, &sync, &d.sp),
         )
         .unwrap_err();
         assert!(matches!(err, ClientError::PlacementUnsupported { .. }));
@@ -768,10 +823,9 @@ mod tests {
         std::os::unix::fs::symlink(&real, &placement).unwrap();
         let bundle = rendered(NEW);
         let lock = lock_of("topos_link", NEW, &"1".repeat(64));
-        let g = 2;
-        let sync = sync_at(g, g, &"1".repeat(64), &digest_hex(NEW));
+        let sync = sync_at(2, 2, &"1".repeat(64), &digest_hex(NEW));
         let prior = prior_map(
-            &placement.to_string_lossy(),
+            &[&placement],
             &digest_hex(OLD),
             SwapCapability::AtomicExchange,
         );
@@ -779,15 +833,7 @@ mod tests {
 
         materialize(
             &RealFs,
-            &req(
-                "topos_link",
-                &placement,
-                &bundle,
-                &prior,
-                &lock,
-                &sync,
-                &d.sp,
-            ),
+            &req("topos_link", &[0], &bundle, &prior, &lock, &sync, &d.sp),
         )
         .unwrap();
 
@@ -802,9 +848,111 @@ mod tests {
         assert_eq!(dir_snapshot(&real), Some(expected(NEW)));
     }
 
-    /// The release-blocker crash gate: fault every materialize boundary and assert the placement holds
-    /// the OLD-or-NEW *complete* bytes (never torn/mixed), and `applied` advances ONLY once the bytes are
-    /// new and all docs are written. A clean re-run converges.
+    /// MULTI-PLACEMENT: one apply lands the SAME bundle in every target dir, each its own staged
+    /// swap; the per-placement states all record the landing, and `applied` advances once at the end.
+    #[test]
+    fn multi_placement_apply_lands_every_target() {
+        let parent = Scratch::new("multi");
+        let home = Scratch::new("multi-home");
+        if !swap_supported(&parent.0) {
+            eprintln!("skipping: temp FS lacks atomic dir exchange");
+            return;
+        }
+        let shared = parent.0.join("agents").join("demo");
+        let native_a = parent.0.join("a").join("demo");
+        let native_b = parent.0.join("b").join("demo"); // absent → first install
+        install_old(&shared);
+        install_old(&native_a);
+        let bundle = rendered(NEW);
+        let lock = lock_of("topos_multi", NEW, &"1".repeat(64));
+        let sync = sync_at(2, 2, &"1".repeat(64), &digest_hex(NEW));
+        let mut prior = prior_map(
+            &[&shared, &native_a, &native_b],
+            &digest_hex(OLD),
+            SwapCapability::AtomicExchange,
+        );
+        prior.placement_state[2].materialized_sha = None; // the appended, never-placed target
+        let d = docs_under(&home.0, "topos_multi");
+
+        materialize(
+            &RealFs,
+            &req(
+                "topos_multi",
+                &[0, 1, 2],
+                &bundle,
+                &prior,
+                &lock,
+                &sync,
+                &d.sp,
+            ),
+        )
+        .unwrap();
+
+        for dir in [&shared, &native_a, &native_b] {
+            assert_eq!(dir_snapshot(dir), Some(expected(NEW)), "{}", dir.display());
+        }
+        let m = crate::doc::read_map(&RealFs, &d.sp.map).unwrap().unwrap();
+        for st in &m.placement_state {
+            assert_eq!(
+                st.materialized_sha.as_deref(),
+                Some(digest_hex(NEW).as_str())
+            );
+        }
+        let s: SyncState = load_versioned(&std::fs::read(&d.sp.sync).unwrap(), 1).unwrap();
+        assert_eq!(s.applied, 2);
+    }
+
+    /// PER-PLACEMENT SNAPSHOT-BEFORE-OVERWRITE: a dir whose bytes differ from ITS recorded sha is
+    /// handed to the snapshot seam BEFORE the swap — never a lost byte — while an unedited dir is not.
+    #[test]
+    fn snapshot_seam_fires_only_for_an_uncaptured_edit() {
+        let parent = Scratch::new("snap");
+        let home = Scratch::new("snap-home");
+        if !swap_supported(&parent.0) {
+            eprintln!("skipping: temp FS lacks atomic dir exchange");
+            return;
+        }
+        let edited = parent.0.join("edited").join("demo");
+        let clean = parent.0.join("clean").join("demo");
+        install_old(&edited);
+        std::fs::write(edited.join("SKILL.md"), b"# my local edit\n").unwrap();
+        install_old(&clean);
+        let bundle = rendered(NEW);
+        let lock = lock_of("topos_snap", NEW, &"1".repeat(64));
+        let sync = sync_at(2, 2, &"1".repeat(64), &digest_hex(NEW));
+        let prior = prior_map(
+            &[&edited, &clean],
+            &digest_hex(OLD),
+            SwapCapability::AtomicExchange,
+        );
+        let d = docs_under(&home.0, "topos_snap");
+
+        let snapshots: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let snap = |scanned: &ScannedBundle| {
+            snapshots
+                .borrow_mut()
+                .push(digest::to_hex(&scanned.bundle_digest));
+            Ok(())
+        };
+        let mut r = req("topos_snap", &[0, 1], &bundle, &prior, &lock, &sync, &d.sp);
+        r.snapshot = Some(&snap);
+        materialize(&RealFs, &r).unwrap();
+
+        let taken = snapshots.borrow();
+        assert_eq!(taken.len(), 1, "exactly the edited dir is snapshotted");
+        assert_ne!(
+            taken[0],
+            digest_hex(OLD),
+            "the snapshot carries the EDITED bytes"
+        );
+        assert_eq!(dir_snapshot(&edited), Some(expected(NEW)));
+        assert_eq!(dir_snapshot(&clean), Some(expected(NEW)));
+    }
+
+    /// The release-blocker crash gate: fault every materialize boundary across TWO placements and
+    /// assert each placement holds the OLD-or-NEW *complete* bytes (never torn/mixed), `applied`
+    /// advances ONLY once every dir holds the new bytes and all docs are written, and a clean re-run
+    /// converges (already-landed dirs skip the swap).
     #[test]
     fn crash_gate_atomic_exchange_leaves_old_or_new_complete() {
         let probe = Scratch::new("probe");
@@ -820,13 +968,15 @@ mod tests {
         let n_ops = {
             let parent = Scratch::new("cg-count");
             let home = Scratch::new("cg-count-home");
-            let placement = parent.0.join("demo");
-            install_old(&placement);
+            let p1 = parent.0.join("one").join("demo");
+            let p2 = parent.0.join("two").join("demo");
+            install_old(&p1);
+            install_old(&p2);
             let bundle = rendered(NEW);
             let lock = lock_of("topos_cg", NEW, &"1".repeat(64));
             let sync = sync_at(g_new, g_new, &"1".repeat(64), &new_digest);
             let prior = prior_map(
-                &placement.to_string_lossy(),
+                &[&p1, &p2],
                 &digest_hex(OLD),
                 SwapCapability::AtomicExchange,
             );
@@ -834,7 +984,7 @@ mod tests {
             let fs = FaultFs::new(0);
             materialize(
                 &fs,
-                &req("topos_cg", &placement, &bundle, &prior, &lock, &sync, &d.sp),
+                &req("topos_cg", &[0, 1], &bundle, &prior, &lock, &sync, &d.sp),
             )
             .unwrap();
             fs.ops_attempted()
@@ -844,13 +994,15 @@ mod tests {
         for fail_at in 1..=n_ops {
             let parent = Scratch::new(&format!("cg-{fail_at}"));
             let home = Scratch::new(&format!("cg-{fail_at}-home"));
-            let placement = parent.0.join("demo");
-            install_old(&placement);
+            let p1 = parent.0.join("one").join("demo");
+            let p2 = parent.0.join("two").join("demo");
+            install_old(&p1);
+            install_old(&p2);
             let bundle = rendered(NEW);
             let lock = lock_of("topos_cg", NEW, &"1".repeat(64));
             let sync = sync_at(g_new, g_new, &"1".repeat(64), &new_digest);
             let prior = prior_map(
-                &placement.to_string_lossy(),
+                &[&p1, &p2],
                 &digest_hex(OLD),
                 SwapCapability::AtomicExchange,
             );
@@ -866,29 +1018,33 @@ mod tests {
             let fs = FaultFs::new(fail_at);
             let _ = materialize(
                 &fs,
-                &req("topos_cg", &placement, &bundle, &prior, &lock, &sync, &d.sp),
+                &req("topos_cg", &[0, 1], &bundle, &prior, &lock, &sync, &d.sp),
             );
 
-            // (a) bytes are old-complete or new-complete — never torn/mixed.
-            let snap = dir_snapshot(&placement);
-            let is_old = snap.as_deref() == Some(&expected(OLD));
-            let is_new = snap.as_deref() == Some(&expected(NEW));
-            assert!(
-                is_old || is_new,
-                "fail_at={fail_at}: placement is torn/mixed: {snap:?}"
-            );
+            // (a) EACH placement is old-complete or new-complete — never torn/mixed.
+            let mut all_new = true;
+            for p in [&p1, &p2] {
+                let snap = dir_snapshot(p);
+                let is_old = snap.as_deref() == Some(&expected(OLD));
+                let is_new = snap.as_deref() == Some(&expected(NEW));
+                assert!(
+                    is_old || is_new,
+                    "fail_at={fail_at}: {} is torn/mixed: {snap:?}",
+                    p.display()
+                );
+                all_new &= is_new;
+            }
 
-            // (b) `applied` advances only when the bytes are new AND every doc is written.
+            // (b) `applied` advances only when EVERY dir holds the new bytes AND every doc is written.
             if let Some(bytes) = std::fs::read(&d.sp.sync).ok()
                 && let Ok(s) = load_versioned::<SyncState>(&bytes, 1)
                 && s.applied == g_new
             {
                 assert!(
-                    is_new,
-                    "fail_at={fail_at}: applied advanced without new bytes"
+                    all_new,
+                    "fail_at={fail_at}: applied advanced without all dirs new"
                 );
-                let m: PlacementMap =
-                    load_versioned(&std::fs::read(&d.sp.map).unwrap(), 1).unwrap();
+                let m = crate::doc::read_map(&RealFs, &d.sp.map).unwrap().unwrap();
                 assert_eq!(
                     m.applied_commit,
                     "1".repeat(64),
@@ -901,18 +1057,24 @@ mod tests {
                 );
             }
 
-            // (c) a clean re-run converges to new bytes + applied advanced.
-            let fs2 = RealFs;
+            // (c) a clean re-run converges to new bytes everywhere + applied advanced. The re-run
+            // reads the crash-progress map (a landed dir skips its swap).
+            let prior2 = crate::doc::read_map(&RealFs, &d.sp.map)
+                .unwrap()
+                .unwrap_or_else(|| prior.clone());
             materialize(
-                &fs2,
-                &req("topos_cg", &placement, &bundle, &prior, &lock, &sync, &d.sp),
+                &RealFs,
+                &req("topos_cg", &[0, 1], &bundle, &prior2, &lock, &sync, &d.sp),
             )
             .unwrap();
-            assert_eq!(
-                dir_snapshot(&placement),
-                Some(expected(NEW)),
-                "fail_at={fail_at}: no converge"
-            );
+            for p in [&p1, &p2] {
+                assert_eq!(
+                    dir_snapshot(p),
+                    Some(expected(NEW)),
+                    "fail_at={fail_at}: no converge at {}",
+                    p.display()
+                );
+            }
             let s2: SyncState = load_versioned(&std::fs::read(&d.sp.sync).unwrap(), 1).unwrap();
             assert_eq!(
                 s2.applied, g_new,
@@ -935,16 +1097,12 @@ mod tests {
             let bundle = rendered(NEW);
             let lock = lock_of("topos_d", NEW, &"1".repeat(64));
             let sync = sync_at(g_new, g_new, &"1".repeat(64), &new_digest);
-            let prior = prior_map(
-                &placement.to_string_lossy(),
-                &digest_hex(OLD),
-                SwapCapability::RenameDance,
-            );
+            let prior = prior_map(&[&placement], &digest_hex(OLD), SwapCapability::RenameDance);
             let d = docs_under(&home.0, "topos_d");
             let fs = FaultFs::new(0);
             materialize(
                 &fs,
-                &req("topos_d", &placement, &bundle, &prior, &lock, &sync, &d.sp),
+                &req("topos_d", &[0], &bundle, &prior, &lock, &sync, &d.sp),
             )
             .unwrap();
             fs.ops_attempted()
@@ -958,17 +1116,13 @@ mod tests {
             let bundle = rendered(NEW);
             let lock = lock_of("topos_d", NEW, &"1".repeat(64));
             let sync = sync_at(g_new, g_new, &"1".repeat(64), &new_digest);
-            let prior = prior_map(
-                &placement.to_string_lossy(),
-                &digest_hex(OLD),
-                SwapCapability::RenameDance,
-            );
+            let prior = prior_map(&[&placement], &digest_hex(OLD), SwapCapability::RenameDance);
             let d = docs_under(&home.0, "topos_d");
 
             let fs = FaultFs::new(fail_at);
             let _ = materialize(
                 &fs,
-                &req("topos_d", &placement, &bundle, &prior, &lock, &sync, &d.sp),
+                &req("topos_d", &[0], &bundle, &prior, &lock, &sync, &d.sp),
             );
 
             let snap = dir_snapshot(&placement);
@@ -981,9 +1135,12 @@ mod tests {
             );
 
             // Converge.
+            let prior2 = crate::doc::read_map(&RealFs, &d.sp.map)
+                .unwrap()
+                .unwrap_or_else(|| prior.clone());
             materialize(
                 &RealFs,
-                &req("topos_d", &placement, &bundle, &prior, &lock, &sync, &d.sp),
+                &req("topos_d", &[0], &bundle, &prior2, &lock, &sync, &d.sp),
             )
             .unwrap();
             assert_eq!(
@@ -1008,16 +1165,17 @@ mod tests {
             let bundle = rendered(NEW);
             let lock = lock_of("topos_fi", NEW, &"1".repeat(64));
             let sync = sync_at(g_new, g_new, &"1".repeat(64), &new_digest);
-            let prior = prior_map(
-                &placement.to_string_lossy(),
+            let mut prior = prior_map(
+                &[&placement],
                 &"0".repeat(64),
                 SwapCapability::AtomicExchange,
             );
+            prior.placement_state[0].materialized_sha = None;
             let d = docs_under(&home.0, "topos_fi");
             let fs = FaultFs::new(0);
             materialize(
                 &fs,
-                &req("topos_fi", &placement, &bundle, &prior, &lock, &sync, &d.sp),
+                &req("topos_fi", &[0], &bundle, &prior, &lock, &sync, &d.sp),
             )
             .unwrap();
             fs.ops_attempted()
@@ -1030,11 +1188,12 @@ mod tests {
             let bundle = rendered(NEW);
             let lock = lock_of("topos_fi", NEW, &"1".repeat(64));
             let sync = sync_at(g_new, g_new, &"1".repeat(64), &new_digest);
-            let prior = prior_map(
-                &placement.to_string_lossy(),
+            let mut prior = prior_map(
+                &[&placement],
                 &"0".repeat(64),
                 SwapCapability::AtomicExchange,
             );
+            prior.placement_state[0].materialized_sha = None;
             let d = docs_under(&home.0, "topos_fi");
             // Seed an OLD sync so a pre-commit fault leaves a readable lagging `applied`.
             doc::write_doc(
@@ -1047,7 +1206,7 @@ mod tests {
             let fs = FaultFs::new(fail_at);
             let _ = materialize(
                 &fs,
-                &req("topos_fi", &placement, &bundle, &prior, &lock, &sync, &d.sp),
+                &req("topos_fi", &[0], &bundle, &prior, &lock, &sync, &d.sp),
             );
 
             // (a) absent or new-complete — never a partial directory.
@@ -1071,9 +1230,12 @@ mod tests {
             }
 
             // (c) a clean re-run converges.
+            let prior2 = crate::doc::read_map(&RealFs, &d.sp.map)
+                .unwrap()
+                .unwrap_or_else(|| prior.clone());
             materialize(
                 &RealFs,
-                &req("topos_fi", &placement, &bundle, &prior, &lock, &sync, &d.sp),
+                &req("topos_fi", &[0], &bundle, &prior2, &lock, &sync, &d.sp),
             )
             .unwrap();
             assert_eq!(

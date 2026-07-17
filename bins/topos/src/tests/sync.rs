@@ -258,6 +258,7 @@ impl Rig {
             harness: &self.harness,
             plane,
             follow,
+            roots: None,
         }
     }
     /// Adopt a skill from the work dir (returns its id, name, and genesis version id).
@@ -318,6 +319,8 @@ fn follow(skill_id: &str, mode: FollowMode) -> FixtureFollow {
                 mode,
                 review_required: false,
                 following: true,
+                agents: Vec::new(),
+                excluded_agents: Vec::new(),
             },
         )],
     }
@@ -1680,6 +1683,8 @@ fn follow_n(skill_id: &str, n: usize) -> FixtureFollow {
                         mode: FollowMode::Auto,
                         review_required: false,
                         following: true,
+                        agents: Vec::new(),
+                        excluded_agents: Vec::new(),
                     },
                 )
             })
@@ -1777,6 +1782,8 @@ fn sweep_surfaces_an_isolated_per_skill_failure_as_an_envelope_warning() {
                     mode: FollowMode::Auto,
                     review_required: false,
                     following: true,
+                    agents: Vec::new(),
+                    excluded_agents: Vec::new(),
                 },
             ),
             (
@@ -1786,6 +1793,8 @@ fn sweep_surfaces_an_isolated_per_skill_failure_as_an_envelope_warning() {
                     mode: FollowMode::Auto,
                     review_required: false,
                     following: true,
+                    agents: Vec::new(),
+                    excluded_agents: Vec::new(),
                 },
             ),
         ],
@@ -1865,6 +1874,8 @@ fn sweep_refuses_a_traversal_follow_id_as_a_warning_never_a_join() {
                 mode: FollowMode::Auto,
                 review_required: false,
                 following: true,
+                agents: Vec::new(),
+                excluded_agents: Vec::new(),
             },
         )],
     };

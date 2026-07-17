@@ -11,6 +11,10 @@
 //! change, and people ops beyond invite are web-only); the structural `everyone` cannot be left at
 //! all (the alternatives are spelled). Un-enrolled (or for a purely local skill) the verb keeps its
 //! graceful local path: the pause flag flips, bytes stay, nothing needs a server.
+//!
+//! `unfollow --agent <slug>` never reaches this module — it dispatches to the offline per-agent
+//! exclusion ([`super::agent_scope`], the SAME implementation `remove --agent` runs): the
+//! subscription is untouched and no server row moves.
 
 use serde::Serialize;
 

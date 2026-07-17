@@ -5,8 +5,6 @@
 //! 64-hex version id; either way the bytes are **fetched ONCE and re-verified** (the same bytes that
 //! reproduce the version id are the bytes displayed — never a second, unverified fetch).
 
-use std::path::Path;
-
 use topos_core::digest::{FileMode, to_hex};
 use topos_gitstore::{DiffFile, Store, unified_diff};
 use topos_types::persisted::{Lock, PlacementMap};
@@ -81,17 +79,16 @@ fn diff_draft_vs_current(
     let bundle_digest = parse_hex32(&lock.bundle_digest)?;
     let base = store.render_verified(version_id, bundle_digest)?;
 
-    let map: PlacementMap = doc::read_doc(ctx.fs, &sp.map)?
+    let map: PlacementMap = doc::read_map(ctx.fs, &sp.map)?
         .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
-    let placement = map
-        .placements
-        .first()
-        .ok_or_else(|| ClientError::Corrupt("placement map has no path".to_owned()))?;
+    // The draft side is the WORK TREE — the single edited copy when one exists (draft-anywhere),
+    // else the first placement; several divergent copies freeze typed.
+    let placement = crate::placement::work_tree_dir(ctx, &lock.name, &map)?;
     let ScannedBundle {
         files: draft,
         bundle_digest: draft_digest,
         ..
-    } = scan::scan(Path::new(placement))?;
+    } = scan::scan(&placement)?;
 
     let base_files: Vec<DiffFile<'_>> = base
         .files

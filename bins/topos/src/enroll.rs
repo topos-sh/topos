@@ -93,6 +93,16 @@ pub(crate) struct FollowEntry {
     /// exclusion row is the source of truth. Defaults `false` for a pre-field document.
     #[serde(default)]
     pub excluded_here: bool,
+    /// The DEVICE-LOCAL agent include-list (`follow --agent`): registry slugs this skill's placement is
+    /// scoped to on this machine. Empty = unscoped (every detected agent). The plane is never told —
+    /// agent scope is placement policy, not subscription state. Defaults empty for a pre-field document.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<String>,
+    /// The DEVICE-LOCAL per-agent exclusions (`unfollow --agent` / `remove --agent`): registry slugs
+    /// whose placement this device cleaned and stopped maintaining. The plane is never told. Defaults
+    /// empty for a pre-field document.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_agents: Vec<String>,
 }
 
 /// The on-disk spelling of [`FollowMode`] (snake_case). A local copy because [`FollowMode`] is a
@@ -190,6 +200,8 @@ pub(crate) fn follow_contexts(follows: &Follows) -> Vec<(String, FollowContext)>
                     mode: e.mode.to_plane(),
                     review_required: e.review_required,
                     following: e.following,
+                    agents: e.agents.clone(),
+                    excluded_agents: e.excluded_agents.clone(),
                 },
             )
         })
@@ -638,6 +650,88 @@ pub(crate) fn set_excluded(
     )
 }
 
+/// Replace one skill's device-local agent SCOPE in place (`follow --agent`): the include-list becomes
+/// `agents` (empty = back to unscoped), and every slug it names is dropped from `excluded_agents` —
+/// naming an agent in a fresh include-list is the explicit consent that re-includes a previously
+/// excluded one (the same verb is the re-inclusion path; there is no separate "un-exclude" spelling).
+/// Same identity-locked read-modify-write discipline as [`set_following`]. A missing file or entry is
+/// a clean no-op.
+pub(crate) fn set_agent_scope(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    skill_id: &str,
+    agents: &[String],
+) -> Result<(), ClientError> {
+    let _guard = fs.lock_exclusive(&layout.identity_lock_file())?;
+    let Some(mut follows) = doc::read_doc_private::<Follows>(fs, &layout.follows_path())? else {
+        return Ok(());
+    };
+    let Some(entry) = follows.follows.iter_mut().find(|e| e.skill_id == skill_id) else {
+        return Ok(());
+    };
+    let next: Vec<String> = agents.to_vec();
+    let next_excluded: Vec<String> = entry
+        .excluded_agents
+        .iter()
+        .filter(|s| !next.contains(s))
+        .cloned()
+        .collect();
+    if entry.agents == next && entry.excluded_agents == next_excluded {
+        return Ok(());
+    }
+    entry.agents = next;
+    entry.excluded_agents = next_excluded;
+    doc::write_doc_private(
+        fs,
+        &layout.follows_path(),
+        &Follows {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            follows: follows.follows,
+        },
+    )
+}
+
+/// ADD device-local per-agent exclusions in place (`unfollow --agent` / `remove --agent`), deduped;
+/// the slugs also leave the include-list (a scoped-in agent that is then excluded is excluded — the
+/// exclusion is the later, more specific act). Same identity-locked discipline as [`set_following`].
+/// A missing file or entry is a clean no-op.
+pub(crate) fn add_excluded_agents(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    skill_id: &str,
+    slugs: &[String],
+) -> Result<(), ClientError> {
+    let _guard = fs.lock_exclusive(&layout.identity_lock_file())?;
+    let Some(mut follows) = doc::read_doc_private::<Follows>(fs, &layout.follows_path())? else {
+        return Ok(());
+    };
+    let Some(entry) = follows.follows.iter_mut().find(|e| e.skill_id == skill_id) else {
+        return Ok(());
+    };
+    let mut changed = false;
+    for slug in slugs {
+        if !entry.excluded_agents.contains(slug) {
+            entry.excluded_agents.push(slug.clone());
+            changed = true;
+        }
+        if let Some(pos) = entry.agents.iter().position(|a| a == slug) {
+            entry.agents.remove(pos);
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    doc::write_doc_private(
+        fs,
+        &layout.follows_path(),
+        &Follows {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            follows: follows.follows,
+        },
+    )
+}
+
 /// DROP a skill's follow entry from `follows.json` under the identity lock — the `keep-as-yours` re-fork
 /// retires the retained (withdrawn/detached) entry so `list` stops showing a ghost once the bytes have
 /// been re-adopted as a new local skill. A no-op when the entry (or the file) is absent.
@@ -786,6 +880,8 @@ mod tests {
                     review_required: false,
                     following: true,
                     excluded_here: false,
+                    agents: Vec::new(),
+                    excluded_agents: Vec::new(),
                 },
                 FollowEntry {
                     skill_id: "s_paused".to_owned(),
@@ -794,6 +890,8 @@ mod tests {
                     review_required: true,
                     following: false,
                     excluded_here: false,
+                    agents: Vec::new(),
+                    excluded_agents: Vec::new(),
                 },
             ],
         }
@@ -1155,6 +1253,8 @@ mod tests {
             review_required: false,
             following: true,
             excluded_here: false,
+            agents: Vec::new(),
+            excluded_agents: Vec::new(),
         };
         write_follows_merged(&fs, &layout, &[entry("w_a")]).unwrap();
         // The SAME skill_id arriving under a DIFFERENT workspace is refused (a skill id is unique to one
@@ -1186,6 +1286,8 @@ mod tests {
             review_required: false,
             following: true,
             excluded_here: false,
+            agents: Vec::new(),
+            excluded_agents: Vec::new(),
         };
         // The SAME skill_id under w_a AND w_b — a cross-workspace collision.
         let hostile = Follows {

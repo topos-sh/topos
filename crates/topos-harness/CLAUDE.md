@@ -78,6 +78,43 @@ and the hook-vs-index ordering were probed against a real local Hermes Agent v0.
 exact build stays a MUST-VERIFY (every filename/key/line is a named const; a failed probe degrades the
 report, never rebuilds the adapter).
 
+**The `coverage` module** — shared-dir coverage with PROVENANCE: whether a harness reads the
+cross-client convention dir `~/.agents/skills` (`shared_skills_dir`). `SharedDirSupport` is
+`Probed(bool)` (verified against a live build) / `Docs(bool)` (vendor docs, or the upstream
+registry's own directory claim) / `Unknown` (no evidence — treated as NOT covered, fail closed). Two
+sources, override first: a small one-row-per-line override table (each row commented with its
+evidence — openclaw `Probed(true)` and codex `Probed(false)` from live probes; amp / gemini-cli /
+github-copilot / goose / opencode `Docs(true)` from vendor docs) over the automatic derivation (a
+registry row whose USER dir is the literal home `.agents/skills` ⇒ `Docs(true)`, staying in sync
+with registry re-syncs). The registry additionally exposes `detected_harnesses(home, cwd)` (the rows
+whose detect dirs exist) and the crate exports `choose_skill_dir` — the ONE placement-naming
+discipline (sanitized display name → workspace-prefixed on collision → the validated id; only a FREE
+dir or one the caller's own record owns), factored out of the Claude Code adapter so registry-target
+dirs name identically. The CLI's placement engine composes these; the adapters stay content-blind.
+
+**The `triggers` module** — currency triggers for NINE more registry harnesses, over two shared
+bases that carry the honest-degrade contract STRUCTURALLY (no API exists for writing another
+program's trust/consent state; `Active` only on stated evidence, else the entry is registered and
+the report floors at explicit pull; fail-closed with zero writes on every unprovable shape;
+ownership keys on the sentinel/marker alone; every (un)install idempotent). Base A (`cc_hooks`) is
+the generalized strict-JSON session-start hook merge, parameterized by config path / events-map
+key / event spelling / entry shape: `gemini-cli` (`~/.gemini/settings.json`, consent floor — its
+own confirm prompt is unreadable evidence), `cursor` (`~/.cursor/hooks.json`, flat `sessionStart`),
+`droid` (`~/.factory/hooks.json`, CC-compatible) — plus `codex` as a standalone LINE-ANCHORED TOML
+merge (`~/.codex/config.toml`; struct names verified against a live 0.144.4 binary, nesting
+inferred; NEVER `Active` — codex's per-definition hook trust is granted in its own UI and is not
+readable evidence). Base B (`file_drop`) is one topos-owned, marker-led file: `github-copilot`
+(`~/.copilot/hooks/topos.json`), `opencode` (`~/.config/opencode/plugin/topos.ts` — plugin
+auto-load + `session.created` verified against a live containerized 1.18.3), `goose`
+(`~/.agents/plugins/topos/hooks/hooks.json`, shape source-verified against 1.43.0; `Active` ONLY on
+read-only evidence of goose's own plugin ENABLEMENT — that enablement is goose's consent surface
+and topos never writes it), `amp` (`~/.config/amp/plugins/topos.js`, vendor docs — closed source),
+`cline` (`~/.cline/hooks/TaskStart.sh`, source-verified against 3.0.43; interpreter-by-extension,
+no exec bit needed). Each instance's evidence level (live-probed vs vendor-docs) is stated in its
+module doc and rides the outcome's `note`. `adapter_for_slug`/`supported_slugs` is the seam the
+CLI's breadth arming sweep consumes; the ONE sweep spelling is composed from shared consts so it
+cannot drift per-surface.
+
 **Planned:** the byte-writing materialization (atomic dir-swap) lives in the CLI's update path, not here;
 what remains for the adapters themselves is the two pilot readiness probes above, not code.
 

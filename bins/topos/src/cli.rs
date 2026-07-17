@@ -61,6 +61,12 @@ pub(crate) enum Command {
         /// Follow a specific skill by name (repeatable; kind-forced).
         #[arg(long, value_name = "NAME")]
         skill: Vec<String>,
+        /// Scope a followed skill's placement to these agents on THIS device (registry slugs;
+        /// repeatable; `'*'` clears the list back to unscoped). Placement policy only — the
+        /// subscription is untouched and the server is never told. Two-phase: bare describes the
+        /// placement plan; `--yes` applies.
+        #[arg(long, value_name = "SLUG")]
+        agent: Vec<String>,
         /// Apply the described subscription (the one-shot consent). Bare = describe only.
         #[arg(long)]
         yes: bool,
@@ -88,6 +94,12 @@ pub(crate) enum Command {
         /// Unfollow a specific skill by name (repeatable; kind-forced).
         #[arg(long, value_name = "NAME")]
         skill: Vec<String>,
+        /// Stop placing a followed skill into these agents on THIS device (registry slugs;
+        /// repeatable). The subscription is untouched (no server call) — the agent's dir is cleaned
+        /// (any edit snapshotted first) and a per-agent exclusion is recorded. Same behavior as
+        /// `remove <skill> --agent <slug>`.
+        #[arg(long, value_name = "SLUG")]
+        agent: Vec<String>,
         /// Apply the described detach (the one-shot consent). Bare = describe only.
         #[arg(long)]
         yes: bool,

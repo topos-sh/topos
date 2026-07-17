@@ -17,6 +17,8 @@
 //! short-version-prefix resolver.
 
 mod add;
+mod agent_scope;
+mod arm;
 mod auth;
 mod channel;
 mod contribute;
@@ -42,6 +44,12 @@ pub(crate) use add::{
     AddRemoteOpts, KeepAsYoursOutcome, add, add_remote, add_with_name, keep_as_yours,
     resolve_add_target, split_target, tracked_skill_at,
 };
+pub(crate) use agent_scope::{AgentScopeData, AgentScopeOutcome, exclude_agents};
+pub(crate) use arm::{arm_detected, scrub_all};
+// The scope-update fn is driven through `follow --agent`; the direct re-exports serve the
+// placement-breadth suite (which exercises the shared fn without the verb dispatch).
+#[cfg(test)]
+pub(crate) use agent_scope::{apply_scope_change, set_scope};
 pub(crate) use auth::{
     AuthConnectors, AuthLoginData, AuthLoginOutcome, AuthLoginPending, AuthLogoutData,
     AuthLogoutDescribe, AuthLogoutOutcome, AuthStatusData, login, logout, status,
@@ -72,6 +80,10 @@ pub(crate) use pull::{
     PullOutcome, PullScope, ReconcileOpts, ResetOutcome, TargetMode, pull, pull_reconcile_with,
     quiet_hook_lines, quiet_soft_failure, reset, update_selective,
 };
+// The withdrawal/exclusion clean is driven through `remove`/the reconcile; the direct re-export
+// serves the placement-breadth suite's foreign-preservation regression.
+#[cfg(test)]
+pub(crate) use pull::{WithdrawReason, snapshot_and_clean};
 pub(crate) use quiet_gate::{
     QuietGate, quiet_gate, reload_skills_json, resolve_ttl_ms, stamp_sweep, sweep_changed_bytes,
     sweep_lock,
@@ -536,6 +548,8 @@ mod tests {
                     mode: FollowMode::Auto,
                     review_required: false,
                     following: true,
+                    agents: Vec::new(),
+                    excluded_agents: Vec::new(),
                 },
             )
         }
@@ -561,6 +575,7 @@ mod tests {
                 harness: &harness,
                 plane: &plane,
                 follow,
+                roots: None,
             };
             f(&ctx)
         }

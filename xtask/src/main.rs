@@ -7,6 +7,8 @@
 //! `cargo xtask gen-cli-ref`         → (re)generate the CLI reference `docs/cli.md` from the real clap tree.
 //! `cargo xtask gen-cli-ref --check` → the CLI-reference drift gate.
 //! `cargo xtask check-arch`          → the architectural-layering + lint-opt-in + toolchain-pin gate.
+//! `cargo xtask check-registry-drift`→ OPT-IN + advisory: fetch upstream `agents.ts` and diff the baked
+//!                                     harness registry against it (network; NEVER in `ci`/CI).
 //! `cargo xtask ci`                  → the full non-DB gate sequence, in CI's order (fmt, clippy, doc,
 //!                                     the drift gates, check-arch) — the contributor's pre-push loop.
 //! `cargo xtask conformance`         → the store matrices (not yet implemented).
@@ -26,6 +28,7 @@ use std::{
 };
 
 mod dist;
+mod registry_drift;
 
 /// The committed JSON-Schema artifacts (the per-loop contract oracle). One entry per top-level wire type.
 fn schemas() -> Vec<(&'static str, String)> {
@@ -430,6 +433,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             harness: None,
             harness_slug: None,
             currency: None,
+            triggers: Vec::new(),
             // Adopted from a local dir, not a remote source — no upstream origin.
             origin: None,
         })
@@ -736,6 +740,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 interval_secs: Some(5),
             }),
             currency: None,
+            triggers: Vec::new(),
         })
         .expect("FollowData serializes"),
         warnings: vec![],
@@ -830,6 +835,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             plane_base_url: Some("https://topos.sh".to_owned()),
             pending: None,
             currency: None,
+            triggers: Vec::new(),
         })
         .expect("FollowData serializes"),
         warnings: vec![],
@@ -2135,12 +2141,13 @@ fn main() -> Result<()> {
         "gen-fixtures" => gen_fixtures(check)?,
         "gen-cli-ref" => gen_cli_ref(check)?,
         "check-arch" => check_arch()?,
+        "check-registry-drift" => registry_drift::run()?,
         "ci" => ci()?,
         "conformance" => println!("conformance: not yet implemented"),
         "dist" => dist::run(&args[1..])?,
         _ => {
             eprintln!(
-                "usage: cargo xtask <gen-schema [--check] | gen-fixtures [--check] | gen-cli-ref [--check] | check-arch | ci | conformance | dist …>"
+                "usage: cargo xtask <gen-schema [--check] | gen-fixtures [--check] | gen-cli-ref [--check] | check-arch | check-registry-drift | ci | conformance | dist …>"
             );
             std::process::exit(2);
         }

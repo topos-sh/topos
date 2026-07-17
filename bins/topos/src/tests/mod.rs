@@ -5,6 +5,7 @@
 mod auth;
 mod durability;
 mod follow;
+mod placement_breadth;
 mod publish_autoadd;
 mod seams;
 mod subscribe;

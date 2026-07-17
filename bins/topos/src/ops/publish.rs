@@ -170,10 +170,13 @@ pub(crate) fn publish_describe(
 
     // Scan the live draft ONCE → the byte-exact digest the apply would ship; the optional `@<digest>` pin
     // gates it here too (refuse on mismatch), so a describe never previews bytes the apply would refuse.
-    let map: PlacementMap = doc::read_doc(ctx.fs, &sp.map)?
+    let map: PlacementMap = doc::read_map(ctx.fs, &sp.map)?
         .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
-    let placement = sync_engine::first_placement(&map)?;
-    let scanned = scan::scan(std::path::Path::new(&placement))?;
+    // The WORK TREE: the single edited copy when one exists (the draft being shipped — it may live
+    // in the shared dir or any native copy), else the first placement; several DIVERGENT copies are
+    // the typed freeze (reconcile or `update --reset` first — never publish an ambiguous draft).
+    let placement = crate::placement::work_tree_dir(ctx, &lock.name, &map)?;
+    let scanned = scan::scan(&placement)?;
     let digest_hex = to_hex(&scanned.bundle_digest);
     if let Some(pin) = &pin
         && digest_hex != *pin
@@ -341,7 +344,7 @@ fn ensure_name(
         // skill's likely means a different copy was intended — refuse rather than publish these bytes.
         Ok((id, lock)) => {
             if let Some(requested) = harness {
-                let map: PlacementMap = doc::read_doc(ctx.fs, &ctx.layout.published(&id).map)?
+                let map: PlacementMap = doc::read_map(ctx.fs, &ctx.layout.published(&id).map)?
                     .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
                 if map.harness_slug.as_deref() != Some(requested) {
                     return Err(ClientError::HarnessMismatch {
@@ -456,15 +459,18 @@ fn enrolled_publish(
     }
 
     let transport = connect(&instance.base_url);
-    let map: PlacementMap = doc::read_doc(ctx.fs, &sp.map)?
+    let map: PlacementMap = doc::read_map(ctx.fs, &sp.map)?
         .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
 
     // Scan the live draft ONCE under the lock → the byte-exact digest the plane re-derives. When a
     // `@<digest>` pin is present, gate here (refuse on mismatch — the disclosure/integrity gate, never a
     // silent mode-flip); without a pin the computed digest ships. This digest is what the WAL replay
     // compares against, so a re-run whose draft has drifted refuses the in-flight op instead of riding it.
-    let placement = sync_engine::first_placement(&map)?;
-    let scanned = scan::scan(std::path::Path::new(&placement))?;
+    // The WORK TREE: the single edited copy when one exists (the draft being shipped — it may live
+    // in the shared dir or any native copy), else the first placement; several DIVERGENT copies are
+    // the typed freeze (reconcile or `update --reset` first — never publish an ambiguous draft).
+    let placement = crate::placement::work_tree_dir(ctx, &lock.name, &map)?;
+    let scanned = scan::scan(&placement)?;
     let digest_hex = to_hex(&scanned.bundle_digest);
     if let Some(pin) = pin
         && digest_hex != pin

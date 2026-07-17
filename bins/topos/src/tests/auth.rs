@@ -119,6 +119,7 @@ impl Rig {
             harness: &self.harness,
             plane,
             follow,
+            roots: None,
         }
     }
     /// Seed the enrolled state a completed `follow <address>` leaves: the pinned plane, one

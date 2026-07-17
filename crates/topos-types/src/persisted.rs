@@ -79,30 +79,44 @@ pub struct LockedFile {
 
 /// `skills/<id>/map.json` — where a skill is materialized + the hashes that drive no-op uninstall and
 /// exact go-back. **Field-set pinned**; `swap_capability`'s value enum is INFERRED.
+///
+/// **Schema v2** (its OWN ceiling, [`crate::PLACEMENT_MAP_SCHEMA_VERSION`]): a skill may hold SEVERAL
+/// placements (the shared cross-agent dir + per-harness native dirs), each with its own durable state
+/// in [`Self::placement_state`], strictly 1:1 with [`Self::placements`]. A v1 document (one placement,
+/// map-level state only) upgrades losslessly in memory on read; the map-level `materialized_sha` /
+/// `pre_existing_sha` / `swap_capability` fields remain the FIRST placement's mirror, so a v2 document
+/// stays legible to inspection tools that predate the per-placement shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct PlacementMap {
-    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 1)))]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("const" = 2)))]
     pub schema_version: u32,
-    /// The target dir(s) where the skill is placed (project / global / per-category layers).
+    /// The target dir(s) where the skill is placed (the shared cross-agent dir and/or per-harness
+    /// native dirs), 1:1 with [`Self::placement_state`].
     pub placements: Vec<String>,
     /// The `version_id` currently realized on disk.
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub applied_commit: String,
     /// sha256 of the bytes topos actually wrote (the projection sha) — may differ from the source
-    /// `bundle_digest` if a harness ever projected; with no projection the two match.
+    /// `bundle_digest` if a harness ever projected; with no projection the two match. The FIRST
+    /// placement's mirror in a v2 document (the per-placement truth is `placement_state`).
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub materialized_sha: String,
     /// sha256 of whatever was in the dir BEFORE placement — restored on uninstall (no-op uninstall).
+    /// The FIRST placement's mirror in a v2 document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub pre_existing_sha: Option<String>,
+    /// The FIRST placement's swap capability (the per-placement truth is `placement_state`).
     pub swap_capability: SwapCapability,
+    /// Per-placement durable state, strictly 1:1 with [`Self::placements`] after the read upgrade.
+    /// Empty on disk only in a v1 document (the reader synthesizes the single entry from the
+    /// map-level fields).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub placement_state: Vec<PlacementState>,
     /// The harness this skill was adopted into, when topos recognized one at adopt time (e.g. Claude
     /// Code); `None` for a plain directory tracked in place with no known harness. Drives where the
-    /// currency trigger applies. **Additive optional** (a `None` placement omits it). v0 records exactly
-    /// one placement, so this single tag is 1:1 with `placements`; a per-placement shape lands if/when a
-    /// skill is ever placed across layers.
+    /// currency trigger applies. **Additive optional** (a `None` placement omits it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<crate::HarnessId>,
     /// The harness layer the placement sits in (e.g. `"user"`), when a harness was recognized.
@@ -114,6 +128,43 @@ pub struct PlacementMap {
     /// under a known harness skill dir. **Additive optional.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_slug: Option<String>,
+}
+
+/// One placement's durable state (`map.json` v2), 1:1 with [`PlacementMap::placements`]. **Field-set
+/// pinned**; the `kind` value set is INFERRED.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct PlacementState {
+    /// Whether this dir is the shared cross-agent skills dir or one harness's own skills dir.
+    pub kind: PlacementKind,
+    /// The registry slug of the harness a `native` placement serves; `None` for `shared` (and for a
+    /// plain adopted dir under no known harness).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// sha256 of the bytes topos wrote into THIS dir; `None` = the target is recorded but was never
+    /// materialized (a newly added placement awaiting its first apply). Draft detection compares each
+    /// dir against ITS recorded sha, so per-dir drift is classified independently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub materialized_sha: Option<String>,
+    /// sha256 of whatever was in THIS dir BEFORE topos first wrote into it (sticky).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub pre_existing_sha: Option<String>,
+    /// The swap capability probed for THIS dir's filesystem.
+    pub swap_capability: SwapCapability,
+}
+
+/// What a placement dir IS — the shared cross-agent convention dir, or one harness's native skills
+/// dir. **INFERRED value set.**
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementKind {
+    /// The shared cross-agent skills dir (one copy, read by every covered harness).
+    Shared,
+    /// One harness's own skills dir.
+    Native,
 }
 
 /// Whether the placement dir supports an atomic swap, or must degrade. **INFERRED value set.**

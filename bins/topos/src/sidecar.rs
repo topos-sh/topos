@@ -3,8 +3,6 @@
 
 use std::path::{Path, PathBuf};
 
-use topos_types::persisted::PlacementMap;
-
 use crate::atomic::TMP_SUFFIX;
 use crate::doc;
 use crate::error::ClientError;
@@ -320,7 +318,7 @@ fn recover_published(
     // `uninstall`), so doing it here means a hidden, redundant copy of skill bytes is never orphaned when
     // the next command is `list` / `diff` / `uninstall`. Done under this skill's writer lock, by the exact
     // per-skill names, so a concurrent pull of another skill in the same parent is never disturbed.
-    if let Some(map) = doc::read_doc::<PlacementMap>(fs, &paths.map)? {
+    if let Some(map) = doc::read_map(fs, &paths.map)? {
         for placement in &map.placements {
             if let Some(parent) = Path::new(placement).parent() {
                 for litter in crate::materialize::litter_siblings(parent, id.as_str()) {

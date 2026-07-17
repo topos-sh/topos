@@ -3,7 +3,10 @@
 The serde structs/enums for the boundary: the `--json` envelope, every per-verb result payload
 ([`results`]), the frozen terminal-outcome enum, the unsigned `WireCurrentRecord` pointer body, the
 error taxonomy, the HTTP wire request/response DTOs ([`requests`]), and the on-disk client documents
-([`persisted`]: sync / lock / map / op / conflict).
+([`persisted`]: sync / lock / map / op / conflict). `map.json` carries its OWN schema ceiling
+(`PLACEMENT_MAP_SCHEMA_VERSION` = 2 — the per-placement `placement_state` shape; a v1 single-placement
+document upgrades losslessly in memory on read); every other persisted doc dispatches on
+`PERSISTED_SCHEMA_VERSION`.
 
 **Generation is a bare `u64` on the wire** — the pointer's single monotonically advancing CAS
 counter (the old `(epoch, seq)` pair is gone). `expected_generation` / `current_generation` /

@@ -16,9 +16,11 @@ use std::path::{Path, PathBuf};
 use topos_types::{CurrencyKind, HarnessId, TriggerReport};
 
 mod claude_code;
+pub mod coverage;
 mod hermes;
 mod openclaw;
 pub mod registry;
+pub mod triggers;
 pub use claude_code::ClaudeCode;
 pub use hermes::Hermes;
 pub use openclaw::OpenClaw;
@@ -78,6 +80,43 @@ pub fn sanitize_skill_dir(raw: &str) -> Option<String> {
     // Leading/trailing dashes are already prevented above; trim defensively anyway.
     let trimmed = out.trim_matches('-');
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+/// Choose the directory a skill's bytes land in under `skills_root` — the ONE naming discipline every
+/// placement target follows (the reference adapter's, factored out so registry-resolved dirs name
+/// identically): prefer the skill's **sanitized display name** (agents invoke a skill by its folder
+/// name); on a collision with a dir that is neither FREE nor this skill's own recorded placement,
+/// disambiguate by the sanitized workspace slug (`<ws>-<name>`); fall back to the validated,
+/// globally-unique `skill_id`. A foreign dir is NEVER a valid target — only a free dir, or one
+/// `is_owned` answers `true` for (the caller's own placement record), is ever chosen, so a placement
+/// can never clobber another skill's (or the user's) directory.
+///
+/// `naming`'s strings are UNTRUSTED and are sanitized to a single safe path component before any join;
+/// `skill_id` must be an already-validated single component (the trait-wide id contract).
+#[must_use]
+pub fn choose_skill_dir(
+    skills_root: &Path,
+    skill_id: &str,
+    naming: PlacementNaming<'_>,
+    is_owned: &dyn Fn(&Path) -> bool,
+) -> PathBuf {
+    if let Some(name) = naming.name.and_then(sanitize_skill_dir) {
+        let by_name = skills_root.join(&name);
+        if !by_name.exists() || is_owned(&by_name) {
+            return by_name;
+        }
+        // Collision: a different skill (or the user's own dir) already holds this name. Namespace by
+        // the workspace so the two coexist (both parts are already sanitized single components).
+        if let Some(ws) = naming.workspace_slug.and_then(sanitize_skill_dir) {
+            let namespaced = skills_root.join(format!("{ws}-{name}"));
+            if !namespaced.exists() || is_owned(&namespaced) {
+                return namespaced;
+            }
+        }
+    }
+    // Unnamed / unsafe name / every candidate taken → the unique id (a validated single component
+    // that can never collide with another skill).
+    skills_root.join(skill_id)
 }
 
 /// The narrow filesystem port an adapter needs to read + atomically replace a harness **config** file

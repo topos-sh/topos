@@ -28,6 +28,7 @@ Follow a workspace, channel, or skill — enroll if needed, then subscribe two-p
 | `[TARGETS]...` |  |  | The follow targets (addresses, qualified paths, or names). Omitted, it resumes a pending enrollment |
 | `--channel` | `<NAME>` |  | Follow a channel by name (repeatable; kind-forced) |
 | `--skill` | `<NAME>` |  | Follow a specific skill by name (repeatable; kind-forced) |
+| `--agent` | `<SLUG>` |  | Scope a followed skill's placement to these agents on THIS device (registry slugs; repeatable; `'*'` clears the list back to unscoped). Placement policy only — the subscription is untouched and the server is never told. Two-phase: bare describes the placement plan; `--yes` applies |
 | `--yes` |  |  | Apply the described subscription (the one-shot consent). Bare = describe only |
 | `--prefix-dirname` |  |  | Install a dirname-colliding skill under `<workspace>.<name>` instead of declining it |
 | `--manual` |  |  | Adopt followed skills in confirm-each mode (a one-tap accept per new version) instead of auto |
@@ -47,6 +48,7 @@ Stop following a skill or channel — two-phase (bare describes what stops; `--y
 | `[TARGETS]...` |  |  | The channel/skill name(s) (or qualified paths) to stop following |
 | `--channel` | `<NAME>` |  | Unfollow a channel by name (repeatable; kind-forced) |
 | `--skill` | `<NAME>` |  | Unfollow a specific skill by name (repeatable; kind-forced) |
+| `--agent` | `<SLUG>` |  | Stop placing a followed skill into these agents on THIS device (registry slugs; repeatable). The subscription is untouched (no server call) — the agent's dir is cleaned (any edit snapshotted first) and a per-agent exclusion is recorded. Same behavior as `remove <skill> --agent <slug>` |
 | `--yes` |  |  | Apply the described detach (the one-shot consent). Bare = describe only |
 
 

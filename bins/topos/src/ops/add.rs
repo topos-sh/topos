@@ -175,16 +175,25 @@ pub(crate) fn add_with_name(
         ),
         None => (source_abs.to_string_lossy().into_owned(), None, None),
     };
-    doc::write_doc(
+    doc::write_map(
         ctx.fs,
         &sp.map,
         &PlacementMap {
-            schema_version: PERSISTED_SCHEMA_VERSION,
+            schema_version: topos_types::PLACEMENT_MAP_SCHEMA_VERSION,
             placements: vec![placement],
             applied_commit: version_hex.clone(),
             materialized_sha: digest_hex.clone(),
             pre_existing_sha: None,
             swap_capability: SwapCapability::Unsupported,
+            // The adopted source dir is the ONE native placement (the adopted bytes ARE what topos
+            // recorded, so the per-placement sha starts at the adopted digest).
+            placement_state: vec![topos_types::persisted::PlacementState {
+                kind: topos_types::persisted::PlacementKind::Native,
+                agent: harness_slug.clone(),
+                materialized_sha: Some(digest_hex.clone()),
+                pre_existing_sha: None,
+                swap_capability: SwapCapability::Unsupported,
+            }],
             harness,
             harness_layer,
             harness_slug: harness_slug.clone(),
@@ -243,6 +252,7 @@ pub(crate) fn add_with_name(
         harness,
         harness_slug,
         currency,
+        triggers: Vec::new(),
         // Set by the remote-import wrapper ([`add_remote`]); a local adopt has no upstream.
         origin: None,
     })
@@ -438,7 +448,7 @@ pub(crate) fn keep_as_yours(
     };
     // Placement state: a withdrawal / exclusion CLEANED the agent dirs; a detach (unfollow) LEFT them.
     let sp = ctx.layout.published(&sid);
-    let placements: Vec<String> = doc::read_doc::<PlacementMap>(ctx.fs, &sp.map)?
+    let placements: Vec<String> = doc::read_map(ctx.fs, &sp.map)?
         .map(|m| m.placements)
         .unwrap_or_default();
     let present = placements.iter().any(|p| ctx.fs.exists(Path::new(p)));
@@ -504,8 +514,8 @@ fn fork_has_draft(
     present: bool,
 ) -> Result<bool, ClientError> {
     if present {
-        let Some(placement) = doc::read_doc::<PlacementMap>(ctx.fs, &sp.map)?
-            .and_then(|m| m.placements.into_iter().next())
+        let Some(placement) =
+            doc::read_map(ctx.fs, &sp.map)?.and_then(|m| m.placements.into_iter().next())
         else {
             return Ok(false);
         };
@@ -922,8 +932,7 @@ pub(crate) fn tracked_skill_at(
         let Ok(id) = crate::id::SkillId::parse(id) else {
             continue; // not a topos-minted dir name
         };
-        let Some(map) = doc::read_doc::<PlacementMap>(ctx.fs, &ctx.layout.published(&id).map)?
-        else {
+        let Some(map) = doc::read_map(ctx.fs, &ctx.layout.published(&id).map)? else {
             continue;
         };
         if map.placements.iter().any(|p| {

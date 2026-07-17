@@ -323,6 +323,7 @@ impl PullHarness {
             harness: &self.harness,
             plane: &inert_plane,
             follow: &inert_follow,
+            roots: None,
         };
         let added = ops::add(&ctx, &dir)
             .unwrap_or_else(|e| panic!("test_support: adopt of {skill_id} failed: {e}"));
@@ -333,7 +334,7 @@ impl PullHarness {
 
         // Record the placement EXACTLY as map.json holds it (canonicalized) — what materialize writes to.
         let map: PlacementMap =
-            doc::read_doc(&self.fs, &self.layout().published(&sid(skill_id)).map)
+            doc::read_map(&self.fs, &self.layout().published(&sid(skill_id)).map)
                 .expect("read map.json")
                 .expect("map.json exists after add");
         let placement = map
@@ -379,6 +380,8 @@ impl PullHarness {
                         mode: s.mode.to_mode(),
                         review_required: false,
                         following: true,
+                        agents: Vec::new(),
+                        excluded_agents: Vec::new(),
                     },
                 )
             })
@@ -395,6 +398,7 @@ impl PullHarness {
             harness: &self.harness,
             plane: &plane,
             follow: &follow,
+            roots: None,
         };
 
         let internal = match scope {
@@ -739,6 +743,7 @@ impl FollowHarness {
                 harness,
                 plane,
                 follow,
+                roots: None,
             };
             ops::follow(
                 &ctx,
@@ -869,6 +874,7 @@ impl FollowHarness {
             prefix_dirname: false,
             channels: Vec::new(),
             skills: Vec::new(),
+            agents: Vec::new(),
         };
         self.run_follow(&inert_plane, &inert_follow, Some(link.to_owned()), opts)
             .map_err(|e| e.to_string())
@@ -889,6 +895,7 @@ impl FollowHarness {
             prefix_dirname: false,
             channels: Vec::new(),
             skills: Vec::new(),
+            agents: Vec::new(),
         };
         self.run_follow(&inert_plane, &inert_follow, None, opts)
             .map_err(|e| e.to_string())
@@ -911,6 +918,7 @@ impl FollowHarness {
             prefix_dirname: false,
             channels: Vec::new(),
             skills: Vec::new(),
+            agents: Vec::new(),
         };
         match self.run_follow(&inert_plane, &inert_follow, None, opts) {
             Ok(_) => panic!("test_support: expected the resume to be denied"),
@@ -962,6 +970,7 @@ impl FollowHarness {
             prefix_dirname: false,
             channels: Vec::new(),
             skills: Vec::new(),
+            agents: Vec::new(),
         };
         let target = targets.first().cloned();
         self.run_follow(&plane, &follow, target, opts)
@@ -1095,6 +1104,8 @@ impl FollowHarness {
                 review_required: false,
                 following: true,
                 excluded_here: false,
+                agents: Vec::new(),
+                excluded_agents: Vec::new(),
             }],
         )
         .expect("write follows.json");
@@ -1194,6 +1205,7 @@ impl FollowHarness {
                 harness,
                 plane: &inert_plane,
                 follow: &inert_follow,
+                roots: None,
             };
             op(&ctx)
         })
@@ -1218,6 +1230,7 @@ impl FollowHarness {
                 harness,
                 plane: &plane,
                 follow: &follow,
+                roots: None,
             };
             op(&ctx)
         })
@@ -1244,6 +1257,7 @@ impl FollowHarness {
                 harness,
                 plane: &plane,
                 follow: &follow,
+                roots: None,
             };
             let opts = ops::ReconcileOpts {
                 ack_notices,
@@ -1276,6 +1290,7 @@ impl FollowHarness {
                 harness,
                 plane: &plane,
                 follow: &follow,
+                roots: None,
             };
             match ops::pull_reconcile_with(&ctx, &plane, &ops::ReconcileOpts::default()) {
                 Ok(out) => Ok(ops::quiet_hook_lines(
@@ -1367,7 +1382,7 @@ impl FollowHarness {
         self.with_inert_ctx(|ctx| {
             match ops::remove(ctx, &connectors, &[target.to_owned()], &[], None, true)? {
                 ops::RemoveOutcome::Applied(d) => Ok(d),
-                ops::RemoveOutcome::Described { .. } => {
+                ops::RemoveOutcome::Described { .. } | ops::RemoveOutcome::AgentScope(_) => {
                     Err(crate::error::ClientError::InvalidArgument(
                         "test_support: expected a remove apply, got a describe".into(),
                     ))
@@ -1390,6 +1405,7 @@ impl FollowHarness {
             prefix_dirname: false,
             channels: Vec::new(),
             skills: skills.iter().map(|s| (*s).to_owned()).collect(),
+            agents: Vec::new(),
         };
         match self
             .run_follow_outcome(&InertPlane, &InertFollow, None, opts)
@@ -1805,6 +1821,7 @@ impl FollowHarness {
                 harness,
                 plane: &plane,
                 follow: &follow,
+                roots: None,
             };
             ops::pull(&ctx, internal)
                 .unwrap_or_else(|e| panic!("test_support: pull failed: {e}"))
@@ -1838,6 +1855,7 @@ impl FollowHarness {
                 harness,
                 plane: &inert_plane,
                 follow: &inert_follow,
+                roots: None,
             };
             let added = ops::add(&ctx, &dir)
                 .unwrap_or_else(|e| panic!("test_support: adopt of {skill_id} failed: {e}"));
@@ -1984,6 +2002,7 @@ impl FollowHarness {
                 harness,
                 plane: &inert_plane,
                 follow: &follow,
+                roots: None,
             };
             match ops::publish(
                 &ctx,
@@ -2066,6 +2085,7 @@ impl FollowHarness {
                 harness,
                 plane: &inert_plane,
                 follow: &inert_follow,
+                roots: None,
             };
             let _ = skills;
             match ops::invite(
@@ -2109,6 +2129,7 @@ impl FollowHarness {
                 harness,
                 plane: &inert_plane,
                 follow: &inert_follow,
+                roots: None,
             };
             // `None` discovery roots = tracked-only: this helper must not scan the runner's real home dirs.
             ops::list(&ctx, None, false, None, None)
@@ -2317,6 +2338,8 @@ impl ContributeHarness {
                     review_required,
                     following: true,
                     excluded_here: false,
+                    agents: Vec::new(),
+                    excluded_agents: Vec::new(),
                 }],
             },
         )
@@ -2339,6 +2362,7 @@ impl ContributeHarness {
             harness: &self.harness,
             plane: &inert_plane,
             follow: &inert_follow,
+            roots: None,
         };
         let added =
             ops::add(&ctx, &dir).unwrap_or_else(|e| panic!("contribute: adopt {skill_id}: {e}"));
@@ -2394,6 +2418,7 @@ impl ContributeHarness {
             harness: &self.harness,
             plane: &plane,
             follow: &follow,
+            roots: None,
         };
         ops::pull(&ctx, ops::PullScope::AllFollowed)
             .unwrap_or_else(|e| panic!("contribute: pull: {e}"))
@@ -2434,6 +2459,7 @@ impl ContributeHarness {
             harness: &self.harness,
             plane: &plane,
             follow: &follow,
+            roots: None,
         };
         let contribute = |b: &str| -> Box<dyn ContributeSource> {
             Box::new(UreqDeviceClient::new(
@@ -2485,6 +2511,7 @@ impl ContributeHarness {
             harness: &self.harness,
             plane: &plane,
             follow: &follow,
+            roots: None,
         };
         let contribute = |b: &str| -> Box<dyn ContributeSource> {
             Box::new(UreqDeviceClient::new(
@@ -2565,6 +2592,7 @@ impl ContributeHarness {
             harness: &self.harness,
             plane: &plane,
             follow: &follow,
+            roots: None,
         };
         let data = ops::list(&ctx, Some(&self.skill_id), false, None, None)
             .expect("list")
@@ -2647,6 +2675,7 @@ impl ContributeHarness {
             harness: &self.harness,
             plane: &inert_plane,
             follow: &inert_follow,
+            roots: None,
         };
         let scope = ops::RemoteScope {
             catalog: &catalog,
@@ -2788,6 +2817,7 @@ impl ReconcileHarness {
             harness: &self.harness,
             plane: &plane,
             follow: &follow,
+            roots: None,
         };
         let out = ops::pull_reconcile_with(&ctx, &plane, &ops::ReconcileOpts::default())
             .unwrap_or_else(|e| panic!("test_support: reconcile failed: {e}"));
@@ -2813,6 +2843,7 @@ impl ReconcileHarness {
             harness: &self.harness,
             plane: &plane,
             follow: &follow,
+            roots: None,
         };
         ops::pull(
             &ctx,
@@ -2918,6 +2949,7 @@ fn follow_opts(yes: bool) -> ops::FollowOpts {
         prefix_dirname: false,
         channels: Vec::new(),
         skills: Vec::new(),
+        agents: Vec::new(),
     }
 }
 

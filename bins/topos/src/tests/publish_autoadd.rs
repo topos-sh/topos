@@ -112,6 +112,7 @@ impl Rig {
             harness: &self.harness,
             plane: &self.plane,
             follow: &self.follow,
+            roots: None,
         }
     }
 }

@@ -128,6 +128,7 @@ impl Rig {
             harness: &self.harness,
             plane,
             follow,
+            roots: None,
         }
     }
     /// Seed the enrolled state a completed `follow` leaves (instance + one membership + credential),
@@ -1254,6 +1255,8 @@ fn publish_describe_gate(cached_review_required: bool, fresh: Option<bool>) -> P
             review_required: cached_review_required,
             following: true,
             excluded_here: false,
+            agents: Vec::new(),
+            excluded_agents: Vec::new(),
         }],
     )
     .unwrap();

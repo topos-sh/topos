@@ -407,6 +407,10 @@ pub struct AddData {
     /// `~/.topos/`. `None` for a plain directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<crate::TriggerReport>,
+    /// The breadth arming sweep's outcomes — one row per OTHER detected agent whose currency
+    /// trigger was (un)installed alongside the active adapter's (`currency` above). **Additive.**
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<BreadthTriggerReport>,
     /// Where the skill was imported FROM, when `add` fetched it from a remote source. `None` for a
     /// locally-adopted skill (a path or a discovered name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -471,6 +475,32 @@ pub struct FollowData {
     /// a degraded config edit is disclosed here, never a rolled-back enrollment).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<crate::TriggerReport>,
+    /// The breadth arming sweep's outcomes — one row per OTHER detected agent whose currency
+    /// trigger was armed alongside the active adapter's (`currency` above). Honest per agent:
+    /// `state`/`currency_kind` follow the same evidence rules every trigger report does, and
+    /// `note` names the consent step still owed (or the docs-level evidence caveat). **Additive.**
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<BreadthTriggerReport>,
+}
+
+/// One breadth-sweep trigger outcome for a DETECTED registry agent (beyond the active adapter's
+/// own [`crate::TriggerReport`]). `agent` is the registry slug; the state/kind pair follows the
+/// same honesty rule everywhere: only `active` carries a live kind, everything else advertises
+/// the explicit-pull floor. **Additive.**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct BreadthTriggerReport {
+    /// The registry slug (e.g. `cursor`, `opencode`).
+    pub agent: String,
+    pub currency_kind: crate::CurrencyKind,
+    pub state: crate::TriggerState,
+    /// The config file the (un)install edited, when it edited one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub touched_path: Option<String>,
+    pub marker_id: String,
+    /// The consent step still owed, or the evidence-level caveat — `None` when nothing needs saying.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// A pending device-authorization a `follow` surfaced — the human visits `verification_uri_complete` (which

@@ -57,6 +57,13 @@
     "tracked": {
       "type": "boolean"
     },
+    "triggers": {
+      "description": "The breadth arming sweep's outcomes — one row per OTHER detected agent whose currency\ntrigger was (un)installed alongside the active adapter's (`currency` above). **Additive.**",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/BreadthTriggerReport"
+      }
+    },
     "version_id": {
       "description": "The base commit the local sidecar starts from.",
       "type": "string",
@@ -71,6 +78,45 @@
     "tracked"
   ],
   "$defs": {
+    "BreadthTriggerReport": {
+      "description": "One breadth-sweep trigger outcome for a DETECTED registry agent (beyond the active adapter's\nown [`crate::TriggerReport`]). `agent` is the registry slug; the state/kind pair follows the\nsame honesty rule everywhere: only `active` carries a live kind, everything else advertises\nthe explicit-pull floor. **Additive.**",
+      "type": "object",
+      "properties": {
+        "agent": {
+          "description": "The registry slug (e.g. `cursor`, `opencode`).",
+          "type": "string"
+        },
+        "currency_kind": {
+          "$ref": "#/$defs/CurrencyKind"
+        },
+        "marker_id": {
+          "type": "string"
+        },
+        "note": {
+          "description": "The consent step still owed, or the evidence-level caveat — `None` when nothing needs saying.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/TriggerState"
+        },
+        "touched_path": {
+          "description": "The config file the (un)install edited, when it edited one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agent",
+        "currency_kind",
+        "state",
+        "marker_id"
+      ]
+    },
     "CurrencyKind": {
       "description": "What fires currency for a harness — drives HONEST receipt copy (\"current by next session\",\n\"within about a minute\", …). `ExplicitPullOnly` is the honest-degrade floor.",
       "oneOf": [

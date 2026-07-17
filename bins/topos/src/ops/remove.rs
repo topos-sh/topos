@@ -12,11 +12,12 @@
 //!   **permanent** delete of that directory (topos never adopted it — deleting it is the only removal).
 //!
 //! Multi-skill positional; resolve ALL-OR-NONE (a batch either resolves every target or applies nothing).
-//! `-a/--agent` scopes UNTRACKED locals only (a followed removal is device-wide by construction).
+//! `-a/--agent` on a FOLLOWED skill is the PER-AGENT exclusion (placement policy — one shared
+//! implementation with `unfollow --agent`, see [`super::agent_scope`]); on untracked locals it keeps
+//! its classic discovery-scoping semantics, and a bare followed removal stays device-wide.
 
 use std::path::PathBuf;
 
-use topos_types::persisted::PlacementMap;
 use topos_types::results::{RemoveData, RemoveItem, RemoveKind};
 
 use super::DiscoveryRoots;
@@ -34,7 +35,8 @@ pub(crate) struct RemoveConnectors<'a> {
     pub directory: &'a DirectoryConnect<'a>,
 }
 
-/// The verb's outcome — the two-phase pair.
+/// The verb's outcome — the two-phase pair, plus the `--agent` per-agent exclusion (the shared
+/// placement-policy surface `unfollow --agent` also runs).
 #[derive(Debug)]
 pub(crate) enum RemoveOutcome {
     Described {
@@ -42,6 +44,7 @@ pub(crate) enum RemoveOutcome {
         yes_argv: Vec<String>,
     },
     Applied(RemoveData),
+    AgentScope(super::agent_scope::AgentScopeOutcome),
 }
 
 /// One resolved removal, pre-apply.
@@ -78,6 +81,23 @@ pub(crate) fn remove(
     if targets.is_empty() {
         return Err(ClientError::InvalidArgument(
             "remove needs a skill name (or `<name>@<agent>` for an untracked local copy)".into(),
+        ));
+    }
+    // `remove <followed> --agent <slug>` is the PER-AGENT exclusion — one shared implementation with
+    // `unfollow --agent` (placement policy; the subscription and the whole-device exclusion row are
+    // untouched). It engages only when every bare target is a FOLLOWED tracked skill; the classic
+    // `-a` semantics for untracked/local copies (and `-a '*'`) stay exactly as they were.
+    if !agents.is_empty()
+        && !agents.iter().any(|a| a == "*")
+        && targets.iter().all(|t| {
+            !t.contains('@')
+                && !t.contains('/')
+                && super::resolve_skill(ctx, t)
+                    .is_ok_and(|(sid, _)| super::followed_workspace(ctx, sid.as_str()).is_some())
+        })
+    {
+        return Ok(RemoveOutcome::AgentScope(
+            super::agent_scope::exclude_agents(ctx, "remove", targets, agents, None, yes)?,
         ));
     }
     // A single `-a` value scopes untracked locals; more than one is accepted (a copy in several agents).
@@ -235,7 +255,7 @@ fn tracked_or_followed(ctx: &Ctx<'_>, sid: SkillId, name: String) -> Result<Remo
     }
     // A purely-local skill — the placement dirs to delete come from its map.
     let sp = ctx.layout.published(&sid);
-    let dirs = doc::read_doc::<PlacementMap>(ctx.fs, &sp.map)?
+    let dirs = doc::read_map(ctx.fs, &sp.map)?
         .map(|m| m.placements.iter().map(PathBuf::from).collect())
         .unwrap_or_default();
     Ok(Removal::TrackedLocal {

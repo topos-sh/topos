@@ -70,6 +70,9 @@ pub(crate) struct FollowOpts {
     pub channels: Vec<String>,
     /// `--skill` selectors — kind-forced skill targets (direct follow).
     pub skills: Vec<String>,
+    /// `--agent` — the DEVICE-LOCAL placement include-list for the followed skill(s): registry slugs
+    /// (repeatable; `'*'` clears back to unscoped). Placement policy only — never told to the plane.
+    pub agents: Vec<String>,
 }
 
 /// Builds the creds-free enrollment transport for a plane base URL.
@@ -126,6 +129,9 @@ pub(crate) enum FollowOutcome {
     },
     /// The `--yes` re-attach report (exclusion lifted, marker cleared, current bytes reinstalled).
     ReattachApplied(Box<Reattach>),
+    /// The `--agent` scope UPDATE on already-followed skills (two-phase, offline — the shared
+    /// placement-policy surface).
+    Scope(super::agent_scope::AgentScopeOutcome),
 }
 
 impl FollowOutcome {
@@ -217,6 +223,10 @@ pub(crate) struct FollowDescribe {
     pub all_devices_note: String,
     /// This device reports its applied versions to the workspace's fleet view after each update.
     pub reporting_note: String,
+    /// The `--agent` placement plan for the described installs (which dirs land where), when the
+    /// invocation carried an include-list. Empty otherwise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub agent_notes: Vec<String>,
 }
 
 /// The `--yes` apply report: the rows written, the installs landed, the collisions declined.
@@ -307,6 +317,37 @@ pub(crate) fn follow(
              enrollment to resume)"
                 .into(),
         ));
+    }
+    if !opts.agents.is_empty() {
+        if !opts.channels.is_empty() {
+            return Err(ClientError::InvalidArgument(
+                "`--agent` scopes where a SKILL's bytes land — it cannot combine with `--channel`"
+                    .into(),
+            ));
+        }
+        // Refuse unknown slugs up front (both dispatch arms share the same validation).
+        let _ = crate::placement::validate_agent_slugs(ctx, &opts.agents)?;
+        // Every target already followed (bare/`@digest` names) ⇒ the offline SCOPE-UPDATE path —
+        // "a follow of an already-followed skill with --agent just updates the scope, two-phase".
+        // Anything else falls through to the ordinary subscribe, which records the include-list at
+        // apply (after the reconcile installs the new follow).
+        let mut tokens: Vec<String> = targets.clone();
+        tokens.extend(opts.skills.iter().cloned());
+        let all_followed = !tokens.is_empty()
+            && tokens.iter().all(|t| {
+                !t.contains("://")
+                    && !t.contains('/')
+                    && matches!(known_followed_entry(ctx, strip_digest(t), ws), Ok(Some(_)))
+            });
+        if all_followed {
+            return Ok(FollowOutcome::Scope(super::agent_scope::set_scope(
+                ctx,
+                &tokens,
+                &opts.agents,
+                ws,
+                opts.yes,
+            )?));
+        }
     }
     if opts.channels.is_empty()
         && opts.skills.is_empty()
@@ -676,6 +717,7 @@ fn pending_followdata(wal: &enroll::PendingEnrollment) -> FollowData {
             interval_secs: Some(wal.interval_secs),
         }),
         currency: None,
+        triggers: Vec::new(),
     }
 }
 
@@ -927,7 +969,7 @@ fn subscribe(
         PlaneError::Unreachable(m) | PlaneError::Unavailable(m) => ClientError::Plane(m),
         PlaneError::Malformed(m) => ClientError::WireInvalid(m),
     })?;
-    let describe = build_describe(
+    let mut describe = build_describe(
         ctx,
         &me,
         &channels,
@@ -936,6 +978,9 @@ fn subscribe(
         resolutions,
         enrolled_now,
     )?;
+    if !opts.agents.is_empty() {
+        describe.agent_notes = agent_plan_notes(ctx, opts, &describe.installs, &me.name);
+    }
 
     if !opts.yes {
         // The paste-ready apply argvs: the canonical qualified paths + `--yes` (and the
@@ -1067,6 +1112,43 @@ fn subscribe(
     } else {
         describe.collisions.clone()
     };
+    // The `--agent` include-list rides the apply: record it on each directly-followed skill and
+    // reconcile its placements (clean what the scope removes, land the native dirs from the local
+    // store). Runs AFTER the reconcile so the first receive has already laid bytes to re-scope.
+    if !opts.agents.is_empty() {
+        let scope: Vec<String> = if opts.agents.iter().any(|a| a == "*") {
+            Vec::new()
+        } else {
+            opts.agents.clone()
+        };
+        for r in resolutions {
+            let Resolution::Resource {
+                kind: ResourceKind::Skill,
+                skill_id: Some(id),
+                ..
+            } = r
+            else {
+                continue;
+            };
+            enroll::set_agent_scope(ctx.fs, &ctx.layout, id, &scope)?;
+            let Ok(sid) = crate::id::SkillId::parse(id) else {
+                continue;
+            };
+            // A declined collision (or a still-pending offer) laid no lock — nothing to re-scope yet;
+            // the recorded include-list engages when the bytes land.
+            if let Some(lock) = doc::read_doc::<Lock>(ctx.fs, &ctx.layout.published(&sid).lock)? {
+                super::agent_scope::apply_scope_change(
+                    ctx,
+                    &sid,
+                    &lock,
+                    crate::placement::AgentScope {
+                        agents: &scope,
+                        excluded: &[],
+                    },
+                )?;
+            }
+        }
+    }
     Ok(FollowOutcome::Applied(Box::new(FollowApplied {
         workspace_id: ws_id.to_owned(),
         workspace_name: me.name,
@@ -1268,7 +1350,71 @@ fn build_describe(
         reporting_note: "this device reports its applied versions to the workspace's fleet view \
                          after each update"
             .to_owned(),
+        agent_notes: Vec::new(),
     })
+}
+
+/// The `--agent` placement-plan lines for a describe: per install, which dirs the scoped placement
+/// lands in (native only — a scope never uses the shared dir), plus the honest per-agent notes
+/// (an undetected slug engages later; a docs-level coverage claim is named as such when the scope
+/// clears back to unscoped).
+fn agent_plan_notes(
+    ctx: &Ctx<'_>,
+    opts: &FollowOpts,
+    installs: &[DescribedInstall],
+    workspace_slug: &str,
+) -> Vec<String> {
+    let scope: Vec<String> = if opts.agents.iter().any(|a| a == "*") {
+        Vec::new()
+    } else {
+        opts.agents.clone()
+    };
+    let undetected = crate::placement::validate_agent_slugs(ctx, &scope).unwrap_or_default();
+    let mut notes = Vec::new();
+    for inst in installs {
+        let plan = crate::placement::plan_targets(
+            ctx,
+            &inst.skill_id,
+            topos_harness::PlacementNaming {
+                name: Some(&inst.name),
+                workspace_slug: Some(workspace_slug),
+            },
+            crate::placement::AgentScope {
+                agents: &scope,
+                excluded: &[],
+            },
+            None,
+        );
+        for target in &plan.targets {
+            let where_ = match (&target.kind, &target.agent) {
+                (topos_types::persisted::PlacementKind::Shared, _) => {
+                    "the shared agents dir".to_owned()
+                }
+                (_, Some(a)) => format!("{a} (native)"),
+                _ => "native".to_owned(),
+            };
+            notes.push(format!(
+                "{} → {} — {where_}",
+                inst.name,
+                target.dir.display()
+            ));
+        }
+        for c in &plan.shared_covers {
+            if c.docs_level {
+                notes.push(format!(
+                    "the shared dir covers {} (per vendor docs — not yet verified against a live \
+                     build)",
+                    c.slug
+                ));
+            }
+        }
+    }
+    for slug in &undetected {
+        notes.push(format!(
+            "'{slug}' is not detected on this machine — placement engages when the agent is detected"
+        ));
+    }
+    notes
 }
 
 /// Whether this device has RECEIVED a skill (a sidecar dir exists past the never-received
@@ -1324,7 +1470,7 @@ fn tracked_names(ctx: &Ctx<'_>) -> Result<Vec<TrackedName>, ClientError> {
         let Some(lock) = doc::read_doc::<Lock>(ctx.fs, &ctx.layout.published(&sid).lock)? else {
             continue;
         };
-        let placement = doc::read_doc::<PlacementMap>(ctx.fs, &ctx.layout.published(&sid).map)?
+        let placement = doc::read_map(ctx.fs, &ctx.layout.published(&sid).map)?
             .and_then(|m| m.placements.first().cloned());
         out.push(TrackedName {
             name: lock.name,
@@ -1368,20 +1514,22 @@ pub(crate) fn lay_first_receive_baseline(
     let store = Store::init(&sp.store)?;
     super::sync_engine::fsync_batch(ctx, &store.durability_set()?)?;
 
-    // The adapter keeps a `&str` seam; the id here is the validated newtype, honoring its "callers pass
-    // an already-validated id" contract. The display name + workspace slug are UNTRUSTED advisory hints —
-    // the adapter sanitizes them and falls back to the id, so they can never redirect the placement.
-    let placement = ctx
-        .harness
-        .placement_for(
-            skill_id.as_str(),
-            topos_harness::PlacementNaming {
-                name: Some(&name),
-                workspace_slug: Some(workspace_slug),
-            },
-            None,
-        )
-        .dir;
+    // The placement TARGETS come from the engine (shared-dir-first over the detected agents; the
+    // classic active-adapter dir when nothing is detected). The id is the validated newtype, honoring
+    // the adapter/registry "callers pass an already-validated id" contract; the display name +
+    // workspace slug are UNTRUSTED advisory hints — the naming discipline sanitizes them and falls
+    // back to the id, so they can never redirect a placement. A brand-new arrival is UNSCOPED (no
+    // follow entry exists yet; a later `--agent` scope narrows through the scope verbs).
+    let plan = crate::placement::plan_targets(
+        ctx,
+        skill_id.as_str(),
+        topos_harness::PlacementNaming {
+            name: Some(&name),
+            workspace_slug: Some(workspace_slug),
+        },
+        crate::placement::AgentScope::default(),
+        None,
+    );
     doc::write_doc(
         ctx.fs,
         &sp.sync,
@@ -1395,20 +1543,22 @@ pub(crate) fn lay_first_receive_baseline(
             held: false,
         },
     )?;
-    doc::write_doc(
+    let baseline = PlacementMap {
+        schema_version: topos_types::PLACEMENT_MAP_SCHEMA_VERSION,
+        placements: Vec::new(),
+        applied_commit: ZERO_HEX.to_owned(),
+        materialized_sha: ZERO_HEX.to_owned(),
+        pre_existing_sha: None,
+        swap_capability: SwapCapability::Unsupported,
+        placement_state: Vec::new(),
+        harness: Some(ctx.harness.id()),
+        harness_layer: None,
+        harness_slug: Some(ctx.harness.id().slug().to_owned()),
+    };
+    doc::write_map(
         ctx.fs,
         &sp.map,
-        &PlacementMap {
-            schema_version: PERSISTED_SCHEMA_VERSION,
-            placements: vec![placement.to_string_lossy().into_owned()],
-            applied_commit: ZERO_HEX.to_owned(),
-            materialized_sha: ZERO_HEX.to_owned(),
-            pre_existing_sha: None,
-            swap_capability: SwapCapability::Unsupported,
-            harness: Some(ctx.harness.id()),
-            harness_layer: None,
-            harness_slug: Some(ctx.harness.id().slug().to_owned()),
-        },
+        &crate::placement::reconcile_map(&baseline, &plan),
     )?;
     // lock LAST — the commit marker (recovery keeps a dir only when lock.json is present).
     doc::write_doc(
@@ -1516,6 +1666,7 @@ fn approve(
             plane_base_url: None,
             pending: None,
             currency: None,
+            triggers: Vec::new(),
         },
         resumed,
     })

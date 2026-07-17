@@ -12,6 +12,7 @@ cargo xtask gen-fixtures           # (re)generate the golden --json fixtures und
 cargo xtask gen-fixtures --check   # the fixture drift gate (same stale/missing/orphan discipline)
 cargo xtask gen-cli-ref            # PARKED (bails): restored with the client rewrite
 cargo xtask check-arch             # the architectural-layering + vocabulary + schema-boundary gate
+cargo xtask check-registry-drift   # OPT-IN + advisory: diff the baked harness registry vs upstream agents.ts (network; NEVER in ci/CI)
 cargo xtask ci                     # ALL the non-DB gates, in CI's order, failing fast
 cargo xtask conformance            # the store matrices (not yet implemented — prints so and exits 0)
 ```
@@ -52,6 +53,15 @@ cargo xtask conformance            # the store matrices (not yet implemented —
     tables (`version`, `current_pointer`, `upload`, …) are the only ones its SQL may touch.
   All three scan gates are **red-tested** (`cargo test -p xtask` drives each scan over a violating
   temp tree and asserts it fires, plus a real-tree clean run) and fail closed on a missing dir.
+- **`check-registry-drift`** — an OPT-IN, advisory check (NOT a `ci` gate, NEVER run in CI): it
+  FETCHES the current upstream `agents.ts` from vercel-labs/skills over HTTPS at runtime and diffs it
+  against `topos_harness::registry::known_harnesses()` — reporting rows missing locally, rows gone
+  upstream, and per-row project/global-dir mismatches, and exiting nonzero on any drift so a human
+  notices. Re-syncing the baked table is a deliberate human decision (an agent's dirs are load-bearing
+  for discovery), which is why this stays out of the automated gates. It's a lightweight line parse of
+  the TS, not a real parser: it reads each entry's `name`/`skillsDir`/`globalSkillsDir` and skips the
+  `detectInstalled` bodies, so a detect-only upstream change is a known blind spot — skim `agents.ts`
+  by eye on a real re-sync. (Uses `ureq`, the workspace's blocking transport.)
 - **`ci`** — the contributor's pre-push loop: fmt, clippy, doc, the drift gates, check-arch (the
   cli-ref gate re-joins with the client rewrite). Not covered: `cargo test --workspace` (needs
   `DATABASE_URL`), `cargo deny check`, the sqlx offline-metadata drift job.

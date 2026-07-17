@@ -25,7 +25,6 @@
 //! it (the guard stays conservatively ON until the clear completes).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 
 use topos_core::digest::{self, FileMode, ManifestEntry, to_hex};
 use topos_core::identity::{self, Commit};
@@ -45,13 +44,13 @@ use topos_types::results::{ConflictPathReport, MergeReport, PullAction, PullSkil
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::materialize::{self, MaterializeReq};
+use crate::placement::{self, ScanStatus};
 use crate::scan::ScannedBundle;
 use crate::sidecar::SkillPaths;
 use crate::{doc, logfile};
 
 use super::sync_engine::{
-    DivergedWitness, WorkState, compute_work, first_placement, forwarded_sync, fsync_batch,
-    lock_from_bundle, map_core, snapshot_draft,
+    DivergedWitness, forwarded_sync, fsync_batch, lock_from_bundle, next_map, snapshot_draft,
 };
 
 /// The fixed commit messages for the resolution commits (folded into the `version_id`; must stay constant).
@@ -351,14 +350,25 @@ pub(crate) fn escape_recorded(
     cs: &ConflictState,
 ) -> Result<PullSkill, ClientError> {
     let _ = witness; // the structural gate; the private `escape` below needs no token
-    let WorkState::Present {
-        scanned,
-        digest_hex,
-        ..
-    } = compute_work(ctx, map, lock)?
-    else {
-        // The placement is gone / unreadable — there is nothing to commit, so the conflict is moot; clear
-        // the (now-pointless) block rather than wedge.
+    // The working tree to commit: the ONE edited copy when one exists, else the first clean copy
+    // (the materialized conflict tree matches its recorded sha, so it reads as clean). Several
+    // DISTINCT edited copies are the typed freeze — reconcile first, escape after.
+    let scans = placement::scan_placements(ctx, map)?;
+    let modified = placement::distinct_modified(&scans);
+    let chosen: Option<&ScannedBundle> = match modified.as_slice() {
+        [] => scans.iter().find_map(|s| match &s.status {
+            ScanStatus::Clean { scanned } => Some(scanned),
+            _ => None,
+        }),
+        [(idx, _)] => match &scans[*idx].status {
+            ScanStatus::Modified { scanned } => Some(scanned),
+            _ => None,
+        },
+        _ => return Err(placement::placements_diverged(&lock.name, &scans)),
+    };
+    let Some(scanned) = chosen else {
+        // Every placement is gone / unreadable — there is nothing to commit, so the conflict is moot;
+        // clear the (now-pointless) block rather than wedge.
         ctx.fs.remove_file(&sp.conflict)?;
         return Ok(PullSkill {
             skill: lock.name.clone(),
@@ -371,6 +381,8 @@ pub(crate) fn escape_recorded(
             merge: None,
         });
     };
+    let scanned = scanned.clone();
+    let digest_hex = to_hex(&scanned.bundle_digest);
     let store = Store::open(&sp.store)?;
     let theirs_commit = super::parse_hex32(&cs.current_commit)?;
     let theirs = store.render_verified(theirs_commit, super::parse_hex32(&cs.current_digest)?)?;
@@ -420,13 +432,29 @@ pub(crate) fn recover_resolution(
     let result = store.render_verified(result_commit, conflicted_digest)?;
     let theirs = store.render_verified(theirs_commit, current_digest)?;
 
-    let do_heal = match compute_work(ctx, map, lock)? {
-        WorkState::Absent => true, // mid-swap absent window → finish the first-install.
-        WorkState::Unscannable => false, // never clobber an unreadable tree.
-        WorkState::Present { digest_hex, .. } => {
-            // The conflict tree is on disk (finish docs) OR the pre-resolution draft is still there (the
-            // swap never ran) — both heal to the result. Anything else is an author edit; leave it.
-            digest_hex == cs.conflicted_digest || digest_hex == cs.draft_digest
+    // The heal decision reads the (single) working copy: absent everywhere → finish the
+    // first-install; the conflict tree on disk (finish docs) OR the pre-resolution draft still there
+    // (the swap never ran) → heal to the result; anything else — an author edit, an unreadable tree,
+    // or several divergent copies — is left untouched (never clobbered).
+    let scans = placement::scan_placements(ctx, map)?;
+    let do_heal = if scans
+        .iter()
+        .any(|s| matches!(s.status, ScanStatus::Unscannable))
+    {
+        false
+    } else {
+        let modified = placement::distinct_modified(&scans);
+        let chosen: Option<String> = match modified.as_slice() {
+            [] => scans.iter().find_map(|s| match &s.status {
+                ScanStatus::Clean { scanned } => Some(to_hex(&scanned.bundle_digest)),
+                _ => None,
+            }),
+            [(_, digest_hex)] => Some(digest_hex.clone()),
+            _ => None,
+        };
+        match chosen {
+            None => true, // absent everywhere: the mid-swap absent window → finish the first-install
+            Some(digest_hex) => digest_hex == cs.conflicted_digest || digest_hex == cs.draft_digest,
         }
     };
     if do_heal {
@@ -672,18 +700,22 @@ fn place_draft_on_current(
     let merged_digest_hex = to_hex(&merged.bundle_digest);
     let next_lock = lock_from_bundle(lock, theirs_commit, theirs);
     let next_sync = forwarded_sync(sync, theirs_commit, &merged_digest_hex);
-    let placement = first_placement(map)?;
+    // The resolution converges EVERY managed placement onto the merged tree (the draft copy included
+    // — its bytes are already committed in the store as a merge parent / the recoverable draft).
+    let plan = placement::plan_for_skill(ctx, skill_id, lock, map);
+    let map = placement::reconcile_map(map, &plan);
+    let managed = placement::managed_indices(&map, &plan);
     materialize::materialize(
         ctx.fs,
         &MaterializeReq {
             skill_id,
-            placement_dir: Path::new(&placement),
+            target_indices: &managed,
             bundle: merged,
-            prior_map: map,
-            next_map_core: map_core(map, theirs_commit, &merged_digest_hex),
+            next_map: next_map(&map, theirs_commit, &merged_digest_hex),
             next_lock: &next_lock,
             next_sync: &next_sync,
             sp,
+            snapshot: Some(&|s: &ScannedBundle| snapshot_draft(ctx, sp, lock, s).map(|_| ())),
         },
     )?;
     Ok(())

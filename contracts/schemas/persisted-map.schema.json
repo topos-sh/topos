@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "PlacementMap",
-  "description": "`skills/<id>/map.json` — where a skill is materialized + the hashes that drive no-op uninstall and\nexact go-back. **Field-set pinned**; `swap_capability`'s value enum is INFERRED.",
+  "description": "`skills/<id>/map.json` — where a skill is materialized + the hashes that drive no-op uninstall and\nexact go-back. **Field-set pinned**; `swap_capability`'s value enum is INFERRED.\n\n**Schema v2** (its OWN ceiling, [`crate::PLACEMENT_MAP_SCHEMA_VERSION`]): a skill may hold SEVERAL\nplacements (the shared cross-agent dir + per-harness native dirs), each with its own durable state\nin [`Self::placement_state`], strictly 1:1 with [`Self::placements`]. A v1 document (one placement,\nmap-level state only) upgrades losslessly in memory on read; the map-level `materialized_sha` /\n`pre_existing_sha` / `swap_capability` fields remain the FIRST placement's mirror, so a v2 document\nstays legible to inspection tools that predate the per-placement shape.",
   "type": "object",
   "properties": {
     "applied_commit": {
@@ -10,7 +10,7 @@
       "pattern": "^[0-9a-f]{64}$"
     },
     "harness": {
-      "description": "The harness this skill was adopted into, when topos recognized one at adopt time (e.g. Claude\nCode); `None` for a plain directory tracked in place with no known harness. Drives where the\ncurrency trigger applies. **Additive optional** (a `None` placement omits it). v0 records exactly\none placement, so this single tag is 1:1 with `placements`; a per-placement shape lands if/when a\nskill is ever placed across layers.",
+      "description": "The harness this skill was adopted into, when topos recognized one at adopt time (e.g. Claude\nCode); `None` for a plain directory tracked in place with no known harness. Drives where the\ncurrency trigger applies. **Additive optional** (a `None` placement omits it).",
       "anyOf": [
         {
           "$ref": "#/$defs/HarnessId"
@@ -35,19 +35,26 @@
       ]
     },
     "materialized_sha": {
-      "description": "sha256 of the bytes topos actually wrote (the projection sha) — may differ from the source\n`bundle_digest` if a harness ever projected; with no projection the two match.",
+      "description": "sha256 of the bytes topos actually wrote (the projection sha) — may differ from the source\n`bundle_digest` if a harness ever projected; with no projection the two match. The FIRST\nplacement's mirror in a v2 document (the per-placement truth is `placement_state`).",
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
+    "placement_state": {
+      "description": "Per-placement durable state, strictly 1:1 with [`Self::placements`] after the read upgrade.\nEmpty on disk only in a v1 document (the reader synthesizes the single entry from the\nmap-level fields).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PlacementState"
+      }
+    },
     "placements": {
-      "description": "The target dir(s) where the skill is placed (project / global / per-category layers).",
+      "description": "The target dir(s) where the skill is placed (the shared cross-agent dir and/or per-harness\nnative dirs), 1:1 with [`Self::placement_state`].",
       "type": "array",
       "items": {
         "type": "string"
       }
     },
     "pre_existing_sha": {
-      "description": "sha256 of whatever was in the dir BEFORE placement — restored on uninstall (no-op uninstall).",
+      "description": "sha256 of whatever was in the dir BEFORE placement — restored on uninstall (no-op uninstall).\nThe FIRST placement's mirror in a v2 document.",
       "type": [
         "string",
         "null"
@@ -57,10 +64,11 @@
     "schema_version": {
       "type": "integer",
       "format": "uint32",
-      "const": 1,
+      "const": 2,
       "minimum": 0
     },
     "swap_capability": {
+      "description": "The FIRST placement's swap capability (the per-placement truth is `placement_state`).",
       "$ref": "#/$defs/SwapCapability"
     }
   },
@@ -78,6 +86,62 @@
         "claude-code",
         "openclaw",
         "hermes"
+      ]
+    },
+    "PlacementKind": {
+      "description": "What a placement dir IS — the shared cross-agent convention dir, or one harness's native skills\ndir. **INFERRED value set.**",
+      "oneOf": [
+        {
+          "description": "The shared cross-agent skills dir (one copy, read by every covered harness).",
+          "type": "string",
+          "const": "shared"
+        },
+        {
+          "description": "One harness's own skills dir.",
+          "type": "string",
+          "const": "native"
+        }
+      ]
+    },
+    "PlacementState": {
+      "description": "One placement's durable state (`map.json` v2), 1:1 with [`PlacementMap::placements`]. **Field-set\npinned**; the `kind` value set is INFERRED.",
+      "type": "object",
+      "properties": {
+        "agent": {
+          "description": "The registry slug of the harness a `native` placement serves; `None` for `shared` (and for a\nplain adopted dir under no known harness).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "Whether this dir is the shared cross-agent skills dir or one harness's own skills dir.",
+          "$ref": "#/$defs/PlacementKind"
+        },
+        "materialized_sha": {
+          "description": "sha256 of the bytes topos wrote into THIS dir; `None` = the target is recorded but was never\nmaterialized (a newly added placement awaiting its first apply). Draft detection compares each\ndir against ITS recorded sha, so per-dir drift is classified independently.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "pre_existing_sha": {
+          "description": "sha256 of whatever was in THIS dir BEFORE topos first wrote into it (sticky).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "swap_capability": {
+          "description": "The swap capability probed for THIS dir's filesystem.",
+          "$ref": "#/$defs/SwapCapability"
+        }
+      },
+      "required": [
+        "kind",
+        "swap_capability"
       ]
     },
     "SwapCapability": {

@@ -135,6 +135,7 @@ impl Rig {
             harness: &self.harness,
             plane,
             follow,
+            roots: None,
         }
     }
 }
@@ -339,6 +340,7 @@ fn opts(yes: bool) -> ops::FollowOpts {
         prefix_dirname: false,
         channels: Vec::new(),
         skills: Vec::new(),
+        agents: Vec::new(),
     }
 }
 

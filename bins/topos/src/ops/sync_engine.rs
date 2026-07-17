@@ -28,10 +28,10 @@ use topos_types::results::{Conflict, Offer, PullAction, PullSkill};
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
-use crate::fs_seam::PathKind;
-use crate::materialize::{self, MaterializeReport, MaterializeReq, NextMapCore};
+use crate::materialize::{self, MaterializeReport, MaterializeReq};
+use crate::placement::{self, ScanStatus};
 use crate::plane::{FollowContext, FollowMode, KnownCurrent, PlaneError, PointerFetch};
-use crate::scan::{self, ScannedBundle};
+use crate::scan::ScannedBundle;
 use crate::{doc, logfile, sidecar};
 
 /// The fixed commit message for a draft snapshot (folded into its `version_id`; must stay constant).
@@ -108,7 +108,7 @@ pub(crate) fn sync_one_with(
     let skill_id = skill_id.as_str();
     let mut sync: SyncState = read_required(ctx, &sp.sync, "sync.json")?;
     let lock: Lock = read_required(ctx, &sp.lock, "lock.json")?;
-    let map: PlacementMap = read_required(ctx, &sp.map, "map.json")?;
+    let map: PlacementMap = read_map_required(ctx, &sp)?;
     let name = lock.name.clone();
 
     // A never-received followed skill (the first-receive baseline `follow` lays: nothing observed yet, no
@@ -192,11 +192,18 @@ pub(crate) fn sync_one_with(
     }
 
     // ---- plan: classify via the kernel's four-state transition, driving toward `observed` ----
+    // The placement TARGET SET is recomputed each sync (a newly detected harness / newly true
+    // coverage adds a target; a record only ever leaves through an explicit verb). The reconciled
+    // map carries every recorded placement — appended targets are never-materialized until an apply.
     let applied_eq_observed = sync.applied == sync.observed;
-    let work = compute_work(ctx, &map, &lock)?;
-    let work_eq_base = match &work {
-        WorkState::Absent => true, // nothing on disk to clobber → a clean install
-        WorkState::Present { eq_base, .. } => *eq_base,
+    let plan = placement::plan_for_skill(ctx, skill_id, &lock, &map);
+    let map = placement::reconcile_map(&map, &plan);
+    let managed = placement::managed_indices(&map, &plan);
+    let work = compute_work(ctx, &map, &lock, &name)?;
+    let work_eq_base = match &work.state {
+        // Nothing on disk to clobber (a clean install) / the work tree matches the locked base.
+        WorkState::Absent | WorkState::CleanAtBase => true,
+        WorkState::Draft { .. } => false,
         WorkState::Unscannable => {
             // An unreadable placement matters only if there is a pending update; never silently
             // fast-forward over it (fail closed), but if already current there is nothing to do.
@@ -209,8 +216,12 @@ pub(crate) fn sync_one_with(
         }
     };
     match sync::decide_state(work_eq_base, applied_eq_observed) {
-        // ① CURRENT / ③ DRAFT — no pending remote update (a draft is surfaced by `list`/`diff`, never nagged).
+        // ① CURRENT / ③ DRAFT — no pending remote update (a draft is surfaced by `list`/`diff`, never
+        // nagged). A missing or stale MANAGED placement (a newly added target, a copy behind the
+        // applied version) is still converged from the LOCAL store — this is where a new agent's dir
+        // (or a scope change) gets its bytes without waiting for the next served version.
         sync::SyncStatus::Current | sync::SyncStatus::Draft => {
+            converge_placements(ctx, &sp, skill_id, &lock, &sync, &map, &managed, &work)?;
             return Ok(state_row(&name, &sync, PullAction::UpToDate));
         }
         // ② BEHIND / ④ DIVERGED — an update is pending; fall through to fetch + apply.
@@ -240,10 +251,10 @@ pub(crate) fn sync_one_with(
     // story) — corruption evidence, never a transient skip.
     let bundle = store.render_verified(target_commit, target_digest)?;
     let target_digest_hex = to_hex(&target_digest);
-    let work_eq_target = match &work {
-        WorkState::Present { digest_hex, .. } => *digest_hex == target_digest_hex,
-        _ => false,
-    };
+    // "At target" is now an EVERYWHERE fact: every managed placement must already hold the target's
+    // bytes for the no-swap heal — a partial landing (a crash mid-loop, a newly added dir) stays a
+    // CleanForward, whose apply loop skips the landed dirs and swaps only the rest.
+    let work_eq_target = all_managed_at_target(&work.scans, &managed, &target_digest_hex);
 
     // ---- apply ----
     let t = ApplyTarget {
@@ -255,7 +266,7 @@ pub(crate) fn sync_one_with(
         ApplyClass::AlreadyAtTarget => {
             // The bytes already equal the target (a crash after a prior swap, or an idempotent re-pull):
             // advance `applied` with NO swap, never a false DIVERGED — and no spurious draft snapshot.
-            heal_forward(ctx, &sp, &map, &lock, &sync, &t)?;
+            heal_forward(ctx, &sp, &map, &managed, &lock, &sync, &t)?;
             Ok(applied_row(&name, &sync, target_commit))
         }
         ApplyClass::CleanForward => {
@@ -264,7 +275,7 @@ pub(crate) fn sync_one_with(
             if topos_core::consent::decide(situation_for(follow, explicit, raised, first_receive))
                 .applies_bytes()
             {
-                apply_forward(ctx, &sp, &map, &lock, &sync, skill_id, &t)?;
+                apply_forward(ctx, &sp, &map, &managed, &lock, &sync, skill_id, &t)?;
                 Ok(applied_row(&name, &sync, target_commit))
             } else {
                 // confirm-each / first-receive TOFU: re-disclose the digest as a one-tap offer; nothing
@@ -274,8 +285,9 @@ pub(crate) fn sync_one_with(
         }
         ApplyClass::Diverged => {
             // ④ a GENUINE local draft vs a newer remote — resolve it (author-side three-way merge / escape).
-            // DIVERGED implies `work != base`, which can only hold for a Present placement.
-            let WorkState::Present { scanned, .. } = &work else {
+            // DIVERGED implies `work != base`, which can only hold for a Draft work tree (the ONE
+            // edited copy — several divergent copies froze typed back in compute_work).
+            let WorkState::Draft { scanned } = &work.state else {
                 return Ok(diverged_row(&name, &sync, target_commit, None));
             };
             // The structural author-only gate: the witness is minted ONLY here.
@@ -333,8 +345,11 @@ pub(crate) fn go_back(
     let skill_id = skill_id.as_str();
     let sync: SyncState = read_required(ctx, &sp.sync, "sync.json")?;
     let lock: Lock = read_required(ctx, &sp.lock, "lock.json")?;
-    let map: PlacementMap = read_required(ctx, &sp.map, "map.json")?;
+    let map: PlacementMap = read_map_required(ctx, &sp)?;
     let name = lock.name.clone();
+    let plan = placement::plan_for_skill(ctx, skill_id, &lock, &map);
+    let map = placement::reconcile_map(&map, &plan);
+    let managed = placement::managed_indices(&map, &plan);
 
     // Resolve the ref against the versions this client holds LOCALLY (the go-back can only install bytes it
     // already has). A prefix that matches no local version reports the same typed error a full unknown id does.
@@ -347,27 +362,12 @@ pub(crate) fn go_back(
     })?;
     let target_hex = to_hex(&target);
 
-    // Snapshot-on-touch FIRST. A go-back is an explicit OVERWRITE of the placement, so it must never
-    // silently lose an unsaved local draft (the never-clobber rail applies here exactly as in the sweep).
-    // Classify the working tree under the held flock: an unreadable placement fails closed; a draft is
-    // committed to the sidecar store before the swap (recoverable); a clean/absent one proceeds.
-    let work = compute_work(ctx, &map, &lock)?;
-    match &work {
-        WorkState::Unscannable => {
-            return Err(ClientError::PlacementUnsupported {
-                reason: "the placement cannot be read; refusing a go-back that might clobber it"
-                    .into(),
-            });
-        }
-        WorkState::Present {
-            eq_base: false,
-            scanned,
-            ..
-        } => {
-            snapshot_draft(ctx, &sp, &lock, scanned)?;
-        }
-        _ => {}
-    }
+    // Snapshot-on-touch FIRST. A go-back is an explicit OVERWRITE of the placements, so it must never
+    // silently lose an unsaved local edit (the never-clobber rail applies here exactly as in the
+    // sweep) — EVERY distinct edited copy is committed to the sidecar store before any swap (a
+    // go-back deliberately converges divergent copies, so it snapshots them all rather than freezing).
+    // An unreadable placement fails closed.
+    snapshot_all_modified(ctx, &sp, &lock, &map, "a go-back")?;
 
     // The target's bytes must be readable from the local store (a previously-applied version); a
     // present-but-unreadable version (e.g. a dangling ref) is refused with the typed go-back error
@@ -403,18 +403,22 @@ pub(crate) fn go_back(
         held: true,
     };
     let next_lock = lock_from_bundle(&lock, target, &bundle);
-    let placement = first_placement(&map)?;
     let report = materialize::materialize(
         ctx.fs,
         &MaterializeReq {
             skill_id,
-            placement_dir: Path::new(&placement),
+            target_indices: &managed,
             bundle: &bundle,
-            prior_map: &map,
-            next_map_core: map_core(&map, target, &target_digest_hex),
+            next_map: next_map(&map, target, &target_digest_hex),
             next_lock: &next_lock,
             next_sync: &next_sync,
             sp: &sp,
+            // Every edited copy was snapshotted above; the seam stays armed for the crash window
+            // between that snapshot and the swap (idempotent — a re-snapshot of the same bytes is
+            // a no-op commit).
+            snapshot: Some(&|scanned: &ScannedBundle| {
+                snapshot_draft(ctx, &sp, &lock, scanned).map(|_| ())
+            }),
         },
     )?;
     log_apply(ctx, skill_id, "pull-goback", target, &report);
@@ -449,38 +453,26 @@ pub(crate) fn reset_to_base(
     let sid = skill_id.as_str();
     let sync: SyncState = read_required(ctx, &sp.sync, "sync.json")?;
     let lock: Lock = read_required(ctx, &sp.lock, "lock.json")?;
-    let map: PlacementMap = read_required(ctx, &sp.map, "map.json")?;
+    let map: PlacementMap = read_map_required(ctx, &sp)?;
+    let plan = placement::plan_for_skill(ctx, sid, &lock, &map);
+    let map = placement::reconcile_map(&map, &plan);
+    let managed = placement::managed_indices(&map, &plan);
 
     let base = super::parse_hex32(&lock.base_commit)?;
     let base_digest = super::parse_hex32(&lock.bundle_digest)?;
     let base_digest_hex = lock.bundle_digest.clone();
 
-    // Snapshot-on-touch FIRST — a reset OVERWRITES the placement, so a draft is committed to the store
-    // (recoverable) before the swap; an unreadable placement fails closed rather than risk a clobber.
-    let work = compute_work(ctx, &map, &lock)?;
-    match &work {
-        WorkState::Unscannable => {
-            return Err(ClientError::PlacementUnsupported {
-                reason: "the placement cannot be read; refusing a reset that might clobber it"
-                    .into(),
-            });
-        }
-        WorkState::Present {
-            eq_base: false,
-            scanned,
-            ..
-        } => {
-            snapshot_draft(ctx, &sp, &lock, scanned)?;
-        }
-        // Already pristine (or absent) — nothing to discard; the re-materialize below is a safe no-op swap.
-        _ => {}
-    }
+    // Snapshot-on-touch FIRST — a reset OVERWRITES the placements, so EVERY distinct edited copy is
+    // committed to the store (recoverable) before any swap. `update --reset` is also the disclosed
+    // way OUT of the divergent-copies freeze, so it never freezes itself — it snapshots each copy and
+    // converges them all back to base. An unreadable placement fails closed rather than risk a clobber.
+    snapshot_all_modified(ctx, &sp, &lock, &map, "a reset")?;
 
     let store = Store::open(&sp.store)?;
     let bundle = store.render_verified(base, base_digest)?;
     fsync_batch(ctx, &store.version_durability(&base)?)?;
 
-    // The restored state: base bytes on the placement, work_hash back at the base digest, held cleared,
+    // The restored state: base bytes on the placements, work_hash back at the base digest, held cleared,
     // observed/applied unchanged (the team's current never moved).
     let next_sync = SyncState {
         schema_version: sync.schema_version,
@@ -491,18 +483,19 @@ pub(crate) fn reset_to_base(
         work_hash: base_digest_hex.clone(),
         held: false,
     };
-    let placement = first_placement(&map)?;
     let report = materialize::materialize(
         ctx.fs,
         &MaterializeReq {
             skill_id: sid,
-            placement_dir: Path::new(&placement),
+            target_indices: &managed,
             bundle: &bundle,
-            prior_map: &map,
-            next_map_core: map_core(&map, base, &base_digest_hex),
+            next_map: next_map(&map, base, &base_digest_hex),
             next_lock: &lock,
             next_sync: &next_sync,
             sp: &sp,
+            snapshot: Some(&|scanned: &ScannedBundle| {
+                snapshot_draft(ctx, &sp, &lock, scanned).map(|_| ())
+            }),
         },
     )?;
     log_apply(ctx, sid, "update-reset", base, &report);
@@ -576,11 +569,15 @@ struct ApplyTarget<'a> {
     bundle: &'a topos_gitstore::RenderedBundle,
 }
 
-/// A clean forward apply: materialize the target onto the placement and advance `applied → observed`.
+/// A clean forward apply: materialize the target onto EVERY managed placement (each its own staged
+/// atomic swap; already-landed dirs skip the swap) and advance `applied → observed` only after all of
+/// them hold the new bytes.
+#[allow(clippy::too_many_arguments)]
 fn apply_forward(
     ctx: &Ctx<'_>,
     sp: &sidecar::SkillPaths,
     map: &PlacementMap,
+    managed: &[usize],
     lock: &Lock,
     sync: &SyncState,
     skill_id: &str,
@@ -588,22 +585,138 @@ fn apply_forward(
 ) -> Result<(), ClientError> {
     let next_sync = forwarded_sync(sync, t.commit, t.digest_hex);
     let next_lock = lock_from_bundle(lock, t.commit, t.bundle);
-    let placement = first_placement(map)?;
     let report = materialize::materialize(
         ctx.fs,
         &MaterializeReq {
             skill_id,
-            placement_dir: Path::new(&placement),
+            target_indices: managed,
             bundle: t.bundle,
-            prior_map: map,
-            next_map_core: map_core(map, t.commit, t.digest_hex),
+            next_map: next_map(map, t.commit, t.digest_hex),
             next_lock: &next_lock,
             next_sync: &next_sync,
             sp,
+            // The pre-overwrite rail: a dir whose bytes differ from ITS recorded sha (an edit no
+            // snapshot captured — a crash-window residue on this clean-follower path) is snapshotted
+            // into the store before the swap. Never a lost byte.
+            snapshot: Some(&|scanned: &ScannedBundle| {
+                snapshot_draft(ctx, sp, lock, scanned).map(|_| ())
+            }),
         },
     )?;
     log_apply(ctx, skill_id, "pull", t.commit, &report);
     Ok(())
+}
+
+/// Converge the MANAGED placements onto the ALREADY-APPLIED version from the LOCAL store: fill a
+/// never-materialized / absent target (a newly detected harness, a fresh `--agent` scope) and refresh
+/// a clean-but-stale copy — without any network and without touching `observed`/`applied` (the team's
+/// current did not move; this is purely the local fan-out catching up). A draft copy is never
+/// touched (only Absent / stale-Clean dirs are targets), and a never-received baseline (no local
+/// bytes yet) is a no-op.
+#[allow(clippy::too_many_arguments)]
+fn converge_placements(
+    ctx: &Ctx<'_>,
+    sp: &sidecar::SkillPaths,
+    skill_id: &str,
+    lock: &Lock,
+    sync: &SyncState,
+    map: &PlacementMap,
+    managed: &[usize],
+    work: &WorkTree,
+) -> Result<(), ClientError> {
+    if is_zero_commit(&lock.base_commit) {
+        return Ok(()); // never received — nothing local to place yet
+    }
+    let missing: Vec<usize> = managed
+        .iter()
+        .copied()
+        .filter(|&i| {
+            work.scans.get(i).is_some_and(|s| match &s.status {
+                ScanStatus::Absent => true,
+                // A clean REPLICA at a different version than the lock's base is stale — refreshed
+                // ONLY when the work tree itself is at base (never toward or over a live draft:
+                // a recorded draft-on-current keeps every copy untouched until it resolves).
+                ScanStatus::Clean { scanned } => {
+                    matches!(work.state, WorkState::CleanAtBase)
+                        && to_hex(&scanned.bundle_digest) != lock.bundle_digest
+                }
+                // Edited, foreign, or unreadable dirs are never converge targets.
+                ScanStatus::Modified { .. } | ScanStatus::Foreign | ScanStatus::Unscannable => {
+                    false
+                }
+            })
+        })
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let base = super::parse_hex32(&lock.base_commit)?;
+    let base_digest = super::parse_hex32(&lock.bundle_digest)?;
+    let store = Store::open(&sp.store)?;
+    let bundle = store.render_verified(base, base_digest)?;
+    fsync_batch(ctx, &store.version_durability(&base)?)?;
+    let report = materialize::materialize(
+        ctx.fs,
+        &MaterializeReq {
+            skill_id,
+            target_indices: &missing,
+            bundle: &bundle,
+            next_map: next_map(map, base, &lock.bundle_digest),
+            next_lock: lock,
+            next_sync: sync, // unchanged — the served target did not move
+            sp,
+            snapshot: Some(&|scanned: &ScannedBundle| {
+                snapshot_draft(ctx, sp, lock, scanned).map(|_| ())
+            }),
+        },
+    )?;
+    log_apply(ctx, skill_id, "converge", base, &report);
+    Ok(())
+}
+
+/// Snapshot EVERY distinct edited copy into the sidecar store (the explicit-overwrite verbs' rail:
+/// go-back / reset converge divergent copies rather than freezing, so each distinct edit is retained
+/// first). Fails closed on an unscannable placement — `what` names the refusing verb.
+fn snapshot_all_modified(
+    ctx: &Ctx<'_>,
+    sp: &sidecar::SkillPaths,
+    lock: &Lock,
+    map: &PlacementMap,
+    what: &str,
+) -> Result<(), ClientError> {
+    let scans = placement::scan_placements(ctx, map)?;
+    if scans
+        .iter()
+        .any(|s| matches!(s.status, ScanStatus::Unscannable))
+    {
+        return Err(ClientError::PlacementUnsupported {
+            reason: format!("a placement cannot be read; refusing {what} that might clobber it"),
+        });
+    }
+    for (idx, _) in placement::distinct_modified(&scans) {
+        if let ScanStatus::Modified { scanned } = &scans[idx].status {
+            snapshot_draft(ctx, sp, lock, scanned)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether every MANAGED placement already holds the target bytes (the no-swap heal precondition).
+/// An empty managed set is vacuously false — there is nothing to advance `applied` over.
+fn all_managed_at_target(
+    scans: &[placement::PlacementScan],
+    managed: &[usize],
+    target_digest_hex: &str,
+) -> bool {
+    !managed.is_empty()
+        && managed.iter().all(|&i| {
+            scans.get(i).is_some_and(|s| match &s.status {
+                ScanStatus::Clean { scanned } | ScanStatus::Modified { scanned } => {
+                    to_hex(&scanned.bundle_digest) == target_digest_hex
+                }
+                ScanStatus::Absent | ScanStatus::Foreign | ScanStatus::Unscannable => false,
+            })
+        })
 }
 
 /// A best-effort action-log note (the spec's "quiet note") — the apply already succeeded, so a log hiccup
@@ -630,31 +743,31 @@ fn log_apply(
     );
 }
 
-/// The heal: the placement already holds the target bytes (a completed-but-unrecorded apply). Advance the
-/// docs (map → lock → sync) with NO swap, via the shared `commit_docs` + `derive_pre_existing_sha`.
+/// The heal: every managed placement already holds the target bytes (a completed-but-unrecorded
+/// apply). Advance the docs (map → lock → sync) with NO swap — each managed placement's state records
+/// the target sha (pre-existing captured stickily; the dirs are present, they hold the bytes).
 fn heal_forward(
     ctx: &Ctx<'_>,
     sp: &sidecar::SkillPaths,
     map: &PlacementMap,
+    managed: &[usize],
     lock: &Lock,
     sync: &SyncState,
     t: &ApplyTarget<'_>,
 ) -> Result<(), ClientError> {
     let next_sync = forwarded_sync(sync, t.commit, t.digest_hex);
     let next_lock = lock_from_bundle(lock, t.commit, t.bundle);
-    let next_map = PlacementMap {
-        schema_version: map.schema_version,
-        placements: map.placements.clone(),
-        applied_commit: to_hex(&t.commit),
-        materialized_sha: t.digest_hex.to_owned(),
-        // The placement is present (it holds the target bytes), so a prior overwrite is captured stickily.
-        pre_existing_sha: materialize::derive_pre_existing_sha(map, true),
-        swap_capability: map.swap_capability,
-        harness: map.harness,
-        harness_layer: map.harness_layer.clone(),
-        harness_slug: map.harness_slug.clone(),
-    };
-    materialize::commit_docs(ctx.fs, sp, &next_map, &next_lock, &next_sync)
+    let mut next = next_map(map, t.commit, t.digest_hex);
+    for &i in managed {
+        let prior = next.placement_state[i].clone();
+        next.placement_state[i] = topos_types::persisted::PlacementState {
+            materialized_sha: Some(t.digest_hex.to_owned()),
+            pre_existing_sha: materialize::derive_pre_existing_state(&prior, true),
+            ..prior
+        };
+    }
+    materialize::mirror_first_placement(&mut next);
+    materialize::commit_docs(ctx.fs, sp, &next, &next_lock, &next_sync)
 }
 
 /// The forward target sync state: `applied = observed`, base/work move to the target, `held` cleared.
@@ -675,17 +788,18 @@ pub(crate) fn forwarded_sync(
     }
 }
 
-pub(crate) fn map_core(
+/// The engine-computed next map for an apply toward `target`: the (already reconciled) placements +
+/// their PRIOR per-placement states — the materializer updates each landed state — with the map-level
+/// summary advanced.
+pub(crate) fn next_map(
     map: &PlacementMap,
     target: [u8; 32],
     target_digest_hex: &str,
-) -> NextMapCore {
-    NextMapCore {
-        placements: map.placements.clone(),
+) -> PlacementMap {
+    PlacementMap {
         applied_commit: to_hex(&target),
         materialized_sha: target_digest_hex.to_owned(),
-        harness: map.harness,
-        harness_layer: map.harness_layer.clone(),
+        ..map.clone()
     }
 }
 
@@ -712,6 +826,12 @@ pub(crate) fn snapshot_draft(
     .map_err(|_| ClientError::Corrupt("draft snapshot commit id".into()))?;
 
     let store = Store::open(&sp.store)?;
+    // Idempotent: the snapshot id is deterministic (base + tree + author + a fixed message), so a
+    // re-snapshot of the same bytes (the multi-placement paths may see one draft twice — once at the
+    // pre-verb snapshot, once at the materializer's pre-overwrite rail) is a clean no-op.
+    if store.list_versions()?.contains(&draft_id) {
+        return Ok(to_hex(&draft_id));
+    }
     let import: Vec<ImportFile<'_>> = scanned
         .files
         .iter()
@@ -860,54 +980,88 @@ fn store_bundle_digest(store: &Store, version_id: [u8; 32]) -> Result<[u8; 32], 
 // Working-tree classification.
 // ---------------------------------------------------------------------------------------------
 
+/// The AGGREGATE work-tree state across every recorded placement — draft-anywhere classification.
 pub(crate) enum WorkState {
-    /// The placement directory does not exist — a clean first install (nothing to clobber).
+    /// No placement holds bytes — a clean first install (nothing to clobber).
     Absent,
-    /// The placement scanned cleanly; `eq_base` is whether it matches the locked base bytes. Carries the
-    /// scan so a draft is snapshotted from the exact bytes the decision was made on (scanned once).
-    Present {
-        digest_hex: String,
-        eq_base: bool,
-        scanned: ScannedBundle,
-    },
-    /// The placement exists but cannot be scanned safely — fail closed, never overwrite it.
+    /// The work tree matches the locked base bytes (replicas may be STALE — a clean converge
+    /// refreshes them from the local store, losing nothing).
+    CleanAtBase,
+    /// The work tree differs from the locked base — the kernel's state-③/④ fodder. Carries the scan
+    /// so the draft is snapshotted from the exact bytes the decision was made on (the single-work-tree
+    /// surfaces — diff / publish / merge — locate the copy through `placement::work_tree_dir`).
+    Draft { scanned: ScannedBundle },
+    /// A placement exists but cannot be scanned safely — fail closed, never overwrite it.
     Unscannable,
 }
 
-/// Classify the placement directory against the locked base digest. Distinguishes ABSENT (a safe install)
-/// from UNSCANNABLE (a hazardous tree — fail closed, never clobber), unlike read-only `list`'s two-way
-/// `is_draft` which collapses both to "no draft".
+/// The classified work tree + the per-placement scans it was derived from (the apply loop and the
+/// at-target refinement read the rows; the kernel reads the aggregate).
+pub(crate) struct WorkTree {
+    pub scans: Vec<placement::PlacementScan>,
+    pub state: WorkState,
+}
+
+/// Classify the placements into ONE work tree — draft-anywhere:
+///
+/// - Each copy is scanned against ITS OWN recorded per-placement sha. Exactly one distinct EDITED
+///   copy ⇒ that copy is THE work tree (the draft may live in the shared dir or any native copy);
+///   MORE than one (with differing bytes) ⇒ the typed [`ClientError::PlacementsDiverged`] freeze —
+///   nothing is overwritten, every edited path is disclosed, and `update --reset` (or
+///   hand-reconciling) is the named way out.
+/// - With NO edited copy, the work tree is the FIRST placement's copy (the canonical one — the exact
+///   single-placement behavior), falling back to the first present copy. Its digest vs the LOCK
+///   decides clean-vs-draft for the kernel: a copy that matches its recorded sha but not the lock is
+///   a RECORDED draft (draft-on-current, the merge's landing shape), never silently re-based.
+///
+/// Distinguishes ABSENT (a safe install) from UNSCANNABLE (fail closed, never clobber).
 pub(crate) fn compute_work(
     ctx: &Ctx<'_>,
     map: &PlacementMap,
     lock: &Lock,
-) -> Result<WorkState, ClientError> {
-    let Some(placement) = map.placements.first() else {
-        return Ok(WorkState::Absent);
+    skill_name: &str,
+) -> Result<WorkTree, ClientError> {
+    let scans = placement::scan_placements(ctx, map)?;
+    if scans
+        .iter()
+        .any(|s| matches!(s.status, ScanStatus::Unscannable))
+    {
+        return Ok(WorkTree {
+            scans,
+            state: WorkState::Unscannable,
+        });
+    }
+    let modified = placement::distinct_modified(&scans);
+    if modified.len() > 1 {
+        return Err(placement::placements_diverged(skill_name, &scans));
+    }
+    // The work tree: the single edited copy when one exists, else the first (canonical) present copy.
+    let chosen: Option<&placement::PlacementScan> = match modified.first() {
+        Some((idx, _)) => Some(&scans[*idx]),
+        None => scans.iter().find(|s| {
+            matches!(
+                s.status,
+                ScanStatus::Clean { .. } | ScanStatus::Modified { .. }
+            )
+        }),
     };
-    let p = Path::new(placement);
-    match ctx.fs.path_kind(p)? {
-        None => return Ok(WorkState::Absent),
-        // A dangling symlink (its target is gone — e.g. a crash in the rename-dance absent window) is
-        // effectively ABSENT: the next pull first-installs into the resolved target and recovers, rather
-        // than failing forever on an "unscannable" placement.
-        Some(PathKind::Symlink) if std::fs::canonicalize(p).is_err() => {
-            return Ok(WorkState::Absent);
+    let state = match chosen {
+        None => WorkState::Absent,
+        Some(s) => {
+            let scanned = match &s.status {
+                ScanStatus::Clean { scanned } | ScanStatus::Modified { scanned } => scanned,
+                _ => unreachable!("chosen is always a scanned copy"),
+            };
+            if to_hex(&scanned.bundle_digest) == lock.bundle_digest {
+                WorkState::CleanAtBase
+            } else {
+                WorkState::Draft {
+                    scanned: scanned.clone(),
+                }
+            }
         }
-        _ => {}
-    }
-    match scan::scan(p) {
-        Ok(scanned) => {
-            let digest_hex = to_hex(&scanned.bundle_digest);
-            let eq_base = digest_hex == lock.bundle_digest;
-            Ok(WorkState::Present {
-                digest_hex,
-                eq_base,
-                scanned,
-            })
-        }
-        Err(_) => Ok(WorkState::Unscannable),
-    }
+    };
+    Ok(WorkTree { scans, state })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1013,11 +1167,13 @@ pub(crate) fn lock_from_bundle(
     }
 }
 
-pub(crate) fn first_placement(map: &PlacementMap) -> Result<String, ClientError> {
-    map.placements
-        .first()
-        .cloned()
-        .ok_or_else(|| ClientError::Corrupt("placement map has no placement".into()))
+/// Read the required `map.json` through the per-doc versioned reader (`v1` upgrades in memory).
+pub(crate) fn read_map_required(
+    ctx: &Ctx<'_>,
+    sp: &sidecar::SkillPaths,
+) -> Result<PlacementMap, ClientError> {
+    doc::read_map(ctx.fs, &sp.map)?
+        .ok_or_else(|| ClientError::Corrupt("missing map.json for a followed skill".into()))
 }
 
 /// fsync a named durability batch through the fault-injectable fs seam — files first, then the dirs

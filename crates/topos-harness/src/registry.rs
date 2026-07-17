@@ -726,6 +726,16 @@ static HARNESSES: &[KnownHarness] = &[
         &[cfg("zed"), appdata("Zed"), flatpak("zed")],
     ),
     kh(
+        "zcode",
+        "ZCode",
+        false,
+        &[home(".zcode/skills")],
+        ".zcode/skills",
+        // Present when either the home config dir OR the macOS app bundle exists (the reference probes
+        // both) — the `.app` path is joined onto the filesystem root, like `codex`'s `/etc/codex`.
+        &[home(".zcode"), abs("Applications/ZCode.app")],
+    ),
+    kh(
         "zencoder",
         "Zencoder",
         false,
@@ -789,6 +799,59 @@ pub fn known_harnesses() -> &'static [KnownHarness] {
     HARNESSES
 }
 
+impl KnownHarness {
+    /// The project/cwd-relative skills dir — a `/`-separated path, verbatim as ported from upstream's
+    /// `skillsDir`.
+    #[must_use]
+    pub fn project_dir(&self) -> &'static str {
+        self.project_dir
+    }
+
+    /// Each user/global skills dir as a canonical RAW spec string — the resolution root named by the
+    /// upstream variable it maps to (`home`, `configHome`, `codexHome`, `claudeHome`, `vibeHome`,
+    /// `hermesHome`, `autohandHome`, `cwd`, `APPDATA`, `FLATPAK_XDG_CONFIG_HOME`; an absolute root renders
+    /// `/`-rooted) followed by the `/`-joined suffix. This is the shape upstream's `join(<root>, …)`
+    /// expressions reduce to, so an out-of-band checker can compare the two tables' dir strings without
+    /// resolving anything against a real home. Usually one entry; `openclaw` has three, the two cwd-only
+    /// harnesses (`eve`, `promptscript`) have none.
+    #[must_use]
+    pub fn user_dir_specs(&self) -> Vec<String> {
+        self.user_dirs.iter().map(spec_display).collect()
+    }
+
+    /// Each "is this harness installed" detect dir as a canonical RAW spec string — same encoding as
+    /// [`Self::user_dir_specs`].
+    #[must_use]
+    pub fn detect_dir_specs(&self) -> Vec<String> {
+        self.detect_dirs.iter().map(spec_display).collect()
+    }
+}
+
+/// Render a [`DirSpec`] to its canonical RAW string (see [`KnownHarness::user_dir_specs`]) — the root as a
+/// tag naming its upstream resolution variable (an absolute root is the empty tag → a leading `/`), joined
+/// to the `/`-separated suffix.
+fn spec_display(spec: &DirSpec) -> String {
+    let tag = match spec.root {
+        Root::Home => "home",
+        Root::Config => "configHome",
+        Root::CodexHome => "codexHome",
+        Root::ClaudeHome => "claudeHome",
+        Root::VibeHome => "vibeHome",
+        Root::HermesHome => "hermesHome",
+        Root::AutohandHome => "autohandHome",
+        Root::Cwd => "cwd",
+        Root::Abs => "", // an absolute path — renders `/`-rooted below
+        Root::Appdata => "APPDATA",
+        Root::FlatpakConfig => "FLATPAK_XDG_CONFIG_HOME",
+    };
+    match (tag.is_empty(), spec.suffix.is_empty()) {
+        (true, true) => "/".to_owned(),
+        (true, false) => format!("/{}", spec.suffix),
+        (false, true) => tag.to_owned(),
+        (false, false) => format!("{tag}/{}", spec.suffix),
+    }
+}
+
 /// Probe every known harness present on this machine, return the skills found.
 ///
 /// `home` = the user's home dir. `cwd` = the project dir for project-scope discovery (`None` skips
@@ -843,6 +906,18 @@ pub fn attribute_path(path: &Path, home: &Path, cwd: Option<&Path>) -> Option<Ha
         }
     }
     None
+}
+
+/// Every known harness that looks INSTALLED on this machine — the rows whose detect dirs exist
+/// (the same presence gate [`discover_all`] probes behind). The placement engine's detection
+/// read: which agents are actually here, so a followed skill's bytes can reach each of them.
+/// Table order is preserved (the same first-match tie-break every other query uses).
+#[must_use]
+pub fn detected_harnesses(home: &Path, cwd: Option<&Path>) -> Vec<&'static KnownHarness> {
+    HARNESSES
+        .iter()
+        .filter(|h| is_present(h, home, cwd))
+        .collect()
 }
 
 /// The skills directory a NEW skill for harness `slug` should land in at `scope`, resolved against
@@ -1080,7 +1155,7 @@ mod tests {
     #[test]
     fn table_shape_is_the_ported_registry() {
         let all = known_harnesses();
-        assert_eq!(all.len(), 72, "every vercel-labs/skills agent is ported");
+        assert_eq!(all.len(), 73, "every vercel-labs/skills agent is ported");
 
         // Slugs are unique.
         let mut slugs: Vec<&str> = all.iter().map(|h| h.slug).collect();
@@ -1096,6 +1171,30 @@ mod tests {
             .map(|h| h.slug)
             .collect();
         assert_eq!(supported, vec!["claude-code", "openclaw", "hermes-agent"]);
+
+        // `zcode` sits between `zed` and `zencoder` in upstream file order — and row order fixes the
+        // shared-dir tie-break, so pin the neighbours, not just the membership.
+        let pos = |slug: &str| all.iter().position(|h| h.slug == slug);
+        let zed = pos("zed").expect("zed present");
+        let zcode = pos("zcode").expect("zcode present");
+        let zencoder = pos("zencoder").expect("zencoder present");
+        assert_eq!(zcode, zed + 1, "zcode follows zed");
+        assert_eq!(zencoder, zcode + 1, "zcode precedes zencoder");
+
+        // The new row's dir specs, through the raw accessors (also the accessors' own coverage): the home
+        // config dir and the absolute macOS app-bundle both mark it present.
+        let zc = &all[zcode];
+        assert_eq!(zc.display_name, "ZCode");
+        assert!(!zc.adapter_supported);
+        assert_eq!(zc.project_dir(), ".zcode/skills");
+        assert_eq!(zc.user_dir_specs(), vec!["home/.zcode/skills".to_owned()]);
+        assert_eq!(
+            zc.detect_dir_specs(),
+            vec![
+                "home/.zcode".to_owned(),
+                "/Applications/ZCode.app".to_owned(),
+            ]
+        );
     }
 
     #[test]

@@ -16,8 +16,14 @@ topos-plane.workspace = true # the OSS vault lib — for `topos_plane::openapi()
 # The client lib — for `topos::cli_command()` (the CLI-reference drift gate). Default features ONLY: the
 # `test-fixtures` surface stays OFF, so gen-cli-ref never compiles the test-only `test_support` facade.
 topos = { workspace = true }
+# The baked harness registry — `check-registry-drift` reads `topos_harness::registry::known_harnesses()`
+# to diff it against upstream `agents.ts` (advisory + opt-in; not a `ci` gate, never run in CI).
+topos-harness.workspace = true
 # The SAME clap the client links — gen-cli-ref introspects the `clap::Command` tree `topos` hands back.
 clap = { workspace = true }
+# The workspace's blocking rustls+ring transport — `check-registry-drift` fetches upstream `agents.ts`
+# at runtime (opt-in + advisory; NEVER wired into `ci`, never run in CI).
+ureq.workspace = true
 schemars.workspace = true
 utoipa.workspace = true
 serde.workspace = true

@@ -166,6 +166,7 @@ impl Harness {
             harness,
             plane: &self.plane,
             follow: &self.follow,
+            roots: None,
         }
     }
 }
@@ -751,6 +752,7 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
         harness: &no_harness,
         plane: &no_plane,
         follow: &no_follow,
+        roots: None,
     };
     ops::add(&probe_ctx, &root).unwrap();
     let max_ops = probe_fs.ops_attempted();
@@ -770,6 +772,7 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
             harness: &no_harness,
             plane: &no_plane,
             follow: &no_follow,
+            roots: None,
         };
         let result = ops::add(&ctx, &root);
 
@@ -793,6 +796,7 @@ fn add_under_fault_preserves_draft_and_is_all_or_nothing() {
             harness: &no_harness,
             plane: &no_plane,
             follow: &no_follow,
+            roots: None,
         };
         let tracked = ops::list(&clean_ctx, None, false, None, None)
             .unwrap()
@@ -1098,6 +1102,8 @@ fn unfollow_flips_follow_state_keeps_bytes_and_is_idempotent() {
             review_required: false,
             following: true,
             excluded_here: false,
+            agents: Vec::new(),
+            excluded_agents: Vec::new(),
         }],
     )
     .unwrap();
@@ -1136,6 +1142,7 @@ fn unfollow_flips_follow_state_keeps_bytes_and_is_idempotent() {
     let file_follow = crate::plane_http::FileFollow::new(enroll::follow_contexts(&follows));
     let sweep_ctx = Ctx {
         follow: &file_follow,
+        roots: None,
         ..h.ctx()
     };
     let data = pull_data(&sweep_ctx, ops::PullScope::AllFollowed).unwrap();
@@ -1261,6 +1268,8 @@ fn list_discloses_enrollment_follow_state_and_hook() {
             review_required: false,
             following: true,
             excluded_here: false,
+            agents: Vec::new(),
+            excluded_agents: Vec::new(),
         }],
     )
     .unwrap();
@@ -1372,6 +1381,8 @@ fn follow_approve_resumes_an_unfollowed_skill() {
             review_required: false,
             following: true,
             excluded_here: false,
+            agents: Vec::new(),
+            excluded_agents: Vec::new(),
         }],
     )
     .unwrap();
@@ -1406,6 +1417,7 @@ fn follow_approve_resumes_an_unfollowed_skill() {
             prefix_dirname: false,
             channels: Vec::new(),
             skills: Vec::new(),
+            agents: Vec::new(),
         },
     )
     .unwrap()
@@ -1449,6 +1461,7 @@ fn follow_approve_resumes_an_unfollowed_skill() {
     let file_follow = crate::plane_http::FileFollow::new(enroll::follow_contexts(&follows));
     let sweep_ctx = Ctx {
         follow: &file_follow,
+        roots: None,
         ..h.ctx()
     };
     let data = pull_data(&sweep_ctx, ops::PullScope::AllFollowed).unwrap();

@@ -146,6 +146,12 @@ pub(crate) struct FollowContext {
     pub review_required: bool,
     /// Whether the skill is currently followed (a `false` skill is inventoried but not pulled).
     pub following: bool,
+    /// The DEVICE-LOCAL agent include-list (`follow --agent`): registry slugs this skill's bytes are
+    /// scoped to. Empty = unscoped (every detected agent). Never told to the plane.
+    pub agents: Vec<String>,
+    /// The DEVICE-LOCAL per-agent exclusions (`unfollow --agent` / `remove --agent`) — agents whose
+    /// placement this device cleans and stops maintaining. Never told to the plane.
+    pub excluded_agents: Vec<String>,
 }
 
 /// The durable follow-state source. The production impl is [`crate::plane_http::FileFollow`] over the

@@ -103,26 +103,11 @@ impl<'a> ClaudeCode<'a> {
     /// DIFFERENT existing dir (another skill, or the user's own), disambiguate by the workspace slug; fall
     /// back to the globally-unique `skill_id` (which can never collide). Only a FREE dir is ever chosen,
     /// so a first receive never clobbers an existing skill. The `naming` strings are untrusted and are
-    /// sanitized to a single safe component before any join.
+    /// sanitized to a single safe component before any join. The rules live in the crate-level
+    /// [`crate::choose_skill_dir`] (this adapter is the reference; other placement targets name
+    /// identically); with no placement record to consult here, only a FREE dir counts as available.
     fn follower_placement_dir(&self, skill_id: &str, naming: PlacementNaming<'_>) -> PathBuf {
-        let skills = self.skills_dir();
-        if let Some(name) = naming.name.and_then(crate::sanitize_skill_dir) {
-            let by_name = skills.join(&name);
-            if !by_name.exists() {
-                return by_name;
-            }
-            // Collision: a different skill (or the user's own dir) already holds this name. Namespace by
-            // the workspace so the two coexist (both parts are already sanitized single components).
-            if let Some(ws) = naming.workspace_slug.and_then(crate::sanitize_skill_dir) {
-                let namespaced = skills.join(format!("{ws}-{name}"));
-                if !namespaced.exists() {
-                    return namespaced;
-                }
-            }
-        }
-        // Unnamed / unsafe name / every candidate taken → the unique id (a validated single component that
-        // can never collide with another skill).
-        skills.join(skill_id)
+        crate::choose_skill_dir(&self.skills_dir(), skill_id, naming, &|_| false)
     }
 
     fn settings_path(&self) -> PathBuf {

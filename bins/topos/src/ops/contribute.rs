@@ -394,26 +394,33 @@ pub(crate) fn apply_publish_ok(
         return Ok(new_gen);
     }
 
-    // Re-scan the placement: did the working tree change during the round-trip?
-    let placement = sync_engine::first_placement(map)?;
-    let scanned = scan::scan(std::path::Path::new(&placement))?;
+    // Re-scan the WORK TREE (the single edited copy when one exists — the draft that was published —
+    // else the first copy): did it change during the round-trip?
+    let placement = crate::placement::work_tree_dir(ctx, &lock.name, map)?;
+    let scanned = scan::scan(&placement)?;
     if scanned.bundle_digest == published_digest {
-        // CLEAN → state ①. The placement already holds the published bytes (no dir-swap); update the docs
+        // CLEAN → state ①. The work tree already holds the published bytes (no dir-swap); update the docs
         // to point `current`/`applied`/`base` at the new version, re-deriving the lock from the store.
+        // Only the copy that holds the published bytes advances its per-placement sha — every other
+        // placement keeps its recorded state and converges from the local store on the next sweep.
         let store = Store::open(&sp.store)?;
         let bundle = store.render_verified(commit_id, published_digest)?;
         let next_lock = sync_engine::lock_from_bundle(lock, commit_id, &bundle);
-        let next_map = PlacementMap {
-            schema_version: map.schema_version,
-            placements: map.placements.clone(),
-            applied_commit: rec.candidate_commit.clone(),
-            materialized_sha: published_digest_hex.clone(),
-            pre_existing_sha: materialize::derive_pre_existing_sha(map, true),
-            swap_capability: map.swap_capability,
-            harness: map.harness,
-            harness_layer: map.harness_layer.clone(),
-            harness_slug: map.harness_slug.clone(),
-        };
+        let mut next_map = map.clone();
+        next_map.applied_commit = rec.candidate_commit.clone();
+        if let Some(i) = next_map
+            .placements
+            .iter()
+            .position(|p| std::path::Path::new(p) == placement)
+        {
+            let prior = next_map.placement_state[i].clone();
+            next_map.placement_state[i] = topos_types::persisted::PlacementState {
+                materialized_sha: Some(published_digest_hex.clone()),
+                pre_existing_sha: materialize::derive_pre_existing_state(&prior, true),
+                ..prior
+            };
+        }
+        materialize::mirror_first_placement(&mut next_map);
         let next_sync = SyncState {
             schema_version: sync.schema_version,
             observed: new_gen,
@@ -650,6 +657,7 @@ mod tests {
             harness: &harness,
             plane: &inert_p,
             follow: &inert_f,
+            roots: None,
         };
         let sp = layout.published(&crate::id::SkillId::parse("s_deploy").unwrap());
         let op_id = "c0000000-0000-4000-8000-000000000001".to_owned();
@@ -747,6 +755,7 @@ mod tests {
             harness: &harness,
             plane: &inert_p,
             follow: &inert_f,
+            roots: None,
         };
         let sp = layout.published(&crate::id::SkillId::parse("s_deploy").unwrap());
         let op_id = "d0000000-0000-4000-8000-000000000001".to_owned();

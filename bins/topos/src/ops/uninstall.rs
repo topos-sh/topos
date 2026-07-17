@@ -35,6 +35,10 @@ pub(crate) struct UninstallDescribe {
 pub(crate) struct UninstallApplied {
     /// The currency-hook scrub report (surfaced honestly — `Inactive` when nothing was armed).
     pub hook: TriggerReport,
+    /// The breadth scrub's outcomes — other agents whose trigger the sweep removed (or could not,
+    /// disclosed) — attached by the composition root; clean no-ops stay off the receipt.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<topos_types::results::BreadthTriggerReport>,
     /// Whether the `~/.topos/` sidecar tree was deleted (false = there was nothing to delete).
     pub sidecar_removed: bool,
     /// The running binary's own path — left in place; the human removes it with their installer.
@@ -115,6 +119,9 @@ pub(crate) fn uninstall(
 
     Ok(UninstallOutcome::Applied(UninstallApplied {
         hook,
+        // The breadth scrub (other agents' triggers) runs at the composition root, which holds
+        // the real ports; it attaches its outcomes here after this returns.
+        triggers: Vec::new(),
         sidecar_removed,
         binary_path: binary,
     }))
@@ -240,6 +247,7 @@ mod tests {
             harness,
             plane,
             follow,
+            roots: None,
         }
     }
 

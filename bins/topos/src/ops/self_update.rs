@@ -369,6 +369,7 @@ mod tests {
             harness: &harness,
             plane: &plane,
             follow: &follow,
+            roots: None,
         };
         f(&ctx)
     }

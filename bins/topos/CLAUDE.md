@@ -32,7 +32,13 @@ renderer over the SAME typed outcomes (one value, two presentations).
   wired too (`topos-harness::OpenClaw`: the two ports; `topos-harness::Hermes`: `$HERMES_HOME` + the
   `HERMES_ACCEPT_HOOKS` evidence resolved at construction), though v0's composition root still selects
   Claude Code only — harness *selection* lands later (the TTY receipt copy already branches on the
-  report's `currency_kind`, so no surface overstates a sibling adapter's update moment).
+  report's `currency_kind`, so no surface overstates a sibling adapter's update moment). **The
+  breadth arming sweep** (`ops/arm`, run at the composition root — the one layer holding the real
+  ports + `$HOME`) additionally (un)installs the trigger of every OTHER detected agent at the same
+  moments the active adapter is armed (the enrollment receipt; `add`'s adopt receipt) and scrubbed
+  (`uninstall --yes`): the nine registry-slug trigger adapters (`topos-harness::triggers`) plus the
+  two non-active sibling `HarnessAdapter`s, each row riding the payloads' additive `triggers` field
+  honestly (evidence-gated Active; consent notes; degraded floors) and rendered on the TTY receipts.
 - **The verbs** (`ops`) — `add <source> [--skill <name>] [--harness <slug>] [--global]` (**one
   source-polymorphic positional**, classified by shape in `crate::source`: a PATH (`./ ../ ~/ /`) adopts a
   directory in place; a bare NAME (optionally `<skill>@<harness>`) resolves against the same untracked
@@ -124,6 +130,24 @@ renderer over the SAME typed outcomes (one value, two presentations).
   `follow <address>` plus proof of the invited email. The POST rides through the `UreqDeviceClient`
   behind a `GovernanceSource` seam, mapping the all-outcome **200 envelope** (`ok` ⇒ `InvitationData`;
   a policy-DENIED `!ok` ⇒ a typed "not authorized").
+- **The placement engine** (`placement`, `topos-harness::{coverage,registry}`) — WHERE a followed
+  skill's bytes land, computed each sync from the machine + the skill's device-local agent scope.
+  Policy is **shared-dir-first**: an UNSCOPED skill lands ONE copy in `~/.agents/skills` when at
+  least one detected harness is covered by it (coverage carries provenance — live-probed vs
+  vendor-docs vs unknown-treated-as-false), plus a native user-dir copy per detected-but-uncovered
+  harness (the active adapter keeps its richer `placement_for`; the rest resolve through the
+  registry's user skills root with the ONE shared naming discipline — sanitize → workspace-prefix on
+  collision → the id; never a foreign dir). A SCOPED skill (`--agent` include-list and/or per-agent
+  exclusions) places into exactly the scoped-and-not-excluded detected harnesses' native dirs —
+  never the shared dir. No detection at all (or no `$HOME`) keeps the classic active-adapter single
+  placement; an adopted agent-less dir (the author's working copy) is ALWAYS managed. Targets are
+  reconciled each sync: new placements (a newly detected harness, newly true coverage) are appended
+  and land on the next apply — from the LOCAL store when the team's current did not move (the
+  converge pass) — while a placement leaves the record ONLY through an explicit verb (its dir
+  cleaned snapshot-first); detection loss alone freezes the copy in place, never deletes it.
+  `map.json` is now schema v2 (its OWN ceiling): per-placement `placement_state` rows (kind ·
+  agent · materialized/pre-existing shas · swap capability), 1:1 with `placements`; a v1 document
+  upgrades losslessly in memory on read and rewrites as v2.
 - **The pull/apply sync engine** (`ops/sync_engine`, `ops/pull`, `materialize`, `plane`) — the
   `checkForUpdates → plan → apply` machine over the kernel's four-state transition: a conditional read of
   the **unsigned** `current` pointer through the `PlaneSource` seam, a workspace/skill **scope check** (a
@@ -134,8 +158,16 @@ renderer over the SAME typed outcomes (one value, two presentations).
   content-addressed integrity story, a mismatch is a loud integrity ERROR) + an ancestor-backfilling durable
   record into the sidecar store, the post-fetch heal (a crash-after-swap advances `applied` with no second
   swap, never a false divergence), the consent decision (the kernel's one policy), and **crash-safe
-  byte-writing materialization** (staging sibling → fsync → atomic dir-swap → fsync parent → `map → lock →
-  sync` commit; `applied` advances only post-swap). `pull <skill>` accepts a pending update (the explicit
+  byte-writing materialization** into EVERY managed placement (per-dir staging sibling → fsync →
+  atomic dir-swap → fsync parent, the map committed after each landed dir as the crash-progress
+  marker; the final `map → lock → sync` commit advances `applied` only once every dir holds the new
+  bytes; a dir whose bytes differ from ITS recorded per-placement sha is snapshotted into the store
+  before any overwrite — never a lost byte). **Draft-anywhere**: every placement is scanned against
+  its own recorded sha — exactly one edited copy IS the draft (diff/publish/merge read that dir via
+  `placement::work_tree_dir`), several byte-identical copies collapse to one, and several DIVERGENT
+  copies freeze typed (`PLACEMENTS_DIVERGED` — nothing overwritten, every path disclosed,
+  `update --reset` the named way out; reset and go-back snapshot EVERY distinct edited copy first
+  and converge all placements). `pull <skill>` accepts a pending update (the explicit
   command is the consent a confirm-each offer solicited); `pull <skill>@<hash>` goes back to a version
   locally (resolved against the local store's versions, sets `held`, leaves the served target untouched). In
   tests the plane response + follow-state are **fixture-fed**; in production they come from the real `ureq`
@@ -244,6 +276,19 @@ are asserted byte-equal in tests.
   (I-COMMIT-PARITY) is proven by `topos-core`'s `commit_id` KAT; the op_id-replay test lives in
   `ops/contribute`; the full loop is proven e2e over loopback HTTP in `tests/`.
 
+- **The `--agent` scope verbs** (`ops/agent_scope`) — DEVICE-LOCAL placement policy for a followed
+  skill, two-phase and fully offline (the plane is NEVER told; the subscription never moves).
+  `follow <skill> --agent <slug>` (repeatable; `'*'` clears back to unscoped) records the
+  include-list on an already-followed skill and reconciles the placements (out-of-scope dirs cleaned
+  snapshot-first, new native dirs landed from the local store); on a not-yet-followed skill the
+  ordinary subscribe runs and the include-list is recorded at apply. `unfollow <skill> --agent
+  <slug>` and `remove <skill> --agent <slug>` on a followed skill are ONE shared implementation
+  (`exclude_agents` — the verbs alias it): record the per-agent exclusion + clean exactly that
+  agent's placement. Unknown slugs refuse naming the registry's valid ones; a known-but-undetected
+  slug is accepted with an honest note; the describes name the placement plan (shared vs native,
+  with a vendor-docs-level parenthetical where coverage is docs-level). `remove`'s classic `-a`
+  semantics for untracked/local copies are unchanged, and bare `remove`/`unfollow` keep their exact
+  prior behavior.
 - **The `unfollow` verb** (`ops/unfollow`) — the PERSON-scoped detach, two-phase and byte-inert.
   Resolves dual-kind through the one grammar: a WORKSPACE target is recognized and refused toward
   the web (leaving is a roster change); the structural `everyone` refuses with the alternatives

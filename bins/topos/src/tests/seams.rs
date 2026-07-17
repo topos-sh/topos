@@ -120,6 +120,7 @@ impl Rig {
             harness: &self.harness,
             plane,
             follow,
+            roots: None,
         }
     }
 
@@ -143,6 +144,8 @@ impl Rig {
                 review_required: false,
                 following,
                 excluded_here: false,
+                agents: Vec::new(),
+                excluded_agents: Vec::new(),
             }],
         )
         .unwrap();

@@ -139,6 +139,7 @@ impl Rig {
             harness: &self.harness,
             plane,
             follow,
+            roots: None,
         }
     }
     /// Seed the on-disk enrolled state a completed `follow <address>` leaves (instance + membership +
@@ -522,6 +523,7 @@ fn opts(yes: bool) -> ops::FollowOpts {
         prefix_dirname: false,
         channels: Vec::new(),
         skills: Vec::new(),
+        agents: Vec::new(),
     }
 }
 
@@ -875,6 +877,8 @@ fn unfollow_skill_writes_the_detach_row_and_flips_the_local_pause() {
             review_required: false,
             following: true,
             excluded_here: false,
+            agents: Vec::new(),
+            excluded_agents: Vec::new(),
         }],
     )
     .unwrap();
@@ -1076,6 +1080,8 @@ fn an_excluded_skills_unreadable_sync_doc_warns_and_never_aborts_the_quiet_sweep
             mode: crate::plane::FollowMode::Auto,
             review_required: false,
             following: true,
+            agents: Vec::new(),
+            excluded_agents: Vec::new(),
         },
     )]);
     // Poison the skill's sync.json with an unknown schema version — the fail-closed doc load refuses it.
