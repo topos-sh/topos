@@ -8,11 +8,14 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use topos_core::digest::{self, FileMode, ManifestEntry};
+use topos_core::identity::{self, Commit};
 use topos_harness::{DiscoveredPlacement, HarnessAdapter, PlacementTarget};
 use topos_types::requests::{
     InvitationData, InvitationRequest, ProposeRequest, PublishRequest, RevertRequest,
-    ReviewRequest, WireChannelEntry, WireChannelIndex, WireChannelSkill, WireMe, WireProposalEntry,
-    WireProposalIndex, WireReach, WireSkillIndex, WireSkillIndexEntry, WireSkillLog,
+    ReviewRequest, WireCandidate, WireChannelEntry, WireChannelIndex, WireChannelSkill,
+    WireFileMode, WireMe, WireProposalEntry, WireProposalIndex, WireReach, WireSkillIndex,
+    WireSkillIndexEntry, WireSkillLog,
 };
 use topos_types::results::PublishGate;
 use topos_types::{
@@ -1308,4 +1311,277 @@ fn publish_describe_gate_falls_back_to_cached_when_delivery_offline() {
     // protection in either direction, so a bare describe still answers with no network.
     assert_eq!(publish_describe_gate(false, None), PublishGate::Lands);
     assert_eq!(publish_describe_gate(true, None), PublishGate::Proposal);
+}
+
+// ---------------------------------------------------------------------------------------------
+// publish (apply + describe) — the NO_CHANGES no-op guard covers a genesis AUTHOR's repeat publish,
+// not just a follower's. A skill adopted locally then published has NO follow entry, so the refusal
+// keys on a published `current` existing (`observed` past GENESIS), never on follow-state.
+// ---------------------------------------------------------------------------------------------
+
+/// Recompute a candidate's `commit_id` (the `version_id` `current` moves to) from the wire bundle — the
+/// SAME derivation the client and the plane run: the bundle digest (git's "tree") over the files, then the
+/// length-prefixed commit frame over `(parents, tree, author, message)`. A faithful OK receipt's pointer
+/// names exactly this, so `apply_publish_ok`'s scope + version check passes.
+fn candidate_commit(candidate: &WireCandidate) -> [u8; 32] {
+    use base64::Engine as _;
+    let entries: Vec<ManifestEntry> = candidate
+        .files
+        .iter()
+        .map(|f| ManifestEntry {
+            path: f.path.clone(),
+            mode: match f.mode {
+                WireFileMode::Regular => FileMode::Regular,
+                WireFileMode::Executable => FileMode::Executable,
+            },
+            content_sha256: digest::sha256(
+                &base64::engine::general_purpose::STANDARD
+                    .decode(&f.content_base64)
+                    .unwrap(),
+            ),
+        })
+        .collect();
+    let tree = digest::bundle_digest(&entries).unwrap();
+    let parents: Vec<[u8; 32]> = candidate
+        .parents
+        .iter()
+        .map(|p| ops::parse_hex32(p).unwrap())
+        .collect();
+    identity::commit_id(&Commit {
+        parents: &parents,
+        tree,
+        author: &candidate.author,
+        message: &candidate.message,
+    })
+    .unwrap()
+}
+
+/// A contribute source that ACKS a direct publish with a byte-faithful OK receipt: it recomputes the
+/// candidate's commit id from the wire bundle exactly as the plane would, and serves a `current` pointer
+/// naming it at `generation` (the plane's genesis branch creates `current` at 1), so the caller's local
+/// state fast-forwards past GENESIS. Records every op id it sent, so a test can assert a repeat identical
+/// publish never reached the wire. Propose/revert/review are unreachable here — the no-op guard refuses an
+/// identical `--propose` BEFORE the send, and these flows never revert/review.
+#[derive(Clone)]
+struct OkPublish {
+    generation: u64,
+    sent: Arc<Mutex<Vec<String>>>,
+}
+impl OkPublish {
+    fn new(generation: u64) -> Self {
+        Self {
+            generation,
+            sent: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+impl ContributeSource for OkPublish {
+    fn publish(&self, b: PublishRequest) -> Result<WriteReceipt, ClientError> {
+        self.sent.lock().unwrap().push(b.op_id.clone());
+        let vid = digest::to_hex(&candidate_commit(&b.candidate));
+        Ok(WriteReceipt {
+            receipt: Some(Receipt {
+                schema_version: 1,
+                op_id: b.op_id,
+                command: "publish".to_owned(),
+                outcome: TerminalOutcome::Ok,
+                workspace_id: b.workspace_id.clone(),
+                skill_id: Some(b.skill_id.clone()),
+                version_id: Some(vid.clone()),
+                bundle_digest: None,
+                expected_generation: None,
+                current_generation: Some(self.generation),
+                created_at: "2026-07-16T00:00:00Z".to_owned(),
+                details: None,
+            }),
+            error: None,
+            wire_record: Some(WireCurrentRecord {
+                schema_version: 1,
+                scope: PointerScope {
+                    workspace_id: b.workspace_id,
+                    skill_id: b.skill_id,
+                },
+                record: CurrentRecord {
+                    version_id: vid,
+                    generation: self.generation,
+                },
+            }),
+        })
+    }
+    fn propose(&self, _b: ProposeRequest) -> Result<WriteReceipt, ClientError> {
+        unreachable!("an identical --propose refuses NO_CHANGES before the send")
+    }
+    fn revert(&self, _b: RevertRequest) -> Result<WriteReceipt, ClientError> {
+        unreachable!("no revert in these flows")
+    }
+    fn review(&self, _b: ReviewRequest) -> Result<WriteReceipt, ClientError> {
+        unreachable!("no review in these flows")
+    }
+}
+
+/// Genesis-AUTHOR setup: enroll, adopt a real skill dir in place (NO follow entry — the author case), and
+/// run the FIRST `publish --yes` against a byte-faithful OK plane, landing the skill's `current` and
+/// advancing local `observed` past GENESIS. Returns the adopted `skill_id` — the post-first-publish state
+/// on which a REPEAT identical publish must refuse `NO_CHANGES` (the reported bug: a duplicate version).
+fn genesis_author_first_publish(rig: &Rig, src: &Scratch) -> String {
+    rig.seed_enrolled("alice@acme.com");
+    let skill_dir = src.0.join("deploy");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: deploy\ndescription: base\n---\n# deploy\n",
+    )
+    .unwrap();
+
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+    let add = ops::add(&ctx, &skill_dir).unwrap();
+
+    let ok = OkPublish::new(1);
+    let connect = |_b: &str| -> Box<dyn ContributeSource> { Box::new(ok.clone()) };
+    let out = ops::publish(&ctx, &connect, None, "deploy", false, None, None, None).unwrap();
+    assert!(
+        matches!(out, ops::PublishOutcome::Published(_)),
+        "the genesis author's first publish lands current"
+    );
+    assert_eq!(
+        ok.sent.lock().unwrap().len(),
+        1,
+        "the first publish reached the wire exactly once"
+    );
+    add.skill_id
+}
+
+#[test]
+fn a_genesis_authors_repeat_publish_refuses_no_changes_and_writes_no_wal() {
+    // The reported bug (apply path): `publish --yes` twice with an unchanged draft used to mint a
+    // duplicate version (same tree, new commit parented on the last). Now the second refuses NO_CHANGES —
+    // even though the author has NO follow entry — because a published `current` exists (`observed` past
+    // GENESIS).
+    let rig = Rig::new("pub-noop-apply");
+    let src = Scratch::new("pub-noop-apply-src");
+    let skill_id = genesis_author_first_publish(&rig, &src);
+
+    let ok = OkPublish::new(2);
+    let connect = |_b: &str| -> Box<dyn ContributeSource> { Box::new(ok.clone()) };
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+    let err = ops::publish(&ctx, &connect, None, "deploy", false, None, None, None).unwrap_err();
+    assert!(
+        matches!(err, ClientError::NoChanges { .. }),
+        "a repeat identical publish is NO_CHANGES, got {err:?}"
+    );
+    assert!(
+        ok.sent.lock().unwrap().is_empty(),
+        "the refusal fired before any wire send"
+    );
+
+    // The guard fires BEFORE the op-WAL write (it lives in `build_publish_op`, ahead of the record), so no
+    // pending publish op is left behind to replay.
+    let pending = crate::op_wal::find_pending_for_skill(
+        &rig.fs,
+        &rig.layout(),
+        WS,
+        &skill_id,
+        &[
+            topos_types::persisted::OpKind::PublishDirect,
+            topos_types::persisted::OpKind::PublishPropose,
+        ],
+    )
+    .unwrap();
+    assert!(
+        pending.is_none(),
+        "the no-op guard leaves no pending op-WAL record"
+    );
+}
+
+#[test]
+fn a_genesis_authors_repeat_publish_describe_is_no_changes() {
+    // Describe path (bare publish), same unfollowed author: the skill has a published `current`
+    // (`observed` past GENESIS) though no follow entry, so the describe refuses NO_CHANGES — before any
+    // network read (reach / me / delivery).
+    let rig = Rig::new("pub-noop-describe");
+    let src = Scratch::new("pub-noop-describe-src");
+    let _ = genesis_author_first_publish(&rig, &src);
+
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let dir = FakeDir::new(log);
+    let dir_c = dir_connect(&dir);
+    let del = FakeDelivery { snapshot: None };
+    let del_c = |_b: &str| -> Box<dyn ReconcileTransport> { Box::new(del.clone()) };
+    let connectors = ops::PublishDescribeConnectors {
+        directory: &dir_c,
+        delivery: &del_c,
+    };
+
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+    let err =
+        ops::publish_describe(&ctx, &connectors, None, "deploy", false, None, None).unwrap_err();
+    assert!(
+        matches!(err, ClientError::NoChanges { .. }),
+        "the unfollowed author's repeat describe is NO_CHANGES, got {err:?}"
+    );
+    assert!(
+        dir.log.lock().unwrap().is_empty(),
+        "the no-op describe reads no network before refusing"
+    );
+}
+
+#[test]
+fn a_genesis_authors_identical_propose_refuses_no_changes() {
+    // `--propose` with identical bytes also refuses (both op kinds flow through `build_publish_op`), so a
+    // no-op proposal is never opened — matching the describe, which refuses regardless of `--propose`.
+    let rig = Rig::new("pub-noop-propose");
+    let src = Scratch::new("pub-noop-propose-src");
+    let _ = genesis_author_first_publish(&rig, &src);
+
+    let ok = OkPublish::new(2);
+    let connect = |_b: &str| -> Box<dyn ContributeSource> { Box::new(ok.clone()) };
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+    let err = ops::publish(&ctx, &connect, None, "deploy", true, None, None, None).unwrap_err();
+    assert!(
+        matches!(err, ClientError::NoChanges { .. }),
+        "an identical --propose is NO_CHANGES, got {err:?}"
+    );
+    assert!(
+        ok.sent.lock().unwrap().is_empty(),
+        "the propose refusal fired before any wire send (propose is unreachable in the fake)"
+    );
+}
+
+#[test]
+fn editing_the_draft_lets_a_second_publish_land() {
+    // Non-regression: the guard keys on byte-identity, so a genuinely changed draft still publishes. Edit
+    // a file byte after the first publish → the second lands a new version (the wire is dialed again).
+    let rig = Rig::new("pub-edit");
+    let src = Scratch::new("pub-edit-src");
+    let _ = genesis_author_first_publish(&rig, &src);
+
+    std::fs::write(
+        src.0.join("deploy").join("SKILL.md"),
+        "---\nname: deploy\ndescription: edited\n---\n# deploy v2\n",
+    )
+    .unwrap();
+
+    let ok = OkPublish::new(2);
+    let connect = |_b: &str| -> Box<dyn ContributeSource> { Box::new(ok.clone()) };
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+    let out = ops::publish(&ctx, &connect, None, "deploy", false, None, None, None).unwrap();
+    assert!(
+        matches!(out, ops::PublishOutcome::Published(_)),
+        "an edited draft publishes again (not a no-op)"
+    );
+    assert_eq!(
+        ok.sent.lock().unwrap().len(),
+        1,
+        "the edited publish reached the wire"
+    );
 }
