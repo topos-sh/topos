@@ -1,10 +1,18 @@
 //! The BUILT-IN `topos` skill — the meta-skill that teaches an agent what topos is and how to
-//! drive it. It ships INSIDE the binary (an authored `SKILL.md` + the same generated verb
-//! reference `docs/cli.md` carries, rendered from this binary's real clap tree), lands through the
-//! ordinary placement engine at the moments the auto-update triggers arm, and re-syncs on every
-//! bare sweep. It is FORCE-SYNCED to the binary: it documents THIS binary's verb surface, so any
-//! divergence — a hand edit, an old binary's bytes — is overwritten on the next sweep (an edited
-//! copy is still snapshotted into the sidecar store first; it just never becomes a draft).
+//! drive it. Its source lives at the repo TOP LEVEL (`skills/topos/` — an authored `SKILL.md` +
+//! `INSTALL.md`, downloadable straight from the public repo by skill installers), and the binary
+//! embeds THOSE files: one source of truth, so a downloaded copy and a binary-placed copy carry
+//! the same authored bytes. The bundle's third file is the generated verb reference `docs/cli.md`
+//! carries, rendered from this binary's real clap tree. It lands through the ordinary placement
+//! engine at the moments the auto-update triggers arm, and re-syncs on every bare sweep. It is
+//! FORCE-SYNCED to the binary: it documents THIS binary's verb surface, so any divergence — a
+//! hand edit, an old binary's bytes — is overwritten on the next sweep (an edited copy is still
+//! snapshotted into the sidecar store first; it just never becomes a draft). A pre-existing
+//! `topos` dir is NEVER written by the sweep (the Foreign freeze — marker or not): one whose
+//! SKILL.md frontmatter carries the public copy's provenance marker (a `metadata:` entry,
+//! `topos: builtin`) is a stale DOWNLOADED copy that the CONSENTED `topos follow topos --yes`
+//! adopts — snapshot-first, then force-synced and managed; without the marker the dir is
+//! someone else's and stays a frozen Foreign reservation.
 //!
 //! Device-local surface: `topos remove topos` opts this machine out durably
 //! (`state/builtin.json`), `topos follow topos` re-places it, and the `--agent` include/exclude
@@ -38,13 +46,78 @@ pub(crate) const BUILTIN_NAME: &str = "topos";
 /// preimage, like `add`'s).
 const BUILTIN_MESSAGE: &str = "topos: builtin";
 
-/// The authored half of the bundle; `{TOPOS_VERSION}` is stamped at render.
-const SKILL_MD: &str = include_str!("builtin/SKILL.md");
+/// The authored halves of the bundle, embedded from the repo-top-level source (`skills/topos/` —
+/// the SAME files a skill installer downloads from the public repo, so placed and downloaded
+/// copies match byte-for-byte).
+const SKILL_MD: &str = include_str!("../../../../skills/topos/SKILL.md");
+const INSTALL_MD: &str = include_str!("../../../../skills/topos/INSTALL.md");
+
+/// The provenance line the public SKILL.md carries in its frontmatter (a `metadata` entry, which
+/// skill installers copy verbatim). A pre-existing `topos` placement dir WITH the marker is a
+/// stale downloaded copy of THIS bundle — adopted only by the consented `follow topos --yes`,
+/// snapshot-first; the silent sweep never writes it. Without it the dir is someone else's and the
+/// Foreign freeze stands everywhere.
+const PROVENANCE_MARKER: &str = "topos: builtin";
 
 /// Whether a skill id names the built-in (ordinary minted ids are `topos_<hex>`, so the bare name
 /// can never collide).
 pub(crate) fn is_builtin(id: &str) -> bool {
     id == BUILTIN_NAME
+}
+
+/// Whether a Foreign-scanned placement holds a DOWNLOADED copy of this skill (see
+/// [`marker_in_frontmatter`]). Gates only the CONSENTED `follow topos --yes` adoption — the
+/// silent sweep never writes a Foreign dir, marker or not. Best-effort and fail-closed: an absent
+/// or unreadable file answers `false` (never adopt on doubt).
+fn is_downloaded_copy(dir: &std::path::Path) -> bool {
+    std::fs::read_to_string(dir.join("SKILL.md"))
+        .map(|text| marker_in_frontmatter(&text))
+        .unwrap_or(false)
+}
+
+/// Whether a SKILL.md's TERMINATED leading frontmatter block carries the provenance marker as a
+/// DIRECT `metadata:` entry — the exact shape the public copy publishes and skill installers copy
+/// verbatim. A tiny top-level-key state machine, fail-closed: the file must open with `---`;
+/// scanning stops at the closing `---` (an unterminated header answers `false`); an unindented
+/// line sets the current top-level key; under `metadata:`, the FIRST indented line fixes the
+/// direct-child indent (space-only), and the marker counts ONLY at exactly that indent — a
+/// root-level `topos: builtin`, one inside another key's block scalar, or one nested DEEPER under
+/// `metadata:` (e.g. inside a `notes: |` scalar) never matches; a tab in leading whitespace
+/// rejects the line outright.
+pub(crate) fn marker_in_frontmatter(text: &str) -> bool {
+    let mut lines = text.lines();
+    if lines.next().map(str::trim_end) != Some("---") {
+        return false;
+    }
+    let mut in_metadata = false;
+    let mut child_indent: Option<usize> = None;
+    let mut found = false;
+    for line in lines {
+        if line.trim_end() == "---" {
+            return found; // the terminated block's verdict
+        }
+        if line.starts_with(' ') || line.starts_with('\t') {
+            if !in_metadata {
+                continue;
+            }
+            let after_spaces = line.trim_start_matches(' ');
+            if after_spaces.starts_with('\t') {
+                continue; // a tab in leading whitespace: not the published shape
+            }
+            let indent = line.len() - after_spaces.len();
+            // The first indented line under `metadata:` fixes the direct-child indent; anything
+            // deeper is nested content (a sub-key's block scalar), never a direct entry.
+            let direct = *child_indent.get_or_insert(indent);
+            if indent == direct && line.trim() == PROVENANCE_MARKER {
+                found = true;
+            }
+        } else {
+            // Any unindented line moves the top-level context (a non-`metadata:` line clears it).
+            in_metadata = line.trim_end() == "metadata:";
+            child_indent = None;
+        }
+    }
+    false // the frontmatter never closed — not the published shape
 }
 
 fn builtin_sid() -> Result<SkillId, ClientError> {
@@ -121,17 +194,22 @@ pub(crate) fn add_excluded(ctx: &Ctx<'_>, slugs: &[String]) -> Result<(), Client
 // The rendered bundle — deterministic for a given binary.
 // ---------------------------------------------------------------------------------------------
 
-/// Render the bundle bytes from the binary: the stamped `SKILL.md` + the generated verb reference
-/// (the same renderer `cargo xtask gen-cli-ref` writes `docs/cli.md` with — one implementation, so
-/// the placed reference can never drift from what this binary parses).
+/// Render the bundle bytes from the binary: the embedded `SKILL.md` + `INSTALL.md` (verbatim —
+/// carrying no version stamp, so the committed source IS the placed bytes) + the generated verb
+/// reference (the same renderer `cargo xtask gen-cli-ref` writes `docs/cli.md` with — one
+/// implementation, so the placed reference can never drift from what this binary parses).
 fn rendered_bundle() -> Result<ScannedBundle, ClientError> {
-    let skill_md = SKILL_MD.replace("{TOPOS_VERSION}", env!("CARGO_PKG_VERSION"));
-    // Sorted by raw path bytes, the scanner's invariant ("S" < "r").
+    // Sorted by raw path bytes, the scanner's invariant ("I" < "S" < "r").
     let files = vec![
+        ScannedFile {
+            path: "INSTALL.md".to_owned(),
+            mode: FileMode::Regular,
+            bytes: INSTALL_MD.as_bytes().to_vec(),
+        },
         ScannedFile {
             path: "SKILL.md".to_owned(),
             mode: FileMode::Regular,
-            bytes: skill_md.into_bytes(),
+            bytes: SKILL_MD.as_bytes().to_vec(),
         },
         ScannedFile {
             path: "reference.md".to_owned(),
@@ -165,20 +243,42 @@ pub(crate) struct BuiltinSync {
     pub changed: bool,
 }
 
+/// What the converge may do to a Foreign-scanned placement dir (one the record says the built-in
+/// never wrote).
+#[derive(Clone, Copy, PartialEq)]
+enum ForeignPosture {
+    /// The silent sweep: never write it, marker or not.
+    Freeze,
+    /// The consented `follow topos --yes` restore: adopt a MARKED downloaded copy
+    /// (snapshot-first); an unmarked dir stays frozen exactly as under [`Self::Freeze`].
+    AdoptMarked,
+}
+
 /// Place/refresh the built-in skill: create the sidecar entry on first contact, commit a new
 /// version when the binary's rendered bytes moved (upgrade or downgrade — the binary is
 /// authoritative), then converge every planned placement, overwriting ANY divergent copy
 /// (snapshot-first). Honors the durable opt-out. Runs at the trigger-arming moments (`add`'s adopt
-/// receipt, the enrollment receipt) and on every bare `update` sweep.
+/// receipt, the enrollment receipt) and on every bare `update` sweep — always with the Foreign
+/// freeze: a dir the record says we never wrote is never written here.
 pub(crate) fn ensure_builtin(ctx: &Ctx<'_>) -> Result<BuiltinSync, ClientError> {
-    ensure_with(ctx, &rendered_bundle()?)
+    ensure_inner(ctx, &rendered_bundle()?, ForeignPosture::Freeze)
 }
 
 /// [`ensure_builtin`] over an explicit bundle — the seam the tests drive a "binary changed" refresh
-/// through (production always passes the rendered bundle).
+/// through (production always renders from the binary and goes through [`ensure_builtin`] /
+/// the restore's adopting call, so this wrapper is test-only).
+#[cfg(test)]
 pub(crate) fn ensure_with(
     ctx: &Ctx<'_>,
     bundle: &ScannedBundle,
+) -> Result<BuiltinSync, ClientError> {
+    ensure_inner(ctx, bundle, ForeignPosture::Freeze)
+}
+
+fn ensure_inner(
+    ctx: &Ctx<'_>,
+    bundle: &ScannedBundle,
+    posture: ForeignPosture,
 ) -> Result<BuiltinSync, ClientError> {
     let state = read_state(ctx)?;
     if state.removed {
@@ -271,9 +371,17 @@ pub(crate) fn ensure_with(
             ScanStatus::Clean { scanned } | ScanStatus::Modified { scanned } => {
                 to_hex(&scanned.bundle_digest) != digest_hex
             }
-            // Never a foreign dir (not ours to write), never an unreadable one (fail open here —
-            // the sweep must not brick a session start over one odd placement).
-            ScanStatus::Foreign | ScanStatus::Unscannable => false,
+            // Never a foreign dir (not ours to write) — the ONE exception is the consented
+            // `follow topos --yes` restore, whose AdoptMarked posture takes over a dir holding a
+            // DOWNLOADED copy of this very skill (the public SKILL.md's provenance marker): the
+            // materializer snapshots its bytes into the sidecar store first, then force-syncs
+            // like any divergent copy. The silent sweep always passes Freeze. Never an unreadable
+            // dir (fail open here — the sweep must not brick a session start over one odd
+            // placement).
+            ScanStatus::Foreign => {
+                posture == ForeignPosture::AdoptMarked && is_downloaded_copy(&scans[i].dir)
+            }
+            ScanStatus::Unscannable => false,
         })
         .collect();
 
@@ -412,7 +520,11 @@ fn create_builtin(ctx: &Ctx<'_>, sid: &SkillId, bundle: &ScannedBundle) -> Resul
 /// ordinary scope update (the shared implementation). Everywhere else it is the RESTORE: an
 /// opted-out or never-placed built-in comes back (`--yes` lifts the opt-out), and any `--agent`
 /// slugs are recorded as the include-list in the same act — so a scoped follow works as the FIRST
-/// placement and straight after a `remove`, never a refusal pointing at a second command.
+/// placement and straight after a `remove`, never a refusal pointing at a second command. The
+/// restore is also the ONE consented takeover path: a planned dir occupied by a MARKED downloaded
+/// copy (the public SKILL.md's provenance marker) is disclosed on the describe and adopted by
+/// `--yes` — snapshot-first, then force-synced and managed; an unmarked occupant stays the frozen
+/// Foreign reservation, exactly as under the sweep.
 pub(crate) fn follow_builtin(
     ctx: &Ctx<'_>,
     agents: &[String],
@@ -455,6 +567,21 @@ pub(crate) fn follow_builtin(
         },
         prior.as_ref(),
     );
+    // The planned dirs a consented `--yes` will ADOPT: occupied, never materialized by the
+    // built-in (the record's Foreign posture), and carrying the downloaded copy's marker.
+    let adoptable: Vec<String> = plan
+        .targets
+        .iter()
+        .filter(|t| {
+            let ours = prior.as_ref().is_some_and(|m| {
+                m.placements.iter().zip(&m.placement_state).any(|(d, st)| {
+                    t.dir == std::path::Path::new(d) && st.materialized_sha.is_some()
+                })
+            });
+            !ours && ctx.fs.exists(&t.dir) && is_downloaded_copy(&t.dir)
+        })
+        .map(|t| t.dir.display().to_string())
+        .collect();
     let recorded: Vec<String> = prior.map(|m| m.placements).unwrap_or_default();
     let (kept, added): (Vec<_>, Vec<_>) = plan
         .targets
@@ -467,6 +594,12 @@ pub(crate) fn follow_builtin(
         "the built-in topos skill is already on this machine — this repairs anything missing"
             .to_owned()
     }];
+    for dir in &adoptable {
+        notes.push(format!(
+            "--yes adopts the downloaded copy at {dir}, snapshot-first: its current bytes are \
+             kept in the sidecar store, then the dir is managed and kept current"
+        ));
+    }
     for slug in &undetected {
         notes.push(format!(
             "'{slug}' is not detected on this machine — placement engages when the agent is \
@@ -512,7 +645,9 @@ pub(crate) fn follow_builtin(
             ..state
         },
     )?;
-    ensure_builtin(ctx)?;
+    // The consented act: the same converge the sweep runs, plus the disclosed adoption of a
+    // MARKED downloaded copy (snapshot-first). Unmarked occupants stay frozen.
+    ensure_inner(ctx, &rendered_bundle()?, ForeignPosture::AdoptMarked)?;
     Ok(AgentScopeOutcome::Applied(data))
 }
 

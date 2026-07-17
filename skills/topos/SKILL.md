@@ -1,18 +1,30 @@
 ---
 name: topos
-description: Manage this machine's shared team skills with the topos CLI — see what is managed, update it, follow more, and share local improvements back to the team. Use when editing any skill in a skills directory, when asked about team skills, skill updates, or sharing a skill, when a change you made to a shared process is worth giving back, or when you have just worked something out in this session — a hard-won fix, a corrected approach, a reusable workflow — that a teammate could use as a skill.
+description: Manage this machine's shared team skills with the topos CLI — see what is managed, update it, follow more, and share local improvements back to the team. Use when editing any skill in a skills directory, when asked about team skills, skill updates, or sharing a skill, when a change you made to a shared process is worth giving back, or when you have just worked something out in this session — a hard-won fix, a corrected approach, a reusable workflow — that a teammate could use as a skill. Also use when a team's shared skills are wanted on a machine that does not have topos yet — this skill covers installing it.
+metadata:
+  topos: builtin
 ---
 
 # topos — shared skills for every agent on the team
 
 topos delivers this machine's shared skills and keeps them current. A team publishes skills to a
 workspace; every enrolled machine receives them and stays on the team's current version
-automatically. Some of the skills sitting next to this file are topos-managed copies — they update
-on their own, and edits to them are drafts you can share back.
+automatically. On a machine topos manages, some of the skills sitting next to this file are
+topos-managed copies — they update on their own, and edits to them are drafts you can share back.
 
-This skill ships inside the `topos` binary (this copy matches topos v{TOPOS_VERSION}) and is
-force-synced to it: hand edits here are overwritten. The complete generated verb reference is in
-`reference.md` next to this file; `topos <verb> --help` has the same detail per verb.
+First check that the CLI is here: run `topos --version`. If it answers, read on — everything below
+assumes a working install. If the command is missing, this is a downloaded copy of the skill and
+the machine is not set up yet: read `INSTALL.md` next to this file and OFFER the install to the
+user — show the command and what it does, and run nothing until they say yes. After the install,
+run `topos follow topos --yes` — it lets this machine's topos manage this copy and keep it
+current; the user's yes to the install covers it.
+
+This skill travels with the CLI. A copy the `topos` binary manages is kept in sync with it — it
+documents that binary's exact verb surface, so hand edits here are overwritten. A downloaded copy
+is never adopted silently: it stays as it landed until `topos follow topos --yes` hands it to this
+machine's topos, or the tool that downloaded it fetches it again. The complete generated verb
+reference is in `reference.md` next to this file; `topos <verb> --help` has the same detail per
+verb.
 
 ## Driving the CLI
 
@@ -112,6 +124,10 @@ app, not the CLI. `topos invite <email>` is the one roster verb here.
 
 ## This skill itself
 
-`topos` (this bundle) is built in: it re-places itself when triggers arm and re-syncs on every
-sweep. `topos remove topos --yes` opts this machine out durably; `topos follow topos` brings it
-back. The name `topos` is reserved — no workspace skill can shadow it.
+`topos` (this bundle) rides the binary: on a managed machine it re-places itself when triggers arm
+and re-syncs on every sweep. A downloaded copy is not adopted automatically — one explicit
+`topos follow topos --yes` lets this machine's topos manage this copy and keep it current.
+`topos remove topos --yes` opts this machine out durably; `topos follow topos --yes` brings it
+back (the bare verb only describes; a `topos` directory that is not a downloaded copy of this
+skill is left untouched, frozen as it stands). The name `topos` is reserved — no workspace skill
+can shadow it.

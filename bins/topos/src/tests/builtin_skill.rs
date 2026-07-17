@@ -1,8 +1,11 @@
 //! The BUILT-IN `topos` skill suite: placement through the one engine (shared-dir-first over the
 //! detected agents), the force-sync (a hand edit is overwritten, snapshot-first; a binary change
-//! refreshes every copy), the durable `remove topos` opt-out (+ `follow topos` back), the `--agent`
-//! exclusion route, `list`'s `built-in` row, and the end-to-end name reservation (`add`). All over
-//! a real fs + a temp fake `$HOME` — the developer's machine is never probed.
+//! refreshes every copy), the Foreign freeze (the sweep never writes a pre-existing dir — marked
+//! or not; only the consented `follow topos --yes` adopts a MARKED downloaded copy,
+//! snapshot-first), the provenance matcher's fail-closed shapes, the durable `remove topos`
+//! opt-out (+ `follow topos` back), the `--agent` exclusion route, `list`'s `built-in` row, and
+//! the end-to-end name reservation (`add`). All over a real fs + a temp fake `$HOME` — the
+//! developer's machine is never probed.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -172,19 +175,20 @@ fn ensure_places_the_bundle_and_lists_it_as_built_in() {
     let sync = ops::ensure_builtin(&ctx).unwrap();
     assert!(sync.changed, "first contact lands bytes");
     let shared = rig.shared_copy();
-    assert!(shared.join("SKILL.md").exists(), "SKILL.md placed");
-    assert!(
-        shared.join("reference.md").exists(),
-        "verb reference placed"
-    );
     let skill_md = std::fs::read_to_string(shared.join("SKILL.md")).unwrap();
-    assert!(
-        skill_md.contains(env!("CARGO_PKG_VERSION")),
-        "the version stamp rides the placed SKILL.md"
+    assert_eq!(
+        skill_md,
+        include_str!("../../../../skills/topos/SKILL.md"),
+        "the placed SKILL.md IS the committed top-level source — one file, no stamp"
     );
     assert!(
-        !skill_md.contains("{TOPOS_VERSION}"),
-        "the placeholder is substituted"
+        skill_md.contains("topos: builtin"),
+        "the provenance marker rides the placed frontmatter"
+    );
+    assert_eq!(
+        std::fs::read_to_string(shared.join("INSTALL.md")).unwrap(),
+        include_str!("../../../../skills/topos/INSTALL.md"),
+        "the placed INSTALL.md IS the committed top-level source"
     );
     let reference = std::fs::read_to_string(shared.join("reference.md")).unwrap();
     assert_eq!(
@@ -392,6 +396,15 @@ fn a_pre_existing_foreign_topos_dir_is_never_written_and_never_deleted() {
         "a foreign dir is never overwritten"
     );
 
+    // The CONSENTED restore does not adopt an UNMARKED dir either — no provenance marker, no
+    // takeover, even under `follow topos --yes`.
+    ops::builtin_follow(&ctx, &[], true).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(foreign.join("SKILL.md")).unwrap(),
+        "# the user's own topos skill\n",
+        "the restore keeps the Foreign freeze on an unmarked occupant"
+    );
+
     // And the opt-out cleans ONLY what the built-in materialized — the foreign dir survives.
     let dir_connect =
         |_: &str| -> Box<dyn crate::plane::DirectorySource> { unreachable!("offline") };
@@ -403,6 +416,180 @@ fn a_pre_existing_foreign_topos_dir_is_never_written_and_never_deleted() {
         foreign.join("SKILL.md").exists(),
         "remove deletes only materialized built-in copies — never a dir it did not write"
     );
+}
+
+/// The marked downloaded copy every takeover test starts from, laid at cursor's native `topos`
+/// dir before topos ever places anything.
+fn lay_downloaded_copy(rig: &Rig) -> (PathBuf, &'static str) {
+    let downloaded = rig
+        .agent_home
+        .0
+        .join(".cursor")
+        .join("skills")
+        .join("topos");
+    std::fs::create_dir_all(&downloaded).unwrap();
+    let stale_skill =
+        "---\nname: topos\nmetadata:\n  topos: builtin\n---\n# a stale downloaded copy\n";
+    std::fs::write(downloaded.join("SKILL.md"), stale_skill).unwrap();
+    std::fs::write(downloaded.join("reference.md"), "stale reference\n").unwrap();
+    (downloaded, stale_skill)
+}
+
+#[test]
+fn the_sweep_never_writes_a_marked_downloaded_copy() {
+    let rig = Rig::new("sweep-freeze");
+    rig.detect(".cursor");
+    let inert_f = InertFollow;
+    let inert_p = InertPlane;
+    let ctx = rig.ctx(&inert_f, &inert_p);
+    let (downloaded, stale_skill) = lay_downloaded_copy(&rig);
+
+    // The silent sweep leaves it byte-untouched — marker or not, a dir the record says topos
+    // never wrote is never written by a sweep. Adoption needs the consented `follow topos --yes`.
+    let sync = ops::ensure_builtin(&ctx).unwrap();
+    assert!(
+        !sync.changed,
+        "no bytes landed — the occupied dir is frozen"
+    );
+    assert_eq!(
+        std::fs::read_to_string(downloaded.join("SKILL.md")).unwrap(),
+        stale_skill,
+        "the marked downloaded copy is never overwritten by the sweep"
+    );
+    assert!(
+        !downloaded.join("INSTALL.md").exists(),
+        "nothing of the binary's bundle lands"
+    );
+
+    // Durable across repeat sweeps.
+    assert!(!ops::ensure_builtin(&ctx).unwrap().changed);
+    assert_eq!(
+        std::fs::read_to_string(downloaded.join("SKILL.md")).unwrap(),
+        stale_skill
+    );
+}
+
+#[test]
+fn follow_yes_adopts_a_marked_downloaded_copy_snapshot_first() {
+    let rig = Rig::new("takeover");
+    rig.detect(".cursor");
+    let inert_f = InertFollow;
+    let inert_p = InertPlane;
+    let ctx = rig.ctx(&inert_f, &inert_p);
+    let (downloaded, stale_skill) = lay_downloaded_copy(&rig);
+    ops::ensure_builtin(&ctx).unwrap(); // the sweep has recorded the frozen reservation
+
+    // The bare `follow topos` DESCRIBES the adoption `--yes` will perform — and writes nothing.
+    match ops::builtin_follow(&ctx, &[], false).unwrap() {
+        ops::AgentScopeOutcome::Described { data, .. } => {
+            let notes = &data.items[0].notes;
+            assert!(
+                notes
+                    .iter()
+                    .any(|n| n.contains("adopts the downloaded copy")
+                        && n.contains(&downloaded.display().to_string())
+                        && n.contains("snapshot-first")),
+                "the describe disclosed the takeover: {notes:?}"
+            );
+        }
+        _ => panic!("bare follow describes"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(downloaded.join("SKILL.md")).unwrap(),
+        stale_skill,
+        "a describe mutates nothing"
+    );
+
+    // `--yes` ADOPTS it: the dir is force-synced to the binary's bundle.
+    match ops::builtin_follow(&ctx, &[], true).unwrap() {
+        ops::AgentScopeOutcome::Applied(data) => assert!(data.applied),
+        _ => panic!("--yes applies"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(downloaded.join("SKILL.md")).unwrap(),
+        include_str!("../../../../skills/topos/SKILL.md"),
+        "the stale copy is replaced by the binary's bytes"
+    );
+    assert_eq!(
+        std::fs::read_to_string(downloaded.join("reference.md")).unwrap(),
+        crate::cli_ref::cli_ref_md(),
+        "the reference tracks the binary"
+    );
+    assert!(
+        downloaded.join("INSTALL.md").exists(),
+        "the full bundle lands"
+    );
+
+    // Snapshot-first: the pre-existing bytes were committed into the sidecar store before the
+    // overwrite (genesis + the snapshot), never lost.
+    let sid = crate::id::SkillId::parse("topos").unwrap();
+    let sp = rig.layout().published(&sid);
+    let versions = topos_gitstore::Store::open(&sp.store)
+        .unwrap()
+        .list_versions()
+        .unwrap();
+    assert_eq!(
+        versions.len(),
+        2,
+        "the genesis version + the pre-adopt snapshot"
+    );
+
+    // Adopted means MANAGED from here on: a repeat sweep is a no-op, and a later hand edit is
+    // force-synced like any built-in copy.
+    assert!(!ops::ensure_builtin(&ctx).unwrap().changed);
+    std::fs::write(downloaded.join("SKILL.md"), "# my edits\n").unwrap();
+    assert!(ops::ensure_builtin(&ctx).unwrap().changed);
+    assert_eq!(
+        std::fs::read_to_string(downloaded.join("SKILL.md")).unwrap(),
+        include_str!("../../../../skills/topos/SKILL.md"),
+    );
+}
+
+#[test]
+fn the_provenance_matcher_accepts_only_the_published_metadata_shape() {
+    // TRUE: the published shape — the marker nested under a top-level `metadata:` key inside a
+    // TERMINATED leading frontmatter block (the committed source is the canonical instance).
+    assert!(ops::builtin_marker_in_frontmatter(include_str!(
+        "../../../../skills/topos/SKILL.md"
+    )));
+    assert!(ops::builtin_marker_in_frontmatter(
+        "---\nname: topos\nmetadata:\n  topos: builtin\n---\n# body\n"
+    ));
+
+    // FALSE: the marker line inside another key's block scalar.
+    assert!(!ops::builtin_marker_in_frontmatter(
+        "---\nname: mine\ndescription: |\n  topos: builtin\n---\n# body\n"
+    ));
+    // FALSE: a root-level `topos: builtin` key — not a `metadata:` entry.
+    assert!(!ops::builtin_marker_in_frontmatter(
+        "---\nname: mine\ntopos: builtin\n---\n# body\n"
+    ));
+    // FALSE: an UNTERMINATED frontmatter block — the whole file would otherwise scan as header.
+    assert!(!ops::builtin_marker_in_frontmatter(
+        "---\nname: mine\nmetadata:\n  topos: builtin\n"
+    ));
+    // FALSE: the marker indented under a LATER top-level key (context left `metadata:`).
+    assert!(!ops::builtin_marker_in_frontmatter(
+        "---\nmetadata:\n  kind: skill\nnotes: |\n  topos: builtin\n---\n# body\n"
+    ));
+    // FALSE: the marker NESTED DEEPER under `metadata:` — inside a sub-key's block scalar, not a
+    // direct entry (the direct-child indent is fixed by the first indented line, here `notes:`).
+    assert!(!ops::builtin_marker_in_frontmatter(
+        "---\nmetadata:\n  notes: |\n    topos: builtin\n---\n# body\n"
+    ));
+    // TRUE: a sibling key AFTER a block-scalar sub-key ends the scalar at the direct-child indent
+    // (YAML sibling semantics) — still a direct `metadata:` entry.
+    assert!(ops::builtin_marker_in_frontmatter(
+        "---\nmetadata:\n  notes: |\n    scribble\n  topos: builtin\n---\n# body\n"
+    ));
+    // FALSE: a tab in the marker line's leading whitespace — not the published shape.
+    assert!(!ops::builtin_marker_in_frontmatter(
+        "---\nmetadata:\n\ttopos: builtin\n---\n# body\n"
+    ));
+    // FALSE: no leading frontmatter at all.
+    assert!(!ops::builtin_marker_in_frontmatter(
+        "# a plain file\ntopos: builtin\n"
+    ));
 }
 
 #[test]

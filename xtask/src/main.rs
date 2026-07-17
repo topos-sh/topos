@@ -1198,37 +1198,55 @@ fn json_files_under(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 // =================================================================================================
-// gen-cli-ref — the CLI reference (`docs/cli.md`), rendered from the REAL `clap` tree by the client
-// lib's own renderer (`topos::cli_ref_md()` — shared with the built-in `topos` skill, which places
-// the same bytes as its `reference.md`). Same byte-compare `--check` drift discipline as the
-// schema/fixture gates.
+// gen-cli-ref — the CLI reference, rendered from the REAL `clap` tree by the client lib's own
+// renderer (`topos::cli_ref_md()`). TWO committed copies of the same bytes: `docs/cli.md` (the
+// repo's reference doc) and `skills/topos/reference.md` (the downloadable public skill's copy —
+// the built-in bundle renders the same fn at placement, and skill installers fetch the committed
+// file straight from the repo, so it must never go stale). Same byte-compare `--check` drift
+// discipline as the schema/fixture gates.
 // =================================================================================================
 
-fn docs_dir() -> PathBuf {
-    workspace_root().join("docs")
+/// The two committed copies the one renderer keeps in step.
+fn cli_ref_paths() -> [PathBuf; 2] {
+    [
+        workspace_root().join("docs").join("cli.md"),
+        workspace_root()
+            .join("skills")
+            .join("topos")
+            .join("reference.md"),
+    ]
 }
 
-/// Generate (or `--check`) `docs/cli.md`, mirroring the schema/fixture drift discipline (a stale or
-/// missing file fails). Rendered from the real clap tree, so the reference tracks the binary exactly.
+/// Generate (or `--check`) `docs/cli.md` AND the public skill's `skills/topos/reference.md`,
+/// mirroring the schema/fixture drift discipline (a stale or missing file fails). Rendered from
+/// the real clap tree, so both references track the binary exactly.
 fn gen_cli_ref(check: bool) -> Result<()> {
-    let dir = docs_dir();
-    let path = dir.join("cli.md");
     let content = topos::cli_ref_md();
-    if check {
-        match fs::read_to_string(&path) {
-            Ok(existing) if existing == content => println!("cli reference up to date"),
-            Ok(_) => bail!(
-                "cli-reference drift: docs/cli.md is stale — run `cargo xtask gen-cli-ref` and commit"
-            ),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => bail!(
-                "cli-reference drift: docs/cli.md is missing — run `cargo xtask gen-cli-ref` and commit"
-            ),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    for path in cli_ref_paths() {
+        let shown = path
+            .strip_prefix(workspace_root())
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        if check {
+            match fs::read_to_string(&path) {
+                Ok(existing) if existing == content => {
+                    println!("cli reference up to date: {shown}");
+                }
+                Ok(_) => bail!(
+                    "cli-reference drift: {shown} is stale — run `cargo xtask gen-cli-ref` and commit"
+                ),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => bail!(
+                    "cli-reference drift: {shown} is missing — run `cargo xtask gen-cli-ref` and commit"
+                ),
+                Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+            }
+        } else {
+            let dir = path.parent().expect("cli-ref paths have a parent");
+            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+            fs::write(&path, &content).with_context(|| format!("writing {}", path.display()))?;
+            println!("wrote {shown}");
         }
-    } else {
-        fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-        fs::write(&path, &content).with_context(|| format!("writing {}", path.display()))?;
-        println!("wrote {}", path.display());
     }
     Ok(())
 }

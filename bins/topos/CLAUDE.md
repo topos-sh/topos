@@ -340,17 +340,31 @@ are asserted byte-equal in tests.
   --yes` reuses the same reconcile with explicit `ReconcileOpts` (batch-accepted first receives,
   declined/renamed collisions, one workspace, no ack) and no gate.
 
-- **The BUILT-IN `topos` skill** (`ops/builtin`, `cli_ref`) — the meta-skill that teaches an agent
-  what topos is, how to drive it, and how to distill a session's own learnings into shared skills
-  (origination: the capture bar, describe-first consent, deepen-before-new), shipped INSIDE the
-  binary: an authored `SKILL.md` (version-stamped) + `reference.md` = the SAME bytes `docs/cli.md`
-  carries (`cli_ref::cli_ref_md()` renders from the real clap tree; xtask's `gen-cli-ref` calls
-  the same fn — one renderer, no drift). It
+- **The BUILT-IN `topos` skill** (`ops/builtin`, `cli_ref`, the repo-top-level `skills/topos/`
+  source) — the meta-skill that teaches an agent what topos is, how to drive it, and how to
+  distill a session's own learnings into shared skills (origination: the capture bar,
+  describe-first consent, deepen-before-new). Its SOURCE is the repo-top-level `skills/topos/`
+  dir — an authored `SKILL.md` (self-contained: a `topos --version` routing step offers the
+  install path when the CLI is absent; NO version stamp, so the committed file is byte-identical
+  to what the binary places) + `INSTALL.md` (installer + join/start-fresh/self-host) + the
+  committed generated `reference.md` — downloadable AS a skill straight from the public repo
+  (`npx skills add`-style installers find it there; the frontmatter `name: topos` names the
+  installed dir). The binary EMBEDS those same files (`include_str!`), and the bundle it places is
+  the same three: `SKILL.md` + `INSTALL.md` + `reference.md` = the SAME bytes `docs/cli.md`
+  carries (`cli_ref::cli_ref_md()` renders from the real clap tree; xtask's `gen-cli-ref`
+  writes/checks BOTH committed copies with the same fn — one renderer, no drift). It
   lands through the ORDINARY placement engine (shared-dir-first; `--agent` scoping works) at the
   trigger-arming moments (`add`'s adopt receipt, the enrollment receipt) and re-syncs on every bare
   `update` sweep — FORCE-SYNCED to the binary (a hand edit is snapshotted into the store, then
   overwritten; never a draft; a binary change commits + re-places), with its byte changes riding the
-  quiet hook's `reloadSkills`. NOT a subscription: no `follows.json` row, the plane never hears of
+  quiet hook's `reloadSkills`. A pre-existing `topos` dir is NEVER written by the sweep (the
+  Foreign freeze — marker or not): one whose SKILL.md frontmatter carries the public copy's
+  provenance marker (a `metadata:` entry `topos: builtin`, matched fail-closed — terminated
+  frontmatter only, nested under `metadata:` only) is a stale DOWNLOADED copy that the CONSENTED
+  `follow topos --yes` adopts — disclosed on the bare describe, snapshot-first into the sidecar
+  store, then force-synced and managed; without the marker it stays the frozen Foreign
+  reservation, never written, never deleted. NOT a subscription: no `follows.json`
+  row, the plane never hears of
   it; its device-local state (`state/builtin.json`) carries the durable `remove topos` opt-out (no
   sweep resurrects; `follow topos` re-places, riding the agent-scope payload as `restore`) + the
   `--agent` scope. `list` shows it as `built-in`; `publish`/`unfollow`/targeted `update` refuse it

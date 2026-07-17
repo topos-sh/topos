@@ -116,6 +116,13 @@ never drift). It re-syncs with the binary on every update sweep; hand edits are 
 `topos remove topos --yes` opts the device out durably; `topos follow topos` brings it back. The name
 `topos` is reserved everywhere, so no workspace skill can ever shadow it.
 
+The skill's source lives at the top of this repo — [`skills/topos/`](skills/topos/) — so it also
+works as a plain downloadable skill with no topos installed: `npx skills add topos-sh/topos` places
+the same three files (`SKILL.md`, the generated `reference.md`, and `INSTALL.md`, which covers
+installing the CLI). If you later install topos, one explicit `topos follow topos --yes` hands the
+downloaded copy to it — recognized by its provenance marker, its bytes snapshotted first, kept
+current from then on. Nothing takes over a pre-existing directory silently.
+
 ## Skill discovery across harnesses
 
 `topos list` scans the skills directory of every agent harness it knows about — not just the ones it fully

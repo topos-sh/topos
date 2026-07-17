@@ -10,8 +10,8 @@ cargo xtask gen-schema             # (re)generate contracts/schemas/*.schema.jso
 cargo xtask gen-schema --check     # the contract drift gate — a stale / missing / orphan artifact fails
 cargo xtask gen-fixtures           # (re)generate the golden --json fixtures under contracts/fixtures/
 cargo xtask gen-fixtures --check   # the fixture drift gate (same stale/missing/orphan discipline)
-cargo xtask gen-cli-ref            # (re)generate docs/cli.md from the client's real clap tree
-cargo xtask gen-cli-ref --check    # the cli-reference drift gate (stale / missing fails)
+cargo xtask gen-cli-ref            # (re)generate docs/cli.md + skills/topos/reference.md from the client's real clap tree
+cargo xtask gen-cli-ref --check    # the cli-reference drift gate over BOTH copies (stale / missing fails)
 cargo xtask check-arch             # the architectural-layering + vocabulary + schema-boundary gate
 cargo xtask check-registry-drift   # OPT-IN + advisory: diff the baked harness registry vs upstream agents.ts (network; NEVER in ci/CI)
 cargo xtask ci                     # ALL the non-DB gates, in CI's order, failing fast
@@ -28,11 +28,13 @@ cargo xtask conformance            # the store matrices (not yet implemented —
   contract). **The artifacts are generated — never hand-edit them.**
 - **`gen-fixtures [--check]`** — builds the golden `--json` envelopes FROM the typed shapes and
   writes them under `contracts/fixtures/json/`; `--check` is the drift gate.
-- **`gen-cli-ref [--check]`** — writes (or `--check`s) `docs/cli.md`. The RENDERER lives in the
-  client lib (`topos::cli_ref_md()` — rendered from the real clap tree, `topos::cli_command()`),
-  because it has TWO consumers: this gate's committed reference, and the built-in `topos` skill,
-  which places the SAME bytes as its `reference.md` — one implementation, so neither copy can
-  drift from what the binary parses. xtask keeps only the file-write/byte-compare driver.
+- **`gen-cli-ref [--check]`** — writes (or `--check`s) TWO committed copies of the same bytes:
+  `docs/cli.md` and the public skill's `skills/topos/reference.md` (skill installers download the
+  committed file straight from the repo, so it is drift-gated like the doc). The RENDERER lives in
+  the client lib (`topos::cli_ref_md()` — rendered from the real clap tree, `topos::cli_command()`),
+  because it has a THIRD consumer: the built-in `topos` skill places the SAME bytes as its
+  `reference.md` at placement time — one implementation, so no copy can drift from what the binary
+  parses. xtask keeps only the file-write/byte-compare driver.
 - **`check-arch`** — the dependency-graph + source-scan trust claims as one gate:
   - the client (`topos`) carries no `plane-store` / `sqlx` / async-runtime / HTTP / contract-derive
     edge; the kernel (`topos-core`) carries no wire DTOs or IO stacks; the leaf crates stay lean;
