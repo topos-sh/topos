@@ -21,10 +21,35 @@ import {
   Scripts,
   ScrollRestoration,
   useRouteError,
+  useRouteLoaderData,
 } from "react-router";
 import appStylesHref from "./app.css?url";
+import { serverEnv } from "./env.server";
 
 export const links: LinksFunction = () => [{ rel: "stylesheet", href: appStylesHref }];
+
+/**
+ * The one root-level knob the shell reads: the optional GTM container id (env.server enforces
+ * its shape). Unset — the OSS default — the loader hands the shell null and the document ships
+ * zero third-party script.
+ */
+export function loader() {
+  return { gtmId: serverEnv().TOPOS_GTM_CONTAINER_ID ?? null };
+}
+
+/**
+ * The standard Google Tag Manager loader, byte-for-byte from Google's install doc with ONLY the
+ * container id parameterized — JSON-stringified into the one string slot, and already
+ * shape-checked by env.server, so no env value can break out of the literal.
+ */
+function gtmSnippet(id: string): string {
+  return (
+    "(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':new Date().getTime()," +
+    "event:'gtm.js'});var f=d.getElementsByTagName(s)[0],j=d.createElement(s),dl=l!='dataLayer'" +
+    "?'&l='+l:'';j.async=true;j.src='https://www.googletagmanager.com/gtm.js?id='+i+dl;" +
+    `f.parentNode.insertBefore(j,f);})(window,document,'script','dataLayer',${JSON.stringify(id)});`
+  );
+}
 
 /**
  * The root default title + description. Pages set their own full `<title>` as `"<page> · Topos"`
@@ -38,15 +63,36 @@ export const meta: MetaFunction = () => [
 
 /** The HTML shell: React Router wraps BOTH the app and the ErrorBoundary in this Layout. */
 export function Layout({ children }: { children: ReactNode }) {
+  // Defensive: the Layout also wraps the ErrorBoundary, where the root loader's data may be
+  // absent — no data reads as no container id, and the shell degrades to script-free.
+  const data = useRouteLoaderData<typeof loader>("root");
+  const gtmId = data?.gtmId ?? null;
   return (
     <html lang="en">
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        {gtmId !== null && (
+          <script
+            // biome-ignore lint/security/noDangerouslySetInnerHtml: the GTM loader is Google's constant snippet with the env-shape-checked id JSON-stringified in — nothing request- or user-derived.
+            dangerouslySetInnerHTML={{ __html: gtmSnippet(gtmId) }}
+          />
+        )}
         <Meta />
         <Links />
       </head>
       <body className="min-h-dvh font-sans">
+        {gtmId !== null && (
+          <noscript>
+            <iframe
+              src={`https://www.googletagmanager.com/ns.html?id=${encodeURIComponent(gtmId)}`}
+              height="0"
+              width="0"
+              style={{ display: "none", visibility: "hidden" }}
+              title="Google Tag Manager"
+            />
+          </noscript>
+        )}
         {children}
         <ScrollRestoration />
         <Scripts />

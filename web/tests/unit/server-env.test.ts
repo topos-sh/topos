@@ -25,6 +25,7 @@ const SCHEMA_KEYS = [
   "TOPOS_WORKSPACE_NAME",
   "TOPOS_SETUP_CODE",
   "TOPOS_SETUP_LINK_FILE",
+  "TOPOS_GTM_CONTAINER_ID",
 ];
 
 // serverEnv() memoizes per module instance, so each case gets a fresh module registry.
@@ -95,5 +96,18 @@ describe("serverEnv", () => {
   it("the /api/v1 rate belt defaults ON (the unit suites must turn it off explicitly)", async () => {
     const env = await parseWith(REQUIRED);
     expect(env.TOPOS_WEB_RATELIMIT).toBe("on");
+  });
+
+  it("TOPOS_GTM_CONTAINER_ID: unset and empty both spell unset; the container-id shape is enforced", async () => {
+    const unset = await parseWith(REQUIRED);
+    expect(unset.TOPOS_GTM_CONTAINER_ID).toBeUndefined();
+    const empty = await parseWith({ ...REQUIRED, TOPOS_GTM_CONTAINER_ID: "  " });
+    expect(empty.TOPOS_GTM_CONTAINER_ID).toBeUndefined();
+    const set = await parseWith({ ...REQUIRED, TOPOS_GTM_CONTAINER_ID: "GTM-NMXMFBSF" });
+    expect(set.TOPOS_GTM_CONTAINER_ID).toBe("GTM-NMXMFBSF");
+    // A value that could break out of the inline snippet never parses.
+    await expect(
+      parseWith({ ...REQUIRED, TOPOS_GTM_CONTAINER_ID: "GTM-X');alert(1);//" }),
+    ).rejects.toThrow();
   });
 });

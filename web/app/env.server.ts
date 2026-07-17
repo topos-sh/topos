@@ -68,6 +68,20 @@ const serverSchema = z.object({
     z.string().optional(),
   ),
   /**
+   * Optional Google Tag Manager container id. Set, the HTML shell (root.tsx) carries the
+   * standard GTM head snippet + body noscript on every document — how a hosted deployment wires
+   * its analytics without forking the shell. Unset — the OSS default — the app ships ZERO
+   * third-party script. Empty spells unset, how compose and every deploy panel spell it; the
+   * container-id shape is enforced so a malformed value can never reach the inline snippet.
+   */
+  TOPOS_GTM_CONTAINER_ID: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z
+      .string()
+      .regex(/^GTM-[A-Z0-9]+$/)
+      .optional(),
+  ),
+  /**
    * The outbound-mail relay — BRING YOUR OWN SMTP, all five or none (the vault's old five-flag
    * rule, moved app-side with the mail unification). With all five set, the app's ONE mail seam
    * really sends: invite notices, the enrollment passcode, and a composition's magic links. Any
