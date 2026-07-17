@@ -112,7 +112,7 @@ vault's SQL names no app-schema table).
 
 **The database posture** is two roles, one per application, each owning its schema — `scripts/compose-init-db.sh`
 provisions them at first boot. The app reads the vault's `plane` schema **read-only** (an `ALTER DEFAULT
-PRIVILEGES` grant, so future vault tables arrive already readable) for its history/fleet/currency pages; the
+PRIVILEGES` grant, so future vault tables arrive already readable) for its history/fleet/freshness pages; the
 vault cannot read `web` at all. `scripts/check-db-grants.sh` proves the cross-lane shape by logging in as each
 role.
 
@@ -174,11 +174,11 @@ languages can depend on the wire without depending on the Rust.
 
 ## Harness adapters
 
-A harness is *which directories to read and write* plus *when a currency check fires* — no dialect
+A harness is *which directories to read and write* plus *when a update check fires* — no dialect
 translation in the OSS core (bytes sync exactly within a harness family). The `HarnessAdapter` port in
 `topos-harness` is the one client-side seam; the **Claude Code** adapter is the reference implementation
-(discovery, adopt-in-place, an idempotent session-start currency hook, clean uninstall). Adding a harness is
-a directory map plus a currency trigger, not a refactor.
+(discovery, adopt-in-place, an idempotent session-start auto-update hook, clean uninstall). Adding a harness is
+a directory map plus a auto-update trigger, not a refactor.
 
 ## The gates
 

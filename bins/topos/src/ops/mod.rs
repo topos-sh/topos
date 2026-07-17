@@ -4,7 +4,7 @@
 //! [`list`], [`diff`], [`publish`], [`review`], [`revert`], [`log`], [`update`](pull), [`self_update`].
 //!
 //! **Shared machinery** (no verb of its own — the verbs above drive it):
-//! - [`sync_engine`] — the per-skill `checkForUpdates → plan → apply` currency machine over the kernel's
+//! - [`sync_engine`] — the per-skill `checkForUpdates → plan → apply` sync machine over the kernel's
 //!   four-state transition. `pull` is its scope dispatch; the `follow <skill>` path drives it too.
 //! - [`merge_resolve`] — the author-side resolution of a diverged draft (three-way merge / conflict
 //!   materialization / the `--onto-current` escape), reachable only through the engine's witness token.

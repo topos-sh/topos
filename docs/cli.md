@@ -2,7 +2,7 @@
 
 > GENERATED from the `clap` command tree by `cargo xtask gen-cli-ref` — do not hand-edit. Change the CLI, re-run the command, and commit the result; the `--check` variant is the drift gate.
 
-`topos` is the client an agent drives non-interactively. Every mutating verb is TWO-PHASE: a bare invocation DESCRIBES what would change (nothing is written), and `--yes` applies it in one shot (`revert` is the exception — `--yes` there also acknowledges a no-op). `--json` works on every verb and prints exactly one envelope on stdout (never a prompt). The exit status is one of three classes: `0` on success, `1` on a domain refusal or a failed operation (the envelope's `ok` + `error.outcome` distinguish a refusal from a transport fault), and `2` on a usage error (an unknown flag or a missing argument). The session-start currency hook runs `topos update --quiet`, which stays silent except a freshness one-liner and exits `0` on a network blip so a session never fails to start.
+`topos` is the client an agent drives non-interactively. Every mutating verb is TWO-PHASE: a bare invocation DESCRIBES what would change (nothing is written), and `--yes` applies it in one shot (`revert` is the exception — `--yes` there also acknowledges a no-op). `--json` works on every verb and prints exactly one envelope on stdout (never a prompt). The exit status is one of three classes: `0` on success, `1` on a domain refusal or a failed operation (the envelope's `ok` + `error.outcome` distinguish a refusal from a transport fault), and `2` on a usage error (an unknown flag or a missing argument). The session-start auto-update hook runs `topos update --quiet`, which stays silent except a freshness one-liner and exits `0` on a network blip so a session never fails to start.
 
 ## Global options
 
@@ -58,7 +58,7 @@ Stop following a skill or channel — two-phase (bare describes what stops; `--y
 topos update [OPTIONS] [TARGETS]...
 ```
 
-Check for and apply updates to followed skills — the harness currency entry point. Bare = the sweep over every followed skill (the installed currency trigger runs `update --quiet`). `<skill>` accepts a pending update for one skill (or resumes a held one); `<skill>@<hash>` goes back to that version
+Check for and apply updates to followed skills — the harness auto-update entry point. Bare = the sweep over every followed skill (the installed auto-update trigger runs `update --quiet`). `<skill>` accepts a pending update for one skill (or resumes a held one); `<skill>@<hash>` goes back to that version
 
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
@@ -310,7 +310,7 @@ Show who you are, per-workspace access health, hook health, and reporting postur
 topos uninstall [OPTIONS]
 ```
 
-Remove topos from this machine — two-phase (bare describes what goes; `--yes` applies). Scrubs the session-start currency hook from the harness config and deletes the `~/.topos/` sidecar tree (the signed-in credential lives there and goes with it). SKILL FILES IN AGENT DIRS ARE LEFT UNTOUCHED — uninstall never deletes a skill byte. The `topos` binary is NOT self-deleted; remove it with the installer you used (or `rm` its printed path). Needs no sign-in
+Remove topos from this machine — two-phase (bare describes what goes; `--yes` applies). Scrubs the session-start auto-update hook from the harness config and deletes the `~/.topos/` sidecar tree (the signed-in credential lives there and goes with it). SKILL FILES IN AGENT DIRS ARE LEFT UNTOUCHED — uninstall never deletes a skill byte. The `topos` binary is NOT self-deleted; remove it with the installer you used (or `rm` its printed path). Needs no sign-in
 
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|

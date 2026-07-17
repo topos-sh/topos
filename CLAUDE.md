@@ -18,7 +18,7 @@ byte-exact digest, consent, content-addressed identity, and sync algorithm. Noth
 ## Status — real but early (living status)
 
 Both loops work **end-to-end today**, proven by loopback-HTTP e2e tests: **distribute** (an author
-publishes; a follower's real two-call `follow` by workspace address arms the harness currency trigger and
+publishes; a follower's real two-call `follow` by workspace address arms the harness auto-update trigger and
 every subsequent `update` lands the team's `current` byte-exact) and **contribute** (`publish --propose` → a four-eyes
 `review --approve` → followers apply; `revert --to` rolls the team forward to older bytes) — plus a
 self-hostable compose stack, a checksummed installer, and a tag-triggered release pipeline. Deferred,

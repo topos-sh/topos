@@ -1,4 +1,4 @@
-//! `cursor` — the session-start currency hook in `<root>/hooks.json` (production root:
+//! `cursor` — the session-start auto-update hook in `<root>/hooks.json` (production root:
 //! `~/.cursor`): `{"version": 1, "hooks": {"sessionStart": [{"command": …}]}}` — a FLAT entry
 //! array per event (no matcher groups), lowercase-camel event key, and a top-level schema
 //! `version` (seeded as `1` only when the file is created from scratch; an existing file's own

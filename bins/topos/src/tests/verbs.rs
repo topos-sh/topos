@@ -1138,7 +1138,7 @@ fn unfollow_flips_follow_state_keeps_bytes_and_is_idempotent() {
         follows
     );
 
-    // The bare sweep skips the unfollowed skill (the currency subscription is off).
+    // The bare sweep skips the unfollowed skill (its auto-update subscription is off).
     let file_follow = crate::plane_http::FileFollow::new(enroll::follow_contexts(&follows));
     let sweep_ctx = Ctx {
         follow: &file_follow,
@@ -1296,7 +1296,7 @@ fn list_discloses_enrollment_follow_state_and_hook() {
     let text = render::list_tty(&out);
     // The header names the plane + hook; the skill sits under its workspace's group header.
     assert!(
-        text.starts_with("Enrolled at https://topos.example — currency hook: not installed"),
+        text.starts_with("Enrolled at https://topos.example — auto-update hook: not installed"),
         "{text}"
     );
     assert!(text.contains("\nAcme:\n"), "{text}");

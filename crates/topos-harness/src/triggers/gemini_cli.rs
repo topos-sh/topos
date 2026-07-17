@@ -1,4 +1,4 @@
-//! `gemini-cli` — the session-start currency hook in `<root>/settings.json` (production root:
+//! `gemini-cli` — the session-start auto-update hook in `<root>/settings.json` (production root:
 //! `~/.gemini`): Claude-Code-shaped matcher groups under a top-level `"hooks"` map, event key
 //! `"SessionStart"`, handler `{"type": "command", "command": …, "timeout": 60}`.
 //!

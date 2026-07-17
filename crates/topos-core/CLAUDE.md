@@ -14,7 +14,7 @@ Implemented (each behind a known-answer / truth-table test):
   construction (the human-facing `version_id`, a length-prefixed binary frame). No keys, no
   signatures — written once here so every component that re-derives an id agrees on the bytes by
   construction.
-- ✅ the **client sync transition** (`sync`) — the four currency states from `work==base?`×`applied==observed?`,
+- ✅ the **client sync transition** (`sync`) — the four sync states from `work==base?`×`applied==observed?`,
   and the post-fetch heal that distinguishes a crash-after-swap from a real divergence; all pure, behind
   a truth-table test. No floor, no alarm: the served pointer is the sync target, its integrity the
   content-addressed version id re-verified by digest on apply.

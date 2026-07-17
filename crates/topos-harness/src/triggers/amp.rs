@@ -33,8 +33,8 @@ fn plugin() -> String {
     format!(
         r#"// topos:amp:currency:1 — Managed by topos; hand edits are overwritten. Remove with `topos uninstall`.
 // Shape per the Amp plugin manual (vendor docs, unverified — Amp is closed source): a
-// session-start listener running the topos currency sweep through Amp's shell API; failures are
-// swallowed (currency is best-effort, never session-breaking).
+// session-start listener running the topos update sweep through Amp's shell API; failures are
+// swallowed (updating is best-effort, never session-breaking).
 const sweep = async () => {{ try {{ await amp.shell("{PLAIN_SWEEP}") }} catch {{}} }}
 sweep()
 amp.on("session.start", () => sweep())
@@ -69,8 +69,8 @@ mod tests {
     /// `plugin()` (or the shared sweep const) fails loudly here.
     const PLUGIN_FIXTURE: &str = r#"// topos:amp:currency:1 — Managed by topos; hand edits are overwritten. Remove with `topos uninstall`.
 // Shape per the Amp plugin manual (vendor docs, unverified — Amp is closed source): a
-// session-start listener running the topos currency sweep through Amp's shell API; failures are
-// swallowed (currency is best-effort, never session-breaking).
+// session-start listener running the topos update sweep through Amp's shell API; failures are
+// swallowed (updating is best-effort, never session-breaking).
 const sweep = async () => { try { await amp.shell("topos update --quiet") } catch {} }
 sweep()
 amp.on("session.start", () => sweep())

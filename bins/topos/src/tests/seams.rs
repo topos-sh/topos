@@ -43,7 +43,7 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
-/// A harness that recognizes nothing — an `add` of a plain dir tracks it in place with no currency.
+/// A harness that recognizes nothing — an `add` of a plain dir tracks it in place with no auto-update.
 struct NullHarness;
 impl HarnessAdapter for NullHarness {
     fn id(&self) -> HarnessId {

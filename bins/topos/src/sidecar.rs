@@ -158,7 +158,7 @@ impl Layout {
         self.state_dir().join("sync_status.json")
     }
 
-    /// `state/quiet_sweep.json` — when the last bare currency sweep completed (epoch millis). The
+    /// `state/quiet_sweep.json` — when the last bare update sweep completed (epoch millis). The
     /// quiet hook's TTL self-throttle reads it; every completed bare sweep (quiet or explicit)
     /// refreshes it. A plain doc — one timestamp, never a secret.
     pub(crate) fn quiet_sweep_path(&self) -> PathBuf {

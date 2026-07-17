@@ -104,8 +104,8 @@ pub(crate) enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Check for and apply updates to followed skills — the harness currency entry point. Bare = the sweep
-    /// over every followed skill (the installed currency trigger runs `update --quiet`). `<skill>` accepts a
+    /// Check for and apply updates to followed skills — the harness auto-update entry point. Bare = the sweep
+    /// over every followed skill (the installed auto-update trigger runs `update --quiet`). `<skill>` accepts a
     /// pending update for one skill (or resumes a held one); `<skill>@<hash>` goes back to that version.
     #[command(alias = "pull")]
     Update {
@@ -332,7 +332,7 @@ pub(crate) enum Command {
         cmd: AuthCmd,
     },
     /// Remove topos from this machine — two-phase (bare describes what goes; `--yes` applies). Scrubs
-    /// the session-start currency hook from the harness config and deletes the `~/.topos/` sidecar tree
+    /// the session-start auto-update hook from the harness config and deletes the `~/.topos/` sidecar tree
     /// (the signed-in credential lives there and goes with it). SKILL FILES IN AGENT DIRS ARE LEFT
     /// UNTOUCHED — uninstall never deletes a skill byte. The `topos` binary is NOT self-deleted; remove
     /// it with the installer you used (or `rm` its printed path). Needs no sign-in.

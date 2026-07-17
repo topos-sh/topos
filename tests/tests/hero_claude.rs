@@ -1,7 +1,7 @@
 //! The HERO on the REAL harness adapters, over the composed stack: a follower whose rig is wired
 //! to the genuine Claude Code / OpenClaw / Hermes adapter enrolls through the device flow, and the
-//! promote arms the REAL currency surface (the `settings.json` SessionStart hook / OpenClaw's
-//! silent currency cron through the rig's fake CLI / the Hermes `config.yaml`
+//! promote arms the REAL auto-update surface (the `settings.json` SessionStart hook / OpenClaw's
+//! silent auto-update cron through the rig's fake CLI / the Hermes `config.yaml`
 //! session-boundary entries) while the `everyone` genesis lands byte-exact in the adapter's OWN skill
 //! directory. An update then lands on a subsequent bare sweep through the same adapter.
 //!
@@ -15,13 +15,13 @@ use common::{OWNER_EMAIL, SKILL, expected, genesis_files};
 use topos::test_support::{FollowHarness, PublishResult, Scope};
 use topos_types::results::PullAction;
 
-/// One adapter case: how the rig is built + how its armed currency surface is witnessed.
+/// One adapter case: how the rig is built + how its armed auto-update surface is witnessed.
 struct Case {
     tag: &'static str,
     rig: fn(&str) -> FollowHarness,
     /// Read the adapter's config surface after enrollment; `None` = not armed / missing.
     config: fn(&FollowHarness) -> Option<String>,
-    /// A substring the armed config MUST carry (the topos currency entry).
+    /// A substring the armed config MUST carry (the topos auto-update entry).
     marker: &'static str,
 }
 
@@ -102,12 +102,12 @@ fn e2e_real_adapters_arm_their_currency_surface_and_land_the_bytes() {
             case.tag
         );
 
-        // The enrollment promote ARMED the adapter's real currency surface.
+        // The enrollment promote ARMED the adapter's real auto-update surface.
         let config = (case.config)(&client)
-            .unwrap_or_else(|| panic!("[{}] the currency config file exists", case.tag));
+            .unwrap_or_else(|| panic!("[{}] the auto-update config file exists", case.tag));
         assert!(
             config.contains(case.marker),
-            "[{}] the currency entry is registered: {config}",
+            "[{}] the auto-update entry is registered: {config}",
             case.tag
         );
         rigs.push(client);

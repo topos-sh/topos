@@ -193,7 +193,7 @@ impl Drop for Scratch {
 }
 
 /// A minimal harness stub — the engine reads the placement from `map.json`, never the adapter, so these
-/// methods are never reached during a pull, and `add` of a plain dir does not recognize it (no currency).
+/// methods are never reached during a pull, and `add` of a plain dir does not recognize it (no auto-update).
 #[derive(Debug)]
 struct NoHarness;
 
@@ -503,10 +503,10 @@ impl HarnessAdapter for WorkHarness {
 /// redeem → first-receive placement) without reaching the client's `pub(crate)` internals.
 ///
 /// Three adapter modes: the default [`new`](Self::new) wires the [`WorkHarness`] stub (placement under the
-/// work root, no currency); [`new_claude`](Self::new_claude) wires the **real Claude Code adapter** over a
+/// work root, no auto-update); [`new_claude`](Self::new_claude) wires the **real Claude Code adapter** over a
 /// temp config home — placements land in `<config-home>/skills/<skill_id>` and the enrollment promote arms
 /// the REAL `settings.json` session-start hook — [`new_openclaw`](Self::new_openclaw) wires the **real
-/// OpenClaw adapter** the same way (a temp stand-in home; the promote registers the silent currency cron
+/// OpenClaw adapter** the same way (a temp stand-in home; the promote registers the silent auto-update cron
 /// through a file-persisted fake `openclaw` CLI — no real gateway exists in a suite) — and
 /// [`new_hermes`](Self::new_hermes) wires the **real Hermes adapter** over a temp `$HERMES_HOME`, so an
 /// e2e can prove the whole second-machine story against a genuine adapter.
@@ -622,7 +622,7 @@ impl FollowHarness {
     }
 
     /// A fresh rig wired to the REAL Claude Code adapter over a temp config home (a stand-in
-    /// `$CLAUDE_CONFIG_DIR` — the real `~/.claude` is never touched). Placement + the currency hook then
+    /// `$CLAUDE_CONFIG_DIR` — the real `~/.claude` is never touched). Placement + the auto-update hook then
     /// go through the genuine adapter: skills land in `<config-home>/skills/<skill_id>` and the promote
     /// writes the real `settings.json` session-start entry.
     #[must_use]
@@ -634,8 +634,8 @@ impl FollowHarness {
 
     /// A fresh rig wired to the REAL OpenClaw adapter over a temp stand-in home (the real `~/.openclaw`
     /// is never touched — the home is injected, mirroring the adapter's own test isolation). Placement +
-    /// the currency trigger then go through the genuine adapter: skills land in `<home>/skills/<skill_id>`
-    /// and the promote registers the silent currency cron through the rig's file-persisted fake
+    /// the auto-update trigger then go through the genuine adapter: skills land in `<home>/skills/<skill_id>`
+    /// and the promote registers the silent auto-update cron through the rig's file-persisted fake
     /// `openclaw` CLI (a healthy-gateway double — no suite spawns a real harness process).
     #[must_use]
     pub fn new_openclaw(tag: &str) -> Self {
@@ -645,7 +645,7 @@ impl FollowHarness {
     }
 
     /// A fresh rig wired to the REAL Hermes adapter over a temp stand-in `$HERMES_HOME` (the real
-    /// `~/.hermes` is never touched). Placement + the currency hook then go through the genuine adapter:
+    /// `~/.hermes` is never touched). Placement + the auto-update hook then go through the genuine adapter:
     /// skills land in `<hermes-home>/skills/general/<skill_id>` and the promote registers the real
     /// `config.yaml` per-turn `pre_llm_call` entry (reported honestly non-Active — no acceptance evidence
     /// exists in a fixture home).
@@ -1052,7 +1052,7 @@ impl FollowHarness {
         write_tree(&self.placement_dir(skill_id), files);
     }
 
-    /// The adapter's currency [`TriggerReport`] — a fresh, IDEMPOTENT re-probe of the same currency
+    /// The adapter's auto-update [`TriggerReport`] — a fresh, IDEMPOTENT re-probe of the same trigger
     /// install the enroll `promote` armed (the adapter's `install_currency_trigger` is idempotent: it
     /// detects the already-installed hook and re-reports it, writing no duplicate). The two-phase ADDRESS
     /// enroll does not surface the classic `FollowData.currency` on its describe/apply, so an e2e reads the
@@ -1743,7 +1743,7 @@ impl FollowHarness {
     }
 
     /// The fake `openclaw` CLI's persisted cron store in the stand-in home (`None` when absent or
-    /// not in openclaw mode) — the e2e asserts the silent currency job's registration (its
+    /// not in openclaw mode) — the e2e asserts the silent auto-update job's registration (its
     /// declaration key) against it.
     #[must_use]
     pub fn openclaw_cron_state(&self) -> Option<String> {

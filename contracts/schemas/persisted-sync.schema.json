@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "SyncState",
-  "description": "`skills/<id>/sync.json` — the durable client sync state (the four-state currency machine's memory).\n**Fully pinned.** The four states (CURRENT / BEHIND / DRAFT / DIVERGED) are *derived* from\n`observed`/`applied` vs the working tree, never stored.",
+  "description": "`skills/<id>/sync.json` — the durable client sync state (the four-state sync machine's memory).\n**Fully pinned.** The four states (CURRENT / BEHIND / DRAFT / DIVERGED) are *derived* from\n`observed`/`applied` vs the working tree, never stored.",
   "type": "object",
   "properties": {
     "applied": {

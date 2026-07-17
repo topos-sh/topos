@@ -534,7 +534,7 @@ fn resume(
 ///      wholesale: a device holds exactly one credential);
 ///   3) `user.json` — upsert the joined membership (a second workspace ADDS, never drops);
 ///   4) delete the WAL — the last durable step, so "WAL absent" proves 1-3 completed;
-///   5) arm the session-start currency trigger — best-effort + idempotent (a pure follower never
+///   5) arm the session-start auto-update trigger — best-effort + idempotent (a pure follower never
 ///      runs `add`, so enrollment is where their hook gets armed); infallible by construction, so it
 ///      can never roll back a completed enrollment.
 ///

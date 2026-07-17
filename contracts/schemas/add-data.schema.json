@@ -9,7 +9,7 @@
       "pattern": "^[0-9a-f]{64}$"
     },
     "currency": {
-      "description": "The currency-trigger outcome, present when adopting into a recognized harness attempted a\nsession-start trigger install — the honest disclosure of the (only) write `add` makes outside\n`~/.topos/`. `None` for a plain directory.",
+      "description": "The auto-update-trigger outcome, present when adopting into a recognized harness attempted a\nsession-start trigger install — the honest disclosure of the (only) write `add` makes outside\n`~/.topos/`. `None` for a plain directory.",
       "anyOf": [
         {
           "$ref": "#/$defs/TriggerReport"
@@ -20,7 +20,7 @@
       ]
     },
     "harness": {
-      "description": "The harness topos recognized the adopted directory as (e.g. Claude Code), or `None` for a plain\ndirectory tracked in place. Disclosed so the agent can see whether currency was armed.",
+      "description": "The harness topos recognized the adopted directory as (e.g. Claude Code), or `None` for a plain\ndirectory tracked in place. Disclosed so the agent can see whether auto-update was armed.",
       "anyOf": [
         {
           "$ref": "#/$defs/HarnessId"
@@ -58,7 +58,7 @@
       "type": "boolean"
     },
     "triggers": {
-      "description": "The breadth arming sweep's outcomes — one row per OTHER detected agent whose currency\ntrigger was (un)installed alongside the active adapter's (`currency` above). **Additive.**",
+      "description": "The breadth arming sweep's outcomes — one row per OTHER detected agent whose auto-update\ntrigger was (un)installed alongside the active adapter's (`currency` above). **Additive.**",
       "type": "array",
       "items": {
         "$ref": "#/$defs/BreadthTriggerReport"
@@ -118,7 +118,7 @@
       ]
     },
     "CurrencyKind": {
-      "description": "What fires currency for a harness — drives HONEST receipt copy (\"current by next session\",\n\"within about a minute\", …). `ExplicitPullOnly` is the honest-degrade floor.",
+      "description": "What fires the update check for a harness — drives HONEST receipt copy (\"current by next session\",\n\"within about a minute\", …). `ExplicitPullOnly` is the honest-degrade floor.",
       "oneOf": [
         {
           "description": "A session-boundary hook runs the sweep (Claude Code's SessionStart; Hermes's\n`on_session_start`/`on_session_reset`) — updates are current when a session begins.",
@@ -187,7 +187,7 @@
       ]
     },
     "TriggerReport": {
-      "description": "The result of installing a currency trigger — what was touched + the marker, so re-install is\nidempotent (the marker is a managed sentinel block in the config edit, NEVER in skill bytes).",
+      "description": "The result of installing a auto-update trigger — what was touched + the marker, so re-install is\nidempotent (the marker is a managed sentinel block in the config edit, NEVER in skill bytes).",
       "type": "object",
       "properties": {
         "currency_kind": {

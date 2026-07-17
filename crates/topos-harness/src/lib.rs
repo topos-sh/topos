@@ -2,8 +2,8 @@
 //! impl, the OpenClaw impl, and the Hermes impl.
 //!
 //! The ONE real client-side port. Content-blind: no `translate`, no `project`, no `to_dialect` (cut).
-//! Placement *bytes* are identical across adapters; an adapter differs only in *where* + *when currency
-//! fires*, and edits its own harness *config* (never a skill dir) to (un)install the currency trigger.
+//! Placement *bytes* are identical across adapters; an adapter differs only in *where* + *when the update check
+//! fires*, and edits its own harness *config* (never a skill dir) to (un)install the auto-update trigger.
 //!
 //! This **harness-independent** unit is frozen (the trait + `CurrencyKind` incl. `ExplicitPullOnly` +
 //! `TriggerReport` + the idempotency-marker convention); the OpenClaw impl ships **build-first behind the
@@ -189,12 +189,12 @@ pub trait HarnessAdapter {
         discovered: Option<&DiscoveredPlacement>,
     ) -> PlacementTarget;
     fn currency_kind(&self) -> CurrencyKind;
-    /// Idempotently install the currency trigger into the harness config (never a skill dir),
+    /// Idempotently install the auto-update trigger into the harness config (never a skill dir),
     /// check-before-add against a topos sentinel. Reports what state the trigger is in; a re-run
     /// when the managed entry is already present writes nothing.
     fn install_currency_trigger(&self) -> TriggerReport;
     /// The reverse of [`HarnessAdapter::install_currency_trigger`]: surgically scrub the topos-managed
-    /// currency entry from the harness config, leaving every other hook and the file itself intact, so
+    /// auto-update entry from the harness config, leaving every other hook and the file itself intact, so
     /// `uninstall` is a clean no-op for the user's own settings. Idempotent: a no-op (and an honest
     /// state) when no managed entry is present, the config is absent, or it cannot be parsed.
     fn remove_currency_trigger(&self) -> TriggerReport;
@@ -202,7 +202,7 @@ pub trait HarnessAdapter {
     /// and never a path `uninstall` deletes (a shared config the trigger lives in is scrubbed via
     /// [`HarnessAdapter::remove_currency_trigger`], never removed).
     fn uninstall_footprint(&self) -> Vec<PathBuf>;
-    /// Whether a topos-managed currency trigger is PROVABLY present right now — the hook-health
+    /// Whether a topos-managed auto-update trigger is PROVABLY present right now — the hook-health
     /// probe `list` / `auth status` read. Defaults to the footprint being non-empty (a config-file
     /// adapter's footprint discloses exactly its managed entry); an adapter whose trigger lives
     /// OUTSIDE the filesystem (OpenClaw's scheduler) overrides this with a live probe. Anything

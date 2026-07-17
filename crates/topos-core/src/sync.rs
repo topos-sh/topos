@@ -1,4 +1,4 @@
-//! The pure sync transition: the four currency states and the post-fetch heal.
+//! The pure sync transition: the four sync states and the post-fetch heal.
 //!
 //! Every decision here is a deterministic function over EXPLICIT VALUES — no I/O, no clock, no RNG (the
 //! kernel constraints). The client engine maps live disk state into these inputs, calls the functions,
@@ -7,7 +7,7 @@
 //! feeds to `decide()`. There is no rollback floor: the served pointer is the sync target, its
 //! integrity is the content-addressed version id re-verified by digest on apply.
 
-/// The four currency states, derived from `(work == base?)` and `(applied == observed?)`.
+/// The four sync states, derived from `(work == base?)` and `(applied == observed?)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncStatus {
     /// ① clean follower, caught up — nothing to do.

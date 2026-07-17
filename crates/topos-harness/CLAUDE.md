@@ -1,7 +1,7 @@
 # `topos-harness` — the `HarnessAdapter` port
 
 The `HarnessAdapter` trait + the `ConfigStore` + `CommandRunner` ports + the harness impls. The one real
-client-side port. Does discovery + byte-exact placement targeting + the currency-trigger (un)install
+client-side port. Does discovery + byte-exact placement targeting + the auto-update-trigger (un)install
 (session-start hooks for Claude Code and Hermes; a scheduled silent cron for OpenClaw). The registered
 sweep everywhere is the ONE byte-stable `topos update --quiet`, which self-throttles client-side (TTL +
 single-flight), so a trigger may fire on every session-shaped event (or a 1-minute cron tick) cheaply.
@@ -92,7 +92,7 @@ discipline (sanitized display name → workspace-prefixed on collision → the v
 dir or one the caller's own record owns), factored out of the Claude Code adapter so registry-target
 dirs name identically. The CLI's placement engine composes these; the adapters stay content-blind.
 
-**The `triggers` module** — currency triggers for NINE more registry harnesses, over two shared
+**The `triggers` module** — auto-update triggers for NINE more registry harnesses, over two shared
 bases that carry the honest-degrade contract STRUCTURALLY (no API exists for writing another
 program's trust/consent state; `Active` only on stated evidence, else the entry is registered and
 the report floors at explicit pull; fail-closed with zero writes on every unprovable shape;
@@ -127,7 +127,7 @@ only files it writes are its **own harness config surface** (`settings.json`; `c
 legacy-artifact scrub) — never a skill dir — and OpenClaw's trigger lives in the harness's own scheduler,
 driven argv-only through the `CommandRunner` port. v0 places a
 skill's **exact bytes** with no frontmatter rewrite, no dialect translation between harnesses, so adding a
-harness is a new impl (a directory mapping + a currency trigger), not a refactor anywhere else.
+harness is a new impl (a directory mapping + a auto-update trigger), not a refactor anywhere else.
 
 **The durable config write is the CLI's, not a second atomic-write here.** `install`/`remove` compute the
 post-image bytes (a pure merge — strict-JSON for Claude Code, line-anchored for Hermes's YAML) and write

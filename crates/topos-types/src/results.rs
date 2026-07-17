@@ -12,10 +12,10 @@
 use serde::{Deserialize, Serialize};
 
 // =================================================================================================
-// PINNED — `pull` (the four-state currency machine, per skill).
+// PINNED — `pull` (the four-state sync machine, per skill).
 // =================================================================================================
 
-/// `pull` result — per-skill currency state plus the reviewer-queue count. **PINNED** (the original
+/// `pull` result — per-skill update status plus the reviewer-queue count. **PINNED** (the original
 /// fields); `notices` + `sync` are ADDITIVE (the delivery-driven sweep's feed + freshness — absent
 /// on a targeted pull and from an older producer).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,8 +254,8 @@ pub struct UntrackedEntry {
     pub harness: String,
     /// The harness's human-readable name (e.g. `Claude Code`, `Cursor`).
     pub harness_name: String,
-    /// True iff topos has a full adapter for this harness (so `add` can arm live currency). False = the
-    /// skill is still adoptable (`topos add` tracks + shares its bytes), but auto-currency lands later.
+    /// True iff topos has a full adapter for this harness (so `add` can arm live auto-updates). False = the
+    /// skill is still adoptable (`topos add` tracks + shares its bytes), but auto-update lands later.
     pub adapter_supported: bool,
     /// Where the skill dir was found: `user` (a global harness home) or `project` (the current repo).
     pub scope: String,
@@ -286,7 +286,7 @@ pub struct SkillEntry {
     /// host, or `local` for a purely local `add`. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    /// The currency posture of the local copy: `current` / `behind` / `draft` / `detached`.
+    /// The update status of the local copy: `current` / `behind` / `draft` / `detached`.
     /// **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<SkillStatus>,
@@ -296,7 +296,7 @@ pub struct SkillEntry {
     pub cause: Option<DetachCause>,
 }
 
-/// A tracked skill's currency posture in [`SkillEntry`]. **INFERRED** (additive value set).
+/// A tracked skill's update status in [`SkillEntry`]. **INFERRED** (additive value set).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
@@ -395,19 +395,19 @@ pub struct AddData {
     pub bundle_digest: String,
     pub tracked: bool,
     /// The harness topos recognized the adopted directory as (e.g. Claude Code), or `None` for a plain
-    /// directory tracked in place. Disclosed so the agent can see whether currency was armed.
+    /// directory tracked in place. Disclosed so the agent can see whether auto-update was armed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<crate::HarnessId>,
     /// The harness's registry slug the adopted dir was attributed to (e.g. `cursor`), even for a harness
     /// topos has no full adapter for (then `harness` is `None`). Provenance/disclosure only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_slug: Option<String>,
-    /// The currency-trigger outcome, present when adopting into a recognized harness attempted a
+    /// The auto-update-trigger outcome, present when adopting into a recognized harness attempted a
     /// session-start trigger install — the honest disclosure of the (only) write `add` makes outside
     /// `~/.topos/`. `None` for a plain directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<crate::TriggerReport>,
-    /// The breadth arming sweep's outcomes — one row per OTHER detected agent whose currency
+    /// The breadth arming sweep's outcomes — one row per OTHER detected agent whose auto-update
     /// trigger was (un)installed alongside the active adapter's (`currency` above). **Additive.**
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<BreadthTriggerReport>,
@@ -470,12 +470,12 @@ pub struct FollowData {
     /// (the client's two-call enrollment surface — visit the URL, then re-run `follow`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<EnrollmentPending>,
-    /// The currency-trigger outcome, present when completing the enrollment armed the session-start hook
-    /// (a pure follower never runs `add`, so enrollment is where their currency gets armed — best-effort:
+    /// The auto-update-trigger outcome, present when completing the enrollment armed the session-start hook
+    /// (a pure follower never runs `add`, so enrollment is where their auto-update gets armed — best-effort:
     /// a degraded config edit is disclosed here, never a rolled-back enrollment).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<crate::TriggerReport>,
-    /// The breadth arming sweep's outcomes — one row per OTHER detected agent whose currency
+    /// The breadth arming sweep's outcomes — one row per OTHER detected agent whose auto-update
     /// trigger was armed alongside the active adapter's (`currency` above). Honest per agent:
     /// `state`/`currency_kind` follow the same evidence rules every trigger report does, and
     /// `note` names the consent step still owed (or the docs-level evidence caveat). **Additive.**

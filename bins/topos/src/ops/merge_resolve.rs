@@ -684,7 +684,7 @@ fn cpath(path: &str, kind: ConflictPathKind) -> ConflictPath {
 
 /// Place `merged`'s bytes on the placement and advance the docs to **draft-on-current**: `base = theirs`,
 /// `lock = theirs` (so the working bytes read as a draft), `applied = observed`, `work_hash = merged`.
-/// Reuses the crash-safe dir-swap; the currency/harness hook is NOT fired (materialize only writes bytes).
+/// Reuses the crash-safe dir-swap; the auto-update/harness hook is NOT fired (materialize only writes bytes).
 #[allow(clippy::too_many_arguments)]
 fn place_draft_on_current(
     ctx: &Ctx<'_>,

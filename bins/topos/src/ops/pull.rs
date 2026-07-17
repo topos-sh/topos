@@ -1,4 +1,4 @@
-//! `pull` — the session-start currency entry point + the targeted accept / go-back.
+//! `pull` — the session-start auto-update entry point + the targeted accept / go-back.
 //!
 //! The bare `topos pull` (the installed session-start hook) sweeps every followed skill toward its
 //! `current`. A targeted `topos pull <skill>` accepts a pending update for one skill (the explicit
@@ -136,7 +136,7 @@ pub(crate) struct ReconcileOpts {
     pub confirm_each: bool,
 }
 
-/// Run the currency check for `scope`.
+/// Run the update check for `scope`.
 ///
 /// # Errors
 /// A hard failure resolving a targeted skill, or (for a targeted pull) a plane-read failure; the bare
@@ -184,7 +184,7 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                     Err(e) => note_skill_failure(ctx, &mut warnings, &skill_id, &e),
                 }
             }
-            // The proposals count runs AFTER the sweep (it is disclosure, not currency) and is skipped
+            // The proposals count runs AFTER the sweep (it is disclosure, not the update itself) and is skipped
             // entirely once the breaker tripped — no point burning more connect timeouts on it.
             let proposals_awaiting = if breaker.tripped() {
                 0

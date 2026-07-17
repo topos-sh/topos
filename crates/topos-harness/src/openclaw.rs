@@ -1,5 +1,5 @@
 //! The `OpenClaw` [`HarnessAdapter`] — discovery, byte-exact placement targeting, and the
-//! idempotent **silent-cron currency trigger** registered through OpenClaw's own CLI.
+//! idempotent **silent-cron auto-update trigger** registered through OpenClaw's own CLI.
 //!
 //! OpenClaw reads native AgentSkills-spec `SKILL.md` bundles from `~/.openclaw/skills` (probed
 //! live against openclaw@2026.7.1 in a container: recognized offline, ungated, source
@@ -12,7 +12,7 @@
 //! independently confirms the retirement; the scrub only ever touches the strict-JSON shapes the
 //! old topos itself wrote, and leaves anything else byte-untouched.
 //!
-//! **The currency trigger is a silent OpenClaw cron job** (probed live): `openclaw cron add
+//! **The auto-update trigger is a silent OpenClaw cron job** (probed live): `openclaw cron add
 //! --command <shell> --no-deliver --declaration-key <key> --json` registers a deterministic,
 //! model-free shell job persisted in OpenClaw's own SQLite, idempotent by declaration key (a
 //! re-add answers `created:false`, same job — the key IS the ownership marker), firing on a

@@ -49,7 +49,7 @@ impl Drop for Scratch {
     }
 }
 
-/// A harness that recognizes nothing but RECORDS the currency-trigger arm (the enrollment persist
+/// A harness that recognizes nothing but RECORDS the auto-update-trigger arm (the enrollment persist
 /// arms the session-start hook for a pure follower).
 struct RecordingHarness {
     armed: AtomicU32,
@@ -547,7 +547,7 @@ fn resume_granted_persists_the_one_credential_and_continues_into_the_describe() 
     let m = user.membership(WS).expect("the joined membership");
     assert_eq!(m.name, "acme");
     assert_eq!(m.display_name, "Acme Inc");
-    // The WAL is gone (the last durable step) and the currency hook armed.
+    // The WAL is gone (the last durable step) and the auto-update hook armed.
     assert!(enroll::read_wal(&rig.fs, &rig.layout()).unwrap().is_none());
     assert!(rig.harness.armed.load(Ordering::Relaxed) >= 1);
 }

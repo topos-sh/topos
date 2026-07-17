@@ -1,4 +1,4 @@
-//! `codex` — the session-start currency hook in `<root>/config.toml` (production root:
+//! `codex` — the session-start auto-update hook in `<root>/config.toml` (production root:
 //! `$CODEX_HOME` else `~/.codex`). The config is TOML and no TOML dependency exists in this
 //! crate, so the edit mirrors the Hermes YAML discipline: a **line-anchored merge** handling
 //! ONLY provable shapes, byte-preserving everywhere else, failing closed (`Degraded`, ZERO

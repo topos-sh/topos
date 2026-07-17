@@ -1,4 +1,4 @@
-//! `triggers` — breadth currency triggers: one [`TriggerAdapter`] per additional registry-slug
+//! `triggers` — breadth auto-update triggers: one [`TriggerAdapter`] per additional registry-slug
 //! harness, all running the ONE byte-stable sweep (`topos update --quiet`, which self-throttles
 //! client-side, so session-shaped re-fires are cheap).
 //!
@@ -53,7 +53,7 @@ pub(crate) const SENTINEL: &str = "# topos:currency";
 
 /// The guarded sweep WITHOUT the sentinel suffix. The `command -v` guard skips the update when
 /// the `topos` binary is gone (post-uninstall safety) and the `|| true` tail makes the whole
-/// line exit 0 regardless, so a best-effort currency sweep never surfaces as a hook error.
+/// line exit 0 regardless, so a best-effort update sweep never surfaces as a hook error.
 /// Quoted-string surfaces (the TOML block) register this form; their sentinel rides a separate
 /// comment line instead of an in-command suffix.
 pub(crate) const GUARDED_SWEEP: &str =
@@ -76,7 +76,7 @@ pub(crate) const PLAIN_SWEEP: &str = "topos update --quiet";
 pub struct TriggerOutcome {
     /// The registry slug (see [`registry`](crate::registry)).
     pub slug: &'static str,
-    /// Honest currency labeling: what fires when `state` is [`TriggerState::Active`]; the
+    /// Honest trigger labeling: what fires when `state` is [`TriggerState::Active`]; the
     /// [`CurrencyKind::ExplicitPullOnly`] floor on every other state.
     pub kind: CurrencyKind,
     pub state: TriggerState,
@@ -89,12 +89,12 @@ pub struct TriggerOutcome {
     pub note: Option<String>,
 }
 
-/// The currency-trigger port for one registry-slug harness: idempotent (un)install of the one
+/// The auto-update-trigger port for one registry-slug harness: idempotent (un)install of the one
 /// sweep trigger, plus a provable-presence health probe.
 pub trait TriggerAdapter {
     /// The registry slug this adapter serves.
     fn slug(&self) -> &'static str;
-    /// Idempotently install the currency trigger — a rerun over an already-canonical artifact
+    /// Idempotently install the auto-update trigger — a rerun over an already-canonical artifact
     /// writes nothing; anything unprovable degrades with zero writes.
     fn install(&self) -> TriggerOutcome;
     /// Surgically remove OUR trigger artifact (sentinel/marker-confirmed only — a foreign
@@ -148,7 +148,7 @@ pub fn adapter_for_slug<'a>(
 }
 
 /// Build a [`TriggerOutcome`] with the honest kind rule applied: only an `Active` state carries
-/// the instance's live currency kind; every other state advertises just the guaranteed floor —
+/// the instance's live trigger kind; every other state advertises just the guaranteed floor —
 /// an explicit `topos update`.
 pub(crate) fn outcome(
     slug: &'static str,

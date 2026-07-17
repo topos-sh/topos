@@ -10,7 +10,7 @@
       "pattern": "^[0-9a-f]{64}$"
     },
     "harness": {
-      "description": "The harness this skill was adopted into, when topos recognized one at adopt time (e.g. Claude\nCode); `None` for a plain directory tracked in place with no known harness. Drives where the\ncurrency trigger applies. **Additive optional** (a `None` placement omits it).",
+      "description": "The harness this skill was adopted into, when topos recognized one at adopt time (e.g. Claude\nCode); `None` for a plain directory tracked in place with no known harness. Drives where the\nauto-update trigger applies. **Additive optional** (a `None` placement omits it).",
       "anyOf": [
         {
           "$ref": "#/$defs/HarnessId"
@@ -28,7 +28,7 @@
       ]
     },
     "harness_slug": {
-      "description": "The harness's registry slug (e.g. `claude-code`, `cursor`) the adopted dir was attributed to —\nrecorded even when topos has no full adapter for it, so a later adapter can retroactively arm\ncurrency for an already-adopted skill. A superset of [`Self::harness`]: set whenever the source sits\nunder a known harness skill dir. **Additive optional.**",
+      "description": "The harness's registry slug (e.g. `claude-code`, `cursor`) the adopted dir was attributed to —\nrecorded even when topos has no full adapter for it, so a later adapter can retroactively arm\nauto-updates for an already-adopted skill. A superset of [`Self::harness`]: set whenever the source sits\nunder a known harness skill dir. **Additive optional.**",
       "type": [
         "string",
         "null"

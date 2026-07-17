@@ -162,7 +162,7 @@ pub(crate) enum ClientError {
     )]
     PlacementsDiverged { skill: String, paths: Vec<String> },
     /// The plane could not be read for an explicitly-targeted skill (unreachable, not served, or a
-    /// malformed response). A bare currency sweep isolates such failures per skill instead of erroring.
+    /// malformed response). A bare update sweep isolates such failures per skill instead of erroring.
     #[error("plane read failed: {0}")]
     Plane(String),
     /// A go-back (`pull <skill>@<hash>`) named a version this client cannot anchor — it is absent from

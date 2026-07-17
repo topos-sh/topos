@@ -438,7 +438,7 @@ impl HarnessId {
     }
 }
 
-/// What fires currency for a harness — drives HONEST receipt copy ("current by next session",
+/// What fires the update check for a harness — drives HONEST receipt copy ("current by next session",
 /// "within about a minute", …). `ExplicitPullOnly` is the honest-degrade floor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
@@ -465,7 +465,7 @@ pub enum TriggerState {
     AlreadyPresentUnmanaged,
 }
 
-/// The result of installing a currency trigger — what was touched + the marker, so re-install is
+/// The result of installing a auto-update trigger — what was touched + the marker, so re-install is
 /// idempotent (the marker is a managed sentinel block in the config edit, NEVER in skill bytes).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]

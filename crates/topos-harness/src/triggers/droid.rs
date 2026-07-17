@@ -1,4 +1,4 @@
-//! `droid` — the session-start currency hook in `<root>/hooks.json` (production root:
+//! `droid` — the session-start auto-update hook in `<root>/hooks.json` (production root:
 //! `~/.factory`): a Claude-Code-COMPATIBLE schema — top-level `"hooks"` → `"SessionStart"` →
 //! matcher groups wrapping handler arrays — with the handler like Claude Code's minus `async`
 //! (unsupported there per the docs): `{"type": "command", "command": …, "timeout": 60}`.

@@ -1,7 +1,7 @@
 //! The `Hermes` [`HarnessAdapter`] — mixed-depth skill discovery, byte-exact placement targeting,
-//! and the idempotent **session-start currency trigger** edit of `~/.hermes/config.yaml`.
+//! and the idempotent **session-start auto-update trigger** edit of `~/.hermes/config.yaml`.
 //!
-//! Hermes's currency mechanism is the pair of **session-boundary shell hooks** — `on_session_start`
+//! Hermes's auto-update mechanism is the pair of **session-boundary shell hooks** — `on_session_start`
 //! (a brand-new session's first turn) and `on_session_reset` (every `/new`, `/reset`, `/clear`) —
 //! each running the same `topos update --quiet` sweep. Both events are shell-executable (probed
 //! against a real local Hermes Agent v0.17.0: both are in the build's valid-event set and fire
@@ -15,7 +15,7 @@
 //! session skill index, and that index is cached per process — a BRAND-NEW skill the sweep lands
 //! enters the model's index at the next cold launch. Skill BODIES are read from disk at
 //! `skill_view()` call time, so content updates land immediately. Session-start is still the
-//! honest currency moment: the bytes are on disk before the session's work begins.
+//! honest update moment: the bytes are on disk before the session's work begins.
 //!
 //! Hermes gates shell hooks behind a one-time **consent allowlist** persisted at
 //! `~/.hermes/shell-hooks-allowlist.json`, keyed per exact `(event, command)` PAIR (probed:
@@ -65,11 +65,11 @@ const CONFIG_FILENAME: &str = "config.yaml";
 /// its own approvals; topos never forges one.
 const ALLOWLIST_FILENAME: &str = "shell-hooks-allowlist.json";
 
-/// The primary currency event — a brand-new session's first turn (probed shell-executable).
+/// The primary trigger event — a brand-new session's first turn (probed shell-executable).
 const EVENT_START: &str = "on_session_start";
 
 /// The reset re-fire — `/new`, `/reset`, `/clear` mint a fresh session key (probed fire sites);
-/// skills reload for the new session, so currency re-fires here too.
+/// skills reload for the new session, so the update check re-fires here too.
 const EVENT_RESET: &str = "on_session_reset";
 
 /// The exact argv command Hermes runs (`shlex.split`, `shell=False` — no shell one-liner, no
@@ -213,7 +213,7 @@ impl<'a> Hermes<'a> {
         self.cfg.read(&self.config_path())
     }
 
-    /// Durable acceptance evidence for the PRIMARY currency pair (`on_session_start`,
+    /// Durable acceptance evidence for the PRIMARY trigger pair (`on_session_start`,
     /// [`HOOK_COMMAND`]): Hermes's persisted allowlist holds that exact pair, or the config
     /// carries a top-level `hooks_auto_accept: true`, or this environment carries Hermes's own
     /// accept env. The allowlist is event-scoped (probed), so an approval of the RETIRED per-turn
@@ -245,7 +245,7 @@ impl<'a> Hermes<'a> {
         }
     }
 
-    /// Build the report. The currency kind rides the state honestly: only a confirmably-live
+    /// Build the report. The trigger kind rides the state honestly: only a confirmably-live
     /// trigger claims `SessionStart`; every other state degrades plainly to the explicit-pull
     /// floor.
     fn report(&self, state: TriggerState, touched: bool) -> TriggerReport {
@@ -262,7 +262,7 @@ impl<'a> Hermes<'a> {
         }
     }
 
-    /// Whether a managed currency entry is currently present (drives `--footprint` disclosure).
+    /// Whether a managed auto-update entry is currently present (drives `--footprint` disclosure).
     /// A missing/unreadable/unprovable config means "not present" — we never claim to own a path
     /// we cannot confirm.
     fn has_managed_entry(&self) -> bool {

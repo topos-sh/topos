@@ -1,5 +1,5 @@
 //! The `ClaudeCode` reference [`HarnessAdapter`] — discovery, byte-exact placement targeting, and the
-//! idempotent session-start **currency trigger** edit of `~/.claude/settings.json`.
+//! idempotent session-start **auto-update trigger** edit of `~/.claude/settings.json`.
 //!
 //! Content-blind: it reads skill *directories* only to confirm a `SKILL.md` exists (never the bytes,
 //! never the frontmatter), and the only file it ever writes is the harness **config** — its own
@@ -19,12 +19,12 @@ use crate::{ConfigStore, DiscoveredPlacement, HarnessAdapter, PlacementNaming, P
 /// is already `Option<String>`.)
 pub(crate) const LAYER_USER: &str = "user";
 
-/// The version-agnostic in-command sentinel marking topos's managed currency hook — a trailing shell
+/// The version-agnostic in-command sentinel marking topos's managed auto-update hook — a trailing shell
 /// comment (the command runs via `sh -c`, so `# …` is inert). Detection matches this PREFIX so a later
 /// topos still recognizes (and could migrate) an entry an earlier build wrote.
 const SENTINEL: &str = "# topos:currency";
 
-/// The command identity that marks a HAND-ROLLED currency hook — a `topos pull` command present
+/// The command identity that marks a HAND-ROLLED auto-update hook — a `topos pull` command present
 /// WITHOUT our sentinel, which we adopt-or-leave (never blind-touch). This is NOT part of the
 /// managed-ours check any more: ownership keys on the sentinel alone (see [`is_managed_command`]), so
 /// our own current `topos update` hook is recognized without enumerating every command spelling here.
@@ -38,7 +38,7 @@ const MARKER_ID: &str = "topos:claude-code:currency:2";
 /// when the binary is gone (post-uninstall safety); the trailing `|| true` then makes the whole line
 /// exit 0 *regardless* — critically when topos is absent (`command -v` itself exits non-zero, and that
 /// code would otherwise become the hook's, which the harness paints as a session-start hook error), and
-/// equally when an update degrades (plane down): a best-effort currency sweep must never surface as an
+/// equally when an update degrades (plane down): a best-effort update sweep must never surface as an
 /// error at session start (diagnostics go to `~/.topos/log.jsonl`, never the session). `--quiet` keeps
 /// stdout near-empty — a no-change sweep emits nothing; a sweep that changed skill bytes emits the ONE
 /// SessionStart hook-output JSON (`reloadSkills`) so Claude Code re-scans its skill dirs same-session
@@ -144,7 +144,7 @@ impl<'a> ClaudeCode<'a> {
         }
     }
 
-    /// Whether the managed currency entry is currently present (drives `--footprint` disclosure). A
+    /// Whether the managed auto-update entry is currently present (drives `--footprint` disclosure). A
     /// missing/unreadable/malformed settings file means "not present" — we never claim to own a path we
     /// cannot confirm.
     fn has_managed_entry(&self) -> bool {
@@ -264,7 +264,7 @@ enum Classification {
     Managed,
     /// A `topos pull` hook exists WITHOUT our marker (hand-rolled) — adopt-or-leave.
     Unmanaged,
-    /// No topos currency hook at all.
+    /// No topos auto-update hook at all.
     Absent,
 }
 

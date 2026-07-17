@@ -62,8 +62,9 @@ const GENESIS: u64 = 0;
 /// the `add`-family errors ([`ClientError::AmbiguousHarness`] / [`ClientError::NoUntrackedSkill`] / …) when
 /// resolving an untracked source; [`ClientError::ApprovalMismatch`] if a `@<digest>` pin does not match the
 /// scanned bytes; [`ClientError::PublishBlocked`] if an unresolved merge conflict is present;
-/// [`ClientError::Conflict`] / [`ClientError::Denied`] on the plane's
-/// typed verdict; a transport / store failure otherwise.
+/// [`ClientError::NoChanges`] when the draft is byte-identical to the published `current` (a published
+/// skill only — a genesis skill's first publish is never a no-op); [`ClientError::Conflict`] /
+/// [`ClientError::Denied`] on the plane's typed verdict; a transport / store failure otherwise.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn publish(
     ctx: &Ctx<'_>,
@@ -114,10 +115,12 @@ pub(crate) struct PublishDescribeConnectors<'a> {
 }
 
 /// The bare (no `--yes`) ENROLLED publish describe — what shipping this draft WOULD do: where it lands,
-/// the gate outcome, the audience, the share line, and the undo path. Mutates nothing on the plane (a
-/// local auto-add of an untracked source is the one disclosed local step, exactly as the apply performs).
-/// The network is read only AFTER the local scan; the genesis / WAL apply paths are untouched
-/// (this runs only for an enrolled `!yes` invocation, dispatched in the composition root).
+/// the gate outcome, the audience, the share line, and the undo path. Mutates NOTHING at all — an
+/// untracked source is NOT adopted here (adopting mints a sidecar and arms the session-start hook, a
+/// durable change the human has not confirmed); it is refused toward `topos add` / `publish --yes`, which
+/// is where the apply performs that adoption. The network is read only AFTER the local scan; the genesis /
+/// WAL apply paths are untouched (this runs only for an enrolled `!yes` invocation, dispatched in the
+/// composition root).
 ///
 /// # Errors
 /// [`ClientError::Enrollment`] if not enrolled; [`ClientError::NoChanges`] when the draft equals current;
@@ -188,9 +191,14 @@ pub(crate) fn publish_describe(
         });
     }
 
-    // A FOLLOWED skill's `current` is the bytes this client holds (`lock.bundle_digest`); an identical
-    // draft is a no-op. A genesis skill (no follow entry) has no current — its first publish is never a
-    // no-op.
+    // A skill has a `current` to be identical TO when it is FOLLOWED (the bytes this client holds are
+    // `lock.bundle_digest`) OR it has ever been published from here (`sync.observed != GENESIS` — a
+    // successful publish advances `observed` past GENESIS, read-your-writes). In either case an unchanged
+    // draft is a no-op. A never-published GENESIS skill (`observed == GENESIS`, no follow entry) stays
+    // exempt: its `lock.bundle_digest` already equals the adopted draft digest by construction, so its
+    // first publish must NOT be refused. `follow_entry`/`followed` are also read below for the gate.
+    let sync: SyncState = doc::read_doc(ctx.fs, &sp.sync)?
+        .ok_or_else(|| ClientError::Corrupt("missing sync state".to_owned()))?;
     let follow_entry = ctx
         .follow
         .followed()
@@ -198,7 +206,7 @@ pub(crate) fn publish_describe(
         .find(|(fid, _)| fid == id.as_str())
         .map(|(_, fc)| fc);
     let followed = follow_entry.is_some();
-    if followed && digest_hex == lock.bundle_digest {
+    if (followed || sync.observed != GENESIS) && digest_hex == lock.bundle_digest {
         return Err(ClientError::NoChanges { skill: skill_name });
     }
 
@@ -552,7 +560,14 @@ fn is_full_digest(s: &str) -> bool {
 /// Build the fresh op from the already-scanned draft (`scanned` / `digest` were computed + gated in
 /// `enrolled_publish`): precondition the state, compute the byte-identical `(commit_id, bundle_digest)`,
 /// commit the candidate into the local store (renderable for a replay + local history), and assemble the
-/// [`OpRecord`] (the WAL write itself happens in `run_write`).
+/// [`OpRecord`] (the WAL write itself happens in `run_write`). Runs ONLY in the fresh-op arm of
+/// `enrolled_publish`'s WAL match — a crashed pending op replays untouched, so this is the right place for
+/// the no-op refusal (a settled-but-unacked publish must still replay to its byte-identical receipt).
+///
+/// # Errors
+/// [`ClientError::Conflict`] if the local state is behind (a newer `current` not yet applied — pull to
+/// rebase); [`ClientError::NoChanges`] when the draft is byte-identical to the published `current` (a
+/// published skill only — a genesis skill's first publish is never a no-op); a store / scan failure otherwise.
 #[allow(clippy::too_many_arguments)]
 fn build_publish_op(
     ctx: &Ctx<'_>,
@@ -584,6 +599,19 @@ fn build_publish_op(
     }
 
     let digest_hex = to_hex(&digest);
+
+    // No-op refusal (the apply-path twin of the describe's guard): once a publish has advanced `observed`
+    // past GENESIS, a draft byte-identical to `current` (`lock.bundle_digest`) has nothing to ship — refuse
+    // rather than mint an empty version parented on the last. Placed AFTER the behind-check (a stale base
+    // must surface as CONFLICT, not NoChanges) and only in this fresh-op arm (a crashed op still replays).
+    // A never-published GENESIS skill (`observed == GENESIS`) is exempt: its `lock.bundle_digest` equals the
+    // adopted draft by construction, so its first publish is never a no-op. This also refuses an
+    // identical-bytes `--propose` (both kinds flow through here), matching the describe.
+    if sync.observed != GENESIS && digest_hex == lock.bundle_digest {
+        return Err(ClientError::NoChanges {
+            skill: lock.name.clone(),
+        });
+    }
 
     // Genesis (no `current` yet) is a zero-parent commit at generation 0; a normal publish parents on
     // `current`.

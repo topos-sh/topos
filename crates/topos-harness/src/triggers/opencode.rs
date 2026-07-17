@@ -1,7 +1,7 @@
 //! `opencode` — one topos-owned plugin file at `<config-home>/opencode/plugin/topos.ts`
 //! (production config-home: `$XDG_CONFIG_HOME` else `~/.config`). The plugin runs the plain
 //! sweep (`topos update --quiet`) through the plugin API's `$` shell handle at plugin load and
-//! again on every `session.created` event, swallowing failures itself — currency is
+//! again on every `session.created` event, swallowing failures itself — updating is
 //! best-effort, never session-breaking.
 //!
 //! **Evidence level:** plugin auto-discovery from the plugin dir, the `$` BunShell handle, and
@@ -34,8 +34,8 @@ pub(crate) static SPEC: FileDropSpec = FileDropSpec {
 fn plugin() -> String {
     format!(
         r#"// topos:opencode:currency:1 — Managed by topos; hand edits are overwritten. Remove with `topos uninstall`.
-// Runs the topos currency sweep at plugin load and on each new session; failures are swallowed
-// (currency is best-effort, never session-breaking).
+// Runs the topos update sweep at plugin load and on each new session; failures are swallowed
+// (updating is best-effort, never session-breaking).
 export const ToposCurrency = async ({{ $ }}) => {{
   const sweep = async () => {{ try {{ await $`{PLAIN_SWEEP}` }} catch {{}} }}
   await sweep()
@@ -71,8 +71,8 @@ mod tests {
     /// The byte-exact plugin fixture — pinned as a literal so a drift in the composed
     /// `plugin()` (or the shared sweep const) fails loudly here.
     const PLUGIN_FIXTURE: &str = r#"// topos:opencode:currency:1 — Managed by topos; hand edits are overwritten. Remove with `topos uninstall`.
-// Runs the topos currency sweep at plugin load and on each new session; failures are swallowed
-// (currency is best-effort, never session-breaking).
+// Runs the topos update sweep at plugin load and on each new session; failures are swallowed
+// (updating is best-effort, never session-breaking).
 export const ToposCurrency = async ({ $ }) => {
   const sweep = async () => { try { await $`topos update --quiet` } catch {} }
   await sweep()

@@ -126,7 +126,7 @@ fn end_to_end_claude_code_adopt_arms_currency_and_pull_is_silent() {
     .unwrap();
     let before = std::fs::read(&skill_md).unwrap();
 
-    // add → recognized as Claude Code, currency armed, hook written to settings.json.
+    // add → recognized as Claude Code, auto-update armed, hook written to settings.json.
     let (ok, v) = run_in(&home, &claude, &["--json", "add", skill.to_str().unwrap()]);
     assert!(ok, "add should exit 0");
     assert_eq!(v["data"]["name"], "pr-describe");
@@ -226,7 +226,7 @@ fn end_to_end_add_by_name_resolves_a_discovered_skill() {
     assert_eq!(untracked[0]["harness"], "claude-code");
 
     // `topos add deploy` — resolves the NAME against that inventory and adopts it (Claude Code recognized,
-    // currency armed), with no path typed.
+    // auto-update armed), with no path typed.
     let v = run_disc(&home, &disc, &claude, &["--json", "add", "deploy"]);
     assert_eq!(v["command"], "add");
     assert_eq!(v["ok"], true, "{v}");

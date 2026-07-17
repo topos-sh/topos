@@ -108,94 +108,107 @@ disclosed and pinned, and a diverged local draft is surfaced — never overwritt
 
 `topos list` scans the skills directory of every agent harness it knows about — not just the ones it fully
 drives — so it surfaces *untracked* skills sitting in any harness's folder, ready to `topos add` (adopt the
-bytes; offline, no account). Three harnesses are first-class: **Claude Code**, **OpenClaw**, and **Hermes
-Agent** get live currency — topos places and follows their skills, and updates land at session start. Every
-other harness in the table is **discover + add** today: topos tracks and shares the bytes, and full currency
-for that harness lands later.
+bytes; offline, no account). Support comes in three tiers:
+
+- **auto-update** — topos installs an update trigger inside the harness itself (a session-start hook, or a
+  scheduled job where that is what the harness offers), so followed skills refresh silently and are current
+  before the agent uses them. Where marked *, the harness asks its own one-time confirmation before it will
+  run the trigger; until you grant it, that harness behaves like the **delivery** tier.
+- **delivery** — topos installs no trigger inside that harness, but every followed skill is still placed
+  into its skills dir whenever the harness is detected (one shared `~/.agents/skills` copy where the harness
+  reads that dir, a native copy otherwise) and refreshed by every update sweep on the machine — whether a
+  hook in an auto-update harness, a scheduled job, or a manual `topos update` ran it. The harness picks up
+  changes on its own scan (many rescan at session start).
+- **discover + add** — project-scoped conventions with no user-level dir: topos finds and adopts skills
+  there, but has no machine-wide place to deliver into.
 
 The directory conventions below are sourced from [`vercel-labs/skills`](https://github.com/vercel-labs/skills)
 (MIT). User-scope dirs resolve under `$HOME`; project-scope dirs are relative to the directory you run in.
 
 | Harness | Slug | User-scope dir | Project-scope dir | topos support |
 |---|---|---|---|---|
-| Claude Code | `claude-code` | `~/.claude/skills` † | `.claude/skills` | full (currency) |
-| OpenClaw | `openclaw` | `~/.openclaw/skills` ‡ | `skills` | full (currency) |
-| Hermes Agent | `hermes-agent` | `~/.hermes/skills` † | `.hermes/skills` | full (currency) |
-| AdaL | `adal` | `~/.adal/skills` | `.adal/skills` | discover + add |
-| AiderDesk | `aider-desk` | `~/.aider-desk/skills` | `.aider-desk/skills` | discover + add |
-| Amp | `amp` | `~/.config/agents/skills` † | `.agents/skills` | discover + add |
-| Antigravity | `antigravity` | `~/.gemini/antigravity/skills` | `.agents/skills` | discover + add |
-| Antigravity CLI | `antigravity-cli` | `~/.gemini/antigravity-cli/skills` | `.agents/skills` | discover + add |
-| AstrBot | `astrbot` | `~/.astrbot/data/skills` | `data/skills` | discover + add |
-| Augment | `augment` | `~/.augment/skills` | `.augment/skills` | discover + add |
-| Autohand Code CLI | `autohand-code` | `~/.autohand/skills` † | `.autohand/skills` | discover + add |
-| Cline | `cline` | `~/.agents/skills` | `.agents/skills` | discover + add |
-| CodeArts Agent | `codearts-agent` | `~/.codeartsdoer/skills` | `.codeartsdoer/skills` | discover + add |
-| CodeBuddy | `codebuddy` | `~/.codebuddy/skills` | `.codebuddy/skills` | discover + add |
-| Codemaker | `codemaker` | `~/.codemaker/skills` | `.codemaker/skills` | discover + add |
-| Code Studio | `codestudio` | `~/.codestudio/skills` | `.codestudio/skills` | discover + add |
-| Codex | `codex` | `~/.codex/skills` † | `.agents/skills` | discover + add |
-| Command Code | `command-code` | `~/.commandcode/skills` | `.commandcode/skills` | discover + add |
-| Continue | `continue` | `~/.continue/skills` | `.continue/skills` | discover + add |
-| Cortex Code | `cortex` | `~/.snowflake/cortex/skills` | `.cortex/skills` | discover + add |
-| Crush | `crush` | `~/.config/crush/skills` | `.crush/skills` | discover + add |
-| Cursor | `cursor` | `~/.cursor/skills` | `.agents/skills` | discover + add |
-| Deep Agents | `deepagents` | `~/.deepagents/agent/skills` | `.agents/skills` | discover + add |
-| Devin for Terminal | `devin` | `~/.config/devin/skills` † | `.devin/skills` | discover + add |
-| Dexto | `dexto` | `~/.agents/skills` | `.agents/skills` | discover + add |
-| Droid | `droid` | `~/.factory/skills` | `.factory/skills` | discover + add |
+| Claude Code | `claude-code` | `~/.claude/skills` † | `.claude/skills` | auto-update |
+| OpenClaw | `openclaw` | `~/.openclaw/skills` ‡ | `skills` | auto-update |
+| Hermes Agent | `hermes-agent` | `~/.hermes/skills` † | `.hermes/skills` | auto-update |
+| AdaL | `adal` | `~/.adal/skills` | `.adal/skills` | delivery |
+| AiderDesk | `aider-desk` | `~/.aider-desk/skills` | `.aider-desk/skills` | delivery |
+| Amp | `amp` | `~/.config/agents/skills` † | `.agents/skills` | auto-update |
+| Antigravity | `antigravity` | `~/.gemini/antigravity/skills` | `.agents/skills` | delivery |
+| Antigravity CLI | `antigravity-cli` | `~/.gemini/antigravity-cli/skills` | `.agents/skills` | delivery |
+| AstrBot | `astrbot` | `~/.astrbot/data/skills` | `data/skills` | delivery |
+| Augment | `augment` | `~/.augment/skills` | `.augment/skills` | delivery |
+| Autohand Code CLI | `autohand-code` | `~/.autohand/skills` † | `.autohand/skills` | delivery |
+| Cline | `cline` | `~/.agents/skills` | `.agents/skills` | auto-update |
+| CodeArts Agent | `codearts-agent` | `~/.codeartsdoer/skills` | `.codeartsdoer/skills` | delivery |
+| CodeBuddy | `codebuddy` | `~/.codebuddy/skills` | `.codebuddy/skills` | delivery |
+| Codemaker | `codemaker` | `~/.codemaker/skills` | `.codemaker/skills` | delivery |
+| Code Studio | `codestudio` | `~/.codestudio/skills` | `.codestudio/skills` | delivery |
+| Codex | `codex` | `~/.codex/skills` † | `.agents/skills` | auto-update * |
+| Command Code | `command-code` | `~/.commandcode/skills` | `.commandcode/skills` | delivery |
+| Continue | `continue` | `~/.continue/skills` | `.continue/skills` | delivery |
+| Cortex Code | `cortex` | `~/.snowflake/cortex/skills` | `.cortex/skills` | delivery |
+| Crush | `crush` | `~/.config/crush/skills` | `.crush/skills` | delivery |
+| Cursor | `cursor` | `~/.cursor/skills` | `.agents/skills` | auto-update |
+| Deep Agents | `deepagents` | `~/.deepagents/agent/skills` | `.agents/skills` | delivery |
+| Devin for Terminal | `devin` | `~/.config/devin/skills` † | `.devin/skills` | delivery |
+| Dexto | `dexto` | `~/.agents/skills` | `.agents/skills` | delivery |
+| Droid | `droid` | `~/.factory/skills` | `.factory/skills` | auto-update |
 | Eve | `eve` | — (project-only) | `agent/skills` | discover + add |
-| Firebender | `firebender` | `~/.firebender/skills` | `.agents/skills` | discover + add |
-| ForgeCode | `forgecode` | `~/.forge/skills` | `.forge/skills` | discover + add |
-| Gemini CLI | `gemini-cli` | `~/.gemini/skills` | `.agents/skills` | discover + add |
-| GitHub Copilot | `github-copilot` | `~/.copilot/skills` | `.agents/skills` | discover + add |
-| Goose | `goose` | `~/.config/goose/skills` † | `.goose/skills` | discover + add |
-| IBM Bob | `bob` | `~/.bob/skills` | `.bob/skills` | discover + add |
-| iFlow CLI | `iflow-cli` | `~/.iflow/skills` | `.iflow/skills` | discover + add |
-| inference.sh | `inference-sh` | `~/.inferencesh/skills` | `.inferencesh/skills` | discover + add |
-| Jazz | `jazz` | `~/.jazz/skills` | `.jazz/skills` | discover + add |
-| Junie | `junie` | `~/.junie/skills` | `.junie/skills` | discover + add |
-| Kilo Code | `kilo` | `~/.kilocode/skills` | `.kilocode/skills` | discover + add |
-| Kimi Code CLI | `kimi-code-cli` | `~/.agents/skills` | `.agents/skills` | discover + add |
-| Kiro CLI | `kiro-cli` | `~/.kiro/skills` | `.kiro/skills` | discover + add |
-| Kode | `kode` | `~/.kode/skills` | `.kode/skills` | discover + add |
-| Lingma | `lingma` | `~/.lingma/skills` | `.lingma/skills` | discover + add |
-| Loaf | `loaf` | `~/.agents/skills` | `.agents/skills` | discover + add |
-| MCPJam | `mcpjam` | `~/.mcpjam/skills` | `.mcpjam/skills` | discover + add |
-| Mistral Vibe | `mistral-vibe` | `~/.vibe/skills` † | `.vibe/skills` | discover + add |
-| Moxby | `moxby` | `~/.moxby/skills` | `.moxby/skills` | discover + add |
-| Mux | `mux` | `~/.mux/skills` | `.mux/skills` | discover + add |
-| Neovate | `neovate` | `~/.neovate/skills` | `.neovate/skills` | discover + add |
-| Ona | `ona` | `~/.ona/skills` | `.ona/skills` | discover + add |
-| OpenCode | `opencode` | `~/.config/opencode/skills` † | `.agents/skills` | discover + add |
-| OpenHands | `openhands` | `~/.openhands/skills` | `.openhands/skills` | discover + add |
-| Pi | `pi` | `~/.pi/agent/skills` | `.pi/skills` | discover + add |
-| Pochi | `pochi` | `~/.pochi/skills` | `.pochi/skills` | discover + add |
+| Firebender | `firebender` | `~/.firebender/skills` | `.agents/skills` | delivery |
+| ForgeCode | `forgecode` | `~/.forge/skills` | `.forge/skills` | delivery |
+| Gemini CLI | `gemini-cli` | `~/.gemini/skills` | `.agents/skills` | auto-update * |
+| GitHub Copilot | `github-copilot` | `~/.copilot/skills` | `.agents/skills` | auto-update |
+| Goose | `goose` | `~/.config/goose/skills` † | `.goose/skills` | auto-update * |
+| IBM Bob | `bob` | `~/.bob/skills` | `.bob/skills` | delivery |
+| iFlow CLI | `iflow-cli` | `~/.iflow/skills` | `.iflow/skills` | delivery |
+| inference.sh | `inference-sh` | `~/.inferencesh/skills` | `.inferencesh/skills` | delivery |
+| Jazz | `jazz` | `~/.jazz/skills` | `.jazz/skills` | delivery |
+| Junie | `junie` | `~/.junie/skills` | `.junie/skills` | delivery |
+| Kilo Code | `kilo` | `~/.kilocode/skills` | `.kilocode/skills` | delivery |
+| Kimi Code CLI | `kimi-code-cli` | `~/.agents/skills` | `.agents/skills` | delivery |
+| Kiro CLI | `kiro-cli` | `~/.kiro/skills` | `.kiro/skills` | delivery |
+| Kode | `kode` | `~/.kode/skills` | `.kode/skills` | delivery |
+| Lingma | `lingma` | `~/.lingma/skills` | `.lingma/skills` | delivery |
+| Loaf | `loaf` | `~/.agents/skills` | `.agents/skills` | delivery |
+| MCPJam | `mcpjam` | `~/.mcpjam/skills` | `.mcpjam/skills` | delivery |
+| Mistral Vibe | `mistral-vibe` | `~/.vibe/skills` † | `.vibe/skills` | delivery |
+| Moxby | `moxby` | `~/.moxby/skills` | `.moxby/skills` | delivery |
+| Mux | `mux` | `~/.mux/skills` | `.mux/skills` | delivery |
+| Neovate | `neovate` | `~/.neovate/skills` | `.neovate/skills` | delivery |
+| Ona | `ona` | `~/.ona/skills` | `.ona/skills` | delivery |
+| OpenCode | `opencode` | `~/.config/opencode/skills` † | `.agents/skills` | auto-update |
+| OpenHands | `openhands` | `~/.openhands/skills` | `.openhands/skills` | delivery |
+| Pi | `pi` | `~/.pi/agent/skills` | `.pi/skills` | delivery |
+| Pochi | `pochi` | `~/.pochi/skills` | `.pochi/skills` | delivery |
 | PromptScript | `promptscript` | — (project-only) | `.agents/skills` | discover + add |
-| Qoder | `qoder` | `~/.qoder/skills` | `.qoder/skills` | discover + add |
-| Qoder CN | `qoder-cn` | `~/.qoder-cn/skills` | `.qoder/skills` | discover + add |
-| Qwen Code | `qwen-code` | `~/.qwen/skills` | `.qwen/skills` | discover + add |
-| Reasonix | `reasonix` | `~/.reasonix/skills` | `.reasonix/skills` | discover + add |
-| Replit | `replit` | `~/.config/agents/skills` † | `.agents/skills` | discover + add |
-| Roo Code | `roo` | `~/.roo/skills` | `.roo/skills` | discover + add |
-| Rovo Dev | `rovodev` | `~/.rovodev/skills` | `.rovodev/skills` | discover + add |
-| Tabnine CLI | `tabnine-cli` | `~/.tabnine/agent/skills` | `.tabnine/agent/skills` | discover + add |
-| Terramind | `terramind` | `~/.terramind/skills` | `.terramind/skills` | discover + add |
-| Tinycloud | `tinycloud` | `~/.tinycloud/skills` | `.tinycloud/skills` | discover + add |
-| Trae | `trae` | `~/.trae/skills` | `.trae/skills` | discover + add |
-| Trae CN | `trae-cn` | `~/.trae-cn/skills` | `.trae/skills` | discover + add |
-| Universal | `universal` | `~/.config/agents/skills` † | `.agents/skills` | discover + add |
-| Warp | `warp` | `~/.agents/skills` | `.agents/skills` | discover + add |
-| Windsurf | `windsurf` | `~/.codeium/windsurf/skills` | `.windsurf/skills` | discover + add |
-| Zed | `zed` | `~/.agents/skills` | `.agents/skills` | discover + add |
-| Zencoder | `zencoder` | `~/.zencoder/skills` | `.zencoder/skills` | discover + add |
-| Zenflow | `zenflow` | `~/.zencoder/skills` | `.zencoder/skills` | discover + add |
+| Qoder | `qoder` | `~/.qoder/skills` | `.qoder/skills` | delivery |
+| Qoder CN | `qoder-cn` | `~/.qoder-cn/skills` | `.qoder/skills` | delivery |
+| Qwen Code | `qwen-code` | `~/.qwen/skills` | `.qwen/skills` | delivery |
+| Reasonix | `reasonix` | `~/.reasonix/skills` | `.reasonix/skills` | delivery |
+| Replit | `replit` | `~/.config/agents/skills` † | `.agents/skills` | delivery |
+| Roo Code | `roo` | `~/.roo/skills` | `.roo/skills` | delivery |
+| Rovo Dev | `rovodev` | `~/.rovodev/skills` | `.rovodev/skills` | delivery |
+| Tabnine CLI | `tabnine-cli` | `~/.tabnine/agent/skills` | `.tabnine/agent/skills` | delivery |
+| Terramind | `terramind` | `~/.terramind/skills` | `.terramind/skills` | delivery |
+| Tinycloud | `tinycloud` | `~/.tinycloud/skills` | `.tinycloud/skills` | delivery |
+| Trae | `trae` | `~/.trae/skills` | `.trae/skills` | delivery |
+| Trae CN | `trae-cn` | `~/.trae-cn/skills` | `.trae/skills` | delivery |
+| Universal | `universal` | `~/.config/agents/skills` † | `.agents/skills` | — (the shared dir itself) |
+| Warp | `warp` | `~/.agents/skills` | `.agents/skills` | delivery |
+| Windsurf | `windsurf` | `~/.codeium/windsurf/skills` | `.windsurf/skills` | delivery |
+| Zed | `zed` | `~/.agents/skills` | `.agents/skills` | delivery |
+| ZCode | `zcode` | `~/.zcode/skills` | `.zcode/skills` | delivery |
+| Zencoder | `zencoder` | `~/.zencoder/skills` | `.zencoder/skills` | delivery |
+| Zenflow | `zenflow` | `~/.zencoder/skills` | `.zencoder/skills` | delivery |
 
 † The dir's root is env-overridable (the default shown applies when the variable is unset):
 `$CLAUDE_CONFIG_DIR` (Claude Code), `$HERMES_HOME` (Hermes Agent), `$CODEX_HOME` (Codex), `$VIBE_HOME`
 (Mistral Vibe), `$AUTOHAND_HOME` (Autohand Code CLI), and `$XDG_CONFIG_HOME` for the `~/.config`-based
 harnesses (Amp, Devin for Terminal, Goose, OpenCode, Replit, Universal).
 ‡ OpenClaw also probes `~/.clawdbot/skills` and `~/.moltbot/skills`.
+* The trigger is installed, but this harness requires its own one-time approval before running it
+(Codex trusts hooks in-app via `/hooks`; Gemini CLI confirms new hooks; Goose enables plugins itself).
+topos reports the trigger honestly as not-yet-active until then.
 
 ## Trust & security
 

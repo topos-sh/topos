@@ -54,7 +54,7 @@ fn schemas() -> Vec<(&'static str, String)> {
             "trigger-report",
             emit(schemars::schema_for!(topos_types::TriggerReport)),
         ),
-        // The per-device currency lane wire bodies (the delivery read + the applied-state report).
+        // The per-device delivery-lane wire bodies (the delivery read + the applied-state report).
         (
             "wire-delivery",
             emit(schemars::schema_for!(topos_types::requests::WireDelivery)),
@@ -429,7 +429,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             bundle_digest: fx_digest.to_owned(),
             tracked: true,
             // The fixture skill is adopted from a plain dir (not under ~/.claude), so it is recognized as
-            // no harness and arms no currency — all three omit from the envelope.
+            // no harness and arms no auto-update trigger — all three omit from the envelope.
             harness: None,
             harness_slug: None,
             currency: None,
@@ -1380,7 +1380,7 @@ fn cli_ref_md() -> String {
          on every verb and prints exactly one envelope on stdout (never a prompt). The exit status is \
          one of three classes: `0` on success, `1` on a domain refusal or a failed operation (the \
          envelope's `ok` + `error.outcome` distinguish a refusal from a transport fault), and `2` on a \
-         usage error (an unknown flag or a missing argument). The session-start currency hook runs \
+         usage error (an unknown flag or a missing argument). The session-start auto-update hook runs \
          `topos update --quiet`, which stays silent except a freshness one-liner and exits `0` on a \
          network blip so a session never fails to start.\n\n",
     );

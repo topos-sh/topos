@@ -397,7 +397,7 @@ pub struct WireDeliverySkill {
 
 /// One unacked, person-scoped notice in the delivery feed. `kind` is an OPEN vocabulary that grows without
 /// a schema break (today's values include `"verdict"` and `"proposal_closed"`); every other field is
-/// present only when the notice names it. The silent currency hook fetches these without acking; an
+/// present only when the notice names it. The silent auto-update hook fetches these without acking; an
 /// interactive surface acks by id.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
@@ -436,7 +436,7 @@ pub struct WireNotice {
     pub created_at: String,
 }
 
-/// `GET /v1/workspaces/{ws}/delivery` response body — the currency answer for ONE enrolled device: the
+/// `GET /v1/workspaces/{ws}/delivery` response body — the update answer for ONE enrolled device: the
 /// entitled skills (what this device should have), the person's detached skills (freeze-in-place, never
 /// cleaned), the unacked notices feed, and the open-proposal count across the entitled set. The
 /// session-start hook fetches it once per workspace and reconciles the harness against it, silently. A

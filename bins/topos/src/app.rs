@@ -49,7 +49,7 @@ pub fn run() -> ExitCode {
         log_path: layout.log_path(),
     };
     // The harness adapter, selected through the one dispatch seam. v0 wires Claude Code only; the
-    // adapter touches its config home only when adopting a recognized skill, arming currency, or on
+    // adapter touches its config home only when adopting a recognized skill, arming auto-updates, or on
     // uninstall.
     let harness = adapter_for(HarnessId::ClaudeCode, &fs, &fs);
 
@@ -583,7 +583,7 @@ pub fn run() -> ExitCode {
                 ..ops::ReconcileOpts::default()
             };
             // `--reset` is its own two-phase discard verb (loss-led describe / `--yes` apply); it does not
-            // flow through the currency engine and is never a `--quiet` hook shape.
+            // flow through the update engine and is never a `--quiet` hook shape.
             if reset {
                 let mut reset_targets = targets.clone();
                 reset_targets.extend(skill.iter().cloned());
@@ -595,7 +595,7 @@ pub fn run() -> ExitCode {
             // and the channel-filtered sync per channel. A single bare target (or none) keeps the classic
             // engine — the go-back `<skill>@<hash>` and the `--onto-current` escape live only there.
             let has_selectors = !channel.is_empty() || !skill.is_empty() || targets.len() > 1;
-            // The BARE sweep is the hook shape (the currency triggers all run `update --quiet`).
+            // The BARE sweep is the hook shape (the auto-update triggers all run `update --quiet`).
             // Hooks now fire on every session-start-shaped event, so the quiet path passes a
             // self-throttle gate BEFORE any engine or network work: single-flight (another sweep
             // in flight → silent no-op) + TTL (a completed sweep within the window → silent

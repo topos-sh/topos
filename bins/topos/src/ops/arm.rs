@@ -1,4 +1,4 @@
-//! The breadth arming sweep — currency triggers for every OTHER detected agent.
+//! The breadth arming sweep — auto-update triggers for every OTHER detected agent.
 //!
 //! The placement engine delivers a followed skill's bytes to every detected agent (the shared
 //! `~/.agents/skills` copy plus native dirs); this module keeps those copies CURRENT by
@@ -21,7 +21,7 @@ use topos_harness::{
 use topos_types::TriggerState;
 use topos_types::results::BreadthTriggerReport;
 
-/// Arm the currency trigger of every DETECTED agent other than `active_slug` (the active
+/// Arm the auto-update trigger of every DETECTED agent other than `active_slug` (the active
 /// adapter's, armed by the verb itself). Best-effort per agent: a degraded row is reported, never
 /// an aborted sweep.
 pub(crate) fn arm_detected(

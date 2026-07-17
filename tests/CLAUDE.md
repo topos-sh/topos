@@ -54,8 +54,8 @@ their crates; this directory is for what only a cross-crate composed run can pro
   is a commit-sensitive no-op; the fleet report row is witnessed) → a revert restores the v1 bytes
   as a NEW forward version (generation moves FORWARD) the follower lands.
 - **`tests/hero_claude.rs`** — the HERO on the REAL adapters, table-driven (Claude Code / OpenClaw
-  / Hermes over temp stand-in homes): the enrollment promote arms each adapter's genuine currency
-  surface (`settings.json` SessionStart / OpenClaw's silent currency cron via the rig's fake CLI /
+  / Hermes over temp stand-in homes): the enrollment promote arms each adapter's genuine auto-update
+  surface (`settings.json` SessionStart / OpenClaw's silent auto-update cron via the rig's fake CLI /
   `config.yaml` `on_session_start` + `on_session_reset`), the genesis lands byte-exact in the
   adapter's own skill dir, and
   v2 lands on the next bare sweep. The honest ceiling: hook-installed + bytes-materialized is

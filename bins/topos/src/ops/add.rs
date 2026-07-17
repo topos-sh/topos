@@ -71,7 +71,7 @@ pub(crate) fn add_with_name(
 
     // Recognize a known harness: a source that IS one of the harness's discovered skill placements
     // (canonical equality — never a prefix, so a subdir is not mistaken for the skill) is tagged so
-    // currency applies to it. A plain/unrecognized dir is tracked in place with no harness association.
+    // auto-update applies to it. A plain/unrecognized dir is tracked in place with no harness association.
     let recognized = recognize(ctx, &source_abs);
 
     // Mint identity. A recognized harness skill is keyed by its DIRECTORY name (the command name the
@@ -156,9 +156,9 @@ pub(crate) fn add_with_name(
             held: false,
         },
     )?;
-    // Attribute the harness. Either the adapter recognized it (adopt-in-place; currency armed below), OR
+    // Attribute the harness. Either the adapter recognized it (adopt-in-place; auto-update armed below), OR
     // the baked registry places the source under a known harness's skill dir — recorded for forward-compat
-    // even when topos has no full adapter for it (a later adapter can arm currency for this adopted skill).
+    // even when topos has no full adapter for it (a later adapter can arm auto-updates for this adopted skill).
     // A plain dir under no harness stays `None` on every field.
     let harness_slug = match &recognized {
         Some(_) => Some(ctx.harness.id().slug().to_owned()),
@@ -236,7 +236,7 @@ pub(crate) fn add_with_name(
         }),
     )?;
 
-    // Arm currency for a recognized harness — a best-effort, idempotent edit of the harness CONFIG
+    // Arm auto-update for a recognized harness — a best-effort, idempotent edit of the harness CONFIG
     // (never the skill dir), AFTER the all-or-nothing adoption above, so a settings.json hiccup never
     // rolls back a good adoption. Disclosed in the result (the only write `add` makes outside ~/.topos/).
     let currency = recognized
@@ -299,7 +299,7 @@ pub(crate) fn add_remote(
 ) -> Result<AddData, ClientError> {
     ctx.fs.create_dir_all(ctx.layout.home())?;
 
-    // 1. Destination harness + scope. Default: the active harness (the one topos drives + can arm currency
+    // 1. Destination harness + scope. Default: the active harness (the one topos drives + can arm auto-updates
     //    for). An explicit `--harness` must name a known registry slug.
     let slug = opts
         .harness
@@ -372,7 +372,7 @@ pub(crate) fn add_remote(
     };
 
     // 5. Record provenance — a best-effort adjunct, never allowed to fail a good adoption (mirrors the
-    //    currency hook being armed after the atomic adopt).
+    //    auto-update hook being armed after the atomic adopt).
     let origin = SkillOrigin {
         source: spec.origin(),
         git_ref: spec.git_ref.clone(),

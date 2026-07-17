@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "TriggerReport",
-  "description": "The result of installing a currency trigger — what was touched + the marker, so re-install is\nidempotent (the marker is a managed sentinel block in the config edit, NEVER in skill bytes).",
+  "description": "The result of installing a auto-update trigger — what was touched + the marker, so re-install is\nidempotent (the marker is a managed sentinel block in the config edit, NEVER in skill bytes).",
   "type": "object",
   "properties": {
     "currency_kind": {
@@ -33,7 +33,7 @@
   ],
   "$defs": {
     "CurrencyKind": {
-      "description": "What fires currency for a harness — drives HONEST receipt copy (\"current by next session\",\n\"within about a minute\", …). `ExplicitPullOnly` is the honest-degrade floor.",
+      "description": "What fires the update check for a harness — drives HONEST receipt copy (\"current by next session\",\n\"within about a minute\", …). `ExplicitPullOnly` is the honest-degrade floor.",
       "oneOf": [
         {
           "description": "A session-boundary hook runs the sweep (Claude Code's SessionStart; Hermes's\n`on_session_start`/`on_session_reset`) — updates are current when a session begins.",

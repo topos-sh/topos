@@ -27,7 +27,7 @@ use crate::ConfigStore;
 
 use super::{SENTINEL, SHELL_SWEEP_LINE, TriggerAdapter, TriggerOutcome, outcome};
 
-/// The command-identity substring marking a HAND-ROLLED currency hook — a `topos pull` command
+/// The command-identity substring marking a HAND-ROLLED auto-update hook — a `topos pull` command
 /// present WITHOUT our sentinel, which we adopt-or-leave (never blind-touch, never blind-append
 /// beside). Not part of the managed-ours check: ownership keys on [`SENTINEL`] alone.
 const COMMAND_IDENTITY: &str = "topos pull";
@@ -178,7 +178,7 @@ enum Classification {
     Managed,
     /// A `topos pull` command exists WITHOUT our sentinel (hand-rolled) — adopt-or-leave.
     Unmanaged,
-    /// No topos currency entry at all.
+    /// No topos auto-update entry at all.
     Absent,
 }
 

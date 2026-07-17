@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "PullData",
-  "description": "`pull` result — per-skill currency state plus the reviewer-queue count. **PINNED** (the original\nfields); `notices` + `sync` are ADDITIVE (the delivery-driven sweep's feed + freshness — absent\non a targeted pull and from an older producer).",
+  "description": "`pull` result — per-skill update status plus the reviewer-queue count. **PINNED** (the original\nfields); `notices` + `sync` are ADDITIVE (the delivery-driven sweep's feed + freshness — absent\non a targeted pull and from an older producer).",
   "type": "object",
   "properties": {
     "notices": {
@@ -306,7 +306,7 @@
       ]
     },
     "WireNotice": {
-      "description": "One unacked, person-scoped notice in the delivery feed. `kind` is an OPEN vocabulary that grows without\na schema break (today's values include `\"verdict\"` and `\"proposal_closed\"`); every other field is\npresent only when the notice names it. The silent currency hook fetches these without acking; an\ninteractive surface acks by id.",
+      "description": "One unacked, person-scoped notice in the delivery feed. `kind` is an OPEN vocabulary that grows without\na schema break (today's values include `\"verdict\"` and `\"proposal_closed\"`); every other field is\npresent only when the notice names it. The silent auto-update hook fetches these without acking; an\ninteractive surface acks by id.",
       "type": "object",
       "properties": {
         "actor": {

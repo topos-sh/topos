@@ -1,8 +1,8 @@
 //! `uninstall [--yes]` — remove topos from this machine, two-phase.
 //!
-//! Bare = a DESCRIBE of exactly what goes: the harness currency-hook entry (named by its config path),
+//! Bare = a DESCRIBE of exactly what goes: the harness auto-update-hook entry (named by its config path),
 //! the `~/.topos/` sidecar tree (which holds the signed-in credential), and the note that SKILL FILES IN
-//! AGENT DIRS STAY (uninstall never deletes a skill byte). `--yes` scrubs the currency hook
+//! AGENT DIRS STAY (uninstall never deletes a skill byte). `--yes` scrubs the auto-update hook
 //! (`remove_currency_trigger`, whose report is surfaced honestly), then deletes the `~/.topos/` tree via
 //! the fs seam. The `topos` binary is NOT self-deleted (a package manager may own it) — its path is
 //! disclosed with a "remove it with your installer (or `rm <path>`)" note. A maintenance command: it needs
@@ -19,7 +19,7 @@ use crate::error::ClientError;
 /// The bare `uninstall` DESCRIBE — what `--yes` would remove (nothing has changed).
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct UninstallDescribe {
-    /// The harness config path(s) the currency hook would be scrubbed from (empty = none armed).
+    /// The harness config path(s) the auto-update hook would be scrubbed from (empty = none armed).
     pub hook_paths: Vec<String>,
     /// The `~/.topos/` sidecar tree that would be deleted (the signed-in credential lives inside it).
     pub sidecar_path: String,
@@ -33,7 +33,7 @@ pub(crate) struct UninstallDescribe {
 /// The applied `uninstall` — what was removed.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct UninstallApplied {
-    /// The currency-hook scrub report (surfaced honestly — `Inactive` when nothing was armed).
+    /// The auto-update-hook scrub report (surfaced honestly — `Inactive` when nothing was armed).
     pub hook: TriggerReport,
     /// The breadth scrub's outcomes — other agents whose trigger the sweep removed (or could not,
     /// disclosed) — attached by the composition root; clean no-ops stay off the receipt.
@@ -107,7 +107,7 @@ pub(crate) fn uninstall(
     }
 
     // ---- APPLY (`--yes`) ----
-    // Scrub the currency hook FIRST (its config lives in the harness home, not `~/.topos/`), then delete
+    // Scrub the auto-update hook FIRST (its config lives in the harness home, not `~/.topos/`), then delete
     // the sidecar tree. Idempotent: a second run finds no hook to remove and no sidecar to delete.
     let hook = ctx.harness.remove_currency_trigger();
     let sidecar_removed = if ctx.fs.exists(home) {
@@ -325,7 +325,7 @@ mod tests {
         let out = uninstall(&ctx, Some(PathBuf::from("/usr/local/bin/topos")), true).unwrap();
         match out {
             UninstallOutcome::Applied(applied) => {
-                assert_eq!(harness.removed.get(), 1, "the currency hook is scrubbed");
+                assert_eq!(harness.removed.get(), 1, "the auto-update hook is scrubbed");
                 assert_eq!(applied.hook.state, TriggerState::Inactive);
                 assert!(applied.sidecar_removed, "the sidecar tree is deleted");
             }

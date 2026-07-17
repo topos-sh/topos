@@ -1,12 +1,12 @@
 //! `list [<skill>] [--footprint]` — inventory this machine. Populates the **tracked** bucket (every
 //! skill with a local sidecar record) and, once enrolled, the **followed** bucket (the tracked subset
 //! `follows.json` says is following its workspace `current`) plus a TTY enrollment header (workspace,
-//! plane, currency-hook state) — the one-command answer to "am I enrolled, what am I following, is the
+//! plane, auto-update-hook state) — the one-command answer to "am I enrolled, what am I following, is the
 //! hook armed". `published_by_you` stays empty: the client keeps no durable record of its own settled
 //! publishes (the op-WAL is deleted once an op settles; `lock.json` records no author), so that bucket
 //! honestly waits for the plane-side `log --team` read. `untracked` needs harness discovery wiring and
 //! renders empty. `--footprint` reports every topos-owned path outside skill dirs: the `~/.topos/` tree
-//! plus any harness config the currency hook lives in (disclosed, never deleted).
+//! plus any harness config the auto-update hook lives in (disclosed, never deleted).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -89,7 +89,7 @@ pub(crate) struct ListEnrollment {
     pub workspace_labels: Vec<(String, String)>,
     /// The enrolled plane's base URL.
     pub base_url: String,
-    /// Whether the harness session-start currency hook is currently installed (read from the adapter's
+    /// Whether the harness session-start auto-update hook is currently installed (read from the adapter's
     /// managed-entry disclosure — it names its config path only while the managed entry is present).
     pub hook_active: bool,
     /// One entry per `data.tracked` row, same order: the follow-state note, or `None` for a purely

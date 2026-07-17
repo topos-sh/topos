@@ -5,7 +5,7 @@
   "type": "object",
   "properties": {
     "currency": {
-      "description": "The currency-trigger outcome, present when completing the enrollment armed the session-start hook\n(a pure follower never runs `add`, so enrollment is where their currency gets armed — best-effort:\na degraded config edit is disclosed here, never a rolled-back enrollment).",
+      "description": "The auto-update-trigger outcome, present when completing the enrollment armed the session-start hook\n(a pure follower never runs `add`, so enrollment is where their auto-update gets armed — best-effort:\na degraded config edit is disclosed here, never a rolled-back enrollment).",
       "anyOf": [
         {
           "$ref": "#/$defs/TriggerReport"
@@ -44,7 +44,7 @@
       }
     },
     "triggers": {
-      "description": "The breadth arming sweep's outcomes — one row per OTHER detected agent whose currency\ntrigger was armed alongside the active adapter's (`currency` above). Honest per agent:\n`state`/`currency_kind` follow the same evidence rules every trigger report does, and\n`note` names the consent step still owed (or the docs-level evidence caveat). **Additive.**",
+      "description": "The breadth arming sweep's outcomes — one row per OTHER detected agent whose auto-update\ntrigger was armed alongside the active adapter's (`currency` above). Honest per agent:\n`state`/`currency_kind` follow the same evidence rules every trigger report does, and\n`note` names the consent step still owed (or the docs-level evidence caveat). **Additive.**",
       "type": "array",
       "items": {
         "$ref": "#/$defs/BreadthTriggerReport"
@@ -106,7 +106,7 @@
       ]
     },
     "CurrencyKind": {
-      "description": "What fires currency for a harness — drives HONEST receipt copy (\"current by next session\",\n\"within about a minute\", …). `ExplicitPullOnly` is the honest-degrade floor.",
+      "description": "What fires the update check for a harness — drives HONEST receipt copy (\"current by next session\",\n\"within about a minute\", …). `ExplicitPullOnly` is the honest-degrade floor.",
       "oneOf": [
         {
           "description": "A session-boundary hook runs the sweep (Claude Code's SessionStart; Hermes's\n`on_session_start`/`on_session_reset`) — updates are current when a session begins.",
@@ -206,7 +206,7 @@
       ]
     },
     "TriggerReport": {
-      "description": "The result of installing a currency trigger — what was touched + the marker, so re-install is\nidempotent (the marker is a managed sentinel block in the config edit, NEVER in skill bytes).",
+      "description": "The result of installing a auto-update trigger — what was touched + the marker, so re-install is\nidempotent (the marker is a managed sentinel block in the config edit, NEVER in skill bytes).",
       "type": "object",
       "properties": {
         "currency_kind": {

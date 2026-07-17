@@ -221,32 +221,32 @@ pub(crate) fn add_tty(data: &AddData) -> String {
             None => out.push_str(" · no license found"),
         }
     }
-    // Disclose the one write `add` makes outside ~/.topos/ — the currency trigger — honestly (it is
+    // Disclose the one write `add` makes outside ~/.topos/ — the auto-update trigger — honestly (it is
     // plumbing: it runs a no-op `update` until something is followed; never "it auto-updates"). The copy
     // branches on the report's `currency_kind` so a harness's honest update moment is never overstated
     // (a session-start hook fires at session boundaries; a scheduled job only while its scheduler runs).
     if let Some(report) = &data.currency {
         out.push_str(match (report.state, report.currency_kind) {
             (TriggerState::Active, CurrencyKind::SessionStart) => {
-                "\nInstalled the session-start currency hook (runs `topos update` at session start)."
+                "\nInstalled the session-start auto-update hook (runs `topos update` at session start)."
             }
             (TriggerState::Active, CurrencyKind::Scheduled) => {
-                "\nRegistered the currency job (updates land within about a minute while the harness's scheduler runs)."
+                "\nRegistered the auto-update job (updates land within about a minute while the harness's scheduler runs)."
             }
             (TriggerState::Active, CurrencyKind::ExplicitPullOnly) => {
-                "\nNo automatic currency trigger — run `topos update` to check for updates."
+                "\nNo automatic auto-update trigger — run `topos update` to check for updates."
             }
             (TriggerState::AlreadyPresentUnmanaged, CurrencyKind::SessionStart) => {
-                "\nLeft your existing session-start currency hook untouched."
+                "\nLeft your existing session-start auto-update hook untouched."
             }
             (TriggerState::AlreadyPresentUnmanaged, _) => {
-                "\nLeft your existing currency trigger untouched."
+                "\nLeft your existing auto-update trigger untouched."
             }
             (TriggerState::Degraded, CurrencyKind::SessionStart) => {
-                "\nCouldn't update settings.json for the currency hook — left it untouched."
+                "\nCouldn't update settings.json for the auto-update hook — left it untouched."
             }
             (TriggerState::Degraded, _) => {
-                "\nCouldn't update the harness config for the currency trigger — left it untouched; run `topos update` to check for updates."
+                "\nCouldn't update the harness config for the auto-update trigger — left it untouched; run `topos update` to check for updates."
             }
             (TriggerState::Inactive, _) => "",
         });
@@ -335,7 +335,7 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
     // only when enrolled; the unenrolled output is byte-identical to the accountless local list.
     if let Some(e) = &out.enrollment {
         s.push_str(&format!(
-            "Enrolled at {} — currency hook: {}\n",
+            "Enrolled at {} — auto-update hook: {}\n",
             e.base_url,
             if e.hook_active {
                 "active"
@@ -467,13 +467,13 @@ fn remote_row(r: &RemoteSkillEntry) -> String {
 
 /// One untracked-discovery row: `<name>  [<harness-name> · <slug>]  <path>`, plus an adopt-only note for a
 /// harness topos has no full adapter for — it can still be `add`ed (the bytes track + share), but live
-/// currency for that harness lands later. The **slug** is shown because it is the `<skill>@<harness>` token
+/// auto-updates for that harness land later. The **slug** is shown because it is the `<skill>@<harness>` token
 /// `add` takes to disambiguate a name found in more than one harness.
 fn untracked_row(u: &UntrackedEntry) -> String {
     let support = if u.adapter_supported {
         ""
     } else {
-        "  (adopt-only — live currency lands later)"
+        "  (adopt-only — live auto-updates land later)"
     };
     format!(
         "  {}  [{} · {}]  {}{}\n",
@@ -1153,10 +1153,10 @@ pub(crate) fn uninstall_describe_tty(
 ) -> String {
     let mut s = String::from("Uninstalling topos would:");
     if d.hook_paths.is_empty() {
-        s.push_str("\n  · scrub the session-start currency hook: none is armed");
+        s.push_str("\n  · scrub the session-start auto-update hook: none is armed");
     } else {
         s.push_str(&format!(
-            "\n  · scrub the session-start currency hook from: {}",
+            "\n  · scrub the session-start auto-update hook from: {}",
             d.hook_paths.join(", ")
         ));
     }
@@ -1189,14 +1189,14 @@ pub(crate) fn uninstall_applied_tty(d: &crate::ops::UninstallApplied) -> String 
     let mut s = String::from("Uninstalled topos.");
     let hook_line = match (d.hook.state, d.hook.touched_path.as_deref()) {
         (TriggerState::Degraded, _) => {
-            "\n  · couldn't edit the harness config — remove the topos currency hook manually"
+            "\n  · couldn't edit the harness config — remove the topos auto-update hook manually"
                 .to_owned()
         }
         (TriggerState::AlreadyPresentUnmanaged, _) => {
-            "\n  · left your hand-rolled currency hook untouched".to_owned()
+            "\n  · left your hand-rolled auto-update hook untouched".to_owned()
         }
-        (_, Some(path)) => format!("\n  · scrubbed the currency hook from {path}"),
-        (_, None) => "\n  · no currency hook was installed — nothing to scrub".to_owned(),
+        (_, Some(path)) => format!("\n  · scrubbed the auto-update hook from {path}"),
+        (_, None) => "\n  · no auto-update hook was installed — nothing to scrub".to_owned(),
     };
     s.push_str(&hook_line);
     // The breadth scrub's rows — only agents with something to say (a real scrub, or a survival
@@ -1269,7 +1269,7 @@ pub(crate) fn auth_status_tty(d: &crate::ops::AuthStatusData) -> String {
         }
     }
     s.push_str(&format!(
-        "\ncurrency hook: {}",
+        "\nauto-update hook: {}",
         if d.hook_armed {
             "armed"
         } else {
@@ -2239,7 +2239,7 @@ mod tests {
         let text = list_tty(&out);
         // The header names the plane + hook; the workspace names move to the group headers.
         assert!(
-            text.starts_with("Enrolled at https://topos.example — currency hook: active"),
+            text.starts_with("Enrolled at https://topos.example — auto-update hook: active"),
             "{text}"
         );
         // The workspace group is named by its membership display label; the local skills group separately.

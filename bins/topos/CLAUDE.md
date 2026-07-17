@@ -22,7 +22,7 @@ renderer over the SAME typed outcomes (one value, two presentations).
 - **The harness adapter wiring** (`config_io` + the `&dyn HarnessAdapter` seam on `Ctx`, selected through
   the `adapter_for(HarnessId)` dispatch — one match arm per harness) — `topos`
   drives `topos-harness::ClaudeCode` for discovery, adopt-in-place recognition, and the session-start
-  currency hook. The adapter owns the strict-JSON `settings.json` merge; the durable write goes through a
+  auto-update hook. The adapter owns the strict-JSON `settings.json` merge; the durable write goes through a
   small `ConfigStore` port implemented here, which reuses the one `atomic_write` dance over `FsOps` (so
   the existing crash gate covers the config write too — never a second atomic-write to drift). The
   foreign-file writer adds the care a shared user file needs: ensure the parent dir, write through a
@@ -54,7 +54,7 @@ renderer over the SAME typed outcomes (one value, two presentations).
   `origin.json` provenance adjunct (repo/commit/subdir/license — never injected into the bundle);
   fully non-interactive, no disclosure gate — the source's trust is the user/agent's to verify); then the
   one adoption path: mint id+name, scan + import, stage + publish with one rename — all-or-nothing;
-  **recognize a Claude Code skill dir, tag it + arm the currency hook**; refuse re-adopting an
+  **recognize a Claude Code skill dir, tag it + arm the auto-update hook**; refuse re-adopting an
   already-tracked dir with `ALREADY_TRACKED`), `follow` (the device-flow enrollment + first-receive — see
   below), `invite` (the roster write — see below),
   `list [--footprint] [--tracked] [--remote]` (the tracked bucket + **untracked discovery** — skills sitting
@@ -66,8 +66,8 @@ renderer over the SAME typed outcomes (one value, two presentations).
   `followed`/`published_by_you` still render empty; footprint = the `~/.topos/` walk plus any harness config
   topos holds an entry in), `diff`
   (draft↔current via the gitstore `unified_diff` renderer), `log` (local actions + git history), `pull
-  [<skill>[@<hash>]] [--quiet]` (the session-start currency entry point — see the sync engine below),
-  `uninstall [--yes]` (the two-phase MAINTENANCE teardown: bare describes; `--yes` **scrubs the currency
+  [<skill>[@<hash>]] [--quiet]` (the session-start auto-update entry point — see the sync engine below),
+  `uninstall [--yes]` (the two-phase MAINTENANCE teardown: bare describes; `--yes` **scrubs the auto-update
   hook** via the adapter's `remove_currency_trigger` then deletes the `~/.topos/` sidecar tree — the
   signed-in credential goes with it — leaving every SKILL FILE in the agent dirs untouched; the `topos`
   binary is NOT self-deleted, only its path disclosed with a remove-it-yourself note; needs no sign-in,
@@ -106,7 +106,7 @@ renderer over the SAME typed outcomes (one value, two presentations).
     expired sweep the WAL typed; GRANTED carries the device's ONE bearer credential (the promoted
     device code), the registered device id, and the AUTHORITATIVE workspace context — the persist
     writes `instance.json` → `credentials.json` (whole) → the `user.json` membership → deletes the
-    WAL → arms the currency trigger, and the flow CONTINUES into the intent's describe/apply in the
+    WAL → arms the auto-update trigger, and the flow CONTINUES into the intent's describe/apply in the
     same invocation. There is no post-grant fence phase: an approved flow re-answers the same
     granted poll, so a crash mid-persist recovers by re-polling;
   - **the classic skill path** (`follow <skill>[@<hash>]`) — the I-TOFU accept / the paused-entry
@@ -205,7 +205,7 @@ renderer over the SAME typed outcomes (one value, two presentations).
   what it drops) — always available, so no deadlock. Unrelated histories (no renderable base) fall back to
   a **2-way** manual choice, never a silent merge. Per the full-auto posture, an `auto` follower's
   bare sweep resolves unattended; a confirm-each follower is surfaced. Materialization never fires the
-  currency/harness hook.
+  auto-update/harness hook.
 - **The real plane transport** (`plane_http`, `enroll`) — a blocking `ureq` (rustls+ring) `PlaneSource` that
   feeds the engine above (no engine change). `get_current` is the commit-sensitive conditional GET
   (`GET /v1/workspaces/{ws}/skills/{skill}/current` with `If-None-Match: "<generation>"` +
@@ -299,7 +299,7 @@ are asserted byte-equal in tests.
   pause in the same identity-locked write (so `list`'s cause column reads the frozen copy offline).
   The describe names the three constants: every device of yours, bytes frozen in place, the final
   detach record. Un-enrolled (or a purely local skill) keeps the graceful local path — the pause
-  flag flips, nothing dials. Idempotent; never a skill file, never a `held` pin, never the currency
+  flag flips, nothing dials. Idempotent; never a skill file, never a `held` pin, never the auto-update
   hook; an explicit local `update <skill>@<hash>` remains available on an unfollowed copy.
 - **The `auth` group** (`ops/auth`) — `login` / `logout` / `status`. **`login [server]`** (default
   `https://topos.sh`, `TOPOS_PLANE_URL` override, or the enrolled plane) re-runs the SAME device flow
@@ -397,7 +397,9 @@ are asserted byte-equal in tests.
   - **`publish`** (`ops/publish::publish_describe`) — a bare ENROLLED publish now DESCRIBES: the workspace,
     the gate outcome (`open` → lands directly / `reviewed` → a proposal), the placements (`--to`, or
     `everyone` for a new skill), the audience (reach), the share line, the undo path, and the origin-demotion
-    note; a no-op (the draft equals current) is a typed `NO_CHANGES`. The scan is local-first; the network is
+    note; a no-op (the draft equals the published current) is a typed `NO_CHANGES` — on BOTH the describe and
+    the apply (`--yes`), keyed on a published `current` existing (not on follow-state), so even the genesis
+    author's repeat publish is refused. The scan is local-first; the network is
     read only after it; the genesis / WAL apply paths stay byte-identical. The TTY success line leads with
     the skill NAME (`Published <name>@…` — `PublishData.name`; the opaque `skill_id` stays a `--json` key).
     `add -s/-a` accept MULTIPLE

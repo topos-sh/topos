@@ -2,7 +2,7 @@
 //! `schema_version` with an additive migration rule, and each is written atomically (temp → fsync →
 //! rename → fsync dir; never mutated in place).
 //!
-//! The **load-bearing, spec-pinned** documents are typed here: `sync.json` (the durable currency
+//! The **load-bearing, spec-pinned** documents are typed here: `sync.json` (the durable update-status
 //! state — fully pinned), `lock.json`, `map.json`, and `ops/<op_id>.json`. The identity / instance /
 //! harness-cache / log documents are pinned in *field-set* only (their exact sub-shapes are not), so
 //! they land with the subsystems that own them rather than being frozen on a guess.
@@ -12,7 +12,7 @@
 use crate::Receipt;
 use serde::{Deserialize, Serialize};
 
-/// `skills/<id>/sync.json` — the durable client sync state (the four-state currency machine's memory).
+/// `skills/<id>/sync.json` — the durable client sync state (the four-state sync machine's memory).
 /// **Fully pinned.** The four states (CURRENT / BEHIND / DRAFT / DIVERGED) are *derived* from
 /// `observed`/`applied` vs the working tree, never stored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,7 +116,7 @@ pub struct PlacementMap {
     pub placement_state: Vec<PlacementState>,
     /// The harness this skill was adopted into, when topos recognized one at adopt time (e.g. Claude
     /// Code); `None` for a plain directory tracked in place with no known harness. Drives where the
-    /// currency trigger applies. **Additive optional** (a `None` placement omits it).
+    /// auto-update trigger applies. **Additive optional** (a `None` placement omits it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<crate::HarnessId>,
     /// The harness layer the placement sits in (e.g. `"user"`), when a harness was recognized.
@@ -124,7 +124,7 @@ pub struct PlacementMap {
     pub harness_layer: Option<String>,
     /// The harness's registry slug (e.g. `claude-code`, `cursor`) the adopted dir was attributed to —
     /// recorded even when topos has no full adapter for it, so a later adapter can retroactively arm
-    /// currency for an already-adopted skill. A superset of [`Self::harness`]: set whenever the source sits
+    /// auto-updates for an already-adopted skill. A superset of [`Self::harness`]: set whenever the source sits
     /// under a known harness skill dir. **Additive optional.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_slug: Option<String>,

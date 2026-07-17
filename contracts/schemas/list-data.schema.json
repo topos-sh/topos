@@ -195,7 +195,7 @@
           ]
         },
         "status": {
-          "description": "The currency posture of the local copy: `current` / `behind` / `draft` / `detached`.\n**INFERRED** (additive).",
+          "description": "The update status of the local copy: `current` / `behind` / `draft` / `detached`.\n**INFERRED** (additive).",
           "anyOf": [
             {
               "$ref": "#/$defs/SkillStatus"
@@ -226,7 +226,7 @@
       ]
     },
     "SkillStatus": {
-      "description": "A tracked skill's currency posture in [`SkillEntry`]. **INFERRED** (additive value set).",
+      "description": "A tracked skill's update status in [`SkillEntry`]. **INFERRED** (additive value set).",
       "oneOf": [
         {
           "description": "On the followed `current` (or a local skill at its own head), no local edits.",
@@ -255,7 +255,7 @@
       "type": "object",
       "properties": {
         "adapter_supported": {
-          "description": "True iff topos has a full adapter for this harness (so `add` can arm live currency). False = the\nskill is still adoptable (`topos add` tracks + shares its bytes), but auto-currency lands later.",
+          "description": "True iff topos has a full adapter for this harness (so `add` can arm live auto-updates). False = the\nskill is still adoptable (`topos add` tracks + shares its bytes), but auto-update lands later.",
           "type": "boolean"
         },
         "harness": {

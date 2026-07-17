@@ -15,7 +15,7 @@
 //! - [`identity`] — the content-addressed identity derivation: the frozen `commit_id` construction
 //!   (the user-facing `version_id`). No keys, no crypto — pure content-addressing, written once so
 //!   every component agrees.
-//! - [`sync`]     — the pure client sync transition: the four currency states and the post-fetch heal.
+//! - [`sync`]     — the pure client sync transition: the four sync states and the post-fetch heal.
 //!   Pure over explicit values, behind a truth-table test. No floor, no rollback machinery.
 //! - [`merge`]    — the pure author-merge policy: the three-way file-set reconciliation over
 //!   `(path, mode, content_sha256)` → a per-path plan, the outcome decision, and the presence-based

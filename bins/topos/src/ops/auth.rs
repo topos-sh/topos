@@ -190,7 +190,7 @@ fn resume_login(
         }
         DeviceAuthPoll::Granted(grant) => {
             // The same persist the follow door runs (instance / the ONE credential / the membership /
-            // the WAL delete / the currency trigger) — a login shares every durable step, it just
+            // the WAL delete / the auto-update trigger) — a login shares every durable step, it just
             // continues into no follow intent.
             persist_enrollment(ctx, &wal.base_url, &grant)?;
             Ok(AuthLoginOutcome::Done(AuthLoginData {
@@ -374,7 +374,7 @@ pub(crate) struct AuthStatusData {
     /// Whether the device credential is stored (the signed-in state).
     pub signed_in: bool,
     pub workspaces: Vec<AuthWorkspaceStatus>,
-    /// Whether the session-start currency hook is armed in the harness config.
+    /// Whether the session-start auto-update hook is armed in the harness config.
     pub hook_armed: bool,
     pub reporting: Vec<AuthReportingStatus>,
 }

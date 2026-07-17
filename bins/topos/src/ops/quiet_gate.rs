@@ -1,7 +1,7 @@
 //! The quiet sweep's self-throttle — the TTL + single-flight gate the hook path passes BEFORE any
 //! engine or network work, and the hook-JSON stdout the sweep emits so a harness can act on it.
 //!
-//! Currency hooks now fire on every session-start-shaped event (startup, resume, clear, compact —
+//! Auto-update hooks now fire on every session-start-shaped event (startup, resume, clear, compact —
 //! and, on other harnesses, session resets or a 1-minute cron), so the sweep must be cheap to
 //! invoke redundantly. Two mechanisms, both client-local under `~/.topos/`:
 //!
