@@ -1,7 +1,6 @@
 import type { ReactNode } from "react";
 import { Providers } from "@/components/providers";
 import { AppSidebar } from "@/components/shell/app-sidebar";
-import { Breadcrumbs } from "@/components/shell/breadcrumbs";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import type { ChromeData } from "@/lib/shell/chrome.server";
 
@@ -32,10 +31,6 @@ export function ShellChrome({
         <div className="relative flex w-full min-w-0 flex-1 flex-col bg-ground">
           <header className="sticky top-0 z-10 flex h-12 shrink-0 items-center gap-2 border-line-soft border-b bg-ground px-4">
             <SidebarTrigger className="shrink-0 text-dim hover:text-ink md:hidden" />
-            {/* Global breadcrumbs — signed-in only (the anonymous face-shell renders no chrome), so
-                the trail is member-scoped by construction. Driven by the route match + the registry
-                in its own module. */}
-            <Breadcrumbs workspace={workspace} tenancy={tenancy} />
           </header>
           <main className="mx-auto w-full max-w-4xl flex-1 px-4 py-8 sm:px-8">{children}</main>
         </div>
