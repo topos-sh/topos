@@ -13,7 +13,7 @@ import {
   UserRound,
   Users,
 } from "lucide-react";
-import type { ElementType } from "react";
+import { type ElementType, useEffect } from "react";
 import { Link, useLocation } from "react-router";
 import { PublishDialog } from "@/components/shell/publish-dialog";
 import {
@@ -71,16 +71,17 @@ const NAV_ICONS: Record<string, ElementType> = {
 };
 
 /**
- * The signed-in shell's left panel, on shadcn's collapsible Sidebar. Top to bottom: the `topos_`
- * wordmark beside the ONE collapse toggle (both live in the header strip, so the toggle stays
- * reachable in the icon-collapsed state); the workspace identity (static in single tenancy, a seat
- * DROPDOWN in multi); the workspace's Skills and Channels, each with a section-header `+ new`; the
- * workspace nav (Members · Settings) as plain items at the bottom; and the account menu in the
- * footer. The Skills/Channels/nav sections render only when a workspace is in scope — every list is
- * loader-derived (`workspace`), passed once as a prop; the seat DROPDOWN reads the React Query the
- * shell route's loader seeded (so first paint has data, and a membership change updates it live).
- * The account menu renders the resolved nav registry's non-`workspace` sections, so a downstream
- * build's appended entries appear there with no shell change.
+ * The signed-in shell's left panel, on shadcn's collapsible Sidebar. Top to bottom: the workspace
+ * identity (static in single tenancy, a seat DROPDOWN in multi; the `topos_` wordmark holds the
+ * slot when no workspace is in scope) beside the ONE collapse toggle — both live in the header
+ * strip, stacked vertically when icon-collapsed so the toggle stays reachable; the workspace's
+ * Skills and Channels, each with a section-header `+ new`; the workspace nav (Members · Settings)
+ * as plain items at the bottom; and the account menu in the footer. The Skills/Channels/nav
+ * sections render only when a workspace is in scope — every list is loader-derived (`workspace`),
+ * passed once as a prop; the seat DROPDOWN reads the React Query the shell route's loader seeded
+ * (so first paint has data, and a membership change updates it live). The account menu renders the
+ * resolved nav registry's non-`workspace` sections, so a downstream build's appended entries
+ * appear there with no shell change.
  */
 export function AppSidebar({
   display,
@@ -105,6 +106,17 @@ export function AppSidebar({
   const wsSegment = workspace === null ? null : tenancy === "multi" ? workspace.address : null;
   const rootHref = workspace === null ? "/app" : wsHref(wsSegment);
 
+  // Remember the active workspace client-side (the shadcn `sidebar_state` cookie pattern): the
+  // chrome loader's off-workspace fallback reads this on person-scoped pages (/account/devices),
+  // so leaving the workspace URL space keeps the panel on the seat last worked in.
+  const activeWorkspaceId = workspace?.id ?? null;
+  useEffect(() => {
+    if (activeWorkspaceId !== null) {
+      // biome-ignore lint/suspicious/noDocumentCookie: a plain preference cookie — the same write shadcn's own sidebar_state uses in ui/sidebar.tsx.
+      document.cookie = `topos_active_ws=${activeWorkspaceId}; path=/; max-age=31536000; samesite=lax`;
+    }
+  }, [activeWorkspaceId]);
+
   // The nav registry splits by section: `workspace` items (Members · Settings) render as plain
   // bottom items; every other section (account + a superset's own) stays in the account menu.
   const workspaceNav = nav.filter((e) => e.section === "workspace");
@@ -113,21 +125,29 @@ export function AppSidebar({
   return (
     <Sidebar collapsible="icon">
       <SidebarHeader>
-        <div className="flex h-8 items-center justify-between gap-2 px-1">
-          <Link
-            to={rootHref}
-            className="font-display font-semibold text-ink text-sm tracking-[-0.02em] focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 group-data-[collapsible=icon]:hidden"
-          >
-            topos<span className="text-accent">_</span>
-          </Link>
-          <SidebarTrigger className="text-dim hover:text-ink" />
+        {/* The strip keeps its h-8 compactness expanded; icon-collapsed it stacks vertically
+            (identity glyph over toggle — side by side they'd overflow the icon rail), so the
+            ONE collapse toggle stays reachable in both states. */}
+        <div className="flex h-8 items-center justify-between gap-2 px-1 group-data-[collapsible=icon]:h-auto group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:gap-1 group-data-[collapsible=icon]:px-0">
+          {workspace === null ? (
+            // Seatless (e.g. /new onboarding in multi): no identity to show — the wordmark
+            // holds the slot, exactly as the strip always rendered it.
+            <Link
+              to={rootHref}
+              className="font-display font-semibold text-ink text-sm tracking-[-0.02em] focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 group-data-[collapsible=icon]:hidden"
+            >
+              topos<span className="text-accent">_</span>
+            </Link>
+          ) : (
+            <WorkspaceIdentity tenancy={tenancy} workspace={workspace} memberships={memberships} />
+          )}
+          <SidebarTrigger className="shrink-0 text-dim hover:text-ink" />
         </div>
       </SidebarHeader>
 
       <SidebarContent>
         {workspace !== null && (
           <>
-            <WorkspaceIdentity tenancy={tenancy} workspace={workspace} memberships={memberships} />
             <SkillsSection
               workspace={workspace}
               wsSegment={wsSegment}
@@ -214,9 +234,11 @@ export function AppSidebar({
 }
 
 /**
- * The workspace identity, item 2 of the panel. Single tenancy — the install IS its one workspace —
+ * The workspace identity in the header strip. Single tenancy — the install IS its one workspace —
  * shows the display name as STATIC text (no menu; there is nowhere to switch to). Multi shows a
  * DROPDOWN of the person's seats, each navigating to that workspace's root, the active one ticked.
+ * Both stay strip-height (h-8); icon-collapsed, the glyph swaps to the workspace's initial and
+ * the name hides, so the icon rail still says WHICH workspace this is.
  */
 function WorkspaceIdentity({
   tenancy,
@@ -229,59 +251,51 @@ function WorkspaceIdentity({
 }) {
   if (tenancy === "single") {
     return (
-      <SidebarGroup className="pb-0">
-        <div className="flex h-9 items-center gap-2 rounded-md px-2 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0">
-          <WorkspaceGlyph name={workspace.displayName} />
-          <span className="min-w-0 truncate font-medium text-ink text-sm group-data-[collapsible=icon]:hidden">
-            {workspace.displayName}
-          </span>
-        </div>
-      </SidebarGroup>
+      <div className="flex h-8 min-w-0 flex-1 items-center gap-2 px-1 group-data-[collapsible=icon]:flex-none group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0">
+        <WorkspaceGlyph name={workspace.displayName} />
+        <span className="min-w-0 truncate font-medium text-ink text-sm group-data-[collapsible=icon]:hidden">
+          {workspace.displayName}
+        </span>
+      </div>
     );
   }
   return (
-    <SidebarGroup className="pb-0">
-      <SidebarMenu>
-        <SidebarMenuItem>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <SidebarMenuButton
-                tooltip={workspace.displayName}
-                className="data-[state=open]:bg-sidebar-accent"
-              >
-                <WorkspaceGlyph name={workspace.displayName} />
-                <span className="min-w-0 truncate font-medium text-ink group-data-[collapsible=icon]:hidden">
-                  {workspace.displayName}
-                </span>
-                <ChevronsUpDown className="ml-auto group-data-[collapsible=icon]:hidden" />
-              </SidebarMenuButton>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="min-w-56">
-              <DropdownMenuLabel className="font-normal text-faint text-xs">
-                Your workspaces
-              </DropdownMenuLabel>
-              {memberships.map((m) => (
-                <DropdownMenuItem key={m.id} asChild>
-                  <Link to={wsHref(m.address)}>
-                    <WorkspaceGlyph name={m.displayName} />
-                    <span className="min-w-0 flex-1 truncate">{m.displayName}</span>
-                    {m.id === workspace.id && <Check className="ml-auto size-4 text-accent" />}
-                  </Link>
-                </DropdownMenuItem>
-              ))}
-              {/* Multi-tenant only by construction — this dropdown renders nowhere else. */}
-              <DropdownMenuSeparator />
-              <DropdownMenuItem asChild>
-                <Link to="/new">
-                  <Plus />
-                  New workspace
-                </Link>
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </SidebarMenuItem>
-      </SidebarMenu>
-    </SidebarGroup>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <SidebarMenuButton
+          tooltip={workspace.displayName}
+          className="min-w-0 flex-1 data-[state=open]:bg-sidebar-accent"
+        >
+          <WorkspaceGlyph name={workspace.displayName} />
+          <span className="min-w-0 truncate font-medium text-ink group-data-[collapsible=icon]:hidden">
+            {workspace.displayName}
+          </span>
+          <ChevronsUpDown className="ml-auto group-data-[collapsible=icon]:hidden" />
+        </SidebarMenuButton>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="min-w-56">
+        <DropdownMenuLabel className="font-normal text-faint text-xs">
+          Your workspaces
+        </DropdownMenuLabel>
+        {memberships.map((m) => (
+          <DropdownMenuItem key={m.id} asChild>
+            <Link to={wsHref(m.address)}>
+              <WorkspaceGlyph name={m.displayName} />
+              <span className="min-w-0 flex-1 truncate">{m.displayName}</span>
+              {m.id === workspace.id && <Check className="ml-auto size-4 text-accent" />}
+            </Link>
+          </DropdownMenuItem>
+        ))}
+        {/* Multi-tenant only by construction — this dropdown renders nowhere else. */}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem asChild>
+          <Link to="/new">
+            <Plus />
+            New workspace
+          </Link>
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

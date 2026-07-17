@@ -67,6 +67,11 @@ test("lists exactly the person's own devices; another user's device never render
 
   // Exactly two active devices ⇒ exactly two Sign out buttons.
   await expect(page.getByRole("button", { name: "Sign out" })).toHaveCount(2);
+
+  // Off-workspace, the left panel keeps its workspace sections (the last-active fallback in the
+  // chrome loader) — a person-scoped page never strips the rail down to logo + account.
+  await expect(page.getByRole("button", { name: "Publish a skill from your agent" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "everyone" })).toBeVisible();
 });
 
 test("self sign-out flips one device to the revoked treatment, persisting across a reload", async ({

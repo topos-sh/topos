@@ -11,7 +11,8 @@ import type { NavContext } from "@/topos-web/nav";
  * anonymous-tolerant `face-shell.tsx` — so the rail, the nav registry, and the sidebar's collapse
  * state can never drift between them. The active workspace is derived from the URL under the
  * deployment's tenancy grammar (single → the sole seat; multi → the seat whose address matches the
- * first path segment), never by probing the DB with an arbitrary segment.
+ * first path segment, else the last-active fallback below), never by probing the DB with an
+ * arbitrary segment.
  */
 
 /** One nav slot with its href already resolved for the request (the shell renders these verbatim). */
@@ -73,9 +74,15 @@ export interface ChromeData {
  * raw pathname of a client-side arrival reads `/acme.data`, not `/acme`): single → the one
  * seat (the URL carries no segment); multi → the seat whose `address` equals the first path
  * segment (memberships already carry the slug, so no DB probe on an arbitrary segment).
- * Returns the seat, or null off-workspace. Exported for the regression test — a `.data`
- * loader URL must resolve the same seat its destination does, or every client-side navigation
- * into a workspace dashboard strips the panel down to logo + account.
+ * A multi-tenancy URL miss — a person-scoped page like /account/devices — falls back to the
+ * seat the sidebar remembered in the `topos_active_ws` cookie, else the first seat, so leaving
+ * the workspace URL space keeps the panel as it was instead of blanking it. The fallback only
+ * ever SELECTS from `memberships` (rows this request already proved), so a stale cookie naming
+ * a workspace the person no longer holds a seat in can never steer `loadChrome`'s
+ * `requireMember` — it just misses and the first seat wins. Returns null only with no seats at
+ * all. Exported for the regression test — a `.data` loader URL must resolve the same seat its
+ * destination does, or every client-side navigation into a workspace dashboard strips the
+ * panel down to logo + account.
  */
 export function activeMembership(
   request: Request,
@@ -85,7 +92,13 @@ export function activeMembership(
     return memberships[0] ?? null;
   }
   const first = destinationPathname(request).split("/")[1] ?? "";
-  return memberships.find((m) => m.address === first) ?? null;
+  const bySegment = memberships.find((m) => m.address === first);
+  if (bySegment !== undefined) {
+    return bySegment;
+  }
+  const cookie = request.headers.get("cookie") ?? "";
+  const remembered = /(?:^|;\s*)topos_active_ws=([^;\s]+)/.exec(cookie)?.[1];
+  return memberships.find((m) => m.id === remembered) ?? memberships[0] ?? null;
 }
 
 /** Load the rail memberships, resolve every nav slot's href for the active workspace, fetch the
