@@ -1042,9 +1042,9 @@ personalities: {}
             "the per-turn registration is retired — skills load at session start, so a per-turn \
              sync paid latency for freshness the loader could not consume"
         );
-        // And the adapter never claims the per-turn kind in any report.
+        // And the un-evidenced report claims only the floor, never a live kind.
         let report = adapter(&cfg).install_currency_trigger();
-        assert_ne!(report.currency_kind, CurrencyKind::FirstTurn);
+        assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
     }
 
     #[test]

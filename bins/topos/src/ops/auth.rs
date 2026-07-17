@@ -444,9 +444,10 @@ pub(crate) fn status(
         device_id: creds.map(|c| c.device_id),
         signed_in,
         workspaces,
-        // The same probe `list`'s enrollment header uses: the adapter holds a config entry iff the
-        // trigger is armed.
-        hook_armed: !ctx.harness.uninstall_footprint().is_empty(),
+        // The same probe `list`'s enrollment header uses: the adapter's own trigger-health
+        // answer (a config-entry check for the hook adapters; a live scheduler probe for
+        // OpenClaw's cron — the footprint is a PATH disclosure, not health).
+        hook_armed: ctx.harness.trigger_present(),
         reporting,
     })
 }

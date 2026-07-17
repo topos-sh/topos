@@ -224,17 +224,14 @@ pub(crate) fn add_tty(data: &AddData) -> String {
     // Disclose the one write `add` makes outside ~/.topos/ — the currency trigger — honestly (it is
     // plumbing: it runs a no-op `update` until something is followed; never "it auto-updates"). The copy
     // branches on the report's `currency_kind` so a harness's honest update moment is never overstated
-    // (a session-start hook fires at session start; an inject surface only on the first `topos` touch).
+    // (a session-start hook fires at session boundaries; a scheduled job only while its scheduler runs).
     if let Some(report) = &data.currency {
         out.push_str(match (report.state, report.currency_kind) {
             (TriggerState::Active, CurrencyKind::SessionStart) => {
                 "\nInstalled the session-start currency hook (runs `topos update` at session start)."
             }
-            (TriggerState::Active, CurrencyKind::FirstToposTouch) => {
-                "\nInstalled the currency trigger (updates surface on the first `topos` touch)."
-            }
-            (TriggerState::Active, CurrencyKind::FirstTurn) => {
-                "\nInstalled the currency trigger (updates surface on the first turn)."
+            (TriggerState::Active, CurrencyKind::Scheduled) => {
+                "\nRegistered the currency job (updates land within about a minute while the harness's scheduler runs)."
             }
             (TriggerState::Active, CurrencyKind::ExplicitPullOnly) => {
                 "\nNo automatic currency trigger — run `topos update` to check for updates."

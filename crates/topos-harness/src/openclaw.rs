@@ -1,109 +1,104 @@
-//! The `OpenClaw` [`HarnessAdapter`] — discovery, byte-exact placement targeting, and the idempotent
-//! **currency trigger** edit of `~/.openclaw/openclaw.json` plus the topos-owned bootstrap-inject
-//! plugin file.
+//! The `OpenClaw` [`HarnessAdapter`] — discovery, byte-exact placement targeting, and the
+//! idempotent **silent-cron currency trigger** registered through OpenClaw's own CLI.
+//!
+//! OpenClaw reads native AgentSkills-spec `SKILL.md` bundles from `~/.openclaw/skills` (probed
+//! live against openclaw@2026.7.1 in a container: recognized offline, ungated, source
+//! `openclaw-managed`; the skills watcher defaults ON with a 250 ms debounce, so changed bytes
+//! surface on the next agent turn mid-session). Placement therefore needs NO injection surface —
+//! the old topos-owned bootstrap-inject plugin (a context file registered in `openclaw.json`) is
+//! RETIRED: this adapter never writes it again, and install/remove SCRUB any legacy artifacts (the
+//! config registration + the marker-confirmed plugin file) so old installs converge. On current
+//! builds the config is JSON5 and the old top-level registration key no longer exists — which
+//! independently confirms the retirement; the scrub only ever touches the strict-JSON shapes the
+//! old topos itself wrote, and leaves anything else byte-untouched.
+//!
+//! **The currency trigger is a silent OpenClaw cron job** (probed live): `openclaw cron add
+//! --command <shell> --no-deliver --declaration-key <key> --json` registers a deterministic,
+//! model-free shell job persisted in OpenClaw's own SQLite, idempotent by declaration key (a
+//! re-add answers `created:false`, same job — the key IS the ownership marker), firing on a
+//! 1-minute cadence. The registered shell line is the same guarded sweep the Claude Code hook
+//! runs — `topos update --quiet` behind a `command -v` guard with an exit-0 tail (the job runs
+//! via `sh -lc`, so the guard works; a cleanly-failing job never trips OpenClaw's error
+//! counters, and an orphaned job after a topos uninstall no-ops silently). The sweep self-
+//! throttles client-side (TTL + single-flight), so the 1-minute cadence is cheap.
+//!
+//! **Honest degrade (probed constraints):** `cron add` requires a RUNNING gateway — it fails fast
+//! when the gateway is down and never queues; the job stops firing while the gateway/daemon is
+//! down and resumes when it returns. So [`TriggerState::Active`] (kind
+//! [`CurrencyKind::Scheduled`]) is claimed ONLY when the registration round-trip succeeded — the
+//! gateway answered — and every other outcome (no `openclaw` binary, a down gateway, a CLI error)
+//! degrades plainly to the [`CurrencyKind::ExplicitPullOnly`] floor with nothing invented. Remove
+//! resolves the job id from `cron list --json` by declaration key (`rm` is id-only) and treats
+//! missing-as-clean; a down gateway at remove time is `Degraded` — the job survives in OpenClaw's
+//! store, disclosed, never silently orphaned (and its guarded command no-ops once topos is gone).
 //!
 //! Content-blind, like the reference: it reads skill *directories* only to confirm a `SKILL.md`
-//! exists (never the bytes, never the frontmatter), and the only files it ever writes are OpenClaw's
-//! own **config surface** — the `openclaw.json` registration plus the inert topos-owned inject
-//! plugin — never a skill dir. The strict-JSON merge is pure (bytes in → an edit plan out); the
-//! crash-safe write is delegated to the injected [`ConfigStore`] (which writes *through* a symlink
-//! to its target, never replacing the link).
-//!
-//! **OpenClaw currency is honestly weaker than Claude Code's.** The registered inject file shows its
-//! LAST-REFRESHED state, so an update surfaces on the **first `topos` touch** of a session — an
-//! honest one-beat-in latency — never at bare session open. OpenClaw's `session_start` surface is
-//! observer-only (it cannot inject into LLM context) and a cron job's stdout never reaches context,
-//! so neither is ever a currency path here, including as a fallback: every failure mode degrades
-//! plainly to an explicit `topos update` (`TriggerState::Degraded` + the `ExplicitPullOnly` floor).
-//!
-//! READINESS PROBE — this adapter is build-first behind the frozen trait: the concrete config bytes
-//! below are PROVISIONAL until verified against the pilot's EXACT OpenClaw build (not latest-main).
-//! A failed or absent probe keeps this structure and the honest "next `topos` touch" degrade — never
-//! a bare-open currency claim, never a cron. The CLI's one harness-selection site still wires Claude
-//! Code only, so no production path selects this adapter before the probe pins the bytes. To verify:
-//!   1. bootstrap-inject is enabled and the extra-files registration is honored at gateway bootstrap
-//!      (and whether a build could ship it off by default — if so, an absent flag must degrade).
-//!   2. the gateway auto-watches `openclaw.json`, so a fresh registration takes effect without a
-//!      restart.
-//!   3. the extra-files array tolerates the fresh-array (immutable-replace) edit form that sidesteps
-//!      upstream openclaw#51789 (in-place array mutation).
-//!   4. char-budget headroom: the inject content fits the injected-context budget
-//!      ([`INJECT_CHAR_BUDGET`]) — else we degrade, never truncate.
-//!   5. the config path is `~/.openclaw/openclaw.json`, the key is [`EXTRA_FILES_KEY`], entries are
-//!      plain path strings, and the plugin's file format (`.mjs`) + flat location under
-//!      `~/.openclaw/` are what this adapter writes; `$HOME/.openclaw` is the real home (no env
-//!      override exists — we deliberately invent none).
-//!
-//! Until every line is confirmed, treat the `FRESH_INSTALL` fixture bytes and [`PLUGIN_CONTENT`] as
-//! provisional.
+//! exists (never the bytes, never the frontmatter). Its trigger surface is OpenClaw's own
+//! scheduler, driven through the injected [`CommandRunner`] port (argv-only — no shell strings
+//! are composed here); the only FILE writes are the legacy scrub of the config registration this
+//! tool itself once wrote (through the injected [`ConfigStore`]) and the unlink of its own
+//! marker-confirmed plugin file — never a skill dir, never a foreign byte.
 
 use std::path::PathBuf;
 
-use serde_json::{Map, Value};
+use serde_json::Value;
 use topos_types::{CurrencyKind, HarnessId, TriggerReport, TriggerState};
 
-use crate::{ConfigStore, DiscoveredPlacement, HarnessAdapter, PlacementNaming, PlacementTarget};
+use crate::{
+    CommandRunner, ConfigStore, DiscoveredPlacement, HarnessAdapter, PlacementNaming,
+    PlacementTarget,
+};
 
 /// The user-scope layer label recorded for a discovered/placed OpenClaw skill (the resolved layer;
 /// a project/enterprise layer stays representable later — `DiscoveredPlacement.layer` is already
 /// `Option<String>`).
 const LAYER_USER: &str = "user";
 
-/// The structured marker identity reported in [`TriggerReport::marker_id`] — and the in-file marker
-/// that makes the plugin file OURS: a file at the plugin path *without* this marker is foreign and
-/// is never registered, never overwritten, never unlinked (adopt-or-leave, mirroring the reference's
-/// sentinel + command-identity double guard).
-const MARKER_ID: &str = "topos:openclaw:currency:1";
+/// The structured marker identity reported in [`TriggerReport::marker_id`] — AND the cron job's
+/// `--declaration-key`, which makes the registration idempotent (probed: a re-add with the same
+/// key answers `created:false`, the same job id, never a duplicate) and is the ownership marker
+/// the remove path resolves the job by. Schema 2 = the silent-cron trigger; schema 1 was the
+/// retired bootstrap-inject surface (still recognized by the legacy scrub below).
+const MARKER_ID: &str = "topos:openclaw:currency:2";
 
-/// The topos-owned inject plugin's file name, flat under the OpenClaw home (deliberately NOT a
-/// `plugins/` subdir: a clean scrub then leaves zero residue — no emptied directory — and the file
-/// never sits in a directory a build might auto-scan). The registration entry is this file's
-/// absolute path, which doubles as the managed-entry identity.
-const PLUGIN_FILE_NAME: &str = "topos-currency.mjs";
+/// The OpenClaw management CLI, resolved from `PATH` by the injected runner.
+const OPENCLAW_BIN: &str = "openclaw";
 
-/// The provisional `openclaw.json` key holding the bootstrap-inject registrations (an array of file
-/// paths injected at gateway bootstrap). Probe item 5.
-const EXTRA_FILES_KEY: &str = "bootstrap-extra-files";
+/// The cron job's human-facing name (shows in `openclaw cron list`; identity rides the
+/// declaration key, never this label).
+const CRON_NAME: &str = "topos-currency";
 
-/// The provisional `openclaw.json` flag disabling the bootstrap-inject surface. Absent = enabled
-/// (probe item 1 re-confirms that default); `false` — or any non-bool — degrades honestly, because
-/// a registration into a disabled surface would claim currency it cannot deliver.
-const INJECT_FLAG_KEY: &str = "bootstrap-inject";
+/// The cadence (probed: sub-minute is allowed; one minute is the deliberate floor — the client's
+/// own TTL gate throttles the sweeps this fires).
+const CRON_EVERY: &str = "1m";
 
-/// The provisional injected-context char budget (probe item 4). A build property, not a config key —
-/// the planner takes the budget as a parameter so the blown-budget degrade is genuinely exercised in
-/// tests while production passes this probe-pinned ceiling.
-const INJECT_CHAR_BUDGET: usize = 4096;
+/// The job's shell payload (OpenClaw runs it via `sh -lc`). The `command -v` guard + exit-0 tail
+/// mirror the Claude Code hook line: a machine that lost the `topos` binary (an uninstall; the
+/// job surviving in OpenClaw's store) no-ops CLEANLY, so the job never accumulates error state.
+const CRON_COMMAND: &str = "command -v topos >/dev/null 2>&1 && topos update --quiet || true";
 
-/// The inert inject plugin topos installs — a pure data default-export with zero side effects
-/// whether or not a gateway loads it. The per-`topos`-touch refresh of this surface's CONTENTS is
-/// the sync engine's job, not this adapter's, and is **not yet wired** — until it lands, the
-/// installed surface keeps exactly these bytes, which claim no update (`lastRefreshed: null`) and
-/// point at `topos update`, so it never announces an update it has not seen. Install checks only
-/// marker-ownership, never byte-equality, so a refreshed file is still a true no-op re-install.
-const PLUGIN_CONTENT: &str = "\
-// topos:openclaw:currency:1 — the topos-managed bootstrap-inject surface.
-// Managed by topos (topos.sh): topos rewrites this file's contents on each `topos` touch, so
-// hand-edits are overwritten. Remove it with `topos uninstall` (which also scrubs the
-// registration in openclaw.json), not by hand.
-//
-// This surface shows its LAST-REFRESHED state: skill updates surface on the
-// first `topos` touch of a session — an honest one-beat-in latency — never at
-// bare session open, and never via cron. To refresh now, run: topos update
-export default {
-  topos: \"currency\",
-  version: 1,
-  lastRefreshed: null,
-  updates: [],
-};
-";
+/// The RETIRED inject surface's marker — recognized only to scrub artifacts an earlier topos
+/// wrote: a plugin file carrying it is ours to unlink (after de-referencing), a file without it
+/// is foreign and never touched.
+const LEGACY_MARKER: &str = "topos:openclaw:currency:1";
 
-/// The `OpenClaw` [`HarnessAdapter`]. Holds the resolved config home (injected, so tests point it at
-/// a temp dir) and the [`ConfigStore`] port that performs the durable config writes.
+/// The retired inject plugin's file name, flat under the OpenClaw home (where the old adapter
+/// wrote it).
+const LEGACY_PLUGIN_FILE_NAME: &str = "topos-currency.mjs";
+
+/// The retired `openclaw.json` registration key the old adapter appended the plugin's path to.
+/// (Current builds moved this surface elsewhere entirely; only the exact strict-JSON shape the
+/// old topos wrote is ever scrubbed.)
+const LEGACY_EXTRA_FILES_KEY: &str = "bootstrap-extra-files";
+
+/// The `OpenClaw` [`HarnessAdapter`]. Holds the resolved config home, the [`ConfigStore`] port
+/// (the legacy scrub's durable write), and the [`CommandRunner`] port (the `openclaw cron` CLI) —
+/// all injected, so tests point the home at a temp dir and drive a fake CLI.
 pub struct OpenClaw<'a> {
     /// `$HOME/.openclaw` — injected in tests; see [`OpenClaw::resolve_home`].
     home: PathBuf,
     cfg: &'a dyn ConfigStore,
+    cli: &'a dyn CommandRunner,
 }
 
 impl std::fmt::Debug for OpenClaw<'_> {
@@ -114,17 +109,38 @@ impl std::fmt::Debug for OpenClaw<'_> {
     }
 }
 
+/// How the cron-removal round-trip ended.
+enum CronRemoval {
+    /// Our job was found and removed.
+    Removed,
+    /// The list parsed and no job carries our declaration key — provably already clean.
+    NotPresent,
+    /// The binary is absent / the CLI errored / the gateway is down / the list did not parse —
+    /// removal was NOT verified: a persisted job may survive and resume when the gateway returns.
+    /// Never claimed clean (the surviving job's guarded command at least no-ops once topos is
+    /// gone).
+    Unavailable,
+}
+
+/// What a `cron list --json` stdout proved.
+enum ListRead {
+    /// The list parsed; our job's id if present.
+    Jobs(Option<String>),
+    /// The output did not parse into the probed shape — it proves NOTHING (never "not present").
+    Unreadable,
+}
+
 impl<'a> OpenClaw<'a> {
-    /// Construct over an explicit config home + a config-store port. Production passes
-    /// [`OpenClaw::resolve_home`]; tests pass a temp dir so a real `~/.openclaw` is never touched.
+    /// Construct over an explicit config home + the two ports. Production passes
+    /// [`OpenClaw::resolve_home`] and the CLI crate's real process runner; tests pass a temp dir
+    /// and fakes so a real `~/.openclaw` (or a real `openclaw` binary) is never touched.
     #[must_use]
-    pub fn new(home: PathBuf, cfg: &'a dyn ConfigStore) -> Self {
-        Self { home, cfg }
+    pub fn new(home: PathBuf, cfg: &'a dyn ConfigStore, cli: &'a dyn CommandRunner) -> Self {
+        Self { home, cfg, cli }
     }
 
     /// Resolve OpenClaw's config home: `$HOME/.openclaw` (falling back to `./.openclaw` if `$HOME`
-    /// is unset). Deliberately NO env-var override — the pilot build defines none we can trust yet
-    /// (a probe item; inventing one would be a fake probe result).
+    /// is unset).
     #[must_use]
     pub fn resolve_home() -> PathBuf {
         std::env::var_os("HOME")
@@ -141,13 +157,8 @@ impl<'a> OpenClaw<'a> {
         self.home.join("openclaw.json")
     }
 
-    fn plugin_path(&self) -> PathBuf {
-        self.home.join(PLUGIN_FILE_NAME)
-    }
-
-    /// The canonical registration entry — the plugin file's absolute path as the config records it.
-    fn canonical_entry(&self) -> String {
-        self.plugin_path().to_string_lossy().into_owned()
+    fn legacy_plugin_path(&self) -> PathBuf {
+        self.home.join(LEGACY_PLUGIN_FILE_NAME)
     }
 
     /// Read the current config bytes, `None` if absent, `Err` only on a genuine I/O failure.
@@ -155,86 +166,131 @@ impl<'a> OpenClaw<'a> {
         self.cfg.read(&self.config_path())
     }
 
-    /// Probe the plugin path through the port: absent, ours (bytes carry [`MARKER_ID`]), or a
-    /// foreign file squatting on our path (never registered / overwritten / unlinked).
+    /// Probe the legacy plugin path through the port: absent, ours (bytes carry
+    /// [`LEGACY_MARKER`]), or a foreign file on that path (never touched).
     fn plugin_file(&self) -> std::io::Result<PluginFile> {
-        Ok(match self.cfg.read(&self.plugin_path())? {
+        Ok(match self.cfg.read(&self.legacy_plugin_path())? {
             None => PluginFile::Absent,
-            Some(bytes) if String::from_utf8_lossy(&bytes).contains(MARKER_ID) => PluginFile::Ours,
+            Some(bytes) if String::from_utf8_lossy(&bytes).contains(LEGACY_MARKER) => {
+                PluginFile::Ours
+            }
             Some(_) => PluginFile::Foreign,
         })
     }
 
-    /// Apply a planned edit, degrading honestly on any write failure — never a blind overwrite.
-    fn apply(&self, plan: EditPlan) -> TriggerReport {
-        match plan {
-            EditPlan::Leave(state) => self.report(state, None),
-            EditPlan::Install {
-                write_plugin,
-                config,
-                state,
-            } => {
-                // Plugin file first, then the registration: the config entry is the sole commit
-                // point, so a crash between the two leaves an inert unregistered file (healed by a
-                // re-run), never a registration pointing at nothing.
-                if write_plugin
-                    && self
-                        .cfg
-                        .replace(&self.plugin_path(), PLUGIN_CONTENT.as_bytes())
-                        .is_err()
-                {
-                    return self.report(TriggerState::Degraded, None);
-                }
-                match config {
-                    None => self.report(state, write_plugin.then(|| self.plugin_path())),
-                    Some(bytes) => match self.cfg.replace(&self.config_path(), &bytes) {
-                        Ok(()) => self.report(state, Some(self.config_path())),
-                        // The plugin write (if any) already durably landed — disclose it even
-                        // though the registration failed; the file is inert while unregistered.
-                        Err(_) => self.report(
-                            TriggerState::Degraded,
-                            write_plugin.then(|| self.plugin_path()),
-                        ),
-                    },
+    /// Scrub the RETIRED inject surface's artifacts, best-effort and fail-closed: remove the
+    /// exact registration the old topos wrote from `openclaw.json` (strict-JSON shapes only — a
+    /// JSON5/malformed/wrong-typed config is left byte-untouched, and then the plugin file is
+    /// left too, since an unreadable config may still reference it), then unlink the plugin file
+    /// ONLY when it carries the legacy marker and is provably de-referenced. Returns the config
+    /// path when the scrub wrote it (for the report's `touched_path`). Never decides the trigger
+    /// STATE — the cron does; leftovers stay disclosed via the footprint.
+    fn scrub_legacy(&self) -> Option<PathBuf> {
+        let Ok(plugin) = self.plugin_file() else {
+            return None; // unreadable plugin path — touch nothing
+        };
+        let mut touched = None;
+        match self.read_config() {
+            Err(_) => return None, // unreadable config — may still reference the plugin
+            Ok(None) => {}         // no config: nothing referenced; fall through to the unlink
+            Ok(Some(bytes)) if bytes.iter().all(u8::is_ascii_whitespace) => {}
+            Ok(Some(bytes)) => {
+                let Ok(mut root) = serde_json::from_slice::<Value>(&bytes) else {
+                    return None; // not strict JSON (incl. JSON5) — never ours to edit
+                };
+                let obj = root.as_object_mut()?;
+                let canonical = self.legacy_plugin_path().to_string_lossy().into_owned();
+                match obj.get(LEGACY_EXTRA_FILES_KEY) {
+                    None => {} // nothing registered
+                    Some(Value::Array(entries)) => {
+                        if entries
+                            .iter()
+                            .any(|e| e.as_str() == Some(canonical.as_str()))
+                        {
+                            // The openclaw#51789-safe fresh-array scrub of ONLY our exact entry;
+                            // prune the key when our removal emptied it.
+                            let fresh: Vec<Value> = entries
+                                .iter()
+                                .filter(|e| e.as_str() != Some(canonical.as_str()))
+                                .cloned()
+                                .collect();
+                            if fresh.is_empty() {
+                                obj.remove(LEGACY_EXTRA_FILES_KEY);
+                            } else {
+                                obj.insert(LEGACY_EXTRA_FILES_KEY.to_owned(), Value::Array(fresh));
+                            }
+                            let out = serialize(&root)?;
+                            // De-reference BEFORE delete: if the scrub write fails, the config
+                            // still points at the file — never unlink it then.
+                            if self.cfg.replace(&self.config_path(), &out).is_err() {
+                                return None;
+                            }
+                            touched = Some(self.config_path());
+                        }
+                    }
+                    Some(_) => return None, // wrong-typed while retired — unprovable, leave all
                 }
             }
-            EditPlan::Scrub {
-                config,
-                unlink,
-                state,
-            } => {
-                let mut touched = None;
-                if let Some(bytes) = config {
-                    // De-reference before delete: scrub the registration first, so the config
-                    // never points at a removed file.
-                    if self.cfg.replace(&self.config_path(), &bytes).is_err() {
-                        return self.report(TriggerState::Degraded, None);
-                    }
-                    touched = Some(self.config_path());
-                }
-                if unlink {
-                    // The port has no delete (the trait is frozen), so the one direct fs call: a
-                    // best-effort unlink of OUR OWN marker-confirmed file, only ever after it is
-                    // de-referenced. A failure leaves an inert orphan the footprint still
-                    // discloses — the trigger itself is cleanly off, so the state stands.
-                    match std::fs::remove_file(self.plugin_path()) {
-                        Ok(()) => {}
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(_) => {}
-                    }
-                }
-                self.report(state, touched)
-            }
+        }
+        if plugin == PluginFile::Ours {
+            // Best-effort: a failed unlink leaves an inert orphan the footprint still discloses.
+            let _ = std::fs::remove_file(self.legacy_plugin_path());
+        }
+        touched
+    }
+
+    /// Register (or re-affirm) the silent cron job. `true` ONLY when the round-trip succeeded —
+    /// which requires a reachable gateway, so success IS the gateway-alive evidence.
+    fn register_cron(&self) -> bool {
+        matches!(
+            self.cli.run(
+                OPENCLAW_BIN,
+                &[
+                    "cron",
+                    "add",
+                    "--name",
+                    CRON_NAME,
+                    "--every",
+                    CRON_EVERY,
+                    "--command",
+                    CRON_COMMAND,
+                    "--no-deliver",
+                    "--declaration-key",
+                    MARKER_ID,
+                    "--json",
+                ],
+            ),
+            Ok(out) if out.success
+        )
+    }
+
+    /// Remove our cron job: resolve the id by declaration key from `cron list --json` (probed:
+    /// `rm` takes an id only, and removing a missing id errors — so the list probe comes first).
+    fn remove_cron(&self) -> CronRemoval {
+        let list = match self.cli.run(OPENCLAW_BIN, &["cron", "list", "--json"]) {
+            Err(_) => return CronRemoval::Unavailable, // binary absent, or any spawn failure
+            Ok(out) if !out.success => return CronRemoval::Unavailable,
+            Ok(out) => out,
+        };
+        let id = match read_jobs(&list.stdout) {
+            ListRead::Jobs(Some(id)) => id,
+            ListRead::Jobs(None) => return CronRemoval::NotPresent,
+            // A zero-exit list whose output we cannot read proves nothing about the job.
+            ListRead::Unreadable => return CronRemoval::Unavailable,
+        };
+        match self.cli.run(OPENCLAW_BIN, &["cron", "rm", &id]) {
+            Ok(out) if out.success => CronRemoval::Removed,
+            _ => CronRemoval::Unavailable,
         }
     }
 
     fn report(&self, state: TriggerState, touched: Option<PathBuf>) -> TriggerReport {
         TriggerReport {
             harness: HarnessId::OpenClaw,
-            // Honest labeling: FirstToposTouch only for a verified, active trigger we own; every
-            // other state advertises just the guaranteed floor — an explicit `topos update`.
+            // Honest labeling: Scheduled only for a verified registration round-trip; every other
+            // state advertises just the guaranteed floor — an explicit `topos update`.
             currency_kind: if state == TriggerState::Active {
-                CurrencyKind::FirstToposTouch
+                CurrencyKind::Scheduled
             } else {
                 CurrencyKind::ExplicitPullOnly
             },
@@ -244,21 +300,53 @@ impl<'a> OpenClaw<'a> {
         }
     }
 
-    /// Whether the managed registration entry is currently present (drives `--footprint`
-    /// disclosure). A missing/unreadable/malformed config means "not present" — we never claim to
-    /// own a path we cannot confirm.
-    fn has_managed_entry(&self) -> bool {
+    /// Whether the RETIRED registration entry is still present (drives `--footprint` disclosure).
+    /// A missing/unreadable/malformed config means "not present" — we never claim to own a path
+    /// we cannot confirm.
+    fn has_legacy_entry(&self) -> bool {
         let Ok(Some(bytes)) = self.read_config() else {
             return false;
         };
         let Ok(root) = serde_json::from_slice::<Value>(&bytes) else {
             return false;
         };
-        matches!(
-            extra_files_ref(&root).map(|e| classify(e, &self.canonical_entry())),
-            Some(Classification::Managed)
-        )
+        let canonical = self.legacy_plugin_path().to_string_lossy().into_owned();
+        root.as_object()
+            .and_then(|o| o.get(LEGACY_EXTRA_FILES_KEY))
+            .and_then(Value::as_array)
+            .is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|e| e.as_str() == Some(canonical.as_str()))
+            })
     }
+}
+
+/// What the legacy plugin path currently holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PluginFile {
+    Absent,
+    /// A file carrying [`LEGACY_MARKER`] — ours to unlink once de-referenced.
+    Ours,
+    /// A file WITHOUT our marker on that path — never touched.
+    Foreign,
+}
+
+/// Parse `cron list --json` (probed shape: `{"jobs": [{"id": …, "declarationKey": …, …}, …]}`).
+/// Output that does not parse into that shape is [`ListRead::Unreadable`] — it proves NOTHING (a
+/// job may exist behind it), so callers never fold it into "not present".
+fn read_jobs(stdout: &str) -> ListRead {
+    let Ok(root) = serde_json::from_str::<Value>(stdout) else {
+        return ListRead::Unreadable;
+    };
+    let Some(jobs) = root.get("jobs").and_then(Value::as_array) else {
+        return ListRead::Unreadable;
+    };
+    ListRead::Jobs(jobs.iter().find_map(|job| {
+        (job.get("declarationKey").and_then(Value::as_str) == Some(MARKER_ID))
+            .then(|| job.get("id").and_then(Value::as_str).map(str::to_owned))
+            .flatten()
+    }))
 }
 
 impl HarnessAdapter for OpenClaw<'_> {
@@ -301,8 +389,8 @@ impl HarnessAdapter for OpenClaw<'_> {
     fn placement_for(
         &self,
         skill_id: &str,
-        // Name-based placement is the reference (Claude Code) adapter's; this pilot adapter's concrete
-        // dir shape stays id-keyed until its readiness probe, so the display name is not used here yet.
+        // Name-based placement is the reference (Claude Code) adapter's; this adapter's concrete
+        // dir shape stays id-keyed until the cross-harness placement work lands.
         _naming: PlacementNaming<'_>,
         discovered: Option<&DiscoveredPlacement>,
     ) -> PlacementTarget {
@@ -310,7 +398,9 @@ impl HarnessAdapter for OpenClaw<'_> {
             Some(d) => PlacementTarget {
                 dir: d.path.clone(),
             },
-            // No-discovered default: `<home>/skills/<skill_id>` — the resolved user layer.
+            // No-discovered default: `<home>/skills/<skill_id>` — the resolved user layer. Probed:
+            // this root is recognized offline, ungated, and watched by default (250 ms debounce),
+            // so placed bytes surface without any injection surface.
             None => PlacementTarget {
                 dir: self.skills_dir().join(skill_id),
             },
@@ -318,283 +408,65 @@ impl HarnessAdapter for OpenClaw<'_> {
     }
 
     fn currency_kind(&self) -> CurrencyKind {
-        CurrencyKind::FirstToposTouch
+        CurrencyKind::Scheduled
     }
 
     fn install_currency_trigger(&self) -> TriggerReport {
-        let Ok(plugin) = self.plugin_file() else {
-            // The plugin path is unreadable (not merely absent) — degrade, write nothing.
-            return self.report(TriggerState::Degraded, None);
-        };
-        match self.read_config() {
-            Ok(current) => self.apply(plan_install(
-                current.as_deref(),
-                plugin,
-                &self.canonical_entry(),
-                INJECT_CHAR_BUDGET,
-            )),
-            // Unreadable (e.g. a permission error) — degrade honestly, never blind-overwrite.
-            Err(_) => self.report(TriggerState::Degraded, None),
+        // The legacy inject surface is scrubbed FIRST (best-effort, fail-closed) so an upgraded
+        // install converges on the one trigger; its outcome never decides the state — the cron
+        // registration does.
+        let touched = self.scrub_legacy();
+        if self.register_cron() {
+            self.report(TriggerState::Active, touched)
+        } else {
+            // No binary / gateway down / CLI error: nothing is registered, nothing fires on its
+            // own — the floor is an explicit `topos update` (the watcher then surfaces the bytes).
+            self.report(TriggerState::Degraded, touched)
         }
     }
 
     fn remove_currency_trigger(&self) -> TriggerReport {
-        let Ok(plugin) = self.plugin_file() else {
-            return self.report(TriggerState::Degraded, None);
-        };
-        match self.read_config() {
-            Ok(current) => self.apply(plan_remove(
-                current.as_deref(),
-                plugin,
-                &self.canonical_entry(),
-            )),
-            Err(_) => self.report(TriggerState::Degraded, None),
+        let touched = self.scrub_legacy();
+        match self.remove_cron() {
+            CronRemoval::Removed | CronRemoval::NotPresent => {
+                self.report(TriggerState::Inactive, touched)
+            }
+            // Removal was NOT verified (no binary / gateway down / unreadable list): a persisted
+            // job may survive and resume — disclosed as Degraded, never claimed clean.
+            CronRemoval::Unavailable => self.report(TriggerState::Degraded, touched),
         }
     }
 
     fn uninstall_footprint(&self) -> Vec<PathBuf> {
-        // Disclosure-only, never delete targets for the shared config (it is scrubbed via
-        // `remove_currency_trigger`, the file kept). The plugin path is disclosed on
-        // marker-confirmed existence — so a de-referenced orphan (a crash window, or a failed
-        // unlink) is still disclosed honestly, while a foreign file at our path is not claimed.
+        // Disclosure-only, and LEGACY-only: the cron job is OpenClaw-owned scheduler state
+        // (removed via `remove_currency_trigger`, not a filesystem path); what topos may still
+        // own on disk are the retired inject artifacts — the config registration (never a delete
+        // target; scrubbed surgically) and the marker-confirmed plugin file.
         let mut out = Vec::new();
-        if self.has_managed_entry() {
+        if self.has_legacy_entry() {
             out.push(self.config_path());
         }
         if matches!(self.plugin_file(), Ok(PluginFile::Ours)) {
-            out.push(self.plugin_path());
+            out.push(self.legacy_plugin_path());
         }
         out
     }
-}
 
-// ---------------------------------------------------------------------------------------------
-// The pure openclaw.json merge — bytes in → an edit plan out. No I/O; fail-closed on anything we
-// cannot safely interpret (never coerce or clobber a user's differently-shaped config).
-// ---------------------------------------------------------------------------------------------
-
-/// What the plugin path currently holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PluginFile {
-    Absent,
-    /// A file carrying [`MARKER_ID`] — ours to (re)use, heal, and unlink.
-    Ours,
-    /// A file WITHOUT our marker squatting on our path — never registered, overwritten, or
-    /// unlinked (registering unknown bytes into an LLM-context surface is the one thing this
-    /// adapter must never do).
-    Foreign,
-}
-
-/// What a planned edit does. `Install` writes the plugin file (when needed) and then the config
-/// post-image; `Scrub` writes the scrubbed config and then unlinks our plugin file; `Leave` touches
-/// nothing (a true no-op — an unchanged re-run never re-serializes the user's file).
-enum EditPlan {
-    Leave(TriggerState),
-    Install {
-        write_plugin: bool,
-        config: Option<Vec<u8>>,
-        state: TriggerState,
-    },
-    Scrub {
-        config: Option<Vec<u8>>,
-        unlink: bool,
-        state: TriggerState,
-    },
-}
-
-/// How the existing registrations relate to topos's managed entry.
-#[derive(Debug, PartialEq, Eq)]
-enum Classification {
-    /// Our exact canonical entry is present.
-    Managed,
-    /// A topos-currency-shaped entry exists that is NOT our canonical one (hand-rolled, or an old
-    /// home's path) — adopt-or-leave, never blind-append and never scrub.
-    Unmanaged,
-    /// No topos currency registration at all.
-    Absent,
-}
-
-fn plan_install(
-    current: Option<&[u8]>,
-    plugin: PluginFile,
-    canonical: &str,
-    budget: usize,
-) -> EditPlan {
-    let mut root = match parse_config(current) {
-        ParsedConfig::Fresh => Value::Object(Map::new()),
-        ParsedConfig::Value(v) => v,
-        ParsedConfig::Malformed => return EditPlan::Leave(TriggerState::Degraded),
-    };
-    let Some(obj) = root.as_object_mut() else {
-        return EditPlan::Leave(TriggerState::Degraded); // valid JSON, non-object root — fail closed
-    };
-    // The capacity gates run BEFORE classification: a managed entry under a disabled inject
-    // surface (or a blown budget) honestly reports Degraded — currency cannot fire — with no write.
-    match obj.get(INJECT_FLAG_KEY) {
-        None | Some(Value::Bool(true)) => {}
-        Some(_) => return EditPlan::Leave(TriggerState::Degraded), // disabled or wrong-typed
-    }
-    if PLUGIN_CONTENT.chars().count() > budget {
-        return EditPlan::Leave(TriggerState::Degraded); // blown char budget — degrade, never truncate
-    }
-    let entries: &[Value] = match obj.get(EXTRA_FILES_KEY) {
-        None => &[],
-        Some(Value::Array(a)) => a,
-        Some(_) => return EditPlan::Leave(TriggerState::Degraded), // un-appliable fresh-array
-    };
-    match classify(entries, canonical) {
-        Classification::Managed => match plugin {
-            PluginFile::Ours => EditPlan::Leave(TriggerState::Active), // already ours → true no-op
-            // Registered but the file vanished (a hand-delete): heal the file, config untouched.
-            PluginFile::Absent => EditPlan::Install {
-                write_plugin: true,
-                config: None,
-                state: TriggerState::Active,
-            },
-            // Our registration, someone else's bytes — leave both; never vouch, never clobber.
-            PluginFile::Foreign => EditPlan::Leave(TriggerState::AlreadyPresentUnmanaged),
-        },
-        Classification::Unmanaged => EditPlan::Leave(TriggerState::AlreadyPresentUnmanaged),
-        Classification::Absent => {
-            if plugin == PluginFile::Foreign {
-                // A foreign file squats on our path with NOTHING registered: registering it would
-                // inject unknown bytes into LLM context, and overwriting it would clobber someone's
-                // file — but no equivalent trigger exists either, so `AlreadyPresentUnmanaged`
-                // would be a false claim. A path collision is a Degraded install: nothing armed,
-                // nothing written, the explicit-pull floor advertised.
-                return EditPlan::Leave(TriggerState::Degraded);
-            }
-            // The openclaw#51789-safe fresh-array form: build a brand-new array and assign it
-            // wholesale — never push into the live one.
-            let mut fresh: Vec<Value> = entries.to_vec();
-            fresh.push(Value::String(canonical.to_owned()));
-            obj.insert(EXTRA_FILES_KEY.to_owned(), Value::Array(fresh));
-            match serialize(&root) {
-                Some(bytes) => EditPlan::Install {
-                    write_plugin: plugin == PluginFile::Absent,
-                    config: Some(bytes),
-                    state: TriggerState::Active,
-                },
-                None => EditPlan::Leave(TriggerState::Degraded),
-            }
+    /// The hook-health probe: our trigger lives in OpenClaw's SCHEDULER, not the filesystem, so
+    /// the default footprint-based answer would call a healthy cron "not installed". A live
+    /// `cron list` proves presence; anything unprovable (no binary, a down gateway, unreadable
+    /// output) answers `false` — health is never claimed on faith.
+    fn trigger_present(&self) -> bool {
+        match self.cli.run(OPENCLAW_BIN, &["cron", "list", "--json"]) {
+            Ok(out) if out.success => matches!(read_jobs(&out.stdout), ListRead::Jobs(Some(_))),
+            _ => false,
         }
     }
 }
 
-fn plan_remove(current: Option<&[u8]>, plugin: PluginFile, canonical: &str) -> EditPlan {
-    let mut root = match parse_config(current) {
-        // No config at all: nothing registered; unlink a confirmed orphan of OURS if one exists.
-        ParsedConfig::Fresh => {
-            return EditPlan::Scrub {
-                config: None,
-                unlink: plugin == PluginFile::Ours,
-                state: TriggerState::Inactive,
-            };
-        }
-        ParsedConfig::Value(v) => v,
-        // Present but unreadable: never touch the config, and never unlink the plugin either — a
-        // format we can't parse may still reference it in a shape we don't understand.
-        ParsedConfig::Malformed => return EditPlan::Leave(TriggerState::Degraded),
-    };
-    let Some(obj) = root.as_object_mut() else {
-        return EditPlan::Leave(TriggerState::Degraded);
-    };
-    let entries: &[Value] = match obj.get(EXTRA_FILES_KEY) {
-        None => &[],
-        Some(Value::Array(a)) => a,
-        // Wrong-typed while the real format is provisional: the managed path could still be live
-        // inside a shape we don't understand — degrade, no scrub, no unlink.
-        Some(_) => return EditPlan::Leave(TriggerState::Degraded),
-    };
-    match classify(entries, canonical) {
-        Classification::Absent => EditPlan::Scrub {
-            config: None,
-            unlink: plugin == PluginFile::Ours,
-            state: TriggerState::Inactive,
-        },
-        Classification::Unmanaged => EditPlan::Leave(TriggerState::AlreadyPresentUnmanaged),
-        Classification::Managed => {
-            // Fresh-array scrub of ONLY our exact entry; prune the key when OUR removal emptied it
-            // (restoring toward the pre-install shape — accepting, like the reference, the edge
-            // where a user's own pre-existing empty array is pruned too).
-            let fresh: Vec<Value> = entries
-                .iter()
-                .filter(|e| e.as_str() != Some(canonical))
-                .cloned()
-                .collect();
-            if fresh.is_empty() {
-                obj.remove(EXTRA_FILES_KEY);
-            } else {
-                obj.insert(EXTRA_FILES_KEY.to_owned(), Value::Array(fresh));
-            }
-            match serialize(&root) {
-                Some(bytes) => EditPlan::Scrub {
-                    config: Some(bytes),
-                    unlink: plugin == PluginFile::Ours,
-                    state: TriggerState::Inactive,
-                },
-                None => EditPlan::Leave(TriggerState::Degraded),
-            }
-        }
-    }
-}
-
-/// The parse outcome for the existing config bytes.
-enum ParsedConfig {
-    /// Absent or whitespace-only — start from a fresh object.
-    Fresh,
-    /// Parsed JSON.
-    Value(Value),
-    /// Present but not valid JSON — fail closed (never clobber a file we can't read).
-    Malformed,
-}
-
-fn parse_config(current: Option<&[u8]>) -> ParsedConfig {
-    match current {
-        None => ParsedConfig::Fresh,
-        Some(bytes) if bytes.iter().all(u8::is_ascii_whitespace) => ParsedConfig::Fresh,
-        Some(bytes) => match serde_json::from_slice::<Value>(bytes) {
-            Ok(value) => ParsedConfig::Value(value),
-            Err(_) => ParsedConfig::Malformed,
-        },
-    }
-}
-
-/// The extra-files array as a shared slice IF it exists and is well-typed.
-fn extra_files_ref(root: &Value) -> Option<&Vec<Value>> {
-    root.as_object()?.get(EXTRA_FILES_KEY)?.as_array()
-}
-
-/// Classify the existing registrations against topos's canonical entry. Ours iff an entry is the
-/// exact canonical plugin path; a topos-currency-shaped entry anywhere else (our file name at a
-/// foreign location, or a name carrying both "topos" and "currency") is a hand-rolled equivalent we
-/// adopt-or-leave; anything else — including a near-miss bearing only one of the tokens — is not a
-/// currency registration at all.
-fn classify(entries: &[Value], canonical: &str) -> Classification {
-    let mut unmanaged = false;
-    for entry in entries {
-        let Some(path) = entry.as_str() else {
-            continue; // a non-string entry is not a shape we interpret
-        };
-        if path == canonical {
-            return Classification::Managed;
-        }
-        let name = path.rsplit('/').next().unwrap_or(path);
-        if name == PLUGIN_FILE_NAME || (name.contains("topos") && name.contains("currency")) {
-            unmanaged = true;
-        }
-    }
-    if unmanaged {
-        Classification::Unmanaged
-    } else {
-        Classification::Absent
-    }
-}
-
-/// Serialize the merged config: 2-space pretty + a trailing newline, keys alphabetical
-/// (`serde_json`'s default — we deliberately do NOT enable `preserve_order`, a workspace-global
-/// feature flip). Provisional: probe item 5 re-confirms this matches OpenClaw's own writer. A write
-/// happens only on a real change, so any normalization is one-time and action-triggered.
+/// Serialize the scrubbed config: 2-space pretty + a trailing newline, keys alphabetical
+/// (`serde_json`'s default — `preserve_order` stays off, a workspace-global feature flip). A
+/// write happens only on a real change, so any normalization is one-time and action-triggered.
 fn serialize(root: &Value) -> Option<Vec<u8>> {
     let mut text = serde_json::to_string_pretty(root).ok()?;
     text.push('\n');
@@ -604,14 +476,15 @@ fn serialize(root: &Value) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RunOutput;
     use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::io;
     use std::path::Path;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    /// A path-keyed in-memory [`ConfigStore`] (the adapter writes TWO files — the config and the
-    /// plugin — so the double must key by path). For the pure-merge tests; the unlink path needs
-    /// [`DiskConfig`] because `remove_currency_trigger` deletes with `std::fs::remove_file`.
+    /// A path-keyed in-memory [`ConfigStore`] for the pure scrub tests; the unlink paths need
+    /// [`DiskConfig`] because the legacy plugin delete uses `std::fs::remove_file`.
     #[derive(Debug, Default)]
     struct MemConfig {
         files: RefCell<HashMap<PathBuf, Vec<u8>>>,
@@ -625,11 +498,6 @@ mod tests {
                 .insert(PathBuf::from("/h/openclaw.json"), bytes.as_bytes().to_vec());
             me
         }
-        fn seed(&self, path: &str, bytes: &[u8]) {
-            self.files
-                .borrow_mut()
-                .insert(PathBuf::from(path), bytes.to_vec());
-        }
         fn text(&self, path: &str) -> Option<String> {
             self.files
                 .borrow()
@@ -641,10 +509,10 @@ mod tests {
         }
     }
     impl ConfigStore for MemConfig {
-        fn read(&self, path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+        fn read(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
             Ok(self.files.borrow().get(path).cloned())
         }
-        fn replace(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        fn replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
             self.files
                 .borrow_mut()
                 .insert(path.to_path_buf(), bytes.to_vec());
@@ -653,23 +521,137 @@ mod tests {
         }
     }
 
-    /// A real-disk [`ConfigStore`] over a temp home, for the tests where the `std::fs` unlink (and
-    /// `discover`'s `read_dir`) must be observable — an in-memory double would mask a false green.
+    /// A real-disk [`ConfigStore`] over a temp home, for the tests where the `std::fs` unlink
+    /// (and `discover`'s `read_dir`) must be observable.
     #[derive(Debug)]
     struct DiskConfig;
     impl ConfigStore for DiskConfig {
-        fn read(&self, path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+        fn read(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
             match std::fs::read(path) {
                 Ok(bytes) => Ok(Some(bytes)),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
                 Err(e) => Err(e),
             }
         }
-        fn replace(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        fn replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(path, bytes)
+        }
+    }
+
+    /// How the fake OpenClaw CLI behaves.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum CliMode {
+        /// The gateway answers: add/list/rm behave like the probed 2026.7.1 build.
+        Healthy,
+        /// The binary exists but every invocation fails (gateway down — `cron add` fails fast,
+        /// `cron list` errors).
+        GatewayDown,
+        /// The binary is absent from PATH (spawn-level `NotFound`).
+        NoBinary,
+        /// Every invocation exits zero but emits output the probed shape does not cover.
+        UnreadableList,
+    }
+
+    /// The fake `openclaw` CLI: records every argv, simulates the probed cron semantics
+    /// (declaration-key idempotence; list/rm by id).
+    struct FakeCli {
+        mode: CliMode,
+        /// Registered jobs as (id, declaration_key).
+        jobs: RefCell<Vec<(String, String)>>,
+        calls: RefCell<Vec<Vec<String>>>,
+    }
+    impl FakeCli {
+        fn new(mode: CliMode) -> Self {
+            Self {
+                mode,
+                jobs: RefCell::new(Vec::new()),
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+        fn with_job(mode: CliMode, key: &str) -> Self {
+            let me = Self::new(mode);
+            me.jobs
+                .borrow_mut()
+                .push(("job-1".to_owned(), key.to_owned()));
+            me
+        }
+        fn calls(&self) -> Vec<Vec<String>> {
+            self.calls.borrow().clone()
+        }
+        fn keys(&self) -> Vec<String> {
+            self.jobs.borrow().iter().map(|(_, k)| k.clone()).collect()
+        }
+    }
+    impl CommandRunner for FakeCli {
+        fn run(&self, program: &str, args: &[&str]) -> io::Result<RunOutput> {
+            assert_eq!(program, OPENCLAW_BIN, "only the openclaw CLI is driven");
+            self.calls
+                .borrow_mut()
+                .push(args.iter().map(|s| (*s).to_owned()).collect());
+            match self.mode {
+                CliMode::NoBinary => Err(io::Error::new(io::ErrorKind::NotFound, "no openclaw")),
+                CliMode::GatewayDown => Ok(RunOutput {
+                    success: false,
+                    stdout: "gateway closed".to_owned(),
+                }),
+                CliMode::UnreadableList => Ok(RunOutput {
+                    success: true,
+                    stdout: "a future build's incompatible output".to_owned(),
+                }),
+                CliMode::Healthy => {
+                    let ok = |stdout: String| {
+                        Ok(RunOutput {
+                            success: true,
+                            stdout,
+                        })
+                    };
+                    match args {
+                        ["cron", "add", rest @ ..] => {
+                            let key = rest
+                                .windows(2)
+                                .find(|w| w[0] == "--declaration-key")
+                                .map(|w| w[1].to_owned())
+                                .expect("add carries a declaration key");
+                            let mut jobs = self.jobs.borrow_mut();
+                            if jobs.iter().any(|(_, k)| *k == key) {
+                                ok("{\"created\":false,\"updated\":false}".to_owned())
+                            } else {
+                                let id = format!("job-{}", jobs.len() + 1);
+                                jobs.push((id, key));
+                                ok("{\"created\":true}".to_owned())
+                            }
+                        }
+                        ["cron", "list", "--json"] => {
+                            let jobs: Vec<Value> = self
+                                .jobs
+                                .borrow()
+                                .iter()
+                                .map(|(id, key)| {
+                                    serde_json::json!({"id": id, "declarationKey": key})
+                                })
+                                .collect();
+                            ok(serde_json::json!({ "jobs": jobs }).to_string())
+                        }
+                        ["cron", "rm", id] => {
+                            let mut jobs = self.jobs.borrow_mut();
+                            let before = jobs.len();
+                            jobs.retain(|(jid, _)| jid != id);
+                            if jobs.len() < before {
+                                ok("{\"ok\":true,\"removed\":true}".to_owned())
+                            } else {
+                                Ok(RunOutput {
+                                    success: false,
+                                    stdout: "id not found".to_owned(),
+                                })
+                            }
+                        }
+                        other => panic!("unexpected argv: {other:?}"),
+                    }
+                }
+            }
         }
     }
 
@@ -696,443 +678,356 @@ mod tests {
         }
     }
 
-    fn adapter<'a>(home: &Path, cfg: &'a dyn ConfigStore) -> OpenClaw<'a> {
-        OpenClaw::new(home.to_path_buf(), cfg)
+    const CONFIG: &str = "/h/openclaw.json";
+
+    /// The legacy plugin bytes an OLD topos wrote (the marker is what the scrub keys on).
+    fn legacy_plugin_bytes() -> String {
+        format!(
+            "// {LEGACY_MARKER} — the retired topos-managed bootstrap-inject surface.\nexport default {{}};\n"
+        )
     }
 
-    const CONFIG: &str = "/h/openclaw.json";
-    const PLUGIN: &str = "/h/topos-currency.mjs";
-
-    /// The exact bytes a fresh install writes into an absent `openclaw.json` — the byte-compared
-    /// fixture (2-space pretty, trailing newline). PROVISIONAL: pinned at the readiness probe.
-    const FRESH_INSTALL: &str = "\
-{
-  \"bootstrap-extra-files\": [
-    \"/h/topos-currency.mjs\"
-  ]
-}
-";
-
     #[test]
-    fn install_into_absent_config_writes_the_plugin_and_the_exact_registration() {
-        let cfg = MemConfig::default(); // both files absent
-        let report = adapter(Path::new("/h"), &cfg).install_currency_trigger();
+    fn install_registers_the_silent_cron_job_byte_exact() {
+        let cfg = MemConfig::default();
+        let cli = FakeCli::new(CliMode::Healthy);
+        let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).install_currency_trigger();
 
         assert_eq!(report.state, TriggerState::Active);
         assert_eq!(report.harness, HarnessId::OpenClaw);
-        assert_eq!(report.currency_kind, CurrencyKind::FirstToposTouch);
+        assert_eq!(report.currency_kind, CurrencyKind::Scheduled);
         assert_eq!(report.marker_id, MARKER_ID);
+        assert!(report.touched_path.is_none(), "no config file was edited");
+        assert_eq!(cfg.writes(), 0, "the trigger writes no file");
+
+        // The exact argv (the declaration key is the idempotency marker; --no-deliver keeps the
+        // job silent; the payload is the guarded sweep).
         assert_eq!(
-            report.touched_path.as_deref(),
-            Some(CONFIG),
-            "the registration is the commit point"
+            cli.calls(),
+            vec![vec![
+                "cron".to_owned(),
+                "add".to_owned(),
+                "--name".to_owned(),
+                CRON_NAME.to_owned(),
+                "--every".to_owned(),
+                CRON_EVERY.to_owned(),
+                "--command".to_owned(),
+                CRON_COMMAND.to_owned(),
+                "--no-deliver".to_owned(),
+                "--declaration-key".to_owned(),
+                MARKER_ID.to_owned(),
+                "--json".to_owned(),
+            ]],
         );
-        assert_eq!(cfg.text(CONFIG).as_deref(), Some(FRESH_INSTALL));
-        assert_eq!(cfg.text(PLUGIN).as_deref(), Some(PLUGIN_CONTENT));
-        assert_eq!(cfg.writes(), 2, "one plugin write + one config write");
+        assert_eq!(cli.keys(), vec![MARKER_ID.to_owned()]);
     }
 
     #[test]
-    fn install_is_idempotent_a_true_no_op_on_rerun() {
+    fn install_is_idempotent_by_declaration_key() {
         let cfg = MemConfig::default();
-        let home = Path::new("/h");
-        adapter(home, &cfg).install_currency_trigger();
-
-        let report = adapter(home, &cfg).install_currency_trigger();
-        assert_eq!(report.state, TriggerState::Active);
-        assert!(
-            report.touched_path.is_none(),
-            "idempotent re-run touches nothing"
-        );
-        assert_eq!(cfg.writes(), 2, "re-run writes to NEITHER file");
-        assert_eq!(cfg.text(CONFIG).as_deref(), Some(FRESH_INSTALL));
-    }
-
-    #[test]
-    fn install_preserves_foreign_keys_and_sibling_registrations() {
-        let cfg = MemConfig::with_config(
-            "{\n  \"model\": \"opus\",\n  \"bootstrap-extra-files\": [\"/h/notes.md\"]\n}\n",
-        );
-        let report = adapter(Path::new("/h"), &cfg).install_currency_trigger();
-        assert_eq!(report.state, TriggerState::Active);
-
-        let root: Value = serde_json::from_str(&cfg.text(CONFIG).unwrap()).unwrap();
-        assert_eq!(root["model"], "opus", "foreign top-level key survives");
-        let entries = root[EXTRA_FILES_KEY].as_array().unwrap();
+        let cli = FakeCli::new(CliMode::Healthy);
+        let a = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli);
+        a.install_currency_trigger();
+        let report = a.install_currency_trigger();
         assert_eq!(
-            entries
-                .iter()
-                .map(|e| e.as_str().unwrap())
-                .collect::<Vec<_>>(),
-            vec!["/h/notes.md", PLUGIN],
-            "the fresh array keeps the sibling and appends ours"
+            report.state,
+            TriggerState::Active,
+            "created:false is still registered"
         );
-    }
-
-    #[test]
-    fn install_heals_a_missing_plugin_file_without_touching_the_config() {
-        let cfg = MemConfig::default();
-        let home = Path::new("/h");
-        adapter(home, &cfg).install_currency_trigger();
-        cfg.files.borrow_mut().remove(Path::new(PLUGIN)); // a hand-delete
-
-        let report = adapter(home, &cfg).install_currency_trigger();
-        assert_eq!(report.state, TriggerState::Active);
-        assert_eq!(
-            report.touched_path.as_deref(),
-            Some(PLUGIN),
-            "only the plugin file is healed"
-        );
-        assert_eq!(cfg.text(PLUGIN).as_deref(), Some(PLUGIN_CONTENT));
-        assert_eq!(cfg.writes(), 3, "the config was NOT re-written");
-    }
-
-    #[test]
-    fn install_never_registers_or_overwrites_a_foreign_file_on_our_path() {
-        // A file without our marker squats on the plugin path and NOTHING is registered: a path
-        // collision — no trigger exists, so the install degrades (never `AlreadyPresentUnmanaged`,
-        // which would falsely claim an equivalent trigger); neither file is written.
-        let cfg = MemConfig::default();
-        cfg.seed(PLUGIN, b"export default { evil: true };\n");
-        let report = adapter(Path::new("/h"), &cfg).install_currency_trigger();
-        assert_eq!(report.state, TriggerState::Degraded);
-        assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
-        assert_eq!(cfg.writes(), 0, "neither file is written");
-        assert!(cfg.text(CONFIG).is_none(), "no registration was created");
-
-        // When OUR registration exists but the file's bytes lost the marker (a hand-edit), a live
-        // inject surface really is present without our marker — adopt-or-leave, never clobber.
-        let cfg = MemConfig::with_config(FRESH_INSTALL);
-        cfg.seed(PLUGIN, b"export default { edited: true };\n");
-        let report = adapter(Path::new("/h"), &cfg).install_currency_trigger();
-        assert_eq!(report.state, TriggerState::AlreadyPresentUnmanaged);
-        assert_eq!(cfg.writes(), 0, "never vouch, never clobber");
-    }
-
-    #[test]
-    fn non_string_sibling_entries_survive_install_and_remove_untouched() {
-        // The fresh-array clone must carry every sibling VERBATIM — including entries that are not
-        // strings (a number, an object) — on both the append and the scrub.
-        let cfg = MemConfig::with_config(
-            "{\"bootstrap-extra-files\": [42, {\"path\": \"x\"}, \"/h/notes.md\"]}",
-        );
-        let home = Path::new("/h");
-        let report = adapter(home, &cfg).install_currency_trigger();
-        assert_eq!(report.state, TriggerState::Active);
-        let root: Value = serde_json::from_str(&cfg.text(CONFIG).unwrap()).unwrap();
-        assert_eq!(
-            root[EXTRA_FILES_KEY],
-            serde_json::json!([42, {"path": "x"}, "/h/notes.md", PLUGIN]),
-            "non-string siblings survive in order; ours is appended once"
-        );
-
-        let report = adapter(home, &cfg).remove_currency_trigger();
-        assert_eq!(report.state, TriggerState::Inactive);
-        let root: Value = serde_json::from_str(&cfg.text(CONFIG).unwrap()).unwrap();
-        assert_eq!(
-            root[EXTRA_FILES_KEY],
-            serde_json::json!([42, {"path": "x"}, "/h/notes.md"]),
-            "the scrub removes only ours, keeping every non-string sibling"
-        );
-    }
-
-    #[test]
-    fn a_double_listed_canonical_entry_is_a_no_op_install_and_a_full_scrub() {
-        // Managed wins on the first exact match, so install never appends a third copy; the scrub
-        // filter drops EVERY copy of the exact canonical entry and prunes the emptied key.
-        let cfg = MemConfig::with_config(
-            "{\"bootstrap-extra-files\": [\"/h/topos-currency.mjs\", \"/h/topos-currency.mjs\"]}",
-        );
-        cfg.seed(PLUGIN, PLUGIN_CONTENT.as_bytes());
-        let home = Path::new("/h");
-        let report = adapter(home, &cfg).install_currency_trigger();
-        assert_eq!(report.state, TriggerState::Active);
-        assert_eq!(
-            cfg.writes(),
-            0,
-            "a double-listed managed entry is still a no-op install"
-        );
-
-        let report = adapter(home, &cfg).remove_currency_trigger();
-        assert_eq!(report.state, TriggerState::Inactive);
-        let root: Value = serde_json::from_str(&cfg.text(CONFIG).unwrap()).unwrap();
-        assert!(
-            root.get(EXTRA_FILES_KEY).is_none(),
-            "both copies are scrubbed and the emptied key pruned"
-        );
-    }
-
-    #[test]
-    fn install_leaves_a_hand_rolled_currency_registration_unmanaged() {
-        // Our file name at a foreign location, and a topos+currency-named file: both adopt-or-leave.
-        for entry in [
-            "/elsewhere/topos-currency.mjs",
-            "/x/my-topos-currency-note.md",
-        ] {
-            let cfg =
-                MemConfig::with_config(&format!("{{\"bootstrap-extra-files\": [\"{entry}\"]}}"));
-            let report = adapter(Path::new("/h"), &cfg).install_currency_trigger();
-            assert_eq!(
-                report.state,
-                TriggerState::AlreadyPresentUnmanaged,
-                "{entry} is a hand-rolled equivalent"
-            );
-            assert_eq!(cfg.writes(), 0);
-        }
-    }
-
-    #[test]
-    fn a_stray_near_miss_entry_is_not_claimed_or_blocked() {
-        // Only one token ("topos" without "currency") → not a currency registration; install ours.
-        let cfg =
-            MemConfig::with_config("{\"bootstrap-extra-files\": [\"/h/topos-skills-index.mjs\"]}");
-        let report = adapter(Path::new("/h"), &cfg).install_currency_trigger();
-        assert_eq!(report.state, TriggerState::Active);
-        let root: Value = serde_json::from_str(&cfg.text(CONFIG).unwrap()).unwrap();
-        assert_eq!(
-            root[EXTRA_FILES_KEY].as_array().unwrap().len(),
-            2,
-            "the near-miss is kept AND ours is appended"
-        );
-    }
-
-    #[test]
-    fn install_fails_closed_on_malformed_or_wrong_typed_config() {
-        // Malformed JSON → degrade, no write, bytes untouched.
-        let bad = MemConfig::with_config("{ this is not json ");
-        let r = adapter(Path::new("/h"), &bad).install_currency_trigger();
-        assert_eq!(r.state, TriggerState::Degraded);
-        assert_eq!(r.currency_kind, CurrencyKind::ExplicitPullOnly);
-        assert_eq!(bad.writes(), 0);
-        assert_eq!(bad.text(CONFIG).as_deref(), Some("{ this is not json "));
-
-        // The extra-files key present but wrong-typed → the fresh-array is un-appliable.
-        let wrong = MemConfig::with_config("{\"bootstrap-extra-files\": \"oops\"}");
-        let r = adapter(Path::new("/h"), &wrong).install_currency_trigger();
-        assert_eq!(r.state, TriggerState::Degraded);
-        assert_eq!(wrong.writes(), 0);
-
-        // A non-object root → fail closed.
-        let arr = MemConfig::with_config("[1, 2]");
-        let r = adapter(Path::new("/h"), &arr).install_currency_trigger();
-        assert_eq!(r.state, TriggerState::Degraded);
-        assert_eq!(arr.writes(), 0);
-    }
-
-    #[test]
-    fn install_degrades_when_bootstrap_inject_is_disabled_or_wrong_typed() {
-        for config in [
-            "{\"bootstrap-inject\": false}",
-            "{\"bootstrap-inject\": \"yes\"}",
-        ] {
-            let cfg = MemConfig::with_config(config);
-            let report = adapter(Path::new("/h"), &cfg).install_currency_trigger();
-            assert_eq!(report.state, TriggerState::Degraded, "for {config}");
-            assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
-            assert_eq!(cfg.writes(), 0, "a disabled surface is never written into");
-        }
-        // The gate outranks classification: even OUR OWN entry reports Degraded while disabled.
-        let cfg = MemConfig::with_config(
-            "{\"bootstrap-extra-files\": [\"/h/topos-currency.mjs\"], \"bootstrap-inject\": false}",
-        );
-        cfg.seed(PLUGIN, PLUGIN_CONTENT.as_bytes());
-        let report = adapter(Path::new("/h"), &cfg).install_currency_trigger();
-        assert_eq!(report.state, TriggerState::Degraded);
+        assert_eq!(cli.keys().len(), 1, "never a duplicate job");
         assert_eq!(cfg.writes(), 0);
     }
 
     #[test]
-    fn a_blown_char_budget_degrades_without_writing() {
-        // The planner takes the budget as a parameter (production passes the probe-pinned const),
-        // so the blown row is genuinely exercised: a ceiling smaller than our content degrades.
-        let plan = plan_install(None, PluginFile::Absent, "/h/topos-currency.mjs", 16);
-        assert!(matches!(plan, EditPlan::Leave(TriggerState::Degraded)));
-        // A generous ceiling installs.
-        let plan = plan_install(None, PluginFile::Absent, "/h/topos-currency.mjs", 1 << 20);
-        assert!(matches!(
-            plan,
-            EditPlan::Install {
-                write_plugin: true,
-                config: Some(_),
-                state: TriggerState::Active,
-            }
-        ));
-        // The production const itself holds our content (the fit is pinned, not assumed).
-        assert!(PLUGIN_CONTENT.chars().count() <= INJECT_CHAR_BUDGET);
+    fn install_degrades_honestly_without_the_binary_or_gateway() {
+        for mode in [CliMode::NoBinary, CliMode::GatewayDown] {
+            let cfg = MemConfig::default();
+            let cli = FakeCli::new(mode);
+            let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).install_currency_trigger();
+            assert_eq!(report.state, TriggerState::Degraded, "{mode:?}");
+            assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
+            assert_eq!(cfg.writes(), 0, "nothing is written on a degrade");
+            assert!(cli.keys().is_empty(), "nothing was registered");
+        }
     }
 
     #[test]
-    fn remove_scrubs_the_entry_unlinks_the_plugin_and_keeps_siblings_then_is_idempotent() {
+    fn install_scrubs_the_legacy_inject_surface_first() {
+        // A home an OLD topos armed: the config registration + the marker plugin, on real disk.
         let home = TempHome::new();
         let cfg = DiskConfig;
         std::fs::write(
             home.0.join("openclaw.json"),
-            "{\n  \"model\": \"opus\",\n  \"bootstrap-extra-files\": [\"/h/notes.md\"]\n}\n",
+            format!(
+                "{{\n  \"bootstrap-extra-files\": [\"/keep/notes.md\", \"{}\"],\n  \"model\": \"opus\"\n}}\n",
+                home.0.join(LEGACY_PLUGIN_FILE_NAME).display()
+            ),
         )
         .unwrap();
-        let a = adapter(&home.0, &cfg);
-        let installed = a.install_currency_trigger();
-        assert_eq!(installed.state, TriggerState::Active);
-        assert!(home.0.join(PLUGIN_FILE_NAME).is_file());
+        std::fs::write(home.0.join(LEGACY_PLUGIN_FILE_NAME), legacy_plugin_bytes()).unwrap();
 
-        let report = a.remove_currency_trigger();
-        assert_eq!(report.state, TriggerState::Inactive);
-        assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
+        let cli = FakeCli::new(CliMode::Healthy);
+        let report = OpenClaw::new(home.0.clone(), &cfg, &cli).install_currency_trigger();
+        assert_eq!(report.state, TriggerState::Active);
+        assert_eq!(
+            report.touched_path.as_deref(),
+            Some(home.0.join("openclaw.json").to_str().unwrap()),
+            "the legacy scrub's config write is disclosed"
+        );
         assert!(
-            !home.0.join(PLUGIN_FILE_NAME).exists(),
-            "our plugin file was unlinked from real disk"
+            !home.0.join(LEGACY_PLUGIN_FILE_NAME).exists(),
+            "the de-referenced marker plugin was unlinked"
         );
         let root: Value =
             serde_json::from_slice(&std::fs::read(home.0.join("openclaw.json")).unwrap()).unwrap();
-        assert_eq!(root["model"], "opus", "foreign key survives the scrub");
+        assert_eq!(root["model"], "opus", "foreign key survives");
         assert_eq!(
-            root[EXTRA_FILES_KEY].as_array().unwrap().len(),
-            1,
-            "the sibling registration survives; only ours is scrubbed"
+            root[LEGACY_EXTRA_FILES_KEY],
+            serde_json::json!(["/keep/notes.md"]),
+            "only our exact entry was scrubbed; the sibling survives"
         );
-
-        // Idempotent: a second remove is a clean no-op.
-        let report = a.remove_currency_trigger();
-        assert_eq!(report.state, TriggerState::Inactive);
-        assert!(report.touched_path.is_none());
-    }
-
-    #[test]
-    fn remove_prunes_the_key_our_removal_emptied_restoring_the_pre_install_shape() {
-        let cfg = MemConfig::default();
-        let home = Path::new("/h");
-        adapter(home, &cfg).install_currency_trigger();
-        let report = adapter(home, &cfg).remove_currency_trigger();
-        assert_eq!(report.state, TriggerState::Inactive);
-        let root: Value = serde_json::from_str(&cfg.text(CONFIG).unwrap()).unwrap();
-        assert!(
-            root.get(EXTRA_FILES_KEY).is_none(),
-            "the key we created was pruned away"
+        assert_eq!(
+            cli.keys(),
+            vec![MARKER_ID.to_owned()],
+            "the cron registered"
         );
     }
 
     #[test]
-    fn remove_leaves_a_hand_rolled_registration_and_an_absent_config_alone() {
-        let cfg = MemConfig::with_config(
-            "{\"bootstrap-extra-files\": [\"/elsewhere/topos-currency.mjs\"]}",
-        );
-        let report = adapter(Path::new("/h"), &cfg).remove_currency_trigger();
-        assert_eq!(report.state, TriggerState::AlreadyPresentUnmanaged);
-        assert_eq!(cfg.writes(), 0);
-
-        // An absent config → a clean no-op, never created.
-        let absent = MemConfig::default();
-        let report = adapter(Path::new("/h"), &absent).remove_currency_trigger();
-        assert_eq!(report.state, TriggerState::Inactive);
-        assert!(
-            absent.text(CONFIG).is_none(),
-            "remove never creates the file"
-        );
-    }
-
-    #[test]
-    fn remove_degrades_on_malformed_or_wrong_typed_without_clobbering_or_unlinking() {
-        // Malformed config + our marked plugin on real disk: neither is touched — a format we
-        // can't parse may still reference the file in a shape we don't understand.
+    fn legacy_scrub_prunes_the_key_it_emptied_and_unlinks_the_orphan() {
         let home = TempHome::new();
         let cfg = DiskConfig;
-        std::fs::write(home.0.join("openclaw.json"), "{ not json ").unwrap();
-        std::fs::write(home.0.join(PLUGIN_FILE_NAME), PLUGIN_CONTENT).unwrap();
-        let report = adapter(&home.0, &cfg).remove_currency_trigger();
-        assert_eq!(report.state, TriggerState::Degraded);
-        assert_eq!(
-            std::fs::read_to_string(home.0.join("openclaw.json")).unwrap(),
-            "{ not json ",
-            "never clobbered"
-        );
-        assert!(
-            home.0.join(PLUGIN_FILE_NAME).is_file(),
-            "the plugin is never unlinked under a config we can't read"
-        );
-
-        // Wrong-typed extra-files while the real format is provisional: same posture.
         std::fs::write(
             home.0.join("openclaw.json"),
-            "{\"bootstrap-extra-files\": \"oops\"}",
+            format!(
+                "{{\"bootstrap-extra-files\": [\"{}\"]}}",
+                home.0.join(LEGACY_PLUGIN_FILE_NAME).display()
+            ),
         )
         .unwrap();
-        let report = adapter(&home.0, &cfg).remove_currency_trigger();
+        std::fs::write(home.0.join(LEGACY_PLUGIN_FILE_NAME), legacy_plugin_bytes()).unwrap();
+
+        let cli = FakeCli::new(CliMode::Healthy);
+        OpenClaw::new(home.0.clone(), &cfg, &cli).install_currency_trigger();
+        let root: Value =
+            serde_json::from_slice(&std::fs::read(home.0.join("openclaw.json")).unwrap()).unwrap();
+        assert!(
+            root.get(LEGACY_EXTRA_FILES_KEY).is_none(),
+            "the key our removal emptied is pruned"
+        );
+        assert!(!home.0.join(LEGACY_PLUGIN_FILE_NAME).exists());
+
+        // A marker orphan with NO config at all is unlinked too.
+        std::fs::remove_file(home.0.join("openclaw.json")).unwrap();
+        std::fs::write(home.0.join(LEGACY_PLUGIN_FILE_NAME), legacy_plugin_bytes()).unwrap();
+        OpenClaw::new(home.0.clone(), &cfg, &cli).install_currency_trigger();
+        assert!(!home.0.join(LEGACY_PLUGIN_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn legacy_scrub_never_touches_an_unprovable_config_or_a_foreign_file() {
+        // A JSON5-ish config (current OpenClaw builds) referencing who-knows-what: byte-untouched,
+        // and the marker plugin stays too (it may still be referenced in a shape we can't read).
+        let home = TempHome::new();
+        let cfg = DiskConfig;
+        let json5 = "{ // comment\n  theme: \"dark\",\n}\n";
+        std::fs::write(home.0.join("openclaw.json"), json5).unwrap();
+        std::fs::write(home.0.join(LEGACY_PLUGIN_FILE_NAME), legacy_plugin_bytes()).unwrap();
+
+        let cli = FakeCli::new(CliMode::Healthy);
+        let report = OpenClaw::new(home.0.clone(), &cfg, &cli).install_currency_trigger();
+        assert_eq!(
+            report.state,
+            TriggerState::Active,
+            "the cron is independent"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.0.join("openclaw.json")).unwrap(),
+            json5,
+            "an unprovable config is never edited"
+        );
+        assert!(
+            home.0.join(LEGACY_PLUGIN_FILE_NAME).exists(),
+            "the plugin stays while the config is unreadable"
+        );
+
+        // A marker-LESS file on the legacy path is foreign — never unlinked, even with no config.
+        std::fs::remove_file(home.0.join("openclaw.json")).unwrap();
+        std::fs::write(home.0.join(LEGACY_PLUGIN_FILE_NAME), "export default {};\n").unwrap();
+        OpenClaw::new(home.0.clone(), &cfg, &cli).install_currency_trigger();
+        assert!(
+            home.0.join(LEGACY_PLUGIN_FILE_NAME).exists(),
+            "foreign file kept"
+        );
+    }
+
+    #[test]
+    fn legacy_scrub_leaves_foreign_registrations_alone() {
+        // Registrations that are NOT our exact canonical path (another home's plugin, a
+        // hand-rolled note) are left verbatim — adopt-or-leave, and the cron proceeds.
+        let before =
+            "{\n  \"bootstrap-extra-files\": [\n    \"/elsewhere/topos-currency.mjs\"\n  ]\n}\n";
+        let cfg = MemConfig::with_config(before);
+        let cli = FakeCli::new(CliMode::Healthy);
+        let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).install_currency_trigger();
+        assert_eq!(report.state, TriggerState::Active);
+        assert_eq!(cfg.writes(), 0, "a foreign registration is never scrubbed");
+        assert_eq!(cfg.text(CONFIG).as_deref(), Some(before));
+    }
+
+    #[test]
+    fn remove_unregisters_by_declaration_key() {
+        let cfg = MemConfig::default();
+        let cli = FakeCli::with_job(CliMode::Healthy, MARKER_ID);
+        let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).remove_currency_trigger();
+        assert_eq!(report.state, TriggerState::Inactive);
+        assert_eq!(report.currency_kind, CurrencyKind::ExplicitPullOnly);
+        assert!(cli.keys().is_empty(), "our job was removed");
+        let calls = cli.calls();
+        assert_eq!(calls[0][..2], ["cron".to_owned(), "list".to_owned()]);
+        assert_eq!(
+            calls[1],
+            vec!["cron".to_owned(), "rm".to_owned(), "job-1".to_owned()],
+            "rm is id-only, resolved from the list"
+        );
+    }
+
+    #[test]
+    fn remove_treats_missing_as_clean_and_never_touches_foreign_jobs() {
+        let cfg = MemConfig::default();
+        // Another tool's job is registered; ours is not.
+        let cli = FakeCli::with_job(CliMode::Healthy, "someone-else:job");
+        let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).remove_currency_trigger();
+        assert_eq!(report.state, TriggerState::Inactive);
+        assert_eq!(
+            cli.keys(),
+            vec!["someone-else:job".to_owned()],
+            "foreign job kept"
+        );
+        assert_eq!(cli.calls().len(), 1, "no rm was attempted");
+    }
+
+    #[test]
+    fn unverified_removal_always_degrades() {
+        // No binary, a down gateway, or an unreadable list: in every case NO removal was proven —
+        // a persisted job may survive and resume when the gateway returns, so the report is
+        // Degraded, never a claimed clean.
+        let cfg = MemConfig::default();
+        for mode in [CliMode::NoBinary, CliMode::GatewayDown] {
+            let cli = FakeCli::new(mode);
+            let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).remove_currency_trigger();
+            assert_eq!(report.state, TriggerState::Degraded, "{mode:?}");
+        }
+        // A zero-exit `cron list` whose stdout does not parse proves nothing about the job.
+        let cli = FakeCli::new(CliMode::UnreadableList);
+        let report = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).remove_currency_trigger();
         assert_eq!(report.state, TriggerState::Degraded);
-        assert!(home.0.join(PLUGIN_FILE_NAME).is_file());
+        assert_eq!(cli.calls().len(), 1, "no blind rm was attempted");
     }
 
     #[test]
-    fn remove_unlinks_a_confirmed_orphan_but_never_a_foreign_file() {
-        // Our marked file with no registration (a crash window's leftover): confirmed ours → unlink.
+    fn trigger_present_is_a_live_scheduler_probe_never_faith() {
+        let cfg = MemConfig::default();
+        // A registered job answers true…
+        let cli = FakeCli::with_job(CliMode::Healthy, MARKER_ID);
+        assert!(OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).trigger_present());
+        // …no job answers false…
+        let cli = FakeCli::new(CliMode::Healthy);
+        assert!(!OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).trigger_present());
+        // …and anything unprovable answers false (health is never claimed on faith).
+        for mode in [
+            CliMode::NoBinary,
+            CliMode::GatewayDown,
+            CliMode::UnreadableList,
+        ] {
+            let cli = FakeCli::new(mode);
+            assert!(
+                !OpenClaw::new(PathBuf::from("/h"), &cfg, &cli).trigger_present(),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn remove_scrubs_legacy_artifacts_too() {
         let home = TempHome::new();
         let cfg = DiskConfig;
-        std::fs::write(home.0.join(PLUGIN_FILE_NAME), PLUGIN_CONTENT).unwrap();
-        let report = adapter(&home.0, &cfg).remove_currency_trigger();
+        std::fs::write(
+            home.0.join("openclaw.json"),
+            format!(
+                "{{\"bootstrap-extra-files\": [\"{}\"]}}",
+                home.0.join(LEGACY_PLUGIN_FILE_NAME).display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(home.0.join(LEGACY_PLUGIN_FILE_NAME), legacy_plugin_bytes()).unwrap();
+        let cli = FakeCli::new(CliMode::Healthy);
+        let report = OpenClaw::new(home.0.clone(), &cfg, &cli).remove_currency_trigger();
         assert_eq!(report.state, TriggerState::Inactive);
+        assert!(!home.0.join(LEGACY_PLUGIN_FILE_NAME).exists());
         assert!(
-            !home.0.join(PLUGIN_FILE_NAME).exists(),
-            "the confirmed orphan was unlinked"
-        );
-
-        // A foreign (marker-less) file on our path: never ours to delete.
-        std::fs::write(home.0.join(PLUGIN_FILE_NAME), "export default {};\n").unwrap();
-        let report = adapter(&home.0, &cfg).remove_currency_trigger();
-        assert_eq!(report.state, TriggerState::Inactive);
-        assert!(
-            home.0.join(PLUGIN_FILE_NAME).is_file(),
-            "a foreign file is left in place"
+            report.touched_path.is_some(),
+            "the legacy config scrub is disclosed"
         );
     }
 
     #[test]
-    fn footprint_disclosed_only_for_the_managed_entry_and_our_own_plugin() {
+    fn the_cron_command_is_the_guarded_sweep() {
+        // The payload runs via `sh -lc` (probed), so the `command -v` guard works: an orphaned
+        // job (topos uninstalled, OpenClaw later restarted) no-ops cleanly instead of erroring
+        // forever in the scheduler's run log.
+        assert!(CRON_COMMAND.starts_with("command -v topos"));
+        assert!(CRON_COMMAND.contains("topos update --quiet"));
+        assert!(CRON_COMMAND.ends_with("|| true"));
+    }
+
+    #[test]
+    fn footprint_discloses_only_legacy_artifacts() {
         let home = TempHome::new();
         let cfg = DiskConfig;
-        let a = adapter(&home.0, &cfg);
-        assert!(
-            a.uninstall_footprint().is_empty(),
-            "nothing installed → nothing disclosed"
-        );
+        let cli = FakeCli::new(CliMode::Healthy);
+        let a = OpenClaw::new(home.0.clone(), &cfg, &cli);
+        assert!(a.uninstall_footprint().is_empty(), "clean home → nothing");
 
+        // A live cron registration is OpenClaw-owned state, never a footprint path.
         a.install_currency_trigger();
+        assert!(a.uninstall_footprint().is_empty());
+
+        // Legacy artifacts ARE disclosed (marker-confirmed only).
+        std::fs::write(
+            home.0.join("openclaw.json"),
+            format!(
+                "{{\"bootstrap-extra-files\": [\"{}\"]}}",
+                home.0.join(LEGACY_PLUGIN_FILE_NAME).display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(home.0.join(LEGACY_PLUGIN_FILE_NAME), legacy_plugin_bytes()).unwrap();
         assert_eq!(
             a.uninstall_footprint(),
-            vec![home.0.join("openclaw.json"), home.0.join(PLUGIN_FILE_NAME)],
-            "both owned paths disclosed (never as delete targets for the shared config)"
+            vec![
+                home.0.join("openclaw.json"),
+                home.0.join(LEGACY_PLUGIN_FILE_NAME)
+            ]
         );
-
-        a.remove_currency_trigger();
-        assert!(
-            a.uninstall_footprint().is_empty(),
-            "a clean scrub leaves no footprint"
-        );
-
-        // A de-referenced orphan of OURS is still disclosed (file-existence-keyed)…
-        std::fs::write(home.0.join(PLUGIN_FILE_NAME), PLUGIN_CONTENT).unwrap();
-        assert_eq!(a.uninstall_footprint(), vec![home.0.join(PLUGIN_FILE_NAME)]);
-        // …but a foreign file on our path is never claimed.
-        std::fs::write(home.0.join(PLUGIN_FILE_NAME), "export default {};\n").unwrap();
-        assert!(a.uninstall_footprint().is_empty());
+        // A foreign file on the legacy path is never claimed.
+        std::fs::write(home.0.join(LEGACY_PLUGIN_FILE_NAME), "export default {};\n").unwrap();
+        assert_eq!(a.uninstall_footprint(), vec![home.0.join("openclaw.json")]);
     }
 
     #[test]
-    fn reports_label_first_topos_touch_only_when_active_and_never_session_start() {
+    fn reports_label_scheduled_only_when_active() {
         let cfg = MemConfig::default();
-        let a = adapter(Path::new("/h"), &cfg);
-        assert_eq!(a.currency_kind(), CurrencyKind::FirstToposTouch);
-
+        let cli = FakeCli::new(CliMode::Healthy);
+        let a = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli);
+        assert_eq!(a.currency_kind(), CurrencyKind::Scheduled);
         let active = a.install_currency_trigger();
-        assert_eq!(active.currency_kind, CurrencyKind::FirstToposTouch);
+        assert_eq!(active.currency_kind, CurrencyKind::Scheduled);
         let inactive = a.remove_currency_trigger();
         assert_eq!(
             inactive.currency_kind,
             CurrencyKind::ExplicitPullOnly,
             "anything but Active advertises only the guaranteed floor"
-        );
-        assert_ne!(active.currency_kind, CurrencyKind::SessionStart);
-        assert!(
-            !PLUGIN_CONTENT.to_lowercase().contains("session start"),
-            "the inject surface never claims session-start currency"
         );
     }
 
@@ -1155,7 +1050,8 @@ mod tests {
         std::fs::write(home.0.join("skills").join("loose.txt"), b"x").unwrap();
 
         let cfg = MemConfig::default();
-        let found = adapter(&home.0, &cfg).discover();
+        let cli = FakeCli::new(CliMode::NoBinary);
+        let found = OpenClaw::new(home.0.clone(), &cfg, &cli).discover();
         let names: Vec<String> = found
             .iter()
             .map(|d| d.path.file_name().unwrap().to_string_lossy().into_owned())
@@ -1171,14 +1067,17 @@ mod tests {
     #[test]
     fn discover_on_absent_home_is_empty_not_an_error() {
         let cfg = MemConfig::default();
-        let found = adapter(Path::new("/no-such-openclaw-home-xyz"), &cfg).discover();
+        let cli = FakeCli::new(CliMode::NoBinary);
+        let found =
+            OpenClaw::new(PathBuf::from("/no-such-openclaw-home-xyz"), &cfg, &cli).discover();
         assert!(found.is_empty());
     }
 
     #[test]
     fn placement_for_reuses_a_discovered_dir_and_defaults_to_the_skills_dir() {
         let cfg = MemConfig::default();
-        let a = adapter(Path::new("/h"), &cfg);
+        let cli = FakeCli::new(CliMode::NoBinary);
+        let a = OpenClaw::new(PathBuf::from("/h"), &cfg, &cli);
         let disc = DiscoveredPlacement {
             path: PathBuf::from("/h/skills/pr-describe"),
             layer: Some(LAYER_USER.to_owned()),

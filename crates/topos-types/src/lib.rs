@@ -433,14 +433,18 @@ impl HarnessId {
 }
 
 /// What fires currency for a harness — drives HONEST receipt copy ("current by next session",
-/// "next topos touch", …). `ExplicitPullOnly` is the honest-degrade floor.
+/// "within about a minute", …). `ExplicitPullOnly` is the honest-degrade floor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum CurrencyKind {
+    /// A session-boundary hook runs the sweep (Claude Code's SessionStart; Hermes's
+    /// `on_session_start`/`on_session_reset`) — updates are current when a session begins.
     SessionStart,
-    FirstToposTouch,
-    FirstTurn,
+    /// A harness-scheduled recurring job runs the sweep (OpenClaw's silent cron) — updates land
+    /// within the cadence while the harness's scheduler is running.
+    Scheduled,
+    /// No automatic trigger is provably live — updates land on an explicit `topos update`.
     ExplicitPullOnly,
 }
 

@@ -1,10 +1,13 @@
 # `topos-harness` — the `HarnessAdapter` port
 
-The `HarnessAdapter` trait + the `ConfigStore` port + the harness impls. The one real client-side port.
-Does discovery + byte-exact placement targeting + the currency-trigger (un)install (session-start for
-Claude Code and Hermes; first-`topos`-touch for OpenClaw). The registered command everywhere is the ONE
-byte-stable `topos update --quiet`, which self-throttles client-side (TTL + single-flight), so a trigger
-may fire on every session-shaped event cheaply.
+The `HarnessAdapter` trait + the `ConfigStore` + `CommandRunner` ports + the harness impls. The one real
+client-side port. Does discovery + byte-exact placement targeting + the currency-trigger (un)install
+(session-start hooks for Claude Code and Hermes; a scheduled silent cron for OpenClaw). The registered
+sweep everywhere is the ONE byte-stable `topos update --quiet`, which self-throttles client-side (TTL +
+single-flight), so a trigger may fire on every session-shaped event (or a 1-minute cron tick) cheaply.
+`HarnessAdapter::trigger_present` is the hook-HEALTH probe `list`/`auth status` read: it defaults to the
+footprint's managed-entry answer for the config-file adapters, and OpenClaw overrides it with a live
+scheduler probe — health is never claimed on faith, and the footprint stays a PATH disclosure.
 
 **Implemented:** the **Claude Code** reference adapter (`claude_code`) — `discover` (probe
 `~/.claude/skills/*/SKILL.md`, confirm by existence, never parse frontmatter), `placement_for` (a pure
@@ -26,21 +29,25 @@ one source) and the user's group, handlers, and matcher stay byte-identical.
 `$CLAUDE_CONFIG_DIR` (else `$HOME/.claude`) is honored and **injected** so tests never touch the real
 config.
 
-The **OpenClaw** adapter (`openclaw`) is implemented too, mirroring the reference over its two config
-artifacts: `discover` probes `~/.openclaw/skills/*/SKILL.md` the same way; `currency_kind` =
-`FirstToposTouch` (honestly weaker — the topos-owned bootstrap-inject plugin file shows its
-last-refreshed state, so updates surface on the first `topos` touch, never at bare session open;
-`session_start` is observer-only and cron is never a currency path; the per-touch refresh of the inject
-CONTENT is the sync engine's follow-on, not yet wired — the installed surface claims no update and
-points at `topos pull` until it lands); install registers the plugin's path
-in `openclaw.json`'s `bootstrap-extra-files` via a fresh-array (immutable-replace) edit + writes the
-inert marker-carrying plugin file; every capacity failure (disabled inject flag, blown char budget,
-malformed/wrong-typed config, a foreign file squatting on the plugin path) degrades to
-`TriggerState::Degraded` with the `ExplicitPullOnly` floor and NO write; remove scrubs the entry first
-and unlinks only the marker-confirmed file. **Build-first behind the trait:** its concrete config bytes
-(key names, plugin format, char budget, gateway auto-watch) stay PROVISIONAL until a readiness probe
-against the pilot's exact OpenClaw build — the checklist is in the `openclaw` module doc, and the CLI
-never selects this adapter in production until then.
+The **OpenClaw** adapter (`openclaw`) is implemented too — container-probed live against
+openclaw@2026.7.1: `discover` probes `~/.openclaw/skills/*/SKILL.md` the same way (that root is
+recognized offline, ungated, and watched by default — 250 ms debounce, next-turn pickup — so placed
+bytes need NO injection surface); `currency_kind` = `Scheduled` — the trigger is a **silent OpenClaw
+cron job** registered through the injected `CommandRunner` port (`openclaw cron add --every 1m
+--command <the guarded sweep> --no-deliver --declaration-key topos:openclaw:currency:2 --json` — the
+declaration key IS the idempotency marker; a re-add answers `created:false`, never a duplicate; the
+payload runs via `sh -lc`, so it carries the same `command -v` guard + exit-0 tail the Claude Code hook
+does, and an orphaned job no-ops cleanly). HONEST DEGRADE, probed: `cron add` needs a RUNNING gateway
+(fails fast offline, never queues) and the job stops firing while the gateway is down — so `Active` +
+`Scheduled` is claimed ONLY on a successful registration round-trip; a missing `openclaw` binary, a
+down gateway, or a CLI error degrades to the `ExplicitPullOnly` floor with zero writes. Remove resolves
+the job id from `cron list --json` by declaration key (`rm` is id-only), treats missing-as-clean, and
+reports `Degraded` when the gateway is down (the job survives in OpenClaw's store — disclosed, never
+silently orphaned). **The bootstrap-inject surface is RETIRED**: the adapter writes no plugin file and
+no `openclaw.json` registration; install/remove SCRUB the legacy artifacts an earlier topos wrote (the
+strict-JSON `bootstrap-extra-files` entry; the marker-confirmed plugin file, unlinked only after
+de-referencing) and leave any unprovable config (current builds are JSON5) byte-untouched. The pilot's
+exact build stays a MUST-VERIFY discipline like Hermes's (every argv/key is a named const).
 
 The **Hermes** adapter (`hermes`) is implemented too, mirroring the reference structurally — `discover`
 over Hermes's mixed-depth `~/.hermes/skills/` shape (`<name>/` uncategorized, `<category>/<name>/` with the
@@ -79,8 +86,9 @@ platform-agnostic.
 
 **Content-blind.** The adapter answers only **where** (`discover` / `placement_for`) and **when**
 (`currency_kind`); it never receives a skill's bytes, never hashes a bundle, never moves a skill file. The
-only files it writes are its **own harness config surface** (`settings.json`; `openclaw.json` + the
-topos-owned inject plugin file; `config.yaml`) — never a skill dir. v0 places a
+only files it writes are its **own harness config surface** (`settings.json`; `config.yaml`; OpenClaw's
+legacy-artifact scrub) — never a skill dir — and OpenClaw's trigger lives in the harness's own scheduler,
+driven argv-only through the `CommandRunner` port. v0 places a
 skill's **exact bytes** with no frontmatter rewrite, no dialect translation between harnesses, so adding a
 harness is a new impl (a directory mapping + a currency trigger), not a refactor anywhere else.
 

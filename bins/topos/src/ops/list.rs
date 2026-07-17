@@ -343,7 +343,7 @@ pub(crate) fn list_with(
             Some(ListEnrollment {
                 workspace_labels,
                 base_url: instance.base_url,
-                hook_active: !ctx.harness.uninstall_footprint().is_empty(),
+                hook_active: ctx.harness.trigger_present(),
                 notes,
             })
         }

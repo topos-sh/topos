@@ -83,6 +83,20 @@ impl ConfigStore for crate::fs_seam::RealFs {
     }
 }
 
+/// The real [`CommandRunner`] — an adapter's window onto a harness's OWN management CLI (OpenClaw's
+/// `openclaw cron …`). Argv-only (`std::process::Command` spawns directly, no shell), output
+/// captured; a missing binary surfaces as the spawn error's `NotFound`, which the adapters read as
+/// "this harness's CLI is not on this machine" and degrade honestly.
+impl topos_harness::CommandRunner for crate::fs_seam::RealFs {
+    fn run(&self, program: &str, args: &[&str]) -> io::Result<topos_harness::RunOutput> {
+        let out = std::process::Command::new(program).args(args).output()?;
+        Ok(topos_harness::RunOutput {
+            success: out.status.success(),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        })
+    }
+}
+
 #[cfg(test)]
 impl ConfigStore for crate::fs_seam::FaultFs {
     fn read(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {

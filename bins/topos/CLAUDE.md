@@ -26,8 +26,10 @@ renderer over the SAME typed outcomes (one value, two presentations).
   small `ConfigStore` port implemented here, which reuses the one `atomic_write` dance over `FsOps` (so
   the existing crash gate covers the config write too — never a second atomic-write to drift). The
   foreign-file writer adds the care a shared user file needs: ensure the parent dir, write through a
-  symlink, a topos-namespaced temp, best-effort mode preservation. The **OpenClaw and Hermes arms** are
-  wired too (`topos-harness::OpenClaw`; `topos-harness::Hermes`: `$HERMES_HOME` + the
+  symlink, a topos-namespaced temp, best-effort mode preservation. `RealFs` also implements the
+  `CommandRunner` port (argv-only `std::process` spawn, output captured) — OpenClaw's cron trigger
+  drives its own `openclaw` CLI through it. The **OpenClaw and Hermes arms** are
+  wired too (`topos-harness::OpenClaw`: the two ports; `topos-harness::Hermes`: `$HERMES_HOME` + the
   `HERMES_ACCEPT_HOOKS` evidence resolved at construction), though v0's composition root still selects
   Claude Code only — harness *selection* lands later (the TTY receipt copy already branches on the
   report's `currency_kind`, so no surface overstates a sibling adapter's update moment).

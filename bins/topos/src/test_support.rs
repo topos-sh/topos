@@ -502,10 +502,82 @@ impl HarnessAdapter for WorkHarness {
 /// work root, no currency); [`new_claude`](Self::new_claude) wires the **real Claude Code adapter** over a
 /// temp config home — placements land in `<config-home>/skills/<skill_id>` and the enrollment promote arms
 /// the REAL `settings.json` session-start hook — [`new_openclaw`](Self::new_openclaw) wires the **real
-/// OpenClaw adapter** the same way (a temp stand-in home; the promote registers the bootstrap-inject
-/// surface in `openclaw.json` + writes the topos-owned plugin file) — and [`new_hermes`](Self::new_hermes)
-/// wires the **real Hermes adapter** over a temp `$HERMES_HOME`, so an e2e can prove the whole
-/// second-machine story against a genuine adapter.
+/// OpenClaw adapter** the same way (a temp stand-in home; the promote registers the silent currency cron
+/// through a file-persisted fake `openclaw` CLI — no real gateway exists in a suite) — and
+/// [`new_hermes`](Self::new_hermes) wires the **real Hermes adapter** over a temp `$HERMES_HOME`, so an
+/// e2e can prove the whole second-machine story against a genuine adapter.
+/// The rig's fake `openclaw` CLI: a file-persisted cron store under the stand-in home
+/// (`fake-cron.json`), simulating the probed healthy-gateway semantics — declaration-key-idempotent
+/// `cron add`, `cron list --json`, id-only `cron rm` — so the composed suites drive the REAL
+/// adapter's trigger path without a real openclaw install (which would need a live gateway).
+#[derive(Debug)]
+struct FakeOpenClawCli {
+    store: std::path::PathBuf,
+}
+
+impl FakeOpenClawCli {
+    fn jobs(&self) -> Vec<serde_json::Value> {
+        std::fs::read(&self.store)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|v| v.get("jobs").and_then(|j| j.as_array().cloned()))
+            .unwrap_or_default()
+    }
+    fn save(&self, jobs: &[serde_json::Value]) {
+        let doc = serde_json::json!({ "jobs": jobs });
+        let _ = std::fs::write(&self.store, doc.to_string());
+    }
+}
+
+impl topos_harness::CommandRunner for FakeOpenClawCli {
+    fn run(&self, _program: &str, args: &[&str]) -> std::io::Result<topos_harness::RunOutput> {
+        let ok = |stdout: String| {
+            Ok(topos_harness::RunOutput {
+                success: true,
+                stdout,
+            })
+        };
+        match args {
+            ["cron", "add", rest @ ..] => {
+                let key = rest
+                    .windows(2)
+                    .find(|w| w[0] == "--declaration-key")
+                    .map(|w| w[1].to_owned())
+                    .unwrap_or_default();
+                let mut jobs = self.jobs();
+                if jobs
+                    .iter()
+                    .any(|j| j.get("declarationKey").and_then(|k| k.as_str()) == Some(&key))
+                {
+                    return ok("{\"created\":false,\"updated\":false}".to_owned());
+                }
+                let id = format!("job-{}", jobs.len() + 1);
+                jobs.push(serde_json::json!({ "id": id, "declarationKey": key }));
+                self.save(&jobs);
+                ok("{\"created\":true}".to_owned())
+            }
+            ["cron", "list", "--json"] => {
+                ok(serde_json::json!({ "jobs": self.jobs() }).to_string())
+            }
+            ["cron", "rm", id] => {
+                let mut jobs = self.jobs();
+                let before = jobs.len();
+                jobs.retain(|j| j.get("id").and_then(|i| i.as_str()) != Some(*id));
+                let removed = jobs.len() < before;
+                self.save(&jobs);
+                Ok(topos_harness::RunOutput {
+                    success: removed,
+                    stdout: format!("{{\"ok\":{removed},\"removed\":{removed}}}"),
+                })
+            }
+            other => Ok(topos_harness::RunOutput {
+                success: false,
+                stdout: format!("unexpected argv: {other:?}"),
+            }),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct FollowHarness {
     home: Scratch,
@@ -559,8 +631,8 @@ impl FollowHarness {
     /// A fresh rig wired to the REAL OpenClaw adapter over a temp stand-in home (the real `~/.openclaw`
     /// is never touched — the home is injected, mirroring the adapter's own test isolation). Placement +
     /// the currency trigger then go through the genuine adapter: skills land in `<home>/skills/<skill_id>`
-    /// and the promote registers the bootstrap-inject surface in `openclaw.json` + writes the topos-owned
-    /// inject plugin file.
+    /// and the promote registers the silent currency cron through the rig's file-persisted fake
+    /// `openclaw` CLI (a healthy-gateway double — no suite spawns a real harness process).
     #[must_use]
     pub fn new_openclaw(tag: &str) -> Self {
         let mut rig = Self::new(tag);
@@ -589,7 +661,10 @@ impl FollowHarness {
     /// the `WorkHarness` stub.
     fn with_adapter<R>(&self, f: impl FnOnce(&dyn HarnessAdapter) -> R) -> R {
         if let Some(home) = &self.openclaw {
-            return f(&OpenClaw::new(home.0.clone(), &self.fs));
+            let cli = FakeOpenClawCli {
+                store: home.0.join("fake-cron.json"),
+            };
+            return f(&OpenClaw::new(home.0.clone(), &self.fs, &cli));
         }
         if let Some(home) = &self.hermes {
             return f(&Hermes::new(home.0.clone(), false, &self.fs));
@@ -1651,20 +1726,13 @@ impl FollowHarness {
         self.openclaw.as_ref().map(|h| h.0.clone())
     }
 
-    /// The raw `openclaw.json` in the stand-in home (`None` when absent or not in openclaw mode) — the
-    /// e2e asserts the exact bootstrap-inject registration against it.
+    /// The fake `openclaw` CLI's persisted cron store in the stand-in home (`None` when absent or
+    /// not in openclaw mode) — the e2e asserts the silent currency job's registration (its
+    /// declaration key) against it.
     #[must_use]
-    pub fn openclaw_config_json(&self) -> Option<String> {
+    pub fn openclaw_cron_state(&self) -> Option<String> {
         let home = self.openclaw.as_ref()?;
-        std::fs::read_to_string(home.0.join("openclaw.json")).ok()
-    }
-
-    /// The topos-owned inject plugin file's text in the stand-in home (`None` when absent or not in
-    /// openclaw mode) — the e2e asserts the honest first-`topos`-touch labeling against it.
-    #[must_use]
-    pub fn openclaw_plugin(&self) -> Option<String> {
-        let home = self.openclaw.as_ref()?;
-        std::fs::read_to_string(home.0.join("topos-currency.mjs")).ok()
+        std::fs::read_to_string(home.0.join("fake-cron.json")).ok()
     }
 
     /// The raw `config.yaml` in the hermes home (`None` when absent or not in hermes mode) — the e2e

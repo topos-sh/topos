@@ -51,7 +51,7 @@ pub fn run() -> ExitCode {
     // The harness adapter, selected through the one dispatch seam. v0 wires Claude Code only; the
     // adapter touches its config home only when adopting a recognized skill, arming currency, or on
     // uninstall.
-    let harness = adapter_for(HarnessId::ClaudeCode, &fs);
+    let harness = adapter_for(HarnessId::ClaudeCode, &fs, &fs);
 
     // `uninstall` dispatches BEFORE state recovery and enrollment loading: its whole point is to
     // remove `~/.topos/` even when that state is corrupt — an unreadable/newer credentials doc or a
@@ -1905,16 +1905,20 @@ fn load_enrollment(fs: &dyn FsOps, layout: &Layout) -> Result<Option<Enrollment>
     Ok(Some(Enrollment { plane, follow }))
 }
 
-/// Build the harness adapter for `id`, borrowing the shared config-store seam. Adding a harness is ONE
-/// new match arm — no caller change. v0 only ever selects Claude Code (the CLI's one selection site
-/// above passes `HarnessId::ClaudeCode`; each adapter resolves its own config home:
-/// `$CLAUDE_CONFIG_DIR` else `$HOME/.claude`; `$HOME/.openclaw`; `$HERMES_HOME` else `$HOME/.hermes`).
-/// The OpenClaw and Hermes arms serve the test rigs while their concrete config bytes stay provisional
-/// behind the pilot readiness probes (each module's doc).
-fn adapter_for<'a>(id: HarnessId, fs: &'a dyn ConfigStore) -> Box<dyn HarnessAdapter + 'a> {
+/// Build the harness adapter for `id`, borrowing the shared config-store seam plus the subprocess
+/// runner (OpenClaw's trigger drives its own `openclaw` CLI). Adding a harness is ONE new match arm
+/// — no caller change. v0 only ever selects Claude Code (the CLI's one selection site above passes
+/// `HarnessId::ClaudeCode`; each adapter resolves its own config home: `$CLAUDE_CONFIG_DIR` else
+/// `$HOME/.claude`; `$HOME/.openclaw`; `$HERMES_HOME` else `$HOME/.hermes`). The OpenClaw and
+/// Hermes arms serve the test rigs while pilot verification stays open (each module's doc).
+fn adapter_for<'a>(
+    id: HarnessId,
+    fs: &'a dyn ConfigStore,
+    cli: &'a dyn topos_harness::CommandRunner,
+) -> Box<dyn HarnessAdapter + 'a> {
     match id {
         HarnessId::ClaudeCode => Box::new(ClaudeCode::new(ClaudeCode::resolve_home(), fs)),
-        HarnessId::OpenClaw => Box::new(OpenClaw::new(OpenClaw::resolve_home(), fs)),
+        HarnessId::OpenClaw => Box::new(OpenClaw::new(OpenClaw::resolve_home(), fs, cli)),
         HarnessId::Hermes => Box::new(topos_harness::Hermes::new(
             topos_harness::Hermes::resolve_home(),
             topos_harness::Hermes::resolve_accept_hooks(),

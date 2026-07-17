@@ -72,13 +72,23 @@
   ],
   "$defs": {
     "CurrencyKind": {
-      "description": "What fires currency for a harness — drives HONEST receipt copy (\"current by next session\",\n\"next topos touch\", …). `ExplicitPullOnly` is the honest-degrade floor.",
-      "type": "string",
-      "enum": [
-        "session_start",
-        "first_topos_touch",
-        "first_turn",
-        "explicit_pull_only"
+      "description": "What fires currency for a harness — drives HONEST receipt copy (\"current by next session\",\n\"within about a minute\", …). `ExplicitPullOnly` is the honest-degrade floor.",
+      "oneOf": [
+        {
+          "description": "A session-boundary hook runs the sweep (Claude Code's SessionStart; Hermes's\n`on_session_start`/`on_session_reset`) — updates are current when a session begins.",
+          "type": "string",
+          "const": "session_start"
+        },
+        {
+          "description": "A harness-scheduled recurring job runs the sweep (OpenClaw's silent cron) — updates land\nwithin the cadence while the harness's scheduler is running.",
+          "type": "string",
+          "const": "scheduled"
+        },
+        {
+          "description": "No automatic trigger is provably live — updates land on an explicit `topos update`.",
+          "type": "string",
+          "const": "explicit_pull_only"
+        }
       ]
     },
     "HarnessId": {

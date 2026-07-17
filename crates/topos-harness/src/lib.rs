@@ -102,6 +102,30 @@ pub trait ConfigStore {
     fn replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
 }
 
+/// One captured subprocess run for [`CommandRunner`]: whether the process exited successfully,
+/// plus its captured stdout (the machine surface — `--json` outputs are parsed from here).
+#[derive(Debug, Clone)]
+pub struct RunOutput {
+    /// The process ran AND exited zero.
+    pub success: bool,
+    /// Captured stdout, lossily decoded.
+    pub stdout: String,
+}
+
+/// The narrow subprocess port an adapter needs to drive a harness's OWN management CLI (OpenClaw's
+/// `openclaw cron …`) — an argv in, a captured outcome out. Argv-only by design: the adapter never
+/// composes shell strings, so nothing it passes is ever re-interpreted. Production (the CLI crate)
+/// implements it over `std::process` with the binary resolved from `PATH`; every test injects a
+/// fake, so no suite ever spawns a real harness process.
+pub trait CommandRunner {
+    /// Run `program` with `args`, capturing output. `Ok` means the process RAN (its own exit
+    /// status rides [`RunOutput::success`]).
+    ///
+    /// # Errors
+    /// A spawn-level failure — the binary is absent (`NotFound`) or another OS-level error.
+    fn run(&self, program: &str, args: &[&str]) -> io::Result<RunOutput>;
+}
+
 /// The one real swap port. Key placement by the stable skill id + the discovered concrete path
 /// (NOT a bare name — same-name skills, categories, project-vs-global layers must be representable).
 /// The adapter never receives skill bytes, never hashes a bundle, never moves a skill file, never
@@ -139,6 +163,14 @@ pub trait HarnessAdapter {
     /// and never a path `uninstall` deletes (a shared config the trigger lives in is scrubbed via
     /// [`HarnessAdapter::remove_currency_trigger`], never removed).
     fn uninstall_footprint(&self) -> Vec<PathBuf>;
+    /// Whether a topos-managed currency trigger is PROVABLY present right now — the hook-health
+    /// probe `list` / `auth status` read. Defaults to the footprint being non-empty (a config-file
+    /// adapter's footprint discloses exactly its managed entry); an adapter whose trigger lives
+    /// OUTSIDE the filesystem (OpenClaw's scheduler) overrides this with a live probe. Anything
+    /// unprovable answers `false` — health is never claimed on faith.
+    fn trigger_present(&self) -> bool {
+        !self.uninstall_footprint().is_empty()
+    }
 }
 
 // ClaudeCode (this crate's `claude_code` module) is the reference; OpenClaw (the `openclaw` module)

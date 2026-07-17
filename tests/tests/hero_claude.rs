@@ -1,7 +1,7 @@
 //! The HERO on the REAL harness adapters, over the composed stack: a follower whose rig is wired
 //! to the genuine Claude Code / OpenClaw / Hermes adapter enrolls through the device flow, and the
-//! promote arms the REAL currency surface (the `settings.json` SessionStart hook / the
-//! `openclaw.json` bootstrap-inject registration + plugin file / the Hermes `config.yaml`
+//! promote arms the REAL currency surface (the `settings.json` SessionStart hook / OpenClaw's
+//! silent currency cron through the rig's fake CLI / the Hermes `config.yaml`
 //! session-boundary entries) while the `everyone` genesis lands byte-exact in the adapter's OWN skill
 //! directory. An update then lands on a subsequent bare sweep through the same adapter.
 //!
@@ -48,8 +48,8 @@ fn e2e_real_adapters_arm_their_currency_surface_and_land_the_bytes() {
         Case {
             tag: "openclaw",
             rig: FollowHarness::new_openclaw,
-            config: FollowHarness::openclaw_config_json,
-            marker: "topos",
+            config: FollowHarness::openclaw_cron_state,
+            marker: "topos:openclaw:currency:2",
         },
         Case {
             tag: "hermes",
@@ -113,15 +113,8 @@ fn e2e_real_adapters_arm_their_currency_surface_and_land_the_bytes() {
         rigs.push(client);
     }
 
-    // OpenClaw's promote ALSO writes the topos-owned inject plugin file.
-    let openclaw = &rigs[1];
-    let plugin = openclaw
-        .openclaw_plugin()
-        .expect("the topos-owned plugin file exists");
-    assert!(
-        plugin.contains("topos"),
-        "the plugin is honestly labeled: {plugin}"
-    );
+    // OpenClaw's promote writes NO file of its own any more (the inject surface is retired) —
+    // the registered cron above is the whole trigger footprint.
 
     // v2 ships; every adapter's bare sweep lands it through the same placement path.
     author.edit_placement(SKILL, &v2_files());
