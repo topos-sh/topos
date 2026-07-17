@@ -1,4 +1,5 @@
 import { firstLine, relativeTime } from "@/components/format";
+import { Breadcrumbs } from "@/components/shell/breadcrumbs";
 import { ShortId } from "@/components/ui";
 import { ProposalStatusBanner, type ReviewStatus } from "./ProposalStatusBanner";
 
@@ -46,6 +47,8 @@ export function ReviewHeader({
         </h1>
         <ShortId value={versionId} />
       </div>
+      {/* The global trail, directly under the title — the parent's `gap-3` seats it, so no margin. */}
+      <Breadcrumbs />
       {title !== "" ? <p className="text-base text-dim">{title}</p> : null}
       {author !== undefined || proposedLine !== "" ? (
         <p className="text-sm text-faint">

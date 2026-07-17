@@ -3,6 +3,7 @@ import { useLoaderData } from "react-router";
 import { PathBreadcrumb } from "@/components/browse/path-breadcrumb";
 import { BrowseEmpty, BrowseShell } from "@/components/browse/shell";
 import { ViewToggle } from "@/components/browse/view-toggle";
+import { Breadcrumbs } from "@/components/shell/breadcrumbs";
 import { Card, Chip } from "@/components/ui";
 import { notFound, requireMember, workspaceInScope } from "@/lib/auth/guards.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
@@ -181,6 +182,10 @@ export default function FileViewPage() {
   } = data;
   return (
     <BrowseShell>
+      {/* This page has no plain title — the file-location bar below (PathBreadcrumb) IS its heading.
+          The global app trail therefore sits at the very top (its natural "under the (absent) title"
+          spot), a page section apart from PathBreadcrumb, which stays the in-version file locator. */}
+      <Breadcrumbs />
       <header className="space-y-2">
         <PathBreadcrumb skill={skill} versionId={versionId} segments={displaySegments} />
         {(sizeBytes !== undefined || executable) && (

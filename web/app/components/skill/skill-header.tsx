@@ -1,3 +1,5 @@
+import { Breadcrumbs } from "@/components/shell/breadcrumbs";
+
 /**
  * The shared title block every skill tab page renders (Current / Proposals / History): the
  * display-font name over the mono locator line. The title is the catalog's `displayName` when the
@@ -28,6 +30,7 @@ export function SkillHeader({
       <h1 className="font-display font-semibold text-lg tracking-[-0.02em] text-ink">
         {displayName ?? skill}
       </h1>
+      <Breadcrumbs className="mt-1" />
       <p className="mt-0.5 font-mono text-xs text-faint">
         {ws} / {skill}
         {kind ? ` · ${kind}` : ""}

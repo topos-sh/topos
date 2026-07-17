@@ -3,21 +3,30 @@ import type { SidebarWorkspace } from "@/lib/shell/chrome.server";
 import { wsHref } from "@/lib/ws-path";
 
 /**
- * The global breadcrumb trail in the signed-in header bar. Two things drive it: React Router's
- * `useMatches()` (the active route branch) and the ONE central REGISTRY below (route module id →
- * a crumb builder). This app centralizes chrome knowledge — the nav registry, the sidebar's link
- * building — rather than scattering `handle` exports across route files, so ALL breadcrumb
- * knowledge lives here, in one place, and a route the registry doesn't know contributes nothing.
+ * The global breadcrumb trail — rendered UNDER the page title on every signed-in page (it used to
+ * live in the top header bar; it moved below the title so a page's own heading leads and the trail
+ * sits beneath it as context). It is SELF-SUFFICIENT: no props feed it the chrome. Two things drive
+ * it: React Router's `useMatches()` (the active route branch) and the ONE central REGISTRY below
+ * (route module id → a crumb builder). This app centralizes chrome knowledge — the nav registry,
+ * the sidebar's link building — rather than scattering `handle` exports across route files, so ALL
+ * breadcrumb knowledge lives here, in one place, and a route the registry doesn't know contributes
+ * nothing.
  *
- * The trail is: the workspace itself (its display name → its dashboard, from ChromeData, only when
- * a workspace is in scope) followed by the DEEPEST match the registry has an entry for. Builders
- * are handed that match's loader `data` and `params` and must be DEFENSIVE — the same module can
- * load a teaser variant with no page data, so a builder returns `null`/`[]` when its shape is
- * missing and the trail degrades to root-only rather than crashing.
+ * The trail is: the workspace itself (its display name → its dashboard, from the layout chrome,
+ * only when a workspace is in scope) followed by the DEEPEST match the registry has an entry for.
+ * Builders are handed that match's loader `data` and `params` and must be DEFENSIVE — the same
+ * module can load a teaser variant with no page data, so a builder returns `null`/`[]` when its
+ * shape is missing and the trail degrades to root-only rather than crashing.
  *
- * Presentation only. It reads no `:ws` param (this component lives in the LAYOUT, above the
- * `<Outlet>`, so it can't see a child route's segment) — links build the sidebar's way, from the
- * loader-supplied workspace address + tenancy through `wsHref`.
+ * The chrome (the active workspace + the tenancy grammar) is read off whichever LAYOUT loader
+ * carries it, found by loader-data SHAPE rather than a hardcoded route id — the downstream superset
+ * re-roots these same modules under a different directory (which renames route ids), so shape
+ * detection is the composition-safe read. When no match carries chrome (an anonymous face, a page
+ * outside both signed-in shells) the trail renders nothing.
+ *
+ * Presentation only. It reads no `:ws` param (this component renders inside a page's title block,
+ * so it can't rely on seeing the workspace segment cleanly) — links build the sidebar's way, from
+ * the loader-supplied workspace address + tenancy through `wsHref`.
  */
 
 /** One trail segment. `sub` is the workspace-relative path (no leading slash) fed to `wsHref`;
@@ -160,21 +169,93 @@ const REGISTRY: Record<string, CrumbBuilder> = {
 
   // Account-scoped (top-level in both tenancies) — mirrors the page's own title.
   "routes/your-devices": () => [{ label: "Your devices" }],
+
+  // Self-serve workspace creation (multi tenancy only, off-workspace — no root crumb precedes it).
+  "routes/workspace-new": () => [{ label: "New workspace" }],
 };
 
-/**
- * The breadcrumb bar. Renders nothing when there's no trail to show (an off-workspace page whose
- * route the registry doesn't cover). Single line: long names ellipsize (flexbox shrinks the longest
- * segment first) rather than wrapping the header.
- */
-export function Breadcrumbs({
-  workspace,
-  tenancy,
-}: {
+/** The shared chrome the two signed-in layouts load — the active workspace + the tenancy grammar
+ *  the trail's links build under. */
+interface Chrome {
   workspace: SidebarWorkspace | null;
   tenancy: "single" | "multi";
-}) {
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+/** The `ChromeData` shape guard: a `tenancy` of the known grammar plus a `workspace` key (null when
+ *  off-workspace, else the sidebar workspace). Defensive — an unexpected shape degrades to null
+ *  rather than throwing. */
+function chromeShape(data: unknown): Chrome | null {
+  if (!isRecord(data)) {
+    return null;
+  }
+  const { tenancy } = data;
+  if ((tenancy !== "single" && tenancy !== "multi") || !("workspace" in data)) {
+    return null;
+  }
+  return { workspace: workspaceShape(data.workspace), tenancy };
+}
+
+/** The trail reads only `displayName` + `address` off the workspace; validate those and degrade a
+ *  malformed row to "no workspace" (a root-less trail) rather than crashing the header. */
+function workspaceShape(data: unknown): SidebarWorkspace | null {
+  if (!isRecord(data)) {
+    return null;
+  }
+  return typeof data.displayName === "string" && typeof data.address === "string"
+    ? (data as unknown as SidebarWorkspace)
+    : null;
+}
+
+/**
+ * Pull the chrome out of a layout match's loader data, in EITHER shape a signed-in layout returns:
+ * `shell.tsx` hands back `ChromeData` directly (a `{ tenancy, workspace, … }` object), while
+ * `face-shell.tsx` wraps it as `{ signedIn: true, chrome: ChromeData }` (or `{ signedIn: false }`
+ * for an anonymous face — no chrome). Route ids are deliberately NOT matched here: the downstream
+ * superset build re-roots these same modules under a different directory, which renames the ids;
+ * the loader-data SHAPE is the composition-safe signal. Returns null for any match that isn't a
+ * chrome-carrying layout (a page loader, the anonymous face, a sessionless route).
+ */
+function chromeFromLoaderData(data: unknown): Chrome | null {
+  const direct = chromeShape(data);
+  if (direct !== null) {
+    return direct;
+  }
+  if (isRecord(data) && data.signedIn === true) {
+    return chromeShape(data.chrome);
+  }
+  return null;
+}
+
+/**
+ * The breadcrumb bar. Renders nothing when there's no chrome (an anonymous face, a page outside the
+ * signed-in shells) or no trail to show (an off-workspace page whose route the registry doesn't
+ * cover). Single line: long names ellipsize (flexbox shrinks the longest segment first) rather than
+ * wrapping. `className` lets a call site add the small top margin that seats it under the title —
+ * kept on the `<nav>` (not a wrapper) so a null render leaves no phantom spacing.
+ */
+export function Breadcrumbs({ className = "" }: { className?: string }) {
   const matches = useMatches();
+
+  // The chrome (the active workspace + tenancy) rides a LAYOUT loader — found by SHAPE, not route
+  // id, so the superset's re-rooted module ids don't matter. No chrome ⇒ no trail (an anonymous
+  // face renders no chrome; a page outside both shells has none to find).
+  let chrome: Chrome | null = null;
+  for (let i = matches.length - 1; i >= 0; i--) {
+    const match = matches[i];
+    const found = match === undefined ? null : chromeFromLoaderData(match.loaderData);
+    if (found !== null) {
+      chrome = found;
+      break;
+    }
+  }
+  if (chrome === null) {
+    return null;
+  }
+  const { workspace, tenancy } = chrome;
 
   // The DEEPEST match the registry knows drives the tail; everything above it (layouts, the door)
   // is skipped. A `null` build (a teaser/empty loader variant) degrades to root-only.
@@ -195,11 +276,11 @@ export function Breadcrumbs({
   }
 
   // Links build from the loader-supplied address + tenancy (the sidebar's rule), never useParams:
-  // this component lives in the layout and can't read a child route's `:ws` segment.
+  // the trail derives its scope from the chrome, not a child route's `:ws` segment.
   const wsSegment = workspace !== null && tenancy === "multi" ? workspace.address : null;
 
   return (
-    <nav aria-label="Breadcrumb" className="min-w-0">
+    <nav aria-label="Breadcrumb" className={`min-w-0 ${className}`.trimEnd()}>
       <ol className="flex min-w-0 items-center gap-1.5 font-mono text-dim text-xs">
         {crumbs.map((crumb, index) => {
           const isLast = index === crumbs.length - 1;

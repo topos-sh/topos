@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { Breadcrumbs } from "@/components/shell/breadcrumbs";
 
 /**
  * The shared primitives — deliberately tiny. The Klein system (see ../../DESIGN.md): warm-gray
@@ -56,7 +57,9 @@ export function SectionHeading({ children }: { children: ReactNode }) {
  * The content-pane header — the "channel header" for a page in the right pane: a display title,
  * an optional quiet meta line (id / counts / topic), and optional right-aligned actions, closed by
  * a hairline that separates the header from the page body. Title/meta are ReactNode so a page can
- * compose a `#` channel prefix or a mono id inline.
+ * compose a `#` channel prefix or a mono id inline. The global breadcrumb trail sits directly under
+ * the title (self-sufficient — it derives its own chrome, and renders nothing off-workspace where
+ * there's no trail), so every page built on this header carries the trail once, in one spot.
  */
 export function PageHeader({
   title,
@@ -73,6 +76,7 @@ export function PageHeader({
         <h1 className="truncate font-display font-semibold text-ink text-lg tracking-[-0.02em]">
           {title}
         </h1>
+        <Breadcrumbs className="mt-1" />
         {meta !== undefined && <div className="mt-1 text-faint text-xs">{meta}</div>}
       </div>
       {actions !== undefined && <div className="flex shrink-0 items-center gap-2">{actions}</div>}

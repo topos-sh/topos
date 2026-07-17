@@ -2,6 +2,7 @@ import type { LoaderFunctionArgs } from "react-router";
 import { Link, useLoaderData } from "react-router";
 import { BrowseShell } from "@/components/browse/shell";
 import { VersionFiles } from "@/components/browse/version-files";
+import { Breadcrumbs } from "@/components/shell/breadcrumbs";
 import { ShortId } from "@/components/ui";
 import { notFound, requireMember, workspaceInScope } from "@/lib/auth/guards.server";
 import { loadVersionFilesData } from "@/lib/browse/version-files.server";
@@ -57,15 +58,18 @@ export default function VersionFilesPage() {
   const wsPath = useWsPath();
   return (
     <BrowseShell>
-      <header className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <Link
-          to={wsPath(`skills/${skill}`)}
-          className="rounded-sm font-display font-semibold text-ink text-lg tracking-[-0.02em] underline decoration-hairline underline-offset-4 transition-colors hover:decoration-ink focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
-        >
-          {skill}
-        </Link>
-        <ShortId value={versionId} />
-      </header>
+      <div>
+        <header className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <Link
+            to={wsPath(`skills/${skill}`)}
+            className="rounded-sm font-display font-semibold text-ink text-lg tracking-[-0.02em] underline decoration-hairline underline-offset-4 transition-colors hover:decoration-ink focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+          >
+            {skill}
+          </Link>
+          <ShortId value={versionId} />
+        </header>
+        <Breadcrumbs className="mt-1" />
+      </div>
       <VersionFiles skill={skill} versionId={versionId} currentChip={isCurrent} {...versionFiles} />
     </BrowseShell>
   );
