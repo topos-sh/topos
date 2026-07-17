@@ -177,6 +177,8 @@ struct FakeDir {
     skills: Vec<WireSkillIndexEntry>,
     proposals: Vec<WireProposalEntry>,
     reach_persons: u64,
+    /// The caller's role `me` answers (default `owner`; the describe-note tests set `member`).
+    role: String,
     /// A code to fail curated placements / protection writes with (e.g. `CURATED_ROLE_REQUIRED`).
     place_refusal: Option<String>,
     protect_refusal: Option<String>,
@@ -193,6 +195,7 @@ impl FakeDir {
             skills: vec![skill("s_deploy", "deploy"), skill("s_docs", "docs")],
             proposals: Vec::new(),
             reach_persons: 7,
+            role: "owner".to_owned(),
             place_refusal: None,
             protect_refusal: None,
             log,
@@ -284,7 +287,7 @@ impl DirectorySource for FakeDir {
             display_name: "Acme Inc".into(),
             address: "https://topos.sh/acme".into(),
             principal: "alice@acme.com".into(),
-            role: "owner".into(),
+            role: self.role.clone(),
             invited_by: None,
             invite_policy: "members".into(),
         })
@@ -1583,5 +1586,136 @@ fn editing_the_draft_lets_a_second_publish_land() {
         ok.sent.lock().unwrap().len(),
         1,
         "the edited publish reached the wire"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// publish (describe placements) — the placement line + its curated note track what the APPLY
+// would actually touch: an explicit `--to` places on EVERY publish, the default `everyone` on a
+// GENESIS only (a bare republish alters no placement); the note fires whenever the TARGET
+// resolves curated against a member caller — never for an owner, an open channel, or a `--to`
+// naming a channel absent from the index (create-on-first-use, born open).
+// ---------------------------------------------------------------------------------------------
+
+/// Adopt a fresh `deploy` skill (genesis author — no follow entry), optionally land its FIRST
+/// publish and edit the draft (`republish` — the non-genesis bare case), then run the bare
+/// publish describe with the caller's `role` and the default `everyone` channel in
+/// `everyone_mode`. Returns the described `(placements, placement_note)`.
+fn describe_placements(
+    tag: &str,
+    role: &str,
+    everyone_mode: &str,
+    channel: Option<&str>,
+    republish: bool,
+) -> (Vec<String>, Option<String>) {
+    let rig = Rig::new(tag);
+    let src = Scratch::new(&format!("{tag}-src"));
+    if republish {
+        let _ = genesis_author_first_publish(&rig, &src);
+        // Edit the draft so the second describe is not NO_CHANGES.
+        std::fs::write(
+            src.0.join("deploy").join("SKILL.md"),
+            "---\nname: deploy\ndescription: edited\n---\n# deploy v2\n",
+        )
+        .unwrap();
+    } else {
+        rig.seed_enrolled("alice@acme.com");
+        let skill_dir = src.0.join("deploy");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: deploy\ndescription: base\n---\n# deploy\n",
+        )
+        .unwrap();
+        let inert_p = InertPlane;
+        let inert_f = InertFollow;
+        let ctx = rig.ctx(&inert_p, &inert_f);
+        ops::add(&ctx, &skill_dir).unwrap();
+    }
+
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let mut dir = FakeDir::new(log);
+    dir.role = role.to_owned();
+    dir.channels = vec![
+        chan("everyone", true, true, everyone_mode, &[]),
+        chan("secure", false, false, "curated", &[]),
+    ];
+    let dir_c = dir_connect(&dir);
+    let del = FakeDelivery { snapshot: None };
+    let del_c = |_b: &str| -> Box<dyn ReconcileTransport> { Box::new(del.clone()) };
+    let connectors = ops::PublishDescribeConnectors {
+        directory: &dir_c,
+        delivery: &del_c,
+    };
+
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+    let data = ops::publish_describe(&ctx, &connectors, None, "deploy", false, channel, None)
+        .expect("describe succeeds");
+    (data.placements, data.placement_note)
+}
+
+#[test]
+fn a_member_genesis_describe_notes_a_curated_default_everyone() {
+    // The bare genesis default: a member's describe under a CURATED `everyone` carries the note
+    // (the apply withholds the placement, catalog-only); an OPEN `everyone`, or an owner caller,
+    // does not — their placement lands.
+    let (placements, note) = describe_placements("pd-note-mem", "member", "curated", None, false);
+    assert_eq!(placements, vec!["everyone".to_owned()]);
+    assert_eq!(
+        note.as_deref(),
+        Some("curated: lands catalog-only; a curator places it afterwards")
+    );
+    let (_, open_note) = describe_placements("pd-note-open", "member", "open", None, false);
+    assert!(open_note.is_none(), "an open everyone needs no note");
+    let (_, owner_note) = describe_placements("pd-note-own", "owner", "curated", None, false);
+    assert!(owner_note.is_none(), "an owner's placement lands — no note");
+}
+
+#[test]
+fn an_explicit_to_describe_notes_a_curated_target_for_a_member() {
+    // `--to everyone` rides the SAME gated path as any named channel at the apply (no string-match
+    // bypass), so the describe notes it too — same for a named curated channel; a `--to` naming a
+    // channel ABSENT from the index is create-on-first-use (born open), so no note.
+    let (placements, note) =
+        describe_placements("pd-to-evr", "member", "curated", Some("everyone"), false);
+    assert_eq!(placements, vec!["everyone".to_owned()]);
+    assert!(
+        note.is_some(),
+        "an explicit --to everyone under curation carries the note"
+    );
+    let (placements, note) =
+        describe_placements("pd-to-sec", "member", "open", Some("secure"), false);
+    assert_eq!(placements, vec!["secure".to_owned()]);
+    assert!(
+        note.is_some(),
+        "a named curated channel carries the note for a member"
+    );
+    let (_, fresh_note) =
+        describe_placements("pd-to-new", "member", "curated", Some("brand-new"), false);
+    assert!(
+        fresh_note.is_none(),
+        "an unknown --to channel is created open — no note"
+    );
+}
+
+#[test]
+fn a_bare_republish_describe_claims_no_placement() {
+    // A locally-authored skill's SECOND bare publish (non-genesis, still no follow entry) alters
+    // no placement server-side — the describe lists none and carries no note, even for a member
+    // under a curated `everyone`; an explicit `--to` still places (and notes) on a republish.
+    let (placements, note) = describe_placements("pd-repub", "member", "curated", None, true);
+    assert!(
+        placements.is_empty(),
+        "a bare republish lists no placement, got {placements:?}"
+    );
+    assert!(note.is_none(), "no placement, no note");
+    let (placements, note) =
+        describe_placements("pd-repub-to", "member", "curated", Some("everyone"), true);
+    assert_eq!(placements, vec!["everyone".to_owned()]);
+    assert!(
+        note.is_some(),
+        "an explicit --to on a republish still notes a curated target"
     );
 }

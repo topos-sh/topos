@@ -584,6 +584,13 @@ pub struct PublishData {
     /// already tracked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added: Option<AddedNote>,
+    /// The channel whose placement was WITHHELD by its curated mode (the receipt's
+    /// `details.placement = curated_role_required`): the publish itself landed — catalog + moved
+    /// pointer — but the skill's reference was NOT placed into this channel (the `--to` target, or
+    /// the default `everyone` for a brand-new skill). A reviewer or owner places it
+    /// (`topos channel add <channel> <skill>`). **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_withheld: Option<String>,
 }
 
 /// The disclosure a `publish` attaches when it ADDED the skill to topos before shipping — the auto-add
@@ -952,6 +959,12 @@ pub struct PublishDescribeData {
     /// of truth).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_note: Option<String>,
+    /// The default placement's mode annotation: present when a brand-new skill's `everyone`
+    /// placement will be WITHHELD at the apply (the channel is curated and the caller is a
+    /// member) — the publish lands catalog-only and a curator places it afterwards. **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_note: Option<String>,
 }
 
 /// The gate a `publish` describe predicts. **INFERRED value set.**
@@ -1005,11 +1018,16 @@ mod tests {
             bundle_digest: "c".repeat(64),
             current_generation: 1,
             added: None,
+            placement_withheld: None,
         };
         let v = serde_json::to_value(&done).unwrap();
         assert_eq!(v["version_id"], "a".repeat(64));
         assert_eq!(v["current_generation"], 1);
         assert!(v.get("added").is_none(), "an absent added note omits");
+        assert!(
+            v.get("placement_withheld").is_none(),
+            "an absent withheld placement omits"
+        );
         let back: PublishData = serde_json::from_value(v).unwrap();
         assert_eq!(back.bundle_digest, "c".repeat(64));
     }

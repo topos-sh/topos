@@ -161,7 +161,7 @@ Ship a draft to the team, ADDING the skill to topos first if it isn't tracked ye
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
 | `<TARGET>` |  |  | The skill to publish: a tracked NAME, an untracked `<skill>` / `<skill>@<harness>` to adopt from discovery, or a `<dir>` to adopt in place — optionally pinned as `<source>@<digest>` |
-| `--to` | `<CHANNEL>` |  | Place the skill's reference into this channel (created on first use; a curated channel needs reviewer+). A brand-new skill with no `--to` lands in `everyone` |
+| `--to` | `<CHANNEL>` |  | Place the skill's reference into this channel (created on first use; a curated channel needs reviewer+). A brand-new skill with no `--to` lands in `everyone` — under a curated `everyone` a member's genesis publishes catalog-only and a curator places it |
 | `--propose` |  |  | Open a proposal (a PR) instead of moving `current` |
 | `-m, --message` | `<MSG>` |  | The commit message for this version (threaded into the candidate commit id) |
 | `--yes` |  |  | Apply without the describe step. Parses today; the two-phase describe lands later |

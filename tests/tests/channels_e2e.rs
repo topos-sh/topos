@@ -343,3 +343,130 @@ fn e2e_publish_to_channel_replaces_the_everyone_default() {
     land(&client, TOOLS);
     assert_eq!(client.placement_files(TOOLS), expected(&tools_files()));
 }
+
+// ── a curated `everyone` gates the genesis default placement: catalog-only until a curator places ──
+
+/// Enroll an owner CLI and TIGHTEN the default channel: a bare channel `protect` sets `curated`
+/// (a member-level placement into it takes reviewer+), mode row witnessed. Returns the owner rig.
+fn curator_rig(stack: &Stack, owner: &common::Session, tag: &str) -> FollowHarness {
+    let rig = FollowHarness::new(tag);
+    stack.enroll_begin_and_approve(&rig, owner);
+    rig.resume_apply().expect("the owner enrolls");
+    let tightened = rig
+        .protect("everyone", None, true)
+        .expect("the owner may tighten the channel");
+    assert_eq!(tightened.level, "curated", "the tighten's applied level");
+    assert_eq!(
+        stack.text_witness("SELECT mode FROM web.channel WHERE name = 'everyone'"),
+        Some("curated".to_owned()),
+        "the mode row landed"
+    );
+    rig
+}
+
+/// The `everyone` reference-row count for `TOOLS` — the placement witness.
+fn everyone_placements(stack: &Stack) -> i64 {
+    stack.count(&format!(
+        "SELECT count(*) FROM web.channel_bundle cb \
+         JOIN web.channel c ON c.id = cb.channel_id \
+         JOIN web.bundle b ON b.id = cb.bundle_id \
+         WHERE c.name = 'everyone' AND b.name = '{TOOLS}'"
+    ))
+}
+
+#[test]
+fn e2e_member_genesis_under_curated_everyone_stays_catalog_only() {
+    let (stack, owner, _member, client) = arranged("curated");
+    let owner_rig = curator_rig(&stack, &owner, "curated-owner");
+
+    // The MEMBER's device ships a BRAND-NEW skill with no `--to`. Custody is never
+    // curation-blocked — the genesis SUCCEEDS (catalog row, moved pointer, nothing on the review
+    // lane) — but REACH is: the default placement into the CURATED `everyone` is WITHHELD, the
+    // receipt disclosing it (`placement_withheld`), and the skill stays CATALOG-ONLY.
+    client.adopt(TOOLS, &tools_files());
+    let digest = client.draft_digest(TOOLS);
+    let published = match client
+        .publish_message("", &format!("{TOOLS}@{digest}"), "a member's genesis")
+        .expect("the genesis lands")
+    {
+        PublishResult::Published(d) => d,
+        other => panic!("expected a direct genesis, got {other:?}"),
+    };
+    assert_eq!(published.current_generation, 1, "a fresh pointer");
+    assert_eq!(
+        published.placement_withheld.as_deref(),
+        Some("everyone"),
+        "the receipt discloses the withheld default placement"
+    );
+    assert_eq!(
+        stack.count(&format!(
+            "SELECT count(*) FROM web.bundle WHERE name = '{TOOLS}'"
+        )),
+        1,
+        "the catalog row landed"
+    );
+    assert_eq!(
+        stack.count("SELECT count(*) FROM web.proposal"),
+        0,
+        "nothing rode the review lane"
+    );
+    assert_eq!(
+        everyone_placements(&stack),
+        0,
+        "the curated everyone withheld the member's default placement — catalog-only"
+    );
+
+    // The CURATOR places it — the real `channel add` verb (an owner passes the curated gate) —
+    // and a second device receives the placed skill byte-exact on its next sweep.
+    let placed = owner_rig
+        .channel_apply("add", "everyone", &[TOOLS])
+        .expect("the curator's placement lands");
+    assert!(placed.applied, "the placement applied");
+    assert_eq!(everyone_placements(&stack), 1, "the reference row landed");
+    land(&owner_rig, TOOLS);
+    assert_eq!(
+        owner_rig.placement_files(TOOLS),
+        expected(&tools_files()),
+        "the curator-placed skill delivers byte-exact"
+    );
+}
+
+// ── `--to everyone` rides the same curated gate as any named channel (no string-match bypass) ──────
+
+#[test]
+fn e2e_member_to_everyone_is_gated_like_a_named_curated_channel() {
+    let (stack, owner, _member, client) = arranged("curated-to");
+    let _owner_rig = curator_rig(&stack, &owner, "curated-to-owner");
+
+    // The member ships a brand-new skill EXPLICITLY `--to everyone`: the target routes through
+    // the SAME gated path a named channel rides, so it answers exactly what `--to <curated-ch>`
+    // answers a member — the publish lands, the placement is withheld (`curated_role_required`
+    // on the receipt), and no reference row exists anywhere.
+    client.adopt(TOOLS, &tools_files());
+    let digest = client.draft_digest(TOOLS);
+    let published = match client
+        .publish_to(
+            &format!("{TOOLS}@{digest}"),
+            "everyone",
+            "a member's genesis",
+        )
+        .expect("the genesis lands")
+    {
+        PublishResult::Published(d) => d,
+        other => panic!("expected a direct genesis, got {other:?}"),
+    };
+    assert_eq!(published.current_generation, 1, "a fresh pointer");
+    assert_eq!(
+        published.placement_withheld.as_deref(),
+        Some("everyone"),
+        "the receipt discloses the withheld `--to everyone` placement"
+    );
+    assert_eq!(
+        stack.count(&format!(
+            "SELECT count(*) FROM web.channel_bundle cb \
+             JOIN web.bundle b ON b.id = cb.bundle_id WHERE b.name = '{TOOLS}'"
+        )),
+        0,
+        "no reference row in ANY channel — the gate answered like a named curated channel"
+    );
+}

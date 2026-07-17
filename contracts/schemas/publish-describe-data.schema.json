@@ -24,6 +24,13 @@
         "null"
       ]
     },
+    "placement_note": {
+      "description": "The default placement's mode annotation: present when a brand-new skill's `everyone`\nplacement will be WITHHELD at the apply (the channel is curated and the caller is a\nmember) — the publish lands catalog-only and a curator places it afterwards. **INFERRED**\n(additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "placements": {
       "description": "The channels the reference lands in (`--to`, or `everyone` for a brand-new skill).",
       "type": "array",

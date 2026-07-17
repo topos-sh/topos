@@ -30,6 +30,13 @@
       "description": "The skill's NAME — the handle humans speak and the TTY success line leads with\n(`Published <name>@…`); the opaque `skill_id` above stays the machine key.",
       "type": "string"
     },
+    "placement_withheld": {
+      "description": "The channel whose placement was WITHHELD by its curated mode (the receipt's\n`details.placement = curated_role_required`): the publish itself landed — catalog + moved\npointer — but the skill's reference was NOT placed into this channel (the `--to` target, or\nthe default `everyone` for a brand-new skill). A reviewer or owner places it\n(`topos channel add <channel> <skill>`). **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "skill_id": {
       "type": "string"
     },

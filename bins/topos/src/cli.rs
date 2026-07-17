@@ -225,7 +225,8 @@ pub(crate) enum Command {
         /// discovery, or a `<dir>` to adopt in place — optionally pinned as `<source>@<digest>`.
         target: String,
         /// Place the skill's reference into this channel (created on first use; a curated channel needs
-        /// reviewer+). A brand-new skill with no `--to` lands in `everyone`.
+        /// reviewer+). A brand-new skill with no `--to` lands in `everyone` — under a curated `everyone`
+        /// a member's genesis publishes catalog-only and a curator places it.
         #[arg(long, value_name = "CHANNEL")]
         to: Option<String>,
         /// Open a proposal (a PR) instead of moving `current`.

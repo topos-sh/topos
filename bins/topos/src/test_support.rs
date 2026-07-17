@@ -1419,6 +1419,35 @@ impl FollowHarness {
         }
     }
 
+    /// Drive `channel add|remove <channel> <skill>... --yes` — the channel-first curation verb over
+    /// the real credentialed directory transport (the same `PUT`/`DELETE …/channels/{ch}/skills/{skill}`
+    /// rows a curator's CLI writes).
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string (a curated-channel role refusal names who can).
+    pub fn channel_apply(
+        &self,
+        action: &str,
+        channel: &str,
+        skills: &[&str],
+    ) -> Result<topos_types::results::ChannelData, String> {
+        let directory = self.dir_connect();
+        let connectors = ops::ChannelConnectors {
+            directory: &directory,
+        };
+        let mut args: Vec<String> = vec![action.to_owned(), channel.to_owned()];
+        args.extend(skills.iter().map(|s| (*s).to_owned()));
+        self.with_inert_ctx(
+            |ctx| match ops::channel(ctx, &connectors, &args, None, true)? {
+                ops::ChannelOutcome::Applied(data) => Ok(data),
+                other => Err(crate::error::ClientError::InvalidArgument(format!(
+                    "test_support: expected an apply, got {other:?}"
+                ))),
+            },
+        )
+        .map_err(|e| e.to_string())
+    }
+
     /// Drive `protect <target> [<level>]` (two-phase: `yes = false` describes — audience included —
     /// `yes = true` applies). Bare level = tighten to the kind's protected default; `"open"` loosens.
     ///

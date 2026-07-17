@@ -240,13 +240,38 @@ pub(crate) fn publish_describe(
         .map(|r| r.persons);
     let me = directory.me(&workspace_id).ok();
 
-    let placements = match channel {
-        Some(ch) => vec![ch.to_owned()],
-        // A brand-new skill's reference lands in `everyone`; a re-publish of a followed skill keeps its
-        // existing placements (none added here).
-        None if !followed => vec!["everyone".to_owned()],
-        None => Vec::new(),
+    // GENESIS = no published `current` exists — the same signal the NO_CHANGES guard above keys
+    // on (never followed AND never published from here). Only a genesis apply creates the DEFAULT
+    // `everyone` placement server-side; a bare NON-genesis republish (a locally-authored skill's
+    // second publish — also `!followed`) moves `current` and alters no placement, so the describe
+    // must not claim one.
+    let genesis = !followed && sync.observed == GENESIS;
+    // The placement TARGET this apply would touch: an explicit `--to <channel>` places on EVERY
+    // publish; without one, only a genesis lands the default `everyone` reference.
+    let placement_target = match channel {
+        Some(ch) => Some(ch.to_owned()),
+        None if genesis => Some("everyone".to_owned()),
+        None => None,
     };
+    let placements: Vec<String> = placement_target.iter().cloned().collect();
+    // The placement's gate: REACH is curation-gated — the default channel AND every named `--to`
+    // (`everyone` included; the apply routes them all through the same mode gate and withholds a
+    // MEMBER's placement into a curated channel, disclosed on its receipt) — so the describe says
+    // so up front whenever the target resolves CURATED against a member caller. The mode rides
+    // the channel index the client already reads (`/channels`); a failed read degrades to the
+    // plain placement line — same as the reach/share reads, the describe keeps working offline.
+    // (A `--to` naming a channel absent from the index is create-on-first-use, born `open`.)
+    let placement_note = placement_target
+        .as_ref()
+        .is_some_and(|target| {
+            me.as_ref().is_some_and(|m| m.role == "member")
+                && directory
+                    .channels_index(&workspace_id)
+                    .ok()
+                    .and_then(|ix| ix.channels.into_iter().find(|c| &c.name == target))
+                    .is_some_and(|c| c.mode == "curated")
+        })
+        .then(|| "curated: lands catalog-only; a curator places it afterwards".to_owned());
     let share_line = me
         .as_ref()
         .map(|m| format!("{}/skills/{}", m.address, skill_name));
@@ -273,6 +298,7 @@ pub(crate) fn publish_describe(
         share_line,
         undo,
         origin_note,
+        placement_note,
     })
 }
 
@@ -708,6 +734,19 @@ fn map_outcome(
                 ClientError::Corrupt("an OK publish carried no current pointer".to_owned())
             })?;
             let new_gen = contribute::apply_publish_ok(ctx, sp, lock, map, rec, record)?;
+            // The receipt's placement detail: `curated_role_required` means the channel placement
+            // (the op's `--to` target, or the default `everyone` on a genesis) was WITHHELD by a
+            // curated channel's role gate — the publish landed, the reference did not. Surfaced so
+            // the receipt never implies a reach the placement did not gain.
+            let withheld = receipt
+                .receipt
+                .as_ref()
+                .and_then(|r| r.details.as_ref())
+                .and_then(|d| d.get("placement"))
+                .and_then(|p| p.as_str())
+                == Some("curated_role_required");
+            let placement_withheld =
+                withheld.then(|| rec.channel.clone().unwrap_or_else(|| "everyone".to_owned()));
             Ok(PublishOutcome::Published(PublishData {
                 skill_id: rec.skill_id.clone(),
                 name: skill_name.to_owned(),
@@ -715,6 +754,7 @@ fn map_outcome(
                 bundle_digest: rec.bundle_digest.clone(),
                 current_generation: new_gen,
                 added: None,
+                placement_withheld,
             }))
         }
         TerminalOutcome::NeedsReview => Ok(PublishOutcome::Proposed(ProposeData {

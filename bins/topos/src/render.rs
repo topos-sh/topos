@@ -1557,6 +1557,9 @@ pub(crate) fn publish_describe_tty(
             "\n  places into: #{}",
             data.placements.join(", #")
         ));
+        if let Some(note) = &data.placement_note {
+            s.push_str(&format!(" — {note}"));
+        }
     }
     if let Some(reach) = data.reach {
         s.push_str(&format!("\n  reaches {reach} people"));
@@ -1593,6 +1596,15 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
         short(&data.bundle_digest),
         data.current_generation,
     ));
+    // A withheld placement is disclosed next to the success it qualifies: the publish landed,
+    // the curated channel's reference did not — placement takes reviewer or owner.
+    if let Some(ch) = &data.placement_withheld {
+        out.push_str(&format!(
+            "\n#{ch} is curated — the reference was NOT placed (placement takes reviewer or \
+             owner). The skill is in the catalog; a curator places it: `topos channel add {ch} {}`.",
+            data.name,
+        ));
+    }
     out
 }
 
@@ -2036,11 +2048,34 @@ mod tests {
             bundle_digest: "c".repeat(64),
             current_generation: 3,
             added: None,
+            placement_withheld: None,
         });
         assert!(line.starts_with("Published smoke-notes@"), "{line}");
         assert!(
             !line.contains("topos_a1b2c3"),
             "the internal bundle id must never surface on the TTY line: {line}"
+        );
+    }
+
+    #[test]
+    fn publish_tty_discloses_a_withheld_curated_placement_next_to_the_success() {
+        let line = publish_tty(&PublishData {
+            skill_id: "topos_a1b2c3".to_owned(),
+            name: "smoke-notes".to_owned(),
+            version_id: "a".repeat(64),
+            bundle_digest: "c".repeat(64),
+            current_generation: 1,
+            added: None,
+            placement_withheld: Some("everyone".to_owned()),
+        });
+        assert!(line.starts_with("Published smoke-notes@"), "{line}");
+        assert!(
+            line.contains("#everyone is curated — the reference was NOT placed"),
+            "the withheld placement is disclosed: {line}"
+        );
+        assert!(
+            line.contains("`topos channel add everyone smoke-notes`"),
+            "the curator's way in is named: {line}"
         );
     }
 

@@ -2956,6 +2956,13 @@
             "type": "string",
             "description": "The skill's NAME — the handle humans speak and the TTY success line leads with\n(`Published <name>@…`); the opaque `skill_id` above stays the machine key."
           },
+          "placement_withheld": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The channel whose placement was WITHHELD by its curated mode (the receipt's\n`details.placement = curated_role_required`): the publish itself landed — catalog + moved\npointer — but the skill's reference was NOT placed into this channel (the `--to` target, or\nthe default `everyone` for a brand-new skill). A reviewer or owner places it\n(`topos channel add <channel> <skill>`). **INFERRED** (additive-only)."
+          },
           "skill_id": {
             "type": "string"
           },
@@ -2985,7 +2992,7 @@
               "string",
               "null"
             ],
-            "description": "The `--to` channel placement: place the skill's reference into this channel (created on first\nuse, member-level; a `curated` channel needs reviewer+ — the placement outcome rides the\nreceipt's details, independently of the version gate). Absent ⇒ no explicit placement (a\nbrand-new skill still lands in `everyone`)."
+            "description": "The `--to` channel placement: place the skill's reference into this channel (created on first\nuse, member-level; a `curated` channel needs reviewer+ — the placement outcome rides the\nreceipt's details, independently of the version gate). Absent ⇒ no explicit placement (a\nbrand-new skill's reference still lands in `everyone` when its mode admits the caller; a\ncurated `everyone` withholds a member's default placement, disclosed on the receipt — the\npublish itself lands catalog-only)."
           },
           "display_name": {
             "type": [

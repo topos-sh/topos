@@ -144,7 +144,8 @@ const RESERVED_BUNDLE_NAMES = new Set(["topos"]);
 export interface GenesisRegistration {
   bundleId: string;
   name: string;
-  /** The `--to` placement's outcome, when a channel was named. */
+  /** The placement's outcome, when a channel was named — or when the DEFAULT `everyone`
+   * placement was withheld by its curated mode (`curated_role_required`). */
   placement?: "placed" | "created" | "curated_role_required";
 }
 
@@ -152,12 +153,14 @@ export interface GenesisRegistration {
  * Register a NEW bundle at its genesis publish, inside the caller's final transaction: the
  * bundle row (name minted from the display name with suffix-on-collision — `name`, `name-2`,
  * `name-3`…), an EXCLUSIVE placement, and the author's self-follow stance. Placement is
- * exclusive because `--to` is the targeting mechanism: with NO `--to` (or an explicit
- * `--to everyone`) the bundle lands in the default `everyone` channel; with a real `--to`
- * channel named it lands in THAT channel alone (gated by the channel's mode, its outcome riding
- * the receipt details, independent of the version gate). A refused `--to` placement
- * (`curated_role_required`) leaves the bundle in NO channel — the refusal rides the receipt and
- * the author's self-follow still stands.
+ * exclusive because `--to` is the targeting mechanism: with NO `--to` the bundle lands in the
+ * default `everyone` channel; with a `--to` channel named (`everyone` included — no
+ * string-match bypass) it lands in THAT channel alone. EVERY placement is gated by the
+ * channel's mode (custody is never curation-blocked; REACH is — including the default channel,
+ * including genesis): a curated channel withholds a member's placement with
+ * `curated_role_required`, riding the receipt details independent of the version gate. A
+ * withheld placement leaves the bundle in NO channel (catalog-only) — the disclosure rides the
+ * receipt and the author's self-follow still stands.
  */
 export async function registerGenesisBundleInTx(
   tx: Tx,
@@ -200,20 +203,28 @@ export async function registerGenesisBundleInTx(
       createdBy: actor.userId,
     })
     .onConflictDoNothing({ target: bundle.id });
-  // EXCLUSIVE placement: the default `everyone` channel ONLY when no real `--to` was named
-  // (`--to` targets a subset; adding `everyone` too would deliver to the whole workspace anyway,
-  // defeating the targeting). A named `--to` places into that channel alone, below.
-  if (toChannel === null || toChannel === "everyone") {
+  // EXCLUSIVE placement: the default `everyone` channel ONLY when no `--to` was named (`--to`
+  // targets a subset; adding `everyone` too would deliver to the whole workspace anyway,
+  // defeating the targeting). REACH is curation-gated even here: a CURATED default channel
+  // withholds a member's placement (`curated_role_required` rides the receipt details — the
+  // same outcome a named curated `--to` answers), while the publish itself — custody — still
+  // lands. The member never asked for a channel, so the default's refusal never fails the op.
+  let placement: GenesisRegistration["placement"];
+  if (toChannel === null) {
     const everyone = await tx
-      .select({ id: channel.id })
+      .select({ id: channel.id, mode: channel.mode })
       .from(channel)
       .where(and(eq(channel.workspaceId, ws), eq(channel.isDefault, true)))
       .limit(1);
     if (everyone[0] !== undefined) {
-      await tx
-        .insert(channelBundle)
-        .values({ channelId: everyone[0].id, workspaceId: ws, bundleId, addedBy: actor.userId })
-        .onConflictDoNothing();
+      if (everyone[0].mode === "curated" && actor.role === "member") {
+        placement = "curated_role_required";
+      } else {
+        await tx
+          .insert(channelBundle)
+          .values({ channelId: everyone[0].id, workspaceId: ws, bundleId, addedBy: actor.userId })
+          .onConflictDoNothing();
+      }
     }
   }
   await tx
@@ -223,8 +234,9 @@ export async function registerGenesisBundleInTx(
       target: [bundleSubscription.userId, bundleSubscription.bundleId],
       set: { state: "following", updatedAt: new Date() },
     });
-  let placement: GenesisRegistration["placement"];
-  if (toChannel !== null && toChannel !== "everyone") {
+  // A named `--to` — `everyone` included — rides the ONE gated path every channel placement
+  // runs (the old `everyone` string-match bypassed the mode gate).
+  if (toChannel !== null) {
     placement = await placeIntoChannelInTx(tx, actor, bundleId, toChannel);
   }
   await auditInTx(tx, {

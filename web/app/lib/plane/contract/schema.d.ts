@@ -734,6 +734,14 @@ export interface components {
              *     (`Published <name>@…`); the opaque `skill_id` above stays the machine key.
              */
             name: string;
+            /**
+             * @description The channel whose placement was WITHHELD by its curated mode (the receipt's
+             *     `details.placement = curated_role_required`): the publish itself landed — catalog + moved
+             *     pointer — but the skill's reference was NOT placed into this channel (the `--to` target, or
+             *     the default `everyone` for a brand-new skill). A reviewer or owner places it
+             *     (`topos channel add <channel> <skill>`). **INFERRED** (additive-only).
+             */
+            placement_withheld?: string | null;
             skill_id: string;
             /** @description The new commit (the shipped `version_id`). */
             version_id: string;
@@ -751,7 +759,9 @@ export interface components {
              * @description The `--to` channel placement: place the skill's reference into this channel (created on first
              *     use, member-level; a `curated` channel needs reviewer+ — the placement outcome rides the
              *     receipt's details, independently of the version gate). Absent ⇒ no explicit placement (a
-             *     brand-new skill still lands in `everyone`).
+             *     brand-new skill's reference still lands in `everyone` when its mode admits the caller; a
+             *     curated `everyone` withholds a member's default placement, disclosed on the receipt — the
+             *     publish itself lands catalog-only).
              */
             channel?: string | null;
             /**

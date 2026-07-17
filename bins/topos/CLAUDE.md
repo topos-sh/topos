@@ -266,8 +266,11 @@ are asserted byte-equal in tests.
   protection gate REROUTING a member's direct publish into a proposal — surfaced as Proposed, never an
   error; CONFLICT surfaces rebase).
   `--to <channel>` rides the wire body + the op-WAL (a replay re-sends the identical placement; the
-  channel's mode gates it server-side, independently of the version gate; a brand-new skill with no
-  `--to` lands in `everyone`). **`review <skill>@<hash> --approve|--reject`** binds the proposal's re-derived
+  channel's mode gates it server-side — `everyone` included, no string-match bypass — independently of
+  the version gate; a brand-new skill with no `--to` lands in `everyone` when its mode admits the
+  caller, while a CURATED `everyone` withholds a member's default placement — the publish still lands,
+  catalog-only, the receipt disclosing it as `PublishData.placement_withheld` with the curator's
+  `channel add` named on the TTY). **`review <skill>@<hash> --approve|--reject`** binds the proposal's re-derived
   identity at `expected` = the FRESH `current` (a reviewable proposal's base). **`revert --to <good>`** binds
   the forward commit `{parents:[FRESH current], tree: good.tree}` (a stale local parent would be a DENIED, so
   it reads the live current). An UNCERTAIN send keeps the WAL so the next attempt **replays the SAME `op_id`**
@@ -338,9 +341,11 @@ are asserted byte-equal in tests.
   declined/renamed collisions, one workspace, no ack) and no gate.
 
 - **The BUILT-IN `topos` skill** (`ops/builtin`, `cli_ref`) — the meta-skill that teaches an agent
-  what topos is and how to drive it, shipped INSIDE the binary: an authored `SKILL.md` (version-
-  stamped) + `reference.md` = the SAME bytes `docs/cli.md` carries (`cli_ref::cli_ref_md()` renders
-  from the real clap tree; xtask's `gen-cli-ref` calls the same fn — one renderer, no drift). It
+  what topos is, how to drive it, and how to distill a session's own learnings into shared skills
+  (origination: the capture bar, describe-first consent, deepen-before-new), shipped INSIDE the
+  binary: an authored `SKILL.md` (version-stamped) + `reference.md` = the SAME bytes `docs/cli.md`
+  carries (`cli_ref::cli_ref_md()` renders from the real clap tree; xtask's `gen-cli-ref` calls
+  the same fn — one renderer, no drift). It
   lands through the ORDINARY placement engine (shared-dir-first; `--agent` scoping works) at the
   trigger-arming moments (`add`'s adopt receipt, the enrollment receipt) and re-syncs on every bare
   `update` sweep — FORCE-SYNCED to the binary (a hand edit is snapshotted into the store, then
@@ -411,8 +416,11 @@ are asserted byte-equal in tests.
     diff); `--yes` snapshots the draft into the sidecar store, then re-materializes the followed `current`
     (an imported skill's adopted origin) over the placement.
   - **`publish`** (`ops/publish::publish_describe`) — a bare ENROLLED publish now DESCRIBES: the workspace,
-    the gate outcome (`open` → lands directly / `reviewed` → a proposal), the placements (`--to`, or
-    `everyone` for a new skill), the audience (reach), the share line, the undo path, and the origin-demotion
+    the gate outcome (`open` → lands directly / `reviewed` → a proposal), the placements (`--to`, or the default
+    `everyone` on a GENESIS only — a bare republish alters no placement, so none is listed — annotated
+    `curated: lands catalog-only; a curator places it afterwards` whenever the channel index the
+    describe already reads resolves the placement target as curated against a member caller),
+    the audience (reach), the share line, the undo path, and the origin-demotion
     note; a no-op (the draft equals the published current) is a typed `NO_CHANGES` — on BOTH the describe and
     the apply (`--yes`), keyed on a published `current` existing (not on follow-state), so even the genesis
     author's repeat publish is refused. The scan is local-first; the network is

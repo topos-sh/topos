@@ -11,9 +11,11 @@ import {
 
 /**
  * Genesis placement is EXCLUSIVE: `--to` is the targeting mechanism, so a brand-new bundle lands
- * in the default `everyone` channel ONLY when no real `--to` was named (or an explicit
- * `--to everyone`). A named `--to` places into THAT channel alone — additive `everyone`
- * placement would deliver to the whole workspace anyway, defeating the targeting. Direct DAL
+ * in the default `everyone` channel ONLY when no `--to` was named. A named `--to` (`everyone`
+ * included) places into THAT channel alone — additive `everyone` placement would deliver to the
+ * whole workspace anyway, defeating the targeting. EVERY placement is mode-gated (custody is
+ * never curation-blocked; REACH is — including the default channel): a curated channel withholds
+ * a member's placement with `curated_role_required`, disclosed on the registration. Direct DAL
  * call inside a transaction (registerGenesisBundleInTx is a Tx step).
  */
 
@@ -79,5 +81,69 @@ describe("registerGenesisBundleInTx — exclusive placement", () => {
     );
     // Byte-identical to a collision: no refusal, no oracle — the suffix walks past the reserve.
     expect(reg.name).toBe("topos-2");
+  });
+});
+
+describe("registerGenesisBundleInTx — a curated `everyone` gates REACH, never custody", () => {
+  /** Register under `role`, returning the registration AND the channels the bundle landed in. */
+  async function genesisUnderCurated(
+    bundleId: string,
+    displayName: string,
+    toChannel: string | null,
+    role: "member" | "reviewer",
+  ) {
+    const { getDb } = await import("@/lib/db/index.server");
+    const custody = await import("@/lib/db/queries.custody.server");
+    const actor =
+      role === "reviewer"
+        ? asDevice(wsId, "u_rev", "dk_rev", "reviewer")
+        : asDevice(wsId, "u_auth", "dk_auth", "member");
+    const reg = await getDb().transaction((tx) =>
+      custody.registerGenesisBundleInTx(tx, actor, bundleId, displayName, toChannel),
+    );
+    const rows = await db.q<{ name: string }>(
+      `SELECT ch.name FROM web.channel_bundle cb
+       JOIN web.channel ch ON ch.id = cb.channel_id
+       WHERE cb.bundle_id = $1 ORDER BY ch.name`,
+      [bundleId],
+    );
+    return { reg, channels: rows.map((r) => r.name) };
+  }
+
+  beforeAll(async () => {
+    await seedUser(db, "u_rev", "Reviewer", "reviewer@example.com");
+    await seatUser(db, wsId, "u_rev", "reviewer");
+    await seedDevice(db, "dk_rev", "u_rev", "rev-laptop");
+    await db.q(`UPDATE web.channel SET mode = 'curated' WHERE workspace_id = $1 AND is_default`, [
+      wsId,
+    ]);
+  });
+
+  it("a member's bare genesis stays CATALOG-ONLY — no row, the withheld placement disclosed", async () => {
+    const { reg, channels } = await genesisUnderCurated("s_c_member", "Cur Member", null, "member");
+    expect(channels).toEqual([]);
+    expect(reg.placement).toBe("curated_role_required");
+  });
+
+  it("a member's explicit `--to everyone` rides the same gate as any named curated channel", async () => {
+    const { reg, channels } = await genesisUnderCurated(
+      "s_c_to_ev",
+      "Cur To Ev",
+      "everyone",
+      "member",
+    );
+    expect(channels).toEqual([]);
+    expect(reg.placement).toBe("curated_role_required");
+  });
+
+  it("a reviewer's bare genesis still places — the curated gate passes reviewer+", async () => {
+    const { reg, channels } = await genesisUnderCurated(
+      "s_c_rev",
+      "Cur Reviewer",
+      null,
+      "reviewer",
+    );
+    expect(channels).toEqual(["everyone"]);
+    expect(reg.placement).toBeUndefined();
   });
 });

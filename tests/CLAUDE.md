@@ -81,7 +81,11 @@ their crates; this directory is for what only a cross-crate composed run can pro
   placement CREATES the named channel; joining it re-delivers. The DEFAULT channel is leavable —
   the leave is a per-person `channel_optout` row (the copy DETACHES, bytes frozen in place) and the
   rejoin deletes it. `remove` is a per-device exclusion row (fenced to the acting credential's own
-  device) that `follow` lifts; the fleet report row is witnessed.
+  device) that `follow` lifts; the fleet report row is witnessed. A CURATED `everyone` gates the
+  genesis default placement too: a member's bare genesis SUCCEEDS catalog-only (no reference row,
+  the withheld placement disclosed on the receipt) until a curator's real `channel add` places it
+  and a second device lands it byte-exact; a member's explicit `--to everyone` answers exactly what
+  a named curated channel answers.
 - **`tests/revocation_e2e.rs`** — revocation: a self-revoke ends the lane IMMEDIATELY (the very
   next request under the dead credential 404s), is FINAL (the un-revoke UPDATE is refused by the
   DB trigger), and re-enrolling recovers; the CLI's `auth logout` best-effort-revokes its device

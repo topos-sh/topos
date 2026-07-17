@@ -1014,6 +1014,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             share_line: Some("https://topos.sh/acme/skills/deploy".to_owned()),
             undo: Some("a".repeat(64)),
             origin_note: None,
+            placement_note: None,
         })
         .expect("PublishDescribeData serializes"),
         warnings: vec![],

@@ -113,7 +113,9 @@ pub struct PublishRequest {
     /// The `--to` channel placement: place the skill's reference into this channel (created on first
     /// use, member-level; a `curated` channel needs reviewer+ — the placement outcome rides the
     /// receipt's details, independently of the version gate). Absent ⇒ no explicit placement (a
-    /// brand-new skill still lands in `everyone`).
+    /// brand-new skill's reference still lands in `everyone` when its mode admits the caller; a
+    /// curated `everyone` withholds a member's default placement, disclosed on the receipt — the
+    /// publish itself lands catalog-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
 }
