@@ -1,8 +1,13 @@
 import { and, asc, count, desc, eq } from "drizzle-orm";
 import type { MemberActor, OwnerActor } from "@/lib/auth/guards.server";
-import { detachExactInTx, entitledIdsInTx, reattachInTx } from "@/lib/db/detach.server";
+import {
+  detachExactInTx,
+  entitledIdsInTx,
+  healDetachmentsInTx,
+  reattachInTx,
+} from "@/lib/db/detach.server";
 import { auditInTx, mintChannelId } from "@/lib/db/identity.server";
-import { getDb, isUniqueViolation } from "@/lib/db/index.server";
+import { type Db, getDb, isUniqueViolation } from "@/lib/db/index.server";
 import { personDisplaySql } from "@/lib/db/person-display.server";
 import {
   bundle,
@@ -15,10 +20,12 @@ import {
 import { user } from "@/lib/db/schema.auth";
 
 /**
- * The CHANNELS data access layer — reads over the app's own channel tables and the existence
- * ceremonies (create / rename / delete) as plain transactions. Every function is actor-first
- * and derives its workspace FROM the actor, so a caller that skipped its guard cannot compile
- * and a wrong-scope read never leaks.
+ * The CHANNELS data access layer — reads over the app's own channel tables, the existence
+ * ceremonies (create / rename / delete) as plain transactions, and the ONE curation core
+ * (place / unplace a bundle reference) that this file's id-keyed web functions AND the device
+ * lane's name-keyed ones both run. Every function is actor-first and derives its workspace
+ * FROM the actor, so a caller that skipped its guard cannot compile and a wrong-scope read
+ * never leaks.
  *
  * A channel is plain rows: a named group holding bundle REFERENCES (labels — one bundle,
  * delivered once) and seat-anchored memberships. The DEFAULT channel ('everyone') has IMPLICIT
@@ -404,6 +411,182 @@ export async function deleteChannel(
       details: { name: row.name },
     });
     return "deleted";
+  });
+}
+
+// ── Curation (place / unplace a bundle reference) — the ONE core both doors run ─────────────
+
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/**
+ * The actor shape BOTH curation doors satisfy: the web page's MemberActor and the device
+ * lane's DeviceActor (whose deviceId rides into the audit row when present). The policy —
+ * gates, idempotence, healing, audit — is written ONCE against this shape so the two lanes
+ * cannot drift; the branded outer functions stay the only entry points.
+ */
+interface CurationActor {
+  readonly userId: string;
+  readonly display: string;
+  readonly workspaceId: string;
+  readonly role: "owner" | "reviewer" | "member";
+  readonly deviceId?: string;
+}
+
+/** The catalog probe every curation door gates on FIRST: NULL = no such bundle in this
+ * workspace (checked before any channel resolution, so a bad skill never mints a channel
+ * on the device lane and the two doors refuse in the same order). */
+export async function bundleStatusInTx(
+  tx: Tx,
+  ws: string,
+  bundleId: string,
+): Promise<string | null> {
+  const rows = await tx
+    .select({ status: bundle.status })
+    .from(bundle)
+    .where(and(eq(bundle.workspaceId, ws), eq(bundle.id, bundleId)))
+    .limit(1);
+  return rows[0]?.status ?? null;
+}
+
+/**
+ * The place core, INSIDE the caller's transaction, after the caller resolved its channel (the
+ * device lane by NAME with create-on-first-use; the web page by ID): the curated-mode role
+ * gate (reviewer+), the idempotent reference insert (ON CONFLICT — a re-place answers
+ * 'placed' again), the bundle-scoped detachment heal (anyone re-entitled through this
+ * placement self-heals), and the `skill_added` audit row — emitted for the ACT, a re-place of
+ * a standing row included.
+ */
+export async function placeBundleRefInTx(
+  tx: Tx,
+  actor: CurationActor,
+  target: { id: string; mode: string },
+  bundleId: string,
+): Promise<"placed" | "curated_role_required"> {
+  if (target.mode === "curated" && actor.role === "member") {
+    return "curated_role_required";
+  }
+  await tx
+    .insert(channelBundle)
+    .values({
+      channelId: target.id,
+      workspaceId: actor.workspaceId,
+      bundleId,
+      addedBy: actor.userId,
+    })
+    .onConflictDoNothing();
+  await healDetachmentsInTx(tx, actor.workspaceId, bundleId);
+  await auditInTx(tx, {
+    workspaceId: actor.workspaceId,
+    actor: { userId: actor.userId, deviceId: actor.deviceId, display: actor.display },
+    kind: "skill_added",
+    subject: target.id,
+    outcome: "ok",
+    details: { skillId: bundleId },
+  });
+  return "placed";
+}
+
+/** The unplace core — symmetric gate with place; the delete's row count answers not_placed. */
+export async function unplaceBundleRefInTx(
+  tx: Tx,
+  actor: CurationActor,
+  target: { id: string; mode: string },
+  bundleId: string,
+): Promise<"removed" | "not_placed" | "curated_role_required"> {
+  if (target.mode === "curated" && actor.role === "member") {
+    return "curated_role_required";
+  }
+  const deleted = await tx
+    .delete(channelBundle)
+    .where(
+      and(
+        eq(channelBundle.workspaceId, actor.workspaceId),
+        eq(channelBundle.channelId, target.id),
+        eq(channelBundle.bundleId, bundleId),
+      ),
+    )
+    .returning({ bundleId: channelBundle.bundleId });
+  if (deleted.length === 0) {
+    return "not_placed";
+  }
+  await auditInTx(tx, {
+    workspaceId: actor.workspaceId,
+    actor: { userId: actor.userId, deviceId: actor.deviceId, display: actor.display },
+    kind: "skill_removed",
+    subject: target.id,
+    outcome: "ok",
+    details: { skillId: bundleId },
+  });
+  return "removed";
+}
+
+/** The id-keyed channel resolve the web curation functions share — workspace-scoped, mode
+ * included (the gate needs it). */
+async function channelCurationTargetInTx(tx: Tx, ws: string, channelId: string) {
+  const rows = await tx
+    .select({ id: channel.id, mode: channel.mode })
+    .from(channel)
+    .where(and(eq(channel.workspaceId, ws), eq(channel.id, channelId)))
+    .limit(1);
+  return rows[0];
+}
+
+export type ChannelPlaceOutcome =
+  | "placed"
+  | "unknown_channel"
+  | "unknown_skill"
+  | "skill_not_active"
+  | "curated_role_required";
+
+/**
+ * Place a bundle reference into a channel — the web page's door onto the one curation core
+ * the device lane shares: same gates (the bundle must exist in-workspace and be active; a
+ * CURATED channel takes reviewer+), same idempotence, same detachment healing, same audit
+ * row. Keyed on the IMMUTABLE channel id like every web ceremony — the page operates on an
+ * existing channel, so there is NO create-on-first-use here: an id that does not resolve in
+ * the actor's workspace is the honest unknown_channel, never a mint.
+ */
+export async function placeBundleInChannel(
+  actor: MemberActor,
+  channelId: string,
+  bundleId: string,
+): Promise<ChannelPlaceOutcome> {
+  const ws = actor.workspaceId;
+  return await getDb().transaction(async (tx) => {
+    const status = await bundleStatusInTx(tx, ws, bundleId);
+    if (status === null) {
+      return "unknown_skill";
+    }
+    if (status !== "active") {
+      return "skill_not_active";
+    }
+    const target = await channelCurationTargetInTx(tx, ws, channelId);
+    if (target === undefined) {
+      return "unknown_channel";
+    }
+    return await placeBundleRefInTx(tx, actor, target, bundleId);
+  });
+}
+
+export type ChannelUnplaceOutcome =
+  | "removed"
+  | "not_placed"
+  | "unknown_channel"
+  | "curated_role_required";
+
+/** Remove a bundle reference from a channel — id-keyed, symmetric gate with place. */
+export async function unplaceBundleFromChannel(
+  actor: MemberActor,
+  channelId: string,
+  bundleId: string,
+): Promise<ChannelUnplaceOutcome> {
+  const ws = actor.workspaceId;
+  return await getDb().transaction(async (tx) => {
+    const target = await channelCurationTargetInTx(tx, ws, channelId);
+    if (target === undefined) {
+      return "unknown_channel";
+    }
+    return await unplaceBundleRefInTx(tx, actor, target, bundleId);
   });
 }
 

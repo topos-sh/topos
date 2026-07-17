@@ -4,7 +4,6 @@ import type { DeviceActor } from "@/lib/auth/guards.server";
 import {
   detachExactInTx,
   entitledIdsInTx,
-  healDetachmentsInTx,
   pgTextArray,
   reattachInTx,
 } from "@/lib/db/detach.server";
@@ -16,12 +15,16 @@ import {
 } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
 import { personDisplayLeftSql } from "@/lib/db/person-display.server";
+import {
+  bundleStatusInTx,
+  placeBundleRefInTx,
+  unplaceBundleRefInTx,
+} from "@/lib/db/queries.channels.server";
 import { foldInviteEmail, INVITATION_TTL_MS } from "@/lib/db/queries.roster.server";
 import {
   bundle,
   bundleSubscription,
   channel,
-  channelBundle,
   channelMember,
   channelOptout,
   deviceExclusion,
@@ -416,15 +419,6 @@ export async function laneReach(
 
 // ── Subscriptions (the ONE stance row) + exclusions ─────────────────────────────────────────
 
-async function bundleStatus(tx: Tx, ws: string, bundleId: string): Promise<string | null> {
-  const rows = await tx
-    .select({ status: bundle.status })
-    .from(bundle)
-    .where(and(eq(bundle.workspaceId, ws), eq(bundle.id, bundleId)))
-    .limit(1);
-  return rows[0]?.status ?? null;
-}
-
 /**
  * Direct-follow: upsert the ONE stance row to 'following', clear THIS device's exclusion (the
  * device fence is construction — the actor's own resolved device id is the only one named),
@@ -437,7 +431,7 @@ export async function followBundle(
 ): Promise<"followed" | "unknown_skill" | "skill_not_active"> {
   const ws = actor.workspaceId;
   return await getDb().transaction(async (tx) => {
-    const status = await bundleStatus(tx, ws, bundleId);
+    const status = await bundleStatusInTx(tx, ws, bundleId);
     if (status === null) {
       return "unknown_skill";
     }
@@ -472,7 +466,7 @@ export async function unfollowBundle(
 ): Promise<"unfollowed" | "unknown_skill"> {
   const ws = actor.workspaceId;
   return await getDb().transaction(async (tx) => {
-    const status = await bundleStatus(tx, ws, bundleId);
+    const status = await bundleStatusInTx(tx, ws, bundleId);
     if (status === null) {
       return "unknown_skill";
     }
@@ -503,7 +497,7 @@ export async function excludeOnDevice(
 ): Promise<"excluded" | "unknown_skill"> {
   const ws = actor.workspaceId;
   return await getDb().transaction(async (tx) => {
-    const status = await bundleStatus(tx, ws, bundleId);
+    const status = await bundleStatusInTx(tx, ws, bundleId);
     if (status === null) {
       return "unknown_skill";
     }
@@ -634,9 +628,12 @@ export async function laneChannelLeave(
 
 /**
  * Place a bundle reference into a channel — creating the channel on FIRST use (member-level).
- * Gates: the bundle active; on a CURATED channel reviewer+ (symmetric with removal). The
- * create-race loser places into the winner's row ('placed', never a raw conflict): ids are
- * minted randomly, so only the name unique can collide, and a re-select resolves it.
+ * Everything past the name resolution is the ONE curation core shared with the web page's
+ * id-keyed functions (queries.channels.server.ts): the bundle-active gate, the CURATED
+ * channel's reviewer+ gate (symmetric with removal), the idempotent insert, the detachment
+ * heal, and the audit row. The create-race loser places into the winner's row ('placed',
+ * never a raw conflict): ids are minted randomly, so only the name unique can collide, and a
+ * re-select resolves it.
  */
 export async function lanePlaceBundle(
   actor: DeviceActor,
@@ -647,7 +644,7 @@ export async function lanePlaceBundle(
 > {
   const ws = actor.workspaceId;
   return await getDb().transaction(async (tx) => {
-    const status = await bundleStatus(tx, ws, bundleId);
+    const status = await bundleStatusInTx(tx, ws, bundleId);
     if (status === null) {
       return "unknown_skill";
     }
@@ -688,27 +685,15 @@ export async function lanePlaceBundle(
         }
       }
     }
-    if (row.mode === "curated" && actor.role === "member") {
-      return "curated_role_required";
+    const placed = await placeBundleRefInTx(tx, actor, row, bundleId);
+    if (placed !== "placed") {
+      return placed;
     }
-    await tx
-      .insert(channelBundle)
-      .values({ channelId: row.id, workspaceId: ws, bundleId, addedBy: actor.userId })
-      .onConflictDoNothing();
-    await healDetachmentsInTx(tx, ws, bundleId);
-    await auditInTx(tx, {
-      workspaceId: ws,
-      actor: { userId: actor.userId, deviceId: actor.deviceId, display: actor.display },
-      kind: "skill_added",
-      subject: row.id,
-      outcome: "ok",
-      details: { skillId: bundleId },
-    });
     return created ? "created" : "placed";
   });
 }
 
-/** Remove a bundle reference from a channel — symmetric gate with place. */
+/** Remove a bundle reference from a channel — symmetric gate with place, the shared core. */
 export async function laneUnplaceBundle(
   actor: DeviceActor,
   channelName: string,
@@ -720,31 +705,7 @@ export async function laneUnplaceBundle(
     if (row === undefined) {
       return "unknown_channel";
     }
-    if (row.mode === "curated" && actor.role === "member") {
-      return "curated_role_required";
-    }
-    const deleted = await tx
-      .delete(channelBundle)
-      .where(
-        and(
-          eq(channelBundle.workspaceId, ws),
-          eq(channelBundle.channelId, row.id),
-          eq(channelBundle.bundleId, bundleId),
-        ),
-      )
-      .returning({ bundleId: channelBundle.bundleId });
-    if (deleted.length === 0) {
-      return "not_placed";
-    }
-    await auditInTx(tx, {
-      workspaceId: ws,
-      actor: { userId: actor.userId, deviceId: actor.deviceId, display: actor.display },
-      kind: "skill_removed",
-      subject: row.id,
-      outcome: "ok",
-      details: { skillId: bundleId },
-    });
-    return "removed";
+    return await unplaceBundleRefInTx(tx, actor, row, bundleId);
   });
 }
 

@@ -139,11 +139,13 @@ function memberWorkspaceChildren(
     route("settings", file("workspace-settings.tsx")),
     // The workspace's device view (staleness + blind spots) — a tab of the Settings page.
     route("settings/devices", file("fleet.tsx")),
-    // The channel index + the create form (Rails-style /channels/new); the channel FACE and its
-    // history live elsewhere (face-shell / here).
+    // The channel index + the create form (Rails-style /channels/new); the channel FACE (the
+    // Skills tab) lives under face-shell, its Members/History/Settings section tabs here.
     route("channels", file("channels-index.tsx")),
     route("channels/new", file("channel-new.tsx")),
+    route("channels/:channel/members", file("channel-members.tsx")),
     route("channels/:channel/history", file("channel-history.tsx")),
+    route("channels/:channel/settings", file("channel-settings.tsx")),
     // The skill subpages (the skill FACE itself is under face-shell). Member-only.
     route("skills/:skill/history", file("skill-history.tsx")),
     route("skills/:skill/proposals", file("skill-proposals.tsx")),

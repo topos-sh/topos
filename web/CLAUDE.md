@@ -148,8 +148,12 @@ an ALIAS origin is 301'd to the canonical one (`TOPOS_PUBLIC_URL`).
 **The signed-in surface:** a workspace dashboard, the skill browser, the rendered review UI (unified diff +
 Approve/Reject + comments + one-click revert), the verification page, the create/join flows, and the ADMIN
 surfaces — the roster page in full (invite / role change / remove / self-serve leave, sole-owner-fenced),
-the skill lifecycle ceremonies (archive / unarchive / delete / purge / rename-with-redirect), channel
-existence-admin + history, the **Settings** page — TABBED into **General** (the workspace policy: review
+the skill lifecycle ceremonies (archive / unarchive / delete / purge / rename-with-redirect), the
+channel pages — TABBED into **Skills** (the face, hosting in-app curation: whoever may curate — any
+member of an open channel, reviewer+ of a curated one — adds/removes the channel's skill references
+through the same core the device lane runs) · **Members** · **History** · **Settings** (the owner
+rename/delete ceremonies) under one shared tab header (`app/components/channel/channel-tabs.tsx`) —
+the **Settings** page — TABBED into **General** (the workspace policy: review
 default · invite policy · staleness window · the `registration` knob) and **Devices** (the workspace fleet
 view: staleness + the named blind spots — detached copies, removed-upstream rows, stale devices), both under
 one shared tab header (`app/components/settings-tabs.tsx`) at `settings` / `settings/devices`), the "your
@@ -158,7 +162,10 @@ read-only, from the vault's `plane` schema; it holds no signing key, computes no
 device-signed write — publishing stays on the enrolled device.
 
 **The left panel** (`app/components/shell/{shell-chrome,app-sidebar}.tsx`, data from
-`app/lib/shell/chrome.server.ts`) is one shadcn collapsible sidebar shared by both signed-in layouts: a
+`app/lib/shell/chrome.server.ts`) is one shadcn collapsible sidebar shared by both signed-in layouts —
+whose content column's header bar carries the global BREADCRUMB trail
+(`app/components/shell/breadcrumbs.tsx`: workspace → section → resource → tab, driven by the route
+match against one central registry; signed-in only, since the anonymous teaser renders no chrome): a
 header strip carrying the `topos_` wordmark beside the ONE collapse toggle (reachable in the icon-collapsed
 state), then the workspace identity (STATIC name in single tenancy, a seat DROPDOWN in multi), the
 workspace's **Skills** and **Channels** lists (each row a name linking to its face, each section header a

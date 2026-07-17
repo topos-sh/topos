@@ -1,10 +1,12 @@
 import type { LoaderFunctionArgs } from "react-router";
-import { Link, useLoaderData } from "react-router";
+import { useLoaderData } from "react-router";
+import { ChannelHeader } from "@/components/channel/channel-header";
+import { ChannelTabs } from "@/components/channel/channel-tabs";
 import { relativeTime } from "@/components/format";
-import { buttonClasses, Card, Chip, PageHeader } from "@/components/ui";
+import { Card, Chip } from "@/components/ui";
 import { notFound, requireMember, workspaceInScope } from "@/lib/auth/guards.server";
 import { type AuditEventRow, auditEventsForSubject } from "@/lib/db/audit.server";
-import { channelKeyByName } from "@/lib/db/queries.channels.server";
+import { channelDetail } from "@/lib/db/queries.channels.server";
 import { useWsPath } from "@/lib/ws-path";
 
 export function meta({ params }: { params: { channel?: string } }) {
@@ -28,34 +30,27 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     notFound();
   }
   const actor = await requireMember(request, workspace.id);
-  const key = await channelKeyByName(actor, channel);
-  if (key === undefined) {
+  const detail = await channelDetail(actor, channel);
+  if (detail === undefined) {
     notFound();
   }
-  const window = await auditEventsForSubject(actor, key.channelId);
-  return { channel, channelName: key.name, events: window.events, hasMore: window.hasMore };
+  const window = await auditEventsForSubject(actor, detail.channelId);
+  return {
+    channel: detail.name,
+    mode: detail.mode,
+    isDefault: detail.isDefault,
+    events: window.events,
+    hasMore: window.hasMore,
+  };
 }
 
 export default function ChannelHistory() {
-  const { channel, channelName, events, hasMore } = useLoaderData<typeof loader>();
+  const { channel, mode, isDefault, events, hasMore } = useLoaderData<typeof loader>();
   const wsPath = useWsPath();
   return (
-    <div className="space-y-8">
-      <PageHeader
-        title={
-          <>
-            <span className="text-faint" aria-hidden="true">
-              #
-            </span>
-            {channelName} history
-          </>
-        }
-        actions={
-          <Link to={wsPath(`channels/${channel}`)} className={buttonClasses("quiet")}>
-            Back to channel
-          </Link>
-        }
-      />
+    <div className="space-y-6">
+      <ChannelHeader name={channel} mode={mode} isDefault={isDefault} />
+      <ChannelTabs basePath={wsPath(`channels/${channel}`)} active="history" />
       {events.length === 0 ? (
         <p className="text-dim text-sm">No recorded events.</p>
       ) : (

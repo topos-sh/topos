@@ -9,6 +9,7 @@ import {
   type ScratchDb,
   seatUser,
   seedBundle,
+  seedChannel,
   seedUser,
 } from "./helpers/scratch-db";
 
@@ -223,5 +224,171 @@ describe("the default channel's self-service opt-out", () => {
     expect(await db.q(`SELECT 1 FROM web.bundle_detachment WHERE user_id = 'u_ana'`)).toHaveLength(
       0,
     );
+  });
+});
+
+describe("curation (place / unplace, id-keyed — the web door onto the shared core)", () => {
+  const openId = "c_cur_open";
+  const curatedId = "c_cur_locked";
+  let everyoneId = "";
+
+  // Fresh fixtures — the earlier suites deleted `eng`, so this block stands on its own: one
+  // open channel, one curated, an active bundle, an archived one, and a reviewer seat.
+  beforeAll(async () => {
+    const queries = await q();
+    await seedChannel(db, wsId, openId, "cur-open");
+    await seedChannel(db, wsId, curatedId, "cur-locked", "curated");
+    await seedBundle(db, wsId, "s_place", "place-helper");
+    await seedBundle(db, wsId, "s_arch", "arch-helper", { status: "archived" });
+    await seedUser(db, "u_rev", "Rev", "rev@example.com");
+    await seatUser(db, wsId, "u_rev", "reviewer");
+    const everyone = await queries.channelKeyByName(asMember(wsId, "u_ana"), "everyone");
+    everyoneId = everyone?.channelId ?? "";
+  });
+
+  it("a member places into an OPEN channel: the reference row + the attributed skill_added audit", async () => {
+    const queries = await q();
+    const ana = asMember(wsId, "u_ana", "member", "Ana");
+    expect(await queries.placeBundleInChannel(ana, openId, "s_place")).toBe("placed");
+    expect(
+      await db.q(
+        `SELECT added_by FROM web.channel_bundle WHERE channel_id = $1 AND bundle_id = 's_place'`,
+        [openId],
+      ),
+    ).toEqual([{ added_by: "u_ana" }]);
+    // The audit row rides the SAME transaction — web-actor attribution carries no device id.
+    expect(
+      await db.q(
+        `SELECT kind, actor_user_id, actor_device_id, details
+         FROM web.audit_event WHERE subject = $1`,
+        [openId],
+      ),
+    ).toEqual([
+      {
+        kind: "skill_added",
+        actor_user_id: "u_ana",
+        actor_device_id: null,
+        details: { skillId: "s_place" },
+      },
+    ]);
+  });
+
+  it("a re-place is idempotent: 'placed' again, ONE row — and the act still audits (the lane's exact behavior)", async () => {
+    const queries = await q();
+    const ana = asMember(wsId, "u_ana", "member", "Ana");
+    expect(await queries.placeBundleInChannel(ana, openId, "s_place")).toBe("placed");
+    expect(
+      await db.q(
+        `SELECT 1 FROM web.channel_bundle WHERE channel_id = $1 AND bundle_id = 's_place'`,
+        [openId],
+      ),
+    ).toHaveLength(1);
+    expect(
+      await db.q(`SELECT 1 FROM web.audit_event WHERE subject = $1 AND kind = 'skill_added'`, [
+        openId,
+      ]),
+    ).toHaveLength(2);
+  });
+
+  it("the bundle gates run FIRST and answer typed: unknown_skill, skill_not_active", async () => {
+    const queries = await q();
+    const ana = asMember(wsId, "u_ana", "member", "Ana");
+    expect(await queries.placeBundleInChannel(ana, openId, "s_nope")).toBe("unknown_skill");
+    expect(await queries.placeBundleInChannel(ana, openId, "s_arch")).toBe("skill_not_active");
+    // The bundle check outranks channel resolution (lane parity — there a bad skill must
+    // never mint a create-on-first-use channel): both unknown answers the skill's.
+    expect(await queries.placeBundleInChannel(ana, "c_nope", "s_nope")).toBe("unknown_skill");
+  });
+
+  it("a channel id that does not resolve in the ACTOR'S workspace is unknown_channel — nonexistent and foreign alike", async () => {
+    const queries = await q();
+    const ana = asMember(wsId, "u_ana", "member", "Ana");
+    expect(await queries.placeBundleInChannel(ana, "c_nope", "s_place")).toBe("unknown_channel");
+    expect(await queries.unplaceBundleFromChannel(ana, "c_nope", "s_place")).toBe(
+      "unknown_channel",
+    );
+    // A REAL channel in another workspace answers the same — the resolve is actor-scoped.
+    // (Born claimed — the claim-state check wants exactly one of code-hash / claimed_at.)
+    await db.q(
+      `INSERT INTO web.workspace (id, name, display_name, claimed_at)
+       VALUES ('ws_other', 'other-ws', 'Other', now())`,
+    );
+    await seedChannel(db, "ws_other", "c_foreign", "foreign-open");
+    expect(await queries.placeBundleInChannel(ana, "c_foreign", "s_place")).toBe("unknown_channel");
+    expect(await queries.unplaceBundleFromChannel(ana, "c_foreign", "s_place")).toBe(
+      "unknown_channel",
+    );
+  });
+
+  it("a CURATED channel refuses a member (no row, no audit); reviewer and owner both pass", async () => {
+    const queries = await q();
+    const ana = asMember(wsId, "u_ana", "member", "Ana");
+    expect(await queries.placeBundleInChannel(ana, curatedId, "s_place")).toBe(
+      "curated_role_required",
+    );
+    expect(
+      await db.q(`SELECT 1 FROM web.channel_bundle WHERE channel_id = $1`, [curatedId]),
+    ).toHaveLength(0);
+    expect(
+      await db.q(`SELECT 1 FROM web.audit_event WHERE subject = $1`, [curatedId]),
+    ).toHaveLength(0);
+    const rev = asMember(wsId, "u_rev", "reviewer", "Rev");
+    expect(await queries.placeBundleInChannel(rev, curatedId, "s_place")).toBe("placed");
+    const owner = asMember(wsId, "u_owner", "owner", "Owner");
+    expect(await queries.placeBundleInChannel(owner, curatedId, "s_doc")).toBe("placed");
+  });
+
+  it("the curated gate is symmetric on remove: a member refuses BEFORE any delete; owner removes", async () => {
+    const queries = await q();
+    const ana = asMember(wsId, "u_ana", "member", "Ana");
+    expect(await queries.unplaceBundleFromChannel(ana, curatedId, "s_place")).toBe(
+      "curated_role_required",
+    );
+    expect(
+      await db.q(
+        `SELECT 1 FROM web.channel_bundle WHERE channel_id = $1 AND bundle_id = 's_place'`,
+        [curatedId],
+      ),
+    ).toHaveLength(1);
+    const owner = asMember(wsId, "u_owner", "owner", "Owner");
+    expect(await queries.unplaceBundleFromChannel(owner, curatedId, "s_place")).toBe("removed");
+  });
+
+  it("remove: the row goes with its skill_removed audit; a second remove is the honest not_placed", async () => {
+    const queries = await q();
+    const ana = asMember(wsId, "u_ana", "member", "Ana");
+    expect(await queries.unplaceBundleFromChannel(ana, openId, "s_place")).toBe("removed");
+    expect(
+      await db.q(
+        `SELECT 1 FROM web.channel_bundle WHERE channel_id = $1 AND bundle_id = 's_place'`,
+        [openId],
+      ),
+    ).toHaveLength(0);
+    expect(
+      await db.q(
+        `SELECT details FROM web.audit_event WHERE subject = $1 AND kind = 'skill_removed'`,
+        [openId],
+      ),
+    ).toEqual([{ details: { skillId: "s_place" } }]);
+    expect(await queries.unplaceBundleFromChannel(ana, openId, "s_place")).toBe("not_placed");
+  });
+
+  it("placing re-entitles: a standing detachment record heals inside the same transaction", async () => {
+    const queries = await q();
+    // u_bo had detached s_heal (their own lapse, frozen); placing it into the default channel
+    // re-entitles them, and the shared core's heal drops the record — entitlement wins.
+    await seedBundle(db, wsId, "s_heal", "heal-helper");
+    await db.q(
+      `INSERT INTO web.bundle_detachment (user_id, workspace_id, bundle_id, cause)
+       VALUES ('u_bo', $1, 's_heal', 'unfollow')`,
+      [wsId],
+    );
+    const ana = asMember(wsId, "u_ana", "member", "Ana");
+    expect(await queries.placeBundleInChannel(ana, everyoneId, "s_heal")).toBe("placed");
+    expect(
+      await db.q(
+        `SELECT 1 FROM web.bundle_detachment WHERE user_id = 'u_bo' AND bundle_id = 's_heal'`,
+      ),
+    ).toHaveLength(0);
   });
 });
