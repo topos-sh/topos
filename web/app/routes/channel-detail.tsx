@@ -4,7 +4,6 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Link, useFetcher, useLoaderData } from "react-router";
 import { ChannelHeader } from "@/components/channel/channel-header";
 import { ChannelTabs } from "@/components/channel/channel-tabs";
-import { ResourcePage } from "@/components/resource-page";
 import { buttonClasses, Card, Chip, SectionHeading } from "@/components/ui";
 import {
   DropdownMenu,
@@ -40,9 +39,12 @@ export function meta({ params }: { params: { channel?: string } }) {
 type AddableSkill = { skillId: string; name: string; displayName: string | null };
 
 /**
- * The channel FACE — resource address and the channel's default SKILLS tab as ONE route. Admission
- * mirrors the other faces: anonymous browser → the constant teaser; a signed-in member → the
- * channel page WITH chrome; a signed-in non-member (or unknown workspace slug) → the house 404.
+ * The channel FACE — resource address and the channel's default SKILLS tab as ONE route. A channel
+ * page is MEMBERS-ONLY: an anonymous browser gets the house 404, indistinguishable from a mistyped
+ * path, so nothing about a channel leaks to a signed-out visitor. (A non-browser document fetch
+ * still got the constant, existence-blind protocol card from the server entry.) A signed-in member
+ * gets the channel page WITH chrome; a signed-in non-member (or unknown workspace slug) → the same
+ * house 404.
  *
  * The Skills tab is the DEFAULT channel view (the bundle references the channel delivers), and it
  * hosts the curation controls: whoever may curate this channel (any member of an open channel, a
@@ -54,7 +56,9 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   const session = await getAuth().api.getSession({ headers: request.headers });
   const actor = actorFromSession(session);
   if (actor === null) {
-    return { face: "teaser" as const };
+    // Signed out: the channel face is not a public teaser — it is the uniform house 404, so an
+    // anonymous probe cannot tell a real channel from a nonexistent one (or from any other path).
+    notFound();
   }
   const workspace = await workspaceInScope(params);
   const memberActor = await requireMember(request, workspace.id);
@@ -199,9 +203,6 @@ async function removeSkillIntent(request: Request, ws: string, channelId: string
 
 export default function ChannelDetail() {
   const data = useLoaderData<typeof loader>();
-  if (data.face === "teaser") {
-    return <ResourcePage />;
-  }
   return (
     <ChannelSkillsPage detail={data.detail} addable={data.addable} canCurate={data.canCurate} />
   );

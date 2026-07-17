@@ -10,9 +10,10 @@ import { gotoSettled, signIn } from "./sign-in";
  *
  * The invariant under test: a non-browser fetcher gets ONE constant protocol card on every path
  * — real, nonexistent, or deep garbage, the origin root included — byte-for-byte identical, so
- * nothing about the response reveals whether the path names anything. A browser gets the
- * constant teaser when anonymous, a redirect into the workspace when it holds the seat, and the
- * uniform house 404 otherwise.
+ * nothing about the response reveals whether the path names anything. An anonymous browser gets
+ * the constant teaser/landing ONLY at the workspace root; a skill or channel face is members-only,
+ * so a signed-out browser gets the uniform house 404 there — indistinguishable from a mistyped
+ * path, and byte-identical whether the name is real or invented. A member gets the canonical page.
  */
 
 const NONEXISTENT = "no-such-workspace-zzz";
@@ -110,16 +111,18 @@ test.describe("anonymous — the constant protocol card + teaser (no existence o
 
     const htmlReal = await real.text();
     const htmlMissing = await missing.text();
-    expect(htmlReal).toContain("Not found");
-    expect(htmlMissing).toContain("Not found");
+    expect(htmlReal).toContain("Page not found");
+    expect(htmlMissing).toContain("Page not found");
     // The real workspace's name leaks into NEITHER (the miss is path-blind).
     expect(htmlReal).not.toContain(WS_DISPLAY_NAME);
     expect(htmlMissing).not.toContain(WS_DISPLAY_NAME);
   });
 
-  test("browser (text/html): the skill FACE renders the constant teaser for real and missing names alike", async ({
+  test("browser (text/html): the skill FACE is the uniform house 404 for a signed-out visitor — real and missing names alike", async ({
     request,
   }) => {
+    // A skill page is members-only. Anonymous → the house 404, NOT a teaser: the marker is gone,
+    // the status is 404, and a real skill name is byte-identical to an invented one (no oracle).
     const real = await request.get(`/skills/card-face-runbook`, {
       headers: { accept: "text/html" },
       maxRedirects: 0,
@@ -128,15 +131,46 @@ test.describe("anonymous — the constant protocol card + teaser (no existence o
       headers: { accept: "text/html" },
       maxRedirects: 0,
     });
-    expect(real.status()).toBe(200);
-    expect(missing.status()).toBe(200);
+    expect(real.status()).toBe(404);
+    expect(missing.status()).toBe(404);
 
     const htmlReal = await real.text();
     const htmlMissing = await missing.text();
-    // The constant teaser marker is present on BOTH pages…
-    expect(htmlReal).toContain(TEASER_MARKER);
-    expect(htmlMissing).toContain(TEASER_MARKER);
-    // …and the real workspace's name leaks into NEITHER (the teaser is path-blind).
+    // The house 404, not the teaser: the resource-address marker is on NEITHER page, and both
+    // carry the constant "Page not found" screen. The response is EXISTENCE-BLIND — both throw
+    // before any workspace/catalog read, so a real skill name and an invented one differ only by
+    // the path the visitor themselves typed (which the address bar already holds), never by any
+    // server-side signal. The real workspace's display name — the true secret — leaks into NEITHER.
+    expect(htmlReal).not.toContain(TEASER_MARKER);
+    expect(htmlMissing).not.toContain(TEASER_MARKER);
+    expect(htmlReal).toContain("Page not found");
+    expect(htmlMissing).toContain("Page not found");
+    expect(htmlReal).not.toContain(WS_DISPLAY_NAME);
+    expect(htmlMissing).not.toContain(WS_DISPLAY_NAME);
+  });
+
+  test("browser (text/html): the channel FACE is the uniform house 404 for a signed-out visitor — real and missing names alike", async ({
+    request,
+  }) => {
+    // Same posture for a channel: members-only, so anonymous → the house 404. `everyone` is the
+    // implicit default channel every workspace is born with — the realest name there is.
+    const real = await request.get(`/channels/everyone`, {
+      headers: { accept: "text/html" },
+      maxRedirects: 0,
+    });
+    const missing = await request.get(`/channels/no-such-channel-zzz`, {
+      headers: { accept: "text/html" },
+      maxRedirects: 0,
+    });
+    expect(real.status()).toBe(404);
+    expect(missing.status()).toBe(404);
+
+    const htmlReal = await real.text();
+    const htmlMissing = await missing.text();
+    expect(htmlReal).not.toContain(TEASER_MARKER);
+    expect(htmlMissing).not.toContain(TEASER_MARKER);
+    expect(htmlReal).toContain("Page not found");
+    expect(htmlMissing).toContain("Page not found");
     expect(htmlReal).not.toContain(WS_DISPLAY_NAME);
     expect(htmlMissing).not.toContain(WS_DISPLAY_NAME);
   });

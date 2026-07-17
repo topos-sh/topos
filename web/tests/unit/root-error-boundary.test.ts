@@ -12,8 +12,8 @@ import { ErrorBoundary } from "@/root";
 
 /**
  * The root boundary is the app's uniform miss/fault surface: a thrown 404 (the guards' `notFound()`,
- * which throws `data(null, { status: 404 })`) must render the "Not found" branch, and anything else
- * the blank "Something went wrong" fault. The branch is chosen from `useRouteError()` — NOT from an
+ * which throws `data(null, { status: 404 })`) must render the "Page not found" branch, and anything
+ * else the "Something went wrong" fault. The branch is chosen from `useRouteError()` — NOT from an
  * `error` prop: a route module's `ErrorBoundary` reads a BUBBLED error only through that hook (a
  * child route throwing, caught by the ancestor root boundary, passes the error via router context,
  * and the framework's own boundary wrapper reads it the same way). Rendering the boundary through
@@ -47,12 +47,12 @@ async function renderBubbledError(thrown: unknown): Promise<string> {
 }
 
 describe("root ErrorBoundary", () => {
-  it("renders the 404 'Not found' branch for a thrown 404 route response", async () => {
+  it("renders the 404 'Page not found' branch for a thrown 404 route response", async () => {
     // Exactly what `notFound()` throws.
     const html = await renderBubbledError(data(null, { status: 404 }));
 
     expect(html).toContain("404");
-    expect(html).toContain("Not found");
+    expect(html).toContain("Page not found");
     expect(html).not.toContain("500");
     expect(html).not.toContain("Something went wrong");
   });

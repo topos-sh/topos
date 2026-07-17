@@ -8,9 +8,11 @@ import { loadChrome } from "@/lib/shell/chrome.server";
 /**
  * The layout for the three shareable FACES (workspace root · a skill · a channel) — where a
  * resource address and its canonical page are ONE route. Unlike shell.tsx there is NO login-bounce
- * middleware: anonymous is a VALID state here (the child face renders the constant teaser / landing
- * with no existence oracle). The chrome loads only for a signed-in visitor; the face module itself
- * decides member (canonical page) vs signed-in non-member (house 404).
+ * middleware: anonymous is a VALID state here, and each child face decides what a signed-out
+ * browser sees with no existence oracle — the workspace ROOT renders the constant teaser / landing,
+ * while a skill or channel face renders the uniform house 404 (members-only, indistinguishable from
+ * a mistyped path). The chrome loads only for a signed-in visitor; the face module itself decides
+ * member (canonical page) vs signed-in non-member (house 404).
  */
 export async function loader({ request }: LoaderFunctionArgs) {
   const session = await getAuth().api.getSession({ headers: request.headers });

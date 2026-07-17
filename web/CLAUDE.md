@@ -143,11 +143,16 @@ redirects + the shareable address, and every workspace-scoped loader resolves th
 and a skill — are each ONE route (resource address AND canonical page) under `face-shell.tsx`, plus a
 catch-all. A non-browser DOCUMENT fetch gets the CONSTANT protocol card (`app/lib/card.server.ts` —
 served whole from the server entry's `handleRequest`, byte-identical on every path incl. `/`,
-`api_base_url` = this origin's own `/api` mount where the device lane is served); an anonymous browser
-gets the constant teaser — the landing page at the single-tenant origin root, the constant resource
-teaser otherwise; a signed-in member gets the canonical page with the app chrome; everyone else (a
-signed-in non-member, an unknown slug) gets the house 404. No face is an existence oracle. A browser on
-an ALIAS origin is 301'd to the canonical one (`TOPOS_PUBLIC_URL`).
+`api_base_url` = this origin's own `/api` mount where the device lane is served). For an ANONYMOUS
+browser the faces split by kind: the workspace ROOT gets the constant teaser (the landing page at the
+single-tenant origin root, the constant resource teaser in multi), but a SKILL or CHANNEL face is
+members-only and gets the house 404 — indistinguishable from a mistyped path, so a signed-out visitor
+gets NO signal that the address shape names a resource (existence-blind: a real name and an invented
+one throw the same `notFound()` before any read). A signed-in member gets the canonical page with the
+app chrome; everyone else (a signed-in non-member, an unknown slug) gets the house 404. No face is an
+existence oracle. A browser on an ALIAS origin is 301'd to the canonical one (`TOPOS_PUBLIC_URL`). The
+uniform miss/fault surface is the root ErrorBoundary → `app/components/error-screen.tsx` (a Klein-voiced
+404/500 page carrying no `error.data`, path, or stack — so every 404 is byte-constant).
 
 **The signed-in surface:** a workspace dashboard, the skill browser, the rendered review UI (unified diff +
 Approve/Reject + comments + one-click revert), the verification page, the create/join flows, and the ADMIN

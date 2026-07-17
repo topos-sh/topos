@@ -1,7 +1,6 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { redirect, useLoaderData } from "react-router";
 import { VersionFiles } from "@/components/browse/version-files";
-import { ResourcePage } from "@/components/resource-page";
 import { SkillHeader } from "@/components/skill/skill-header";
 import { SkillTabs } from "@/components/skill/skill-tabs";
 import { Card } from "@/components/ui";
@@ -23,10 +22,12 @@ export function meta({ params }: { params: { skill?: string } }) {
 }
 
 /**
- * The skill FACE — resource address and canonical Current tab as ONE route. Admission mirrors the
- * workspace face: a non-browser document fetch got the protocol card already; an anonymous browser
- * gets the constant teaser; a signed-in member gets the skill page WITH chrome; a signed-in
- * non-member (or unknown workspace slug) gets the house 404.
+ * The skill FACE — resource address and canonical Current tab as ONE route. A skill page is
+ * MEMBERS-ONLY: an anonymous browser gets the house 404, indistinguishable from a mistyped path, so
+ * nothing about a skill (not even that the address shape names one) leaks to a signed-out visitor.
+ * (A non-browser document fetch still got the constant protocol card from the server entry — that
+ * machine face is existence-blind and teaches `topos follow` regardless.) A signed-in member gets
+ * the skill page WITH chrome; a signed-in non-member (or unknown workspace slug) gets the same 404.
  *
  * The Current tab is the DEFAULT skill view: the current version's files + doc preview inline.
  * Proposals and History are sibling MEMBER-only routes (see SkillTabs). The catalog row this page
@@ -38,7 +39,9 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   const session = await getAuth().api.getSession({ headers: request.headers });
   const actor = actorFromSession(session);
   if (actor === null) {
-    return { face: "teaser" as const };
+    // Signed out: the skill face is not a public teaser — it is the uniform house 404, so an
+    // anonymous probe cannot tell a real skill from a nonexistent one (or from any other path).
+    notFound();
   }
   const workspace = await workspaceInScope(params);
   const memberActor = await requireMember(request, workspace.id);
@@ -73,9 +76,6 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 
 export default function SkillCurrentPage() {
   const data = useLoaderData<typeof loader>();
-  if (data.face === "teaser") {
-    return <ResourcePage />;
-  }
   return <SkillCurrentContent {...data} />;
 }
 

@@ -14,7 +14,6 @@ import type { ReactNode } from "react";
 import type { LinksFunction, MetaFunction } from "react-router";
 import {
   isRouteErrorResponse,
-  Link,
   Links,
   Meta,
   Outlet,
@@ -24,6 +23,7 @@ import {
   useRouteLoaderData,
 } from "react-router";
 import appStylesHref from "./app.css?url";
+import { ErrorScreen } from "./components/error-screen";
 
 export const links: LinksFunction = () => [{ rel: "stylesheet", href: appStylesHref }];
 
@@ -110,31 +110,14 @@ export default function App() {
 
 /**
  * The root boundary — the uniform miss/fault surface. A thrown 404 (the guards' `notFound()`)
- * renders the same blank "Not found" as any missing route; anything else renders the same blank
- * fault. It DELIBERATELY renders no `error.data`, message, or stack: the app discloses nothing
- * about what exists or why a request failed (the 404-not-403 posture carried through to the
- * shell). React Router sets the HTTP status from the thrown response.
+ * renders the SAME designed "Page not found" as any missing route; anything else renders the same
+ * "Something went wrong" fault. It DELIBERATELY passes no `error.data`, message, or stack to the
+ * screen: the app discloses nothing about what exists or why a request failed (the 404-not-403
+ * posture carried through to the shell), so a resource face that 404s an anonymous visitor is
+ * byte-identical to a mistyped path. React Router sets the HTTP status from the thrown response.
  */
 export function ErrorBoundary() {
   const error = useRouteError();
   const notFound = isRouteErrorResponse(error) && error.status === 404;
-  return (
-    <main className="grid min-h-dvh place-items-center px-6">
-      <div className="text-center">
-        <p className="font-mono text-sm text-faint">{notFound ? "404" : "500"}</p>
-        <h1 className="mt-2 font-display text-2xl font-semibold text-ink">
-          {notFound ? "Not found" : "Something went wrong"}
-        </h1>
-        <p className="mt-3 text-dim">
-          {notFound ? "That page isn’t here." : "An unexpected error occurred. Please try again."}
-        </p>
-        <Link
-          to="/"
-          className="mt-6 inline-block border-b border-hairline text-ink hover:border-ink"
-        >
-          Back home
-        </Link>
-      </div>
-    </main>
-  );
+  return <ErrorScreen kind={notFound ? "not-found" : "fault"} />;
 }
