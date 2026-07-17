@@ -69,4 +69,15 @@ describe("registerGenesisBundleInTx — exclusive placement", () => {
       "everyone",
     ]);
   });
+
+  it("the catalog name `topos` is reserved (the CLI's built-in skill) — minted past like a taken name", async () => {
+    const { getDb } = await import("@/lib/db/index.server");
+    const custody = await import("@/lib/db/queries.custody.server");
+    const actor = asDevice(wsId, "u_auth", "dk_auth", "member");
+    const reg = await getDb().transaction((tx) =>
+      custody.registerGenesisBundleInTx(tx, actor, "s_g_reserved", "Topos", null),
+    );
+    // Byte-identical to a collision: no refusal, no oracle — the suffix walks past the reserve.
+    expect(reg.name).toBe("topos-2");
+  });
 });

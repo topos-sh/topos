@@ -90,7 +90,10 @@ with registry re-syncs). The registry additionally exposes `detected_harnesses(h
 whose detect dirs exist) and the crate exports `choose_skill_dir` — the ONE placement-naming
 discipline (sanitized display name → workspace-prefixed on collision → the validated id; only a FREE
 dir or one the caller's own record owns), factored out of the Claude Code adapter so registry-target
-dirs name identically. The CLI's placement engine composes these; the adapters stay content-blind.
+dirs name identically. The dir name `topos` (`RESERVED_SKILL_DIR`) is reserved for the CLI's
+BUILT-IN skill (the one skill whose id equals it): any other skill folding to that name
+disambiguates exactly like an occupied-dir collision, even when the dir is free. The CLI's
+placement engine composes these; the adapters stay content-blind.
 
 **The `triggers` module** — auto-update triggers for NINE more registry harnesses, over two shared
 bases that carry the honest-degrade contract STRUCTURALLY (no API exists for writing another

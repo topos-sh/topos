@@ -275,10 +275,15 @@ pub fn run() -> ExitCode {
             };
             // The breadth arming sweep rides the adopt receipt: when the active adapter armed its
             // own trigger (`currency`), every OTHER detected agent's trigger is armed here at the
-            // composition root — the one layer holding the real ports + `$HOME`.
+            // composition root — the one layer holding the real ports + `$HOME`. The built-in
+            // `topos` skill lands at the same moment (best-effort — an install must not fail over
+            // it), so a freshly wired harness knows how to drive the tool.
             let result = result.map(|mut data| {
                 if data.currency.is_some() {
                     data.triggers = breadth_arm(&ctx.roots, harness.as_ref(), &fs);
+                    if let Err(e) = ops::ensure_builtin(&ctx) {
+                        let _ = diag.note(cmd_name, &e);
+                    }
                 }
                 data
             });
@@ -332,6 +337,10 @@ pub fn run() -> ExitCode {
                 ops::FollowOutcome::Data { mut data, resumed } => {
                     if data.currency.is_some() {
                         data.triggers = breadth_arm(&ctx.roots, harness.as_ref(), &fs);
+                        // The built-in `topos` skill lands with the enrollment (best-effort).
+                        if let Err(e) = ops::ensure_builtin(&ctx) {
+                            let _ = diag.note(cmd_name, &e);
+                        }
                     }
                     ops::FollowOutcome::Data { data, resumed }
                 }
@@ -627,6 +636,21 @@ pub fn run() -> ExitCode {
                     }
                 }
             }
+            // The bare sweep also re-syncs the BUILT-IN `topos` skill (create/refresh/converge —
+            // force-synced to this binary; the durable opt-out is honored inside). Best-effort: a
+            // built-in hiccup must never block the team sweep. Its byte changes count toward the
+            // quiet hook's `reloadSkills` below.
+            let builtin_changed = if bare_sweep {
+                match ops::ensure_builtin(&ctx) {
+                    Ok(r) => r.changed,
+                    Err(e) => {
+                        let _ = diag.note(cmd_name, &e);
+                        false
+                    }
+                }
+            } else {
+                false
+            };
             let result = if has_selectors {
                 if onto_current {
                     Err(ClientError::InvalidArgument(
@@ -646,7 +670,21 @@ pub fn run() -> ExitCode {
                 }
             } else {
                 let target = targets.into_iter().next();
-                pull_with_name_fallback(&ctx, target, onto_current, delivery, &reconcile_opts)
+                // A TARGETED update of the built-in skill has no served pointer to sync against —
+                // refuse toward the verbs that do move it (the name is reserved, so this can never
+                // shadow a followed skill).
+                if target
+                    .as_deref()
+                    .is_some_and(|t| ops::is_builtin(t.split('@').next().unwrap_or(t)))
+                {
+                    Err(ClientError::InvalidArgument(
+                        "`topos` is the built-in skill — the bare `topos update` re-syncs it to \
+                         this binary; `topos self-update` updates the binary itself"
+                            .into(),
+                    ))
+                } else {
+                    pull_with_name_fallback(&ctx, target, onto_current, delivery, &reconcile_opts)
+                }
             };
             // A COMPLETED bare sweep stamps the TTL clock (best-effort) — success, or the quiet
             // path's soft failure (an unreachable plane must not be re-dialed on every session
@@ -676,7 +714,7 @@ pub fn run() -> ExitCode {
                 match result {
                     Ok(out) => {
                         let lines = ops::quiet_hook_lines(&fs, &ctx.layout, now, &out);
-                        if ops::sweep_changed_bytes(&out.data) {
+                        if ops::sweep_changed_bytes(&out.data) || builtin_changed {
                             println!("{}", ops::reload_skills_json(&lines));
                         } else {
                             for line in lines {

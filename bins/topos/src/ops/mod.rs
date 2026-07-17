@@ -20,6 +20,7 @@ mod add;
 mod agent_scope;
 mod arm;
 mod auth;
+mod builtin;
 mod channel;
 mod contribute;
 mod diff;
@@ -46,6 +47,10 @@ pub(crate) use add::{
 };
 pub(crate) use agent_scope::{AgentScopeData, AgentScopeOutcome, exclude_agents};
 pub(crate) use arm::{arm_detected, scrub_all};
+pub(crate) use builtin::{ensure_builtin, is_builtin};
+// The built-in suite drives the refresh seam + the restore verb fn directly.
+#[cfg(test)]
+pub(crate) use builtin::{ensure_with as builtin_ensure_with, follow_builtin as builtin_follow};
 // The scope-update fn is driven through `follow --agent`; the direct re-exports serve the
 // placement-breadth suite (which exercises the shared fn without the verb dispatch).
 #[cfg(test)]

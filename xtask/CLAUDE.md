@@ -10,7 +10,8 @@ cargo xtask gen-schema             # (re)generate contracts/schemas/*.schema.jso
 cargo xtask gen-schema --check     # the contract drift gate — a stale / missing / orphan artifact fails
 cargo xtask gen-fixtures           # (re)generate the golden --json fixtures under contracts/fixtures/
 cargo xtask gen-fixtures --check   # the fixture drift gate (same stale/missing/orphan discipline)
-cargo xtask gen-cli-ref            # PARKED (bails): restored with the client rewrite
+cargo xtask gen-cli-ref            # (re)generate docs/cli.md from the client's real clap tree
+cargo xtask gen-cli-ref --check    # the cli-reference drift gate (stale / missing fails)
 cargo xtask check-arch             # the architectural-layering + vocabulary + schema-boundary gate
 cargo xtask check-registry-drift   # OPT-IN + advisory: diff the baked harness registry vs upstream agents.ts (network; NEVER in ci/CI)
 cargo xtask ci                     # ALL the non-DB gates, in CI's order, failing fast
@@ -27,10 +28,11 @@ cargo xtask conformance            # the store matrices (not yet implemented —
   contract). **The artifacts are generated — never hand-edit them.**
 - **`gen-fixtures [--check]`** — builds the golden `--json` envelopes FROM the typed shapes and
   writes them under `contracts/fixtures/json/`; `--check` is the drift gate.
-- **`gen-cli-ref`** — PARKED during the custody rewrite (it bails with an explanation): `docs/cli.md`
-  is generated from the client's real clap tree, and the client is being rebuilt against the new
-  custody types; xtask carries no edge to it until that lands. The CLI rewrite restores the
-  generator, the `topos` dep, and the ci() gate entry.
+- **`gen-cli-ref [--check]`** — writes (or `--check`s) `docs/cli.md`. The RENDERER lives in the
+  client lib (`topos::cli_ref_md()` — rendered from the real clap tree, `topos::cli_command()`),
+  because it has TWO consumers: this gate's committed reference, and the built-in `topos` skill,
+  which places the SAME bytes as its `reference.md` — one implementation, so neither copy can
+  drift from what the binary parses. xtask keeps only the file-write/byte-compare driver.
 - **`check-arch`** — the dependency-graph + source-scan trust claims as one gate:
   - the client (`topos`) carries no `plane-store` / `sqlx` / async-runtime / HTTP / contract-derive
     edge; the kernel (`topos-core`) carries no wire DTOs or IO stacks; the leaf crates stay lean;
@@ -62,7 +64,7 @@ cargo xtask conformance            # the store matrices (not yet implemented —
   the TS, not a real parser: it reads each entry's `name`/`skillsDir`/`globalSkillsDir` and skips the
   `detectInstalled` bodies, so a detect-only upstream change is a known blind spot — skim `agents.ts`
   by eye on a real re-sync. (Uses `ureq`, the workspace's blocking transport.)
-- **`ci`** — the contributor's pre-push loop: fmt, clippy, doc, the drift gates, check-arch (the
-  cli-ref gate re-joins with the client rewrite). Not covered: `cargo test --workspace` (needs
-  `DATABASE_URL`), `cargo deny check`, the sqlx offline-metadata drift job.
+- **`ci`** — the contributor's pre-push loop: fmt, clippy, doc, the drift gates (schema / fixtures /
+  cli-ref), check-arch. Not covered: `cargo test --workspace` (needs `DATABASE_URL`),
+  `cargo deny check`, the sqlx offline-metadata drift job.
 - **`conformance`** — a stub; prints "not yet implemented".

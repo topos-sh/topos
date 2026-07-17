@@ -3,6 +3,7 @@
 //! the crash/durability gate, the follow/enrollment flow, the pull/apply sync engine, and the verbs.
 
 mod auth;
+mod builtin_skill;
 mod durability;
 mod follow;
 mod placement_breadth;

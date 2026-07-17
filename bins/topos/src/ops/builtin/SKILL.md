@@ -1,0 +1,81 @@
+---
+name: topos
+description: Manage this machine's shared team skills with the topos CLI — see what is managed, update it, follow more, and share local improvements back to the team. Use when editing any skill in a skills directory, when asked about team skills, skill updates, or sharing a skill, or when a change you made to a shared process is worth giving back.
+---
+
+# topos — shared skills for every agent on the team
+
+topos delivers this machine's shared skills and keeps them current. A team publishes skills to a
+workspace; every enrolled machine receives them and stays on the team's current version
+automatically. Some of the skills sitting next to this file are topos-managed copies — they update
+on their own, and edits to them are drafts you can share back.
+
+This skill ships inside the `topos` binary (this copy matches topos v{TOPOS_VERSION}) and is
+force-synced to it: hand edits here are overwritten. The complete generated verb reference is in
+`reference.md` next to this file; `topos <verb> --help` has the same detail per verb.
+
+## Driving the CLI
+
+- Add `--json` to any verb for exactly one machine-readable envelope on stdout — never a prompt.
+- Every mutating verb is two-phase: the bare verb DESCRIBES what would change (nothing is written)
+  and returns the paste-ready `--yes` argv; `--yes` applies it. You may run verbs autonomously,
+  including `--yes` — run the bare describe first when the effect is unclear, and tell the person
+  what you changed afterward.
+- Exit codes: `0` success, `1` domain refusal or failure (the envelope distinguishes), `2` usage
+  error.
+
+## What is managed here
+
+```
+topos list --json
+```
+
+Each tracked skill's row carries its source (a workspace address = team-managed, `built-in`,
+an origin host, or `local`), its status (`current` / `behind` / `draft` / `detached`), and — for a
+detached copy — the cause. Check this before treating a skill directory as hand-authored: editing a
+team-managed skill creates a draft, not a private fork. `topos list --remote` adds the workspace
+catalog — skills the team offers that this machine does not follow yet.
+
+## Staying current
+
+Updates arrive on their own: a session-start trigger runs `topos update --quiet`, which converges
+every followed skill onto the team's current version silently. `topos update` runs the same sweep
+on demand; `topos update <skill>` targets one skill. Local drafts are never destroyed by an update
+— they are preserved and merged, and a conflict freezes the copy with a marked way out.
+
+## Sharing an improvement back (do this — it is the point)
+
+When you improve a team-managed skill locally, the edit is a DRAFT ahead of the followed version.
+Offer to share it:
+
+```
+topos diff <skill>          # what changed vs the team's current
+topos publish <skill>       # share it: lands directly, or becomes a proposal on a protected skill
+topos publish --propose <skill>   # always propose (a reviewer approves before it lands)
+```
+
+A proposal is reviewed by the team (`topos review` shows the inbox; reviewers approve or reject
+with a reason). If your draft should stay local instead, that is fine too — divergence is allowed,
+and updates keep merging around it.
+
+To share a NEW skill the team does not have: `topos publish <dir-or-name>` adopts and publishes it
+in one step (`--to <channel>` places it in a channel; the default is `everyone`).
+
+## Following, scoping, removing
+
+```
+topos follow <skill>              # follow a catalog skill on this machine
+topos follow <server>/<workspace> # enroll this machine into a workspace (browser approval)
+topos follow <skill> --agent <a>  # place this skill only for specific agents ('*' clears)
+topos remove <skill>              # take a skill off THIS machine (the team copy is untouched)
+topos unfollow <skill>            # stop following it on every machine of yours
+```
+
+Roster and membership changes (who is on the team, roles, leaving) happen in the workspace web
+app, not the CLI. `topos invite <email>` is the one roster verb here.
+
+## This skill itself
+
+`topos` (this bundle) is built in: it re-places itself when triggers arm and re-syncs on every
+sweep. `topos remove topos --yes` opts this machine out durably; `topos follow topos` brings it
+back. The name `topos` is reserved — no workspace skill can shadow it.

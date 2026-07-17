@@ -236,15 +236,29 @@ pub(crate) fn list_with(
             .as_deref()
             .and_then(|w| sync.workspaces.get(w))
             .and_then(|ws| ws.delivered.get(&id_str));
-        let (source, status, cause) = derive_columns(
-            follow_entry,
-            draft,
-            origin_host,
-            workspace_id.as_deref().and_then(|w| labels.get(w)),
-            workspace_id.is_none() || signed_in,
-            delivered,
-            &lock.base_commit,
-        );
+        let (source, status, cause) = if crate::ops::builtin::is_builtin(&id_str) {
+            // The built-in skill: shipped by the CLI, force-synced to the binary. A hand edit shows
+            // `draft` honestly until the next sweep overwrites it (snapshot-first).
+            (
+                Some("built-in".to_owned()),
+                Some(if draft {
+                    SkillStatus::Draft
+                } else {
+                    SkillStatus::Current
+                }),
+                None,
+            )
+        } else {
+            derive_columns(
+                follow_entry,
+                draft,
+                origin_host,
+                workspace_id.as_deref().and_then(|w| labels.get(w)),
+                workspace_id.is_none() || signed_in,
+                delivered,
+                &lock.base_commit,
+            )
+        };
         tracked.push((
             id_str,
             SkillEntry {

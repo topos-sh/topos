@@ -1043,6 +1043,7 @@ pub(crate) fn agent_scope_tty(
     let heading = match (d.action.as_str(), d.agents.is_empty()) {
         ("exclude", _) => format!("Excluding agents on this device: {}", d.agents.join(", ")),
         ("scope", true) => "Clearing the agent scope (back to every detected agent)".to_owned(),
+        ("restore", _) => "Placing the built-in `topos` skill on this machine".to_owned(),
         _ => format!("Scoping placement to agents: {}", d.agents.join(", ")),
     };
     s.push_str(&heading);
@@ -1171,6 +1172,12 @@ pub(crate) fn uninstall_describe_tty(
             d.sidecar_path
         ));
     }
+    if !d.builtin_dirs.is_empty() {
+        s.push_str(&format!(
+            "\n  · remove the built-in `topos` skill's copies (topos-authored): {}",
+            d.builtin_dirs.join(", ")
+        ));
+    }
     s.push_str("\n  · leave every SKILL FILE in your agent dirs untouched — uninstall deletes no skill bytes");
     if let Some(bin) = &d.binary_path {
         s.push_str(&format!(
@@ -1187,6 +1194,12 @@ pub(crate) fn uninstall_describe_tty(
 /// The applied `uninstall`'s TTY — what was removed, the hook scrub surfaced honestly.
 pub(crate) fn uninstall_applied_tty(d: &crate::ops::UninstallApplied) -> String {
     let mut s = String::from("Uninstalled topos.");
+    if !d.builtin_dirs.is_empty() {
+        s.push_str(&format!(
+            "\n  · removed the built-in `topos` skill's copies: {}",
+            d.builtin_dirs.join(", ")
+        ));
+    }
     let hook_line = match (d.hook.state, d.hook.touched_path.as_deref()) {
         (TriggerState::Degraded, _) => {
             "\n  · couldn't edit the harness config — remove the topos auto-update hook manually"
@@ -1293,6 +1306,17 @@ pub(crate) fn auth_status_tty(d: &crate::ops::AuthStatusData) -> String {
 /// One `remove` item line for the describe/apply — the boundary a followed removal keeps vs the
 /// permanence of a local delete.
 fn remove_item_line(item: &RemoveItem, applied: bool) -> String {
+    // A removal-specific disclosure overrides the kind's stock line (the built-in skill's durable
+    // opt-out and its way back).
+    if let Some(note) = &item.note {
+        let verb = if applied { "Removed" } else { "Would remove" };
+        let dirs = if item.agent_dirs.is_empty() {
+            String::new()
+        } else {
+            format!(" from {}", item.agent_dirs.join(", "))
+        };
+        return format!("{verb} '{}'{dirs} — {note}.", item.name);
+    }
     match item.kind {
         RemoveKind::FollowedExclusion => {
             let verb = if applied { "Removed" } else { "Would remove" };

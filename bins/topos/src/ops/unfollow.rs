@@ -112,6 +112,19 @@ pub(crate) fn unfollow(
     skills: &[String],
     yes: bool,
 ) -> Result<UnfollowOutcome, ClientError> {
+    // The built-in `topos` skill is not a subscription — there is nothing to unfollow; taking it
+    // off this machine is `remove` (recognized before the grammar; the name is reserved).
+    if targets
+        .iter()
+        .chain(skills.iter())
+        .any(|t| super::builtin::is_builtin(t))
+    {
+        return Err(ClientError::InvalidArgument(
+            "`topos` is the built-in skill — nothing is followed; `topos remove topos` takes it \
+             off this machine"
+                .into(),
+        ));
+    }
     let mut specs: Vec<resolve::TargetSpec> = targets
         .iter()
         .map(|t| resolve::TargetSpec::free(t))

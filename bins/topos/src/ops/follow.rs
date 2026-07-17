@@ -318,6 +318,22 @@ pub(crate) fn follow(
                 .into(),
         ));
     }
+    // The BUILT-IN `topos` skill — dispatched before the grammar (the name is reserved end-to-end,
+    // so it can never shadow a workspace resource): bare `follow topos` re-places it after a
+    // `remove` (or repairs it in place); `--agent` scopes it — on a present built-in the ordinary
+    // scope update, on an absent/opted-out one the restore records the include-list in the same
+    // act (one invocation, never a refusal toward a second command).
+    if let [single] = targets.as_slice()
+        && super::builtin::is_builtin(single)
+        && opts.channels.is_empty()
+        && opts.skills.is_empty()
+    {
+        return Ok(FollowOutcome::Scope(super::builtin::follow_builtin(
+            ctx,
+            &opts.agents,
+            opts.yes,
+        )?));
+    }
     if !opts.agents.is_empty() {
         if !opts.channels.is_empty() {
             return Err(ClientError::InvalidArgument(

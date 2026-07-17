@@ -28,6 +28,10 @@ pub(crate) struct UninstallDescribe {
     /// The running binary's own path — NOT deleted; disclosed so the human can remove it themselves.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binary_path: Option<String>,
+    /// The BUILT-IN `topos` skill's placed copies — topos-authored artifacts (like the hook entry),
+    /// so they go with the teardown; YOUR skill files still stay untouched.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub builtin_dirs: Vec<String>,
 }
 
 /// The applied `uninstall` — what was removed.
@@ -41,6 +45,9 @@ pub(crate) struct UninstallApplied {
     pub triggers: Vec<topos_types::results::BreadthTriggerReport>,
     /// Whether the `~/.topos/` sidecar tree was deleted (false = there was nothing to delete).
     pub sidecar_removed: bool,
+    /// The built-in `topos` skill's placed copies that were removed (topos-authored artifacts).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub builtin_dirs: Vec<String>,
     /// The running binary's own path — left in place; the human removes it with their installer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binary_path: Option<String>,
@@ -90,6 +97,10 @@ pub(crate) fn uninstall(
         )));
     }
 
+    // The built-in `topos` skill's placed copies (best-effort read — a torn/newer sidecar must
+    // never block the one command that deletes it).
+    let builtin_dirs = super::builtin::placement_dirs(ctx).unwrap_or_default();
+
     if !yes {
         return Ok(UninstallOutcome::Described {
             describe: UninstallDescribe {
@@ -97,6 +108,7 @@ pub(crate) fn uninstall(
                 sidecar_path,
                 sidecar_present,
                 binary_path: binary,
+                builtin_dirs,
             },
             yes_argv: vec![
                 "topos".to_owned(),
@@ -107,9 +119,18 @@ pub(crate) fn uninstall(
     }
 
     // ---- APPLY (`--yes`) ----
-    // Scrub the auto-update hook FIRST (its config lives in the harness home, not `~/.topos/`), then delete
-    // the sidecar tree. Idempotent: a second run finds no hook to remove and no sidecar to delete.
+    // Scrub the auto-update hook FIRST (its config lives in the harness home, not `~/.topos/`), then
+    // the built-in skill's placed copies (topos-authored, recorded in the sidecar we are about to
+    // delete), then the sidecar tree itself. Idempotent: a second run finds nothing to remove.
     let hook = ctx.harness.remove_currency_trigger();
+    let mut builtin_removed = Vec::new();
+    for dir in &builtin_dirs {
+        let p = std::path::Path::new(dir);
+        if ctx.fs.exists(p) {
+            ctx.fs.remove_dir_all(p)?;
+            builtin_removed.push(dir.clone());
+        }
+    }
     let sidecar_removed = if ctx.fs.exists(home) {
         ctx.fs.remove_dir_all(home)?;
         true
@@ -123,6 +144,7 @@ pub(crate) fn uninstall(
         // the real ports; it attaches its outcomes here after this returns.
         triggers: Vec::new(),
         sidecar_removed,
+        builtin_dirs: builtin_removed,
         binary_path: binary,
     }))
 }

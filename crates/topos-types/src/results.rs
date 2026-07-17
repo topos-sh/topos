@@ -731,6 +731,10 @@ pub struct RemoveItem {
     /// Whether the sidecar bytes are kept (a followed exclusion / a tracked-local keeps the bytes as a
     /// frozen copy; an untracked-local delete removes the only copy there is).
     pub bytes_kept: bool,
+    /// A removal-specific disclosure (the built-in skill's durable opt-out + its way back). Absent
+    /// for ordinary removals. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// How `remove` treats one skill. **INFERRED value set.**

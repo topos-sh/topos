@@ -63,6 +63,9 @@ enum Removal {
     },
     /// An untracked copy in an agent dir → a permanent delete of that directory.
     Untracked { name: String, dir: PathBuf },
+    /// The built-in `topos` skill → the durable device opt-out (no sweep re-places it;
+    /// `topos follow topos` brings it back).
+    Builtin { dirs: Vec<PathBuf> },
 }
 
 /// Dispatch the `remove` verb: resolve every target (all-or-none), describe (bare) or apply (`--yes`).
@@ -92,8 +95,10 @@ pub(crate) fn remove(
         && targets.iter().all(|t| {
             !t.contains('@')
                 && !t.contains('/')
-                && super::resolve_skill(ctx, t)
-                    .is_ok_and(|(sid, _)| super::followed_workspace(ctx, sid.as_str()).is_some())
+                && (super::builtin::is_builtin(t)
+                    || super::resolve_skill(ctx, t).is_ok_and(|(sid, _)| {
+                        super::followed_workspace(ctx, sid.as_str()).is_some()
+                    }))
         })
     {
         return Ok(RemoveOutcome::AgentScope(
@@ -185,6 +190,9 @@ pub(crate) fn remove(
                     ctx.fs.remove_dir_all(dir)?;
                 }
             }
+            Removal::Builtin { .. } => {
+                super::builtin::remove_builtin(ctx)?;
+            }
         }
     }
     Ok(RemoveOutcome::Applied(RemoveData {
@@ -202,6 +210,16 @@ fn classify(
     agent_filter: Option<&str>,
     token: &str,
 ) -> Result<Removal, ClientError> {
+    // The built-in `topos` skill — recognized before the grammar (the name is reserved end-to-end,
+    // so it can never shadow a workspace resource): removal is the durable device opt-out.
+    if super::builtin::is_builtin(token) {
+        return Ok(Removal::Builtin {
+            dirs: super::builtin::placement_dirs(ctx)?
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
+        });
+    }
     let parsed = resolve::parse_target(token)?;
     // An explicit `<name>@<agent>` names an untracked agent-dir copy — resolve it through discovery
     // (never a plane resource).
@@ -310,6 +328,7 @@ fn describe_item(removal: &Removal) -> RemoveItem {
             workspace_id: Some(workspace_id.clone()),
             agent_dirs: Vec::new(),
             bytes_kept: true,
+            note: None,
         },
         Removal::TrackedLocal { name, dirs, .. } => RemoveItem {
             name: name.clone(),
@@ -317,6 +336,7 @@ fn describe_item(removal: &Removal) -> RemoveItem {
             workspace_id: None,
             agent_dirs: dirs.iter().map(|d| d.display().to_string()).collect(),
             bytes_kept: false,
+            note: None,
         },
         Removal::Untracked { name, dir } => RemoveItem {
             name: name.clone(),
@@ -324,6 +344,19 @@ fn describe_item(removal: &Removal) -> RemoveItem {
             workspace_id: None,
             agent_dirs: vec![dir.display().to_string()],
             bytes_kept: false,
+            note: None,
+        },
+        Removal::Builtin { dirs } => RemoveItem {
+            name: super::builtin::BUILTIN_NAME.to_owned(),
+            kind: RemoveKind::TrackedLocalPermanent,
+            workspace_id: None,
+            agent_dirs: dirs.iter().map(|d| d.display().to_string()).collect(),
+            bytes_kept: false,
+            note: Some(
+                "the built-in topos skill — the opt-out is durable (no sweep re-places it); \
+                 `topos follow topos` brings it back"
+                    .to_owned(),
+            ),
         },
     }
 }

@@ -82,6 +82,12 @@ pub fn sanitize_skill_dir(raw: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
+/// The dir name reserved for the CLI's BUILT-IN skill (whose skill id IS this name). No other
+/// skill may name its placement dir `topos` — even a free dir — so the built-in can never be
+/// shadowed or clobbered by a workspace skill; a colliding display name disambiguates exactly like
+/// an occupied-dir collision (workspace prefix, then the id).
+pub const RESERVED_SKILL_DIR: &str = "topos";
+
 /// Choose the directory a skill's bytes land in under `skills_root` — the ONE naming discipline every
 /// placement target follows (the reference adapter's, factored out so registry-resolved dirs name
 /// identically): prefer the skill's **sanitized display name** (agents invoke a skill by its folder
@@ -89,7 +95,8 @@ pub fn sanitize_skill_dir(raw: &str) -> Option<String> {
 /// disambiguate by the sanitized workspace slug (`<ws>-<name>`); fall back to the validated,
 /// globally-unique `skill_id`. A foreign dir is NEVER a valid target — only a free dir, or one
 /// `is_owned` answers `true` for (the caller's own placement record), is ever chosen, so a placement
-/// can never clobber another skill's (or the user's) directory.
+/// can never clobber another skill's (or the user's) directory. The name [`RESERVED_SKILL_DIR`] is
+/// additionally reserved for the built-in skill (the one skill whose ID equals it).
 ///
 /// `naming`'s strings are UNTRUSTED and are sanitized to a single safe path component before any join;
 /// `skill_id` must be an already-validated single component (the trait-wide id contract).
@@ -101,8 +108,9 @@ pub fn choose_skill_dir(
     is_owned: &dyn Fn(&Path) -> bool,
 ) -> PathBuf {
     if let Some(name) = naming.name.and_then(sanitize_skill_dir) {
+        let reserved = name == RESERVED_SKILL_DIR && skill_id != RESERVED_SKILL_DIR;
         let by_name = skills_root.join(&name);
-        if !by_name.exists() || is_owned(&by_name) {
+        if !reserved && (!by_name.exists() || is_owned(&by_name)) {
             return by_name;
         }
         // Collision: a different skill (or the user's own dir) already holds this name. Namespace by

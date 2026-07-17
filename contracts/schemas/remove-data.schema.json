@@ -42,6 +42,13 @@
         "name": {
           "type": "string"
         },
+        "note": {
+          "description": "A removal-specific disclosure (the built-in skill's durable opt-out + its way back). Absent\nfor ordinary removals. **INFERRED** (additive).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "workspace_id": {
           "description": "The workspace the exclusion is recorded in (a followed skill); absent for a local copy.",
           "type": [

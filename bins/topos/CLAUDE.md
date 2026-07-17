@@ -337,6 +337,22 @@ are asserted byte-equal in tests.
   --yes` reuses the same reconcile with explicit `ReconcileOpts` (batch-accepted first receives,
   declined/renamed collisions, one workspace, no ack) and no gate.
 
+- **The BUILT-IN `topos` skill** (`ops/builtin`, `cli_ref`) — the meta-skill that teaches an agent
+  what topos is and how to drive it, shipped INSIDE the binary: an authored `SKILL.md` (version-
+  stamped) + `reference.md` = the SAME bytes `docs/cli.md` carries (`cli_ref::cli_ref_md()` renders
+  from the real clap tree; xtask's `gen-cli-ref` calls the same fn — one renderer, no drift). It
+  lands through the ORDINARY placement engine (shared-dir-first; `--agent` scoping works) at the
+  trigger-arming moments (`add`'s adopt receipt, the enrollment receipt) and re-syncs on every bare
+  `update` sweep — FORCE-SYNCED to the binary (a hand edit is snapshotted into the store, then
+  overwritten; never a draft; a binary change commits + re-places), with its byte changes riding the
+  quiet hook's `reloadSkills`. NOT a subscription: no `follows.json` row, the plane never hears of
+  it; its device-local state (`state/builtin.json`) carries the durable `remove topos` opt-out (no
+  sweep resurrects; `follow topos` re-places, riding the agent-scope payload as `restore`) + the
+  `--agent` scope. `list` shows it as `built-in`; `publish`/`unfollow`/targeted `update` refuse it
+  typed toward the verbs that do act; `uninstall --yes` removes its placed copies (topos-authored
+  artifacts — user skill files still stay). The NAME is reserved end-to-end: `add` refuses it, the
+  one naming discipline never hands the `topos` dir to another skill
+  (`topos_harness::RESERVED_SKILL_DIR`), and the app's catalog mint suffixes past it server-side.
 - **The `upgrade` maintenance command** (`ops/upgrade`, `release`, `plane_http::UreqReleases`) — the native
   self-updater. It resolves the target release (the latest tag, or a `--version <tag>` pin — which allows a
   pinned downgrade), downloads that tag's `topos-<triple>.tar.gz` + its `SHA256SUMS`, verifies the

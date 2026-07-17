@@ -860,6 +860,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 workspace_id: Some("w_acme".to_owned()),
                 agent_dirs: vec!["~/.claude/skills/deploy".to_owned()],
                 bytes_kept: true,
+                note: None,
             }],
             applied: false,
         })
@@ -886,6 +887,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 workspace_id: Some("w_acme".to_owned()),
                 agent_dirs: vec!["~/.claude/skills/deploy".to_owned()],
                 bytes_kept: true,
+                note: None,
             }],
             applied: true,
         })
@@ -1195,247 +1197,14 @@ fn json_files_under(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 // =================================================================================================
-// gen-cli-ref — the CLI reference (`docs/cli.md`), rendered from the REAL `clap` tree (`topos::
-// cli_command()`) so it can never drift from what the binary parses. Same byte-compare `--check` drift
-// discipline as the schema/fixture gates.
+// gen-cli-ref — the CLI reference (`docs/cli.md`), rendered from the REAL `clap` tree by the client
+// lib's own renderer (`topos::cli_ref_md()` — shared with the built-in `topos` skill, which places
+// the same bytes as its `reference.md`). Same byte-compare `--check` drift discipline as the
+// schema/fixture gates.
 // =================================================================================================
-
-/// The behavior verbs grouped by SCOPE — the KNOWN verb lists drive the grouping (not clap metadata),
-/// so the reference reads the way the tool is taught: self-scoped, then team-scoped, then maintenance.
-const SELF_SCOPED: [&str; 8] = [
-    "follow", "unfollow", "update", "add", "remove", "list", "diff", "log",
-];
-const TEAM_SCOPED: [&str; 6] = [
-    "publish", "review", "revert", "channel", "protect", "invite",
-];
-const MAINTENANCE: [&str; 3] = ["self-update", "auth", "uninstall"];
 
 fn docs_dir() -> PathBuf {
     workspace_root().join("docs")
-}
-
-/// One markdown table cell: collapse internal whitespace to single spaces and escape the `|` that would
-/// otherwise split the row.
-fn cell(s: &str) -> String {
-    s.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .replace('|', "\\|")
-}
-
-/// Does the arg carry a value (an option or a positional), vs a bare boolean flag?
-fn takes_value(arg: &clap::Arg) -> bool {
-    matches!(
-        arg.get_action(),
-        clap::ArgAction::Set | clap::ArgAction::Append
-    )
-}
-
-/// Is the arg repeatable / multi-valued (a `Vec` field)?
-fn is_multiple(arg: &clap::Arg) -> bool {
-    matches!(arg.get_action(), clap::ArgAction::Append)
-}
-
-/// The first declared value name for an arg (its `<NAME>` placeholder), falling back to the id in caps.
-fn value_name(arg: &clap::Arg) -> String {
-    arg.get_value_names()
-        .and_then(|names| names.first().map(|n| n.as_str().to_owned()))
-        .unwrap_or_else(|| arg.get_id().as_str().to_uppercase())
-}
-
-/// The usage token for a positional arg: `<NAME>` (required) / `[NAME]` (optional), plus `...` when
-/// repeatable.
-fn positional_token(arg: &clap::Arg) -> String {
-    let name = value_name(arg);
-    let inner = if arg.is_required_set() {
-        format!("<{name}>")
-    } else {
-        format!("[{name}]")
-    };
-    if is_multiple(arg) {
-        format!("{inner}...")
-    } else {
-        inner
-    }
-}
-
-/// The auto-generated `--help` / `--version` args clap injects — identified by their ACTION, so a real
-/// user field literally named `version` (e.g. `self-update --version <TAG>`) is NEVER mistaken for one.
-fn is_auto_help(arg: &clap::Arg) -> bool {
-    matches!(
-        arg.get_action(),
-        clap::ArgAction::Help
-            | clap::ArgAction::HelpShort
-            | clap::ArgAction::HelpLong
-            | clap::ArgAction::Version
-    )
-}
-
-/// True for the auto-generated help/version pair + the two global flags surfaced once under "Global
-/// options" — the args each per-verb table omits.
-fn is_boilerplate(arg: &clap::Arg) -> bool {
-    is_auto_help(arg) || matches!(arg.get_id().as_str(), "json" | "workspace")
-}
-
-/// The comma-joined spellings of an option (`-m, --message`); empty for a bare positional.
-fn option_spellings(arg: &clap::Arg) -> String {
-    let mut spellings = Vec::new();
-    if let Some(short) = arg.get_short() {
-        spellings.push(format!("-{short}"));
-    }
-    if let Some(long) = arg.get_long() {
-        spellings.push(format!("--{long}"));
-    }
-    spellings.join(", ")
-}
-
-/// Render one command (recursing into any subcommands) into `out` at the given heading level.
-fn render_command(out: &mut String, path: &str, cmd: &clap::Command, level: usize) {
-    let hashes = "#".repeat(level);
-    out.push_str(&format!("\n{hashes} `{path}`\n\n"));
-
-    // The usage line.
-    let mut usage = vec![path.to_owned()];
-    let has_flags = cmd
-        .get_arguments()
-        .any(|a| !a.is_positional() && !a.is_hide_set() && !is_boilerplate(a));
-    if has_flags {
-        usage.push("[OPTIONS]".to_owned());
-    }
-    if cmd.has_subcommands() {
-        usage.push("<COMMAND>".to_owned());
-    }
-    for arg in cmd.get_arguments() {
-        if arg.is_positional() && !arg.is_hide_set() && !is_boilerplate(arg) {
-            usage.push(positional_token(arg));
-        }
-    }
-    out.push_str(&format!("```\n{}\n```\n\n", usage.join(" ")));
-
-    // The about text — the long form when present (the full description), collapsed to one paragraph.
-    if let Some(about) = cmd.get_long_about().or_else(|| cmd.get_about()) {
-        out.push_str(&format!("{}\n\n", cell(&about.to_string())));
-    }
-
-    // The args/flags table (visible, non-boilerplate args only).
-    let rows: Vec<&clap::Arg> = cmd
-        .get_arguments()
-        .filter(|a| !a.is_hide_set() && !is_boilerplate(a))
-        .collect();
-    if !rows.is_empty() {
-        out.push_str("| Argument / flag | Value | Default | Description |\n");
-        out.push_str("|---|---|---|---|\n");
-        for arg in rows {
-            let name = if arg.is_positional() {
-                positional_token(arg)
-            } else {
-                option_spellings(arg)
-            };
-            let value = if takes_value(arg) && !arg.is_positional() {
-                format!("`<{}>`", value_name(arg))
-            } else {
-                String::new()
-            };
-            let default = arg
-                .get_default_values()
-                .iter()
-                .map(|v| v.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let help = arg.get_help().map(|h| h.to_string()).unwrap_or_default();
-            out.push_str(&format!(
-                "| `{}` | {} | {} | {} |\n",
-                cell(&name),
-                value,
-                cell(&default),
-                cell(&help),
-            ));
-        }
-        out.push('\n');
-    }
-
-    // Recurse into visible subcommands (e.g. `auth login|logout|status`).
-    for sub in cmd.get_subcommands() {
-        if sub.is_hide_set() {
-            continue;
-        }
-        render_command(out, &format!("{path} {}", sub.get_name()), sub, level + 1);
-    }
-}
-
-/// Render the full CLI reference markdown from the real clap command tree.
-fn cli_ref_md() -> String {
-    let root = topos::cli_command();
-    let mut out = String::new();
-    out.push_str("# `topos` command reference\n\n");
-    out.push_str(
-        "> GENERATED from the `clap` command tree by `cargo xtask gen-cli-ref` — do not hand-edit. \
-         Change the CLI, re-run the command, and commit the result; the `--check` variant is the drift \
-         gate.\n\n",
-    );
-    out.push_str(
-        "`topos` is the client an agent drives non-interactively. Every mutating verb is TWO-PHASE: a \
-         bare invocation DESCRIBES what would change (nothing is written), and `--yes` applies it in \
-         one shot (`revert` is the exception — `--yes` there also acknowledges a no-op). `--json` works \
-         on every verb and prints exactly one envelope on stdout (never a prompt). The exit status is \
-         one of three classes: `0` on success, `1` on a domain refusal or a failed operation (the \
-         envelope's `ok` + `error.outcome` distinguish a refusal from a transport fault), and `2` on a \
-         usage error (an unknown flag or a missing argument). The session-start auto-update hook runs \
-         `topos update --quiet`, which stays silent except a freshness one-liner and exits `0` on a \
-         network blip so a session never fails to start.\n\n",
-    );
-
-    // Global options — rendered from the root command's own args (the `--json` + `--workspace` flags).
-    let globals: Vec<&clap::Arg> = root
-        .get_arguments()
-        .filter(|a| !a.is_hide_set() && !is_auto_help(a))
-        .collect();
-    if !globals.is_empty() {
-        out.push_str("## Global options\n\nThese work before or after any verb.\n\n");
-        out.push_str("| Flag | Value | Description |\n|---|---|---|\n");
-        for arg in globals {
-            let value = if takes_value(arg) {
-                format!("`<{}>`", value_name(arg))
-            } else {
-                String::new()
-            };
-            let help = arg.get_help().map(|h| h.to_string()).unwrap_or_default();
-            out.push_str(&format!(
-                "| `{}` | {} | {} |\n",
-                cell(&option_spellings(arg)),
-                value,
-                cell(&help),
-            ));
-        }
-        out.push('\n');
-    }
-
-    // The verbs, grouped by scope (the known verb lists, not clap metadata).
-    for (title, names) in [
-        ("Self-scoped verbs", SELF_SCOPED.as_slice()),
-        ("Team-scoped verbs", TEAM_SCOPED.as_slice()),
-        ("Maintenance", MAINTENANCE.as_slice()),
-    ] {
-        out.push_str(&format!("## {title}\n"));
-        for name in names {
-            let cmd = root
-                .get_subcommands()
-                .find(|c| c.get_name() == *name)
-                .unwrap_or_else(|| panic!("the cli tree is missing the `{name}` verb"));
-            render_command(&mut out, &format!("topos {name}"), cmd, 3);
-        }
-    }
-
-    // The hidden / renamed verbs note (the reference omits hidden subcommands themselves).
-    out.push_str(
-        "\n## Renamed verbs\n\n\
-         - `topos pull` is a hidden alias of `topos update` (armed session-start hooks in the field \
-         still invoke `pull`); the `--json` envelope always reads `update`.\n\
-         - `topos upgrade` is intentionally ambiguous and refuses with a disambiguation: `topos \
-         update` refreshes followed skills, while `topos self-update` replaces the `topos` binary.\n",
-    );
-
-    out
 }
 
 /// Generate (or `--check`) `docs/cli.md`, mirroring the schema/fixture drift discipline (a stale or
@@ -1443,7 +1212,7 @@ fn cli_ref_md() -> String {
 fn gen_cli_ref(check: bool) -> Result<()> {
     let dir = docs_dir();
     let path = dir.join("cli.md");
-    let content = cli_ref_md();
+    let content = topos::cli_ref_md();
     if check {
         match fs::read_to_string(&path) {
             Ok(existing) if existing == content => println!("cli reference up to date"),

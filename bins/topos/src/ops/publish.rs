@@ -316,6 +316,15 @@ pub(crate) fn ensure_tracked(
     roots: Option<&DiscoveryRoots>,
     source_str: &str,
 ) -> Result<(String, Option<AddedNote>), ClientError> {
+    // The built-in `topos` skill ships with the CLI and is never workspace state — refuse before
+    // any resolution (its reserved name also can't reach a catalog server-side).
+    if super::builtin::is_builtin(source_str) {
+        return Err(ClientError::InvalidArgument(
+            "`topos` is the built-in skill — it ships with the CLI and cannot be published; to \
+             share files, put them in a new skill and publish that"
+                .into(),
+        ));
+    }
     // Exact literal tracked name wins first (never re-adopt / misclassify a tracked skill).
     match resolve_skill(ctx, source_str) {
         Ok((_, lock)) => return Ok((lock.name, None)),
@@ -347,6 +356,13 @@ fn ensure_name(
     raw: &str,
 ) -> Result<(String, Option<AddedNote>), ClientError> {
     let (bare, harness) = split_target(raw);
+    if super::builtin::is_builtin(bare) {
+        return Err(ClientError::InvalidArgument(
+            "`topos` is the built-in skill — it ships with the CLI and cannot be published; to \
+             share files, put them in a new skill and publish that"
+                .into(),
+        ));
+    }
     match resolve_skill(ctx, bare) {
         // Uniquely tracked → publish it. A `@<harness>` that names a DIFFERENT harness than the tracked
         // skill's likely means a different copy was intended — refuse rather than publish these bytes.

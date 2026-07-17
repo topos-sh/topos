@@ -104,6 +104,18 @@ generated straight from the CLI — is in [`docs/cli.md`](docs/cli.md).
 Consent is explicit end to end: a `<skill>@<digest>` pin binds the exact bytes, nothing lands that wasn't
 disclosed and pinned, and a diverged local draft is surfaced — never overwritten.
 
+### The built-in `topos` skill
+
+Agents shouldn't need this README — so topos teaches them itself, with its own mechanism. A **built-in
+skill named `topos`** ships inside the binary and lands in your agents' skill directories the moment
+topos wires into a harness: what topos is, how to check what's managed (`topos list`), how updates
+arrive, and how to share an improvement back (`publish` / `publish --propose`) — plus the complete
+generated verb reference (the same bytes as `docs/cli.md`, rendered from the CLI itself so it can
+never drift). It re-syncs with the binary on every update sweep; hand edits are overwritten (your
+*other* skills' drafts are sacred — this one documents the binary). Don't want it?
+`topos remove topos --yes` opts the device out durably; `topos follow topos` brings it back. The name
+`topos` is reserved everywhere, so no workspace skill can ever shadow it.
+
 ## Skill discovery across harnesses
 
 `topos list` scans the skills directory of every agent harness it knows about — not just the ones it fully

@@ -135,6 +135,12 @@ export function mintCatalogName(displayName: string | null, bundleId: string): s
   return fromId.length > 0 ? fromId : "skill";
 }
 
+/**
+ * Catalog names reserved for the CLI's own artifacts (the built-in `topos` skill). A reserved
+ * name behaves byte-identically to a taken one: the genesis mint suffixes past it.
+ */
+const RESERVED_BUNDLE_NAMES = new Set(["topos"]);
+
 export interface GenesisRegistration {
   bundleId: string;
   name: string;
@@ -164,12 +170,18 @@ export async function registerGenesisBundleInTx(
   const base = mintCatalogName(displayName, bundleId);
   let name = base;
   for (let n = 2; ; n++) {
-    const taken = await tx
-      .select({ id: bundle.id })
-      .from(bundle)
-      .where(and(eq(bundle.workspaceId, ws), eq(bundle.name, name)))
-      .limit(1);
-    if (taken.length === 0) {
+    // `topos` is reserved for the CLI's built-in skill — treated exactly like a taken name
+    // (suffix-on-collision, no oracle, no new refusal shape), so no workspace skill can ever
+    // shadow the built-in in an agent's skill dirs.
+    const reserved = RESERVED_BUNDLE_NAMES.has(name);
+    const taken = reserved
+      ? []
+      : await tx
+          .select({ id: bundle.id })
+          .from(bundle)
+          .where(and(eq(bundle.workspaceId, ws), eq(bundle.name, name)))
+          .limit(1);
+    if (!reserved && taken.length === 0) {
       break;
     }
     name = `${base.slice(0, 60)}-${n}`;

@@ -55,6 +55,9 @@ export const FUTURE_RESERVED_SEGMENTS: readonly string[] = [
   "status",
   "support",
   "terms",
+  // Also the CLI's built-in skill's reserved name — a workspace named `topos` would collide with
+  // the product name everywhere a bare `topos` token is resolved.
+  "topos",
   "webhooks",
   "www",
 ];

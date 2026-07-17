@@ -16,6 +16,7 @@
 mod app;
 pub(crate) mod atomic;
 pub(crate) mod cli;
+mod cli_ref;
 pub(crate) mod config_io;
 pub(crate) mod ctx;
 pub(crate) mod doc;
@@ -52,3 +53,4 @@ mod tests;
 
 pub use app::run;
 pub use cli::cli_command;
+pub use cli_ref::cli_ref_md;

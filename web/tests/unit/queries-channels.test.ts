@@ -138,6 +138,11 @@ describe("createChannel", () => {
     expect(await queries.createChannel(asMember(wsId, "u_ana"), "new")).toEqual({
       outcome: "bad_name",
     });
+    // `topos` is the CLI built-in skill's reserved token — a channel by that name would be
+    // unreachable from the CLI's bare-name resolution.
+    expect(await queries.createChannel(asMember(wsId, "u_ana"), "topos")).toEqual({
+      outcome: "bad_name",
+    });
   });
 
   // (Drizzle wraps the pg error — the unique-violation probe reads the code through `.cause`.)

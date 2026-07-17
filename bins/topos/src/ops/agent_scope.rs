@@ -105,7 +105,7 @@ pub(crate) fn exclude_agents(
     let mut items = Vec::with_capacity(resolved.len());
     for (sid, lock, ws) in &resolved {
         let map = sync_engine::read_map_required(ctx, &ctx.layout.published(sid))?;
-        let (cur_agents, cur_excluded) = placement::scope_of(ctx, sid.as_str());
+        let (cur_agents, cur_excluded) = scope_state(ctx, sid.as_str())?;
         // The hypothetical post-exclusion scope: the named slugs join the exclusions and leave the
         // include-list (the same folding `enroll::add_excluded_agents` applies durably).
         let next_excluded: Vec<String> = cur_excluded
@@ -158,8 +158,12 @@ pub(crate) fn exclude_agents(
     // re-derived per skill from the CURRENT follow-state folded with this verb's slugs (the seam on
     // `ctx` predates the write we just made, so the fold is explicit).
     for (sid, lock, _) in &resolved {
-        enroll::add_excluded_agents(ctx.fs, &ctx.layout, sid.as_str(), agents)?;
-        let (cur_agents, cur_excluded) = placement::scope_of(ctx, sid.as_str());
+        if super::builtin::is_builtin(sid.as_str()) {
+            super::builtin::add_excluded(ctx, agents)?;
+        } else {
+            enroll::add_excluded_agents(ctx.fs, &ctx.layout, sid.as_str(), agents)?;
+        }
+        let (cur_agents, cur_excluded) = scope_state(ctx, sid.as_str())?;
         let next_excluded: Vec<String> = cur_excluded
             .iter()
             .chain(agents.iter())
@@ -215,7 +219,7 @@ pub(crate) fn set_scope(
     let mut items = Vec::with_capacity(resolved.len());
     for (sid, lock, ws) in &resolved {
         let map = sync_engine::read_map_required(ctx, &ctx.layout.published(sid))?;
-        let (_, cur_excluded) = placement::scope_of(ctx, sid.as_str());
+        let (_, cur_excluded) = scope_state(ctx, sid.as_str())?;
         // Naming an agent re-includes it (the durable write folds the same way).
         let next_excluded: Vec<String> = cur_excluded
             .iter()
@@ -257,8 +261,12 @@ pub(crate) fn set_scope(
     }
 
     for (sid, lock, _) in &resolved {
-        enroll::set_agent_scope(ctx.fs, &ctx.layout, sid.as_str(), &next_agents)?;
-        let (_, cur_excluded) = placement::scope_of(ctx, sid.as_str());
+        if super::builtin::is_builtin(sid.as_str()) {
+            super::builtin::set_agents(ctx, &next_agents)?;
+        } else {
+            enroll::set_agent_scope(ctx.fs, &ctx.layout, sid.as_str(), &next_agents)?;
+        }
+        let (_, cur_excluded) = scope_state(ctx, sid.as_str())?;
         let next_excluded: Vec<String> = cur_excluded
             .iter()
             .filter(|e| !next_agents.contains(e))
@@ -300,9 +308,20 @@ fn data(
     }
 }
 
+/// One skill's device-local scope: the built-in's rides `state/builtin.json`; a followed skill's
+/// rides its `follows.json` row.
+fn scope_state(ctx: &Ctx<'_>, sid: &str) -> Result<(Vec<String>, Vec<String>), ClientError> {
+    if super::builtin::is_builtin(sid) {
+        super::builtin::current_scope(ctx)
+    } else {
+        Ok(placement::scope_of(ctx, sid))
+    }
+}
+
 /// Resolve every target to a FOLLOWED tracked skill (all-or-none). The `--agent` verbs are placement
 /// policy for a followed skill; an untracked agent-dir copy keeps `remove`'s classic `-a` semantics,
-/// and a never-followed local skill has no delivery to scope.
+/// and a never-followed local skill has no delivery to scope. The BUILT-IN skill is the one
+/// non-followed target the scope verbs accept — its placement is scoped exactly the same way.
 fn resolve_followed(
     ctx: &Ctx<'_>,
     targets: &[String],
@@ -316,6 +335,19 @@ fn resolve_followed(
     }
     let mut out = Vec::with_capacity(targets.len());
     for token in targets {
+        if super::builtin::is_builtin(token) {
+            let sid = SkillId::parse(token)?;
+            let lock: Lock =
+                doc::read_doc(ctx.fs, &ctx.layout.published(&sid).lock)?.ok_or_else(|| {
+                    ClientError::InvalidArgument(
+                        "the built-in topos skill is not on this machine — `topos follow topos` \
+                         places it first"
+                            .into(),
+                    )
+                })?;
+            out.push((sid, lock, None));
+            continue;
+        }
         let (sid, lock) = super::resolve_skill_in_workspace(ctx, token, workspace)?;
         let ws = super::followed_workspace(ctx, sid.as_str());
         if ws.is_none() {

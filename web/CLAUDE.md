@@ -91,7 +91,11 @@ an editable address slug with live availability (`?check=` on the same route), t
 channel + the creator's owner seat + the audit row. A reserved slug (the route table's multi-mode
 statics in `app/topos-web/segments.ts` ∪ the future-reserve list ∪ `composition.reservedWorkspaceNames`)
 refuses byte-identically to a taken name and is never enumerable through the form; a vitest red-test
-locks the segment list to the real route table. A seatless signed-in visitor is routed here (`/app` →
+locks the segment list to the real route table. The name `topos` is reserved across ALL three name
+spaces for the CLI's built-in skill and the product itself: the future-reserve list carries it for
+workspace slugs, `CHANNEL_RESERVED` refuses it as a channel name (`bad_name`), and the bundle
+catalog mint (`RESERVED_BUNDLE_NAMES` in `queries.custody.server.ts`) treats it as always-taken —
+the genesis suffix walks past it (`topos-2`), byte-identical to a collision, no oracle. A seatless signed-in visitor is routed here (`/app` →
 `/new`; the `/verify` weave preserves the device code); the dashboard's empty state is the first-skill
 card — the same publish-from-your-agent instructions the panel's `+ new` skill dialog shows. In single
 tenancy `/new` does not mount (the house 404) and the seatless answer stays the 404.

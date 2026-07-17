@@ -158,6 +158,13 @@ impl Layout {
         self.state_dir().join("sync_status.json")
     }
 
+    /// `state/builtin.json` — the built-in `topos` skill's device-local state: the durable
+    /// `remove topos` opt-out + its `--agent` scope. Not a `follows.json` row (the built-in is not
+    /// a subscription; the plane never hears of it).
+    pub(crate) fn builtin_state_path(&self) -> PathBuf {
+        self.state_dir().join("builtin.json")
+    }
+
     /// `state/quiet_sweep.json` — when the last bare update sweep completed (epoch millis). The
     /// quiet hook's TTL self-throttle reads it; every completed bare sweep (quiet or explicit)
     /// refreshes it. A plain doc — one timestamp, never a secret.

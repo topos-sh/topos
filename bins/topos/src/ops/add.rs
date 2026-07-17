@@ -97,6 +97,16 @@ pub(crate) fn add_with_name(
         },
     };
 
+    // The built-in skill's name is reserved end-to-end — an adopted skill can never share it (the
+    // sidecar, `list`, `publish`, and the placement dirs would all collide with the built-in's).
+    if super::builtin::is_builtin(&name) {
+        return Err(ClientError::InvalidArgument(
+            "the name `topos` is reserved for the built-in topos skill — adopt under another name \
+             (`--skill <name>`)"
+                .into(),
+        ));
+    }
+
     // version_id depends ONLY on the bytes + device id + the fixed message — never the id/time/RNG — so a
     // fixed fixture pins it while ids stay free.
     let version_id = identity::commit_id(&Commit {
@@ -883,7 +893,7 @@ fn tracked_by_name(ctx: &Ctx<'_>, name: &str) -> Result<bool, ClientError> {
     }
 }
 
-fn locked_files(bundle: &ScannedBundle) -> Vec<LockedFile> {
+pub(super) fn locked_files(bundle: &ScannedBundle) -> Vec<LockedFile> {
     bundle
         .files
         .iter()
