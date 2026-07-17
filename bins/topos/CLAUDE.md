@@ -273,12 +273,22 @@ are asserted byte-equal in tests.
   staleness_window_ms}}}` — a plain doc, no secret) on every successful delivery/report and mirrors
   it onto `PullData.sync`; the delivered NOTICES ride `PullData.notices` — an interactive or
   `--json` `update` ACKS exactly the ids it returns (`POST …/notices/ack`), the quiet hook fetches
-  WITHOUT acking. `update --quiet` stays byte-silent EXCEPT two one-liners a person must not miss:
+  WITHOUT acking. **The bare quiet sweep self-throttles** (`ops/quiet_gate`): hooks may fire on
+  every session-shaped event, so `update --quiet` passes a gate BEFORE any engine/network work —
+  single-flight (`locks/currency.lock`, try-lock; a held lock = another sweep in flight → silent
+  exit 0) + TTL (`state/quiet_sweep.json`, stamped AFTER a completed sweep; default 300 s, `--ttl`
+  flag > `TOPOS_UPDATE_TTL` env > default, `0` disables). An explicit non-quiet bare `update`
+  always sweeps (blocking lock, refreshes the stamp). `update --quiet` stays near-byte-silent: a
+  no-change sweep emits nothing; a sweep that CHANGED skill bytes emits the ONE SessionStart
+  hook-output JSON (`hookSpecificOutput.reloadSkills` — Claude Code re-scans its skill dirs
+  same-session; other harnesses discard hook stdout) with the two facts a person must not miss —
   the removed-from-roster freeze, and unreachable-AND-stale ("last synced <age> ago — server
-  unreachable", read against the recorded window); an auth/transport failure warns and exits 0 (the
-  hook never fails a session start for a network blip) while a genuinely local failure still exits
-  nonzero. `follow --yes` reuses the same reconcile with explicit `ReconcileOpts`
-  (batch-accepted first receives, declined/renamed collisions, one workspace, no ack).
+  unreachable", read against the recorded window) — riding its `additionalContext`; without
+  changes those facts stay ONE plain line each. An auth/transport failure warns and exits 0 (the
+  hook never fails a session start for a network blip; it still stamps, so a dead plane is not
+  re-dialed every session event) while a genuinely local failure still exits nonzero. `follow
+  --yes` reuses the same reconcile with explicit `ReconcileOpts` (batch-accepted first receives,
+  declined/renamed collisions, one workspace, no ack) and no gate.
 
 - **The `upgrade` maintenance command** (`ops/upgrade`, `release`, `plane_http::UreqReleases`) — the native
   self-updater. It resolves the target release (the latest tag, or a `--version <tag>` pin — which allows a
@@ -364,9 +374,10 @@ governance** (reviewer roles / N-approver / a rendered diff UI — single-approv
 the **`review-required` policy toggle verb** (enforcement is built; the policy row is a plane/console
 setting) + `log --team`'s plane half; harness *selection* in the composition root (v0 constructs Claude
 Code only; both the OpenClaw and Hermes adapters are built + wired into `adapter_for` — OpenClaw's
-concrete config bytes and Hermes's per-turn-injection claim stay pilot-pending behind their readiness
-probes; only Claude Code guarantees the swap completes before skills resolve, so non-Claude adapters
-leave a named, bounded multi-file-read residual). The identity step (sign-in) runs on the server's
+concrete config bytes stay pilot-pending behind its readiness probe, Hermes's are probed against a
+real local build with the pilot's exact build a named MUST-VERIFY; only Claude Code guarantees the
+swap completes before skills resolve, so non-Claude adapters leave a named, bounded multi-file-read
+residual). The identity step (sign-in) runs on the server's
 approval page (the agent only polls), so the client needs no UI for it.
 
 ## Architectural layering (enforced at the dependency graph)

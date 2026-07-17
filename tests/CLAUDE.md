@@ -56,7 +56,8 @@ their crates; this directory is for what only a cross-crate composed run can pro
 - **`tests/hero_claude.rs`** — the HERO on the REAL adapters, table-driven (Claude Code / OpenClaw
   / Hermes over temp stand-in homes): the enrollment promote arms each adapter's genuine currency
   surface (`settings.json` SessionStart / `openclaw.json` + the topos-owned plugin file /
-  `config.yaml` `pre_llm_call`), the genesis lands byte-exact in the adapter's own skill dir, and
+  `config.yaml` `on_session_start` + `on_session_reset`), the genesis lands byte-exact in the
+  adapter's own skill dir, and
   v2 lands on the next bare sweep. The honest ceiling: hook-installed + bytes-materialized is
   asserted; that a live session's hook output reaches model context is a manual MUST-VERIFY.
 - **`tests/follow_e2e.rs`** — the real `topos follow <address>` loop: the constant protocol card on

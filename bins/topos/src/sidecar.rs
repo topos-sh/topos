@@ -96,6 +96,14 @@ impl Layout {
         self.locks_dir().join("identity.lock")
     }
 
+    /// `locks/currency.lock` — the bare-sweep single-flight lock (a fixed name): the quiet hook
+    /// TRY-locks it (a held lock means another sweep is in flight → silent no-op), an explicit bare
+    /// `update` takes it blocking. Per-skill writer locks still guard every actual placement write —
+    /// this lock only stops two whole sweeps from duplicating work.
+    pub(crate) fn currency_lock_file(&self) -> PathBuf {
+        self.locks_dir().join("currency.lock")
+    }
+
     pub(crate) fn log_path(&self) -> PathBuf {
         self.home.join("log.jsonl")
     }
@@ -150,6 +158,13 @@ impl Layout {
     /// carries timestamps and the staleness window, never a secret.
     pub(crate) fn sync_status_path(&self) -> PathBuf {
         self.state_dir().join("sync_status.json")
+    }
+
+    /// `state/quiet_sweep.json` — when the last bare currency sweep completed (epoch millis). The
+    /// quiet hook's TTL self-throttle reads it; every completed bare sweep (quiet or explicit)
+    /// refreshes it. A plain doc — one timestamp, never a secret.
+    pub(crate) fn quiet_sweep_path(&self) -> PathBuf {
+        self.state_dir().join("quiet_sweep.json")
     }
 
     /// `ops/` — the contribute write-ahead log directory (`ops/<op_id>.json`, one per in-flight op). A

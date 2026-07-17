@@ -497,6 +497,7 @@ pub fn run() -> ExitCode {
             yes,
             onto_current,
             quiet,
+            ttl,
         } => {
             // The bare sweep prefers the delivery-driven reconcile when enrolled (one delivery
             // call per workspace answers "what should this device have"); every targeted form and
@@ -525,6 +526,38 @@ pub fn run() -> ExitCode {
             // and the channel-filtered sync per channel. A single bare target (or none) keeps the classic
             // engine — the go-back `<skill>@<hash>` and the `--onto-current` escape live only there.
             let has_selectors = !channel.is_empty() || !skill.is_empty() || targets.len() > 1;
+            // The BARE sweep is the hook shape (the currency triggers all run `update --quiet`).
+            // Hooks now fire on every session-start-shaped event, so the quiet path passes a
+            // self-throttle gate BEFORE any engine or network work: single-flight (another sweep
+            // in flight → silent no-op) + TTL (a completed sweep within the window → silent
+            // no-op; `--ttl`/`TOPOS_UPDATE_TTL`/default 300 s, `0` disables). An explicit
+            // non-quiet sweep always runs but takes the same lock (never two concurrent sweeps)
+            // and refreshes the stamp.
+            let bare_sweep = !has_selectors && targets.is_empty();
+            let now_ms = i64::try_from(clock.now_unix_millis()).unwrap_or(i64::MAX);
+            let mut _sweep_guard = None;
+            if bare_sweep {
+                if quiet {
+                    match ops::quiet_gate(&fs, &ctx.layout, now_ms, ops::resolve_ttl_ms(ttl)) {
+                        Ok(ops::QuietGate::Run(guard)) => _sweep_guard = Some(guard),
+                        // Skipped (fresh, or another sweep in flight): byte-silent success — the
+                        // whole point is that redundant hook fires cost nothing. The reason stays
+                        // a typed value (tests pin it) but is deliberately not narrated anywhere.
+                        Ok(ops::QuietGate::Skip(reason)) => {
+                            let _ = reason;
+                            return ExitCode::SUCCESS;
+                        }
+                        // A gate I/O failure is a LOCAL failure — surface it (nonzero), exactly
+                        // like any other local quiet failure.
+                        Err(e) => return emit_err(false, cmd_name, &e, &diag),
+                    }
+                } else {
+                    match ops::sweep_lock(&fs, &ctx.layout) {
+                        Ok(guard) => _sweep_guard = Some(guard),
+                        Err(e) => return emit_err(json, cmd_name, &e, &diag),
+                    }
+                }
+            }
             let result = if has_selectors {
                 if onto_current {
                     Err(ClientError::InvalidArgument(
@@ -546,17 +579,40 @@ pub fn run() -> ExitCode {
                 let target = targets.into_iter().next();
                 pull_with_name_fallback(&ctx, target, onto_current, delivery, &reconcile_opts)
             };
+            // A COMPLETED bare sweep stamps the TTL clock (best-effort) — success, or the quiet
+            // path's soft failure (an unreachable plane must not be re-dialed on every session
+            // event; the staleness warning still fires once the window blows). A hard local
+            // failure leaves the old stamp so the next session retries.
+            if bare_sweep
+                && (result.is_ok()
+                    || (quiet && result.as_ref().is_err_and(ops::quiet_soft_failure)))
+            {
+                ops::stamp_sweep(
+                    &fs,
+                    &ctx.layout,
+                    i64::try_from(clock.now_unix_millis()).unwrap_or(now_ms),
+                );
+            }
             if quiet {
-                // NEAR-byte-silent stdout (the session-start hook injects stdout into the session):
-                // a clean sweep emits nothing; the two facts a person must not miss — an access-gone
-                // freeze, and unreachable-AND-stale — emit ONE line each. An auth/transport failure
-                // warns and exits 0 (the hook must never fail a session start for a network blip);
-                // a genuinely local failure still surfaces on stderr with a non-zero exit.
+                // NEAR-byte-silent stdout (a session-start hook's stdout reaches the session):
+                // a clean no-change sweep emits nothing; a sweep that CHANGED skill bytes emits the
+                // ONE SessionStart hook-output JSON (`reloadSkills`, so Claude Code re-scans its
+                // skill dirs same-session — other harnesses ignore hook stdout by construction),
+                // with the two facts a person must not miss — an access-gone freeze, and
+                // unreachable-AND-stale — riding its context injection; without changes those
+                // facts stay ONE plain line each. An auth/transport failure warns and exits 0
+                // (the hook must never fail a session start for a network blip); a genuinely
+                // local failure still surfaces on stderr with a non-zero exit.
                 let now = i64::try_from(clock.now_unix_millis()).unwrap_or(i64::MAX);
                 match result {
                     Ok(out) => {
-                        for line in ops::quiet_hook_lines(&fs, &ctx.layout, now, &out) {
-                            println!("{line}");
+                        let lines = ops::quiet_hook_lines(&fs, &ctx.layout, now, &out);
+                        if ops::sweep_changed_bytes(&out.data) {
+                            println!("{}", ops::reload_skills_json(&lines));
+                        } else {
+                            for line in lines {
+                                println!("{line}");
+                            }
                         }
                         ExitCode::SUCCESS
                     }

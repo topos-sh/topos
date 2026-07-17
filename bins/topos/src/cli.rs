@@ -121,6 +121,13 @@ pub(crate) enum Command {
         /// still go to stderr with a non-zero exit. Overrides `--json`.
         #[arg(long)]
         quiet: bool,
+        /// The quiet sweep's self-throttle window in seconds (`--quiet` only): a bare quiet sweep
+        /// within this window of the last completed sweep is a silent no-op, so hooks may fire on
+        /// every session event cheaply. `0` disables the throttle for this run. Default 300;
+        /// `TOPOS_UPDATE_TTL` overrides the default. An explicit non-quiet `topos update` always
+        /// runs the full sweep.
+        #[arg(long, value_name = "SECONDS")]
+        ttl: Option<u64>,
     },
     /// Adopt a skill into topos. The source is polymorphic:
     ///   • a skill NAME (`deploy`, `deploy@claude-code`) — resolved against the untracked skills

@@ -2,7 +2,7 @@
 //! to the genuine Claude Code / OpenClaw / Hermes adapter enrolls through the device flow, and the
 //! promote arms the REAL currency surface (the `settings.json` SessionStart hook / the
 //! `openclaw.json` bootstrap-inject registration + plugin file / the Hermes `config.yaml`
-//! `pre_llm_call` entry) while the `everyone` genesis lands byte-exact in the adapter's OWN skill
+//! session-boundary entries) while the `everyone` genesis lands byte-exact in the adapter's OWN skill
 //! directory. An update then lands on a subsequent bare sweep through the same adapter.
 //!
 //! Table-driven: one case row per adapter, the SAME flow. The honest ceiling stands:
@@ -55,7 +55,7 @@ fn e2e_real_adapters_arm_their_currency_surface_and_land_the_bytes() {
             tag: "hermes",
             rig: FollowHarness::new_hermes,
             config: FollowHarness::hermes_config,
-            marker: "pre_llm_call",
+            marker: "on_session_start",
         },
     ];
 

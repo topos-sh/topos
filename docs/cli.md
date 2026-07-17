@@ -67,6 +67,7 @@ Check for and apply updates to followed skills — the harness currency entry po
 | `--yes` |  |  | Apply without the describe step. Parses today; the two-phase describe lands later |
 | `--onto-current` |  |  | Resolve a diverged draft the OTHER way: commit YOUR bytes straight onto `current`, DROPPING the pending three-way merge (the changes it would have merged are disclosed first). Requires exactly one `<skill>` target. Use when you want your version to win outright |
 | `--quiet` |  |  | Emit nothing on stdout (the session-start hook's stdout is injected into the session). Errors still go to stderr with a non-zero exit. Overrides `--json` |
+| `--ttl` | `<SECONDS>` |  | The quiet sweep's self-throttle window in seconds (`--quiet` only): a bare quiet sweep within this window of the last completed sweep is a silent no-op, so hooks may fire on every session event cheaply. `0` disables the throttle for this run. Default 300; `TOPOS_UPDATE_TTL` overrides the default. An explicit non-quiet `topos update` always runs the full sweep |
 
 
 ### `topos add`

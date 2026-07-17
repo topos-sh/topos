@@ -29,6 +29,7 @@ mod merge_resolve;
 mod protect;
 mod publish;
 mod pull;
+mod quiet_gate;
 mod remove;
 mod revert;
 mod review;
@@ -70,6 +71,10 @@ pub(crate) use publish::ensure_tracked;
 pub(crate) use pull::{
     PullOutcome, PullScope, ReconcileOpts, ResetOutcome, TargetMode, pull, pull_reconcile_with,
     quiet_hook_lines, quiet_soft_failure, reset, update_selective,
+};
+pub(crate) use quiet_gate::{
+    QuietGate, quiet_gate, reload_skills_json, resolve_ttl_ms, stamp_sweep, sweep_changed_bytes,
+    sweep_lock,
 };
 pub(crate) use remove::{RemoveConnectors, RemoveOutcome, remove};
 pub(crate) use revert::{RevertOutcome, revert};

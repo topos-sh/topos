@@ -31,8 +31,8 @@ const SENTINEL: &str = "# topos:currency";
 const COMMAND_IDENTITY: &str = "topos pull";
 
 /// The structured marker identity reported in [`TriggerReport::marker_id`] — topos + harness id +
-/// schema version + command identity.
-const MARKER_ID: &str = "topos:claude-code:currency:1";
+/// schema version + command identity. Schema 2 = the async, every-SessionStart-source entry.
+const MARKER_ID: &str = "topos:claude-code:currency:2";
 
 /// The exact session-start hook command topos installs. The `command -v topos` guard skips the update
 /// when the binary is gone (post-uninstall safety); the trailing `|| true` then makes the whole line
@@ -40,16 +40,20 @@ const MARKER_ID: &str = "topos:claude-code:currency:1";
 /// code would otherwise become the hook's, which the harness paints as a session-start hook error), and
 /// equally when an update degrades (plane down): a best-effort currency sweep must never surface as an
 /// error at session start (diagnostics go to `~/.topos/log.jsonl`, never the session). `--quiet` keeps
-/// stdout empty (a SessionStart hook's stdout is injected into the session context); the trailing
-/// comment is the idempotency sentinel.
+/// stdout near-empty — a no-change sweep emits nothing; a sweep that changed skill bytes emits the ONE
+/// SessionStart hook-output JSON (`reloadSkills`) so Claude Code re-scans its skill dirs same-session
+/// (any person-facing line rides that document's context injection). The quiet path also self-throttles
+/// (a TTL + single-flight gate in the client), so this command may fire on EVERY SessionStart source —
+/// startup, resume, clear, compact — cheaply. The trailing comment is the idempotency sentinel.
 const HOOK_COMMAND: &str =
     "command -v topos >/dev/null 2>&1 && topos update --quiet || true  # topos:currency";
 
-/// The per-hook timeout (seconds). A real sweep makes network calls (one conditional GET per followed
-/// skill, plus fetches when a pointer moved), so this must cover a slow-but-working plane — while a dead
-/// or stalling one must never hold the session start hostage: the client bounds its own connect/response
-/// /body timeouts and trips a plane-down circuit breaker on the first connect failure, so one minute is
-/// generous headroom, not the expected cost.
+/// The per-hook timeout (seconds). A real sweep makes network calls (one delivery call per enrolled
+/// workspace, plus fetches when a pointer moved), so this must cover a slow-but-working plane — while a
+/// dead or stalling one must never hold the session start hostage: the client bounds its own connect/
+/// response/body timeouts and trips a plane-down circuit breaker on the first connect failure, so one
+/// minute is generous headroom, not the expected cost. The hook also runs `async` (below), so even the
+/// worst case never blocks the session.
 const HOOK_TIMEOUT_SECS: u64 = 60;
 
 /// The reference [`HarnessAdapter`] for Claude Code. Holds the resolved config home (injected, so tests
@@ -291,12 +295,14 @@ fn plan_install(current: Option<&[u8]>) -> EditPlan {
     };
     match classify(session_start) {
         Classification::Managed => {
-            // Ours already — but an entry an EARLIER build wrote may carry a stale command string (the
-            // sentinel is version-agnostic on purpose, so we still recognize it). Rewrite it to the
-            // current canonical command; a true no-op (no write) when it already matches. This is how a
-            // fix to `HOOK_COMMAND` reaches installs that predate it — without it, `Managed` would be an
-            // unconditional no-op and the old bytes would live forever.
-            if migrate_managed_command(session_start) {
+            // Ours already — but an entry an EARLIER build wrote may carry a stale command string or a
+            // stale entry shape (the old `matcher: startup` group; a pre-`async` handler). The sentinel
+            // is version-agnostic on purpose, so we still recognize it. Rewrite the managed handler —
+            // and, on a group holding ONLY our handler, the group's shape — to the current canonical
+            // form; a true no-op (no write) when it already matches. This is how a fix to the managed
+            // entry reaches installs that predate it — without it, `Managed` would be an unconditional
+            // no-op and the old bytes would live forever.
+            if migrate_managed(session_start) {
                 match serialize(&root) {
                     Some(bytes) => EditPlan::Write(bytes, TriggerState::Active),
                     None => EditPlan::Leave(TriggerState::Degraded),
@@ -446,40 +452,86 @@ fn is_managed_command(cmd: &str) -> bool {
     cmd.contains(SENTINEL)
 }
 
-/// Rewrite every topos-managed handler's `command` to the current [`HOOK_COMMAND`], returning whether
-/// anything changed. Idempotent: a handler already carrying the canonical command is left byte-for-byte,
-/// so re-running install after a migration writes nothing. The rewritten string still satisfies
-/// [`is_managed_command`] (it keeps the sentinel), so the entry stays classified as ours — this is how a
-/// re-arm REPLACES an old `topos pull` managed entry with the current `topos update` one, in place.
-fn migrate_managed_command(session_start: &mut [Value]) -> bool {
+/// Rewrite every topos-managed handler to the current canonical handler object (command + timeout +
+/// type + async), and — on a group whose handlers are ALL ours — normalize the group to the canonical
+/// matcher-free shape (an omitted matcher fires on EVERY SessionStart source: startup, resume, clear,
+/// compact — the point of the migration). A group also holding a user's own handler keeps its matcher
+/// and grouping untouched (we own our handler, never the user's grouping). Returns whether anything
+/// changed; idempotent — a canonical entry is left byte-for-byte, so re-running install after a
+/// migration writes nothing. The canonical handler still satisfies [`is_managed_command`] (it keeps the
+/// sentinel), so the entry stays classified as ours — this is how a re-arm REPLACES an old
+/// `topos pull` / `matcher: startup` managed entry with the current async all-sources one, in place.
+fn migrate_managed(session_start: &mut Vec<Value>) -> bool {
     let mut changed = false;
+    // Pass 1: pull our handler OUT of any group also holding a user's handler. Their group (and
+    // its matcher) governs THEIR handlers; leaving ours inside would pin it to their source
+    // filter (e.g. `matcher: resume` — never firing at startup) while re-arms read it as
+    // canonical and no-op forever. Extraction only fires when a foreign handler exists, so the
+    // user's group is never emptied.
     for group in session_start.iter_mut() {
         let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
             continue;
         };
+        let ours = handlers
+            .iter()
+            .filter(|h| command_of(h).is_some_and(is_managed_command))
+            .count();
+        if ours > 0 && ours < handlers.len() {
+            handlers.retain(|h| !command_of(h).is_some_and(is_managed_command));
+            changed = true;
+        }
+    }
+    // Pass 2: every remaining managed handler now lives in an all-ours group — canonicalize the
+    // handler objects and shed the group's stale source matcher.
+    let mut any_managed = false;
+    for group in session_start.iter_mut() {
+        let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let mut ours = false;
         for handler in handlers.iter_mut() {
-            let Some(obj) = handler.as_object_mut() else {
+            if !command_of(handler).is_some_and(is_managed_command) {
                 continue;
-            };
-            let is_ours = obj
-                .get("command")
-                .and_then(Value::as_str)
-                .is_some_and(is_managed_command);
-            if is_ours && obj.get("command").and_then(Value::as_str) != Some(HOOK_COMMAND) {
-                obj.insert("command".to_owned(), Value::String(HOOK_COMMAND.to_owned()));
+            }
+            ours = true;
+            if handler != &canonical_handler() {
+                *handler = canonical_handler();
                 changed = true;
             }
         }
+        if ours {
+            any_managed = true;
+            if let Some(obj) = group.as_object_mut()
+                && obj.remove("matcher").is_some()
+            {
+                changed = true; // an all-ours group sheds its stale source matcher
+            }
+        }
+    }
+    // Pass 3: an extraction that left NO managed handler anywhere re-homes it as the canonical
+    // matcher-free group (never a duplicate: this fires only when none remains).
+    if !any_managed {
+        session_start.push(managed_group());
+        changed = true;
     }
     changed
 }
 
-/// The matcher group topos appends: a dedicated `startup` group carrying the one guarded command.
-fn managed_group() -> Value {
+/// The canonical managed handler object.
+fn canonical_handler() -> Value {
     serde_json::json!({
-        "matcher": "startup",
-        "hooks": [ { "type": "command", "command": HOOK_COMMAND, "timeout": HOOK_TIMEOUT_SECS } ]
+        "type": "command",
+        "command": HOOK_COMMAND,
+        "timeout": HOOK_TIMEOUT_SECS,
+        "async": true
     })
+}
+
+/// The group topos appends: NO matcher (an omitted matcher fires on every SessionStart source —
+/// startup, resume, clear, compact; the quiet sweep's own TTL makes the redundant fires cheap),
+/// carrying the one guarded, async command.
+fn managed_group() -> Value {
+    serde_json::json!({ "hooks": [ canonical_handler() ] })
 }
 
 /// After a removal, drop an emptied `SessionStart` array and then an emptied `hooks` object — but only
@@ -585,7 +637,9 @@ mod tests {
     }
 
     /// The exact bytes a fresh install produces — the byte-compared fixture (2-space pretty, keys
-    /// alphabetical, trailing newline; matches Claude Code's own writer).
+    /// alphabetical, trailing newline; matches Claude Code's own writer). NO matcher — an omitted
+    /// matcher fires on every SessionStart source (startup/resume/clear/compact); the handler is
+    /// async so the sweep never blocks a session event.
     const FRESH_INSTALL: &str = "\
 {
   \"hooks\": {
@@ -593,12 +647,12 @@ mod tests {
       {
         \"hooks\": [
           {
+            \"async\": true,
             \"command\": \"command -v topos >/dev/null 2>&1 && topos update --quiet || true  # topos:currency\",
             \"timeout\": 60,
             \"type\": \"command\"
           }
-        ],
-        \"matcher\": \"startup\"
+        ]
       }
     ]
   }
@@ -648,7 +702,8 @@ mod tests {
     fn install_migrates_a_stale_managed_command_to_the_current_one() {
         // An entry an earlier build wrote — the old `topos pull` command, without the `|| true` exit-0
         // tail, carrying our sentinel. Recognized by the sentinel ALONE, so it is still classified as
-        // ours and rewritten to the current `topos update` command.
+        // ours and rewritten to the current canonical handler (command + async), the group's stale
+        // `startup` matcher shed with it.
         let stale = "command -v topos >/dev/null 2>&1 && topos pull --quiet  # topos:currency";
         let cfg = MemConfig::with(&format!(
             "{{\"hooks\":{{\"SessionStart\":[{{\"matcher\":\"startup\",\"hooks\":[{{\"type\":\"command\",\"command\":\"{stale}\",\"timeout\":60}}]}}]}}}}"
@@ -663,9 +718,8 @@ mod tests {
         assert_eq!(cfg.writes(), 1, "exactly one migrating write");
 
         let root: Value = serde_json::from_str(&cfg.text().unwrap()).unwrap();
-        let cmd = root["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap();
+        let handler = &root["hooks"]["SessionStart"][0]["hooks"][0];
+        let cmd = handler["command"].as_str().unwrap();
         assert_eq!(
             cmd, HOOK_COMMAND,
             "migrated to the current canonical command"
@@ -673,6 +727,11 @@ mod tests {
         assert!(
             cmd.ends_with("|| true  # topos:currency"),
             "the migrated command carries the exit-0 tail"
+        );
+        assert_eq!(handler["async"], true, "the migrated handler runs async");
+        assert!(
+            root["hooks"]["SessionStart"][0].get("matcher").is_none(),
+            "the all-ours group shed its startup matcher — the hook now covers every source"
         );
 
         // Re-running is now a true no-op — the migration is idempotent.
@@ -683,6 +742,72 @@ mod tests {
             "no second write after migration"
         );
         assert_eq!(cfg.writes(), 1, "migration does not re-fire");
+    }
+
+    #[test]
+    fn install_migrates_the_previous_canonical_shape_to_async_all_sources() {
+        // The EXACT entry the previous build wrote (matcher: startup; sync handler; current command).
+        // A re-arm rewrites it to the async matcher-free canonical shape — in place, idempotent.
+        let cfg = MemConfig::with(&format!(
+            "{{\"hooks\":{{\"SessionStart\":[{{\"matcher\":\"startup\",\"hooks\":[{{\"type\":\"command\",\"command\":\"{}\",\"timeout\":60}}]}}]}}}}",
+            HOOK_COMMAND.replace('"', "\\\"")
+        ));
+        let report = adapter(&PathBuf::from("/h"), &cfg).install_currency_trigger();
+        assert_eq!(report.state, TriggerState::Active);
+        assert_eq!(cfg.writes(), 1, "one migrating write");
+
+        let root: Value = serde_json::from_str(&cfg.text().unwrap()).unwrap();
+        let groups = root["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(groups.len(), 1, "rewritten in place, never duplicated");
+        assert!(groups[0].get("matcher").is_none(), "matcher shed");
+        assert_eq!(groups[0]["hooks"][0]["async"], true);
+
+        let again = adapter(&PathBuf::from("/h"), &cfg).install_currency_trigger();
+        assert!(again.touched_path.is_none(), "idempotent after migration");
+        assert_eq!(cfg.writes(), 1);
+    }
+
+    #[test]
+    fn migration_moves_our_handler_out_of_a_users_matcher_filtered_group() {
+        // Our sentinel-marked handler sharing a group with a USER's handler: leaving ours inside
+        // would pin it to THEIR matcher (here `resume` — never firing at startup/clear/compact)
+        // while re-arms no-op forever. The migration EXTRACTS our handler into its own canonical
+        // matcher-free group; the user's group, handler, and matcher stay byte-identical.
+        let cfg = MemConfig::with(
+            "{\"hooks\":{\"SessionStart\":[{\"matcher\":\"resume\",\"hooks\":[{\"type\":\"command\",\"command\":\"echo mine\"},{\"type\":\"command\",\"command\":\"topos pull --quiet  # topos:currency\"}]}]}}",
+        );
+        let report = adapter(&PathBuf::from("/h"), &cfg).install_currency_trigger();
+        assert_eq!(report.state, TriggerState::Active);
+        assert_eq!(cfg.writes(), 1);
+
+        let root: Value = serde_json::from_str(&cfg.text().unwrap()).unwrap();
+        let groups = root["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(groups.len(), 2, "ours relocated into its own group");
+        assert_eq!(
+            groups[0]["matcher"], "resume",
+            "the user's group keeps its matcher"
+        );
+        let user_handlers = groups[0]["hooks"].as_array().unwrap();
+        assert_eq!(user_handlers.len(), 1, "only the user's handler remains");
+        assert_eq!(user_handlers[0]["command"], "echo mine");
+        assert!(
+            groups[1].get("matcher").is_none(),
+            "our relocated group is matcher-free (fires on every source)"
+        );
+        let ours = groups[1]["hooks"].as_array().unwrap();
+        assert_eq!(ours.len(), 1);
+        assert_eq!(ours[0]["command"].as_str().unwrap(), HOOK_COMMAND);
+        assert_eq!(ours[0]["async"], true);
+
+        // Idempotent: the relocated shape is canonical — a re-run writes nothing.
+        let again = adapter(&PathBuf::from("/h"), &cfg).install_currency_trigger();
+        assert!(again.touched_path.is_none(), "no second write");
+        assert_eq!(cfg.writes(), 1);
+        assert_eq!(
+            cfg.text().unwrap().matches(SENTINEL).count(),
+            1,
+            "exactly one managed handler — never duplicated by the relocation"
+        );
     }
 
     #[test]
