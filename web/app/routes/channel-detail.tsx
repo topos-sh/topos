@@ -1,9 +1,18 @@
+import { Check, ChevronsUpDown, Package, Plus } from "lucide-react";
+import { useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Link, useFetcher, useLoaderData } from "react-router";
 import { ChannelHeader } from "@/components/channel/channel-header";
 import { ChannelTabs } from "@/components/channel/channel-tabs";
 import { ResourcePage } from "@/components/resource-page";
 import { buttonClasses, Card, Chip, SectionHeading } from "@/components/ui";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   actorFromSession,
   notFound,
@@ -326,33 +335,69 @@ function RemoveSkillControl({ channelId, skillId }: { channelId: string; skillId
 }
 
 /** The add picker — a native select of the addable catalog + an Add submit, quiet under the list. */
+/**
+ * The add picker, in the workspace selector's design language: one dropdown trigger (a leading
+ * glyph, a truncating label, the ChevronsUpDown tail) over a menu of the addable catalog with
+ * the staged choice ticked. Choosing only STAGES the skill on the trigger — the explicit Add
+ * button beside it performs the act (a surprise-free two-step, like every other form here). The
+ * staged choice is validated against the CURRENT addable list, so a successful add — which
+ * revalidates the skill out of the catalog — resets the trigger to its placeholder by itself.
+ */
 function AddSkillForm({ channelId, addable }: { channelId: string; addable: AddableSkill[] }) {
   const fetcher = useFetcher<SkillCurationActionData>();
+  const [stagedId, setStagedId] = useState<string | null>(null);
+  const staged = addable.find((skill) => skill.skillId === stagedId);
   const pending = fetcher.state !== "idle";
   const error =
     fetcher.data?.form === "add" && fetcher.data.error.length > 0 ? fetcher.data.error : undefined;
   return (
     <div className="space-y-2">
-      <fetcher.Form method="post" className="flex flex-wrap items-end gap-2">
-        <input type="hidden" name="intent" value="add-skill" />
-        <input type="hidden" name="channel_id" value={channelId} />
-        <label className="block">
-          <span className="mb-1 block font-medium text-sm text-dim">Add a skill</span>
-          <select
-            name="skill_id"
-            className="block h-11 min-w-56 rounded-md border border-line bg-panel px-3 text-ink text-sm focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
-          >
+      <span className="block font-medium text-dim text-sm">Add a skill</span>
+      <div className="flex flex-wrap items-center gap-2">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              disabled={pending}
+              className="flex h-11 min-w-56 items-center gap-2 rounded-md border border-line bg-panel px-3 text-ink text-sm transition-colors hover:bg-panel2 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50 data-[state=open]:bg-panel2"
+            >
+              {staged === undefined ? (
+                <Plus className="size-4 shrink-0 text-faint" aria-hidden="true" />
+              ) : (
+                <Package className="size-4 shrink-0 text-faint" aria-hidden="true" />
+              )}
+              <span className="min-w-0 flex-1 truncate text-left font-medium">
+                {staged === undefined ? "Choose a skill" : (staged.displayName ?? staged.name)}
+              </span>
+              <ChevronsUpDown className="size-4 shrink-0 text-faint" aria-hidden="true" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="min-w-56">
+            <DropdownMenuLabel className="font-normal text-faint text-xs">
+              Workspace skills
+            </DropdownMenuLabel>
             {addable.map((skill) => (
-              <option key={skill.skillId} value={skill.skillId}>
-                {skill.displayName ?? skill.name}
-              </option>
+              <DropdownMenuItem key={skill.skillId} onSelect={() => setStagedId(skill.skillId)}>
+                <Package />
+                <span className="min-w-0 flex-1 truncate">{skill.displayName ?? skill.name}</span>
+                {skill.skillId === stagedId && <Check className="ml-auto size-4 text-accent" />}
+              </DropdownMenuItem>
             ))}
-          </select>
-        </label>
-        <button type="submit" disabled={pending} className={`${buttonClasses("quiet")} min-h-11`}>
-          {pending ? "Adding…" : "Add"}
-        </button>
-      </fetcher.Form>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <fetcher.Form method="post">
+          <input type="hidden" name="intent" value="add-skill" />
+          <input type="hidden" name="channel_id" value={channelId} />
+          <input type="hidden" name="skill_id" value={staged?.skillId ?? ""} />
+          <button
+            type="submit"
+            disabled={pending || staged === undefined}
+            className={`${buttonClasses("quiet")} min-h-11`}
+          >
+            {pending ? "Adding…" : "Add"}
+          </button>
+        </fetcher.Form>
+      </div>
       {error !== undefined && (
         <p className="text-red-600 text-sm" role="alert">
           {error}

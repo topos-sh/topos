@@ -281,15 +281,21 @@ test("the owner adds a skill via the Skills-face picker; the row links out and t
   await page.waitForURL(`**/channels/${CURATED}`);
   await expect(page.getByText("This channel references no skills yet.")).toBeVisible();
 
-  // Add the seeded, not-yet-referenced skill through the picker (its value is the immutable id).
-  const picker = page.getByRole("main").getByLabel("Add a skill");
-  await picker.selectOption(SKILL2_ID);
-  await page.getByRole("main").getByRole("button", { name: "Add", exact: true }).click();
+  // Stage the seeded, not-yet-referenced skill through the picker — the workspace-selector-style
+  // dropdown. Choosing only stages it on the trigger; nothing lands yet.
+  await page.getByRole("main").getByRole("button", { name: "Choose a skill" }).click();
+  await page.getByRole("menuitem", { name: SKILL2_NAME }).click();
+  await expect(page.getByRole("main").getByRole("link", { name: SKILL2_NAME })).toHaveCount(0);
 
-  // The reference row appears as a link to the skill face…
+  // The explicit Add performs the act; the reference row appears as a link to the skill face…
+  await page.getByRole("main").getByRole("button", { name: "Add", exact: true }).click();
   await expect(page.getByRole("main").getByRole("link", { name: SKILL2_NAME })).toBeVisible();
-  // …and the revalidated picker no longer offers what's now placed.
-  await expect(picker.getByRole("option", { name: SKILL2_NAME })).toHaveCount(0);
+  // …the trigger resets to its placeholder (the staged skill left the addable catalog), and the
+  // reopened picker no longer offers what's now placed.
+  const picker = page.getByRole("main").getByRole("button", { name: "Choose a skill" });
+  await picker.click();
+  await expect(page.getByRole("menuitem", { name: SKILL2_NAME })).toHaveCount(0);
+  await page.keyboard.press("Escape");
 });
 
 test("the owner removes the skill via the row control; the empty state returns", async ({
@@ -331,7 +337,9 @@ test("a non-owner member on a CURATED channel sees no add/remove controls, only 
   await gotoSettled(page, `/channels/${CURATED}`);
   // The Skills face is member-visible; only the curation controls are gated — an honest note.
   await expect(page.getByText(/Reviewers and owners manage/)).toBeVisible();
-  await expect(page.getByRole("main").getByLabel("Add a skill")).toHaveCount(0);
+  await expect(page.getByRole("main").getByRole("button", { name: "Choose a skill" })).toHaveCount(
+    0,
+  );
   await expect(
     page.getByRole("main").getByRole("button", { name: "Add", exact: true }),
   ).toHaveCount(0);
