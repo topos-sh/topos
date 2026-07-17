@@ -24,17 +24,20 @@ import {
   useRouteLoaderData,
 } from "react-router";
 import appStylesHref from "./app.css?url";
-import { serverEnv } from "./env.server";
 
 export const links: LinksFunction = () => [{ rel: "stylesheet", href: appStylesHref }];
 
 /**
- * The one root-level knob the shell reads: the optional GTM container id (env.server enforces
- * its shape). Unset — the OSS default — the loader hands the shell null and the document ships
- * zero third-party script.
+ * The one root-level knob the shell reads: the optional GTM container id. Read straight off
+ * `process.env` — DELIBERATELY not through env.server: a composing superset build re-exports
+ * this module from its own root route, which puts it in that build's CLIENT module graph, where
+ * a static `.server` import cannot be stripped and fails the build. The shape fence matches the
+ * env.server schema (which still validates the var loudly at boot); an unset or malformed value
+ * hands the shell null and the document ships zero third-party script.
  */
 export function loader() {
-  return { gtmId: serverEnv().TOPOS_GTM_CONTAINER_ID ?? null };
+  const raw = (process.env.TOPOS_GTM_CONTAINER_ID ?? "").trim();
+  return { gtmId: /^GTM-[A-Z0-9]+$/.test(raw) ? raw : null };
 }
 
 /**
