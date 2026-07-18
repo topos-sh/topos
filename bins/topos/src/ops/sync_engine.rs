@@ -655,9 +655,9 @@ fn converge_placements(
                 // A clean REPLICA at a different version than the lock's base is stale — refreshed
                 // ONLY when the work tree itself is at base (never toward or over a live draft:
                 // a recorded draft-on-current keeps every copy untouched until it resolves).
-                ScanStatus::Clean { scanned } => {
+                ScanStatus::Clean { digest } => {
                     matches!(work.state, WorkState::CleanAtBase)
-                        && to_hex(&scanned.bundle_digest) != lock.bundle_digest
+                        && to_hex(digest) != lock.bundle_digest
                 }
                 // Edited, foreign, or unreadable dirs are never converge targets.
                 ScanStatus::Modified { .. } | ScanStatus::Foreign | ScanStatus::Unscannable => {
@@ -730,7 +730,8 @@ fn all_managed_at_target(
     !managed.is_empty()
         && managed.iter().all(|&i| {
             scans.get(i).is_some_and(|s| match &s.status {
-                ScanStatus::Clean { scanned } | ScanStatus::Modified { scanned } => {
+                ScanStatus::Clean { digest } => to_hex(digest) == target_digest_hex,
+                ScanStatus::Modified { scanned } => {
                     to_hex(&scanned.bundle_digest) == target_digest_hex
                 }
                 ScanStatus::Absent | ScanStatus::Foreign | ScanStatus::Unscannable => false,
@@ -835,6 +836,12 @@ pub(crate) fn snapshot_draft(
     lock: &Lock,
     scanned: &ScannedBundle,
 ) -> Result<String, ClientError> {
+    // A snapshot commits the working bytes, so the bundle must carry them — never the digest-only
+    // shape a cache-clean placement yields (the byte-consuming callers full-scan before snapshotting).
+    debug_assert!(
+        !scanned.files.is_empty(),
+        "snapshot_draft needs a full byte bundle, not a digest-only clean scan"
+    );
     let base = super::parse_hex32(&lock.base_commit)?;
     let draft_id = identity::commit_id(&Commit {
         parents: &[base],
@@ -1069,16 +1076,23 @@ pub(crate) fn compute_work(
     let state = match chosen {
         None => WorkState::Absent,
         Some(s) => {
-            let scanned = match &s.status {
-                ScanStatus::Clean { scanned } | ScanStatus::Modified { scanned } => scanned,
+            let digest_hex = match &s.status {
+                ScanStatus::Clean { digest } => to_hex(digest),
+                ScanStatus::Modified { scanned } => to_hex(&scanned.bundle_digest),
                 _ => unreachable!("chosen is always a scanned copy"),
             };
-            if to_hex(&scanned.bundle_digest) == lock.bundle_digest {
+            if digest_hex == lock.bundle_digest {
                 WorkState::CleanAtBase
             } else {
-                WorkState::Draft {
-                    scanned: scanned.clone(),
-                }
+                // A draft: an edited copy, or a stale clean replica recorded as a draft-on-current.
+                // It needs the exact working bytes — a Modified status already carries them; a Clean
+                // status is digest-only (the stat cache spared the read), so re-scan its dir now.
+                let scanned = match &s.status {
+                    ScanStatus::Modified { scanned } => scanned.clone(),
+                    ScanStatus::Clean { .. } => crate::scan::scan(&s.dir)?,
+                    _ => unreachable!("chosen is always a scanned copy"),
+                };
+                WorkState::Draft { scanned }
             }
         }
     };

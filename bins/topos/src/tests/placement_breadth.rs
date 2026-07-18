@@ -818,3 +818,100 @@ fn withdrawal_cleanup_never_deletes_a_foreign_occupied_target() {
     assert!(!adopted.exists(), "the managed adopted copy was cleaned");
     assert!(!cursor.exists(), "the managed native copy was cleaned");
 }
+
+// ---------------------------------------------------------------------------------------------
+// The drift-scan stat cache (`crate::stat_cache`) — equivalence with the cache off, and swap
+// invalidation via the recorded materialized-sha basis.
+// ---------------------------------------------------------------------------------------------
+
+/// The clean-vs-modified verdict is identical with the cache ON and OFF — the cache only spares
+/// reads, never the verdict (the `TOPOS_NO_STAT_CACHE` kill switch is this equivalence in prod).
+#[test]
+fn stat_cache_verdicts_match_with_the_cache_on_or_off() {
+    let rig = Rig::new("cache-eq");
+    let sid = rig.adopt_followed("deploy");
+    let follow = rig.follow_seam();
+    let inert_p = InertPlane;
+    let ctx = rig.ctx(&follow, &inert_p);
+    let map = rig.read_map(&sid);
+
+    // A clean placement reads clean in BOTH modes (the cache-on run also warms the cache).
+    for on in [false, true, true] {
+        let scans = placement::scan_placements_cached(&ctx, &map, on).unwrap();
+        assert!(
+            matches!(scans[0].status, placement::ScanStatus::Clean { .. }),
+            "clean verdict must hold with cache_on={on}"
+        );
+    }
+
+    // Edit the placement (a different size, so the change can never hide) — Modified in BOTH modes,
+    // and the warm cache (populated above at the OLD bytes) still catches it.
+    let adopted = rig.work.0.join("deploy");
+    std::fs::write(
+        adopted.join("SKILL.md"),
+        "# deploy\nan edit of a new length\n",
+    )
+    .unwrap();
+    for on in [false, true] {
+        let scans = placement::scan_placements_cached(&ctx, &map, on).unwrap();
+        match &scans[0].status {
+            placement::ScanStatus::Modified { scanned } => {
+                assert!(!scanned.files.is_empty(), "Modified must carry full bytes");
+            }
+            _ => panic!("expected Modified with cache_on={on}"),
+        }
+    }
+}
+
+/// A directory swap (new bytes AND an advanced recorded materialized sha) invalidates the bucket
+/// through the `basis` mismatch: the stale rows are dropped, the dir re-hashed to the new version,
+/// and the bucket's generation bumps — the visible marker the swap hook fired.
+#[test]
+fn stat_cache_swap_invalidation_rebuilds_and_bumps_the_generation() {
+    let rig = Rig::new("cache-swap");
+    let sid = rig.adopt_followed("deploy");
+    let follow = rig.follow_seam();
+    let inert_p = InertPlane;
+    let ctx = rig.ctx(&follow, &inert_p);
+    let mut map = rig.read_map(&sid);
+    let dir = map.placements[0].clone();
+
+    // Warm the cache at version A.
+    let scans = placement::scan_placements_cached(&ctx, &map, true).unwrap();
+    assert!(matches!(
+        scans[0].status,
+        placement::ScanStatus::Clean { .. }
+    ));
+    let cache_a = crate::stat_cache::load(&rig.fs, &rig.layout());
+    let bucket_a = &cache_a.placements[&dir];
+    let gen_a = bucket_a.generation;
+    let basis_a = bucket_a.basis.clone().unwrap();
+
+    // Simulate the materialize dir-swap: NEW bytes on disk, and the recorded materialized sha moves.
+    std::fs::write(
+        Path::new(&dir).join("SKILL.md"),
+        "# deploy\nversion B bytes\n",
+    )
+    .unwrap();
+    let digest_b =
+        topos_core::digest::to_hex(&crate::scan::scan(Path::new(&dir)).unwrap().bundle_digest);
+    assert_ne!(basis_a, digest_b, "the swap must move the basis");
+    map.placement_state[0].materialized_sha = Some(digest_b.clone());
+    map.materialized_sha = digest_b.clone();
+
+    // The new bytes match the new recorded sha → Clean at B (A's rows were invalidated, not trusted).
+    let scans = placement::scan_placements_cached(&ctx, &map, true).unwrap();
+    assert!(matches!(
+        scans[0].status,
+        placement::ScanStatus::Clean { .. }
+    ));
+    let cache_b = crate::stat_cache::load(&rig.fs, &rig.layout());
+    let bucket_b = &cache_b.placements[&dir];
+    assert_eq!(bucket_b.basis.as_deref(), Some(digest_b.as_str()));
+    assert!(
+        bucket_b.generation > gen_a,
+        "the swap invalidation must bump the generation ({} !> {})",
+        bucket_b.generation,
+        gen_a
+    );
+}

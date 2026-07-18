@@ -38,6 +38,7 @@ use topos_types::persisted::{Lock, PlacementKind, PlacementMap, PlacementState, 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::scan::{self, ScannedBundle};
+use crate::stat_cache;
 
 /// One planned placement target — where one copy of the skill's bytes belongs on this machine.
 #[derive(Debug, Clone)]
@@ -351,9 +352,13 @@ pub(crate) fn managed_indices(map: &PlacementMap, plan: &PlacementPlan) -> Vec<u
 pub(crate) enum ScanStatus {
     /// The dir does not exist (or is a dangling symlink).
     Absent,
-    /// Bytes match the recorded sha — no local edits in this copy.
-    Clean { scanned: ScannedBundle },
-    /// Bytes differ from the recorded sha — a local edit in this copy.
+    /// Bytes match the recorded sha — no local edits in this copy. Carries ONLY the `bundle_digest`
+    /// (which equals the recorded sha): the stat cache may have proven this without reading a byte,
+    /// so there is no `ScannedBundle` to hand out. A consumer that needs the working bytes of a clean
+    /// copy re-scans the dir (the cold stale-replica / merge-escape paths do exactly that).
+    Clean { digest: [u8; 32] },
+    /// Bytes differ from the recorded sha — a local edit in this copy. ALWAYS carries the full scanned
+    /// bundle (bytes), because every `Modified` consumer snapshots or commits those exact bytes.
     Modified { scanned: ScannedBundle },
     /// The record says topos never wrote here, yet the dir holds content — not ours; never scanned
     /// into drafts, never overwritten.
@@ -371,20 +376,57 @@ pub(crate) struct PlacementScan {
 
 /// Scan every recorded placement against its per-placement materialized sha. The caller classifies
 /// (see [`crate::ops::sync_engine::compute_work`]) or snapshots (reset / withdraw) from these rows.
+///
+/// The routine drift verdict is accelerated by the stat cache ([`crate::stat_cache`]) — a clean copy
+/// is confirmed by `(mtime_ns, ctime_ns, size)` rather than a re-hash — unless `TOPOS_NO_STAT_CACHE=1`
+/// disables it. The verdict is byte-for-byte identical either way (the cache only spares reads).
 pub(crate) fn scan_placements(
     ctx: &Ctx<'_>,
     map: &PlacementMap,
 ) -> Result<Vec<PlacementScan>, ClientError> {
+    scan_placements_cached(ctx, map, stat_cache::enabled_from_env())
+}
+
+/// The cache-mode-explicit core of [`scan_placements`] — the equivalence tests drive both modes here
+/// without touching process-global env.
+pub(crate) fn scan_placements_cached(
+    ctx: &Ctx<'_>,
+    map: &PlacementMap,
+    cache_on: bool,
+) -> Result<Vec<PlacementScan>, ClientError> {
+    let mut cache = if cache_on {
+        stat_cache::load(ctx.fs, &ctx.layout)
+    } else {
+        stat_cache::StatCache::default()
+    };
+    let original = cache.clone();
+    // The racy-clean reference: when the cache was last persisted. Read BEFORE this scan writes it,
+    // so a file touched at/after the last write is re-hashed rather than trusted.
+    let racy_ref = cache_on
+        .then(|| stat_cache::last_written_ns(&ctx.layout))
+        .flatten();
+
     let mut out = Vec::with_capacity(map.placements.len());
     for (idx, (placement, state)) in map.placements.iter().zip(&map.placement_state).enumerate() {
         let dir = PathBuf::from(placement);
-        let status = scan_one(ctx, &dir, state)?;
+        let status = scan_one(ctx, &dir, state, cache_on.then_some(&mut cache), racy_ref)?;
         out.push(PlacementScan { idx, dir, status });
+    }
+
+    // Persist the refreshed cache only when it moved — best-effort, never a scan blocker.
+    if cache_on && cache != original {
+        let _ = stat_cache::store(ctx.fs, &ctx.layout, &cache);
     }
     Ok(out)
 }
 
-fn scan_one(ctx: &Ctx<'_>, dir: &Path, state: &PlacementState) -> Result<ScanStatus, ClientError> {
+fn scan_one(
+    ctx: &Ctx<'_>,
+    dir: &Path,
+    state: &PlacementState,
+    cache: Option<&mut stat_cache::StatCache>,
+    racy_ref: Option<i64>,
+) -> Result<ScanStatus, ClientError> {
     match ctx.fs.path_kind(dir)? {
         None => return Ok(ScanStatus::Absent),
         // A dangling symlink (its target is gone — e.g. a crash in the rename-dance absent window)
@@ -394,18 +436,76 @@ fn scan_one(ctx: &Ctx<'_>, dir: &Path, state: &PlacementState) -> Result<ScanSta
         }
         _ => {}
     }
+
+    // A dir the record says we never wrote (no recorded sha) is FOREIGN when scannable, else
+    // UNSCANNABLE — decided by a full scan (rare; never cache-accelerated, no digest to compare).
+    let Some(recorded) = state.materialized_sha.as_deref() else {
+        return Ok(match scan::scan(dir) {
+            Ok(_) => ScanStatus::Foreign,
+            Err(_) => ScanStatus::Unscannable,
+        });
+    };
+
+    // The FAST path: prove clean-vs-modified from the cached per-file shas, reading only changed
+    // files. A cached-walk failure (or the cache disabled) falls through to a full scan below.
+    if let Some(cache) = cache {
+        let key = dir.to_string_lossy().into_owned();
+        let prev = cache
+            .placements
+            .get(&key)
+            .and_then(|b| b.usable_rows(recorded).cloned());
+        if let Ok(drift) = scan::drift_digest(dir, prev.as_ref(), racy_ref) {
+            let clean = topos_core::digest::to_hex(&drift.bundle_digest) == *recorded;
+            let digest = drift.bundle_digest;
+            // Refresh the bucket to the freshly observed rows (basis = the recorded sha these rows
+            // were compared against); bump the generation when anything moved.
+            update_bucket(
+                cache.placements.entry(key).or_default(),
+                recorded,
+                drift.files,
+            );
+            return Ok(if clean {
+                ScanStatus::Clean { digest }
+            } else {
+                // A draft: the byte-shipping consumers need the exact bytes, so a Modified status
+                // always carries the FULL scan (never the digest-only fast path).
+                match scan::scan(dir) {
+                    Ok(scanned) => ScanStatus::Modified { scanned },
+                    Err(_) => ScanStatus::Unscannable,
+                }
+            });
+        }
+        // The cached walk hit a hazard (or a read error) — fall through to the full scan, which
+        // classifies it identically (Unscannable on the same failure); no empty bucket is left.
+    }
+
     let Ok(scanned) = scan::scan(dir) else {
         return Ok(ScanStatus::Unscannable);
     };
-    match &state.materialized_sha {
-        None => Ok(ScanStatus::Foreign),
-        Some(recorded) => {
-            if topos_core::digest::to_hex(&scanned.bundle_digest) == *recorded {
-                Ok(ScanStatus::Clean { scanned })
-            } else {
-                Ok(ScanStatus::Modified { scanned })
+    Ok(
+        if topos_core::digest::to_hex(&scanned.bundle_digest) == *recorded {
+            ScanStatus::Clean {
+                digest: scanned.bundle_digest,
             }
-        }
+        } else {
+            ScanStatus::Modified { scanned }
+        },
+    )
+}
+
+/// Replace a placement bucket's rows with the freshly observed set, tagging them with the recorded
+/// sha they were compared against and bumping the generation whenever the basis or rows moved (the
+/// visible marker that a swap invalidation, or an edit, was absorbed).
+fn update_bucket(
+    bucket: &mut stat_cache::PlacementBucket,
+    recorded: &str,
+    files: std::collections::BTreeMap<String, stat_cache::FileStat>,
+) {
+    let changed = bucket.basis.as_deref() != Some(recorded) || bucket.files != files;
+    if changed {
+        bucket.generation = bucket.generation.saturating_add(1);
+        bucket.basis = Some(recorded.to_owned());
+        bucket.files = files;
     }
 }
 

@@ -368,9 +368,8 @@ fn ensure_inner(
         .into_iter()
         .filter(|&i| match &scans[i].status {
             ScanStatus::Absent => true,
-            ScanStatus::Clean { scanned } | ScanStatus::Modified { scanned } => {
-                to_hex(&scanned.bundle_digest) != digest_hex
-            }
+            ScanStatus::Clean { digest } => to_hex(digest) != digest_hex,
+            ScanStatus::Modified { scanned } => to_hex(&scanned.bundle_digest) != digest_hex,
             // Never a foreign dir (not ours to write) — the ONE exception is the consented
             // `follow topos --yes` restore, whose AdoptMarked posture takes over a dir holding a
             // DOWNLOADED copy of this very skill (the public SKILL.md's provenance marker): the

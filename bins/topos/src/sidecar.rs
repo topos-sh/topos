@@ -172,6 +172,13 @@ impl Layout {
         self.state_dir().join("quiet_sweep.json")
     }
 
+    /// `state/stat_cache.json` — the per-placement `(mtime_ns, ctime_ns, size) → sha256` drift-scan
+    /// cache (see `crate::stat_cache`). A plain, ADVISORY doc — never a secret, never fail-closed;
+    /// a bad or missing cache just means the next scan re-hashes.
+    pub(crate) fn stat_cache_path(&self) -> PathBuf {
+        self.state_dir().join("stat_cache.json")
+    }
+
     /// `ops/` — the contribute write-ahead log directory (`ops/<op_id>.json`, one per in-flight op). A
     /// home-level dir (outside `skills/<id>/`, so a publish rename never disturbs an in-flight record), it
     /// is covered by the footprint walk + uninstall like any other `~/.topos/` path.

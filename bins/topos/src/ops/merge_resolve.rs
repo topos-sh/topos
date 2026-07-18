@@ -357,18 +357,23 @@ pub(crate) fn escape_recorded(
     // DISTINCT edited copies are the typed freeze — reconcile first, escape after.
     let scans = placement::scan_placements(ctx, map)?;
     let modified = placement::distinct_modified(&scans);
-    let chosen: Option<&ScannedBundle> = match modified.as_slice() {
+    // The working copy to commit: the ONE edited copy, else the first clean copy (the materialized
+    // conflict tree reads clean against its recorded sha). Carry its digest + dir — a clean copy is
+    // digest-only (the stat cache may have spared the read), so its bytes are re-scanned below.
+    let chosen: Option<(String, std::path::PathBuf)> = match modified.as_slice() {
         [] => scans.iter().find_map(|s| match &s.status {
-            ScanStatus::Clean { scanned } => Some(scanned),
+            ScanStatus::Clean { digest } => Some((to_hex(digest), s.dir.clone())),
             _ => None,
         }),
         [(idx, _)] => match &scans[*idx].status {
-            ScanStatus::Modified { scanned } => Some(scanned),
+            ScanStatus::Modified { scanned } => {
+                Some((to_hex(&scanned.bundle_digest), scans[*idx].dir.clone()))
+            }
             _ => None,
         },
         _ => return Err(placement::placements_diverged(&lock.name, &scans)),
     };
-    let Some(scanned) = chosen else {
+    let Some((digest_hex, work_dir)) = chosen else {
         // Every placement is gone / unreadable — there is nothing to commit, so the conflict is moot;
         // clear the (now-pointless) block rather than wedge.
         ctx.fs.remove_file(&sp.conflict)?;
@@ -384,8 +389,6 @@ pub(crate) fn escape_recorded(
             merge_preview: None,
         });
     };
-    let scanned = scanned.clone();
-    let digest_hex = to_hex(&scanned.bundle_digest);
     let store = Store::open(&sp.store)?;
     let theirs_commit = super::parse_hex32(&cs.current_commit)?;
     let theirs = store.render_verified(theirs_commit, super::parse_hex32(&cs.current_digest)?)?;
@@ -398,7 +401,8 @@ pub(crate) fn escape_recorded(
             super::parse_hex32(&cs.draft_digest)?,
         )?
     } else {
-        scanned_to_bundle(&scanned)?
+        // A high-stakes commit ships bytes: full-scan the placement (never a cache-derived digest).
+        scanned_to_bundle(&crate::scan::scan(&work_dir)?)?
     };
     escape(
         ctx,
@@ -449,7 +453,7 @@ pub(crate) fn recover_resolution(
         let modified = placement::distinct_modified(&scans);
         let chosen: Option<String> = match modified.as_slice() {
             [] => scans.iter().find_map(|s| match &s.status {
-                ScanStatus::Clean { scanned } => Some(to_hex(&scanned.bundle_digest)),
+                ScanStatus::Clean { digest } => Some(to_hex(digest)),
                 _ => None,
             }),
             [(_, digest_hex)] => Some(digest_hex.clone()),
