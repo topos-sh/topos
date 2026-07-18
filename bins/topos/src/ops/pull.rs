@@ -126,8 +126,10 @@ pub(crate) struct ReconcileOpts {
     /// RE-ATTACH exactly its subject. Every OTHER pending first-receive stays undisclosed: a
     /// never-received skill this device already follows keeps its offer (never auto-placed), and a
     /// brand-new arrival outside the set is skipped WHOLESALE (no follow entry, no baseline, no bytes)
-    /// for the next full describe to disclose. `None` (the default, the bare sweep) installs across
-    /// the whole delivered set.
+    /// for the next full describe to disclose. The restriction scopes first-receive INSTALLS only:
+    /// UPDATES to already-followed, already-received skills stay eligible exactly as on any sweep —
+    /// their consent is the standing follow mode, given at follow time. `None` (the default, the
+    /// bare sweep) installs across the whole delivered set.
     pub install_only: Option<HashSet<String>>,
     /// Ack the delivered notices after collecting them (the interactive / `--json` update); the
     /// quiet hook fetches WITHOUT acking, so nothing is marked read that no one narrated.

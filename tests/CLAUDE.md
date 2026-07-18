@@ -71,7 +71,9 @@ their crates; this directory is for what only a cross-crate composed run can pro
   targeted channel/skill describes list ONLY their named target's set and the targeted `--yes`
   lands exactly that (no subscription state, no bytes for the un-named arrival — no member
   direct-follow row either), while a later targeted `--yes` on the arrival lands it byte-exact.
-  The DENIED arm: the
+  A RESOURCE-address enrollment (`follow <origin>/<ws>/skills/<x>` and the `channels/<y>` form)
+  completes through the same resume and lands ONLY its named target at enroll time — the
+  `everyone` arrival stays uninstalled, individually consentable afterwards. The DENIED arm: the
   approver clicks Deny and the device's next poll is the ONE typed refusal (`DENIED` +
   `REQUEST_ACCESS`) with zero enrollment state; a wrong workspace name at the flow start is the
   uniform 404, byte-identical to a wrong path.

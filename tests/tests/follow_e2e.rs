@@ -450,6 +450,114 @@ fn e2e_a_targeted_follow_yes_lands_only_its_named_target() {
     );
 }
 
+// ── resource-address enrollment: `follow <server>/<ws>/skills|channels/<name>` scopes its landing ──
+
+/// A RESOURCE address as the enrollment door: `follow <origin>/<ws>/skills/<x>` (and the channel
+/// form `<origin>/<ws>/channels/<y>`) records the resource intent on the WAL; the resumed `follow --yes`
+/// completes the enrollment and lands ONLY the named target — an unrelated `everyone` arrival
+/// stays uninstalled (no subscription state, no bytes) and remains individually consentable
+/// afterwards. Both forms in one stack: two devices of the same member, one per address form.
+#[test]
+fn e2e_a_resource_address_enrollment_lands_only_its_named_target() {
+    let stack = common::start_stack("resenroll");
+    let owner = stack.claim_owner(OWNER_EMAIL);
+
+    // The author: the genesis into `everyone`, plus a channel-placed skill in #rel.
+    let author = FollowHarness::new("resenroll-author");
+    stack.enroll_begin_and_approve(&author, &owner);
+    author.resume_apply().expect("the author's resume applies");
+    author.adopt(SKILL, &genesis_files());
+    let digest = author.draft_digest(SKILL);
+    author
+        .publish_message("", &format!("{SKILL}@{digest}"), "genesis: deploy runbook")
+        .expect("the genesis publish lands");
+    let rel_files: Vec<(&str, bool, &[u8])> =
+        vec![("SKILL.md", false, b"# relnotes\nlead with the user\n")];
+    author.adopt("relnotes", &rel_files);
+    let d_rel = author.draft_digest("relnotes");
+    author
+        .publish_to(&format!("relnotes@{d_rel}"), "rel", "relnotes v1")
+        .expect("the channel-placed publish lands");
+
+    let member = stack.add_member(MEMBER_EMAIL, "member");
+
+    // ── the SKILL form: enroll via `<origin>/<ws>/skills/relnotes` ─────────────────────────────
+    let via_skill = FollowHarness::new("resenroll-skill");
+    let pending = via_skill
+        .follow(&format!("{}/skills/relnotes", stack.address()))
+        .expect("follow call 1 (skill address)");
+    let handle = pending.pending.expect("the pending verification handle");
+    stack.approve_device(&member, &handle.user_code);
+    let applied = via_skill
+        .resume_apply()
+        .expect("the resumed --yes completes enrollment and applies");
+    assert!(applied.enrolled_now, "the resume completed the enrollment");
+    assert!(via_skill.instance_written() && !via_skill.wal_exists());
+    assert_eq!(
+        applied
+            .installed
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["relnotes"],
+        "the skill-address enrollment lands ONLY its named target"
+    );
+    assert_eq!(
+        via_skill.follows_count(),
+        1,
+        "no subscription state for the unrelated everyone arrival"
+    );
+    assert_eq!(
+        via_skill.placement_files(&applied.installed[0].skill_id),
+        expected(&rel_files),
+        "the named target is placed byte-exact"
+    );
+    // The everyone arrival stays individually consentable afterwards.
+    let applied = via_skill
+        .follow_apply(&format!("{WS_NAME}/skills/{SKILL}"))
+        .expect("the later targeted --yes applies");
+    assert_eq!(
+        applied
+            .installed
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![SKILL],
+        "the everyone arrival lands under its OWN consent"
+    );
+
+    // ── the CHANNEL form: enroll via `<origin>/<ws>/channels/rel` ──────────────────────────────
+    let via_channel = FollowHarness::new("resenroll-channel");
+    let pending = via_channel
+        .follow(&format!("{}/channels/rel", stack.address()))
+        .expect("follow call 1 (channel address)");
+    let handle = pending.pending.expect("the pending verification handle");
+    stack.approve_device(&member, &handle.user_code);
+    let applied = via_channel
+        .resume_apply()
+        .expect("the resumed --yes completes enrollment and applies");
+    assert!(applied.enrolled_now, "the resume completed the enrollment");
+    assert_eq!(
+        applied.subscribed,
+        vec![("channel".to_owned(), "rel".to_owned())],
+        "the channel join is the one subscription row"
+    );
+    assert_eq!(
+        applied
+            .installed
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["relnotes"],
+        "the channel-address enrollment lands ONLY the channel's set"
+    );
+    assert_eq!(
+        via_channel.follows_count(),
+        1,
+        "the everyone arrival stayed uninstalled on this device too"
+    );
+}
+
 // ── the denied arm: the approver clicks Deny, the device's next poll is the ONE typed denial ───────
 
 #[test]

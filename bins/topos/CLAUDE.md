@@ -121,9 +121,10 @@ renderer over the SAME typed outcomes (one value, two presentations).
   — identity, reversible, disclosed as `enrolled_now`); `--yes` = the row ops (`channel_join` /
   `follow_skill`) then the delivery-driven reconcile landing the DESCRIBED set THIS invocation
   (batch-accepting first-receive offers through the SAME engine — never a fork; `install_only`
-  restricts installation to exactly the ids the describe disclosed, so a waiting arrival outside
+  restricts INSTALLATION to exactly the ids the describe disclosed, so a waiting arrival outside
   the named targets is never swept in under an unrelated `--yes` — it stays an individually
-  consentable offer; collisions decline
+  consentable offer, while already-followed skills still UPDATE under their standing follow mode,
+  as on any sweep; collisions decline
   by default or install prefixed), then the fleet report. The transports are built per-base-URL
   behind injectable factories, so the whole flow is tested over fakes with no HTTP.
 - **The `invite` verb** (`ops/invite`, `plane_http::UreqDeviceClient`) — the two-phase roster write

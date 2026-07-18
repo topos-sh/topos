@@ -1074,10 +1074,12 @@ fn subscribe(
     }
 
     // 2) The reconcile lands the set THIS invocation — batch-accepting first receives, declining
-    //    or prefixing the collisions, one workspace only. Installation is RESTRICTED to exactly
+    //    or prefixing the collisions, one workspace only. INSTALLATION is RESTRICTED to exactly
     //    the ids THIS invocation's describe disclosed (`install_only`): a `--yes` is consent for
     //    its own describe, so a waiting arrival outside the named targets is never swept in — it
-    //    stays an offer for the sweep / its own describe. The notices stay unacked (they belong
+    //    stays an offer for the sweep / its own describe. Already-followed, already-received
+    //    skills still UPDATE under their standing follow mode, exactly as on any sweep — that
+    //    consent was given at follow time, not here. The notices stay unacked (they belong
     //    to `update`'s narration).
     let mut rec_opts = ReconcileOpts {
         accept_first_receive: true,
