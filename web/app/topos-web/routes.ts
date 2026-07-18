@@ -139,6 +139,9 @@ function memberWorkspaceChildren(
     route("settings", file("workspace-settings.tsx")),
     // The workspace's device view (staleness + blind spots) — a tab of the Settings page.
     route("settings/devices", file("fleet.tsx")),
+    // The whole-catalog export (a zip stream) — a resource route the Settings page links to.
+    // Loader-only, so a document GET returns its Response directly; owner-gated in its loader.
+    route("settings/export", file("workspace-export.ts")),
     // The channel index + the create form (Rails-style /channels/new); the channel FACE (the
     // Skills tab) lives under face-shell, its Members/History/Settings section tabs here.
     route("channels", file("channels-index.tsx")),

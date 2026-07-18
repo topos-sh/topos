@@ -249,6 +249,7 @@ export default function WorkspaceSettings() {
         <SettingsTabs active="general" />
         <MembersPointer />
         <AddressSection address={shareAddress} />
+        {isOwner && <ExportSection />}
         <ReviewRequiredPanel
           isOwner={isOwner}
           reviewRequired={reviewRequired}
@@ -287,6 +288,31 @@ function MembersPointer() {
         <Link to={wsPath("members")} className={buttonClasses("quiet")}>
           Manage members
         </Link>
+      </Card>
+    </section>
+  );
+}
+
+/**
+ * Export — an owner-only action that downloads the WHOLE catalog as one zip (every skill at its
+ * current version, one directory each, plus a manifest). A native anchor (not a client `Link`),
+ * so the browser makes a document GET the resource-route loader answers with the stream.
+ */
+function ExportSection() {
+  const wsPath = useWsPath();
+  return (
+    <section aria-labelledby="export-heading" className="space-y-3">
+      <SectionHeading>
+        <span id="export-heading">Export</span>
+      </SectionHeading>
+      <Card className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+        <p className="text-dim text-sm">
+          Download every skill in this workspace at its current version, plus a manifest, as a
+          single zip archive.
+        </p>
+        <a href={wsPath("settings/export")} download className={buttonClasses("quiet")}>
+          Export skills
+        </a>
       </Card>
     </section>
   );
