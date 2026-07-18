@@ -46,7 +46,9 @@ const IS_CHILD = Boolean(process.env.TOPOS_EVAL_CHILD);
 const INFRA_EXIT = 86;
 
 /** Failures that are the harness/provider's fault, never the driven model's verdict. */
-const INFRA_RE = /\b429\b|rate.?limit|overloaded|usage limit|too many requests|quota exceeded|never healthy|ECONNREFUSED|ETIMEDOUT/i;
+// "session limit" included: the subscription's 5-hour window refuses with "You've hit your
+// session limit · resets <time>", which is provider infrastructure, not a model verdict.
+const INFRA_RE = /\b429\b|rate.?limit|overloaded|usage limit|session limit|too many requests|quota exceeded|never healthy|ECONNREFUSED|ETIMEDOUT/i;
 
 class InfraError extends Error {}
 

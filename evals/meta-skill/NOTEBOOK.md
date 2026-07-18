@@ -857,3 +857,45 @@ skill (the same shape appears in the baseline's without-arm transcripts).
 set (iterations 1+2 together) now reads: describe-loop gone, recovery taught, org-bound consent
 explicit, deepen discipline intact, guards green throughout. The stale-base cell goes into the
 ledger flagged as noise-dominated rather than regressed.
+
+---
+
+## 2026-07-18 — iteration 3 (exp/4-skill-trim): the −28% SKILL.md, and an infrastructure day
+
+**Hypothesis:** the skill's prose can compress ~30% (every RULE kept — the consent bar, the
+injection defense, the capture bar, the iteration-1/2 bullets — the elaboration dropped) with
+scores flat; if scores drop, the elaboration was load-bearing and the trim reverts. 9220 →
+6599 bytes (−28%; body prose −35% — the frontmatter description and command blocks are
+incompressible on purpose).
+
+**Run health — honest, because this matrix fought its infrastructure.** Three incidents, none
+a model verdict: (1) the eval Postgres container DIED mid-matrix — the Docker VM disk hit 100%
+(each per-run database was never dropped, and every container recreation leaked its anonymous
+data volume; `docker volume prune` reclaimed 35 GB) — 46 cells recorded as infra, container
+recreated fresh; (2) the resumed wave then hit the subscription's SESSION LIMIT ("You've hit
+your session limit · resets 9:30am"), whose phrasing `INFRA_RE` did not match, so ~24 dead
+runs recorded as FAKE FAILS — the regex now includes "session limit", and the poisoned rows
+(identified by transcript tail) were purged, never scored; (3) the final 26 cells reran clean
+after the window reset. Every kept row is a complete, isolated run; the matrix is stitched
+from three waves, which per-cell isolation makes valid. Completed-run cost $78.56 (+~$5 burned
+by poisoned partials). Two named harness follow-ups for after the program: drop each run's
+database in teardown, and `docker rm -v` in the README teardown line.
+
+**Numbers (`report.mjs` on the 108 clean rows):** totals with 53/54 ($39.02), without 51/54
+($39.55). **Majority: with 18/18, without 17/18** (without fails only distill-offer 1/3; its
+conflict/ambiguous cells landed 3/3, 2/3 this round — the ±1 wobble again). Guard cells 3/3 in
+BOTH arms. deepen-not-fork with 3/3 — the consent carve-out held through the trim. The one
+with-arm miss: publish-stale-base r1, turn-cap exhaustion with a correct end state (only the
+finished-without-error invariant tripped) — the same cap-vs-noise story this cell has told all
+program.
+
+**The trim's effect:** with-arm median output tokens per run, baseline 2019 → iter 2 1795 →
+iter 3 **1577** (−22% vs baseline); per-cell medians dropped or held nearly everywhere
+(update-preserves-drafts 861→608, read-the-states 1386→925, conflict-reset 3833→1344 across
+the program). Scores did NOT drop: 18/18 with, equal to the program's best, on a skill 28%
+smaller. The elaboration was NOT load-bearing; the rules were.
+
+**Verdict: KEEP.** The final skill = baseline text + decisive-apply/envelope-recovery bullets
++ the org-bound consent carve-out, all at −28% bytes. Program cumulative API-equivalent usage
+≈ $354 (smokes $20 + baseline $84 + three iteration matrices $83/$79/$84 + ~$4 lost to the
+poisoned wave).
