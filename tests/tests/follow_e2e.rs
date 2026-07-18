@@ -313,6 +313,143 @@ fn e2e_follow_by_bare_origin_enrolls_describes_and_delivers() {
     assert_eq!(devices, 1, "one live device for the member");
 }
 
+// ── target-scoped consent: a targeted `--yes` lands only its named target, never the waiting set ───
+
+/// The union regression, on the real stack: after the member enrolls (landing `everyone`'s set —
+/// the enrollment consent), the author publishes a channel-placed skill AND a later `everyone`
+/// arrival the member's device never received (a WAITING arrival). The member explores with BARE
+/// describes (a skill's, a channel's — nothing applied), then runs a targeted
+/// `follow <channel> --yes`. That `--yes` is consent for exactly what ITS OWN describe disclosed
+/// for its named target: the channel's set lands, the waiting arrival stays waiting (no
+/// subscription state, no bytes), and a LATER targeted `--yes` on the arrival still lands it.
+#[test]
+fn e2e_a_targeted_follow_yes_lands_only_its_named_target() {
+    let stack = common::start_stack("scoped");
+    let owner = stack.claim_owner(OWNER_EMAIL);
+
+    // The author's enrolled CLI, then the genesis into `everyone`.
+    let author = FollowHarness::new("scoped-author");
+    stack.enroll_begin_and_approve(&author, &owner);
+    author.resume_apply().expect("the author's resume applies");
+    author.adopt(SKILL, &genesis_files());
+    let digest = author.draft_digest(SKILL);
+    author
+        .publish_message("", &format!("{SKILL}@{digest}"), "genesis: deploy runbook")
+        .expect("the genesis publish lands");
+
+    // The member enrolls through the real two-call flow and lands `everyone`'s current set — the
+    // enrollment describe disclosed the whole delivered set, so the whole set landing IS consent.
+    let member = stack.add_member(MEMBER_EMAIL, "member");
+    let client = FollowHarness::new("scoped-member");
+    stack.enroll_begin_and_approve(&client, &member);
+    let enrolled = client.resume_apply().expect("the member's resume applies");
+    assert!(enrolled.enrolled_now);
+    assert_eq!(
+        enrolled.installed.len(),
+        1,
+        "the enrollment landed everyone's set: {:?}",
+        enrolled.installed
+    );
+
+    // The author now places a skill into the NAMED channel #rel (publish --to creates it) and
+    // publishes a LATER skill into `everyone` — the latter is delivered to the member but never
+    // received on their device: a WAITING arrival.
+    let rel_files: Vec<(&str, bool, &[u8])> =
+        vec![("SKILL.md", false, b"# relnotes\nlead with the user\n")];
+    author.adopt("relnotes", &rel_files);
+    let d_rel = author.draft_digest("relnotes");
+    author
+        .publish_to(&format!("relnotes@{d_rel}"), "rel", "relnotes v1")
+        .expect("the channel-placed publish lands");
+    let later_files: Vec<(&str, bool, &[u8])> =
+        vec![("SKILL.md", false, b"# laterthing\nnot consented here\n")];
+    author.adopt("laterthing", &later_files);
+    let d_later = author.draft_digest("laterthing");
+    author
+        .publish_message("", &format!("laterthing@{d_later}"), "laterthing v1")
+        .expect("the later everyone publish lands");
+
+    // Exploratory BARE describes (the observed pre-bug shape): each lists ONLY its named target's
+    // set — the waiting arrival never rides another target's disclosure.
+    let skill_describe = client
+        .follow_describe(&format!("{WS_NAME}/skills/laterthing"))
+        .expect("the skill describe");
+    assert_eq!(
+        skill_describe
+            .installs
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["laterthing"],
+        "a skill describe lists exactly its named target"
+    );
+    let channel_describe = client
+        .follow_describe(&format!("{WS_NAME}/channels/rel"))
+        .expect("the channel describe");
+    assert_eq!(
+        channel_describe
+            .installs
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["relnotes"],
+        "a channel describe lists exactly the channel's set — never the waiting arrival"
+    );
+
+    // The targeted `--yes` on the channel: the channel's set lands, and NOTHING else.
+    let follows_before = client.follows_count();
+    let applied = client
+        .follow_apply(&format!("{WS_NAME}/channels/rel"))
+        .expect("the channel --yes applies");
+    assert_eq!(
+        applied
+            .installed
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["relnotes"],
+        "the targeted --yes landed exactly the channel's set"
+    );
+    assert_eq!(
+        client.follows_count(),
+        follows_before + 1,
+        "exactly ONE new follow entry (the channel's skill) — the waiting arrival got none"
+    );
+
+    // The waiting arrival is untouched on this device AND unsubscribed on the plane: no
+    // person-scoped follow row exists for THE MEMBER (the author's own publish-time auto-follow
+    // row is exactly why the arrival was delivered to the author's devices — not the member's).
+    assert_eq!(
+        stack.count(&format!(
+            "SELECT count(*) FROM web.bundle_subscription bs \
+             JOIN web.bundle b ON b.id = bs.bundle_id \
+             JOIN web.\"user\" u ON u.id = bs.user_id \
+             WHERE b.name = 'laterthing' AND u.email = '{MEMBER_EMAIL}'"
+        )),
+        0,
+        "no direct-follow row was minted for the member's un-named arrival"
+    );
+
+    // A LATER targeted `--yes` on the arrival still lands it — individually consentable, byte-exact.
+    let applied = client
+        .follow_apply(&format!("{WS_NAME}/skills/laterthing"))
+        .expect("the later targeted --yes applies");
+    assert_eq!(
+        applied
+            .installed
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["laterthing"],
+        "the arrival lands under its OWN consent"
+    );
+    assert_eq!(
+        client.placement_files(&applied.installed[0].skill_id),
+        expected(&later_files),
+        "the consented arrival is placed byte-exact"
+    );
+}
+
 // ── the denied arm: the approver clicks Deny, the device's next poll is the ONE typed denial ───────
 
 #[test]

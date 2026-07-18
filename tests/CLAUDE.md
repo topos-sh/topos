@@ -66,7 +66,12 @@ their crates; this directory is for what only a cross-crate composed run can pro
   1 pends (user code + the `0600` WAL) → the signed-in member approves at `/verify` → the resumed
   follow persists the ONE `0600` bearer credential and continues into the two-phase DESCRIBE
   (role, installs with consent digests, the `via everyone` attribution, the all-devices +
-  fleet-reporting disclosures) → `--yes` lands `everyone`'s genesis byte-exact. The DENIED arm: the
+  fleet-reporting disclosures) → `--yes` lands `everyone`'s genesis byte-exact. The TARGET-SCOPED
+  consent regression: with a waiting `everyone` arrival never received on the member's device, the
+  targeted channel/skill describes list ONLY their named target's set and the targeted `--yes`
+  lands exactly that (no subscription state, no bytes for the un-named arrival — no member
+  direct-follow row either), while a later targeted `--yes` on the arrival lands it byte-exact.
+  The DENIED arm: the
   approver clicks Deny and the device's next poll is the ONE typed refusal (`DENIED` +
   `REQUEST_ACCESS`) with zero enrollment state; a wrong workspace name at the flow start is the
   uniform 404, byte-identical to a wrong path.

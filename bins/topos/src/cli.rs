@@ -42,7 +42,10 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     // ---- Self-scoped (affect only you) ----
     /// Follow a workspace, channel, or skill — enroll if needed, then subscribe two-phase (a bare
-    /// invocation DESCRIBES what would land; `--yes` applies). Targets: a workspace address
+    /// invocation DESCRIBES what would land; `--yes` applies exactly what its own describe
+    /// disclosed for the NAMED targets — a workspace target lands the whole delivered set, a
+    /// channel/skill target only its own; other waiting arrivals stay individually consentable).
+    /// Targets: a workspace address
     /// (`https://topos.sh/acme`, or a bare workspace name), a bare SERVER address with no workspace
     /// slug (`https://topos.example.com`, or the schemeless `topos.example.com`) — "the workspace
     /// that origin addresses", the single-tenant install form, a qualified path

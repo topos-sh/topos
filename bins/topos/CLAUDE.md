@@ -112,13 +112,18 @@ renderer over the SAME typed outcomes (one value, two presentations).
   - **the classic skill path** (`follow <skill>[@<hash>]`) — the I-TOFU accept / the paused-entry
     resume, unchanged.
   The SUBSCRIBE is two-phase: bare = a DESCRIBE (`GET /me` + `/channels` + the catalog + `/delivery`
-  → workspace/role/invited-by, the install list with digests + `via` attribution, the all-devices +
+  → workspace/role/invited-by, the install list — SCOPED to the named targets: a WORKSPACE target
+  lists the whole delivered set, a channel/skill target only what it entitles — with digests +
+  `via` attribution, the all-devices +
   fleet-reporting disclosures, pre-placed channels, dirname collisions with the `--prefix-dirname`
   `<ws>.<name>` choice, freed-name new-identity notes, the direct-follow explanation) + `next_actions`
   carrying the paste-ready `--yes` argv (NOTHING mutates before `--yes` except the enrollment itself
   — identity, reversible, disclosed as `enrolled_now`); `--yes` = the row ops (`channel_join` /
-  `follow_skill`) then the delivery-driven reconcile landing the set THIS invocation
-  (batch-accepting first-receive offers through the SAME engine — never a fork; collisions decline
+  `follow_skill`) then the delivery-driven reconcile landing the DESCRIBED set THIS invocation
+  (batch-accepting first-receive offers through the SAME engine — never a fork; `install_only`
+  restricts installation to exactly the ids the describe disclosed, so a waiting arrival outside
+  the named targets is never swept in under an unrelated `--yes` — it stays an individually
+  consentable offer; collisions decline
   by default or install prefixed), then the fleet report. The transports are built per-base-URL
   behind injectable factories, so the whole flow is tested over fakes with no HTTP.
 - **The `invite` verb** (`ops/invite`, `plane_http::UreqDeviceClient`) — the two-phase roster write
@@ -337,8 +342,9 @@ are asserted byte-equal in tests.
   changes those facts stay ONE plain line each. An auth/transport failure warns and exits 0 (the
   hook never fails a session start for a network blip; it still stamps, so a dead plane is not
   re-dialed every session event) while a genuinely local failure still exits nonzero. `follow
-  --yes` reuses the same reconcile with explicit `ReconcileOpts` (batch-accepted first receives,
-  declined/renamed collisions, one workspace, no ack) and no gate.
+  --yes` reuses the same reconcile with explicit `ReconcileOpts` (batch-accepted first receives
+  restricted to the describe's disclosed ids, declined/renamed collisions, one workspace, no ack)
+  and no gate.
 
 - **The BUILT-IN `topos` skill** (`ops/builtin`, `cli_ref`, the repo-top-level `skills/topos/`
   source) — the meta-skill that teaches an agent what topos is, how to drive it, and how to

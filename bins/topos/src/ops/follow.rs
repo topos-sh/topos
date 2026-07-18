@@ -204,7 +204,9 @@ pub(crate) struct FollowDescribe {
     pub enrolled_now: bool,
     /// What this follow subscribes (workspace / channels / skills).
     pub targets: Vec<DescribedTarget>,
-    /// The installs `--yes` would land on this device (pending first-receives included).
+    /// The installs `--yes` would land on this device — scoped to the named targets (a workspace
+    /// target lists the whole delivered set, pending first-receives included; a channel/skill
+    /// target lists only what it entitles).
     pub installs: Vec<DescribedInstall>,
     /// Channels the person is already placed into (an inviter's pre-placement; `everyone` excluded).
     pub preplaced_channels: Vec<String>,
@@ -753,8 +755,9 @@ fn fmt_rfc3339_millis(millis: i64) -> String {
 
 // =================================================================================================
 // The two-phase SUBSCRIBE — resolve (all-or-none) → describe (bare) → apply (`--yes`): the row ops,
-// then the delivery-driven reconcile landing the set THIS invocation (batch-accepted first
-// receives), then the fleet report. Nothing mutates before `--yes` except the enrollment itself.
+// then the delivery-driven reconcile landing the DESCRIBED set THIS invocation (batch-accepted
+// first receives, restricted to the ids the describe disclosed), then the fleet report. Nothing
+// mutates before `--yes` except the enrollment itself.
 // =================================================================================================
 
 /// The address/subscribe dispatch: build the target specs (positionals + selectors), resolve them
@@ -1070,12 +1073,22 @@ fn subscribe(
         }
     }
 
-    // 2) The reconcile lands the set THIS invocation — batch-accepting first receives (the describe
-    //    disclosed them), declining or prefixing the collisions, one workspace only. The notices
-    //    stay unacked (they belong to `update`'s narration).
+    // 2) The reconcile lands the set THIS invocation — batch-accepting first receives, declining
+    //    or prefixing the collisions, one workspace only. Installation is RESTRICTED to exactly
+    //    the ids THIS invocation's describe disclosed (`install_only`): a `--yes` is consent for
+    //    its own describe, so a waiting arrival outside the named targets is never swept in — it
+    //    stays an offer for the sweep / its own describe. The notices stay unacked (they belong
+    //    to `update`'s narration).
     let mut rec_opts = ReconcileOpts {
         accept_first_receive: true,
         only_workspace: Some(ws_id.to_owned()),
+        install_only: Some(
+            describe
+                .installs
+                .iter()
+                .map(|i| i.skill_id.clone())
+                .collect(),
+        ),
         ack_notices: false,
         // `--manual` threads through to the adopted entries: every later update is an offer.
         confirm_each: opts.manual,
@@ -1176,8 +1189,12 @@ fn subscribe(
     })))
 }
 
-/// Assemble the DESCRIBE: everything a `--yes` would land (the pending first-receives already
-/// delivered, plus the targets' additions), who you are here, the pre-placements, the dirname
+/// Assemble the DESCRIBE: everything a `--yes` would land — SCOPED to the named targets. A
+/// WORKSPACE target lists the whole delivered-but-not-yet-received set (membership itself is the
+/// entitlement, so the enrollment/workspace describe is where that set is disclosed); a targeted
+/// channel/skill subscribe lists ONLY what its own targets entitle — any other waiting arrival
+/// stays an undisclosed offer for the sweep / a later describe of its own, never listed under (or
+/// landed by) an unrelated `--yes`. Plus: who you are here, the pre-placements, the dirname
 /// collisions with the prefixed choice, and the standing disclosures.
 fn build_describe(
     ctx: &Ctx<'_>,
@@ -1192,21 +1209,28 @@ fn build_describe(
     let mut seen: HashSet<String> = HashSet::new();
     let mut direct_follow_note = None;
 
-    // The delivered-but-not-yet-received set: `--yes` batch-accepts these pending first receives,
-    // so the describe must list them (they land with everything else).
-    for ds in &snapshot.skills {
-        if locally_received(ctx, &ds.skill_id)? {
-            continue;
+    // The delivered-but-not-yet-received set rides a WORKSPACE target's describe only: there
+    // `--yes` batch-accepts these pending first receives, so the describe must list them. A
+    // targeted subscribe's `--yes` is consent for exactly its named targets — the waiting set is
+    // neither listed nor landed there.
+    let workspace_scoped = resolutions
+        .iter()
+        .any(|r| matches!(r, Resolution::Workspace { .. }));
+    if workspace_scoped {
+        for ds in &snapshot.skills {
+            if locally_received(ctx, &ds.skill_id)? {
+                continue;
+            }
+            seen.insert(ds.skill_id.clone());
+            installs.push(DescribedInstall {
+                skill_id: ds.skill_id.clone(),
+                name: ds.name.clone(),
+                version_id: Some(to_hex(&ds.version_id)),
+                bundle_digest: Some(to_hex(&ds.bundle_digest)),
+                via_channels: ds.via_channels.clone(),
+                via_direct: ds.via_direct,
+            });
         }
-        seen.insert(ds.skill_id.clone());
-        installs.push(DescribedInstall {
-            skill_id: ds.skill_id.clone(),
-            name: ds.name.clone(),
-            version_id: Some(to_hex(&ds.version_id)),
-            bundle_digest: Some(to_hex(&ds.bundle_digest)),
-            via_channels: ds.via_channels.clone(),
-            via_direct: ds.via_direct,
-        });
     }
 
     // The targets' additions (what the subscription would NEWLY entitle).
@@ -1240,13 +1264,25 @@ fn build_describe(
                     }
                     seen.insert(skill.skill_id.clone());
                     let cat = catalog.skills.iter().find(|s| s.skill_id == skill.skill_id);
+                    // Attribution stays honest on the TARGETED describe (where the snapshot rows
+                    // are not pre-listed): a channel skill that is already a waiting delivery
+                    // keeps every lane delivering it, with this channel appended.
+                    let (mut via_channels, via_direct) = snapshot
+                        .skills
+                        .iter()
+                        .find(|s| s.skill_id == skill.skill_id)
+                        .map(|ds| (ds.via_channels.clone(), ds.via_direct))
+                        .unwrap_or_default();
+                    if !via_channels.contains(name) {
+                        via_channels.push(name.clone());
+                    }
                     installs.push(DescribedInstall {
                         skill_id: skill.skill_id.clone(),
                         name: skill.name.clone(),
                         version_id: cat.map(|c| c.version_id.clone()),
                         bundle_digest: cat.map(|c| c.bundle_digest.clone()),
-                        via_channels: vec![name.clone()],
-                        via_direct: false,
+                        via_channels,
+                        via_direct,
                     });
                 }
             }
@@ -1282,12 +1318,21 @@ fn build_describe(
                     continue;
                 }
                 seen.insert(cat.skill_id.clone());
+                // A skill target always lands as a direct follow; when it is already a waiting
+                // delivery, the channels already carrying it stay attributed (the targeted
+                // describe skips the snapshot pre-list, so the lookup happens here).
+                let via_channels = snapshot
+                    .skills
+                    .iter()
+                    .find(|s| s.skill_id == cat.skill_id)
+                    .map(|ds| ds.via_channels.clone())
+                    .unwrap_or_default();
                 installs.push(DescribedInstall {
                     skill_id: cat.skill_id.clone(),
                     name: cat.name.clone(),
                     version_id: Some(cat.version_id.clone()),
                     bundle_digest: Some(cat.bundle_digest.clone()),
-                    via_channels: Vec::new(),
+                    via_channels,
                     via_direct: true,
                 });
             }

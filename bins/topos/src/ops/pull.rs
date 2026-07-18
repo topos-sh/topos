@@ -122,11 +122,12 @@ pub(crate) struct ReconcileOpts {
     /// Reconcile only this workspace (a `follow --yes` targets one); `None` = every enrolled one.
     pub only_workspace: Option<String>,
     /// When `Some`, RESTRICT first-receive acceptance AND new-arrival installation to these skill ids —
-    /// the targeted RE-ATTACH installs exactly its subject. Every OTHER pending first-receive stays
-    /// undisclosed: a never-received skill this device already follows keeps its offer (never
-    /// auto-placed), and a brand-new arrival outside the set is skipped WHOLESALE (no follow entry, no
-    /// baseline, no bytes) for the next full describe to disclose. `None` (the default) installs across
-    /// the whole delivered set (the bare sweep / `follow --yes`, whose describe already disclosed it all).
+    /// the `follow --yes` apply passes exactly the ids ITS OWN describe disclosed, and the targeted
+    /// RE-ATTACH exactly its subject. Every OTHER pending first-receive stays undisclosed: a
+    /// never-received skill this device already follows keeps its offer (never auto-placed), and a
+    /// brand-new arrival outside the set is skipped WHOLESALE (no follow entry, no baseline, no bytes)
+    /// for the next full describe to disclose. `None` (the default, the bare sweep) installs across
+    /// the whole delivered set.
     pub install_only: Option<HashSet<String>>,
     /// Ack the delivered notices after collecting them (the interactive / `--json` update); the
     /// quiet hook fetches WITHOUT acking, so nothing is marked read that no one narrated.
@@ -446,9 +447,10 @@ pub(crate) fn pull_reconcile_with(
                 // a server-side detach freezes by touching nothing.
                 Some((_, f)) if !f.following => continue,
                 Some((_, f)) => sync_delivered(ctx, &ws, ds, f, accept_for(ctx, ds, opts)),
-                // A brand-new arrival OUTSIDE a targeted install (the re-attach) stays undisclosed —
-                // no follow entry, no baseline, no bytes. Skipped wholesale (like a declined collision)
-                // so the next full describe is the first to disclose it.
+                // A brand-new arrival OUTSIDE a targeted install (a re-attach / a targeted
+                // `follow --yes`) stays undisclosed — no follow entry, no baseline, no bytes.
+                // Skipped wholesale (like a declined collision) so the next full describe is the
+                // first to disclose it.
                 None if opts
                     .install_only
                     .as_ref()
@@ -835,8 +837,9 @@ fn accept_for(ctx: &Ctx<'_>, ds: &DeliverySkill, opts: &ReconcileOpts) -> Invoca
     if !opts.accept_first_receive {
         return Invocation::Sweep;
     }
-    // A targeted install (the re-attach) accepts ONLY its subject's first receive — any OTHER
-    // never-received skill stays an offer, never silently placed under a describe that named just one.
+    // A targeted install (a re-attach / a targeted `follow --yes`) accepts ONLY its subjects' first
+    // receives — any OTHER never-received skill stays an offer, never silently placed under a
+    // describe that did not name it.
     if opts
         .install_only
         .as_ref()

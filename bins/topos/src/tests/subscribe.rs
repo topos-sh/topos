@@ -815,6 +815,301 @@ fn the_yes_apply_joins_then_lands_the_delivered_set_and_reports() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Target-scoped consent: a targeted `--yes` lands ONLY its named target's set — waiting arrivals
+// (delivered-but-never-received skills outside the target) are neither described nor installed.
+// ---------------------------------------------------------------------------------------------
+
+/// A transport whose delivery carries a WAITING ARRIVAL — `s_extra` (delivered via a standing
+/// direct follow, e.g. the person's own publish from another device; never received here) — beside
+/// the channel skill `s_deploy` (via #eng). Both serve real bytes.
+fn transport_with_waiting_arrival(log: CallLog) -> FakeTransport {
+    let v_deploy = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n")]);
+    let v_extra = mk_version(&[("SKILL.md", FileMode::Regular, b"# extra\n")]);
+    let mut transport = FakeTransport::empty(log);
+    transport.snapshot.skills.push(DeliverySkill {
+        skill_id: "s_deploy".into(),
+        name: "deploy".into(),
+        review_required: false,
+        version_id: v_deploy.id,
+        generation: 1,
+        bundle_digest: v_deploy.digest,
+        via_channels: vec!["eng".into()],
+        via_direct: false,
+    });
+    transport.snapshot.skills.push(DeliverySkill {
+        skill_id: "s_extra".into(),
+        name: "extra".into(),
+        review_required: false,
+        version_id: v_extra.id,
+        generation: 1,
+        bundle_digest: v_extra.digest,
+        via_channels: Vec::new(),
+        via_direct: true,
+    });
+    transport
+        .versions
+        .insert("s_deploy".into(), v_deploy.fetched);
+    transport.versions.insert("s_extra".into(), v_extra.fetched);
+    transport
+}
+
+/// The `acme` directory extended with the waiting arrival's catalog entry, so `extra` resolves as
+/// a skill target too.
+fn directory_with_extra(log: CallLog) -> FakeDirectory {
+    let mut directory = FakeDirectory::acme(log);
+    directory.skills.push(skill_entry("s_extra", "extra"));
+    directory
+}
+
+#[test]
+fn a_targeted_channel_yes_never_sweeps_in_a_waiting_arrival() {
+    // The union regression: bare describes (a skill's, a channel's), then a targeted `--yes` on the
+    // CHANNEL. The `--yes` must land exactly the channel's set — the waiting arrival `extra`
+    // (delivered via a standing direct follow, never consented here) stays un-listed, un-followed,
+    // and un-materialized; a LATER targeted `--yes` on it still lands it.
+    let rig = Rig::new("scoped-channel");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: log.clone(),
+    };
+    let directory = directory_with_extra(log.clone());
+    let transport = transport_with_waiting_arrival(log.clone());
+
+    // Exploratory BARE describes first (the observed shape): the skill's, then the channel's.
+    // Neither mutates anything, and neither's disclosure leaks into the other's consent.
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["acme/skills/extra".to_owned()],
+        opts(false),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Described { describe, .. } = out else {
+        panic!("bare = describe");
+    };
+    assert_eq!(
+        describe
+            .installs
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["extra"],
+        "the skill describe lists ONLY its named target"
+    );
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["acme/channels/eng".to_owned()],
+        opts(false),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Described { describe, .. } = out else {
+        panic!("bare = describe");
+    };
+    assert_eq!(
+        describe
+            .installs
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["deploy"],
+        "the channel describe lists ONLY the channel's set — never the waiting arrival"
+    );
+
+    // The targeted `--yes` on the CHANNEL: exactly the channel's set lands.
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["acme/channels/eng".to_owned()],
+        opts(true),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Applied(applied) = out else {
+        panic!("--yes = apply");
+    };
+    assert_eq!(applied.subscribed.len(), 1);
+    assert_eq!(applied.subscribed[0].name, "eng");
+    assert_eq!(
+        applied
+            .installed
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["deploy"],
+        "the channel's set landed and NOTHING else"
+    );
+    // The waiting arrival stayed waiting: no follow entry, no sidecar baseline, no bytes.
+    let follows = enroll::read_follows(&rig.fs, &rig.layout())
+        .unwrap()
+        .unwrap();
+    assert!(
+        follows.follows.iter().all(|e| e.skill_id != "s_extra"),
+        "no subscription state for the un-named arrival: {:?}",
+        follows.follows
+    );
+    assert!(
+        !rig.work.0.join("skills").join("extra").exists(),
+        "the un-named arrival's bytes never materialized"
+    );
+    assert!(
+        log.lock().unwrap().iter().all(|e| e != "follow s_extra"),
+        "no direct-follow row was written for the un-named arrival: {:?}",
+        log.lock().unwrap()
+    );
+
+    // A LATER targeted `--yes` on the waiting arrival still works — individually consentable.
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["acme/skills/extra".to_owned()],
+        opts(true),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Applied(applied) = out else {
+        panic!("--yes = apply");
+    };
+    assert_eq!(
+        applied
+            .installed
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["extra"],
+        "the later targeted consent lands exactly its target"
+    );
+    assert_eq!(
+        std::fs::read(rig.work.0.join("skills").join("extra").join("SKILL.md")).unwrap(),
+        b"# extra\n"
+    );
+}
+
+#[test]
+fn a_targeted_skill_yes_with_several_waiting_arrivals_installs_exactly_one() {
+    // Several waiting catalog arrivals; `follow <one-skill> --yes` installs exactly the named one.
+    let rig = Rig::new("scoped-skill");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: log.clone(),
+    };
+    let directory = directory_with_extra(log.clone());
+    // BOTH skills are waiting arrivals (delivered via #everyone, never received here).
+    let mut transport = transport_with_waiting_arrival(log.clone());
+    for ds in &mut transport.snapshot.skills {
+        ds.via_channels = vec!["everyone".into()];
+        ds.via_direct = false;
+    }
+
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["acme/skills/extra".to_owned()],
+        opts(true),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Applied(applied) = out else {
+        panic!("--yes = apply");
+    };
+    assert_eq!(
+        applied
+            .installed
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["extra"],
+        "exactly the named skill landed"
+    );
+    // The attribution stays honest: the named skill's existing delivery lane is disclosed.
+    assert_eq!(
+        applied.installed[0].via_channels,
+        vec!["everyone".to_owned()]
+    );
+    assert!(
+        applied.installed[0].via_direct,
+        "a skill target follows direct"
+    );
+    assert!(
+        !rig.work.0.join("skills").join("deploy").exists(),
+        "the OTHER waiting arrival stayed waiting"
+    );
+    let follows = enroll::read_follows(&rig.fs, &rig.layout())
+        .unwrap()
+        .unwrap();
+    assert!(
+        follows.follows.iter().all(|e| e.skill_id != "s_deploy"),
+        "no subscription state for the un-named arrival: {:?}",
+        follows.follows
+    );
+}
+
+#[test]
+fn a_workspace_yes_still_lands_the_whole_delivered_set() {
+    // The enrollment/workspace consent is the one place the whole delivered set is disclosed —
+    // and its `--yes` still lands all of it (the two-call enrollment flow depends on this).
+    let rig = Rig::new("scoped-workspace");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: log.clone(),
+    };
+    let directory = directory_with_extra(log.clone());
+    let transport = transport_with_waiting_arrival(log.clone());
+
+    // The bare workspace describe lists BOTH pending deliveries.
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["acme".to_owned()],
+        opts(false),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Described { describe, .. } = out else {
+        panic!("bare = describe");
+    };
+    let mut described: Vec<&str> = describe.installs.iter().map(|i| i.name.as_str()).collect();
+    described.sort_unstable();
+    assert_eq!(described, vec!["deploy", "extra"]);
+
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["acme".to_owned()],
+        opts(true),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Applied(applied) = out else {
+        panic!("--yes = apply");
+    };
+    let mut landed: Vec<&str> = applied.installed.iter().map(|i| i.name.as_str()).collect();
+    landed.sort_unstable();
+    assert_eq!(
+        landed,
+        vec!["deploy", "extra"],
+        "the workspace-consented apply lands the whole disclosed set"
+    );
+    assert!(rig.work.0.join("skills").join("deploy").exists());
+    assert!(rig.work.0.join("skills").join("extra").exists());
+}
+
+// ---------------------------------------------------------------------------------------------
 // unfollow: the workspace / everyone refusals, the skill detach row + the local pause.
 // ---------------------------------------------------------------------------------------------
 
