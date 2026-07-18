@@ -31,7 +31,8 @@ pub(crate) const DEFAULT_BASE_URL: &str = "https://github.com/topos-sh/topos/rel
 /// `INTEGRITY_ERROR` refusal with no unsigned fallback. The key ceremony
 /// (`scripts/mint-release-key.sh`) prints the exact `Some("…")` line to paste here — this constant
 /// and `scripts/install.sh`'s `MINISIGN_PUBKEY` are the only two places it flips.
-pub(crate) const RELEASE_PUBKEY: Option<&str> = None;
+pub(crate) const RELEASE_PUBKEY: Option<&str> =
+    Some("RWRsqhNImLJGum9BdXy1X/p7Dhr+xc0JQTyNPxaGW5emP/K/+828Euav");
 
 #[derive(Debug, Clone)]
 pub(crate) struct SelfUpdateOpts {
@@ -582,7 +583,7 @@ mod tests {
         std::fs::write(&current_exe, b"the OLD binary").unwrap();
 
         let out = with_ctx(|ctx| {
-            self_update(
+            self_update_with_key(
                 ctx,
                 &releases,
                 &current_exe,
@@ -591,6 +592,7 @@ mod tests {
                     version: Some(tag.to_owned()),
                     base_url: None,
                 },
+                None,
             )
         })
         .expect("a matching checksum installs");
@@ -599,8 +601,9 @@ mod tests {
         assert_eq!(out.latest_version.as_deref(), Some("9.9.9"));
         // The running binary now holds the extracted `topos` bytes, byte-exact.
         assert_eq!(std::fs::read(&current_exe).unwrap(), new_bin);
-        // This build compiles in no release public key (RELEASE_PUBKEY is None), so the install is
-        // checksum-only — disclosed honestly: not signed, with the unsigned-build note.
+        // Driven KEYLESS (the pre-ceremony shape), the install is checksum-only — disclosed
+        // honestly: not signed, with the unsigned-build note. The production entry compiles in
+        // `RELEASE_PUBKEY` (mandatory signatures — the signature tests cover that path).
         assert!(!out.signed);
         assert!(
             out.note
@@ -630,7 +633,7 @@ mod tests {
         std::fs::write(&current_exe, b"the OLD binary").unwrap();
 
         let err = with_ctx(|ctx| {
-            self_update(
+            self_update_with_key(
                 ctx,
                 &releases,
                 &current_exe,
@@ -639,6 +642,7 @@ mod tests {
                     version: Some(tag.to_owned()),
                     base_url: None,
                 },
+                None,
             )
         })
         .unwrap_err();
@@ -735,7 +739,7 @@ mod tests {
         std::fs::write(&current_exe, b"the OLD binary").unwrap();
 
         let out = with_ctx(|ctx| {
-            self_update(
+            self_update_with_key(
                 ctx,
                 &releases,
                 &current_exe,
@@ -745,6 +749,7 @@ mod tests {
                     // A non-HTTPS mirror the operator controls — the checksum is still enforced.
                     base_url: Some(base.to_owned()),
                 },
+                None,
             )
         })
         .expect("a non-HTTPS mirror still installs with the checksum enforced");

@@ -62,7 +62,7 @@ BASE_URL="${TOPOS_INSTALL_BASE_URL:-https://github.com/topos-sh/topos/releases}"
 # flips the binary's compiled-in RELEASE_PUBKEY), the asset's .minisig becomes REQUIRED and is
 # verified BEFORE the checksum whenever the `minisign` tool is available. Not a knob: this is
 # release-time configuration, deliberately not overridable by flag or environment.
-MINISIGN_PUBKEY=""
+MINISIGN_PUBKEY="RWRsqhNImLJGum9BdXy1X/p7Dhr+xc0JQTyNPxaGW5emP/K/+828Euav"
 
 while [ $# -gt 0 ]; do
   case "$1" in
