@@ -27,13 +27,17 @@ const HERE = path.dirname(new URL(import.meta.url).pathname);
 const RUNS = path.join(HERE, ".runs");
 
 function parseArgs(argv) {
-  const a = { task: "all", arm: "both", model: DEFAULT_MODEL, reps: 1 };
+  const a = { task: "all", arm: "both", model: DEFAULT_MODEL, reps: 1, rep: null };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     if (k === "--task") a.task = argv[++i];
     else if (k === "--arm") a.arm = argv[++i];
     else if (k === "--model") a.model = argv[++i];
     else if (k === "--reps") a.reps = Number(argv[++i]);
+    // --rep <n> runs ONE repetition labeled n (in the run-dir name AND the result row). An
+    // external per-cell driver that loops reps itself must pass this, or every single-run
+    // invocation defaults to rep 1 and the on-disk run dirs collide on the `-r1` suffix.
+    else if (k === "--rep") a.rep = Number(argv[++i]);
     else throw new Error(`unknown arg: ${k}`);
   }
   return a;
@@ -224,7 +228,8 @@ const arms = args.arm === "both" ? ["with", "without"] : [args.arm];
 mkdirSync(RUNS, { recursive: true });
 
 const records = [];
-for (let rep = 1; rep <= args.reps; rep++) {
+const reps = args.rep != null ? [args.rep] : Array.from({ length: args.reps }, (_, i) => i + 1);
+for (const rep of reps) {
   for (const t of tasks) {
     for (const arm of arms) {
       records.push(await runOne(t, arm, args.model, rep));

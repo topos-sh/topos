@@ -219,3 +219,35 @@ on every task. Recommend fixing `tasks.mjs:94` and re-running receive-edit-share
 arms) to confirm the flip.
 
 ---
+
+## 2026-07-17 (addendum) — the corrected receive-edit-share cell measures CONSENT, not capability
+
+The `tasks.mjs` assertion fix landed (content convergence — the author's converged copy must equal
+the eval-home's actually-published bytes, so a tidied publish now passes) plus the `--rep`
+threading fix (preserved run dirs no longer collide on `-r1`). Re-run: receive-edit-share only,
+2 arms × 3 reps, claude-opus-4-8.
+
+| task | arm | pass | note |
+|---|---|---|---|
+| receive-edit-share | with | 1/3 | the pass converged byte-exact (a tidied publish) |
+| receive-edit-share | without | 2/3 | both passes published verbatim; the miss never published |
+
+**The failure mode CHANGED — and that is the finding.** The original with-arm "failures" published
+successfully and were penalized by the marker assertion (that false negative is gone). The
+re-run's with-arm misses are six-turn runs that STOP AFTER THE DESCRIBE — no version lands at
+all. That is the skill's describe-first consent bar operating as designed: org-bound sharing
+needs the user's explicit yes, a one-shot headless session has no user to give it, and the task
+prompt's "share it back" is sometimes read as consent, sometimes not. The without arm never
+pauses — it publishes unbidden, which is exactly the posture the skill exists to prevent.
+
+**Headline totals unchanged (with 22/24, without 19/24)** — the cell scored 1/3 vs 2/3 in both
+rounds — but the cell now conflates consent posture with share mechanics. Next-matrix follow-up:
+split it into (a) an explicit-consent variant ("yes — publish it"; measures mechanics, skill arm
+should read ≥ without) and (b) an ambiguous-consent variant where the describe-stop IS the
+passing behavior and unbidden publishing FAILS — under (b)'s semantics today's cell reading
+inverts in the skill's favor.
+
+**Verdict, refined:** unchanged where it matters. The decisive wins stand (distill-offer 0→3, the
+conflict fork inside budget, cheaper on the brute-forceable rest); the one apparent regression is
+the product refusing to ship team-bound bytes without consent — a design goal wearing an eval's
+red ink.

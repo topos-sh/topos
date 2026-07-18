@@ -84,14 +84,23 @@ export const TASKS = {
     assert(ctx) {
       const after = dbSnapshot(ctx.stack.db);
       const row = listRows(ctx).find((r) => r.skill === "commit-style");
-      // End-to-end distribution proof: the author's sweep lands the shared bytes.
+      // End-to-end distribution proof by CONTENT CONVERGENCE, not a keyed marker: whatever the
+      // agent actually published — its now-current placed copy — must be byte-for-byte what the
+      // author's sweep lands. A well-behaved share may tidy the draft before publishing (drop
+      // scaffolding, fix a heading), so asserting the survival of an injected token would fail
+      // the RIGHT behavior; asserting equality of the shared bytes proves propagation honestly.
+      const published = placedFile(ctx.evalHome, "commit-style") ?? "";
       topos(ctx.authorHome, ctx.stack, ["update", "--json"], { allowFail: true });
       const authorCopy = readFileSync(path.join(ctx.authorHome, "seeds", "commit-style", "SKILL.md"), "utf8");
       return [
         check("one new version landed on the plane", after.versions === ctx.before.versions + 1),
         check("current moved exactly once", after.generations === ctx.before.generations + 1),
         check("the draft flag cleared (draft became current)", row && row.draft === false),
-        check("the author's sweep received the improvement", authorCopy.includes("EVAL-T1-DRAFT")),
+        check(
+          "the author's sweep converged on the exact published bytes",
+          published !== "" && authorCopy === published,
+          authorCopy === published ? "" : "author copy != eval-home's published SKILL.md",
+        ),
       ];
     },
   },
