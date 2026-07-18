@@ -61,7 +61,7 @@ task without it.
 explored: `which topos`, read `~/.topos/follows.json` directly (sidecar internals the skill
 steers around), `follow --help`, one failed invocation (`follow --skill pr-review` with no
 enrollment context), then recovered via the qualified path `follow acme/skills/pr-review
---yes` — 7 Bash calls, 2.4x the output tokens, 44% more wall time.
+--yes` — 7 Bash calls, 2.4x the output tokens, 46% more wall time.
 
 **Verdict:** harness PROVEN end to end on a real model — honest assertions (the without arm
 legitimately passed; opus can discover the CLI from `--help` on an easy task), and the
@@ -84,5 +84,38 @@ full matrix measures.
 - Bounds: $22 (if every task behaved like the smoke) to ~$45 (2x, hard tasks hitting turn
   caps). Add ~$0.70 per extra single-task iteration during assertion tuning.
 - Wall time: ~2.5 min per run including stack boot ≈ 2 hours serial for the matrix.
+
+---
+
+## 2026-07-17 — external review (codex) + hardening
+
+**Hypothesis:** a strict reviewer finds isolation or honesty gaps the smoke did not.
+
+**Findings + resolutions:**
+
+1. *Env inheritance* (P1): the driven agent inherited the operator's full environment;
+   redirecting three variables is not isolation. FIXED: the agent env is now an allowlist
+   (redirected homes, PATH, pinned bash, locale) — no ambient keys or tokens reach it.
+2. *Credential lifetime* (P1): the seeded Claude credential was never deleted. FIXED: wiped
+   from the fixture config dir the moment the agent run ends, error or not.
+3. *Repo reachability* (P1): with permissions bypassed, the driven agent could in principle
+   modify the checkout (skills dirs, Cargo inputs, CI). Structurally out of scope for an
+   env-level harness (no OS sandbox), so it is now a MEASURED invariant instead: every run
+   compares `git status --porcelain` before/after and FAILS if the agent touched the repo.
+   The residual is stated in the README.
+4. *Fakeable transcript check* (P2): `--reset` matched any Bash string. FIXED: requires a
+   real `topos … update … --reset` invocation.
+5. *Errored result could pass* (P2): FIXED — a run-level invariant fails any run whose agent
+   result is an error (budget/turn exhaustion included).
+6. *Arithmetic* (P3): the smoke wall-time delta is 46%, not 44%. Fixed above.
+
+**Re-validation:** `node run.mjs --task follow-catalog-skill --arm with` on the hardened
+runner: PASS, 39.9 s wall, 9 turns, $0.492 — all four task checks plus both new run-level
+invariants green, and the seeded credential is gone from the fixture after the run. The
+allowlisted env changed nothing about the agent's ability to do the task.
+
+**Verdict:** review findings closed at the root where structural (env allowlist, credential
+wipe, invariants), stated honestly where inherent (no OS sandbox). Numbers unchanged within
+noise; the cost projection stands.
 
 ---

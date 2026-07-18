@@ -28,11 +28,17 @@ Per (task, arm, repetition) — nothing shared between runs:
 4. **The task's state** (a planted draft, an upstream move, a frozen conflict, …) built with
    the real CLI, then the arm applied.
 5. **Headless Claude Code** (`claude -p`, default model `claude-opus-4-8`) runs the task
-   prompt, sandboxed to the fixture: `HOME`, `TOPOS_HOME`, and `CLAUDE_CONFIG_DIR` all point
-   inside the run dir, `PATH` gets `target/debug` prepended, and `TOPOS_PLANE_URL` pins the
-   fixture origin — the driven agent cannot touch the real user environment. Auth is the
-   operator's own Claude Code sign-in, extracted at run time into the gitignored fixture
-   config dir (never committed).
+   prompt, sandboxed to the fixture at the environment level: it gets an ALLOWLISTED env —
+   `HOME`, `TOPOS_HOME`, `CLAUDE_CONFIG_DIR` pointing inside the run dir, `PATH` with
+   `target/debug` prepended, `TOPOS_PLANE_URL` pinning the fixture origin, a pinned
+   `SHELL=/bin/bash` — never the operator's ambient variables (no inherited API keys or
+   tokens). Auth is the operator's own Claude Code sign-in, extracted at run time into the
+   gitignored fixture config dir and deleted again the moment the agent run ends. Honest
+   limit: this is env-level isolation, not an OS sandbox — the driven agent has the same
+   filesystem access as any local process, which matches how the operator's own agent runs
+   anyway. Two run-level invariants back it: an errored agent result never passes, and a
+   pre/post `git status` comparison fails any run in which the driven agent touched the repo
+   checkout itself (skills dirs, Cargo inputs, CI files).
 6. **Assertions** on the end state — placed-file bytes, `list --json` rows, and row/version
    counts in the run's own database — write one JSON line to `.runs/results.jsonl` with
    pass/fail, wall time, turns, token usage, and cost.

@@ -25,17 +25,25 @@ const SEED_BODY = {
   "incident-runbook": "Page the on-call first.\nSnapshot logs before any restart.\nWrite the timeline as you go.\n",
 };
 
-/** Environment for driving the topos CLI (and later the driven agent) inside a fixture home. */
+/**
+ * Environment for the topos CLI and the driven agent inside a fixture home. ALLOWLISTED, not
+ * inherited: the driven agent must not see the operator's ambient env (API keys, tokens,
+ * cloud credentials) — it gets the redirected home vars, a PATH with the repo binary first,
+ * and a pinned bash so no operator shell config leaks in.
+ */
 export function homeEnv(home, stack) {
   const root = repoRoot();
-  return {
-    ...process.env,
+  const env = {
     HOME: home,
     TOPOS_HOME: path.join(home, ".topos"),
     CLAUDE_CONFIG_DIR: path.join(home, ".claude"),
     TOPOS_PLANE_URL: stack.origin,
     PATH: `${path.join(root, "target/debug")}:${process.env.PATH}`,
+    SHELL: "/bin/bash",
+    TERM: process.env.TERM ?? "dumb",
   };
+  for (const k of ["TMPDIR", "LANG", "LC_ALL"]) if (process.env[k]) env[k] = process.env[k];
+  return env;
 }
 
 /** Run the topos binary in a home; returns {status, stdout, stderr, json} (json when parseable). */

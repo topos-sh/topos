@@ -15,10 +15,10 @@
 // config dir — never committed, wiped with the run dir.
 
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync, readFileSync, appendFileSync, existsSync, chmodSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, appendFileSync, existsSync, chmodSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { startStack } from "./stack.mjs";
+import { repoRoot, startStack } from "./stack.mjs";
 import { buildFixture, applyArm, homeEnv } from "./fixture.mjs";
 import { TASKS, taskIds, dbSnapshot } from "./tasks.mjs";
 
@@ -64,6 +64,20 @@ function seedClaudeAuth(evalHome) {
   }
   seed.hasCompletedOnboarding = true;
   writeFileSync(path.join(cfg, ".claude.json"), JSON.stringify(seed, null, 2));
+}
+
+/** Remove the seeded operator credential from the fixture as soon as the agent run ends. */
+function wipeClaudeAuth(evalHome) {
+  for (const f of [".credentials.json", ".claude.json"]) {
+    rmSync(path.join(evalHome, ".claude", f), { force: true });
+  }
+}
+
+/** The repo checkout must be byte-untouched by the driven agent (skills/, Cargo inputs, CI). */
+function repoStatus() {
+  const r = spawnSync("git", ["-C", repoRoot(), "status", "--porcelain"], { encoding: "utf8" });
+  if (r.status !== 0) throw new Error(`git status failed: ${r.stderr}`);
+  return r.stdout;
 }
 
 /** Run headless Claude Code sandboxed to the fixture home; parse the stream-json transcript. */
@@ -152,19 +166,33 @@ async function runOne(taskId, arm, model, rep) {
     applyArm(evalHome, stack, arm);
     seedClaudeAuth(evalHome);
     ctx.before = dbSnapshot(stack.db);
+    const repoBefore = repoStatus();
 
-    const metrics = driveAgent({
-      evalHome,
-      stack,
-      prompt: task.prompt,
-      model,
-      maxTurns: task.maxTurns,
-      transcriptPath: path.join(runDir, "transcript.jsonl"),
-    });
+    let metrics;
+    try {
+      metrics = driveAgent({
+        evalHome,
+        stack,
+        prompt: task.prompt,
+        model,
+        maxTurns: task.maxTurns,
+        transcriptPath: path.join(runDir, "transcript.jsonl"),
+      });
+    } finally {
+      wipeClaudeAuth(evalHome);
+    }
     ctx.resultText = metrics.resultText;
     ctx.bashCommands = metrics.bashCommands;
 
     const checks = await task.assert(ctx);
+    // Run-level invariants, independent of the task: an errored agent result never passes,
+    // and the driven agent must not have touched the repo checkout itself.
+    checks.push({ name: "agent finished without error", ok: !metrics.isError, detail: "" });
+    checks.push({
+      name: "repo checkout untouched by the driven agent",
+      ok: repoStatus() === repoBefore,
+      detail: "",
+    });
     const pass = checks.every((c) => c.ok);
     const record = {
       task: taskId,

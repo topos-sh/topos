@@ -107,7 +107,8 @@ export const TASKS = {
     assert(ctx) {
       const after = dbSnapshot(ctx.stack.db);
       const placed = placedFile(ctx.evalHome, "incident-runbook") ?? "";
-      const usedReset = ctx.bashCommands.some((c) => c.includes("--reset"));
+      // A real `topos … update … --reset` invocation — `echo --reset` does not count.
+      const usedReset = ctx.bashCommands.some((c) => /\btopos\b[\s\S]*\bupdate\b[\s\S]*--reset/.test(c));
       return [
         check("placed bytes are the team's v2", placed.includes("TEAM-V2-RUNBOOK")),
         check("the local rewrite is gone", !placed.includes("LOCAL-REWRITE")),
