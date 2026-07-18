@@ -10,3 +10,6 @@ Cargo.lock.bak
 .vscode/
 .claude/
 /target-musl/
+
+# Eval run artifacts (fixture homes carry extracted credentials — never tracked)
+/evals/meta-skill/.runs/
