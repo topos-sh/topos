@@ -120,12 +120,14 @@ Inventory the skills on this machine. By default also discovers **untracked** sk
 | `--footprint` |  |  | Also report the paths topos owns outside skill directories |
 | `--channel` | `<NAME>` |  | Narrow to one channel's skills (repeatable). Lands with the full resolution grammar |
 | `--skill` | `<NAME>` |  | Narrow to a specific skill (repeatable). Lands with the full resolution grammar |
+| `--limit` | `<N>` |  | Emit at most this many rows PER BUCKET (`0` = all). Default: unlimited on the TTY, 50 under `--json` (a truncation marker + a NEXT_PAGE next action disclose the rest) |
+| `--offset` | `<N>` |  | Skip this many rows per bucket before emitting (the next-page cursor) |
 
 
 ### `topos diff`
 
 ```
-topos diff <SKILL> [REF]
+topos diff [OPTIONS] <SKILL> [REF]
 ```
 
 Show a skill's change. Bare = draft ↔ current; `<hash>` / `@<hash>` reviews that version against current (`current..<hash>` — a proposal IS a version); `<a>..<b>` = version ↔ version. `--json` emits the target digest + `source: local\|plane`
@@ -134,12 +136,13 @@ Show a skill's change. Bare = draft ↔ current; `<hash>` / `@<hash>` reviews th
 |---|---|---|---|
 | `<SKILL>` |  |  | The skill name |
 | `[REF]` |  |  | The optional ref: `<hash>` / `@<hash>` / `current..<hash>` / `<a>..<b>`. Omitted = draft ↔ current |
+| `--max-bytes` | `<BYTES>` |  | Cap the emitted diff body at this many bytes, truncating at FILE boundaries (`0` = no cap). Default: unlimited on the TTY, 64 KiB under `--json` — a capped envelope lists every file with `patch_omitted` marks and a FETCH_FULL_DIFF next action for the rest |
 
 
 ### `topos log`
 
 ```
-topos log <SKILL>
+topos log [OPTIONS] <SKILL>
 ```
 
 Show a skill's local action log + embedded-git history
@@ -147,6 +150,8 @@ Show a skill's local action log + embedded-git history
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
 | `<SKILL>` |  |  | The skill name |
+| `--limit` | `<N>` |  | Emit at most this many events (`0` = all). Default: unlimited on the TTY, 20 under `--json` (a truncation marker + a NEXT_PAGE next action disclose the rest) |
+| `--offset` | `<N>` |  | Skip this many events before emitting (the next-page cursor) |
 
 ## Team-scoped verbs
 
@@ -182,6 +187,7 @@ Resolve a proposal (the `gh pr review` model). `--approve` moves `current` to th
 | `--reject` |  |  | Reject the proposal (needs `-m <reason>`) |
 | `--withdraw` |  |  | Withdraw your own open proposal |
 | `-m, --message` | `<MSG>` |  | The reject reason / withdrawal note (required with `--reject`) |
+| `--max-bytes` | `<BYTES>` |  | Cap the describe's diff body at this many bytes, truncating at FILE boundaries (`0` = no cap). Default: unlimited on the TTY, 64 KiB under `--json` — a capped describe carries `diff_truncated` and a FETCH_FULL_DIFF next action for the rest |
 | `--yes` |  |  | Apply without the describe step. Parses today; the two-phase describe lands later |
 
 

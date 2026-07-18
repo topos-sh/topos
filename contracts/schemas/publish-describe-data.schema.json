@@ -17,6 +17,17 @@
       "description": "Whether this publish restores an ancestor's bytes (a revert-shaped publish, same gate).",
       "type": "boolean"
     },
+    "merge_preview": {
+      "description": "The PREDICTED conflict verdict when the draft's base is BEHIND the last-known observed\n`current` (the apply would refuse with CONFLICT — rebase first): a pure in-memory three-way\ndry run of the draft onto that current, from already-local bytes only. Absent = unknown\n(up to date, or the needed version is not locally held — the describe never adds a network\ncall for it). **INFERRED** (additive-only).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MergePreview"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "origin_note": {
       "description": "The origin-demotion disclosure for an imported skill (publishing makes the team copy the source\nof truth).",
       "type": [
@@ -87,6 +98,40 @@
     "is_revert"
   ],
   "$defs": {
+    "MergePreview": {
+      "description": "The predicted verdict of a three-way merge that has NOT been run against the placements — a pure\nin-memory dry run of the same kernel plan + per-file diff3 the real resolution executes. Never a\npromise: the authoritative outcome is the resolution's own [`MergeReport`]. **INFERRED** (additive).",
+      "type": "object",
+      "properties": {
+        "conflicts": {
+          "description": "The paths that would conflict when `verdict` is `conflicted` (structural conflicts + failed\ncontent merges). Empty for a clean preview — and for the rare conflicted-with-no-path case\n(a merge that would empty the bundle).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "verdict": {
+          "$ref": "#/$defs/MergePreviewVerdict"
+        }
+      },
+      "required": [
+        "verdict"
+      ]
+    },
+    "MergePreviewVerdict": {
+      "description": "The two predicted merge verdicts. **INFERRED** (additive value set).",
+      "oneOf": [
+        {
+          "description": "Every path would resolve cleanly — the merge would land a publishable draft-on-current.",
+          "type": "string",
+          "const": "clean"
+        },
+        {
+          "description": "At least one path would conflict — the merge would write markers and block publish.",
+          "type": "string",
+          "const": "conflicted"
+        }
+      ]
+    },
     "PublishGate": {
       "description": "The gate a `publish` describe predicts. **INFERRED value set.**",
       "oneOf": [

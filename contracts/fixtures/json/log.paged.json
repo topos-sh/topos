@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "command": "log",
+  "ok": true,
+  "data": {
+    "events": [
+      {
+        "action": "add",
+        "at": 1700000000000,
+        "name": "pr-describe",
+        "skill_id": "topos_t00",
+        "version_id": "d77b648d8149d63189864c6b6d06da4f7919935c4242cc197e708b1dafe941d5"
+      },
+      {
+        "action": "version",
+        "author": "d_test",
+        "message": "topos: add",
+        "parents": [],
+        "version_id": "d77b648d8149d63189864c6b6d06da4f7919935c4242cc197e708b1dafe941d5"
+      }
+    ],
+    "total": 3,
+    "truncated": true
+  },
+  "warnings": [],
+  "next_actions": [
+    {
+      "code": "NEXT_PAGE",
+      "argv": [
+        "topos",
+        "log",
+        "pr-describe",
+        "--limit",
+        "2",
+        "--offset",
+        "2",
+        "--json"
+      ],
+      "mutates": false
+    }
+  ]
+}

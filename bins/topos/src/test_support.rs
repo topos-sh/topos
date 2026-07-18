@@ -1502,14 +1502,21 @@ impl FollowHarness {
             directory: &directory,
             contribute: &contribute,
         };
-        self.with_inert_ctx(
-            |ctx| match ops::review_dispatch(ctx, &connectors, None, None, None)? {
+        self.with_inert_ctx(|ctx| {
+            match ops::review_dispatch(
+                ctx,
+                &connectors,
+                None,
+                None,
+                None,
+                ops::DiffBudget::unlimited(),
+            )? {
                 ops::ReviewOutcome::Inbox(data) => Ok(data),
                 other => Err(crate::error::ClientError::InvalidArgument(format!(
                     "test_support: expected the review inbox, got {other:?}"
                 ))),
-            },
-        )
+            }
+        })
         .map_err(|e| e.to_string())
     }
 
@@ -1548,7 +1555,14 @@ impl FollowHarness {
             contribute: &contribute,
         };
         self.with_enrolled_ctx(|ctx| {
-            match ops::review_dispatch(ctx, &connectors, Some(target), Some(verdict), None)? {
+            match ops::review_dispatch(
+                ctx,
+                &connectors,
+                Some(target),
+                Some(verdict),
+                None,
+                ops::DiffBudget::unlimited(),
+            )? {
                 ops::ReviewOutcome::Applied(data) => Ok(data),
                 other => Err(crate::error::ClientError::InvalidArgument(format!(
                     "test_support: expected an applied verdict, got {other:?}"
@@ -2565,8 +2579,15 @@ impl ContributeHarness {
                 reason: Some("test_support: rejected".to_owned()),
             }
         };
-        match ops::review_dispatch(&ctx, &connectors, Some(target), Some(verdict), None)
-            .map_err(|e| e.to_string())?
+        match ops::review_dispatch(
+            &ctx,
+            &connectors,
+            Some(target),
+            Some(verdict),
+            None,
+            ops::DiffBudget::unlimited(),
+        )
+        .map_err(|e| e.to_string())?
         {
             ops::ReviewOutcome::Applied(data) => Ok(data),
             other => Err(format!(
@@ -2595,7 +2616,9 @@ impl ContributeHarness {
     /// The verb's typed error rendered to a string.
     pub fn diff(&self, r#ref: Option<&str>) -> Result<DiffData, String> {
         let skill = self.skill_id.clone();
-        self.with_write_ctx(|ctx, _c, _g| ops::diff(ctx, &skill, r#ref).map_err(|e| e.to_string()))
+        self.with_write_ctx(|ctx, _c, _g| {
+            ops::diff(ctx, &skill, r#ref, ops::DiffBudget::unlimited()).map_err(|e| e.to_string())
+        })
     }
 
     /// Run `pull` and return the `proposals_awaiting` count (the plane proposals route summed over the

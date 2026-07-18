@@ -19,13 +19,15 @@
   "warnings": [],
   "next_actions": [
     {
-      "code": "APPLY",
+      "code": "APPLY_DESCRIBED",
       "argv": [
         "topos",
         "remove",
         "deploy",
         "--yes"
-      ]
+      ],
+      "mutates": true,
+      "risk_note": "removes the skill from this machine (a followed skill keeps its canonical bytes)"
     }
   ]
 }

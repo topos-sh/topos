@@ -21,7 +21,10 @@
         "topos",
         "follow",
         "--json"
-      ]
+      ],
+      "mutates": true,
+      "needs_network": true,
+      "risk_note": "completes device enrollment — a credential is stored on this machine"
     }
   ]
 }

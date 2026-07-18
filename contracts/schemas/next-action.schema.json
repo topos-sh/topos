@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "NextAction",
-  "description": "A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent\nbranch on the known set and still pass through unknowns.",
+  "description": "A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent\nbranch on the known set and still pass through unknowns. The three safety fields are ADDITIVE\nand optional (absent = unknown) — a producer fills them from its one rules module, never\nper call site, so the classification cannot drift between surfaces.",
   "type": "object",
   "properties": {
     "argv": {
@@ -13,6 +13,27 @@
     },
     "code": {
       "$ref": "#/$defs/ActionCode"
+    },
+    "mutates": {
+      "description": "Whether executing `argv` CHANGES state — local files (skill bytes, the sidecar) or shared\nworkspace state. Absent = unknown (e.g. a bare `RETRY`, whose safety is the retried\ncommand's own).",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "needs_network": {
+      "description": "Whether executing `argv` dials the plane. Absent = unknown.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "risk_note": {
+      "description": "A one-line caution for an action whose effect a human/agent should weigh before running\n(team-visible moves, local discards). Absent = nothing to flag.",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [
@@ -32,7 +53,9 @@
         "DISAMBIGUATE_NAME",
         "REQUEST_ACCESS",
         "RETRY",
-        "CONTACT_ADMIN"
+        "CONTACT_ADMIN",
+        "FETCH_FULL_DIFF",
+        "NEXT_PAGE"
       ]
     }
   }

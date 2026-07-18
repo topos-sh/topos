@@ -51,8 +51,10 @@ renderer is fuzzed. Holds **no access control** and **no `~/.topos/` policy** (i
 - `unified_diff` (`diff`) — a byte-stable line-oriented unified-diff renderer over two bundles (`DiffFile`
   views). The diff **algorithm** is `imara-diff` (histogram); the unified-diff **formatting** (hunk headers,
   mode-change, binary detection, the no-newline marker) is **owned here**, so the committed `diff` golden
-  stays byte-stable across imara-diff releases. The `diff` verb calls this; the `current..<hash>` plane half
-  reuses it later.
+  stays byte-stable across imara-diff releases. `unified_diff_sections` is the SAME walk split per
+  changed file (concatenating the sections reproduces `unified_diff` byte-for-byte — a tested
+  invariant), so the client's byte-budgeted `--json` diff can truncate at file boundaries with no
+  second renderer. The `diff` verb calls this; the `current..<hash>` plane half reuses it later.
 - `merge_file` (`merge`) — the per-file three-way (diff3) content **execution** behind the kernel's merge
   policy: `merge_file(base, mine, theirs) -> Clean(bytes) | Conflict(bytes-with-markers) | Binary`, over
   `diffy` (pinned **exact**; its conflict bytes are a consent artifact locked by a byte-golden, so an

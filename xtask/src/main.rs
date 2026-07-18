@@ -397,15 +397,14 @@ fn fixtures() -> Vec<(&'static str, String)> {
     use topos_types::persisted::ConflictPathKind;
     use topos_types::requests::{WireDelivery, WireDeliverySkill, WireNotice, WireVia};
     use topos_types::results::{
-        AddData, ChannelAction, ChannelData, ChannelItem, ChannelItemOutcome, ConflictPathReport,
-        DiffData, DiffSource, EnrollmentPending, FollowData, FollowOffer, InviteReadData, ListData,
-        LogData, MergeReport, Offer, ProtectData, PublishDescribeData, PublishGate, PullAction,
-        PullData, PullSkill, RemoveData, RemoveItem, RemoveKind, ReviewIndexData, ReviewIndexEntry,
+        AddData, ChannelAction, ChannelData, ChannelItem, ChannelItemOutcome, Conflict,
+        ConflictPathReport, DiffData, DiffPatchInfo, DiffSource, EnrollmentPending, FollowData,
+        FollowOffer, InviteReadData, ListData, LogData, MergePreview, MergePreviewVerdict,
+        MergeReport, Offer, ProtectData, PublishDescribeData, PublishGate, PullAction, PullData,
+        PullSkill, RemoveData, RemoveItem, RemoveKind, ReviewIndexData, ReviewIndexEntry,
         SkillEntry, UnfollowData, WorkspaceSyncReport,
     };
-    use topos_types::{
-        ActionCode, Affected, JsonEnvelope, NextAction, Receipt, TerminalOutcome, WireError,
-    };
+    use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
 
     let argv = |parts: &[&str]| parts.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
 
@@ -478,6 +477,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 offer: None,
                 conflict: None,
                 merge: None,
+                merge_preview: None,
             }],
             proposals_awaiting: 0,
         })
@@ -514,6 +514,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     conflicts: vec![],
                     drop_diff: None,
                 }),
+                merge_preview: None,
             }],
             proposals_awaiting: 0,
         })
@@ -552,6 +553,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     }],
                     drop_diff: None,
                 }),
+                merge_preview: None,
             }],
             proposals_awaiting: 0,
         })
@@ -602,6 +604,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             version_id: fx_version.to_owned(),
             bundle_digest: fx_draft_digest.to_owned(),
             diff: "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -4,4 +4,4 @@\n \n # PR describe\n \n-Write a clear PR description.\n+Write a GREAT PR description.\n".to_owned(),
+            truncated: false,
+            files: Vec::new(),
         })
         .expect("DiffData serializes"),
         warnings: vec![],
@@ -635,6 +639,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             team: None,
             // A local skill resolved by its own name — no freed-base-name archived-successor hint (omits).
             archived_successor: None,
+            truncated: false,
+            total: None,
         })
         .expect("LogData serializes"),
         warnings: vec![],
@@ -681,10 +687,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ok: false,
         data: serde_json::json!({}),
         warnings: vec![],
-        next_actions: vec![NextAction {
-            code: ActionCode::RebaseAndRetry,
-            argv: argv(&["topos", "publish", "pr-describe"]),
-        }],
+        next_actions: vec![topos::actions::next_action(
+            ActionCode::RebaseAndRetry,
+            argv(&["topos", "publish", "pr-describe"]),
+        )],
         receipt: Some(Receipt {
             schema_version: 1,
             op_id: "9f1b8c2e-7a6d-4e3f-9b0a-1c2d3e4f5a6b".to_owned(),
@@ -712,10 +718,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
             expected_generation: Some(42),
             current_generation: Some(43),
             context: serde_json::json!({}),
-            next_actions: vec![NextAction {
-                code: ActionCode::RebaseAndRetry,
-                argv: argv(&["topos", "publish", "pr-describe"]),
-            }],
+            next_actions: vec![topos::actions::next_action(
+                ActionCode::RebaseAndRetry,
+                argv(&["topos", "publish", "pr-describe"]),
+            )],
         }),
     };
 
@@ -744,10 +750,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("FollowData serializes"),
         warnings: vec![],
-        next_actions: vec![NextAction {
-            code: ActionCode::from("ENROLL_RESUME".to_owned()),
-            argv: argv(&["topos", "follow", "--json"]),
-        }],
+        next_actions: vec![topos::actions::next_action(
+            ActionCode::from("ENROLL_RESUME".to_owned()),
+            argv(&["topos", "follow", "--json"]),
+        )],
         receipt: None,
         error: None,
     };
@@ -839,10 +845,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("FollowData serializes"),
         warnings: vec![],
-        next_actions: vec![NextAction {
-            code: ActionCode::from("APPLY".to_owned()),
-            argv: argv(&["topos", "follow", "acme", "--yes"]),
-        }],
+        next_actions: vec![topos::actions::next_action(
+            ActionCode::from("APPLY_DESCRIBED".to_owned()),
+            argv(&["topos", "follow", "acme", "--yes"]),
+        )],
         receipt: None,
         error: None,
     };
@@ -866,10 +872,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("RemoveData serializes"),
         warnings: vec![],
-        next_actions: vec![NextAction {
-            code: ActionCode::from("APPLY".to_owned()),
-            argv: argv(&["topos", "remove", "deploy", "--yes"]),
-        }],
+        next_actions: vec![topos::actions::next_action(
+            ActionCode::from("APPLY_DESCRIBED".to_owned()),
+            argv(&["topos", "remove", "deploy", "--yes"]),
+        )],
         receipt: None,
         error: None,
     };
@@ -943,10 +949,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         })
         .expect("ProtectData serializes"),
         warnings: vec![],
-        next_actions: vec![NextAction {
-            code: ActionCode::from("APPLY".to_owned()),
-            argv: argv(&["topos", "protect", "deploy", "--yes"]),
-        }],
+        next_actions: vec![topos::actions::next_action(
+            ActionCode::from("APPLY_DESCRIBED".to_owned()),
+            argv(&["topos", "protect", "deploy", "--yes"]),
+        )],
         receipt: None,
         error: None,
     };
@@ -1015,13 +1021,15 @@ fn fixtures() -> Vec<(&'static str, String)> {
             undo: Some("a".repeat(64)),
             origin_note: None,
             placement_note: None,
+            // An up-to-date copy predicts nothing — the additive preview omits (absent = unknown).
+            merge_preview: None,
         })
         .expect("PublishDescribeData serializes"),
         warnings: vec![],
-        next_actions: vec![NextAction {
-            code: ActionCode::from("APPLY".to_owned()),
-            argv: argv(&["topos", "publish", "deploy", "--yes"]),
-        }],
+        next_actions: vec![topos::actions::next_action(
+            ActionCode::from("APPLY_DESCRIBED".to_owned()),
+            argv(&["topos", "publish", "deploy", "--yes"]),
+        )],
         receipt: None,
         error: None,
     };
@@ -1068,6 +1076,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 offer: None,
                 conflict: None,
                 merge: None,
+                merge_preview: None,
             }],
             proposals_awaiting: 1,
             notices: vec![WireNotice {
@@ -1096,6 +1105,125 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
+    // A bare `update` sweep that SURFACED a divergence (a confirm-each follower): the row carries the
+    // conflict panel AND the additive in-memory merge PREVIEW — the predicted verdict + conflicting
+    // paths, computed from already-local bytes (never a network read; absent = unknown).
+    let update_diverged = JsonEnvelope {
+        schema_version: 1,
+        command: "update".to_owned(),
+        ok: true,
+        data: serde_json::to_value(PullData {
+            skills: vec![PullSkill {
+                skill: "deploy".to_owned(),
+                workspace_id: Some("w_acme".to_owned()),
+                observed: 13,
+                applied: 12,
+                action: PullAction::Diverged,
+                offer: None,
+                conflict: Some(Conflict {
+                    remote_version_id: "c".repeat(64),
+                    local_version_id: Some("d".repeat(64)),
+                }),
+                merge: None,
+                merge_preview: Some(MergePreview {
+                    verdict: MergePreviewVerdict::Conflicted,
+                    conflicts: vec!["SKILL.md".to_owned()],
+                }),
+            }],
+            proposals_awaiting: 0,
+            notices: Vec::new(),
+            sync: Vec::new(),
+        })
+        .expect("PullData serializes"),
+        warnings: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
+    // A BYTE-CAPPED `diff` (`--max-bytes`, or the `--json` default): the body keeps only the leading
+    // whole-file sections that fit, `files` lists every changed file with `patch_omitted` marks, and
+    // the FETCH_FULL_DIFF next action re-runs the same diff uncapped.
+    let diff_truncated = JsonEnvelope {
+        schema_version: 1,
+        command: "diff".to_owned(),
+        ok: true,
+        data: serde_json::to_value(DiffData {
+            source: DiffSource::Local,
+            version_id: fx_version.to_owned(),
+            bundle_digest: fx_draft_digest.to_owned(),
+            diff: "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -4,4 +4,4 @@\n \n # PR describe\n \n-Write a clear PR description.\n+Write a GREAT PR description.\n".to_owned(),
+            truncated: true,
+            files: vec![
+                DiffPatchInfo {
+                    path: "SKILL.md".to_owned(),
+                    patch_omitted: false,
+                    patch_bytes: 120,
+                },
+                DiffPatchInfo {
+                    path: "reference.md".to_owned(),
+                    patch_omitted: true,
+                    patch_bytes: 98_304,
+                },
+            ],
+        })
+        .expect("DiffData serializes"),
+        warnings: vec![],
+        next_actions: vec![topos::actions::next_action(
+            ActionCode::FetchFullDiff,
+            argv(&["topos", "diff", "pr-describe", "--max-bytes", "0", "--json"]),
+        )],
+        receipt: None,
+        error: None,
+    };
+
+    // A ROW-PAGED `log` (`--limit`/`--offset`, or the `--json` default page): the additive
+    // `truncated`/`total` markers + the NEXT_PAGE next action carrying the COMPLETE argv.
+    let log_paged = JsonEnvelope {
+        schema_version: 1,
+        command: "log".to_owned(),
+        ok: true,
+        data: serde_json::to_value(LogData {
+            events: vec![
+                serde_json::json!({
+                    "action": "add",
+                    "skill_id": "topos_t00",
+                    "name": "pr-describe",
+                    "version_id": fx_version,
+                    "at": 1_700_000_000_000u64,
+                }),
+                serde_json::json!({
+                    "action": "version",
+                    "version_id": fx_version,
+                    "author": "d_test",
+                    "message": "topos: add",
+                    "parents": [],
+                }),
+            ],
+            team: None,
+            archived_successor: None,
+            truncated: true,
+            total: Some(3),
+        })
+        .expect("LogData serializes"),
+        warnings: vec![],
+        next_actions: vec![topos::actions::next_action(
+            ActionCode::NextPage,
+            argv(&[
+                "topos",
+                "log",
+                "pr-describe",
+                "--limit",
+                "2",
+                "--offset",
+                "2",
+                "--json",
+            ]),
+        )],
+        receipt: None,
+        error: None,
+    };
+
     vec![
         ("json/pull.ok", emit_json(&pull_ok)),
         ("json/pull.merged", emit_json(&pull_merged)),
@@ -1119,6 +1247,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ("json/publish.describe", emit_json(&publish_describe)),
         ("json/publish.no-changes", emit_json(&publish_no_changes)),
         ("json/update.stale", emit_json(&update_stale)),
+        ("json/update.diverged", emit_json(&update_diverged)),
+        ("json/diff.truncated", emit_json(&diff_truncated)),
+        ("json/log.paged", emit_json(&log_paged)),
     ]
 }
 

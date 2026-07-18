@@ -16,8 +16,8 @@ use topos_harness::registry::{self, SkillScope};
 use topos_types::persisted::{Lock, PlacementMap};
 use topos_types::requests::WireSkillIndexEntry;
 use topos_types::results::{
-    DetachCause, ListData, RemoteFollowState, RemoteSkillEntry, SkillEntry, SkillStatus,
-    UntrackedEntry,
+    BucketTruncation, DetachCause, ListData, RemoteFollowState, RemoteSkillEntry, SkillEntry,
+    SkillStatus, UntrackedEntry,
 };
 
 use crate::ctx::Ctx;
@@ -158,11 +158,20 @@ pub(crate) fn list(
         names: skill.map(|s| vec![s.to_owned()]).unwrap_or_default(),
         ..ListFilter::default()
     };
-    list_with(ctx, &filter, want_footprint, discover, remote)
+    list_with(
+        ctx,
+        &filter,
+        want_footprint,
+        discover,
+        remote,
+        crate::ops::RowPage::unlimited(),
+    )
 }
 
 /// Inventory the tracked skills under a full [`ListFilter`] (positional names + `--channel`/`--skill`
-/// selectors), the footprint, and the optional `--remote` catalog.
+/// selectors), the footprint, and the optional `--remote` catalog — row-capped by `page` (the
+/// `--json` default page / the `--limit`/`--offset` flags), applied PER BUCKET with a
+/// [`BucketTruncation`] marker per capped bucket.
 ///
 /// # Errors
 /// [`ClientError::NoSuchSkill`] when a name selector matches no tracked skill; the uniform not-found when
@@ -174,6 +183,7 @@ pub(crate) fn list_with(
     want_footprint: bool,
     discover: Option<DiscoveryRoots>,
     remote: Option<RemoteScope<'_>>,
+    page: super::RowPage,
 ) -> Result<ListOutcome, ClientError> {
     // The follow-state is the ONE source for the per-skill workspace provenance, the followed bucket, and
     // the TTY notes — read it once here (absent ⇒ empty, e.g. unenrolled or a membership-only door). We
@@ -322,7 +332,7 @@ pub(crate) fn list_with(
     // absent (a membership-only enrollment). A followed skill always has a sidecar record (`follow` lays
     // the first-receive baseline), so the followed bucket is the tracked subset its ids select; a
     // follows entry with no local record (a foreign/partial state) is simply not listable yet.
-    let enrollment = match enroll::read_instance(ctx.fs, &ctx.layout)? {
+    let mut enrollment = match enroll::read_instance(ctx.fs, &ctx.layout)? {
         None => None,
         Some(instance) => {
             let notes: Vec<Option<FollowNote>> = tracked
@@ -423,6 +433,35 @@ pub(crate) fn list_with(
         (None, _) => Vec::new(),
     };
 
+    // The row page, applied LAST and PER BUCKET (after the remote merge, whose follow-state
+    // discriminant needs the complete tracked set): each bucket independently skips `offset` rows
+    // and emits up to `limit`, with one truncation marker per bucket that lost rows. The TTY's
+    // per-row follow notes are index-aligned with `tracked`, so they slice under the SAME page —
+    // alignment is preserved by construction. An inactive page keeps the exact prior shape.
+    let mut followed = followed;
+    let mut tracked = tracked;
+    let mut untracked = untracked;
+    let mut remote_available = remote_available;
+    let mut truncated: Vec<BucketTruncation> = Vec::new();
+    if page.is_active() {
+        let mut mark = |bucket: &str, (shown, total): (usize, usize)| {
+            if shown < total {
+                truncated.push(BucketTruncation {
+                    bucket: bucket.to_owned(),
+                    shown: shown as u64,
+                    total: total as u64,
+                });
+            }
+        };
+        mark("followed", page.apply(&mut followed));
+        mark("tracked", page.apply(&mut tracked));
+        if let Some(e) = &mut enrollment {
+            page.apply(&mut e.notes);
+        }
+        mark("untracked", page.apply(&mut untracked));
+        mark("remote_available", page.apply(&mut remote_available));
+    }
+
     Ok(ListOutcome {
         data: ListData {
             followed,
@@ -431,6 +470,7 @@ pub(crate) fn list_with(
             untracked,
             remote_available,
             footprint,
+            truncated,
         },
         enrollment,
         warnings,
@@ -1201,6 +1241,7 @@ mod tests {
             false,
             None,
             None,
+            crate::ops::RowPage::unlimited(),
         )
         .unwrap()
         .data
@@ -1218,6 +1259,7 @@ mod tests {
             false,
             None,
             None,
+            crate::ops::RowPage::unlimited(),
         )
         .unwrap()
         .data
@@ -1236,6 +1278,7 @@ mod tests {
                 false,
                 None,
                 None,
+                crate::ops::RowPage::unlimited(),
             ),
             Err(ClientError::NoSuchSkill { .. })
         ));
@@ -1250,6 +1293,7 @@ mod tests {
                 false,
                 None,
                 None,
+                crate::ops::RowPage::unlimited(),
             ),
             Err(ClientError::TargetNotFound { .. })
         ));

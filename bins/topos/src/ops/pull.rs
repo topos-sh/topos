@@ -298,8 +298,9 @@ pub(crate) fn reset(
     for (id, lock) in &resolved {
         // The draft delta vs current — the exact bytes a reset drops. DIVERGENT copies cannot render
         // one diff (that freeze is exactly what `--reset` is the named way out of), so the loss is
-        // disclosed as the frozen set instead of failing the reset.
-        let drop_diff = match super::diff(ctx, &lock.name, None) {
+        // disclosed as the frozen set instead of failing the reset. UNCAPPED deliberately: a loss
+        // disclosure must never truncate what would be discarded.
+        let drop_diff = match super::diff(ctx, &lock.name, None, super::DiffBudget::unlimited()) {
             Ok(d) => d.diff,
             Err(e @ ClientError::PlacementsDiverged { .. }) => {
                 format!("{e}\n(each copy is snapshotted into the local store before the reset)")
@@ -1118,6 +1119,7 @@ fn undelivered_row(name: &str, sync: Option<&SyncState>, action: PullAction) -> 
         offer: None,
         conflict: None,
         merge: None,
+        merge_preview: None,
     }
 }
 

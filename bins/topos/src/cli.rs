@@ -198,6 +198,13 @@ pub(crate) enum Command {
         /// Narrow to a specific skill (repeatable). Lands with the full resolution grammar.
         #[arg(long, value_name = "NAME")]
         skill: Vec<String>,
+        /// Emit at most this many rows PER BUCKET (`0` = all). Default: unlimited on the TTY,
+        /// 50 under `--json` (a truncation marker + a NEXT_PAGE next action disclose the rest).
+        #[arg(long, value_name = "N")]
+        limit: Option<u64>,
+        /// Skip this many rows per bucket before emitting (the next-page cursor).
+        #[arg(long, value_name = "N")]
+        offset: Option<u64>,
     },
     /// Show a skill's change. Bare = draft ↔ current; `<hash>` / `@<hash>` reviews that version against
     /// current (`current..<hash>` — a proposal IS a version); `<a>..<b>` = version ↔ version. `--json`
@@ -208,11 +215,23 @@ pub(crate) enum Command {
         /// The optional ref: `<hash>` / `@<hash>` / `current..<hash>` / `<a>..<b>`. Omitted = draft ↔ current.
         #[arg(value_name = "REF")]
         r#ref: Option<String>,
+        /// Cap the emitted diff body at this many bytes, truncating at FILE boundaries (`0` = no
+        /// cap). Default: unlimited on the TTY, 64 KiB under `--json` — a capped envelope lists
+        /// every file with `patch_omitted` marks and a FETCH_FULL_DIFF next action for the rest.
+        #[arg(long, value_name = "BYTES")]
+        max_bytes: Option<u64>,
     },
     /// Show a skill's local action log + embedded-git history.
     Log {
         /// The skill name.
         skill: String,
+        /// Emit at most this many events (`0` = all). Default: unlimited on the TTY, 20 under
+        /// `--json` (a truncation marker + a NEXT_PAGE next action disclose the rest).
+        #[arg(long, value_name = "N")]
+        limit: Option<u64>,
+        /// Skip this many events before emitting (the next-page cursor).
+        #[arg(long, value_name = "N")]
+        offset: Option<u64>,
     },
 
     // ---- Team-scoped ----
@@ -259,6 +278,11 @@ pub(crate) enum Command {
         /// The reject reason / withdrawal note (required with `--reject`).
         #[arg(long, short = 'm', value_name = "MSG")]
         message: Option<String>,
+        /// Cap the describe's diff body at this many bytes, truncating at FILE boundaries (`0` = no
+        /// cap). Default: unlimited on the TTY, 64 KiB under `--json` — a capped describe carries
+        /// `diff_truncated` and a FETCH_FULL_DIFF next action for the rest.
+        #[arg(long, value_name = "BYTES")]
+        max_bytes: Option<u64>,
         /// Apply without the describe step. Parses today; the two-phase describe lands later.
         #[arg(long)]
         yes: bool,

@@ -29,34 +29,65 @@ pub struct DiffFile<'a> {
 
 const CONTEXT: usize = 3;
 
+/// One changed file's rendered section of a unified diff — its bundle-relative path plus the exact
+/// bytes [`unified_diff`] would emit for it (headers + hunks; a mode-only change or a binary note
+/// included). Concatenating every section in order IS the full unified diff, by construction —
+/// which is what lets a byte-budgeted consumer truncate at file boundaries without a second
+/// renderer.
+#[derive(Debug, Clone)]
+pub struct FileDiffSection {
+    pub path: String,
+    pub text: String,
+}
+
 /// Render a unified diff of two bundles, each sorted by raw path bytes. Files only in `base` are
 /// deletions; files only in `draft` are additions; common files with differing bytes **or mode** are shown.
 pub fn unified_diff(base: &[DiffFile<'_>], draft: &[DiffFile<'_>]) -> String {
-    let mut out = String::new();
+    unified_diff_sections(base, draft)
+        .into_iter()
+        .map(|s| s.text)
+        .collect()
+}
+
+/// [`unified_diff`], split per changed file — the same walk, the same bytes, one section per file
+/// (files with no rendered output are skipped, exactly as the concatenated form omits them).
+pub fn unified_diff_sections(
+    base: &[DiffFile<'_>],
+    draft: &[DiffFile<'_>],
+) -> Vec<FileDiffSection> {
+    let mut out = Vec::new();
+    let mut push = |path: &str, text: String| {
+        if !text.is_empty() {
+            out.push(FileDiffSection {
+                path: path.to_owned(),
+                text,
+            });
+        }
+    };
     let (mut i, mut j) = (0usize, 0usize);
     while i < base.len() || j < draft.len() {
         match (base.get(i), draft.get(j)) {
             (Some(b), Some(d)) if b.path == d.path => {
                 if b.bytes != d.bytes || b.mode != d.mode {
-                    out.push_str(&file_diff(b.path, Some(*b), Some(*d)));
+                    push(b.path, file_diff(b.path, Some(*b), Some(*d)));
                 }
                 i += 1;
                 j += 1;
             }
             (Some(b), Some(d)) if b.path.as_bytes() < d.path.as_bytes() => {
-                out.push_str(&file_diff(b.path, Some(*b), None));
+                push(b.path, file_diff(b.path, Some(*b), None));
                 i += 1;
             }
             (Some(_), Some(d)) => {
-                out.push_str(&file_diff(d.path, None, Some(*d)));
+                push(d.path, file_diff(d.path, None, Some(*d)));
                 j += 1;
             }
             (Some(b), None) => {
-                out.push_str(&file_diff(b.path, Some(*b), None));
+                push(b.path, file_diff(b.path, Some(*b), None));
                 i += 1;
             }
             (None, Some(d)) => {
-                out.push_str(&file_diff(d.path, None, Some(*d)));
+                push(d.path, file_diff(d.path, None, Some(*d)));
                 j += 1;
             }
             (None, None) => break,
@@ -330,6 +361,34 @@ mod tests {
 
     fn f<'a>(path: &'a str, mode: FileMode, bytes: &'a [u8]) -> DiffFile<'a> {
         DiffFile { path, mode, bytes }
+    }
+
+    #[test]
+    fn sections_concatenate_to_the_exact_unified_diff() {
+        // The per-file split is the SAME renderer: concatenating the sections in order reproduces
+        // `unified_diff` byte-for-byte, and each section names its file. Covers a content edit, a
+        // deletion, an addition, a mode-only change, and a binary file in one walk.
+        let base = [
+            f("a.md", FileMode::Regular, b"one\n"),
+            f("bin", FileMode::Regular, &[0xff, 0xfe]),
+            f("gone.txt", FileMode::Regular, b"x\n"),
+            f("run.sh", FileMode::Regular, b"#!/bin/sh\n"),
+            f("same.txt", FileMode::Regular, b"kept\n"),
+        ];
+        let draft = [
+            f("a.md", FileMode::Regular, b"two\n"),
+            f("bin", FileMode::Regular, &[0x00, 0x01]),
+            f("new.txt", FileMode::Regular, b"added\n"),
+            f("run.sh", FileMode::Executable, b"#!/bin/sh\n"),
+            f("same.txt", FileMode::Regular, b"kept\n"),
+        ];
+        let sections = unified_diff_sections(&base, &draft);
+        let concat: String = sections.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(concat, unified_diff(&base, &draft));
+        // One section per CHANGED file, in walk order; the unchanged file emits none.
+        let paths: Vec<&str> = sections.iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(paths, vec!["a.md", "bin", "gone.txt", "new.txt", "run.sh"]);
+        assert!(sections.iter().all(|s| !s.text.is_empty()));
     }
 
     #[test]

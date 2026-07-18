@@ -448,6 +448,27 @@ are asserted byte-equal in tests.
     so every consumer keeps id semantics; the selection/refusal guidance lists the joined ADDRESS names,
     never bare `w_…` ids.
 
+- **The envelope's agent ergonomics** (`actions`, `ops/diff`'s budget, `ops/{list,log}`'s row page,
+  `ops/merge_resolve::preview_merge`) — three additive `--json` affordances (schema_version stays 1;
+  every new field omits when absent, so an uncapped envelope is byte-identical to before):
+  **byte budgets** — `diff` and `review` take `--max-bytes <n>` (`0` = uncapped; explicit flags
+  bind both surfaces; a `--json` run with no flag default-caps at 64 KiB) and truncate at FILE
+  boundaries via the gitstore's `unified_diff_sections` (a clean prefix, never a cherry-pick),
+  disclosing `truncated` + per-file `patch_omitted` rows and a `FETCH_FULL_DIFF` next action that
+  re-runs the same diff uncapped (loss disclosures — `update --reset`'s drop diff, the merge
+  escape's — stay deliberately uncapped); **pagination** — `list`/`log` take `--limit`/`--offset`
+  (`--json` defaults 50/20 rows; `list` pages PER BUCKET) with typed truncation markers and a
+  `NEXT_PAGE` next action carrying the complete re-spelled argv; **next-action safety metadata** —
+  every emitted next action carries optional `mutates`/`needs_network`/`risk_note`, filled by the
+  ONE rules module (`actions::next_action` — xtask's fixture generator calls the same fn, so no
+  second table), keyed by action code with an argv-verb refinement where the code alone cannot
+  answer (an unknowable fact stays absent, never guessed); and the **predicted-conflict preview** —
+  `update`'s SURFACED diverged rows and `publish`'s describe on a behind copy carry
+  `merge_preview` (`clean`/`conflicted` + conflicting paths), a pure in-memory dry run of the same
+  kernel plan + diff3 executor the real resolution uses, computed ONLY from already-local bytes
+  (describes gain no network call; when the needed version is not local the field is simply
+  absent = unknown).
+
 ## Planned (lands later)
 
 The **unified-identity credential model is now in place**: the device-authorization flow mints ONE

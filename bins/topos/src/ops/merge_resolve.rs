@@ -39,7 +39,9 @@ use topos_gitstore::{
 use topos_types::persisted::{
     ConflictPath, ConflictPathKind, ConflictReason, ConflictState, Lock, PlacementMap, SyncState,
 };
-use topos_types::results::{ConflictPathReport, MergeReport, PullAction, PullSkill};
+use topos_types::results::{
+    ConflictPathReport, MergePreview, MergePreviewVerdict, MergeReport, PullAction, PullSkill,
+};
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
@@ -379,6 +381,7 @@ pub(crate) fn escape_recorded(
             offer: None,
             conflict: None,
             merge: None,
+            merge_preview: None,
         });
     };
     let scanned = scanned.clone();
@@ -471,6 +474,66 @@ pub(crate) fn recover_resolution(
         )?;
     }
     Ok(())
+}
+
+// --------------------------------------------------------------------------------------------------
+// The in-memory merge PREVIEW (no witness, no writes).
+// --------------------------------------------------------------------------------------------------
+
+/// Predict the outcome of the three-way merge `(base, mine, theirs)` implies — the SAME kernel plan
+/// ([`plan_merge`]) + per-file diff3 ([`merge_file`]) the real resolution runs, executed purely in
+/// memory: nothing is committed, nothing is placed, no store or placement is written. That is why it
+/// needs no [`DivergedWitness`] — the witness gates RESOLUTION (which mutates); a prediction over
+/// bytes the caller already holds mutates nothing. Callers must hand it ALREADY-LOCAL bytes only
+/// (the describe surfaces' no-new-network-calls constraint lives at the call sites).
+pub(crate) fn preview_merge(
+    base: &RenderedBundle,
+    mine: &ScannedBundle,
+    theirs: &RenderedBundle,
+) -> MergePreview {
+    let plan = plan_merge(&file_ids(base), &scanned_file_ids(mine), &file_ids(theirs));
+    let base_map = render_map(base);
+    let mine_map = scanned_map(mine);
+    let theirs_map = render_map(theirs);
+
+    let mut conflicts: Vec<String> = Vec::new();
+    let mut content_results = Vec::new();
+    for pp in &plan.paths {
+        match &pp.plan {
+            PathPlan::ContentMerge { .. } => {
+                // Absent sides / failed merges classify CONFLICTED (fail closed) — the preview must
+                // never predict cleaner than the real run would be.
+                let verdict = match (
+                    base_map.get(pp.path.as_str()),
+                    mine_map.get(pp.path.as_str()),
+                    theirs_map.get(pp.path.as_str()),
+                ) {
+                    (Some(b), Some(m), Some(t)) => match merge_file(b.bytes, m.bytes, t.bytes) {
+                        Ok(MergeFileResult::Clean(_)) => ContentMergeResult::Clean,
+                        Ok(MergeFileResult::Conflict(_) | MergeFileResult::Binary) | Err(_) => {
+                            ContentMergeResult::Conflicted
+                        }
+                    },
+                    _ => ContentMergeResult::Conflicted,
+                };
+                if verdict == ContentMergeResult::Conflicted {
+                    conflicts.push(pp.path.clone());
+                }
+                content_results.push(verdict);
+            }
+            PathPlan::FileSetConflict { .. } => conflicts.push(pp.path.clone()),
+            _ => {}
+        }
+    }
+    let verdict = match decide_outcome(&plan, &content_results) {
+        MergeOutcome::CleanCommitOnTip => MergePreviewVerdict::Clean,
+        // BlockedConflict also covers the emptying-merge edge (a clean plan whose tree would be
+        // empty) — conflicted with no named path, honestly.
+        MergeOutcome::BlockedConflict | MergeOutcome::NoBaseTwoWay => {
+            MergePreviewVerdict::Conflicted
+        }
+    };
+    MergePreview { verdict, conflicts }
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -927,6 +990,7 @@ fn merged_row(
             conflicts: Vec::new(),
             drop_diff,
         }),
+        merge_preview: None,
     }
 }
 
@@ -958,6 +1022,7 @@ fn conflicted_row(
             conflicts,
             drop_diff,
         }),
+        merge_preview: None,
     }
 }
 

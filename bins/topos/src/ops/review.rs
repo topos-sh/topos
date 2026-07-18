@@ -63,10 +63,11 @@ pub(crate) fn review_dispatch(
     target: Option<&str>,
     verdict: Option<ReviewVerdict>,
     workspace: Option<&str>,
+    budget: super::DiffBudget,
 ) -> Result<ReviewOutcome, ClientError> {
     match (target, verdict) {
         (None, None) => review_inbox(ctx, connectors, workspace).map(ReviewOutcome::Inbox),
-        (Some(t), None) => review_describe(ctx, connectors, t, workspace),
+        (Some(t), None) => review_describe(ctx, connectors, t, workspace, budget),
         (Some(t), Some(v)) => review(ctx, connectors, t, v, workspace).map(ReviewOutcome::Applied),
         (None, Some(_)) => Err(ClientError::InvalidArgument(
             "review needs a <skill>@<hash> target for a verdict — a bare `review` is the inbox"
@@ -145,6 +146,7 @@ fn review_describe(
     connectors: &ReviewConnectors<'_>,
     target: &str,
     workspace: Option<&str>,
+    budget: super::DiffBudget,
 ) -> Result<ReviewOutcome, ClientError> {
     let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
         ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
@@ -193,13 +195,16 @@ fn review_describe(
             .is_some_and(|me| me == enroll::canonical_principal(&proposal.proposer))
     });
 
-    // The diff against current — the same plane-diff machinery `diff` runs (`current..<proposal>`).
-    let diff = super::diff(
+    // The diff against current — the same plane-diff machinery `diff` runs (`current..<proposal>`),
+    // under the caller's byte budget (the `--json` default cap / `--max-bytes`); a truncated body
+    // is flagged and the finisher adds the FETCH_FULL_DIFF next action (`topos diff … --max-bytes
+    // 0`), so a huge proposal never floods an agent's context yet stays one command away in full.
+    let diffed = super::diff(
         ctx,
         &skill_name,
         Some(&format!("current..{}", proposal.version_id)),
-    )?
-    .diff;
+        budget,
+    )?;
     let handle = format!("{}@{}", skill_name, proposal.version_id);
     let next_argvs = verdict_next_argvs(&handle, yours);
     Ok(ReviewOutcome::Describe {
@@ -211,7 +216,8 @@ fn review_describe(
             base_version_id: proposal.base_version_id,
             stale: proposal.stale,
             yours,
-            diff,
+            diff: diffed.diff,
+            diff_truncated: diffed.truncated,
         }),
         next_argvs,
     })

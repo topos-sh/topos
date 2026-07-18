@@ -20,13 +20,16 @@
   "warnings": [],
   "next_actions": [
     {
-      "code": "APPLY",
+      "code": "APPLY_DESCRIBED",
       "argv": [
         "topos",
         "publish",
         "deploy",
         "--yes"
-      ]
+      ],
+      "mutates": true,
+      "needs_network": true,
+      "risk_note": "ships these bytes to the team — every follower receives them"
     }
   ]
 }

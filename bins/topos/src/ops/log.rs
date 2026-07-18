@@ -28,7 +28,9 @@ pub(crate) struct LogConnectors<'a> {
 }
 
 /// History for `skill`: the local action events + git versions, then (when followed + enrolled) the
-/// plane's version/proposal history. A channel target is refused toward the web.
+/// plane's version/proposal history — row-capped by `page` (the `--json` default page / the
+/// `--limit`/`--offset` flags), with the `truncated`/`total` markers when rows fall off the page.
+/// A channel target is refused toward the web.
 ///
 /// # Errors
 /// Name-resolution errors; [`ClientError::InvalidArgument`] for a channel target; a store / transport failure.
@@ -36,6 +38,7 @@ pub(crate) fn log(
     ctx: &Ctx<'_>,
     connectors: &LogConnectors<'_>,
     skill: &str,
+    page: super::RowPage,
 ) -> Result<LogData, ClientError> {
     // A CHANNEL target (resolved through the grammar) is a web surface — refuse it toward the web before
     // the local skill resolution swallows it as a not-found.
@@ -111,7 +114,7 @@ pub(crate) fn log(
 
     // A version the PLANE reports (display attribution + `current`/purge marks) SUPERSEDES the local git
     // event for the same id — else a followed skill's versions print twice. Local-only versions stay.
-    let events = assemble_log_events(
+    let mut events = assemble_log_events(
         local_actions,
         local_versions,
         plane_versions,
@@ -119,10 +122,22 @@ pub(crate) fn log(
         &plane_version_ids,
     );
 
+    // The row page, applied AFTER assembly (the assembled order is deterministic, so consecutive
+    // pages tile the same list). An inactive page keeps the exact prior shape (no marker fields).
+    let (page_applied, truncated, total) = if page.is_active() {
+        let (_, total) = page.apply(&mut events);
+        let end = page.offset.saturating_add(events.len());
+        (true, end < total, total)
+    } else {
+        (false, false, events.len())
+    };
+
     Ok(LogData {
         events,
         team: None,
         archived_successor,
+        truncated,
+        total: page_applied.then_some(total as u64),
     })
 }
 

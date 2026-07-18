@@ -39,6 +39,13 @@
         "$ref": "#/$defs/SkillEntry"
       }
     },
+    "truncated": {
+      "description": "The buckets that were row-capped (`--limit`/`--offset`, or the `--json` default page), one\nmarker per capped bucket. The page applies PER BUCKET (each bucket skips `offset` rows and\nshows up to `limit`); the `NEXT_PAGE` next action's argv fetches the next page. Empty (and\nomitted) on an uncapped list — the pinned shape is byte-identical there. **INFERRED**\n(additive).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/BucketTruncation"
+      }
+    },
     "untracked": {
       "description": "A real skill in a harness dir that topos doesn't manage yet (discovered, not adopted) — it has\nno topos `version_id`/`bundle_digest` yet, so it carries only what is knowable on disk.",
       "type": "array",
@@ -54,6 +61,33 @@
     "untracked"
   ],
   "$defs": {
+    "BucketTruncation": {
+      "description": "One row-capped bucket in a paged [`ListData`]. **INFERRED** (additive).",
+      "type": "object",
+      "properties": {
+        "bucket": {
+          "description": "The capped bucket's field name (`followed` / `published_by_you` / `tracked` / `untracked` /\n`remote_available`).",
+          "type": "string"
+        },
+        "shown": {
+          "description": "Rows emitted on this page.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "total": {
+          "description": "Total rows in the bucket before paging.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "bucket",
+        "shown",
+        "total"
+      ]
+    },
     "DetachCause": {
       "description": "Why a tracked skill is `detached` in [`SkillEntry`]. **INFERRED** (additive value set).",
       "oneOf": [

@@ -11,7 +11,9 @@
         "topos",
         "publish",
         "pr-describe"
-      ]
+      ],
+      "mutates": true,
+      "needs_network": true
     }
   ],
   "receipt": {
@@ -42,7 +44,9 @@
           "topos",
           "publish",
           "pr-describe"
-        ]
+        ],
+        "mutates": true,
+        "needs_network": true
       }
     ]
   }

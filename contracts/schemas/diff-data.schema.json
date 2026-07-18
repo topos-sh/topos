@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "DiffData",
-  "description": "`diff` result. `source` + `version_id` (+ the emitted digest) are **PINNED**; the diff *body*\nrepresentation (\"a plain unified diff\") is the only INFERRED part.",
+  "description": "`diff` result. `source` + `version_id` (+ the emitted digest) are **PINNED**; the diff *body*\nrepresentation (\"a plain unified diff\") is the only INFERRED part. The byte-budget fields\n(`truncated` / `files`) are ADDITIVE and omit entirely on an uncapped diff, so the pinned shape\nis byte-identical there.",
   "type": "object",
   "properties": {
     "bundle_digest": {
@@ -9,11 +9,22 @@
       "pattern": "^[0-9a-f]{64}$"
     },
     "diff": {
-      "description": "A plain unified diff.",
+      "description": "A plain unified diff. Under a byte budget (`--max-bytes`, or the `--json` default cap) it\ncarries only the LEADING whole-file sections that fit — truncation is always at a file\nboundary, never mid-hunk — and `truncated`/`files` disclose the rest.",
       "type": "string"
+    },
+    "files": {
+      "description": "Present ONLY when `truncated`: one row per file in the FULL diff, in diff order, with\n`patch_omitted: true` on the files whose section was dropped from `diff`. The\naccompanying `FETCH_FULL_DIFF` next action re-runs the diff uncapped. **INFERRED** (additive).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DiffPatchInfo"
+      }
     },
     "source": {
       "$ref": "#/$defs/DiffSource"
+    },
+    "truncated": {
+      "description": "`true` when the emitted `diff` was capped by a byte budget (some file sections were dropped).\nOmits when `false` — an uncapped diff keeps the exact prior shape. **INFERRED** (additive).",
+      "type": "boolean"
     },
     "version_id": {
       "type": "string",
@@ -27,6 +38,31 @@
     "diff"
   ],
   "$defs": {
+    "DiffPatchInfo": {
+      "description": "One file's row in a byte-capped [`DiffData`]. **INFERRED** (additive).",
+      "type": "object",
+      "properties": {
+        "patch_bytes": {
+          "description": "The full section's size in bytes (headers + hunks), so an agent can budget a refetch.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "patch_omitted": {
+          "description": "`true` when this file's patch section was dropped from `diff` to fit the byte budget.",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "The bundle-relative path of the changed file.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "patch_omitted",
+        "patch_bytes"
+      ]
+    },
     "DiffSource": {
       "description": "Where the compared bytes came from: the local sidecar, or a plane-held proposal. **PINNED.**",
       "type": "string",

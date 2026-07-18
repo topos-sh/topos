@@ -24,7 +24,7 @@ use topos_core::identity::{self, Commit};
 use topos_core::sync::{self, ApplyClass};
 use topos_gitstore::{ImportFile, Store, WriteBatch};
 use topos_types::persisted::{Lock, LockedFile, PlacementMap, SyncState};
-use topos_types::results::{Conflict, Offer, PullAction, PullSkill};
+use topos_types::results::{Conflict, MergePreview, Offer, PullAction, PullSkill};
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
@@ -288,7 +288,7 @@ pub(crate) fn sync_one_with(
             // DIVERGED implies `work != base`, which can only hold for a Draft work tree (the ONE
             // edited copy — several divergent copies froze typed back in compute_work).
             let WorkState::Draft { scanned } = &work.state else {
-                return Ok(diverged_row(&name, &sync, target_commit, None));
+                return Ok(diverged_row(&name, &sync, target_commit, None, None));
             };
             // The structural author-only gate: the witness is minted ONLY here.
             let witness = DivergedWitness(());
@@ -323,7 +323,25 @@ pub(crate) fn sync_one_with(
                 ),
                 None => {
                     let draft_id = snapshot_draft(ctx, &sp, &lock, scanned)?;
-                    Ok(diverged_row(&name, &sync, target_commit, Some(draft_id)))
+                    // The SURFACED divergence (a confirm-each follower's offer, not a resolution):
+                    // predict the merge purely in memory — the target's bytes are already local
+                    // (fetched above) and the base renders from the store, so this adds NO network
+                    // call. An unrenderable base (the no-base fallback's territory) yields no
+                    // preview: absent = unknown.
+                    let preview = super::parse_hex32(&lock.bundle_digest)
+                        .ok()
+                        .and_then(|base_digest| {
+                            let base_commit = super::parse_hex32(&lock.base_commit).ok()?;
+                            store.render_verified(base_commit, base_digest).ok()
+                        })
+                        .map(|base| super::merge_resolve::preview_merge(&base, scanned, &bundle));
+                    Ok(diverged_row(
+                        &name,
+                        &sync,
+                        target_commit,
+                        Some(draft_id),
+                        preview,
+                    ))
                 }
             }
         }
@@ -433,6 +451,7 @@ pub(crate) fn go_back(
         offer: None,
         conflict: None,
         merge: None,
+        merge_preview: None,
     })
 }
 
@@ -948,8 +967,10 @@ fn ensure_local(
 /// The `bundle_digest` of a stored version, or `None` if it is not present **or not readable**. A present
 /// ref whose objects cannot be rendered (a dangling ref left by a crash between the ref write and the
 /// object fsync) is treated as absent, so `ensure_local` re-fetches + re-commits and heals it rather than
-/// wedging forever, and a go-back to such a version is refused as unknown.
-fn store_bundle_digest_opt(
+/// wedging forever, and a go-back to such a version is refused as unknown. `pub(crate)` — the publish
+/// describe's merge preview reads the locally-held observed current through the same is-it-really-here
+/// gate.
+pub(crate) fn store_bundle_digest_opt(
     store: &Store,
     version_id: [u8; 32],
 ) -> Result<Option<[u8; 32]>, ClientError> {
@@ -1215,6 +1236,7 @@ fn state_row(name: &str, sync: &SyncState, action: PullAction) -> PullSkill {
         offer: None,
         conflict: None,
         merge: None,
+        merge_preview: None,
     }
 }
 
@@ -1229,6 +1251,7 @@ fn applied_row(name: &str, sync: &SyncState, _target: [u8; 32]) -> PullSkill {
         offer: None,
         conflict: None,
         merge: None,
+        merge_preview: None,
     }
 }
 
@@ -1245,6 +1268,7 @@ fn offer_row(name: &str, sync: &SyncState, target: [u8; 32], target_digest_hex: 
         }),
         conflict: None,
         merge: None,
+        merge_preview: None,
     }
 }
 
@@ -1253,6 +1277,7 @@ fn diverged_row(
     sync: &SyncState,
     target: [u8; 32],
     draft_id: Option<String>,
+    merge_preview: Option<MergePreview>,
 ) -> PullSkill {
     PullSkill {
         skill: name.to_owned(),
@@ -1266,5 +1291,6 @@ fn diverged_row(
             local_version_id: draft_id,
         }),
         merge: None,
+        merge_preview,
     }
 }

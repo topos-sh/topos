@@ -469,6 +469,42 @@ fn confirm_each_offers_then_explicit_pull_accepts() {
     assert_eq!(rig.read_sync(&id).applied, 1);
 }
 
+/// A confirm-each follower's surfaced divergence over an OVERLAPPING edit predicts the conflict —
+/// the in-memory preview names the conflicting path — while running nothing: no markers on disk,
+/// no conflict record, no snapshot side effects beyond the ordinary surfaced-diverged snapshot.
+#[test]
+fn surfaced_divergence_predicts_a_conflicted_merge_without_running_it() {
+    let rig = Rig::new("preview");
+    let (id, _name, genesis) = rig.adopt(BASE);
+    // The same overlap the auto-sweep conflict test uses: SKILL.md edited on both sides.
+    let edited: &[(&str, FileMode, &[u8])] = &[
+        ("SKILL.md", FileMode::Regular, b"# my local edit\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
+    ];
+    write_tree(&rig.placement(), edited);
+
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id, FollowMode::ConfirmEach);
+
+    let data = pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap();
+    let row = only(&data);
+    assert_eq!(row.action, PullAction::Diverged);
+    let preview = row.merge_preview.as_ref().expect("a merge preview");
+    assert_eq!(
+        preview.verdict,
+        topos_types::results::MergePreviewVerdict::Conflicted
+    );
+    assert_eq!(preview.conflicts, vec!["SKILL.md".to_owned()]);
+    // Predicted, never run: the placement still holds the author's bytes (no markers) and no
+    // conflict record exists.
+    let skill = std::fs::read_to_string(rig.placement().join("SKILL.md")).unwrap();
+    assert!(!skill.contains("<<<<<<<"), "{skill}");
+    assert!(!rig.conflict_exists(&id));
+}
+
 /// Full-auto: an AUTO follower's bare sweep RESOLVES a diverged draft. Here the local edit
 /// overlaps theirs' edit to `SKILL.md`, so the merge conflicts: the complete conflict tree is materialized
 /// (markers carrying BOTH sides, the other files merged clean), the draft is snapshotted recoverably, and
@@ -1110,6 +1146,15 @@ fn confirm_each_bare_sweep_surfaces_without_merging() {
         row.merge.is_none(),
         "confirm-each bare sweep must not merge"
     );
+    // The surfaced divergence carries the in-memory merge PREVIEW (this trio merges cleanly): the
+    // person picks merge-vs-escape informed, and NOTHING ran — the placement assertion below proves
+    // the preview wrote no byte.
+    let preview = row.merge_preview.as_ref().expect("a merge preview");
+    assert_eq!(
+        preview.verdict,
+        topos_types::results::MergePreviewVerdict::Clean
+    );
+    assert!(preview.conflicts.is_empty());
     assert_eq!(
         snapshot(&rig.placement()),
         Some(expect(mine)),
@@ -1838,7 +1883,13 @@ fn a_wedged_skills_sweep_failure_surfaces_in_its_topos_log() {
         unreachable!("local log builds no directory transport")
     };
     let connectors = ops::LogConnectors { directory: &dir };
-    let log = ops::log(&rig.ctx(&plane, &foll), &connectors, &name).unwrap();
+    let log = ops::log(
+        &rig.ctx(&plane, &foll),
+        &connectors,
+        &name,
+        ops::RowPage::unlimited(),
+    )
+    .unwrap();
     let errors: Vec<_> = log
         .events
         .iter()

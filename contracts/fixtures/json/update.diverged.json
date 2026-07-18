@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "command": "update",
+  "ok": true,
+  "data": {
+    "proposals_awaiting": 0,
+    "skills": [
+      {
+        "action": "diverged",
+        "applied": 12,
+        "conflict": {
+          "local_version_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "remote_version_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "merge_preview": {
+          "conflicts": [
+            "SKILL.md"
+          ],
+          "verdict": "conflicted"
+        },
+        "observed": 13,
+        "skill": "deploy",
+        "workspace_id": "w_acme"
+      }
+    ]
+  },
+  "warnings": [],
+  "next_actions": []
+}

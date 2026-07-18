@@ -203,6 +203,7 @@ mod tests {
             offer: None,
             conflict: None,
             merge: None,
+            merge_preview: None,
         }
     }
 

@@ -405,7 +405,29 @@ pub fn run() -> ExitCode {
             footprint,
             channel,
             skill,
+            limit,
+            offset,
         } => {
+            let page = ops::RowPage::resolve(limit, offset, json, ops::DEFAULT_JSON_LIST_LIMIT);
+            // The complete NEXT_PAGE argv base — this same invocation, re-spelled (the page flags are
+            // appended by the finisher once the effective page is known).
+            let mut page_argv = vec!["topos".to_owned(), "list".to_owned()];
+            page_argv.extend(name.iter().cloned());
+            for (flag, on) in [
+                ("--remote", remote),
+                ("--tracked", tracked),
+                ("--footprint", footprint),
+            ] {
+                if on {
+                    page_argv.push(flag.to_owned());
+                }
+            }
+            for c in &channel {
+                page_argv.extend(["--channel".to_owned(), c.clone()]);
+            }
+            for s in &skill {
+                page_argv.extend(["--skill".to_owned(), s.clone()]);
+            }
             // The full row filter: positional names + the `--channel`/`--skill` selectors. A single bare
             // name keeps the classic exactly-one narrowing; richer forms resolve ALL-OR-NONE (an unmatched
             // name refuses the whole invocation) and filter the tracked rows.
@@ -441,17 +463,43 @@ pub fn run() -> ExitCode {
             finish_list(
                 json,
                 cmd_name,
-                ops::list_with(&ctx, &filter, footprint, list_discovery(tracked), scope),
+                ops::list_with(
+                    &ctx,
+                    &filter,
+                    footprint,
+                    list_discovery(tracked),
+                    scope,
+                    page,
+                ),
+                page,
+                page_argv,
                 &diag,
             )
         }
-        Command::Diff { skill, r#ref } => finish(
-            json,
-            cmd_name,
-            ops::diff(&ctx, &skill, r#ref.as_deref()),
-            render::diff_tty,
-            &diag,
-        ),
+        Command::Diff {
+            skill,
+            r#ref,
+            max_bytes,
+        } => {
+            let budget = ops::DiffBudget::resolve(max_bytes, json);
+            // The FETCH_FULL_DIFF argv — this same diff, uncapped.
+            let mut full_argv = vec!["topos".to_owned(), "diff".to_owned(), skill.clone()];
+            if let Some(r) = &r#ref {
+                full_argv.push(r.clone());
+            }
+            full_argv.extend([
+                "--max-bytes".to_owned(),
+                "0".to_owned(),
+                "--json".to_owned(),
+            ]);
+            finish_diff(
+                json,
+                cmd_name,
+                ops::diff(&ctx, &skill, r#ref.as_deref(), budget),
+                full_argv,
+                &diag,
+            )
+        }
         Command::Publish {
             target,
             to,
@@ -514,9 +562,11 @@ pub fn run() -> ExitCode {
             reject,
             withdraw,
             message,
+            max_bytes,
             yes,
         } => {
             let _ = yes;
+            let budget = ops::DiffBudget::resolve(max_bytes, json);
             // clap's `verdict` ArgGroup (now OPTIONAL) guarantees AT MOST one flag is set.
             let verdict = if approve {
                 Some(ops::ReviewVerdict::Approve)
@@ -537,6 +587,7 @@ pub fn run() -> ExitCode {
                 target.as_deref(),
                 verdict,
                 workspace.as_deref(),
+                budget,
             );
             finish_review(json, cmd_name, result, &diag)
         }
@@ -555,15 +606,21 @@ pub fn run() -> ExitCode {
             ),
             &diag,
         ),
-        Command::Log { skill } => {
+        Command::Log {
+            skill,
+            limit,
+            offset,
+        } => {
             let connectors = ops::LogConnectors {
                 directory: &connect_directory,
             };
-            finish(
+            let page = ops::RowPage::resolve(limit, offset, json, ops::DEFAULT_JSON_LOG_LIMIT);
+            finish_log(
                 json,
                 cmd_name,
-                ops::log(&ctx, &connectors, &skill),
-                render::log_tty,
+                ops::log(&ctx, &connectors, &skill, page),
+                &skill,
+                page,
                 &diag,
             )
         }
@@ -957,22 +1014,125 @@ fn finish_pull(
 /// `list`'s finisher — the `--json` envelope carries exactly the schema-pinned `ListData` plus any
 /// `--remote` per-workspace catalog-read warnings (mirroring `pull`); the TTY additionally renders the
 /// enrollment header + per-row follow annotations the outcome carries alongside (TTY-only disclosure —
-/// `ListData`'s pinned shape has no enrollment fields).
+/// `ListData`'s pinned shape has no enrollment fields). A row-capped list (any bucket marker) adds
+/// the NEXT_PAGE next action carrying this same invocation's COMPLETE argv at the next offset.
 fn finish_list(
     json: bool,
     command: &str,
     result: Result<ops::ListOutcome, ClientError>,
+    page: ops::RowPage,
+    page_argv: Vec<String>,
     diag: &Diag<'_>,
 ) -> ExitCode {
     match result {
         Ok(out) => {
             if json {
+                let next_actions = next_page_action(
+                    &page,
+                    out.data
+                        .truncated
+                        .iter()
+                        .any(|b| (page.offset as u64).saturating_add(b.shown) < b.total),
+                    page_argv,
+                );
                 let value = serde_json::to_value(&out.data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
                 envelope.warnings = out.warnings;
+                envelope.next_actions = next_actions;
                 println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::list_tty(&out));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
+/// The NEXT_PAGE next action for a row-capped enumeration: the caller's COMPLETE argv re-spelled at
+/// the next offset (same page size). Empty when nothing lies past this page. A truncated page always
+/// has a finite limit (an unlimited page runs to the end), so the argv always carries `--limit`.
+fn next_page_action(
+    page: &ops::RowPage,
+    more_after: bool,
+    mut argv: Vec<String>,
+) -> Vec<topos_types::NextAction> {
+    if !more_after {
+        return Vec::new();
+    }
+    let Some(limit) = page.limit else {
+        return Vec::new();
+    };
+    argv.extend([
+        "--limit".to_owned(),
+        limit.to_string(),
+        "--offset".to_owned(),
+        page.offset.saturating_add(limit).to_string(),
+        "--json".to_owned(),
+    ]);
+    vec![crate::actions::next_action(
+        topos_types::ActionCode::NextPage,
+        argv,
+    )]
+}
+
+/// `diff`'s finisher — a byte-capped body adds the FETCH_FULL_DIFF next action (this same diff,
+/// `--max-bytes 0`).
+fn finish_diff(
+    json: bool,
+    command: &str,
+    result: Result<topos_types::results::DiffData, ClientError>,
+    full_argv: Vec<String>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(data) => {
+            if json {
+                let next_actions = if data.truncated {
+                    vec![crate::actions::next_action(
+                        topos_types::ActionCode::FetchFullDiff,
+                        full_argv,
+                    )]
+                } else {
+                    Vec::new()
+                };
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = next_actions;
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::diff_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
+/// `log`'s finisher — a row-capped event list adds the NEXT_PAGE next action (this same log at the
+/// next offset).
+fn finish_log(
+    json: bool,
+    command: &str,
+    result: Result<topos_types::results::LogData, ClientError>,
+    skill: &str,
+    page: ops::RowPage,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(data) => {
+            if json {
+                let next_actions = next_page_action(
+                    &page,
+                    data.truncated,
+                    vec!["topos".to_owned(), "log".to_owned(), skill.to_owned()],
+                );
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = next_actions;
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::log_tty(&data));
             }
             ExitCode::SUCCESS
         }
@@ -1482,9 +1642,28 @@ fn finish_review(
         }
         Ok(ops::ReviewOutcome::Describe { data, next_argvs }) => {
             if json {
+                let mut next_actions = render::describe_next_actions(next_argvs.clone());
+                // A byte-capped describe diff adds the full-fidelity escape: the SAME
+                // `current..<proposal>` diff through `topos diff`, uncapped.
+                if data.diff_truncated
+                    && let Some((_, hash)) = data.proposal.rsplit_once('@')
+                {
+                    next_actions.push(crate::actions::next_action(
+                        topos_types::ActionCode::FetchFullDiff,
+                        vec![
+                            "topos".to_owned(),
+                            "diff".to_owned(),
+                            data.skill.clone(),
+                            format!("current..{hash}"),
+                            "--max-bytes".to_owned(),
+                            "0".to_owned(),
+                            "--json".to_owned(),
+                        ],
+                    ));
+                }
                 let value = serde_json::json!({ "describe": data });
                 let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions = render::describe_next_actions(next_argvs.clone());
+                envelope.next_actions = next_actions;
                 println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::review_describe_tty(&data, &next_argvs));

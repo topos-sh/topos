@@ -23,6 +23,19 @@
         "null"
       ],
       "items": true
+    },
+    "total": {
+      "description": "The TOTAL event count before paging, present only when a page was applied. **INFERRED**\n(additive).",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "truncated": {
+      "description": "`true` when `events` was row-capped (`--limit`/`--offset`, or the `--json` default page):\nmore events exist past this page — the `NEXT_PAGE` next action's argv fetches them. Omits\nwhen `false` (an uncapped log keeps the exact prior shape). **INFERRED** (additive).",
+      "type": "boolean"
     }
   },
   "required": [

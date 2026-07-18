@@ -14,13 +14,15 @@
   "warnings": [],
   "next_actions": [
     {
-      "code": "APPLY",
+      "code": "APPLY_DESCRIBED",
       "argv": [
         "topos",
         "protect",
         "deploy",
         "--yes"
-      ]
+      ],
+      "mutates": true,
+      "needs_network": true
     }
   ]
 }

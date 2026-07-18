@@ -111,7 +111,9 @@ pub enum TerminalOutcome {
 // ---------------------------------------------------------------------------------------------
 
 /// A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent
-/// branch on the known set and still pass through unknowns.
+/// branch on the known set and still pass through unknowns. The three safety fields are ADDITIVE
+/// and optional (absent = unknown) — a producer fills them from its one rules module, never
+/// per call site, so the classification cannot drift between surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -121,12 +123,24 @@ pub struct NextAction {
     pub code: ActionCode,
     /// A complete argv array — execute as-is (no TTY parsing).
     pub argv: Vec<String>,
+    /// Whether executing `argv` CHANGES state — local files (skill bytes, the sidecar) or shared
+    /// workspace state. Absent = unknown (e.g. a bare `RETRY`, whose safety is the retried
+    /// command's own).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutates: Option<bool>,
+    /// Whether executing `argv` dials the plane. Absent = unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_network: Option<bool>,
+    /// A one-line caution for an action whose effect a human/agent should weigh before running
+    /// (team-visible moves, local discards). Absent = nothing to flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_note: Option<String>,
 }
 
 /// The closed initial action-code vocabulary (each maps to its producing outcome). Advertised in
 /// the [`ActionCode`] schema's `examples` so a cross-language consumer learns the set without
 /// reading Rust; additive-only — new codes append here.
-pub const KNOWN_ACTION_CODES: [&str; 8] = [
+pub const KNOWN_ACTION_CODES: [&str; 10] = [
     "PROPOSE_PUBLISH",
     "REBASE_AND_RETRY",
     "RESOLVE_DIVERGED_DRAFT",
@@ -135,6 +149,8 @@ pub const KNOWN_ACTION_CODES: [&str; 8] = [
     "REQUEST_ACCESS",
     "RETRY",
     "CONTACT_ADMIN",
+    "FETCH_FULL_DIFF",
+    "NEXT_PAGE",
 ];
 
 /// The action-code vocabulary. Known variants serialize to their SCREAMING_SNAKE string; an
@@ -149,6 +165,8 @@ pub enum ActionCode {
     RequestAccess,        // DENIED → invite/enroll
     Retry,                // RETRYABLE_FAILURE / UNAVAILABLE
     ContactAdmin,         // non-self-service denials
+    FetchFullDiff,        // a byte-capped diff — the argv re-runs it uncapped
+    NextPage,             // a row-capped enumeration — the argv fetches the next page
     /// A forward-compatible code this build doesn't know — execute the action's `argv` anyway.
     /// Only constructible via the normalizing [`From<String>`], which maps a known string to its
     /// variant first, so an `Unknown` can never alias a known code (the inner value is private).
@@ -179,6 +197,8 @@ impl ActionCode {
             ActionCode::RequestAccess => "REQUEST_ACCESS",
             ActionCode::Retry => "RETRY",
             ActionCode::ContactAdmin => "CONTACT_ADMIN",
+            ActionCode::FetchFullDiff => "FETCH_FULL_DIFF",
+            ActionCode::NextPage => "NEXT_PAGE",
             ActionCode::Unknown(s) => s.as_str(),
         }
     }
@@ -195,6 +215,8 @@ impl From<String> for ActionCode {
             "REQUEST_ACCESS" => ActionCode::RequestAccess,
             "RETRY" => ActionCode::Retry,
             "CONTACT_ADMIN" => ActionCode::ContactAdmin,
+            "FETCH_FULL_DIFF" => ActionCode::FetchFullDiff,
+            "NEXT_PAGE" => ActionCode::NextPage,
             _ => ActionCode::Unknown(UnknownActionCode(s)),
         }
     }

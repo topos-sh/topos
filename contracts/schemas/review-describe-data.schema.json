@@ -9,8 +9,12 @@
       "pattern": "^[0-9a-f]{64}$"
     },
     "diff": {
-      "description": "The unified diff of the proposal against current (`current..<proposal>`).",
+      "description": "The unified diff of the proposal against current (`current..<proposal>`). Under a byte\nbudget (`--max-bytes`, or the `--json` default cap) it carries only the leading whole-file\nsections that fit; `diff_truncated` says so and the `FETCH_FULL_DIFF` next action's argv\nre-runs the same diff uncapped through `topos diff`.",
       "type": "string"
+    },
+    "diff_truncated": {
+      "description": "`true` when `diff` was byte-capped. Omits when `false` (the prior shape is unchanged).\n**INFERRED** (additive).",
+      "type": "boolean"
     },
     "message": {
       "type": "string"

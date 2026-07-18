@@ -77,71 +77,62 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
         | ClientError::AmbiguousHarness { .. }
         | ClientError::AmbiguousScope { .. }
         | ClientError::NoUntrackedSkill { .. }
-        | ClientError::HarnessNotFound(_) => vec![NextAction {
-            code: ActionCode::DisambiguateName,
-            argv: vec!["topos".into(), "list".into(), "--json".into()],
-        }],
+        | ClientError::HarnessNotFound(_) => vec![crate::actions::next_action(
+            ActionCode::DisambiguateName,
+            vec!["topos".into(), "list".into(), "--json".into()],
+        )],
         // A review verdict on a no-longer-open proposal — point the agent at the open inbox.
-        ClientError::ReviewNotOpen(_) => vec![NextAction {
-            code: ActionCode::from("REVIEW_INBOX".to_owned()),
-            argv: vec!["topos".into(), "review".into(), "--json".into()],
-        }],
+        ClientError::ReviewNotOpen(_) => vec![crate::actions::next_action(
+            ActionCode::from("REVIEW_INBOX".to_owned()),
+            vec!["topos".into(), "review".into(), "--json".into()],
+        )],
         // A stale base — update to rebase, then re-show the diff and retry. Never a silent retry.
-        ClientError::Conflict { skill, .. } => vec![NextAction {
-            code: ActionCode::RebaseAndRetry,
-            argv: vec![
+        ClientError::Conflict { skill, .. } => vec![crate::actions::next_action(
+            ActionCode::RebaseAndRetry,
+            vec![
                 "topos".into(),
                 "update".into(),
                 skill.clone(),
                 "--json".into(),
             ],
-        }],
+        )],
         // An unresolved author merge blocks publish — resolve it (the update surfaces/runs the resolution).
-        ClientError::PublishBlocked { skill } => vec![NextAction {
-            code: ActionCode::ResolveDivergedDraft,
-            argv: vec![
+        ClientError::PublishBlocked { skill } => vec![crate::actions::next_action(
+            ActionCode::ResolveDivergedDraft,
+            vec![
                 "topos".into(),
                 "update".into(),
                 skill.clone(),
                 "--json".into(),
             ],
-        }],
+        )],
         // A denial is not self-service (ask an owner to invite/roster you, or contact an admin) — the
         // codes carry no executable argv.
         ClientError::Denied(_) => vec![
-            NextAction {
-                code: ActionCode::RequestAccess,
-                argv: Vec::new(),
-            },
-            NextAction {
-                code: ActionCode::ContactAdmin,
-                argv: Vec::new(),
-            },
+            crate::actions::next_action(ActionCode::RequestAccess, Vec::new()),
+            crate::actions::next_action(ActionCode::ContactAdmin, Vec::new()),
         ],
         // A denied enrollment redeem (authenticated-but-uninvited): the ask-an-owner guidance rides the
         // message; the action code is the existing REQUEST_ACCESS (no argv — the fix is another human's).
-        ClientError::EnrollDenied => vec![NextAction {
-            code: ActionCode::RequestAccess,
-            argv: Vec::new(),
-        }],
+        ClientError::EnrollDenied => vec![crate::actions::next_action(
+            ActionCode::RequestAccess,
+            Vec::new(),
+        )],
         // A retryable plane outcome (e.g. a not-yet-committed lease) — re-run the same command. The agent
         // owns the argv (this surface doesn't carry the verb); a permanent one carries no Retry.
         ClientError::PlaneTerminal {
             retryable: true, ..
-        } => vec![NextAction {
-            code: ActionCode::Retry,
-            argv: Vec::new(),
-        }],
+        } => vec![crate::actions::next_action(ActionCode::Retry, Vec::new())],
         // `topos upgrade` disambiguates to two concrete commands the agent can pick between.
         ClientError::UpgradeAmbiguous => vec![
-            NextAction {
-                code: ActionCode::from("UPDATE_SKILLS".to_owned()),
-                argv: vec!["topos".into(), "update".into(), "--json".into()],
-            },
-            NextAction {
-                code: ActionCode::from("UPDATE_CLI".to_owned()),
-                argv: vec!["topos".into(), "self-update".into()],
-            },
+            crate::actions::next_action(
+                ActionCode::from("UPDATE_SKILLS".to_owned()),
+                vec!["topos".into(), "update".into(), "--json".into()],
+            ),
+            crate::actions::next_action(
+                ActionCode::from("UPDATE_CLI".to_owned()),
+                vec!["topos".into(), "self-update".into()],
+            ),
         ],
         _ => Vec::new(),
     }
@@ -152,17 +143,17 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
 /// surface/place them.
 pub(crate) fn follow_next_actions(data: &FollowData) -> Vec<NextAction> {
     if data.pending.is_some() {
-        return vec![NextAction {
-            // An OPEN action code (carries the executable argv); no schema change to the closed set.
-            code: ActionCode::from("ENROLL_RESUME".to_owned()),
-            argv: vec!["topos".into(), "follow".into(), "--json".into()],
-        }];
+        // An OPEN action code (carries the executable argv); no schema change to the closed set.
+        return vec![crate::actions::next_action(
+            ActionCode::from("ENROLL_RESUME".to_owned()),
+            vec!["topos".into(), "follow".into(), "--json".into()],
+        )];
     }
     if data.enrolled && !data.skills.is_empty() {
-        return vec![NextAction {
-            code: ActionCode::ApplyWaitingUpdate,
-            argv: vec!["topos".into(), "update".into(), "--json".into()],
-        }];
+        return vec![crate::actions::next_action(
+            ActionCode::ApplyWaitingUpdate,
+            vec!["topos".into(), "update".into(), "--json".into()],
+        )];
     }
     Vec::new()
 }
@@ -315,14 +306,16 @@ pub(crate) fn withdrawn_next_actions(data: &PullData) -> Vec<NextAction> {
     data.skills
         .iter()
         .filter(|s| matches!(s.action, topos_types::results::PullAction::Withdrawn))
-        .map(|s| NextAction {
-            code: ActionCode::from("KEEP_AS_YOURS".to_owned()),
-            argv: vec![
-                "topos".to_owned(),
-                "add".to_owned(),
-                s.skill.clone(),
-                "--yes".to_owned(),
-            ],
+        .map(|s| {
+            crate::actions::next_action(
+                ActionCode::from("KEEP_AS_YOURS".to_owned()),
+                vec![
+                    "topos".to_owned(),
+                    "add".to_owned(),
+                    s.skill.clone(),
+                    "--yes".to_owned(),
+                ],
+            )
         })
         .collect()
 }
@@ -417,6 +410,13 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
             }
             s.push_str(&remote_row(r));
         }
+    }
+    // An explicit `--limit`/`--offset` page on the TTY: one line per capped bucket.
+    for t in &data.truncated {
+        s.push_str(&format!(
+            "… {}: {} of {} rows shown — a higher `--offset` pages on\n",
+            t.bucket, t.shown, t.total
+        ));
     }
     // Isolated per-workspace catalog-read failures — the same stable lines the `--json` envelope carries.
     for w in &out.warnings {
@@ -614,11 +614,24 @@ pub(crate) fn reset_applied_tty(items: &[topos_types::results::ResetData]) -> St
 }
 
 pub(crate) fn diff_tty(data: &DiffData) -> String {
-    if data.diff.is_empty() {
-        "No changes — the draft matches current.".to_owned()
-    } else {
-        data.diff.trim_end_matches('\n').to_owned()
+    if data.diff.is_empty() && !data.truncated {
+        return "No changes — the draft matches current.".to_owned();
     }
+    let mut s = data.diff.trim_end_matches('\n').to_owned();
+    // An explicit `--max-bytes` cap on the TTY: say what fell off and how to get it (the same cap
+    // the `--json` envelope discloses structurally).
+    if data.truncated {
+        let omitted = data.files.iter().filter(|f| f.patch_omitted).count();
+        if !s.is_empty() {
+            s.push('\n');
+        }
+        s.push_str(&format!(
+            "… diff truncated — {omitted} of {} file patch(es) omitted by the byte cap; re-run \
+             with `--max-bytes 0` for the full diff",
+            data.files.len()
+        ));
+    }
+    s
 }
 
 pub(crate) fn log_tty(data: &LogData) -> String {
@@ -636,6 +649,15 @@ pub(crate) fn log_tty(data: &LogData) -> String {
     }
     for e in &data.events {
         out.push_str(&format!("  {}\n", log_line(e)));
+    }
+    // An explicit `--limit`/`--offset` page on the TTY: name what lies past it.
+    if data.truncated
+        && let Some(total) = data.total
+    {
+        out.push_str(&format!(
+            "… {} of {total} events shown — a higher `--offset` pages on\n",
+            data.events.len()
+        ));
     }
     out.trim_end().to_owned()
 }
@@ -822,9 +844,8 @@ pub(crate) fn follow_tty(data: &FollowData, resumed: &[String]) -> String {
 pub(crate) fn describe_next_actions(argvs: Vec<Vec<String>>) -> Vec<NextAction> {
     argvs
         .into_iter()
-        .map(|argv| NextAction {
-            code: ActionCode::from("APPLY_DESCRIBED".to_owned()),
-            argv,
+        .map(|argv| {
+            crate::actions::next_action(ActionCode::from("APPLY_DESCRIBED".to_owned()), argv)
         })
         .collect()
 }
@@ -1111,15 +1132,15 @@ pub(crate) fn login_done_tty(d: &crate::ops::AuthLoginData) -> String {
 
 /// The pending login's next action — re-invoke `auth login` (re-invoking IS the resume).
 pub(crate) fn login_pending_next_actions() -> Vec<NextAction> {
-    vec![NextAction {
-        code: ActionCode::from("ENROLL_RESUME".to_owned()),
-        argv: vec![
+    vec![crate::actions::next_action(
+        ActionCode::from("ENROLL_RESUME".to_owned()),
+        vec![
             "topos".into(),
             "auth".into(),
             "login".into(),
             "--json".into(),
         ],
-    }]
+    )]
 }
 
 /// The logout DESCRIBE's TTY.
@@ -1564,6 +1585,15 @@ pub(crate) fn publish_describe_tty(
     if let Some(reach) = data.reach {
         s.push_str(&format!("\n  reaches {reach} people"));
     }
+    // The behind-copy conflict prediction: this publish would be refused (rebase first), and the
+    // in-memory dry run says how that rebase's merge would go.
+    if let Some(preview) = &data.merge_preview {
+        s.push_str(&format!(
+            "\n  note: your copy is behind the team's current — this publish will be refused \
+             (update to rebase); {}",
+            merge_preview_line(preview)
+        ));
+    }
     if let Some(note) = &data.origin_note {
         s.push_str(&format!("\n  note: {note}"));
     }
@@ -1923,7 +1953,13 @@ fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
                      `topos update {name}` to merge it (or `topos update {name} --onto-current` to \
                      keep your bytes and drop the update)"
                 ),
-                Vec::new(),
+                // The in-memory merge PREVIEW (already-local bytes only): what the merge WOULD do,
+                // so the person picks merge-vs-escape informed. Absent = unknown, nothing printed.
+                s.merge_preview
+                    .as_ref()
+                    .map(merge_preview_line)
+                    .into_iter()
+                    .collect(),
             )
         }
         PullAction::Merged => {
@@ -1967,6 +2003,22 @@ fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
             ),
             Vec::new(),
         ),
+    }
+}
+
+/// One human line for a merge PREVIEW (the in-memory dry run — a prediction, never a promise).
+fn merge_preview_line(p: &topos_types::results::MergePreview) -> String {
+    use topos_types::results::MergePreviewVerdict;
+    match p.verdict {
+        MergePreviewVerdict::Clean => {
+            "merge preview: clean — the three-way merge would apply without conflicts".to_owned()
+        }
+        MergePreviewVerdict::Conflicted if p.conflicts.is_empty() => {
+            "merge preview: conflicted — the merge would need manual resolution".to_owned()
+        }
+        MergePreviewVerdict::Conflicted => {
+            format!("merge preview: conflicts in {}", p.conflicts.join(", "))
+        }
     }
 }
 
@@ -2024,6 +2076,7 @@ mod tests {
             offer: None,
             conflict: None,
             merge: None,
+            merge_preview: None,
         }
     }
 
@@ -2276,6 +2329,7 @@ mod tests {
                 untracked: Vec::new(),
                 remote_available: Vec::new(),
                 footprint: None,
+                truncated: Vec::new(),
             },
             warnings: Vec::new(),
             enrollment: Some(ListEnrollment {
@@ -2460,6 +2514,8 @@ mod tests {
             ],
             team: None,
             archived_successor: None,
+            truncated: false,
+            total: None,
         };
         let out = log_tty(&data);
         // Columns: human timestamp, action, name, short id.

@@ -13,6 +13,9 @@
 //! so adoption is all-or-nothing on top of the per-document guarantee. The git objects a document refers
 //! to are made durable **before** the document that names them.
 
+/// The ONE owner of next-action construction + safety metadata. `pub` because the fixture
+/// generator (xtask) builds its golden envelopes through the SAME constructor — no second table.
+pub mod actions;
 mod app;
 pub(crate) mod atomic;
 pub(crate) mod cli;

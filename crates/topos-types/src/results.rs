@@ -75,6 +75,36 @@ pub struct PullSkill {
     /// Present for the author-merge outcomes (`merged` / `conflicted`) — the resolution disclosure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge: Option<MergeReport>,
+    /// The PREDICTED outcome of the three-way merge a surfaced `diverged` row implies, computed
+    /// purely in memory from already-local bytes (never a network read). Absent = unknown (not a
+    /// diverged row, or the merge base is not locally renderable). **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_preview: Option<MergePreview>,
+}
+
+/// The predicted verdict of a three-way merge that has NOT been run against the placements — a pure
+/// in-memory dry run of the same kernel plan + per-file diff3 the real resolution executes. Never a
+/// promise: the authoritative outcome is the resolution's own [`MergeReport`]. **INFERRED** (additive).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct MergePreview {
+    pub verdict: MergePreviewVerdict,
+    /// The paths that would conflict when `verdict` is `conflicted` (structural conflicts + failed
+    /// content merges). Empty for a clean preview — and for the rare conflicted-with-no-path case
+    /// (a merge that would empty the bundle).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<String>,
+}
+
+/// The two predicted merge verdicts. **INFERRED** (additive value set).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum MergePreviewVerdict {
+    /// Every path would resolve cleanly — the merge would land a publishable draft-on-current.
+    Clean,
+    /// At least one path would conflict — the merge would write markers and block publish.
+    Conflicted,
 }
 
 /// What `pull` did / offers for a skill. **INFERRED value set** — the four-state machine pins the
@@ -192,6 +222,26 @@ pub struct ListData {
     /// Only present under `--footprint`: topos-owned paths outside skill dirs. **INFERRED shape.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub footprint: Option<Vec<String>>,
+    /// The buckets that were row-capped (`--limit`/`--offset`, or the `--json` default page), one
+    /// marker per capped bucket. The page applies PER BUCKET (each bucket skips `offset` rows and
+    /// shows up to `limit`); the `NEXT_PAGE` next action's argv fetches the next page. Empty (and
+    /// omitted) on an uncapped list — the pinned shape is byte-identical there. **INFERRED**
+    /// (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub truncated: Vec<BucketTruncation>,
+}
+
+/// One row-capped bucket in a paged [`ListData`]. **INFERRED** (additive).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct BucketTruncation {
+    /// The capped bucket's field name (`followed` / `published_by_you` / `tracked` / `untracked` /
+    /// `remote_available`).
+    pub bucket: String,
+    /// Rows emitted on this page.
+    pub shown: u64,
+    /// Total rows in the bucket before paging.
+    pub total: u64,
 }
 
 /// A skill available in a followed workspace's catalog (`list --remote`), annotated with this install's
@@ -331,7 +381,9 @@ pub enum DetachCause {
 // =================================================================================================
 
 /// `diff` result. `source` + `version_id` (+ the emitted digest) are **PINNED**; the diff *body*
-/// representation ("a plain unified diff") is the only INFERRED part.
+/// representation ("a plain unified diff") is the only INFERRED part. The byte-budget fields
+/// (`truncated` / `files`) are ADDITIVE and omit entirely on an uncapped diff, so the pinned shape
+/// is byte-identical there.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct DiffData {
@@ -340,8 +392,31 @@ pub struct DiffData {
     pub version_id: String,
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub bundle_digest: String,
-    /// A plain unified diff.
+    /// A plain unified diff. Under a byte budget (`--max-bytes`, or the `--json` default cap) it
+    /// carries only the LEADING whole-file sections that fit — truncation is always at a file
+    /// boundary, never mid-hunk — and `truncated`/`files` disclose the rest.
     pub diff: String,
+    /// `true` when the emitted `diff` was capped by a byte budget (some file sections were dropped).
+    /// Omits when `false` — an uncapped diff keeps the exact prior shape. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+    /// Present ONLY when `truncated`: one row per file in the FULL diff, in diff order, with
+    /// `patch_omitted: true` on the files whose section was dropped from `diff`. The
+    /// accompanying `FETCH_FULL_DIFF` next action re-runs the diff uncapped. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<DiffPatchInfo>,
+}
+
+/// One file's row in a byte-capped [`DiffData`]. **INFERRED** (additive).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct DiffPatchInfo {
+    /// The bundle-relative path of the changed file.
+    pub path: String,
+    /// `true` when this file's patch section was dropped from `diff` to fit the byte budget.
+    pub patch_omitted: bool,
+    /// The full section's size in bytes (headers + hunks), so an agent can budget a refetch.
+    pub patch_bytes: u64,
 }
 
 /// Where the compared bytes came from: the local sidecar, or a plane-held proposal. **PINNED.**
@@ -554,6 +629,15 @@ pub struct LogData {
     /// the archived-successor hint: "`<base>` is archived as `<archived>`". **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_successor: Option<String>,
+    /// `true` when `events` was row-capped (`--limit`/`--offset`, or the `--json` default page):
+    /// more events exist past this page — the `NEXT_PAGE` next action's argv fetches them. Omits
+    /// when `false` (an uncapped log keeps the exact prior shape). **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+    /// The TOTAL event count before paging, present only when a page was applied. **INFERRED**
+    /// (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
 /// `publish` (a direct publish that moves `current`). Under a `reviewed` bundle a direct publish is
@@ -879,8 +963,15 @@ pub struct ReviewDescribeData {
     /// Whether the CALLER authored this proposal — when `true` the describe offers `--withdraw` (a
     /// four-eyes author cannot approve their own version) and the renderer says "your proposal".
     pub yours: bool,
-    /// The unified diff of the proposal against current (`current..<proposal>`).
+    /// The unified diff of the proposal against current (`current..<proposal>`). Under a byte
+    /// budget (`--max-bytes`, or the `--json` default cap) it carries only the leading whole-file
+    /// sections that fit; `diff_truncated` says so and the `FETCH_FULL_DIFF` next action's argv
+    /// re-runs the same diff uncapped through `topos diff`.
     pub diff: String,
+    /// `true` when `diff` was byte-capped. Omits when `false` (the prior shape is unchanged).
+    /// **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub diff_truncated: bool,
 }
 
 /// `invite` (bare, no emails) — the no-mutation read of the workspace address + invite policy.
@@ -965,6 +1056,13 @@ pub struct PublishDescribeData {
     /// (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement_note: Option<String>,
+    /// The PREDICTED conflict verdict when the draft's base is BEHIND the last-known observed
+    /// `current` (the apply would refuse with CONFLICT — rebase first): a pure in-memory three-way
+    /// dry run of the draft onto that current, from already-local bytes only. Absent = unknown
+    /// (up to date, or the needed version is not locally held — the describe never adds a network
+    /// call for it). **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_preview: Option<MergePreview>,
 }
 
 /// The gate a `publish` describe predicts. **INFERRED value set.**
@@ -994,6 +1092,7 @@ mod tests {
                 offer: None,
                 conflict: None,
                 merge: None,
+                merge_preview: None,
             }],
             proposals_awaiting: 0,
             notices: Vec::new(),
@@ -1030,6 +1129,48 @@ mod tests {
         );
         let back: PublishData = serde_json::from_value(v).unwrap();
         assert_eq!(back.bundle_digest, "c".repeat(64));
+    }
+
+    #[test]
+    fn additive_budget_and_preview_fields_omit_when_absent() {
+        // An uncapped diff serializes byte-identically to the pre-budget shape: no `truncated`, no
+        // `files`.
+        let diff = DiffData {
+            source: DiffSource::Local,
+            version_id: "a".repeat(64),
+            bundle_digest: "b".repeat(64),
+            diff: String::new(),
+            truncated: false,
+            files: Vec::new(),
+        };
+        let v = serde_json::to_value(&diff).unwrap();
+        assert!(v.get("truncated").is_none() && v.get("files").is_none());
+
+        // An unpaged log/list likewise.
+        let log = LogData::default();
+        let v = serde_json::to_value(&log).unwrap();
+        assert!(v.get("truncated").is_none() && v.get("total").is_none());
+        let list = ListData::default();
+        let v = serde_json::to_value(&list).unwrap();
+        assert!(v.get("truncated").is_none());
+
+        // A capped diff carries the per-file rows + the flag; the preview verdict is snake_case.
+        let capped = DiffData {
+            truncated: true,
+            files: vec![DiffPatchInfo {
+                path: "SKILL.md".to_owned(),
+                patch_omitted: true,
+                patch_bytes: 9,
+            }],
+            ..diff
+        };
+        let v = serde_json::to_value(&capped).unwrap();
+        assert_eq!(v["truncated"], true);
+        assert_eq!(v["files"][0]["patch_omitted"], true);
+        assert_eq!(
+            serde_json::to_string(&MergePreviewVerdict::Conflicted).unwrap(),
+            "\"conflicted\""
+        );
     }
 
     #[test]

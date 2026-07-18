@@ -64,7 +64,7 @@ pub(crate) use auth::{
     AuthLogoutDescribe, AuthLogoutOutcome, AuthStatusData, login, logout, status,
 };
 pub(crate) use channel::{ChannelConnectors, ChannelOutcome, channel};
-pub(crate) use diff::diff;
+pub(crate) use diff::{DiffBudget, diff};
 pub(crate) use follow::{
     FollowApplied, FollowConnectors, FollowDescribe, FollowOpts, FollowOutcome, Reattach, follow,
 };
@@ -113,6 +113,70 @@ use crate::error::ClientError;
 use crate::id::SkillId;
 use crate::sidecar::SkillPaths;
 use crate::{doc, enroll};
+
+/// The default row page a `--json` enumeration is capped at when no explicit `--limit` was given —
+/// one per verb (the TTY stays uncapped by default; `--limit 0` lifts the cap everywhere).
+pub(crate) const DEFAULT_JSON_LIST_LIMIT: usize = 50;
+pub(crate) const DEFAULT_JSON_LOG_LIMIT: usize = 20;
+
+/// One page of a row-capped enumeration (`list` / `log`): skip `offset` rows, emit up to `limit`.
+/// The page applies PER BUCKET on `list` (each bucket skips/caps independently — one grammar for
+/// every bucket, so the next-page argv stays a single `--offset`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RowPage {
+    pub offset: usize,
+    /// `None` = unlimited.
+    pub limit: Option<usize>,
+}
+
+impl RowPage {
+    /// Resolve the effective page from the `--limit`/`--offset` flags + the output surface: explicit
+    /// flags win everywhere (`--limit 0` = unlimited); with no `--limit`, `--json` defaults to
+    /// `json_default` rows and the TTY stays uncapped (human output is left alone).
+    pub(crate) fn resolve(
+        limit: Option<u64>,
+        offset: Option<u64>,
+        json: bool,
+        json_default: usize,
+    ) -> Self {
+        let offset = usize::try_from(offset.unwrap_or(0)).unwrap_or(usize::MAX);
+        let limit = match limit {
+            Some(0) => None,
+            Some(n) => Some(usize::try_from(n).unwrap_or(usize::MAX)),
+            None if json => Some(json_default),
+            None => None,
+        };
+        Self { offset, limit }
+    }
+
+    /// The no-op page — the test-only `list` shim's default (production always resolves a page).
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub(crate) fn unlimited() -> Self {
+        Self {
+            offset: 0,
+            limit: None,
+        }
+    }
+
+    /// Whether this page can ever drop a row (a real offset or a finite limit).
+    pub(crate) fn is_active(&self) -> bool {
+        self.offset > 0 || self.limit.is_some()
+    }
+
+    /// Slice `rows` down to this page in place; returns `(shown, total)` — `shown < total` means
+    /// some rows are not on this page (skipped before it, or past its end).
+    pub(crate) fn apply<T>(&self, rows: &mut Vec<T>) -> (usize, usize) {
+        let total = rows.len();
+        let start = self.offset.min(total);
+        let end = match self.limit {
+            Some(l) => start.saturating_add(l).min(total),
+            None => total,
+        };
+        rows.truncate(end);
+        rows.drain(..start);
+        (rows.len(), total)
+    }
+}
 
 /// Resolve a skill name to its `(id, lock)` across the tracked skills, WITHOUT a workspace filter — the
 /// common case (the local verbs that do not act in a workspace: `add`, `log`, `diff`, `unfollow`, `pull`,
@@ -397,6 +461,38 @@ pub(crate) fn local_version_ids(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn row_page_resolution_and_slicing() {
+        use super::RowPage;
+        // Defaults: json capped at the verb default, TTY uncapped; `--limit 0` lifts; flags win.
+        assert_eq!(RowPage::resolve(None, None, true, 50).limit, Some(50));
+        assert_eq!(RowPage::resolve(None, None, false, 50).limit, None);
+        assert_eq!(RowPage::resolve(Some(0), None, true, 50).limit, None);
+        assert_eq!(RowPage::resolve(Some(5), Some(7), false, 50).limit, Some(5));
+        assert_eq!(RowPage::resolve(None, Some(7), false, 50).offset, 7);
+
+        // Slicing: skip offset, cap at limit; (shown, total) reports honestly.
+        let page = RowPage {
+            offset: 2,
+            limit: Some(2),
+        };
+        let mut rows = vec![1, 2, 3, 4, 5];
+        assert_eq!(page.apply(&mut rows), (2, 5));
+        assert_eq!(rows, vec![3, 4]);
+        // Past the end: empty page, total intact.
+        let mut rows = vec![1, 2];
+        assert_eq!(page.apply(&mut rows), (0, 2));
+        assert!(rows.is_empty());
+        // An unlimited page from offset 0 is a no-op.
+        let all = RowPage {
+            offset: 0,
+            limit: None,
+        };
+        let mut rows = vec![1, 2, 3];
+        assert_eq!(all.apply(&mut rows), (3, 3));
+        assert_eq!(rows, vec![1, 2, 3]);
+    }
+
     use super::{VersionRef, parse_hex32, parse_hex32_arg, resolve_version_ref};
 
     fn recorded(commits: &[&str]) -> Vec<String> {

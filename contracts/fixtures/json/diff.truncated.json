@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "command": "diff",
+  "ok": true,
+  "data": {
+    "bundle_digest": "0c6cdac7150f974c8acb9d608516adfb5181655ce0316464300fa82bbb5c19fe",
+    "diff": "--- a/SKILL.md\n+++ b/SKILL.md\n@@ -4,4 +4,4 @@\n \n # PR describe\n \n-Write a clear PR description.\n+Write a GREAT PR description.\n",
+    "files": [
+      {
+        "patch_bytes": 120,
+        "patch_omitted": false,
+        "path": "SKILL.md"
+      },
+      {
+        "patch_bytes": 98304,
+        "patch_omitted": true,
+        "path": "reference.md"
+      }
+    ],
+    "source": "local",
+    "truncated": true,
+    "version_id": "d77b648d8149d63189864c6b6d06da4f7919935c4242cc197e708b1dafe941d5"
+  },
+  "warnings": [],
+  "next_actions": [
+    {
+      "code": "FETCH_FULL_DIFF",
+      "argv": [
+        "topos",
+        "diff",
+        "pr-describe",
+        "--max-bytes",
+        "0",
+        "--json"
+      ],
+      "mutates": false,
+      "needs_network": false
+    }
+  ]
+}

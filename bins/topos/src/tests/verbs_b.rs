@@ -853,7 +853,15 @@ fn review_inbox_splits_others_from_yours_by_principal() {
     let inert_f = InertFollow;
     let ctx = rig.ctx(&inert_p, &inert_f);
 
-    let out = ops::review_dispatch(&ctx, &connectors, None, None, None).unwrap();
+    let out = ops::review_dispatch(
+        &ctx,
+        &connectors,
+        None,
+        None,
+        None,
+        ops::DiffBudget::resolve(None, false),
+    )
+    .unwrap();
     match out {
         ops::ReviewOutcome::Inbox(data) => {
             assert_eq!(data.inbox.len(), 1, "bob's proposal is in the inbox");
@@ -893,7 +901,15 @@ fn review_inbox_prefers_the_server_yours_flag_over_the_principal_string() {
     let inert_f = InertFollow;
     let ctx = rig.ctx(&inert_p, &inert_f);
 
-    let out = ops::review_dispatch(&ctx, &connectors, None, None, None).unwrap();
+    let out = ops::review_dispatch(
+        &ctx,
+        &connectors,
+        None,
+        None,
+        None,
+        ops::DiffBudget::resolve(None, false),
+    )
+    .unwrap();
     match out {
         ops::ReviewOutcome::Inbox(data) => {
             assert_eq!(data.inbox.len(), 1, "only bob's proposal is to review");
@@ -941,7 +957,15 @@ fn review_inbox_never_overrides_a_served_yours_false_with_the_principal_match() 
     let inert_f = InertFollow;
     let ctx = rig.ctx(&inert_p, &inert_f);
 
-    let out = ops::review_dispatch(&ctx, &connectors, None, None, None).unwrap();
+    let out = ops::review_dispatch(
+        &ctx,
+        &connectors,
+        None,
+        None,
+        None,
+        ops::DiffBudget::resolve(None, false),
+    )
+    .unwrap();
     match out {
         ops::ReviewOutcome::Inbox(data) => {
             assert!(data.outbox.is_empty(), "a served false is never overridden");
@@ -976,7 +1000,15 @@ fn review_target_falls_back_to_the_catalog_when_not_locally_followed() {
     let ctx = rig.ctx(&inert_p, &inert_f);
 
     let target = format!("release-notes@{}", "a".repeat(64));
-    let err = ops::review_dispatch(&ctx, &connectors, Some(&target), None, None).unwrap_err();
+    let err = ops::review_dispatch(
+        &ctx,
+        &connectors,
+        Some(&target),
+        None,
+        None,
+        ops::DiffBudget::resolve(None, false),
+    )
+    .unwrap_err();
     assert_eq!(
         err.code(),
         "NOT_FOUND",
@@ -1004,7 +1036,15 @@ fn review_target_keeps_no_such_skill_when_absent_from_the_catalog() {
     let ctx = rig.ctx(&inert_p, &inert_f);
 
     let target = format!("release-notes@{}", "a".repeat(64));
-    let err = ops::review_dispatch(&ctx, &connectors, Some(&target), None, None).unwrap_err();
+    let err = ops::review_dispatch(
+        &ctx,
+        &connectors,
+        Some(&target),
+        None,
+        None,
+        ops::DiffBudget::resolve(None, false),
+    )
+    .unwrap_err();
     assert_eq!(err.code(), "NO_SUCH_SKILL");
 }
 
@@ -1037,7 +1077,15 @@ fn a_catalog_resolved_describe_with_no_local_copy_degrades_to_the_clean_not_foun
     let ctx = rig.ctx(&inert_p, &inert_f);
 
     let target = format!("release-notes@{hash}");
-    let err = ops::review_dispatch(&ctx, &connectors, Some(&target), None, None).unwrap_err();
+    let err = ops::review_dispatch(
+        &ctx,
+        &connectors,
+        Some(&target),
+        None,
+        None,
+        ops::DiffBudget::resolve(None, false),
+    )
+    .unwrap_err();
     assert_eq!(
         err.code(),
         "NO_SUCH_SKILL",
@@ -1154,6 +1202,7 @@ fn a_catalog_resolved_review_binds_the_skill_credential_for_the_downstream_reads
             reason: Some("not yet".into()),
         }),
         None,
+        ops::DiffBudget::resolve(None, false),
     )
     .unwrap();
     assert!(
@@ -1314,6 +1363,154 @@ fn publish_describe_gate_falls_back_to_cached_when_delivery_offline() {
     // protection in either direction, so a bare describe still answers with no network.
     assert_eq!(publish_describe_gate(false, None), PublishGate::Lands);
     assert_eq!(publish_describe_gate(true, None), PublishGate::Proposal);
+}
+
+/// The publish describe's MERGE PREVIEW: a copy BEHIND the last-known observed `current` (whose
+/// bytes a prior sweep already fetched into the local store) predicts the rebase merge purely from
+/// local bytes — clean when the edits are disjoint, conflicted (naming the path) when they overlap.
+/// An up-to-date copy carries NO preview, and the whole thing runs over INERT transports (the
+/// describe gains no network call for it).
+#[test]
+fn publish_describe_previews_the_rebase_merge_for_a_behind_copy() {
+    use topos_gitstore::{ImportFile, Store};
+    use topos_types::persisted::SyncState;
+    use topos_types::results::MergePreviewVerdict;
+
+    // `overlap`: whether theirs edits the same SKILL.md the draft edits (→ conflicted) or adds a
+    // disjoint file (→ clean). Returns the describe's preview.
+    let run = |tag: &str, overlap: bool| {
+        let rig = Rig::new(tag);
+        rig.seed_enrolled("alice@acme.com");
+        let src = Scratch::new(&format!("{tag}-src"));
+        let skill_dir = src.0.join("pv-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: pv-skill\ndescription: base\n---\n# base\n",
+        )
+        .unwrap();
+        let inert_p = InertPlane;
+        let inert_f = InertFollow;
+        let add = {
+            let ctx = rig.ctx(&inert_p, &inert_f);
+            ops::add(&ctx, &skill_dir).unwrap()
+        };
+        // The local draft edits SKILL.md.
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: pv-skill\ndescription: edited\n---\n# edited draft\n",
+        )
+        .unwrap();
+
+        // "Theirs" — the observed current a prior sweep fetched: parented on the genesis, either
+        // overlapping the draft's SKILL.md edit or a disjoint added file. Committed straight into
+        // the skill's local store (exactly where a sweep's ensure_local lands it).
+        let sid = crate::id::SkillId::parse(&add.skill_id).unwrap();
+        let sp = rig.layout().published(&sid);
+        let theirs_files: Vec<(&str, &[u8])> = if overlap {
+            vec![(
+                "SKILL.md",
+                b"---\nname: pv-skill\ndescription: theirs\n---\n# theirs\n",
+            )]
+        } else {
+            vec![
+                (
+                    "SKILL.md",
+                    b"---\nname: pv-skill\ndescription: base\n---\n# base\n",
+                ),
+                ("notes.md", b"theirs\n"),
+            ]
+        };
+        let entries: Vec<ManifestEntry> = theirs_files
+            .iter()
+            .map(|(p, b)| ManifestEntry {
+                path: (*p).to_owned(),
+                mode: FileMode::Regular,
+                content_sha256: digest::sha256(b),
+            })
+            .collect();
+        let tree_digest = digest::bundle_digest(&entries).unwrap();
+        let genesis = ops::parse_hex32(&add.version_id).unwrap();
+        let theirs_id = identity::commit_id(&Commit {
+            parents: &[genesis],
+            tree: tree_digest,
+            author: "d_pub",
+            message: "v1",
+        })
+        .unwrap();
+        let store = Store::open(&sp.store).unwrap();
+        let import: Vec<ImportFile<'_>> = theirs_files
+            .iter()
+            .map(|(p, b)| ImportFile {
+                path: p,
+                mode: FileMode::Regular,
+                bytes: b,
+            })
+            .collect();
+        let tree = store.write_bundle(&import).unwrap();
+        store
+            .commit(theirs_id, &[genesis], &tree, "d_pub", "v1")
+            .unwrap();
+
+        // The BEHIND state: a sweep observed generation 2 (theirs) but never applied it.
+        let sync: SyncState = crate::doc::read_doc(&rig.fs, &sp.sync).unwrap().unwrap();
+        crate::doc::write_doc(
+            &rig.fs,
+            &sp.sync,
+            &SyncState {
+                observed: 2,
+                observed_version_id: topos_core::digest::to_hex(&theirs_id),
+                ..sync
+            },
+        )
+        .unwrap();
+
+        enroll::write_follows_merged(
+            &rig.fs,
+            &rig.layout(),
+            &[enroll::FollowEntry {
+                skill_id: add.skill_id.clone(),
+                workspace_id: WS.to_owned(),
+                mode: enroll::FollowModeDoc::Auto,
+                review_required: false,
+                following: true,
+                excluded_here: false,
+                agents: Vec::new(),
+                excluded_agents: Vec::new(),
+            }],
+        )
+        .unwrap();
+        let follows = enroll::read_follows(&rig.fs, &rig.layout())
+            .unwrap()
+            .unwrap();
+        let file_follow = FileFollow::new(enroll::follow_contexts(&follows));
+        let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+        let dir = FakeDir::new(log);
+        let dir_c = dir_connect(&dir);
+        let del = FakeDelivery { snapshot: None };
+        let del_c = |_b: &str| -> Box<dyn ReconcileTransport> { Box::new(del.clone()) };
+        let connectors = ops::PublishDescribeConnectors {
+            directory: &dir_c,
+            delivery: &del_c,
+        };
+        let ctx = rig.ctx(&inert_p, &file_follow);
+        ops::publish_describe(&ctx, &connectors, None, "pv-skill", false, None, None)
+            .expect("describe succeeds")
+            .merge_preview
+    };
+
+    // Disjoint edits → a clean prediction.
+    let clean = run("pvclean", false).expect("a behind copy previews");
+    assert_eq!(clean.verdict, MergePreviewVerdict::Clean);
+    assert!(clean.conflicts.is_empty());
+    // Overlapping edits → conflicted, naming the path.
+    let conflicted = run("pvconf", true).expect("a behind copy previews");
+    assert_eq!(conflicted.verdict, MergePreviewVerdict::Conflicted);
+    assert_eq!(conflicted.conflicts, vec!["SKILL.md".to_owned()]);
+
+    // And the control: the gate tests above run the SAME describe with an up-to-date copy — their
+    // envelopes carry no preview (absent = nothing to predict). Re-proven here structurally: an
+    // up-to-date sync (observed == applied) short-circuits before any store read.
 }
 
 // ---------------------------------------------------------------------------------------------

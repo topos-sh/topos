@@ -113,6 +113,40 @@
         "kind"
       ]
     },
+    "MergePreview": {
+      "description": "The predicted verdict of a three-way merge that has NOT been run against the placements — a pure\nin-memory dry run of the same kernel plan + per-file diff3 the real resolution executes. Never a\npromise: the authoritative outcome is the resolution's own [`MergeReport`]. **INFERRED** (additive).",
+      "type": "object",
+      "properties": {
+        "conflicts": {
+          "description": "The paths that would conflict when `verdict` is `conflicted` (structural conflicts + failed\ncontent merges). Empty for a clean preview — and for the rare conflicted-with-no-path case\n(a merge that would empty the bundle).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "verdict": {
+          "$ref": "#/$defs/MergePreviewVerdict"
+        }
+      },
+      "required": [
+        "verdict"
+      ]
+    },
+    "MergePreviewVerdict": {
+      "description": "The two predicted merge verdicts. **INFERRED** (additive value set).",
+      "oneOf": [
+        {
+          "description": "Every path would resolve cleanly — the merge would land a publishable draft-on-current.",
+          "type": "string",
+          "const": "clean"
+        },
+        {
+          "description": "At least one path would conflict — the merge would write markers and block publish.",
+          "type": "string",
+          "const": "conflicted"
+        }
+      ]
+    },
     "MergeReport": {
       "description": "The author-merge disclosure (the `merged` / `conflicted` outcomes of a diverged draft). **INFERRED\nfields** — the spec pins the merge semantics (deterministic, author-only, conflict-blocks-publish),\nnot this exact shape.",
       "type": "object",
@@ -265,6 +299,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/MergeReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "merge_preview": {
+          "description": "The PREDICTED outcome of the three-way merge a surfaced `diverged` row implies, computed\npurely in memory from already-local bytes (never a network read). Absent = unknown (not a\ndiverged row, or the merge base is not locally renderable). **INFERRED** (additive).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MergePreview"
             },
             {
               "type": "null"

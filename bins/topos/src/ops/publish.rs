@@ -276,6 +276,30 @@ pub(crate) fn publish_describe(
         .as_ref()
         .map(|m| format!("{}/skills/{}", m.address, skill_name));
     let undo = followed.then(|| format!("topos revert {skill_name} --to {}", lock.base_commit));
+    // The predicted-conflict preview: when this copy is BEHIND the last-known observed `current`
+    // (the apply would refuse with a locally-detected CONFLICT — pull to rebase first), dry-run the
+    // three-way merge of the draft onto that current PURELY from bytes already on this machine: the
+    // draft was scanned above, the base renders from the sidecar store, and the observed version's
+    // bytes are present iff a prior sweep fetched them. Anything missing ⇒ NO preview (absent =
+    // unknown) — the describe gains no network call for it, per the describe contract.
+    let merge_preview = (sync.applied != sync.observed)
+        .then(|| {
+            let store = Store::open(&sp.store).ok()?;
+            let theirs_commit = parse_hex32(&sync.observed_version_id).ok()?;
+            let theirs_digest =
+                sync_engine::store_bundle_digest_opt(&store, theirs_commit).ok()??;
+            let theirs = store.render_verified(theirs_commit, theirs_digest).ok()?;
+            let base = store
+                .render_verified(
+                    parse_hex32(&lock.base_commit).ok()?,
+                    parse_hex32(&lock.bundle_digest).ok()?,
+                )
+                .ok()?;
+            Some(super::merge_resolve::preview_merge(
+                &base, &scanned, &theirs,
+            ))
+        })
+        .flatten();
     let origin_note = doc::read_doc::<add::OriginDoc>(ctx.fs, &sp.origin)?.map(|o| {
         format!(
             "this skill was imported from {} — publishing makes the team copy the source of truth",
@@ -299,6 +323,7 @@ pub(crate) fn publish_describe(
         undo,
         origin_note,
         placement_note,
+        merge_preview,
     })
 }
 

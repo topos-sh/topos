@@ -45,7 +45,7 @@ pub mod largeobj;
 #[cfg(test)]
 mod tests;
 
-pub use diff::{DiffFile, unified_diff};
+pub use diff::{DiffFile, FileDiffSection, unified_diff, unified_diff_sections};
 pub use error::{GitstoreError, VerifyError};
 pub use fence::{GIT_OID_LEN, StagedBundle, StagedEntry};
 pub use largeobj::{LargeObjectStore, LocalLargeStore};
