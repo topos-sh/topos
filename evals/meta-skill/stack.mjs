@@ -47,15 +47,23 @@ export function psql(sql, db = "postgres") {
 /** Provision a fresh database with the production role/schema recipe (mirrors compose-init-db.sh). */
 export function provisionDb() {
   const db = `topos_eval_${process.pid}_${++dbCounter}`;
-  // Roles are cluster-wide; guard creation so repeated runs are idempotent.
+  // Roles are cluster-wide; guard creation so repeated runs are idempotent — and swallow the
+  // duplicate_object race two CONCURRENT lanes can hit between the existence check and the
+  // CREATE (each cell is its own process under --jobs, so the check-then-create is not atomic).
   psql(`
     DO $$ BEGIN
-      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'topos_plane') THEN
-        CREATE ROLE topos_plane LOGIN PASSWORD 'plane';
-      END IF;
-      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'topos_web') THEN
-        CREATE ROLE topos_web LOGIN PASSWORD 'web';
-      END IF;
+      BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'topos_plane') THEN
+          CREATE ROLE topos_plane LOGIN PASSWORD 'plane';
+        END IF;
+      EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
+      END;
+      BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'topos_web') THEN
+          CREATE ROLE topos_web LOGIN PASSWORD 'web';
+        END IF;
+      EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
+      END;
     END $$;`);
   psql(`CREATE DATABASE "${db}"`);
   psql(
