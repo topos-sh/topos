@@ -35,7 +35,10 @@ verb.
   what you changed afterward.
 - Describe once, then act: when the describe matches what the user already asked for, apply with
   `--yes` immediately. Re-running the same describe, or re-surveying state you already read,
-  changes nothing — a describe is never progress by itself.
+  changes nothing — a describe is never progress by itself. Acting decisively never overrides
+  the consent bar: anything org-bound (`publish`, with or without `--propose`) still needs the
+  user's explicit yes from THIS session — "improve our team skill" asks for the edit (a local
+  draft, free and reversible), not for shipping it.
 - A refusal names its own fix: on exit `1`, read the envelope's `error` message and
   `next_actions` — run the named fix (often `topos update <skill>`, which also merges a stale
   base), then retry the original verb with `--yes` once. Never route around a refusal by

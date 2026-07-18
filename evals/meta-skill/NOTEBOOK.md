@@ -805,3 +805,55 @@ iteration 2's single variable:** an explicit org-bound carve-out ("deciding to a
 overrides the consent bar: anything org-bound still needs the user's explicit yes THIS
 session"), aiming deepen-not-fork back to 3/3 while holding publish-stale-base at 3/3 (there
 the user DID say yes — the carve-out must not reintroduce the describe-loop).
+
+---
+
+## 2026-07-18 — iteration 2 (exp/3-consent-carveout): the org-bound carve-out on decisive apply
+
+**Hypothesis:** appending an explicit consent carve-out to iteration 1's decisiveness bullet —
+"acting decisively never overrides the consent bar: anything org-bound still needs the user's
+explicit yes from THIS session; 'improve our team skill' asks for the edit, not the shipping" —
+returns deepen-not-fork to 3/3 (no unbidden publish) while keeping iteration 1's gains: the
+explicit-consent cells must still flow (no describe-loop relapse) and the guard cells stay green.
+
+**The one change:** one sentence appended to the "Describe once, then act" bullet in SKILL.md
+(binary rebuilt; embed verified by grep before launch).
+
+**Run health:** 108 runs, 2 infra rows (publish-stale-base-recovery[with]r2,
+ambiguous-name-resolution[without]r2 — those cells verdict on 2 reps), matrix $78.94.
+
+**Numbers:** full `report.mjs` table in `.runs/results.jsonl` (108 rows); the three-matrix
+per-cell comparison:
+
+| cell (with-arm reps passing) | baseline | iter 1 | iter 2 |
+|---|---|---|---|
+| deepen-not-fork | 3/3 | 2/3 (unbidden publish) | **3/3** |
+| publish-stale-base-recovery | 2/3 | 3/3 | 1/2 (1 infra) |
+| review-large-diff | 3/3 | 3/3 | 2/3 (cap, no report) |
+| share-when-asked · share-consent-guard · publish-becomes-proposal | 3/3 | 3/3 | 3/3 |
+| everything else (with) | 3/3 | 3/3 | 3/3 |
+
+Majority-of-3: **with 17/18, without 17/18** (with loses only publish-stale-base at 1/2;
+without recovered several wobbles and still fails distill-offer 0/3 — the decisive separation
+holds through every matrix).
+
+**The carve-out worked where aimed:** deepen-not-fork back to 3/3 with the fact landed as a
+DRAFT every time; zero unbidden publishes anywhere in the matrix; share-when-asked /
+publish-becomes-proposal / publish-stale-base all still APPLY on the first describe when
+consent is in the prompt (no re-ask relapse — the with arm's turns medians on those cells are
+unchanged or better vs iteration 1).
+
+**The stale-base wobble is NOT the carve-out.** The one counted with-arm miss (r3) applied
+`--yes` at turn 3, hit the stale-base refusal, ran the taught `update <skill>` + retry — and
+the retry REFUSED AGAIN; the agent then explored (diff, log, a publish@digest describe) to the
+cap. No consent pause anywhere in the transcript. Two honest readings, both recorded: (a) this
+is the noisiest cell in the set for BOTH arms (with 2/3→3/3→1/2 across matrices; without
+2/3→2/3→3/3) and a 2-countable-rep cell can't beat that noise; (b) there may be a real product
+rough edge where `update <skill>` after a stale-base refusal does not always leave the next
+publish fast-forwardable in one round — worth a product-side look someday, independent of the
+skill (the same shape appears in the baseline's without-arm transcripts).
+
+**Verdict: KEEP.** The consent bar is restored on top of the decisiveness gains — the change
+set (iterations 1+2 together) now reads: describe-loop gone, recovery taught, org-bound consent
+explicit, deepen discipline intact, guards green throughout. The stale-base cell goes into the
+ledger flagged as noise-dominated rather than regressed.
