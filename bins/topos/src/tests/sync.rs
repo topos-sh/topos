@@ -1287,6 +1287,48 @@ fn conflict_blocks_and_persists_until_escaped() {
     assert!(!rig.conflict_exists(&id), "the escape clears the block");
 }
 
+/// `update --reset` in the RECORDED-conflict state resolves it the team's way: the marker tree is
+/// snapshotted and discarded, theirs lands on the placement, and the conflict record is CLEARED with
+/// the draft it described — so publish is not left refused by a divergence that no longer exists, and
+/// the next sweep reads the skill current instead of re-disclosing a stale block.
+#[test]
+fn reset_clears_the_recorded_conflict_block() {
+    let rig = Rig::new("reset-clears");
+    let (id, name, genesis) = rig.adopt(BASE);
+    let mine: &[(&str, FileMode, &[u8])] = &[
+        ("SKILL.md", FileMode::Regular, b"# mine\n"),
+        ("run.sh", FileMode::Executable, b"#!/bin/sh\necho v0\n"),
+    ];
+    write_tree(&rig.placement(), mine);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id, FollowMode::Auto);
+
+    // Auto sweep → conflict (overlapping SKILL.md) → blocked.
+    assert_eq!(
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::Conflicted
+    );
+    assert!(rig.conflict_exists(&id));
+
+    // The loss-led discard (`--yes`): theirs restored, the block gone.
+    ops::reset(&rig.ctx(&plane, &foll), &[name], true).unwrap();
+    assert!(!rig.conflict_exists(&id), "the reset clears the block");
+    assert_eq!(
+        std::fs::read(rig.placement().join("SKILL.md")).unwrap(),
+        b"# v1\n",
+        "the placement holds the team's bytes after the reset"
+    );
+
+    // The next sweep reads the skill current — never a re-disclosed stale conflict.
+    assert_eq!(
+        only(&pull_data(&rig.ctx(&plane, &foll), ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::UpToDate
+    );
+}
+
 /// Unrelated histories (no renderable base) fall back to a 2-way manual choice — never a silent merge:
 /// MINE is kept on disk, a 2-way diff is disclosed, and publish is blocked until the author resolves.
 #[test]

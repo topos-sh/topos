@@ -57,11 +57,7 @@ fn safety(code: &ActionCode, argv: &[String]) -> Safety {
         "REBASE_AND_RETRY" | "APPLY_WAITING_UPDATE" | "UPDATE_SKILLS" => {
             Safety::new(Some(true), Some(true), None)
         }
-        "RESOLVE_DIVERGED_DRAFT" => Safety::new(
-            Some(true),
-            Some(true),
-            Some("runs the three-way merge over your local draft (the draft is snapshotted first)"),
-        ),
+        "RESOLVE_DIVERGED_DRAFT" => resolve_diverged_draft(argv),
         "PROPOSE_PUBLISH" => Safety::new(
             Some(true),
             Some(true),
@@ -106,6 +102,39 @@ fn safety(code: &ActionCode, argv: &[String]) -> Safety {
         // An unrecognized code stays fully unknown — never guessed.
         _ => Safety::new(None, None, None),
     }
+}
+
+/// The per-shape refinement for `RESOLVE_DIVERGED_DRAFT` — WHICH act resolves the divergence is the
+/// argv's story. The `--onto-current` escape commits YOUR bytes onto current and clears a recorded
+/// conflict (a local resolution — no plane call in the blocked state this action is emitted for); a
+/// bare `--reset` only DESCRIBES the loss-led discard (its own describe carries the `--yes`); the
+/// plain targeted update runs the three-way merge.
+fn resolve_diverged_draft(argv: &[String]) -> Safety {
+    if has_flag(argv, "--onto-current") {
+        return Safety::new(
+            Some(true),
+            Some(false),
+            Some(
+                "commits YOUR bytes (your edited resolution, or your original draft) onto current, \
+                 dropping the team's side of the merge",
+            ),
+        );
+    }
+    if has_flag(argv, "--reset") {
+        return Safety::new(
+            Some(false),
+            Some(false),
+            Some(
+                "describes the discard; applying it drops your local draft so the team's version \
+                 wins (a snapshot is kept in the sidecar store)",
+            ),
+        );
+    }
+    Safety::new(
+        Some(true),
+        Some(true),
+        Some("runs the three-way merge over your local draft (the draft is snapshotted first)"),
+    )
 }
 
 /// The verb token of a `topos …` argv (`argv[1]`, skipping the binary name), if present.
@@ -292,6 +321,49 @@ mod tests {
         );
         assert_eq!(log.needs_network, None);
         assert_eq!(log.mutates, Some(false));
+    }
+
+    #[test]
+    fn resolve_diverged_draft_refines_by_the_resolution_shape() {
+        // The `--onto-current` escape resolves a recorded conflict locally — your bytes win.
+        let escape = next_action(
+            ActionCode::ResolveDivergedDraft,
+            argv(&["topos", "update", "deploy", "--onto-current", "--json"]),
+        );
+        assert_eq!(
+            (escape.mutates, escape.needs_network),
+            (Some(true), Some(false))
+        );
+        assert!(
+            escape.risk_note.as_deref().unwrap_or("").contains("YOUR"),
+            "{escape:?}"
+        );
+        // A bare `--reset` only DESCRIBES the loss-led discard (its describe carries the `--yes`).
+        let reset = next_action(
+            ActionCode::ResolveDivergedDraft,
+            argv(&["topos", "update", "deploy", "--reset", "--json"]),
+        );
+        assert_eq!(
+            (reset.mutates, reset.needs_network),
+            (Some(false), Some(false))
+        );
+        // The plain targeted update keeps the three-way-merge story.
+        let merge = next_action(
+            ActionCode::ResolveDivergedDraft,
+            argv(&["topos", "update", "deploy", "--json"]),
+        );
+        assert_eq!(
+            (merge.mutates, merge.needs_network),
+            (Some(true), Some(true))
+        );
+        assert!(
+            merge
+                .risk_note
+                .as_deref()
+                .unwrap_or("")
+                .contains("three-way"),
+            "{merge:?}"
+        );
     }
 
     #[test]

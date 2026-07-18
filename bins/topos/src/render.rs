@@ -96,16 +96,34 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
                 "--json".into(),
             ],
         )],
-        // An unresolved author merge blocks publish — resolve it (the update surfaces/runs the resolution).
-        ClientError::PublishBlocked { skill } => vec![crate::actions::next_action(
-            ActionCode::ResolveDivergedDraft,
-            vec![
-                "topos".into(),
-                "update".into(),
-                skill.clone(),
-                "--json".into(),
-            ],
-        )],
+        // An unresolved author merge blocks publish. The block only ever exists with a RECORDED
+        // conflict, and a plain `update <skill>` merely RE-DISCLOSES a recorded conflict (it never
+        // re-merges) — naming it here sent agents into a publish→update→publish refusal loop. Name
+        // the two acts that actually RESOLVE the block: keep yours (`--onto-current` commits your
+        // edited resolution — or your original draft — onto current and clears the record) or let
+        // the team win (`--reset`, the loss-led two-phase discard).
+        ClientError::PublishBlocked { skill } => vec![
+            crate::actions::next_action(
+                ActionCode::ResolveDivergedDraft,
+                vec![
+                    "topos".into(),
+                    "update".into(),
+                    skill.clone(),
+                    "--onto-current".into(),
+                    "--json".into(),
+                ],
+            ),
+            crate::actions::next_action(
+                ActionCode::ResolveDivergedDraft,
+                vec![
+                    "topos".into(),
+                    "update".into(),
+                    skill.clone(),
+                    "--reset".into(),
+                    "--json".into(),
+                ],
+            ),
+        ],
         // A denial is not self-service (ask an owner to invite/roster you, or contact an admin) — the
         // codes carry no executable argv.
         ClientError::Denied(_) => vec![
@@ -2607,5 +2625,32 @@ mod tests {
         );
         assert!(text.contains("code: WXYZ-1234"), "{text}");
         assert!(text.contains("confirm it matches the page"), "{text}");
+    }
+
+    #[test]
+    fn publish_blocked_names_the_real_resolutions_never_the_bare_update() {
+        // PUBLISH_BLOCKED only ever fires with a RECORDED conflict, and a plain `update <skill>`
+        // merely RE-DISCLOSES a recorded conflict (it never re-merges) — an agent following that
+        // pointer looped publish→update→publish forever. The envelope names the two acts that
+        // actually clear the block: the `--onto-current` escape and the `--reset` discard.
+        let actions = super::next_actions(&crate::error::ClientError::PublishBlocked {
+            skill: "deploy-checklist".to_owned(),
+        });
+        assert_eq!(actions.len(), 2, "{actions:?}");
+        assert!(
+            actions[0].argv.iter().any(|t| t == "--onto-current"),
+            "{actions:?}"
+        );
+        assert!(
+            actions[1].argv.iter().any(|t| t == "--reset"),
+            "{actions:?}"
+        );
+        for a in &actions {
+            assert_eq!(a.code.as_str(), "RESOLVE_DIVERGED_DRAFT");
+            assert!(
+                a.argv.contains(&"deploy-checklist".to_owned()),
+                "the argv must name the blocked skill: {a:?}"
+            );
+        }
     }
 }

@@ -459,7 +459,9 @@ pub(crate) fn go_back(
 /// skill's adopted origin snapshot). The draft is snapshotted into the sidecar store FIRST (never lost —
 /// recoverable), then the base bytes are re-materialized over the placement. `observed`/`applied` are
 /// untouched (the team's current did not move) and `held` stays `false`, so a later sweep sees the skill
-/// current again. A pristine working tree is a clean no-op (nothing to discard).
+/// current again. A pristine working tree is a clean no-op (nothing to discard). A RECORDED merge
+/// conflict is cleared with the draft it described (the reset resolves the divergence the team's way),
+/// so publish is not left blocked by a conflict whose draft is gone.
 ///
 /// # Errors
 /// [`ClientError::PlacementUnsupported`] on an unscannable placement; a store / io / integrity failure.
@@ -517,6 +519,10 @@ pub(crate) fn reset_to_base(
             }),
         },
     )?;
+    // A recorded merge conflict describes the divergence this reset just DISCARDED — clear the
+    // block (idempotent; absent is fine), or publish would stay refused by a conflict whose draft
+    // no longer exists. Cleared AFTER the placements landed, mirroring the escape's order.
+    ctx.fs.remove_file(&sp.conflict)?;
     log_apply(ctx, sid, "update-reset", base, &report);
     Ok(base)
 }
