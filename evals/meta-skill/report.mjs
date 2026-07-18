@@ -6,7 +6,7 @@
 //   node evals/meta-skill/report.mjs --since 2026-07-17T20:00:00Z
 //   node evals/meta-skill/report.mjs --file some/results.jsonl
 //
-// Per (task, arm): pass x/n, median wall s, median turns, median output tokens, median cost —
+// Per (task, arm): pass x/n, median wall s, median turns, median output tokens, median API-equivalent cost —
 // then per-arm totals. Tolerant of missing fields (older rows, errored runs). Rows carrying an
 // `infra` marker (a rate-limited/never-booted cell the runner recorded honestly) are EXCLUDED
 // from verdicts and medians and listed separately — an infra failure is not a model verdict.
@@ -72,7 +72,7 @@ for (const r of runs) if (!order.includes(r.task)) order.push(r.task);
 const armsSeen = ["with", "without"];
 for (const r of runs) if (!armsSeen.includes(r.arm)) armsSeen.push(r.arm);
 
-const lines = ["| task | arm | pass | wall | turns | out tok | cost |", "|---|---|---|---|---|---|---|"];
+const lines = ["| task | arm | pass | wall | turns | out tok | api-equiv cost |", "|---|---|---|---|---|---|---|"];
 for (const task of order) {
   for (const arm of armsSeen) {
     const cell = runs.filter((r) => r.task === task && r.arm === arm);

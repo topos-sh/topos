@@ -132,3 +132,12 @@ smokes and assertion tuning only; never draw a cell conclusion from them.
 **Cost discipline:** every run is metered (`--max-turns` per task, `--max-budget-usd` per run).
 Run ONE task end-to-end as a smoke first; project the full matrix from its measured usage
 before funding it.
+
+## What "cost" means
+
+The per-run cost is Claude Code's own `total_cost_usd` — the session's token usage priced at API
+list rates. It is an **API-equivalent estimate**, reported identically whether the runner is
+authenticated with an API key (then it approximates real spend) or a subscription login (then
+nothing is billed per token — the run consumes plan usage against rate/usage limits, roughly
+proportional to the same token counts). Read it as a normalized usage weight for comparing arms
+and cells, not as a bill.
