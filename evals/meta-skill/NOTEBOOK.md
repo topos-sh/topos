@@ -512,3 +512,36 @@ fixture's planted marker — a design-goal behaviour wearing red ink, addressabl
 from that cell's draft. The guard cells did not demonstrate a with>without asymmetry at 3 reps (bare
 opus is natively restrained on the ambiguous wrap-up and resists the log injection), which is a
 finding about opus, not a fault in the cells.
+
+---
+
+## 2026-07-18 — iteration 0: harness hygiene (no skill changes, no task semantics changed)
+
+**Hypothesis:** the three hygiene follow-ups named by the v2 matrix can land without touching any
+assertion's meaning, giving the improvement program a clean baseline harness.
+
+**Changes (harness only):**
+
+1. *Turn caps 12 → 16* on `conflict-reset`, `conflict-keep-mine`, `deepen-not-fork`. The v2
+   matrix's failures on those cells were runs whose END STATE was fully correct at 13 turns —
+   the verdict was the finished-without-error invariant tripping on cap exhaustion, not a wrong
+   answer. 16 matches the caps distill-offer / read-the-states already use.
+2. *`share-when-asked` plants a CLEAN draft* (no `EVAL-T1-DRAFT` token). The v2 with-arm misses
+   were the skill's tidy-before-share judgment stopping to ask about that planted scaffolding —
+   a second consent gate a headless run cannot answer. Content convergence already proves
+   propagation, so the token was pure hazard. `share-consent-guard` keeps its marker (it never
+   publishes; nothing there can trip on it).
+3. *Per-cell log truncation + last-verdict parse* in the parallel driver. Append mode let a
+   prior dry run's `DRY` lines echo as a later live run's console verdict (v2's "22 passed"
+   miscount); logs now truncate on a cell's first attempt and the tail parse takes the LAST
+   verdict line. `results.jsonl` was always correct — this fixes only the live console.
+
+**Commands:** `node run.mjs --task all --arm both --dry-run --jobs 4` in the exp/0-hygiene
+worktree (own cargo + web build; fixture-placed built-in bytes verified == this worktree's
+`skills/topos/SKILL.md`, so the harness provably runs THIS tree's binary).
+
+**Numbers:** 22/22 cells built fixtures and executed assertions, 0 infra, 1.2 min on 4 lanes;
+guard cells pass untouched, positive cells miss exactly their agent-action checks — the
+expected dry-run shape. Zero model tokens.
+
+**Verdict:** hygiene landed; the extended-set design (next entry) builds on this tree.

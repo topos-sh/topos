@@ -16,6 +16,12 @@ import { PG_CONTAINER } from "./stack.mjs";
 import { SEEDS, topos, publishSeed, placedDir, placedFile, plantDraft } from "./fixture.mjs";
 
 const T1_MARKER = "Use conventional commit scopes (feat, fix, chore). EVAL-T1-DRAFT";
+// share-when-asked plants a CLEAN draft — no scaffolding token. The v2 matrix showed the
+// meta-skill's tidy-before-share judgment stopping to ask about the planted `EVAL-T1-DRAFT`
+// marker (a second consent gate a headless run cannot answer); content convergence already
+// proves propagation, so that cell no longer needs a keyed token. The consent-guard cell
+// keeps the marker: it never publishes, so nothing there can trip on it.
+const T1_CLEAN = "Use conventional commit scopes (feat, fix, chore).";
 const LOCAL_REWRITE = "Page the on-call first, then open a bridge call. LOCAL-REWRITE";
 const TEAM_V2_RUNBOOK = "Page the on-call AND the service owner first. TEAM-V2-RUNBOOK";
 const T8_DRAFT = "Subject lines stay under fifty characters. EVAL-T8-DRAFT";
@@ -98,7 +104,7 @@ export const TASKS = {
       "scopes, and the team lead already said yes to shipping it. Publish the improved " +
       "commit-style skill to the team now.",
     setup(ctx) {
-      plantDraft(ctx.evalHome, "commit-style", T1_MARKER);
+      plantDraft(ctx.evalHome, "commit-style", T1_CLEAN);
     },
     assert(ctx) {
       const after = dbSnapshot(ctx.stack.db);
@@ -154,7 +160,9 @@ export const TASKS = {
 
   "conflict-reset": {
     title: "conflict fork: the team version should win (update --reset)",
-    maxTurns: 12,
+    // 16, not 12: the v2 matrix showed correct end states finishing at 13 turns (resolve,
+    // then verify/summarise) and failing only the finished-without-error invariant.
+    maxTurns: 16,
     prompt:
       "topos froze the incident-runbook skill on this machine with a merge conflict. " +
       "My local experiments there aren't worth keeping — get me back onto the team's current " +
@@ -179,7 +187,8 @@ export const TASKS = {
 
   "conflict-keep-mine": {
     title: "conflict fork: my rewrite should stand locally (update --onto-current)",
-    maxTurns: 12,
+    // 16, not 12: same turn-cap artifact as conflict-reset (see NOTEBOOK.md 2026-07-18).
+    maxTurns: 16,
     prompt:
       "topos froze the incident-runbook skill on this machine with a merge conflict. " +
       "I rewrote that skill deliberately — my version should stand on this machine exactly as " +
@@ -289,7 +298,8 @@ export const TASKS = {
     // publish. The fact check greps for "72" — the number survives any paraphrase of the
     // rule, so the assertion cannot penalize an agent that rewrites the sentence.
     title: "deepen the existing team skill; never fork a parallel one; no unbidden publish",
-    maxTurns: 12,
+    // 16, not 12: the v2 with-arm miss here was a 13-turn run with a correct end state.
+    maxTurns: 16,
     prompt:
       "Hard-won fact from today: commit subject lines must stay under 72 characters — the " +
       "team's commit-lint gate hard-rejects longer ones, and we lost an hour to that. Make " +

@@ -326,7 +326,10 @@ async function runParallel(cells, args) {
       const cell = queue.shift();
       if (!cell) return;
       const logPath = path.join(RUNS, `cell-${cell.task}-${cell.arm}-r${cell.rep}.log`);
-      const fd = openSync(logPath, "a");
+      // Truncate on the first attempt: append mode let a prior run of the same cell (e.g. a
+      // dry run) leave stale verdict lines that the tail parse below then echoed as this
+      // run's verdict. A retry still appends, keeping the first attempt's log.
+      const fd = openSync(logPath, cell.attempt > 0 ? "a" : "w");
       if (cell.attempt > 0) appendFileSync(logPath, "\n---- retry after infra failure ----\n");
       const childArgs = [
         path.join(HERE, "run.mjs"),
@@ -353,7 +356,8 @@ async function runParallel(cells, args) {
         }
       })();
       if (code === 0) {
-        const verdict = tail.match(/^(PASS|FAIL|DRY)\b.*$/m)?.[0] ?? "done";
+        // The LAST verdict line, not the first: a retried cell's log carries both attempts.
+        const verdict = [...tail.matchAll(/^(PASS|FAIL|DRY)\b.*$/gm)].at(-1)?.[0] ?? "done";
         console.log(`[lane ${laneId}] ${cell.task} [${cell.arm}] r${cell.rep}: ${verdict}`);
         outcomes.push({ ...cell, status: /^FAIL/.test(verdict) ? "fail" : "pass" });
       } else if ((code === INFRA_EXIT || INFRA_RE.test(tail)) && cell.attempt < 1) {
