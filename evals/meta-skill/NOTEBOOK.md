@@ -545,3 +545,78 @@ guard cells pass untouched, positive cells miss exactly their agent-action check
 expected dry-run shape. Zero model tokens.
 
 **Verdict:** hygiene landed; the extended-set design (next entry) builds on this tree.
+
+---
+
+## 2026-07-18 — task-set v3: the extended set (18 tasks) — audit, seven new cells, probes, smokes
+
+**Design goal:** cover what the skill teaches but nothing measured — the contribute loop (both
+sides), envelope-guided recovery, ambiguity resolution, catalog triage, remote-diff paging, and
+the divergent-copies freeze — every cell state-asserted, generous-but-real caps, no transcript
+vibes. Alongside: a cross-cutting `--json` adoption metric (per-run `toposCalls`/`toposJsonCalls`
+counted from the transcript's Bash calls, verdict-neutral) now rides every result row.
+
+**Audit of the carried 11:** no assertion changes beyond iteration 0's. The v2 brittleness class
+(assertions penalizing correct-but-tidier judgment; tight caps) drove the new cells' design
+rules instead: every new cell accepts ANY correct end shape (`diverged-copies-recovery`
+explicitly passes both reconcile-by-hand and drop-the-second-placement), and caps were set from
+measured smoke turns, not guesses.
+
+**The seven new cells** (fixture mechanics probed against the real stack before the smoke;
+see the task-table rows in README.md):
+
+1. `publish-stale-base-recovery` — the envelope-recovery cell (stale base → `topos update`).
+2. `publish-becomes-proposal` — the NEEDS_REVIEW downgrade as a receipt, on a MEMBER device.
+3. `review-approve-proposal` — the reviewer side, four-eyes-valid via a real member proposer.
+4. `ambiguous-name-resolution` — channel/skill name collision; resolve to what was asked.
+5. `follow-right-skill` — catalog triage by name/description; land exactly one skill.
+6. `review-large-diff` — a >64 KiB upstream diff read through `patch_omitted` truncation.
+7. `diverged-copies-recovery` — the typed `PLACEMENTS_DIVERGED` freeze, judgment-tolerant.
+
+**Product-semantics findings the first smoke forced (probed, then designed around):**
+
+- *The waiting set is consent-gated and UNIONED.* Post-enrollment catalog arrivals are never
+  auto-placed by the bare sweep (even from `everyone`); they wait as first-receive offers, and
+  ANY `follow --yes` discloses-and-lands the WHOLE waiting set, not just its named target. The
+  first triage smoke failed BOTH arms because the agents — correctly, per the user's "just the
+  one" — refused a describe that said "Would install:" all four distractors. Fix: distractors
+  are now published catalog-only (curated `everyone` + member genesis → `placement_withheld`,
+  probed), so the waiting set stays empty and a single follow lands exactly its target. Worth a
+  product look someday: an agent that runs several bare `follow` describes then one `--yes`
+  applies the union — exploration with describes has side state.
+- *The owner's publish does not downgrade on a `reviewed` skill* — the NEEDS_REVIEW reroute is
+  the member lane (probed: member publish → `ok:true` + `data.proposal`, versions +1,
+  generations +0, one open proposal). The cell now swaps the driven home to a real member
+  device (`memberizeEvalHome`; the runner drives `ctx.evalHome` as of post-setup).
+- *A channel follow's durable trace is its `web.channel_member` seat* (a skill follow writes
+  none) — the ambiguity cell asserts that row instead of a delivery-behavior check, because a
+  late arrival into a followed channel is itself a consent-gated offer, not an auto-install.
+
+**Smokes (claude-opus-4-8, 1 rep each arm).** First wave (14 runs, $12.6): the three
+carried-design cells passed both arms (`publish-stale-base-recovery`,
+`review-approve-proposal`, `diverged-copies-recovery`); the triage/ambiguity/proposal cells
+failed BOTH arms on the fixture premises above (not agent gaps), and `review-large-diff`'s
+without arm capped out. Second wave after the redesigns (8 runs, $7.4), `report.mjs` verbatim:
+
+| task | arm | pass | wall | turns | out tok | api-equiv cost |
+|---|---|---|---|---|---|---|
+| publish-becomes-proposal | with | 1/1 | 29.9 s | 7 | 1556 | $0.654 |
+| publish-becomes-proposal | without | 1/1 | 82.1 s | 12 | 4956 | $0.838 |
+| ambiguous-name-resolution | with | 1/1 | 45.9 s | 10 | 2608 | $0.800 |
+| ambiguous-name-resolution | without | 0/1 | 119.6 s | 13 | 6076 | $0.758 |
+| follow-right-skill | with | 1/1 | 35.5 s | 9 | 2045 | $0.741 |
+| follow-right-skill | without | 1/1 | 59.9 s | 7 | 3003 | $0.481 |
+| review-large-diff | with | 1/1 | 132.9 s | 21 | 7954 | $1.202 |
+| review-large-diff | without | 0/1 | 163.4 s | 25 | 10395 | $1.615 |
+
+The ambiguous without miss reached the full correct end state at 13 turns and died on the
+12-turn cap → cap raised to 16 (same for `publish-becomes-proposal`, whose without pass used
+exactly 12). `review-large-diff`'s without miss is genuine at cap 24: 25 turns and no report
+written while the with arm finished in 21 — left as-is. Cap raises after a smoke are the
+same measured-cap policy as iteration 0, applied before the freeze.
+
+**Dry-run:** all 18 tasks × 2 arms build fixtures and execute assertions clean (36/36, 0 infra).
+
+**THE SET IS NOW FROZEN at these 18 tasks.** Task changes after this point invalidate
+comparisons; a task that proves broken mid-program gets its cells marked invalid in the ledger,
+never edited. Smoke spend so far: $20.0 API-equivalent (22 runs).

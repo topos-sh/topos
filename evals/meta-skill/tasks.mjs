@@ -13,7 +13,17 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import path from "node:path";
 import { PG_CONTAINER } from "./stack.mjs";
-import { SEEDS, topos, publishSeed, placedDir, placedFile, plantDraft } from "./fixture.mjs";
+import {
+  SEEDS,
+  topos,
+  publishSeed,
+  placedDir,
+  placedFile,
+  plantDraft,
+  enrollMember,
+  memberizeEvalHome,
+  memberPublish,
+} from "./fixture.mjs";
 
 const T1_MARKER = "Use conventional commit scopes (feat, fix, chore). EVAL-T1-DRAFT";
 // share-when-asked plants a CLEAN draft — no scaffolding token. The v2 matrix showed the
@@ -37,7 +47,7 @@ function q(db, sql) {
   return r.stdout.trim();
 }
 
-/** Counts that move iff someone published / excluded / detached. */
+/** Counts that move iff someone published / excluded / detached / proposed. */
 export function dbSnapshot(db) {
   return {
     versions: Number(q(db, "SELECT count(*) FROM plane.version")),
@@ -45,6 +55,9 @@ export function dbSnapshot(db) {
     bundles: Number(q(db, 'SELECT count(*) FROM web."bundle"')),
     exclusions: Number(q(db, 'SELECT count(*) FROM web."device_exclusion"')),
     detachments: Number(q(db, 'SELECT count(*) FROM web."bundle_detachment"')),
+    proposalsOpen: Number(q(db, "SELECT count(*) FROM web.proposal WHERE status = 'open'")),
+    proposalsApproved: Number(q(db, "SELECT count(*) FROM web.proposal WHERE status = 'approved'")),
+    proposalsTotal: Number(q(db, "SELECT count(*) FROM web.proposal")),
   };
 }
 
@@ -426,6 +439,331 @@ export const TASKS = {
         check("no conflict markers anywhere", !rel.includes("<<<<<<<") && !commit.includes("<<<<<<<")),
         check("nothing was published during the sweep", after.versions === ctx.before.versions),
       ];
+    },
+  },
+
+  // ------------------------------------------------------------------------------------------
+  // Extended set (added after the v2 matrix): the contribute loop, envelope-guided recovery,
+  // ambiguity resolution, catalog triage, remote diff paging, and the divergent-copies freeze.
+  // ------------------------------------------------------------------------------------------
+
+  "publish-stale-base-recovery": {
+    // The team moved `current` AFTER this machine's draft: a direct publish refuses typed
+    // (stale base — the envelope's recovery names `topos update <skill>`), the update merges
+    // the non-overlapping edits cleanly, and the re-publish lands. Reaching the end state
+    // REQUIRES the merge, so the assertions are pure state — an agent that syncs first and
+    // never sees the refusal is equally correct.
+    title: "publish over a stale base: recover via the envelope's named fix, then land",
+    maxTurns: 16,
+    prompt:
+      "I added a rollback-rehearsal step to the deploy-checklist skill on this machine, and " +
+      "the team lead already approved sharing it. Publish the improved deploy-checklist to " +
+      "the team.",
+    setup(ctx) {
+      plantDraft(ctx.evalHome, "deploy-checklist", "Rehearse the rollback path before every ship. EVAL-STALE-DRAFT");
+      publishSeed(ctx.authorHome, ctx.stack, "deploy-checklist", {
+        edit: (dir) => {
+          const p = path.join(dir, "SKILL.md");
+          writeFileSync(
+            p,
+            readFileSync(p, "utf8").replace(
+              "Verify the health endpoint after rollout.",
+              "Verify the health endpoint after rollout, then watch the error budget. TEAM-V2-DEPLOY",
+            ),
+          );
+        },
+      });
+    },
+    assert(ctx) {
+      const after = dbSnapshot(ctx.stack.db);
+      const placed = placedFile(ctx.evalHome, "deploy-checklist") ?? "";
+      const row = listRows(ctx).find((r) => r.skill === "deploy-checklist");
+      topos(ctx.authorHome, ctx.stack, ["update", "--json"], { allowFail: true });
+      const authorCopy = readFileSync(path.join(ctx.authorHome, "seeds", "deploy-checklist", "SKILL.md"), "utf8");
+      return [
+        check("one new version landed on the plane", after.versions === ctx.before.versions + 1),
+        check("current moved exactly once", after.generations === ctx.before.generations + 1),
+        check("the published copy carries BOTH the team's v2 line and the draft", placed.includes("TEAM-V2-DEPLOY") && placed.includes("EVAL-STALE-DRAFT")),
+        check("no conflict markers remain", !placed.includes("<<<<<<<")),
+        check("the draft flag cleared", row && row.draft === false),
+        check("the author's sweep converged on the published bytes", placed !== "" && authorCopy === placed),
+      ];
+    },
+  },
+
+  "publish-becomes-proposal": {
+    // The NEEDS_REVIEW downgrade is a RECEIPT, not an error: on a protected (`reviewed`)
+    // skill, a MEMBER's direct publish reroutes to a proposal — current does not move, a
+    // candidate version is minted, and a reviewer approves later. The driven machine is a
+    // MEMBER device (the owner's own publish lands direct even on a reviewed skill — probed;
+    // the downgrade is the member lane). The correct agent behavior is to understand the
+    // receipt and report it; forcing (retrying, self-approving — four-eyes refuses) or
+    // treating it as failure is the miss. NOTE the expected state shape: versions +1 WITH
+    // pointer unmoved is this cell's PASS, not a leak.
+    title: "protected skill: the member's publish downgrades to a proposal — understand the receipt",
+    // 16: the smoke's passing without arm used exactly 12 — leave the cap out of the verdict.
+    maxTurns: 16,
+    prompt:
+      "I've improved the commit-style skill on this machine — the ticket-id rule addition. " +
+      "The team lead said yes to sharing it. Ship it to the team.",
+    async setup(ctx) {
+      topos(ctx.authorHome, ctx.stack, ["protect", "commit-style", "--yes", "--json"]);
+      await memberizeEvalHome(ctx);
+      plantDraft(ctx.evalHome, "commit-style", "Reference the ticket id in the commit body.");
+    },
+    assert(ctx) {
+      const after = dbSnapshot(ctx.stack.db);
+      return [
+        check("exactly one proposal is open", after.proposalsOpen === ctx.before.proposalsOpen + 1),
+        check("exactly one candidate version was minted", after.versions === ctx.before.versions + 1),
+        check("current did NOT move (awaiting review)", after.generations === ctx.before.generations),
+        check("nothing was self-approved", after.proposalsApproved === ctx.before.proposalsApproved),
+        check(
+          "the wrap-up explains the review state",
+          /propos|review|await|approv/i.test(ctx.resultText),
+        ),
+      ];
+    },
+  },
+
+  "review-approve-proposal": {
+    // The reviewer side of the contribute loop: a MEMBER (a real second account, enrolled
+    // through the real device flow) proposed an improvement; the driven agent — the owner's
+    // machine — reviews the inbox, approves (four-eyes holds: proposer ≠ approver), and
+    // brings this machine onto the approved version.
+    title: "review a teammate's proposal, approve it, converge this machine",
+    maxTurns: 16,
+    prompt:
+      "A teammate proposed an improvement to the release-notes skill. Review the proposal — " +
+      "if it looks reasonable, approve it for the team, and make sure this machine ends up " +
+      "on the approved version.",
+    async setup(ctx) {
+      const memberHome = path.join(path.dirname(ctx.evalHome), "member-home");
+      await enrollMember(memberHome, ctx.stack);
+      plantDraft(memberHome, "release-notes", "Call out breaking changes in their own section. TEAM-PROPOSED-RELNOTES");
+      const r = topos(memberHome, ctx.stack, [
+        "publish", "release-notes", "--propose", "--yes", "-m", "release-notes: breaking-changes section", "--json",
+      ]);
+      if (!r.json?.ok) throw new Error(`fixture: member propose failed: ${r.stdout}`);
+    },
+    assert(ctx) {
+      const after = dbSnapshot(ctx.stack.db);
+      const placed = placedFile(ctx.evalHome, "release-notes") ?? "";
+      return [
+        check("the proposal was approved", after.proposalsApproved === ctx.before.proposalsApproved + 1),
+        check("no proposal is left open", after.proposalsOpen === ctx.before.proposalsOpen - 1),
+        check("current moved exactly once (the approve)", after.generations === ctx.before.generations + 1),
+        check("no extra version was minted (approve moves the pointer, not new bytes)", after.versions === ctx.before.versions),
+        check("this machine converged on the approved bytes", placed.includes("TEAM-PROPOSED-RELNOTES")),
+      ];
+    },
+  },
+
+  "ambiguous-name-resolution": {
+    // One workspace, a channel AND a skill both named `release`: the bare name refuses
+    // typed (AMBIGUOUS_NAME) with paste-ready qualified candidates in the envelope. The
+    // correct behavior is resolving to the CHANNEL (the ask names it) — by candidate path
+    // or by kind-forcing `--channel`; following the same-named skill instead is the miss.
+    // The same-named SKILL is published catalog-only (curated `everyone`, member genesis —
+    // probed) so it is never a waiting arrival that a `--yes` would sweep in alongside the
+    // channel. The channel subscription is proven by its OWN row: `follow` on a channel
+    // seats the person in web.channel_member; a direct skill follow does not.
+    title: "a bare name is ambiguous (channel vs skill): resolve it to what was asked",
+    // 16: the smoke's without arm reached the full correct end state at 13 turns and
+    // failed only the finished-without-error invariant at cap 12.
+    maxTurns: 16,
+    prompt:
+      "Get this machine subscribed to the team's release channel, so its skills are here " +
+      "and stay current.",
+    async setup(ctx) {
+      topos(ctx.authorHome, ctx.stack, ["protect", "everyone", "--yes", "--json"]);
+      publishSeed(ctx.authorHome, ctx.stack, "release-checklist", {
+        to: "release",
+        description: "The team's release-channel checklist.",
+        body: "Check the changelog is complete before tagging. RELEASE-CHANNEL-CHECKLIST\n",
+      });
+      const memberHome = path.join(path.dirname(ctx.evalHome), "member-home");
+      await enrollMember(memberHome, ctx.stack);
+      memberPublish(memberHome, ctx.stack, "release", {
+        description: "Cutting a product release end to end.",
+        body: "Cut from main only. Tag after the changelog lands.\n",
+      });
+    },
+    assert(ctx) {
+      const after = dbSnapshot(ctx.stack.db);
+      const rows = listRows(ctx);
+      const checklistPlaced = placedFile(ctx.evalHome, "release-checklist") ?? "";
+      const channelSeat = Number(
+        q(
+          ctx.stack.db,
+          "SELECT count(*) FROM web.channel_member cm JOIN web.channel c ON cm.channel_id = c.id WHERE c.name = 'release'",
+        ),
+      );
+      return [
+        check("the release channel's skill is placed here", checklistPlaced.includes("RELEASE-CHANNEL-CHECKLIST")),
+        check("the release channel's skill is tracked", Boolean(rows.find((r) => r.skill === "release-checklist"))),
+        check("the CHANNEL was followed (a channel_member seat exists)", channelSeat === 1),
+        check("the same-named SKILL 'release' was NOT followed", !rows.find((r) => r.skill === "release") && placedDir(ctx.evalHome, "release") === null),
+        check("nothing was published", after.versions === ctx.before.versions),
+      ];
+    },
+  },
+
+  "follow-right-skill": {
+    // Catalog triage: four catalog-only skills, one matching the user's actual problem.
+    // Published by a MEMBER under a curated `everyone` (probed: placement withheld →
+    // catalog-only, so none of them is a waiting arrival and a single `follow --yes`
+    // installs exactly its target). Bring exactly the right one here — a blanket pull or
+    // a wrong pick fails on state.
+    title: "pick the right catalog skill; bring only it onto this machine",
+    maxTurns: 12,
+    prompt:
+      "I'm about to repair a corrupted Terraform state file on production infra. The team " +
+      "shares a skill for exactly this — get the right one onto this machine. Just the one " +
+      "I need, nothing else.",
+    async setup(ctx) {
+      topos(ctx.authorHome, ctx.stack, ["protect", "everyone", "--yes", "--json"]);
+      const memberHome = path.join(path.dirname(ctx.evalHome), "member-home");
+      await enrollMember(memberHome, ctx.stack);
+      memberPublish(memberHome, ctx.stack, "tf-state-surgery", {
+        description: "Repairing and recovering corrupted Terraform state files safely — locks, backups, state mv/rm/import.",
+        body: "Back up the state file before any operation. TF-STATE-SURGERY-V1\n",
+      });
+      memberPublish(memberHome, ctx.stack, "k8s-oncall-triage", {
+        description: "Triaging Kubernetes production incidents on call — pods, events, rollouts.",
+        body: "Check events before logs. K8S-ONCALL-V1\n",
+      });
+      memberPublish(memberHome, ctx.stack, "sql-migration-review", {
+        description: "Reviewing SQL schema migrations for lock and data-loss hazards.",
+        body: "Flag table rewrites. SQL-MIGRATION-V1\n",
+      });
+      memberPublish(memberHome, ctx.stack, "perf-flamegraphs", {
+        description: "CPU profiling with flamegraphs — capture, read, compare.",
+        body: "Profile before and after. PERF-FLAME-V1\n",
+      });
+    },
+    assert(ctx) {
+      const after = dbSnapshot(ctx.stack.db);
+      const rows = listRows(ctx);
+      const wanted = placedFile(ctx.evalHome, "tf-state-surgery") ?? "";
+      const strays = ["k8s-oncall-triage", "sql-migration-review", "perf-flamegraphs"];
+      return [
+        check("the right skill is placed on this machine", wanted.includes("TF-STATE-SURGERY-V1")),
+        check("the right skill is tracked/followed", Boolean(rows.find((r) => r.skill === "tf-state-surgery"))),
+        check(
+          "none of the other catalog skills were pulled in",
+          strays.every((s) => placedDir(ctx.evalHome, s) === null && !rows.find((r) => r.skill === s)),
+          strays.filter((s) => placedDir(ctx.evalHome, s) !== null).join(","),
+        ),
+        check("nothing was published", after.versions === ctx.before.versions),
+        check("current pointers unmoved", after.generations === ctx.before.generations),
+      ];
+    },
+  },
+
+  "review-large-diff": {
+    // The upstream change is far bigger than one `--json` diff envelope (64 KiB default
+    // cap, truncated at FILE boundaries with `patch_omitted` marks and a FETCH_FULL_DIFF
+    // next action): two ~70 KiB reference files each hide one banned word, a third sits in
+    // the small SKILL.md patch. Reporting all three REQUIRES following the truncation to
+    // the full diff — while the machine itself must stay untouched (mid-incident: no
+    // update, no state change).
+    title: "read a truncated remote diff to the bottom; change nothing on this machine",
+    // 24: the smoke's passing with-arm run needed 21 turns (survey → diff → follow the
+    // truncation → full fetch → write the report); 16 capped out the without arm.
+    maxTurns: 24,
+    prompt:
+      "The team just updated the style-guide skill upstream. We're mid-incident on this " +
+      "machine, so do NOT update or change anything here. Find out exactly what changed " +
+      "upstream in style-guide and write upstream-changes.md in the current directory, " +
+      "listing every newly banned word it introduces.",
+    setup(ctx) {
+      const filler = (tag) =>
+        Array.from({ length: 1100 }, (_, i) => `${tag} guidance line ${i}: prefer plain words, one idea per sentence, active voice.`).join("\n");
+      publishSeed(ctx.authorHome, ctx.stack, "style-guide", {
+        edit: (dir) => {
+          const p = path.join(dir, "SKILL.md");
+          writeFileSync(p, readFileSync(p, "utf8") + "\n## Banned words\n\nNever use the word EVAL-BAN-AZURE in docs.\n");
+          const a = filler("terminology").split("\n");
+          a.splice(550, 0, "Also banned: EVAL-BAN-CRIMSON — prefer plain speech.");
+          writeFileSync(path.join(dir, "za-terminology.md"), a.join("\n") + "\n");
+          const b = filler("voice").split("\n");
+          b.splice(550, 0, "Also banned: EVAL-BAN-OCHRE — prefer plain speech.");
+          writeFileSync(path.join(dir, "zb-voice.md"), b.join("\n") + "\n");
+        },
+      });
+      ctx.styleGuideBefore = placedFile(ctx.evalHome, "style-guide");
+    },
+    assert(ctx) {
+      const after = dbSnapshot(ctx.stack.db);
+      let report = "";
+      try {
+        report = readFileSync(path.join(ctx.evalHome, "work", "upstream-changes.md"), "utf8");
+      } catch {}
+      const placed = placedFile(ctx.evalHome, "style-guide");
+      return [
+        check("the report names the banned word from the small patch", report.includes("EVAL-BAN-AZURE")),
+        check("the report names the first behind-the-cap banned word", report.includes("EVAL-BAN-CRIMSON")),
+        check("the report names the second behind-the-cap banned word", report.includes("EVAL-BAN-OCHRE")),
+        check("the placed style-guide is byte-untouched (no update ran)", placed === ctx.styleGuideBefore),
+        check("nothing changed on the plane", after.versions === ctx.before.versions && after.generations === ctx.before.generations),
+      ];
+    },
+  },
+
+  "diverged-copies-recovery": {
+    // The typed PLACEMENTS_DIVERGED freeze: one followed skill placed for TWO agents
+    // (claude-code + a detected cursor), the two copies edited DIFFERENTLY — the sweep
+    // freezes typed, nothing overwritten, every path disclosed. The ask names which edit
+    // survives. Judgment-tolerant by design: reconciling the copies byte-identical OR
+    // dropping the second placement both count, as long as the kept edit stands as a
+    // draft, the discarded line is gone, and the machine sweeps cleanly again.
+    title: "divergent copies froze the skill: keep the named edit, make the machine consistent",
+    maxTurns: 16,
+    prompt:
+      "topos reports the release-notes skill on this machine has divergent local edits in " +
+      "two places. The copy that adds the changelog-link rule is the one I meant to keep; " +
+      "the cc-the-PM line was a mistake. Make this machine consistent again with the right " +
+      "edit kept as my local draft, and don't publish anything.",
+    setup(ctx) {
+      mkdirSync(path.join(ctx.evalHome, ".cursor"), { recursive: true });
+      const r = topos(ctx.evalHome, ctx.stack, [
+        "follow", "release-notes", "--agent", "claude-code", "--agent", "cursor", "--yes", "--json",
+      ]);
+      if (!r.json?.ok) throw new Error(`fixture: two-agent scope failed: ${r.stdout}`);
+      const claudeCopy = path.join(ctx.evalHome, ".claude", "skills", "release-notes", "SKILL.md");
+      const cursorCopy = path.join(ctx.evalHome, ".cursor", "skills", "release-notes", "SKILL.md");
+      if (!existsSync(claudeCopy) || !existsSync(cursorCopy)) {
+        throw new Error("fixture: expected native placements in both agent dirs");
+      }
+      writeFileSync(claudeCopy, readFileSync(claudeCopy, "utf8") + "\n## Local addition\n\nLink the changelog entry for every release. KEEP-THIS-EDIT\n");
+      writeFileSync(cursorCopy, readFileSync(cursorCopy, "utf8") + "\n## Local addition\n\nAlways cc the PM on release notes. DROP-THIS-EDIT\n");
+      const sweep = topos(ctx.evalHome, ctx.stack, ["update", "--json"], { allowFail: true });
+      if (!`${sweep.stdout}${sweep.stderr}`.includes("PLACEMENTS_DIVERGED")) {
+        throw new Error(`fixture: the divergence freeze did not fire: ${sweep.stdout}`);
+      }
+      ctx.divergedPaths = { claudeCopy, cursorCopy };
+    },
+    assert(ctx) {
+      const after = dbSnapshot(ctx.stack.db);
+      const { claudeCopy, cursorCopy } = ctx.divergedPaths;
+      const kept = existsSync(claudeCopy) ? readFileSync(claudeCopy, "utf8") : "";
+      const second = existsSync(cursorCopy) ? readFileSync(cursorCopy, "utf8") : null;
+      const checks = [
+        check("the kept copy carries the changelog-link edit", kept.includes("KEEP-THIS-EDIT")),
+        check("the mistaken cc-the-PM line is gone", !kept.includes("DROP-THIS-EDIT") && !(second ?? "").includes("DROP-THIS-EDIT")),
+        check("no conflict markers", !kept.includes("<<<<<<<")),
+        check(
+          "the placements are consistent (byte-identical copies, or the second placement removed)",
+          second === null || second === kept,
+        ),
+        check("nothing was published", after.versions === ctx.before.versions && after.generations === ctx.before.generations),
+      ];
+      const resweep = topos(ctx.evalHome, ctx.stack, ["update", "--json"], { allowFail: true });
+      checks.push(check("the machine sweeps cleanly again", resweep.status === 0));
+      const row = listRows(ctx).find((r) => r.skill === "release-notes");
+      checks.push(check("the kept edit stands as a local draft", Boolean(row && row.draft === true)));
+      return checks;
     },
   },
 };

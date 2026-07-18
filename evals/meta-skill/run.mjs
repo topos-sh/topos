@@ -203,7 +203,10 @@ async function runOne(taskId, arm, model, rep, dryRun) {
     const { authorHome, evalHome } = await buildFixture(stack, runDir);
     const ctx = { stack, authorHome, evalHome };
     await task.setup(ctx);
-    applyArm(evalHome, stack, arm);
+    // The DRIVEN home is ctx.evalHome as of post-setup: a task may swap it (e.g. to a
+    // member-enrolled home built by memberizeEvalHome) and everything downstream — the
+    // arm, the credential seeding, the agent itself — follows the swap.
+    applyArm(ctx.evalHome, stack, arm);
     ctx.before = dbSnapshot(stack.db);
 
     if (dryRun) {
@@ -218,13 +221,13 @@ async function runOne(taskId, arm, model, rep, dryRun) {
       return { task: taskId, arm, rep, dryRun: true, checks };
     }
 
-    seedClaudeAuth(evalHome);
+    seedClaudeAuth(ctx.evalHome);
     const repoBefore = repoStatus();
 
     let metrics;
     try {
       metrics = driveAgent({
-        evalHome,
+        evalHome: ctx.evalHome,
         stack,
         prompt: task.prompt,
         model,
@@ -232,7 +235,7 @@ async function runOne(taskId, arm, model, rep, dryRun) {
         transcriptPath: path.join(runDir, "transcript.jsonl"),
       });
     } finally {
-      wipeClaudeAuth(evalHome);
+      wipeClaudeAuth(ctx.evalHome);
     }
     ctx.resultText = metrics.resultText;
     ctx.bashCommands = metrics.bashCommands;
@@ -247,6 +250,10 @@ async function runOne(taskId, arm, model, rep, dryRun) {
       detail: "",
     });
     const pass = checks.every((c) => c.ok);
+    // Cross-cutting practice metric, verdict-neutral: how many Bash calls invoked the topos
+    // binary, and how many of those asked for the machine envelope. Lets any analysis read
+    // --json adoption per cell without a dedicated task for it.
+    const toposCalls = metrics.bashCommands.filter((c) => /\btopos\b/.test(c));
     const record = {
       task: taskId,
       arm,
@@ -258,6 +265,8 @@ async function runOne(taskId, arm, model, rep, dryRun) {
       turns: metrics.turns,
       costUsd: metrics.costUsd,
       tokens: metrics.tokens,
+      toposCalls: toposCalls.length,
+      toposJsonCalls: toposCalls.filter((c) => c.includes("--json")).length,
       agentError: metrics.isError,
       runDir,
       at: new Date().toISOString(),

@@ -75,32 +75,50 @@ function newHome(dir) {
 }
 
 /** Enroll a home into the stack's workspace through the real device flow. */
-export async function enroll(home, stack) {
+export async function enroll(home, stack, session = undefined) {
   const call1 = topos(home, stack, ["follow", stack.address(), "--json"]);
   const pending = call1.json?.data?.pending;
   if (!pending?.user_code) {
     throw new Error(`follow call-1 did not pend: ${call1.stdout}`);
   }
-  await stack.approveDevice(pending.user_code);
+  await stack.approveDevice(pending.user_code, session);
   const resumed = topos(home, stack, ["follow", "--yes", "--json"]);
   if (!resumed.json?.ok) throw new Error(`follow resume failed: ${resumed.stdout}`);
   return resumed.json;
 }
 
+/**
+ * A second PERSON on the roster with their own enrolled home: mint the member account
+ * (mail-less, the e2e arrangement), then run the same real device flow with the MEMBER
+ * approving at /verify — the device binds to whoever approves, so the owner must not.
+ */
+export async function enrollMember(home, stack, email = "mara@acme.test") {
+  newHome(home);
+  const session = await stack.addMember(email, "eval-member-pw-1234");
+  await enroll(home, stack, session);
+  return home;
+}
+
 /** Publish (or re-publish) a seed skill from the author home's working copy. */
-export function publishSeed(authorHome, stack, name, { edit } = {}) {
+export function publishSeed(authorHome, stack, name, { edit, body, description, to } = {}) {
   const seedDir = path.join(authorHome, "seeds", name);
   if (!existsSync(seedDir)) {
     mkdirSync(seedDir, { recursive: true });
+    const desc =
+      description ?? `Team ${name} conventions. Use when the task touches ${name.replace(/-/g, " ")}.`;
     writeFileSync(
       path.join(seedDir, "SKILL.md"),
-      `---\nname: ${name}\ndescription: Team ${name} conventions. Use when the task touches ${name.replace(/-/g, " ")}.\n---\n# ${name}\n\n${SEED_BODY[name] ?? "Team conventions.\n"}`,
+      `---\nname: ${name}\ndescription: ${desc}\n---\n# ${name}\n\n${body ?? SEED_BODY[name] ?? "Team conventions.\n"}`,
     );
     writeFileSync(path.join(seedDir, "NOTES.md"), `Seed notes for ${name} (v1).\n`);
     topos(authorHome, stack, ["add", `./seeds/${name}`], { cwd: authorHome });
   }
   if (edit) edit(seedDir);
-  const r = topos(authorHome, stack, ["publish", name, "--yes", "-m", edit ? `${name} v-next` : `${name} v1`, "--json"]);
+  const args = ["publish", name, "--yes", "-m", edit ? `${name} v-next` : `${name} v1`, "--json"];
+  // A genesis `--to <channel>` places the reference THERE instead of `everyone`, so the
+  // skill is catalog-visible but never auto-arrives on a home that follows only `everyone`.
+  if (to) args.push("--to", to);
+  const r = topos(authorHome, stack, args);
   if (!r.json?.ok) throw new Error(`publish ${name} failed: ${r.stdout}`);
   return r.json;
 }
@@ -136,6 +154,17 @@ function stripSessionHook(home) {
  * Build the base fixture for one run: claim the workspace, enroll both homes,
  * publish the seed set, land it on the eval home, scope placements native.
  */
+/** The driven-home treatment: native claude-code placements for the whole set, hook stripped. */
+function scopeNativeAndVerify(home, stack) {
+  for (const name of [...SEEDS, "topos"]) {
+    topos(home, stack, ["follow", name, "--agent", "claude-code", "--yes", "--json"]);
+  }
+  for (const name of [...SEEDS, "topos"]) {
+    if (!placedFile(home, name)) throw new Error(`fixture: ${name} not placed in ${home}`);
+  }
+  stripSessionHook(home);
+}
+
 export async function buildFixture(stack, runDir) {
   const authorHome = newHome(path.join(runDir, "author-home"));
   const evalHome = newHome(path.join(runDir, "eval-home"));
@@ -145,14 +174,36 @@ export async function buildFixture(stack, runDir) {
   for (const name of SEEDS) publishSeed(authorHome, stack, name);
 
   await enroll(evalHome, stack); // lands the seed set via `everyone` in the same invocation
-  for (const name of [...SEEDS, "topos"]) {
-    topos(evalHome, stack, ["follow", name, "--agent", "claude-code", "--yes", "--json"]);
-  }
-  for (const name of [...SEEDS, "topos"]) {
-    if (!placedFile(evalHome, name)) throw new Error(`fixture: ${name} not placed in the eval home`);
-  }
-  stripSessionHook(evalHome);
+  scopeNativeAndVerify(evalHome, stack);
   return { authorHome, evalHome };
+}
+
+/**
+ * Swap the DRIVEN home to a MEMBER's device: a fresh home enrolled as a real member (the
+ * member approves at /verify), given the same driven-home treatment as the base eval home.
+ * Call from a task's setup; the runner drives ctx.evalHome as of post-setup.
+ */
+export async function memberizeEvalHome(ctx, email = "mara@acme.test") {
+  const home = newHome(path.join(path.dirname(ctx.evalHome), "member-eval-home"));
+  const session = await ctx.stack.addMember(email, "eval-member-pw-1234");
+  await enroll(home, ctx.stack, session);
+  scopeNativeAndVerify(home, ctx.stack);
+  ctx.evalHome = home;
+  return home;
+}
+
+/** A member-authored genesis publish (under a curated `everyone` it lands catalog-only). */
+export function memberPublish(memberHome, stack, name, { description, body }) {
+  const dir = path.join(memberHome, "work", name);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    path.join(dir, "SKILL.md"),
+    `---\nname: ${name}\ndescription: ${description}\n---\n# ${name}\n\n${body}`,
+  );
+  topos(memberHome, stack, ["add", `./work/${name}`], { cwd: memberHome });
+  const r = topos(memberHome, stack, ["publish", name, "--yes", "-m", `${name} v1`, "--json"]);
+  if (!r.json?.ok) throw new Error(`member publish ${name} failed: ${r.stdout}`);
+  return r.json;
 }
 
 /** Plant a local draft in the eval home's placed copy (an edit ahead of the followed version). */

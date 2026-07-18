@@ -154,6 +154,21 @@ export class Session {
   signedIn() {
     return [...this.jar.keys()].some((k) => k.includes("session_token"));
   }
+  async postJson(pathname, body) {
+    const res = await fetch(this.origin + pathname, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        Cookie: this.cookieHeader(),
+        Origin: this.origin,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    this.absorb(res);
+    return res;
+  }
 }
 
 export class Stack {
@@ -184,12 +199,38 @@ export class Stack {
     return s;
   }
   /** Approve a pending device flow at the real /verify ceremony (signed-in accept). */
-  async approveDevice(userCode) {
-    const res = await this.owner.postForm("/verify", { intent: "approve", code: userCode });
+  async approveDevice(userCode, session = this.owner) {
+    const res = await session.postForm("/verify", { intent: "approve", code: userCode });
     const body = await res.text();
     if (res.status !== 200 || !body.includes("connected")) {
       throw new Error(`approve failed: ${res.status}`);
     }
+  }
+  /**
+   * Mint a MEMBER account + seat, mail-lessly — the same arrangement the workspace e2e
+   * harness uses (the OSS surface for this is the invitation rung, which needs SMTP; the
+   * eval stack runs none): flip the registration knob open, sign the account up through
+   * the real better-auth endpoint, then seat it directly and mark the email verified.
+   * The knob goes back to gated afterwards. Returns a signed-in Session for the member.
+   */
+  async addMember(email, password) {
+    psql(`UPDATE web.workspace SET registration = 'open'`, this.db);
+    const s = new Session(this.origin);
+    const r = await s.postJson("/api/auth/sign-up/email", {
+      email,
+      password,
+      name: email.split("@")[0],
+    });
+    if (r.status !== 200) throw new Error(`member sign-up ${r.status}: ${await r.text()}`);
+    psql(`UPDATE web."user" SET email_verified = true WHERE email = '${email}'`, this.db);
+    psql(
+      `INSERT INTO web.seat (workspace_id, user_id, role)
+       SELECT w.id, u.id, 'member' FROM web.workspace w, web."user" u WHERE u.email = '${email}'`,
+      this.db,
+    );
+    psql(`UPDATE web.workspace SET registration = 'invite_only'`, this.db);
+    if (!s.signedIn()) throw new Error("member sign-up did not sign in");
+    return s;
   }
   async teardown() {
     for (const p of this.procs) {

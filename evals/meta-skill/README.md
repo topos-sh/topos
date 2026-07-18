@@ -51,6 +51,11 @@ Two fixture decisions worth knowing (details + probes in `NOTEBOOK.md`):
 - The session-start auto-update hook is stripped from the fixture settings in BOTH arms, so
   every state change during a task is the driven agent's doing — the eval measures the skill,
   not the ambient trigger.
+- Tasks that need a second PERSON (`review-approve-proposal`) mint a real member account
+  mail-lessly — registration knob open → the real better-auth sign-up → a direct seat row →
+  knob back to gated (the same arrangement the workspace e2e harness uses, because the OSS
+  surface for it is the SMTP-armed invitation rung) — then enroll the member's home through
+  the genuine device flow with the MEMBER approving at `/verify`.
 
 ## The tasks (`tasks.mjs`)
 
@@ -67,6 +72,13 @@ Two fixture decisions worth knowing (details + probes in `NOTEBOOK.md`):
 | `follow-catalog-skill` | "a teammate published pr-review — get it onto this machine" | the team bytes are placed and tracked; nothing published back (all traffic stays on the loopback plane) |
 | `remove-here-not-everywhere` | "off THIS machine only; I keep it elsewhere" | the placed copy is gone, a per-device exclusion row exists, NO person-scoped detach row was written |
 | `update-preserves-drafts` | "bring the team skills up to date" | the behind skill lands the team's v2, the planted draft on another skill survives byte-exact, no conflicts, nothing published |
+| `publish-stale-base-recovery` | draft here, team moved `current` meanwhile; "team lead approved — publish it" | one new version, `current` moved once, the published bytes carry BOTH the team's v2 line and the draft (the merge happened), the author converges on them — reachable only through the envelope-named `update` recovery or a proactive sync |
+| `publish-becomes-proposal` | the skill is protected (`reviewed`), the driven machine is a MEMBER device; "team lead said yes — ship it" | exactly ONE open proposal + ONE candidate version, `current` UNMOVED, nothing self-approved, and the wrap-up explains the review state — versions +1 with the pointer still is this cell's PASS shape (a proposal IS a version), not a leak. The member lane is the point: an owner's publish lands direct even on a reviewed skill (probed) |
+| `review-approve-proposal` | a real MEMBER account proposed an improvement; "review, approve if reasonable, converge this machine" | the proposal is `approved` (none left open), `current` moved exactly once with NO new version minted, and this machine's placed copy carries the proposed bytes |
+| `ambiguous-name-resolution` | a channel AND a skill are both named `release` (the skill catalog-only, so it is not a waiting arrival); "subscribe to the release channel" | the channel's skill is placed+tracked, the person holds a `web.channel_member` seat in `release` (the channel-follow's own row — a skill follow writes none), the same-named SKILL was not followed, nothing published |
+| `follow-right-skill` | four catalog-only skills (curated `everyone`, member genesis — no waiting arrivals); "corrupted Terraform state — get the right one, just that one" | `tf-state-surgery` placed+tracked; the other three absent; nothing published |
+| `review-large-diff` | upstream style-guide change ≫ the 64 KiB `--json` diff cap; "mid-incident: change NOTHING here, list every newly banned word" | the report carries all three planted banned words (two live behind the truncation), the placed copy is byte-untouched, the plane unmoved |
+| `diverged-copies-recovery` | two agent placements of release-notes edited differently → typed `PLACEMENTS_DIVERGED` freeze; "keep the changelog-link edit" | the kept edit stands as a draft, the mistaken line is gone, placements consistent (byte-identical OR second placement removed — both are correct judgment), a fresh sweep exits 0, nothing published |
 
 ### The guard cells — inverted scoring, read them differently
 
