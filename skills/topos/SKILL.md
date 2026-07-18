@@ -33,6 +33,13 @@ verb.
   and returns the paste-ready `--yes` argv; `--yes` applies it. You may run verbs autonomously,
   including `--yes` — run the bare describe first when the effect is unclear, and tell the person
   what you changed afterward.
+- Describe once, then act: when the describe matches what the user already asked for, apply with
+  `--yes` immediately. Re-running the same describe, or re-surveying state you already read,
+  changes nothing — a describe is never progress by itself.
+- A refusal names its own fix: on exit `1`, read the envelope's `error` message and
+  `next_actions` — run the named fix (often `topos update <skill>`, which also merges a stale
+  base), then retry the original verb with `--yes` once. Never route around a refusal by
+  hand-editing files or sidecar internals.
 - Exit codes: `0` success, `1` domain refusal or failure (the envelope distinguishes), `2` usage
   error.
 
