@@ -47,6 +47,17 @@ thiserror.workspace = true
 # unsafe-forbid + no-C-deps posture); both stay clear of check-arch's ban list.
 tar = "0.4"
 flate2 = "1"
+# The self-update release-signature VERIFIER: pure Rust, ZERO dependencies (jedisct1's own verify-only
+# minisign crate — the same one cargo-binstall ships). The shipped binary carries verify-only code; the
+# signing side lives in CI (the minisign CLI) and, for tests, in the dev-dependency below. Stays clear
+# of check-arch's ban list and adds no transitive edge at all.
+minisign-verify = "0.2"
+
+[dev-dependencies]
+# Test-only SIGNING capability: mint a throwaway keypair + sign fixture tarballs in the self-update
+# tests. A dev-dependency ONLY — check-arch's `-e normal` tree proves the production binary never
+# carries a signer.
+minisign = "0.7"
 
 [lints]
 workspace = true

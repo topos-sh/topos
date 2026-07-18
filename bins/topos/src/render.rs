@@ -779,6 +779,9 @@ pub(crate) fn self_update_tty(o: &crate::ops::SelfUpdateOutcome) -> String {
     if let Some(w) = &o.warning {
         s.push_str(&format!("\nwarning: {w}"));
     }
+    if let Some(n) = &o.note {
+        s.push_str(&format!("\nnote: {n}"));
+    }
     s
 }
 

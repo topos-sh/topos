@@ -246,6 +246,13 @@ pub(crate) enum ClientError {
     /// (the binary's path + how to reinstall); a path is not a secret, so it is shown VERBATIM.
     #[error("{0}")]
     UpgradeUnwritable(String),
+    /// A self-update download failed minisign verification against this build's COMPILED-IN release
+    /// public key — the `.minisig` was missing, unreadable, or did not verify over the downloaded
+    /// bytes. With a key compiled in, signature verification is mandatory and fail-closed: refused
+    /// BEFORE the checksum step and BEFORE the binary is touched. The message is all-public (the
+    /// asset name + a non-secret reason), so it is safe to show verbatim.
+    #[error("downloaded {asset}: release signature {reason} — refusing to install")]
+    SignatureInvalid { asset: String, reason: String },
     /// `add <owner/repo>` (a remote import) could not fetch the source over the network (unreachable
     /// host, an HTTP error, a not-found repo/ref). Transient by default — the agent may retry. The
     /// message is all-public (the source + a transport reason), so it is shown VERBATIM.
@@ -388,6 +395,9 @@ impl ClientError {
             ClientError::PlaneRejected(_) => "PLANE_REJECTED",
             // A self-update checksum mismatch is an integrity failure (same family as verify-on-read).
             ClientError::ChecksumMismatch { .. } => "INTEGRITY_ERROR",
+            // A failed (or missing) release signature is the same integrity family — same code, so an
+            // agent branches identically on either self-update integrity refusal.
+            ClientError::SignatureInvalid { .. } => "INTEGRITY_ERROR",
             // A not-writable install location is a filesystem-shaped, permanent failure.
             ClientError::UpgradeUnwritable(_) => "IO_ERROR",
             // The remote-import family (each machine-branchable; a fetch fault is retryable, the rest are
@@ -452,6 +462,9 @@ impl ClientError {
             ClientError::PlaneRejected(_) => TerminalOutcome::PermanentFailure,
             // A tampered/corrupt download will not heal on a retry against the same bad bytes.
             ClientError::ChecksumMismatch { .. } => TerminalOutcome::PermanentFailure,
+            // A release that fails (or lacks) its mandatory signature will not heal on a retry either —
+            // fail closed, never a retry loop against the same unverifiable bytes.
+            ClientError::SignatureInvalid { .. } => TerminalOutcome::PermanentFailure,
             // A read-only / package-managed install location will not heal on a retry.
             ClientError::UpgradeUnwritable(_) => TerminalOutcome::PermanentFailure,
             // The plane's terminal outcome, surfaced verbatim (not flattened to a transport error).

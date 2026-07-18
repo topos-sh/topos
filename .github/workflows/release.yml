@@ -221,7 +221,7 @@ jobs:
           path: topos-plane-image.spdx.json
           if-no-files-found: error
 
-  # Assemble every asset, checksum + attest them, and publish the release.
+  # Assemble every asset, checksum + sign + attest them, and publish the release.
   release:
     name: publish the release
     needs: [build-cli, image-merge]
@@ -231,6 +231,12 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+    env:
+      # Release signing is ARMED by the MINISIGN_SECRET_KEY repo secret (minted by the key
+      # ceremony, scripts/mint-release-key.sh). Secrets cannot be tested in `if:` directly, so the
+      # presence check rides a job env var. Absent secret ⇒ 'false' ⇒ the release ships unsigned
+      # (the pre-ceremony state); present ⇒ signing runs and a signing FAILURE fails the release.
+      HAVE_MINISIGN_KEY: ${{ secrets.MINISIGN_SECRET_KEY != '' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       # xtask (the `dist sums` tool) compiles from source here.
@@ -280,6 +286,32 @@ jobs:
         run: |
           cargo run -p xtask --locked -- dist sums --dir dist
           cargo run -p xtask --locked -- dist sums --dir dist --check
+      # Minisign release signing (see docs/RELEASE.md). Runs AFTER the checksums so SHA256SUMS is
+      # itself signable; the `.minisig` files ride the same `dist/*` upload as every other asset.
+      # No `continue-on-error`: with the secret armed, a signing failure fails the release.
+      - name: install minisign
+        if: env.HAVE_MINISIGN_KEY == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minisign
+      - name: sign the release assets (minisign)
+        if: env.HAVE_MINISIGN_KEY == 'true'
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          set -eu
+          # The unencrypted secret key (minted with `minisign -G -W`) lands in a 0600 file under
+          # RUNNER_TEMP for the tool — never in the workspace, never in an output — and is removed
+          # when the step ends, success or failure.
+          keyfile="$RUNNER_TEMP/minisign.key"
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$keyfile"
+          trap 'rm -f "$keyfile"' EXIT
+          for f in dist/*.tar.gz dist/install.sh dist/SHA256SUMS; do
+            minisign -S -s "$keyfile" -m "$f" \
+              -t "topos-sh/topos ${GITHUB_REF_NAME} $(basename "$f")"
+          done
+          ls -l dist/*.minisig
       - name: attest the CLI tarballs + checksums
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
@@ -301,6 +333,9 @@ jobs:
                 echo "| \`topos-${t}.tar.gz\` | the \`topos\` CLI (${t}) |"
               fi
             done
+            if ls dist/*.minisig >/dev/null 2>&1; then
+              echo "| \`<asset>.minisig\` | minisign signatures over the CLI tarballs, \`install.sh\`, and \`SHA256SUMS\` |"
+            fi
             cat <<'EOF'
           | `install.sh` | the checksummed installer (`curl -fsSL …/latest/download/install.sh \| sh`) |
           | `SHA256SUMS` | checksums over every asset |
@@ -326,6 +361,14 @@ jobs:
           gh attestation verify <asset> --repo topos-sh/topos
           ```
           EOF
+            if ls dist/*.minisig >/dev/null 2>&1; then
+              echo
+              echo "This release is minisign-signed — verify any asset against the topos release public key:"
+              echo
+              echo '```'
+              echo 'minisign -Vm <asset> -P <the topos release public key>'
+              echo '```'
+            fi
             if [ -s missing-targets.md ]; then
               echo
               echo "## Not published this release"

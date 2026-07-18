@@ -39,6 +39,53 @@ check an item off in the same change that lands it.
       this and the key-loss caveat) was trimmed, so the posture is currently documented nowhere
       user-facing — decide whether to restate it briefly or leave it.
 
+## Release signing (minisign)
+
+The release pipeline can sign every CLI tarball, `install.sh`, and `SHA256SUMS` with
+[minisign](https://jedisct1.github.io/minisign/) — small, boring, verifiable with one command. The
+scheme is committed end-to-end but DORMANT until the key ceremony runs.
+
+**State today: UNSIGNED.** No key has been minted; releases carry checksums + GitHub artifact
+attestation only, and `topos self-update` prints an honest "unsigned build" note on every install.
+
+How the pieces fit:
+
+- **The key ceremony** — `scripts/mint-release-key.sh`, run once by a maintainer (offline-safe). It
+  mints a minisign keypair into a directory it creates `0700` and prints exactly what to paste
+  where: the `RELEASE_PUBKEY` constant in `bins/topos/src/ops/self_update.rs`, the
+  `MINISIGN_PUBKEY` variable in `scripts/install.sh`, and the `gh secret set MINISIGN_SECRET_KEY`
+  command that arms CI. One commit flips both files; a test
+  (`release_pubkey_when_present_is_a_valid_minisign_key`) guards the paste.
+- **CI** (`.github/workflows/release.yml`, the `release` job) — with the `MINISIGN_SECRET_KEY`
+  secret present, the job signs `dist/*.tar.gz`, `install.sh`, and `SHA256SUMS` (pre-hashed
+  minisign, a per-asset trusted comment naming the tag) and uploads the `.minisig` files alongside
+  the assets; a signing failure FAILS the release. With the secret absent, the release proceeds
+  unsigned — today's behavior, bit-for-bit. The key touches only a `0600` file under `RUNNER_TEMP`,
+  removed when the step ends.
+- **The self-updater** (`topos self-update`) — with `RELEASE_PUBKEY = Some(…)` compiled in,
+  signature verification is MANDATORY and fail-closed: the asset's `.minisig` is fetched and
+  verified over the downloaded bytes BEFORE the checksum gate and long before the binary is
+  touched; a missing or invalid signature is a typed `INTEGRITY_ERROR` with no unsigned fallback.
+  With `None` (today) the checksum path is unchanged and the outcome discloses `signed: false` +
+  the unsigned-build note.
+- **The installer** (`scripts/install.sh`) — with `MINISIGN_PUBKEY` set, the asset's `.minisig` is
+  REQUIRED and verified before the checksum whenever the `minisign` tool is installed; without the
+  tool the signature step is skipped with a loud note (the sha256 gate below it is never
+  skippable). The installer is fetched from the same origin as the assets, so its embedded key is
+  defense-in-depth rather than a trust bootstrap — the binary's COMPILED-IN key (and GitHub
+  attestation) are the origin-independent anchors.
+
+What signing adds over `SHA256SUMS`: checksums prove transit integrity (the sums file rides the
+same origin as the asset), not origin integrity — whoever controls the release controls both files.
+A minisign signature moves that trust to the offline secret key: a compromised release host or
+repository account cannot mint a `.minisig` that an already-shipped binary accepts.
+
+Rotation is a transitional release signed with the OLD key that embeds the NEW public key — the
+ceremony script prints the full procedure.
+
+- [ ] **Key ceremony** — not yet run (deliberate: mint the key at the first public release). Run
+      `scripts/mint-release-key.sh` and follow its printed steps; nothing else needs editing.
+
 ## Already in place (verify green at the gate)
 
 - [x] CI: fmt / clippy / rustdoc / the schema+fixture+OpenAPI drift gates / check-arch / the Postgres test

@@ -372,19 +372,28 @@ are asserted byte-equal in tests.
   artifacts — user skill files still stay). The NAME is reserved end-to-end: `add` refuses it, the
   one naming discipline never hands the `topos` dir to another skill
   (`topos_harness::RESERVED_SKILL_DIR`), and the app's catalog mint suffixes past it server-side.
-- **The `upgrade` maintenance command** (`ops/upgrade`, `release`, `plane_http::UreqReleases`) — the native
-  self-updater. It resolves the target release (the latest tag, or a `--version <tag>` pin — which allows a
-  pinned downgrade), downloads that tag's `topos-<triple>.tar.gz` + its `SHA256SUMS`, verifies the
-  download's sha256 against the manifest (mandatory, never skippable — a mismatch is a typed
-  `INTEGRITY_ERROR` refused BEFORE the binary is touched), extracts the `topos` entry in memory (never
-  unpacking attacker paths to disk), and atomically replaces the running binary via a same-dir
-  staged-temp → fsync → rename-over → fsync-dir (the existing crash gate covers it; a running process
-  keeps its old inode). `--check` reports availability and stops. The upstream sits behind an injectable
-  `ReleaseSource` seam, so the whole flow is unit-tested with a fake (no HTTP); `build.rs` embeds the
-  compiled target triple so the updater fetches THIS platform's asset. A default GitHub base is compiled
-  in, overridable via `TOPOS_INSTALL_BASE_URL` for a local mirror / air-gap (a non-HTTPS base is warned,
-  the checksum still enforced). NOT a behavior verb — it touches no skills, no plane, no account, and
-  mints no device identity.
+- **The `self-update` maintenance command** (`ops/self_update`, `release`, `plane_http::UreqReleases`) —
+  the native self-updater. It resolves the target release (the latest tag, or a `--version <tag>` pin —
+  which allows a pinned downgrade), downloads that tag's `topos-<triple>.tar.gz` + its `SHA256SUMS`,
+  runs the **release-signature gate** (`RELEASE_PUBKEY`, an Option-shaped compiled-in minisign key:
+  `Some` makes the asset's `.minisig` MANDATORY and fail-closed — fetched + verified over the
+  downloaded bytes BEFORE the checksum, a missing/invalid signature is a typed `INTEGRITY_ERROR`
+  with no unsigned fallback; `None` — the pre-key-ceremony state — keeps checksum-only behavior,
+  disclosed as `signed: false` + an "unsigned build" note; the verify side is `minisign-verify`,
+  pure Rust with zero deps, while SIGNING exists only in CI and a test-only dev-dependency —
+  `scripts/mint-release-key.sh` is the ceremony that flips the constant, and `docs/RELEASE.md`
+  documents the scheme), verifies the download's sha256 against the manifest (mandatory, never
+  skippable — a mismatch is a typed `INTEGRITY_ERROR` refused BEFORE the binary is touched),
+  extracts the `topos` entry in memory (never unpacking attacker paths to disk), and atomically
+  replaces the running binary via a same-dir staged-temp → fsync → rename-over → fsync-dir (the
+  existing crash gate covers it; a running process keeps its old inode). `--check` reports
+  availability and stops. The upstream sits behind an injectable `ReleaseSource` seam, so the whole
+  flow is unit-tested with a fake (no HTTP) — the signature tests mint a throwaway keypair per run;
+  `build.rs` embeds the compiled target triple so the updater fetches THIS platform's asset. A
+  default GitHub base is compiled in, overridable via `TOPOS_INSTALL_BASE_URL` for a local mirror /
+  air-gap (a non-HTTPS base is warned, the checksum still enforced). NOT a behavior verb — it
+  touches no skills, no plane, no account, and mints no device identity. (`topos upgrade` stays the
+  hidden disambiguation refusal toward `update` / `self-update`.)
 
 - **The reshaped team verbs** (`ops/{remove,channel,protect,invite,review,log,list,pull,publish}`) — each
   runs the ONE resolution grammar + the two-phase describe/`--yes` gate over the built directory row ops:
@@ -501,7 +510,11 @@ Dependencies: `topos-core`, `topos-types`, `topos-gitstore`, `topos-harness`, `c
 device-authorization start sends as the requested device display name), `hex` (decode sidecar id
 fields), `base64` (the contribute candidate's `content_base64`; wire encoding only), `ureq` (the
 blocking rustls+ring plane + enrollment transport — self-contained, so no `tokio`/`plane-store`/`sqlx`
-edge), `anyhow`, `thiserror`. No key material and no crypto deps: the device authenticates with the
-ONE bearer credential the device flow mints. None of these crates cross `check-arch`'s line (it bans
+edge), `tar`+`flate2` (the self-update asset codec, in-memory), `minisign-verify` (the self-update
+release-signature VERIFIER — pure Rust, zero deps; signing exists only in CI and the test-only
+`minisign` dev-dependency), `anyhow`, `thiserror`. No signing key material client-side: the device
+authenticates with the ONE bearer credential the device flow mints, and the only key the binary
+carries is the PUBLIC release key (`RELEASE_PUBKEY`, `None` until the key ceremony). None of these
+crates cross `check-arch`'s line (it bans
 only `plane-store`/`sqlx`/`libsqlite3-sys`/`tokio`/`reqwest`/`hyper`); `topos-core` is signature-free
 `no_std`.

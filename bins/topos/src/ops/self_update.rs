@@ -1,7 +1,8 @@
 //! `topos self-update` — the native self-updater for the CLI binary itself. Resolve the target release,
-//! download the asset for THIS build's target triple, verify its sha256 against the release SHA256SUMS
-//! (never skippable), and atomically replace the running binary. A maintenance command: no skills, no
-//! plane, no account. (Skills are updated by `topos update`; this updates the `topos` program.)
+//! download the asset for THIS build's target triple, verify its minisign signature when this build
+//! carries a release public key (mandatory + fail-closed then), verify its sha256 against the release
+//! SHA256SUMS (never skippable), and atomically replace the running binary. A maintenance command: no
+//! skills, no plane, no account. (Skills are updated by `topos update`; this updates the `topos` program.)
 
 use std::io::Read;
 use std::path::Path;
@@ -17,9 +18,20 @@ use crate::release::ReleaseSource;
 /// The compiled target triple (from build.rs) — the asset this binary knows how to replace itself with.
 const TARGET_TRIPLE: &str = env!("TOPOS_TARGET");
 /// This build's version, e.g. "0.1.0".
-const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The default release download base (GitHub). Overridable via TOPOS_INSTALL_BASE_URL (mirrors/air-gap).
-const DEFAULT_BASE_URL: &str = "https://github.com/topos-sh/topos/releases";
+pub(crate) const DEFAULT_BASE_URL: &str = "https://github.com/topos-sh/topos/releases";
+
+/// The COMPILED-IN minisign release public key (the base64 line of `minisign.pub`).
+///
+/// `None` — today's pre-key-ceremony state — keeps self-update checksum-only, with an honest
+/// "unsigned build" note on every install. `Some(key)` makes signature verification MANDATORY and
+/// fail-closed: the asset's `.minisig` is fetched and verified over the downloaded bytes BEFORE the
+/// checksum gate (and long before the binary is touched); a missing or invalid signature is a typed
+/// `INTEGRITY_ERROR` refusal with no unsigned fallback. The key ceremony
+/// (`scripts/mint-release-key.sh`) prints the exact `Some("…")` line to paste here — this constant
+/// and `scripts/install.sh`'s `MINISIGN_PUBKEY` are the only two places it flips.
+pub(crate) const RELEASE_PUBKEY: Option<&str> = None;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SelfUpdateOpts {
@@ -47,26 +59,52 @@ pub(crate) struct SelfUpdateOutcome {
     /// The resolved target (latest, or the pinned tag), sans 'v'.
     pub latest_version: Option<String>,
     pub update_available: bool,
+    /// Whether the downloaded asset's minisign signature was verified against this build's
+    /// compiled-in release public key. Always `false` on a build with no key, and on the
+    /// `--check` / already-current outcomes (nothing was downloaded to verify).
+    pub signed: bool,
     /// The target triple this binary was built for.
     pub target: String,
     /// e.g. a non-HTTPS base URL warning.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// e.g. the unsigned-build note (this build carries no release public key — checksum only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
-/// Update the running `topos` binary to the target release. `current_exe` is injected (the binary to
-/// replace) so a test replaces a fake target, never the test runner.
+/// Update the running `topos` binary to the target release, verifying against this build's
+/// compiled-in [`RELEASE_PUBKEY`]. The production entry — tests drive [`self_update_with_key`] to
+/// exercise both key postures.
 ///
 /// # Errors
-/// [`ClientError::Plane`] on a release-check / download transport fault;
-/// [`ClientError::ChecksumMismatch`] when the download does not match the release SHA256SUMS (never
-/// skippable); [`ClientError::WireInvalid`] on an unreadable tarball / a SHA256SUMS missing the asset;
-/// an [`FsOps`](crate::fs_seam::FsOps) failure (e.g. a not-writable install dir) on the atomic replace.
+/// See [`self_update_with_key`].
 pub(crate) fn self_update(
     ctx: &Ctx<'_>,
     releases: &dyn ReleaseSource,
     current_exe: &Path,
     opts: SelfUpdateOpts,
+) -> Result<SelfUpdateOutcome, ClientError> {
+    self_update_with_key(ctx, releases, current_exe, opts, RELEASE_PUBKEY)
+}
+
+/// Update the running `topos` binary to the target release. `current_exe` is injected (the binary to
+/// replace) so a test replaces a fake target, never the test runner; `pubkey` is injected so tests
+/// exercise both the unsigned (`None`) and the mandatory-signature (`Some`) postures.
+///
+/// # Errors
+/// [`ClientError::Plane`] on a release-check / download transport fault;
+/// [`ClientError::SignatureInvalid`] when this build carries a release public key and the asset's
+/// `.minisig` is missing or does not verify (mandatory, fail-closed — checked BEFORE the checksum);
+/// [`ClientError::ChecksumMismatch`] when the download does not match the release SHA256SUMS (never
+/// skippable); [`ClientError::WireInvalid`] on an unreadable tarball / a SHA256SUMS missing the asset;
+/// an [`FsOps`](crate::fs_seam::FsOps) failure (e.g. a not-writable install dir) on the atomic replace.
+fn self_update_with_key(
+    ctx: &Ctx<'_>,
+    releases: &dyn ReleaseSource,
+    current_exe: &Path,
+    opts: SelfUpdateOpts,
+    pubkey: Option<&str>,
 ) -> Result<SelfUpdateOutcome, ClientError> {
     let base_url = opts
         .base_url
@@ -104,8 +142,10 @@ pub(crate) fn self_update(
             current_version: CURRENT_VERSION.to_owned(),
             latest_version: Some(latest_version),
             update_available,
+            signed: false,
             target: TARGET_TRIPLE.to_owned(),
             warning,
+            note: None,
         });
     }
 
@@ -121,8 +161,10 @@ pub(crate) fn self_update(
             current_version: CURRENT_VERSION.to_owned(),
             latest_version: Some(latest_version),
             update_available: false,
+            signed: false,
             target: TARGET_TRIPLE.to_owned(),
             warning,
+            note: None,
         });
     }
 
@@ -133,7 +175,38 @@ pub(crate) fn self_update(
     let tarball = releases.download(&asset_url)?;
     let sums = releases.download(&sums_url)?;
 
-    // 5. verify sha256 (never skippable) — exact filename match in SHA256SUMS.
+    // 5. MANDATORY minisign verification when this build carries a release public key: fetch the
+    //    asset's `.minisig` and verify it over the downloaded bytes BEFORE the checksum gate (and
+    //    long before the binary is touched). Fail-closed — with a key compiled in there is no
+    //    unsigned fallback; a missing or invalid signature refuses typed. Without a key (the
+    //    pre-key-ceremony state) the checksum-only behavior is preserved, disclosed by a note.
+    let signed = match pubkey {
+        Some(key) => {
+            let sig_url = format!("{asset_url}.minisig");
+            let sig_bytes =
+                releases
+                    .download(&sig_url)
+                    .map_err(|e| ClientError::SignatureInvalid {
+                        asset: asset.clone(),
+                        reason: format!("is required by this build but could not be fetched ({e})"),
+                    })?;
+            let sig_text =
+                std::str::from_utf8(&sig_bytes).map_err(|_| ClientError::SignatureInvalid {
+                    asset: asset.clone(),
+                    reason: "file is not valid UTF-8".into(),
+                })?;
+            verify_release_signature(key, sig_text, &tarball, &asset)?;
+            true
+        }
+        None => false,
+    };
+    let note = (!signed).then(|| {
+        "this build carries no release-signing public key — the download was verified by checksum \
+         only"
+            .to_owned()
+    });
+
+    // 6. verify sha256 (never skippable) — exact filename match in SHA256SUMS.
     let sums_text = std::str::from_utf8(&sums)
         .map_err(|_| ClientError::WireInvalid("SHA256SUMS is not valid UTF-8".into()))?;
     let expected = expected_sum(sums_text, &asset)
@@ -147,10 +220,10 @@ pub(crate) fn self_update(
         });
     }
 
-    // 6. extract the `topos` binary from the tarball (in memory — never unpack attacker paths to disk).
+    // 7. extract the `topos` binary from the tarball (in memory — never unpack attacker paths to disk).
     let bin_bytes = extract_topos(&tarball)?;
 
-    // 7. atomically replace the running binary. Stage a sibling temp so the rename is same-filesystem.
+    // 8. atomically replace the running binary. Stage a sibling temp so the rename is same-filesystem.
     let dir = current_exe.parent().unwrap_or_else(|| Path::new("."));
     let tmp = dir.join(format!(".topos-upgrade.{}.tmp", std::process::id()));
     if let Err(e) = crate::atomic::atomic_write_executable(ctx.fs, current_exe, &tmp, &bin_bytes) {
@@ -164,9 +237,36 @@ pub(crate) fn self_update(
         current_version: CURRENT_VERSION.to_owned(),
         latest_version: Some(latest_version),
         update_available: true,
+        signed,
         target: TARGET_TRIPLE.to_owned(),
         warning,
+        note,
     })
+}
+
+/// Verify `tarball` against the minisign signature document `sig_text` using the compiled-in release
+/// public key. Strict: only the modern PRE-HASHED minisign algorithm is accepted (`allow_legacy =
+/// false` — the release pipeline's signing command produces exactly that), and every failure maps to
+/// the one typed [`ClientError::SignatureInvalid`] refusal.
+fn verify_release_signature(
+    pubkey_b64: &str,
+    sig_text: &str,
+    tarball: &[u8],
+    asset: &str,
+) -> Result<(), ClientError> {
+    let refuse = |reason: String| ClientError::SignatureInvalid {
+        asset: asset.to_owned(),
+        reason,
+    };
+    let key = minisign_verify::PublicKey::from_base64(pubkey_b64).map_err(|e| {
+        refuse(format!(
+            "cannot be checked — this build's compiled-in public key is malformed ({e})"
+        ))
+    })?;
+    let sig = minisign_verify::Signature::decode(sig_text)
+        .map_err(|e| refuse(format!("is malformed ({e})")))?;
+    key.verify(tarball, &sig, false)
+        .map_err(|e| refuse(format!("does not verify ({e})")))
 }
 
 /// Prepend a leading 'v' if the tag looks like a bare `X.Y.Z`.
@@ -198,8 +298,9 @@ fn expected_sum(sums: &str, asset: &str) -> Option<String> {
 
 /// A minimal semver-core `>` : compare (major, minor, patch), ignoring any pre-release/build suffix. Tags
 /// come from our own release pipeline (`vX.Y.Z`), so the core triple is sufficient; a malformed side is
-/// treated as (0,0,0) so a valid newer version still wins.
-fn version_gt(a: &str, b: &str) -> bool {
+/// treated as (0,0,0) so a valid newer version still wins. (Shared with the passive version check —
+/// one newer-than decision, never two implementations to drift.)
+pub(super) fn version_gt(a: &str, b: &str) -> bool {
     parse_core(a) > parse_core(b)
 }
 
@@ -279,15 +380,16 @@ fn map_replace_error(e: std::io::Error, current_exe: &Path) -> ClientError {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use topos_core::digest::{sha256, to_hex};
     use topos_harness::ClaudeCode;
 
     use super::{
-        CURRENT_VERSION, SelfUpdateAction, SelfUpdateOpts, TARGET_TRIPLE, expected_sum,
-        extract_topos, map_replace_error, normalize_tag, parse_core, self_update, version_gt,
+        CURRENT_VERSION, RELEASE_PUBKEY, SelfUpdateAction, SelfUpdateOpts, TARGET_TRIPLE,
+        expected_sum, extract_topos, map_replace_error, normalize_tag, parse_core, self_update,
+        self_update_with_key, version_gt,
     };
     use crate::ctx::Ctx;
     use crate::error::ClientError;
@@ -477,6 +579,16 @@ mod tests {
         assert_eq!(out.latest_version.as_deref(), Some("9.9.9"));
         // The running binary now holds the extracted `topos` bytes, byte-exact.
         assert_eq!(std::fs::read(&current_exe).unwrap(), new_bin);
+        // This build compiles in no release public key (RELEASE_PUBKEY is None), so the install is
+        // checksum-only — disclosed honestly: not signed, with the unsigned-build note.
+        assert!(!out.signed);
+        assert!(
+            out.note
+                .as_deref()
+                .is_some_and(|n| n.contains("no release-signing public key")),
+            "{:?}",
+            out.note
+        );
     }
 
     #[test]
@@ -679,6 +791,242 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert_eq!(std::fs::read(&current_exe).unwrap(), b"the OLD binary");
+    }
+
+    // ---- the mandatory-signature posture (a compiled-in release public key) --------------------
+    //
+    // Signing capability is a DEV-dependency only (the `minisign` crate) — the shipped binary
+    // carries verify-only code (`minisign-verify`, zero deps). Each test mints a throwaway keypair.
+
+    /// A throwaway minisign keypair: (the base64 public key — what the compiled-in constant holds,
+    /// the keypair for signing).
+    fn test_keypair() -> (String, minisign::KeyPair) {
+        let kp = minisign::KeyPair::generate_unencrypted_keypair().expect("keygen");
+        (kp.pk.to_base64(), kp)
+    }
+
+    /// Sign `bytes` the way the release pipeline does (pre-hashed — the modern minisign default);
+    /// returns the full `.minisig` document text.
+    fn sign_bytes(kp: &minisign::KeyPair, bytes: &[u8]) -> String {
+        minisign::sign(
+            Some(&kp.pk),
+            &kp.sk,
+            std::io::Cursor::new(bytes),
+            Some("topos test signature"),
+            Some("topos test"),
+        )
+        .expect("sign")
+        .into_string()
+    }
+
+    /// A signed-release fixture: the tarball + correct SHA256SUMS + a `.minisig` (as `sig` says) at
+    /// the default GitHub URLs for `tag`, plus a scratch `current_exe` holding the OLD binary.
+    fn signed_release(
+        tag: &str,
+        sig: Option<String>,
+        scratch_tag: &str,
+    ) -> (FakeReleases, PathBuf) {
+        let (asset, asset_url, sums_url) = urls(tag);
+        let targz = build_targz(&[
+            ("LICENSE", b"Apache-2.0\n", 0o644),
+            ("topos", b"#!/bin/sh\nthe signed binary\n", 0o755),
+        ]);
+        let sums = format!("{}  {asset}\n", to_hex(&sha256(&targz)));
+        let mut blobs: std::collections::HashMap<String, Vec<u8>> =
+            [(asset_url.clone(), targz), (sums_url, sums.into_bytes())]
+                .into_iter()
+                .collect();
+        if let Some(sig) = sig {
+            blobs.insert(format!("{asset_url}.minisig"), sig.into_bytes());
+        }
+        let releases = FakeReleases {
+            latest: tag.to_owned(),
+            blobs,
+        };
+        let exe_dir = scratch(scratch_tag);
+        let current_exe = exe_dir.join("topos");
+        std::fs::write(&current_exe, b"the OLD binary").unwrap();
+        (releases, current_exe)
+    }
+
+    fn run_with_key(
+        releases: &FakeReleases,
+        current_exe: &Path,
+        tag: &str,
+        pubkey: &str,
+    ) -> Result<super::SelfUpdateOutcome, ClientError> {
+        with_ctx(|ctx| {
+            self_update_with_key(
+                ctx,
+                releases,
+                current_exe,
+                SelfUpdateOpts {
+                    check: false,
+                    version: Some(tag.to_owned()),
+                    base_url: None,
+                },
+                Some(pubkey),
+            )
+        })
+    }
+
+    #[test]
+    fn signed_build_happy_path_verifies_and_installs() {
+        let tag = "v9.9.9";
+        let (pubkey, kp) = test_keypair();
+        // Sign the EXACT tarball the fixture serves (rebuild the same bytes deterministically).
+        let targz = build_targz(&[
+            ("LICENSE", b"Apache-2.0\n", 0o644),
+            ("topos", b"#!/bin/sh\nthe signed binary\n", 0o755),
+        ]);
+        let (releases, current_exe) = signed_release(tag, Some(sign_bytes(&kp, &targz)), "sig-ok");
+
+        let out = run_with_key(&releases, &current_exe, tag, &pubkey)
+            .expect("a valid signature + checksum installs");
+        assert!(matches!(out.action, SelfUpdateAction::Upgraded));
+        assert!(out.signed, "the outcome discloses the verified signature");
+        assert!(
+            out.note.is_none(),
+            "no unsigned-build note on a signed install"
+        );
+        assert_eq!(
+            std::fs::read(&current_exe).unwrap(),
+            b"#!/bin/sh\nthe signed binary\n"
+        );
+    }
+
+    #[test]
+    fn signed_build_refuses_a_missing_minisig() {
+        // With a key compiled in, signature verification is mandatory: no `.minisig` on the release
+        // is a typed INTEGRITY refusal, not a silent checksum-only downgrade.
+        let tag = "v9.9.9";
+        let (pubkey, _kp) = test_keypair();
+        let (releases, current_exe) = signed_release(tag, None, "sig-missing");
+
+        let err = run_with_key(&releases, &current_exe, tag, &pubkey).unwrap_err();
+        assert!(
+            matches!(err, ClientError::SignatureInvalid { .. }),
+            "got {err:?}"
+        );
+        assert_eq!(err.code(), "INTEGRITY_ERROR");
+        assert_eq!(std::fs::read(&current_exe).unwrap(), b"the OLD binary");
+    }
+
+    #[test]
+    fn signed_build_refuses_a_corrupted_signature() {
+        let tag = "v9.9.9";
+        let (pubkey, kp) = test_keypair();
+        let targz = build_targz(&[
+            ("LICENSE", b"Apache-2.0\n", 0o644),
+            ("topos", b"#!/bin/sh\nthe signed binary\n", 0o755),
+        ]);
+        // Corrupt the base64 signature line (line 2 of the .minisig document) — one flipped char.
+        let good = sign_bytes(&kp, &targz);
+        let corrupted: String = good
+            .lines()
+            .enumerate()
+            .map(|(i, line)| {
+                if i == 1 {
+                    let mut chars: Vec<char> = line.chars().collect();
+                    let mid = chars.len() / 2;
+                    chars[mid] = if chars[mid] == 'A' { 'B' } else { 'A' };
+                    chars.into_iter().collect::<String>() + "\n"
+                } else {
+                    line.to_owned() + "\n"
+                }
+            })
+            .collect();
+        assert_ne!(good, corrupted, "the corruption must change the document");
+        let (releases, current_exe) = signed_release(tag, Some(corrupted), "sig-corrupt");
+
+        let err = run_with_key(&releases, &current_exe, tag, &pubkey).unwrap_err();
+        assert!(
+            matches!(err, ClientError::SignatureInvalid { .. }),
+            "got {err:?}"
+        );
+        assert_eq!(err.code(), "INTEGRITY_ERROR");
+        assert_eq!(std::fs::read(&current_exe).unwrap(), b"the OLD binary");
+    }
+
+    #[test]
+    fn signed_build_refuses_a_signature_over_different_bytes() {
+        // A VALID signature by the right key — but over other bytes. The classic swap: serve asset B
+        // with asset A's signature. Must refuse before the binary is touched.
+        let tag = "v9.9.9";
+        let (pubkey, kp) = test_keypair();
+        let wrong_sig = sign_bytes(&kp, b"entirely different bytes");
+        let (releases, current_exe) = signed_release(tag, Some(wrong_sig), "sig-wrong-bytes");
+
+        let err = run_with_key(&releases, &current_exe, tag, &pubkey).unwrap_err();
+        assert!(
+            matches!(err, ClientError::SignatureInvalid { .. }),
+            "got {err:?}"
+        );
+        assert_eq!(std::fs::read(&current_exe).unwrap(), b"the OLD binary");
+    }
+
+    #[test]
+    fn signature_is_checked_before_the_checksum() {
+        // Both the signature AND the checksum are wrong: the refusal must be the SIGNATURE one —
+        // proving the ordering (sig gate first, checksum second, binary never touched).
+        let tag = "v9.9.9";
+        let (pubkey, kp) = test_keypair();
+        let (asset, asset_url, sums_url) = urls(tag);
+        let targz = build_targz(&[("topos", b"tampered binary", 0o755)]);
+        let wrong_sums = format!("{}  {asset}\n", "0".repeat(64));
+        let wrong_sig = sign_bytes(&kp, b"not the tarball");
+        let releases = FakeReleases {
+            latest: tag.to_owned(),
+            blobs: [
+                (asset_url.clone(), targz),
+                (sums_url, wrong_sums.into_bytes()),
+                (format!("{asset_url}.minisig"), wrong_sig.into_bytes()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let exe_dir = scratch("sig-order");
+        let current_exe = exe_dir.join("topos");
+        std::fs::write(&current_exe, b"the OLD binary").unwrap();
+
+        let err = run_with_key(&releases, &current_exe, tag, &pubkey).unwrap_err();
+        assert!(
+            matches!(err, ClientError::SignatureInvalid { .. }),
+            "the signature gate must fire first, got {err:?}"
+        );
+        assert_eq!(std::fs::read(&current_exe).unwrap(), b"the OLD binary");
+    }
+
+    #[test]
+    fn a_wrong_keys_signature_is_refused() {
+        // A valid signature over the right bytes — by a DIFFERENT key. The compiled-in key decides.
+        let tag = "v9.9.9";
+        let (pubkey, _kp) = test_keypair();
+        let (_other_pub, other_kp) = test_keypair();
+        let targz = build_targz(&[
+            ("LICENSE", b"Apache-2.0\n", 0o644),
+            ("topos", b"#!/bin/sh\nthe signed binary\n", 0o755),
+        ]);
+        let (releases, current_exe) =
+            signed_release(tag, Some(sign_bytes(&other_kp, &targz)), "sig-wrong-key");
+
+        let err = run_with_key(&releases, &current_exe, tag, &pubkey).unwrap_err();
+        assert!(
+            matches!(err, ClientError::SignatureInvalid { .. }),
+            "got {err:?}"
+        );
+        assert_eq!(std::fs::read(&current_exe).unwrap(), b"the OLD binary");
+    }
+
+    #[test]
+    fn release_pubkey_when_present_is_a_valid_minisign_key() {
+        // The key-ceremony guard: a pasted Some("…") constant must be a decodable minisign public
+        // key. Today's None state passes vacuously; after the ceremony this catches a bad paste in
+        // `cargo test` before any release ships it.
+        if let Some(key) = RELEASE_PUBKEY {
+            minisign_verify::PublicKey::from_base64(key)
+                .expect("RELEASE_PUBKEY must be the base64 line of a minisign public key");
+        }
     }
 
     #[test]

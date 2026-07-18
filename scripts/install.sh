@@ -5,10 +5,14 @@
 #   1. Detects your OS and CPU architecture (uname) and picks the matching release target.
 #   2. Downloads topos-<target>.tar.gz AND SHA256SUMS from
 #      https://github.com/topos-sh/topos/releases (with retries; GitHub 302s to a CDN).
-#   3. Prints the EXPECTED sha256 (this asset's entry in SHA256SUMS) and the ACTUAL sha256
+#   3. When this installer embeds a release-signing public key (MINISIGN_PUBKEY below is
+#      non-empty), also downloads the asset's .minisig (REQUIRED then) and verifies the
+#      minisign signature — fail-closed — whenever the `minisign` tool is installed;
+#      without the tool the signature step is skipped with a loud note.
+#   4. Prints the EXPECTED sha256 (this asset's entry in SHA256SUMS) and the ACTUAL sha256
 #      (computed locally over the downloaded bytes), and REFUSES to install unless they
 #      match. Verification is never skippable — there is no flag that disables it.
-#   4. Installs the binary to ~/.local/bin (no sudo): staged inside the destination
+#   5. Installs the binary to ~/.local/bin (no sudo): staged inside the destination
 #      directory, then moved into place atomically — a half-written binary can never
 #      appear on your PATH. Finally runs `topos --version` to prove it executes.
 #
@@ -51,6 +55,14 @@ usage() {
 VERSION="${TOPOS_VERSION:-}"
 INSTALL_DIR="${TOPOS_INSTALL_DIR:-$HOME/.local/bin}"
 BASE_URL="${TOPOS_INSTALL_BASE_URL:-https://github.com/topos-sh/topos/releases}"
+
+# The release-signing public key (minisign, the base64 line of minisign.pub). Empty in the
+# pre-key-ceremony state — the checksum below is then the only verification. When non-empty
+# (scripts/mint-release-key.sh prints the exact value to paste here, in the same change that
+# flips the binary's compiled-in RELEASE_PUBKEY), the asset's .minisig becomes REQUIRED and is
+# verified BEFORE the checksum whenever the `minisign` tool is available. Not a knob: this is
+# release-time configuration, deliberately not overridable by flag or environment.
+MINISIGN_PUBKEY=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -195,6 +207,41 @@ if ! fetch "$URL_DIR/SHA256SUMS" "$TMP_DIR/SHA256SUMS"; then
   err "ERROR: could not download SHA256SUMS from $URL_DIR"
   err "Refusing to install an UNVERIFIED binary."
   exit 1
+fi
+
+# ---------- signature (when a release public key is embedded; mirrors the binary's own
+# ---------- self-update order: signature first, then checksum) -------------------------
+
+if [ -n "$MINISIGN_PUBKEY" ]; then
+  say "downloading: $URL_DIR/$ASSET.minisig"
+  if ! fetch "$URL_DIR/$ASSET.minisig" "$TMP_DIR/$ASSET.minisig"; then
+    err "ERROR: could not download $ASSET.minisig from $URL_DIR"
+    err "This installer embeds a release-signing public key, so a signature is REQUIRED"
+    err "for every asset. Refusing to install an unsigned binary."
+    exit 1
+  fi
+  if command -v minisign >/dev/null 2>&1; then
+    if ! minisign -Vm "$TMP_DIR/$ASSET" -x "$TMP_DIR/$ASSET.minisig" -P "$MINISIGN_PUBKEY" >/dev/null 2>&1; then
+      err ""
+      err "ERROR: minisign signature verification FAILED for $ASSET."
+      err "The downloaded bytes are NOT the bytes the release signed."
+      err "Refusing to install. Nothing was installed, and the download was deleted."
+      err "Possible causes:"
+      err "  - a corrupted download"
+      err "  - a tampering proxy or mirror between you and the release host"
+      err "  - a compromised release"
+      err "Please retry once; if it happens again, report it:"
+      err "  https://github.com/topos-sh/topos/issues"
+      exit 1
+    fi
+    say "OK: minisign signature verified."
+  else
+    # The tool is absent: skip loudly, never silently. The sha256 gate below still runs — it is
+    # never skippable — and the shipped binary's own self-update enforces the compiled-in key.
+    say "NOTE: minisign is not installed — skipping signature verification for this install."
+    say "      (The sha256 checksum below is still enforced. To also check the signature,"
+    say "      install minisign and re-run this installer.)"
+  fi
 fi
 
 # ---------- verify (never skippable) ---------------------------------------------------
