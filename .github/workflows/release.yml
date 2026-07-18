@@ -231,11 +231,19 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+    # The signing-key confinement boundary: the job binds to the `release-signing` environment so
+    # the ceremony can store MINISIGN_SECRET_KEY as an ENVIRONMENT secret behind required-reviewer
+    # protection (a tag push alone then cannot reach the key — the release waits for an approval).
+    # Until the environment is configured (it is auto-created unprotected on first run), behavior
+    # is unchanged; the protection rules + the v* tag ruleset live in repo settings (see
+    # docs/RELEASE.md and the ceremony script's printed steps).
+    environment: release-signing
     env:
-      # Release signing is ARMED by the MINISIGN_SECRET_KEY repo secret (minted by the key
-      # ceremony, scripts/mint-release-key.sh). Secrets cannot be tested in `if:` directly, so the
-      # presence check rides a job env var. Absent secret ⇒ 'false' ⇒ the release ships unsigned
-      # (the pre-ceremony state); present ⇒ signing runs and a signing FAILURE fails the release.
+      # Release signing is ARMED by the MINISIGN_SECRET_KEY secret (minted by the key ceremony,
+      # scripts/mint-release-key.sh — an environment secret of `release-signing` above). Secrets
+      # cannot be tested in `if:` directly, so the presence check rides a job env var. Absent
+      # secret ⇒ 'false' ⇒ the release ships unsigned (the pre-ceremony state); present ⇒ signing
+      # runs and a signing FAILURE fails the release.
       HAVE_MINISIGN_KEY: ${{ secrets.MINISIGN_SECRET_KEY != '' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -289,11 +297,18 @@ jobs:
       # Minisign release signing (see docs/RELEASE.md). Runs AFTER the checksums so SHA256SUMS is
       # itself signable; the `.minisig` files ride the same `dist/*` upload as every other asset.
       # No `continue-on-error`: with the secret armed, a signing failure fails the release.
-      - name: install minisign
+      - name: install minisign (pinned)
         if: env.HAVE_MINISIGN_KEY == 'true'
+        # A sha256-PINNED official minisign release binary — never an unpinned package fetched
+        # moments before it touches the signing key. Bumping the version means updating BOTH the
+        # URL and the hash here, deliberately.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends minisign
+          curl -fsSL -o "$RUNNER_TEMP/minisign.tar.gz" \
+            https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
+          echo "9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73  $RUNNER_TEMP/minisign.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/minisign.tar.gz" -C "$RUNNER_TEMP"
+          sudo install "$RUNNER_TEMP/minisign-linux/x86_64/minisign" /usr/local/bin/minisign
+          minisign -v
       - name: sign the release assets (minisign)
         if: env.HAVE_MINISIGN_KEY == 'true'
         env:
@@ -307,6 +322,10 @@ jobs:
           umask 077
           printf '%s\n' "$MINISIGN_SECRET_KEY" > "$keyfile"
           trap 'rm -f "$keyfile"' EXIT
+          # The trusted comment BINDS each signature to this release: the self-updater and a
+          # pinned-version install verify the signed comment names the exact tag + asset they
+          # resolved, so a valid signature from an older release cannot be re-served under a newer
+          # tag. Keep the format `topos-sh/topos <tag> <file>` — the clients token-match it.
           for f in dist/*.tar.gz dist/install.sh dist/SHA256SUMS; do
             minisign -S -s "$keyfile" -m "$f" \
               -t "topos-sh/topos ${GITHUB_REF_NAME} $(basename "$f")"

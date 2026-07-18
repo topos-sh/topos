@@ -58,22 +58,34 @@ How the pieces fit:
   (`release_pubkey_when_present_is_a_valid_minisign_key`) guards the paste.
 - **CI** (`.github/workflows/release.yml`, the `release` job) — with the `MINISIGN_SECRET_KEY`
   secret present, the job signs `dist/*.tar.gz`, `install.sh`, and `SHA256SUMS` (pre-hashed
-  minisign, a per-asset trusted comment naming the tag) and uploads the `.minisig` files alongside
-  the assets; a signing failure FAILS the release. With the secret absent, the release proceeds
-  unsigned — today's behavior, bit-for-bit. The key touches only a `0600` file under `RUNNER_TEMP`,
-  removed when the step ends.
+  minisign; the trusted comment `topos-sh/topos <tag> <file>` binds each signature to ONE release
+  — the clients token-match it) and uploads the `.minisig` files alongside the assets; a signing
+  failure FAILS the release. With the secret absent, the release proceeds unsigned — today's
+  behavior, bit-for-bit. The signer itself is a sha256-PINNED official minisign binary (never an
+  unpinned package install next to the key), the key touches only a `0600` file under
+  `RUNNER_TEMP` (removed when the step ends), and the job binds to the **`release-signing`
+  environment**: store the secret as an ENVIRONMENT secret and give the environment a required
+  reviewer, so a pushed `v*` tag alone cannot reach the key — pair it with a tag ruleset
+  restricting `v*` creation to maintainers (both are repo settings; the ceremony script prints
+  the exact steps).
 - **The self-updater** (`topos self-update`) — with `RELEASE_PUBKEY = Some(…)` compiled in,
   signature verification is MANDATORY and fail-closed: the asset's `.minisig` is fetched and
   verified over the downloaded bytes BEFORE the checksum gate and long before the binary is
-  touched; a missing or invalid signature is a typed `INTEGRITY_ERROR` with no unsigned fallback.
-  With `None` (today) the checksum path is unchanged and the outcome discloses `signed: false` +
-  the unsigned-build note.
+  touched; a missing or invalid signature is a typed `INTEGRITY_ERROR` with no unsigned fallback,
+  and the SIGNED trusted comment must name the exact tag + asset the update resolved — so a valid
+  signature minted for an OLD release cannot be re-served under a newer tag (a substitution the
+  checksum cannot catch, since whoever moves the asset moves its SHA256SUMS too). With `None`
+  (today) the checksum path is unchanged and the outcome discloses `signed: false` + the
+  unsigned-build note.
 - **The installer** (`scripts/install.sh`) — with `MINISIGN_PUBKEY` set, the asset's `.minisig` is
-  REQUIRED and verified before the checksum whenever the `minisign` tool is installed; without the
-  tool the signature step is skipped with a loud note (the sha256 gate below it is never
-  skippable). The installer is fetched from the same origin as the assets, so its embedded key is
-  defense-in-depth rather than a trust bootstrap — the binary's COMPILED-IN key (and GitHub
-  attestation) are the origin-independent anchors.
+  REQUIRED and verified before the checksum whenever the `minisign` tool is installed (a pinned
+  `--version` install additionally binds the signed comment to that tag); without the tool the
+  signature step is skipped with a loud, honest note — the sha256 gate below it is never
+  skippable. The skip is a DELIBERATE tradeoff, not an oversight: minisign is preinstalled
+  nowhere, so a hard requirement would break virtually every `curl | sh` first install, and the
+  installer rides the same origin as the assets — installer-side verification can never exceed
+  origin trust. The origin-independent anchors are the binary's COMPILED-IN key (every
+  `self-update` thereafter is fail-closed) and GitHub artifact attestation.
 
 What signing adds over `SHA256SUMS`: checksums prove transit integrity (the sums file rides the
 same origin as the asset), not origin integrity — whoever controls the release controls both files.
@@ -84,7 +96,10 @@ Rotation is a transitional release signed with the OLD key that embeds the NEW p
 ceremony script prints the full procedure.
 
 - [ ] **Key ceremony** — not yet run (deliberate: mint the key at the first public release). Run
-      `scripts/mint-release-key.sh` and follow its printed steps; nothing else needs editing.
+      `scripts/mint-release-key.sh` and follow its printed steps — including the two repo
+      settings it names (required reviewer on the `release-signing` environment; a `v*` tag
+      ruleset); nothing else needs editing. Until then, releases ship checksum-only — treat the
+      ceremony as a launch-gate item.
 
 ## Already in place (verify green at the gate)
 

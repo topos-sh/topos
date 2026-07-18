@@ -378,7 +378,9 @@ are asserted byte-equal in tests.
   runs the **release-signature gate** (`RELEASE_PUBKEY`, an Option-shaped compiled-in minisign key:
   `Some` makes the asset's `.minisig` MANDATORY and fail-closed — fetched + verified over the
   downloaded bytes BEFORE the checksum, a missing/invalid signature is a typed `INTEGRITY_ERROR`
-  with no unsigned fallback; `None` — the pre-key-ceremony state — keeps checksum-only behavior,
+  with no unsigned fallback, and the SIGNED trusted comment must name the exact tag + asset the
+  update resolved, so an old release's valid signature cannot be re-served under a newer tag;
+  `None` — the pre-key-ceremony state — keeps checksum-only behavior,
   disclosed as `signed: false` + an "unsigned build" note; the verify side is `minisign-verify`,
   pure Rust with zero deps, while SIGNING exists only in CI and a test-only dev-dependency —
   `scripts/mint-release-key.sh` is the ceremony that flips the constant, and `docs/RELEASE.md`

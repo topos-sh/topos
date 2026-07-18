@@ -57,9 +57,18 @@ Flip the two committed files in ONE change, and set one secret:
 
      MINISIGN_PUBKEY="$PUB_B64"
 
-3. GitHub Actions — arm release signing (the secret is the whole secret-key FILE, both lines):
+3. GitHub Actions — arm release signing. The release job binds to the \`release-signing\`
+   ENVIRONMENT, so store the secret THERE (not as a plain repo secret — an environment secret
+   stays confined behind the environment's protection rules). The secret is the whole
+   secret-key FILE, both lines:
 
-     gh secret set MINISIGN_SECRET_KEY --repo topos-sh/topos < "$OUT_DIR/minisign.key"
+     gh api -X PUT repos/topos-sh/topos/environments/release-signing >/dev/null
+     gh secret set MINISIGN_SECRET_KEY --repo topos-sh/topos --env release-signing < "$OUT_DIR/minisign.key"
+
+   Then two one-time repo settings (not committable — do them in the GitHub UI):
+     - environment \`release-signing\`: add yourself as a REQUIRED REVIEWER, so a pushed tag
+       alone cannot reach the signing key — each release waits for your approval first;
+     - a tag RULESET restricting \`v*\` tag creation to maintainers.
 
 Then:
   - run \`cargo test -p topos\` — a paste guard validates the constant decodes as a minisign key;
@@ -67,6 +76,10 @@ Then:
     that commit refuses an unsigned or tampered self-update);
   - keep an OFFLINE copy of $OUT_DIR (a password manager or an encrypted drive), then remove any
     working copy. Never commit it; never paste minisign.key anywhere but the GitHub secret.
+
+Signing OUTSIDE the pipeline (avoid if you can): the clients token-match the SIGNED trusted
+comment against the release they resolved, so any manual signature must use the pipeline's
+exact format:  minisign -S -s minisign.key -m <file> -t "topos-sh/topos <tag> <file>"
 
 Rotation (only if the key must ever change):
   - mint a NEW keypair with this script (a fresh directory);

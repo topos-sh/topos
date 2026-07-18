@@ -195,7 +195,7 @@ fn self_update_with_key(
                     asset: asset.clone(),
                     reason: "file is not valid UTF-8".into(),
                 })?;
-            verify_release_signature(key, sig_text, &tarball, &asset)?;
+            verify_release_signature(key, sig_text, &tarball, &tag, &asset)?;
             true
         }
         None => false,
@@ -245,13 +245,21 @@ fn self_update_with_key(
 }
 
 /// Verify `tarball` against the minisign signature document `sig_text` using the compiled-in release
-/// public key. Strict: only the modern PRE-HASHED minisign algorithm is accepted (`allow_legacy =
-/// false` — the release pipeline's signing command produces exactly that), and every failure maps to
-/// the one typed [`ClientError::SignatureInvalid`] refusal.
+/// public key. Strict, twice over:
+/// - only the modern PRE-HASHED minisign algorithm is accepted (`allow_legacy = false` — the
+///   release pipeline's signing command produces exactly that);
+/// - the SIGNED trusted comment must name the exact `tag` + `asset` this update resolved (the
+///   pipeline signs `topos-sh/topos <tag> <asset>`, and minisign's global signature covers the
+///   comment). Without the binding, a valid signature over an OLD release's bytes could be
+///   re-served under a newer tag — a substitution the checksum cannot catch either, because the
+///   attacker who moves the asset also moves its SHA256SUMS.
+///
+/// Every failure maps to the one typed [`ClientError::SignatureInvalid`] refusal.
 fn verify_release_signature(
     pubkey_b64: &str,
     sig_text: &str,
     tarball: &[u8],
+    tag: &str,
     asset: &str,
 ) -> Result<(), ClientError> {
     let refuse = |reason: String| ClientError::SignatureInvalid {
@@ -266,7 +274,19 @@ fn verify_release_signature(
     let sig = minisign_verify::Signature::decode(sig_text)
         .map_err(|e| refuse(format!("is malformed ({e})")))?;
     key.verify(tarball, &sig, false)
-        .map_err(|e| refuse(format!("does not verify ({e})")))
+        .map_err(|e| refuse(format!("does not verify ({e})")))?;
+    // The comment is authenticated by the global signature `verify` just checked, so token-matching
+    // it here is sound. Exact whitespace tokens — never a substring (a tag must not match inside a
+    // longer tag or a filename).
+    let comment = sig.trusted_comment();
+    let names = |token: &str| comment.split_whitespace().any(|t| t == token);
+    if !(names(tag) && names(asset)) {
+        return Err(refuse(format!(
+            "is not bound to this release — the signed trusted comment ({comment:?}) does not \
+             name {tag} and {asset}"
+        )));
+    }
+    Ok(())
 }
 
 /// Prepend a leading 'v' if the tag looks like a bare `X.Y.Z`.
@@ -805,18 +825,25 @@ mod tests {
         (kp.pk.to_base64(), kp)
     }
 
-    /// Sign `bytes` the way the release pipeline does (pre-hashed — the modern minisign default);
-    /// returns the full `.minisig` document text.
-    fn sign_bytes(kp: &minisign::KeyPair, bytes: &[u8]) -> String {
+    /// Sign `bytes` the way the release pipeline does: pre-hashed (the modern minisign default),
+    /// with the pipeline's trusted-comment format binding the signature to one release. Returns the
+    /// full `.minisig` document text.
+    fn sign_bytes(kp: &minisign::KeyPair, bytes: &[u8], trusted_comment: &str) -> String {
         minisign::sign(
             Some(&kp.pk),
             &kp.sk,
             std::io::Cursor::new(bytes),
-            Some("topos test signature"),
+            Some(trusted_comment),
             Some("topos test"),
         )
         .expect("sign")
         .into_string()
+    }
+
+    /// The release pipeline's trusted comment for `tag` + this build's asset — what CI's
+    /// `minisign -S -t` writes and what the verifier binds against.
+    fn release_comment(tag: &str) -> String {
+        format!("topos-sh/topos {tag} topos-{TARGET_TRIPLE}.tar.gz")
     }
 
     /// A signed-release fixture: the tarball + correct SHA256SUMS + a `.minisig` (as `sig` says) at
@@ -879,7 +906,11 @@ mod tests {
             ("LICENSE", b"Apache-2.0\n", 0o644),
             ("topos", b"#!/bin/sh\nthe signed binary\n", 0o755),
         ]);
-        let (releases, current_exe) = signed_release(tag, Some(sign_bytes(&kp, &targz)), "sig-ok");
+        let (releases, current_exe) = signed_release(
+            tag,
+            Some(sign_bytes(&kp, &targz, &release_comment(tag))),
+            "sig-ok",
+        );
 
         let out = run_with_key(&releases, &current_exe, tag, &pubkey)
             .expect("a valid signature + checksum installs");
@@ -921,7 +952,7 @@ mod tests {
             ("topos", b"#!/bin/sh\nthe signed binary\n", 0o755),
         ]);
         // Corrupt the base64 signature line (line 2 of the .minisig document) — one flipped char.
-        let good = sign_bytes(&kp, &targz);
+        let good = sign_bytes(&kp, &targz, &release_comment(tag));
         let corrupted: String = good
             .lines()
             .enumerate()
@@ -954,7 +985,7 @@ mod tests {
         // with asset A's signature. Must refuse before the binary is touched.
         let tag = "v9.9.9";
         let (pubkey, kp) = test_keypair();
-        let wrong_sig = sign_bytes(&kp, b"entirely different bytes");
+        let wrong_sig = sign_bytes(&kp, b"entirely different bytes", &release_comment(tag));
         let (releases, current_exe) = signed_release(tag, Some(wrong_sig), "sig-wrong-bytes");
 
         let err = run_with_key(&releases, &current_exe, tag, &pubkey).unwrap_err();
@@ -974,7 +1005,7 @@ mod tests {
         let (asset, asset_url, sums_url) = urls(tag);
         let targz = build_targz(&[("topos", b"tampered binary", 0o755)]);
         let wrong_sums = format!("{}  {asset}\n", "0".repeat(64));
-        let wrong_sig = sign_bytes(&kp, b"not the tarball");
+        let wrong_sig = sign_bytes(&kp, b"not the tarball", &release_comment(tag));
         let releases = FakeReleases {
             latest: tag.to_owned(),
             blobs: [
@@ -1007,13 +1038,45 @@ mod tests {
             ("LICENSE", b"Apache-2.0\n", 0o644),
             ("topos", b"#!/bin/sh\nthe signed binary\n", 0o755),
         ]);
-        let (releases, current_exe) =
-            signed_release(tag, Some(sign_bytes(&other_kp, &targz)), "sig-wrong-key");
+        let (releases, current_exe) = signed_release(
+            tag,
+            Some(sign_bytes(&other_kp, &targz, &release_comment(tag))),
+            "sig-wrong-key",
+        );
 
         let err = run_with_key(&releases, &current_exe, tag, &pubkey).unwrap_err();
         assert!(
             matches!(err, ClientError::SignatureInvalid { .. }),
             "got {err:?}"
+        );
+        assert_eq!(std::fs::read(&current_exe).unwrap(), b"the OLD binary");
+    }
+
+    #[test]
+    fn a_valid_signature_for_a_different_release_is_refused() {
+        // The substitution attack the trusted-comment binding closes: a VALID signature by the
+        // RIGHT key over the EXACT bytes served — but minted for an OLD release (its signed
+        // trusted comment names the old tag). Re-served under a newer tag, the crypto verifies and
+        // the checksum matches (the attacker moved SHA256SUMS too) — the comment binding must
+        // still refuse it.
+        let tag = "v9.9.9";
+        let (pubkey, kp) = test_keypair();
+        let targz = build_targz(&[
+            ("LICENSE", b"Apache-2.0\n", 0o644),
+            ("topos", b"#!/bin/sh\nthe signed binary\n", 0o755),
+        ]);
+        let old_release_sig = sign_bytes(&kp, &targz, &release_comment("v1.0.0"));
+        let (releases, current_exe) = signed_release(tag, Some(old_release_sig), "sig-substitute");
+
+        let err = run_with_key(&releases, &current_exe, tag, &pubkey).unwrap_err();
+        assert!(
+            matches!(err, ClientError::SignatureInvalid { .. }),
+            "got {err:?}"
+        );
+        assert_eq!(err.code(), "INTEGRITY_ERROR");
+        assert!(
+            format!("{err}").contains("not bound to this release"),
+            "{err}"
         );
         assert_eq!(std::fs::read(&current_exe).unwrap(), b"the OLD binary");
     }

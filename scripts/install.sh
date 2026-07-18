@@ -235,12 +235,31 @@ if [ -n "$MINISIGN_PUBKEY" ]; then
       exit 1
     fi
     say "OK: minisign signature verified."
+    # A pinned --version additionally binds the SIGNED trusted comment to that tag: the release
+    # pipeline signs "topos-sh/topos <tag> <asset>" and minisign's global signature covers the
+    # comment, so a valid signature minted for a DIFFERENT release cannot be re-served under this
+    # tag. (A "latest" install has no expected tag to bind against; the installed binary's own
+    # self-update binds every update it performs.)
+    if [ -n "$VERSION" ]; then
+      TC_LINE="$(sed -n 's/^trusted comment://p' "$TMP_DIR/$ASSET.minisig")"
+      if ! printf '%s\n' "$TC_LINE" | awk -v tag="$VERSION" '{ for (i = 1; i <= NF; i++) if ($i == tag) ok = 1 } END { exit ok ? 0 : 1 }'; then
+        err ""
+        err "ERROR: the signature is valid but was minted for a DIFFERENT release."
+        err "  requested release: $VERSION"
+        err "  signed comment:   $TC_LINE"
+        err "Refusing to install. Nothing was installed, and the download was deleted."
+        exit 1
+      fi
+      say "OK: signature is bound to release $VERSION."
+    fi
   else
-    # The tool is absent: skip loudly, never silently. The sha256 gate below still runs — it is
-    # never skippable — and the shipped binary's own self-update enforces the compiled-in key.
-    say "NOTE: minisign is not installed — skipping signature verification for this install."
-    say "      (The sha256 checksum below is still enforced. To also check the signature,"
-    say "      install minisign and re-run this installer.)"
+    # The tool is absent: skip LOUDLY, never silently. The sha256 gate below still runs — it is
+    # never skippable — but be honest about what it proves without a signature.
+    say "NOTE: minisign is not installed — the downloaded signature was NOT verified."
+    say "      The sha256 checksum below is still enforced, but it rides the SAME origin as the"
+    say "      asset (transit integrity, not origin integrity). For the stronger check, install"
+    say "      minisign and re-run this installer — and note the installed binary's own"
+    say "      'topos self-update' always enforces its compiled-in release key."
   fi
 fi
 
