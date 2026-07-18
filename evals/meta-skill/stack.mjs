@@ -244,6 +244,12 @@ export class Stack {
         p.kill("SIGKILL");
       } catch {}
     }
+    // Drop the run's database — never-dropped per-run databases accumulate ~90 MB each until
+    // the Docker VM disk fills (it did). The vault/web processes are dead by now; FORCE clears
+    // any straggler connection. Best-effort: teardown must never throw.
+    try {
+      psql(`DROP DATABASE "${this.db}" WITH (FORCE)`);
+    } catch {}
   }
 }
 

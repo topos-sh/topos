@@ -114,8 +114,11 @@ node evals/meta-skill/run.mjs --task follow-catalog-skill --arm both
 node evals/meta-skill/run.mjs --task all --arm both --reps 3 --jobs 4
 
 # afterwards:
-docker rm -f topos-bundle-d-pg
+docker rm -vf topos-bundle-d-pg
 ```
+
+The `-v` matters: without it the postgres image's anonymous data volume leaks on every container
+recreation and eventually fills the Docker VM disk.
 
 **Concurrency (`--jobs N`).** The default is 1 — the serial in-process path. With `--jobs N`
 cells run on N lanes as child processes pulling from one queue; every cell was already fully
