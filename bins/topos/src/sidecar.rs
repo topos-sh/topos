@@ -179,6 +179,13 @@ impl Layout {
         self.state_dir().join("stat_cache.json")
     }
 
+    /// `state/version_check.json` — when the passive version check last ATTEMPTED its probe (epoch
+    /// millis; stamped BEFORE the probe, so an offline machine still holds the daily cadence). A
+    /// plain doc — one timestamp, never a secret.
+    pub(crate) fn version_check_path(&self) -> PathBuf {
+        self.state_dir().join("version_check.json")
+    }
+
     /// `ops/` — the contribute write-ahead log directory (`ops/<op_id>.json`, one per in-flight op). A
     /// home-level dir (outside `skills/<id>/`, so a publish rename never disturbs an in-flight record), it
     /// is covered by the footprint walk + uninstall like any other `~/.topos/` path.

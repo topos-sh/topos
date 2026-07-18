@@ -1429,6 +1429,59 @@ impl crate::release::ReleaseSource for UreqReleases {
 }
 
 // =================================================================================================
+// UreqVersionProbe — the passive version check's transport: ONE redirect-disabled GET of the public
+// `releases/latest` URL on a deliberately short, hard timeout. The 302's `Location` header is the
+// whole answer (no API, no auth, no JSON body); every failure is `None` — the nag is silent by
+// contract, so this transport never errors. Its OWN agent (not `agent_config()`): the plane
+// transports follow redirects and tolerate slow bodies; the probe must do neither.
+// =================================================================================================
+
+/// The URL whose 302 names the latest release (the same public coordinates `UreqReleases` speaks).
+const VERSION_PROBE_URL: &str = "https://github.com/topos-sh/topos/releases/latest";
+
+/// The hard ceiling on the probe's one request — a passive nag must never make a command feel slow.
+const VERSION_PROBE_TIMEOUT_SECS: u64 = 2;
+
+/// The blocking `ureq` version probe: redirects disabled, 2s global timeout.
+pub(crate) struct UreqVersionProbe {
+    agent: ureq::Agent,
+}
+
+impl UreqVersionProbe {
+    pub(crate) fn new() -> Self {
+        let config = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            // Redirects DISABLED — the redirect response itself comes back to the caller.
+            .max_redirects(0)
+            // ONE global ceiling over the whole request (DNS + connect + TLS + response), so the
+            // probe can never hold a finished command hostage.
+            .timeout_global(Some(Duration::from_secs(VERSION_PROBE_TIMEOUT_SECS)))
+            .build();
+        Self {
+            agent: ureq::Agent::new_with_config(config),
+        }
+    }
+}
+
+impl crate::release::ReleaseProbe for UreqVersionProbe {
+    fn latest_release_location(&self) -> Option<String> {
+        let resp = self
+            .agent
+            .get(VERSION_PROBE_URL)
+            .header("User-Agent", RELEASE_USER_AGENT)
+            .call()
+            .ok()?;
+        if !resp.status().is_redirection() {
+            return None;
+        }
+        resp.headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    }
+}
+
+// =================================================================================================
 // UreqGitSource — the real remote-source fetcher for `add <owner/repo>`. Downloads a repo as a `.tar.gz`
 // from GitHub's API tarball endpoint (which 302-redirects to codeload; the agent follows it) over the same
 // blocking agent as the other transports. GitHub 403s a UA-less request, so every call carries this

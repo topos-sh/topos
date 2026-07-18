@@ -40,6 +40,7 @@ mod self_update;
 pub(crate) mod sync_engine;
 mod unfollow;
 mod uninstall;
+mod version_check;
 
 pub(crate) use add::{
     AddRemoteOpts, KeepAsYoursOutcome, add, add_remote, add_with_name, keep_as_yours,
@@ -103,6 +104,7 @@ pub(crate) use review::{ReviewConnectors, ReviewOutcome, ReviewVerdict, review_d
 pub(crate) use self_update::{SelfUpdateAction, SelfUpdateOpts, SelfUpdateOutcome, self_update};
 pub(crate) use unfollow::{UnfollowConnectors, UnfollowOutcome, unfollow};
 pub(crate) use uninstall::{UninstallApplied, UninstallDescribe, UninstallOutcome, uninstall};
+pub(crate) use version_check::{version_check_env_allows, version_nag};
 
 use topos_core::digest::to_hex;
 use topos_gitstore::Store;

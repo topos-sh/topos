@@ -394,6 +394,19 @@ are asserted byte-equal in tests.
   air-gap (a non-HTTPS base is warned, the checksum still enforced). NOT a behavior verb — it
   touches no skills, no plane, no account, and mints no device identity. (`topos upgrade` stays the
   hidden disambiguation refusal toward `update` / `self-update`.)
+- **The passive version check** (`ops/version_check`, `release::ReleaseProbe`,
+  `plane_http::UreqVersionProbe`) — after a SUCCESSFUL eligible command, at most once per day, the
+  binary probes the public GitHub `releases/latest` 302 redirect (redirects DISABLED — the tag is
+  parsed from the `Location` header; no API, no auth, no JSON) on a hard 2 s timeout and prints ONE
+  newer-version line on STDERR (`stdout` stays byte-clean for `--json` consumers; nothing enters
+  the envelope). Quiet by construction: every probe failure is silent, and the stamp
+  (`state/version_check.json`) is written BEFORE the probe so an offline machine holds the daily
+  cadence instead of re-dialing per command; the FIRST eligible command only lays the stamp and
+  never probes (a fresh install is current; short-lived test homes never dial out); the quiet sweep
+  (`update --quiet` — the session-start hook path), `self-update`/`upgrade`, `uninstall` (the stamp
+  would recreate the state dir the teardown deleted), a `TOPOS_INSTALL_BASE_URL` mirror (it cannot
+  answer `/latest`), and `TOPOS_NO_UPDATE_CHECK=1` all skip the check entirely — gated in the
+  composition root (`app::run`), which runs the check ONCE after the dispatch, never per-verb.
 
 - **The reshaped team verbs** (`ops/{remove,channel,protect,invite,review,log,list,pull,publish}`) — each
   runs the ONE resolution grammar + the two-phase describe/`--yes` gate over the built directory row ops:

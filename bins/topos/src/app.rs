@@ -23,9 +23,46 @@ use crate::plane_http::{FileFollow, UreqDeviceClient, UreqPlane};
 use crate::sidecar::{Layout, recover};
 use crate::{enroll, identity, logfile, ops, render};
 
-/// Run the CLI; returns the process exit code.
+/// Run the CLI; returns the process exit code. A thin wrapper over the dispatch: AFTER a successful
+/// eligible command it runs the passive version check (stderr-only, self-throttled to at most one
+/// probe per day, silent on every failure — `ops::version_check` owns the policy). The check never
+/// runs on the quiet sweep (the session-start hook path gains zero latency and zero noise), on
+/// `self-update`/`upgrade` (they ARE the release surface), on `uninstall` (it would recreate the
+/// state dir the command just deleted), or on a failed command.
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
+    let check = version_check_applies(&cli.command) && ops::version_check_env_allows();
+    let code = run_command(cli);
+    if check && code == ExitCode::SUCCESS {
+        let fs = RealFs;
+        let clock = RealClock;
+        let layout = Layout::new(&resolve_home());
+        let now_ms = i64::try_from(clock.now_unix_millis()).unwrap_or(i64::MAX);
+        let probe = crate::plane_http::UreqVersionProbe::new();
+        if let Some(line) = ops::version_nag(&fs, &layout, now_ms, &probe) {
+            // stderr ONLY — stdout already carries the command's document (`--json` stays byte-clean).
+            eprintln!("{line}");
+        }
+    }
+    code
+}
+
+/// Whether the passive version check may run after `command`. Excluded: the quiet sweep (any
+/// `update --quiet` — hooks fire on every session event and must stay silent + latency-free),
+/// `self-update` and its `upgrade` disambiguation (that surface just spoke to releases itself),
+/// and `uninstall` (the check's stamp would recreate `~/.topos/state` after the teardown).
+fn version_check_applies(command: &Command) -> bool {
+    !matches!(
+        command,
+        Command::SelfUpdate { .. }
+            | Command::Upgrade
+            | Command::Uninstall { .. }
+            | Command::Update { quiet: true, .. }
+    )
+}
+
+/// Parse-free dispatch: wire the real seams, run recovery, dispatch the verb, emit the outcome.
+fn run_command(cli: Cli) -> ExitCode {
     let json = cli.json;
     // The global `--workspace` — which workspace the ambient write verbs act in (and the filter that
     // disambiguates a skill name shared across workspaces). Optional; inferred with a single workspace.
