@@ -899,3 +899,21 @@ smaller. The elaboration was NOT load-bearing; the rules were.
 + the org-bound consent carve-out, all at −28% bytes. Program cumulative API-equivalent usage
 ≈ $354 (smokes $20 + baseline $84 + three iteration matrices $83/$79/$84 + ~$4 lost to the
 poisoned wave).
+
+---
+
+## 2026-07-18 — correction: publish-stale-base-recovery was never the cell we designed
+
+The stale-base root-cause work (this branch) invalidates the cell's design assumption, recorded
+here so nobody reads the historical numbers wrong. The fixture's draft (append at end of
+SKILL.md) and the team's v2 edit (last content line) are ADJACENT hunks — diff3 reports a
+content conflict, never the clean merge the task comment promised. So in EVERY matrix the cell
+actually measured: stale-base refusal → update records a conflict → escape a recorded conflict
+whose `PUBLISH_BLOCKED` envelope pointed at the one verb that cannot clear it (bare
+`update <skill>` re-discloses; `--reset` didn't clear the record either — both now fixed). The
+"noisiest cell in the set" was agents finding — or not finding — an unnamed escape hatch
+(`--onto-current`, or hand-resolving the markers). Verdicts stand as recorded (the end state
+was honestly reachable and reached), but the cell's DIFFICULTY was a product bug plus fixture
+geometry, not task design. The task set stays frozen; with the envelope fixed, expect this
+cell's pass rates and turn counts to improve in both arms on any future matrix, and read that
+improvement as the PRODUCT fix landing, not skill/model movement.
