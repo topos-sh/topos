@@ -171,15 +171,19 @@ read-only, from the vault's `plane` schema; it holds no signing key, computes no
 device-signed write — publishing stays on the enrolled device.
 
 **The left panel** (`app/components/shell/{shell-chrome,app-sidebar}.tsx`, data from
-`app/lib/shell/chrome.server.ts`) is one shadcn collapsible sidebar shared by both signed-in layouts —
-whose content column's header bar carries the global BREADCRUMB trail
-(`app/components/shell/breadcrumbs.tsx`: workspace → section → resource → tab, driven by the route
-match against one central registry; signed-in only, since the anonymous teaser renders no chrome): a
-header strip carrying the `topos_` wordmark beside the ONE collapse toggle (reachable in the icon-collapsed
-state), then the workspace identity (STATIC name in single tenancy, a seat DROPDOWN in multi), the
-workspace's **Skills** and **Channels** lists (each row a name linking to its face, each section header a
-`+ new` — Skills opens a **publish-from-your-agent** dialog of copyable lines composed for this workspace's
-real address, since the app never authors a bundle; Channels links to the create form), the workspace nav
+`app/lib/shell/chrome.server.ts`) is one shadcn collapsible sidebar shared by both signed-in layouts.
+The content column's header bar carries the `topos_` wordmark (linking to the workspace root); the
+global BREADCRUMB trail (`app/components/shell/breadcrumbs.tsx`: workspace → section → resource →
+tab, driven by the route match against one central registry) renders UNDER EVERY PAGE'S TITLE — the
+shared `PageHeader`/`SkillHeader` render it once, the bespoke-title pages place it directly; the
+component is self-sufficient (it shape-detects the chrome in `useMatches()` loader data, both layout
+shapes, no hardcoded route ids — composition-safe), so an anonymous teaser, carrying no chrome,
+renders no trail. The panel: a header strip carrying the workspace identity (STATIC name in single
+tenancy, a seat DROPDOWN in multi; the `topos_` wordmark as the off-workspace fallback) beside the
+ONE collapse toggle (reachable in the icon-collapsed state), the workspace's **Skills** and
+**Channels** lists (each row a name linking to its face, each section header a `+ new` — Skills opens
+a **publish-from-your-agent** dialog of copyable lines composed for this workspace's real address,
+since the app never authors a bundle; Channels links to the create form), the workspace nav
 (Members · Settings, from the registry's `workspace` section) as plain bottom items, and an account menu
 footer (the registry's non-`workspace` sections + Sign out). The Skills/Channels/nav sections render only
 when a workspace is in scope; every list is loader-derived, so the panel — living in the layout — never
@@ -187,7 +191,10 @@ reads a child route's `:ws` param (it builds links from the loader-supplied addr
 `app/lib/ws-path.ts`). The chrome loader derives the active seat from the request's DESTINATION
 path — React Router's client navigations fetch loaders from `<path>.data`, and that suffix is
 normalized before the seat match (`destinationPathname`), so a client-side arrival at a workspace
-dashboard keeps the full panel.
+dashboard keeps the full panel. An OFF-workspace destination (the person-scoped `/account/devices`,
+`/new`) falls back to the LAST ACTIVE workspace — the `topos_active_ws` cookie the panel writes
+client-side, matched strictly against the person's proven memberships (else the first seat) — so
+navigating to a person-scoped page keeps the panel as it was instead of blanking it.
 
 **Stack.** React Router 8 in framework mode (SSR, Vite, bun) · React 19 · Better Auth on Drizzle /
 Postgres · Tailwind 4 with the Klein token set (`DESIGN.md` is the source of truth; the `--color-*` table
