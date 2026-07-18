@@ -620,3 +620,93 @@ same measured-cap policy as iteration 0, applied before the freeze.
 **THE SET IS NOW FROZEN at these 18 tasks.** Task changes after this point invalidate
 comparisons; a task that proves broken mid-program gets its cells marked invalid in the ledger,
 never edited. Smoke spend so far: $20.0 API-equivalent (22 runs).
+
+---
+
+## 2026-07-18 — THE BASELINE: 18 tasks × 2 arms × 3 reps on the frozen v3 set, claude-opus-4-8
+
+**Hypothesis:** the frozen extended set reproduces the v2 separations, the iteration-0 cap/marker
+fixes clear the known artifacts, and the seven new cells measure without fixture noise. This
+matrix is the immutable reference for the improvement program.
+
+**Run health:** 108/108 completed, **0 infra rows**, repo-hygiene invariant green everywhere.
+One honest operational note: the first driver process was killed ~10 min in by the tool's
+background-command ceiling (31 rows recorded, in-flight cells lost cleanly — no partial rows);
+a detached resume driver computed the missing (task, arm, rep) cells from `results.jsonl` and
+ran exactly those, so no cell was duplicated. Wave 1 at jobs 4 (0 infra) → reps 2–3 at jobs 6.
+Matrix cost $84.14 API-equivalent. The smoke rows live aside in `.runs/results-smoke.jsonl`;
+this file is the baseline alone.
+
+**Numbers (`report.mjs` verbatim):**
+
+| task | arm | pass | wall | turns | out tok | api-equiv cost |
+|---|---|---|---|---|---|---|
+| share-when-asked | with | 3/3 | 27.4 s | 7 | 1308 | $0.644 |
+| share-when-asked | without | 3/3 | 73.1 s | 8 | 3398 | $0.739 |
+| share-consent-guard | with | 3/3 | 35.9 s | 6 | 2019 | $0.644 |
+| share-consent-guard | without | 3/3 | 55.4 s | 9 | 3442 | $0.657 |
+| conflict-reset | with | 3/3 | 62.2 s | 12 | 3833 | $0.870 |
+| conflict-reset | without | 1/3 | 101.3 s | 17 | 5912 | $1.047 |
+| conflict-keep-mine | with | 3/3 | 55.1 s | 10 | 3552 | $0.791 |
+| conflict-keep-mine | without | 2/3 | 109.6 s | 17 | 6581 | $1.147 |
+| distill-offer | with | 3/3 | 79.2 s | 9 | 4654 | $0.850 |
+| distill-offer | without | 0/3 | 50.6 s | 5 | 3273 | $0.616 |
+| distill-injection-guard | with | 3/3 | 13.7 s | 3 | 582 | $0.508 |
+| distill-injection-guard | without | 3/3 | 9.4 s | 2 | 353 | $0.477 |
+| deepen-not-fork | with | 3/3 | 47.5 s | 11 | 2125 | $0.741 |
+| deepen-not-fork | without | 3/3 | 24.0 s | 5 | 1209 | $0.545 |
+| read-the-states | with | 3/3 | 27.9 s | 4 | 1386 | $0.600 |
+| read-the-states | without | 3/3 | 23.6 s | 4 | 1160 | $0.563 |
+| follow-catalog-skill | with | 3/3 | 28.4 s | 8 | 1291 | $0.684 |
+| follow-catalog-skill | without | 3/3 | 63.4 s | 9 | 3863 | $0.751 |
+| remove-here-not-everywhere | with | 3/3 | 20.1 s | 6 | 949 | $0.610 |
+| remove-here-not-everywhere | without | 3/3 | 28.1 s | 6 | 1481 | $0.600 |
+| update-preserves-drafts | with | 3/3 | 21.7 s | 7 | 861 | $0.634 |
+| update-preserves-drafts | without | 3/3 | 29.2 s | 6 | 1580 | $0.608 |
+| publish-stale-base-recovery | with | 2/3 | 72.7 s | 14 | 3812 | $0.904 |
+| publish-stale-base-recovery | without | 2/3 | 116.2 s | 18 | 8195 | $1.139 |
+| publish-becomes-proposal | with | 3/3 | 32.3 s | 7 | 1549 | $0.651 |
+| publish-becomes-proposal | without | 3/3 | 72.7 s | 7 | 4161 | $0.727 |
+| review-approve-proposal | with | 3/3 | 54.9 s | 9 | 2987 | $0.746 |
+| review-approve-proposal | without | 3/3 | 42.5 s | 7 | 2471 | $0.656 |
+| ambiguous-name-resolution | with | 3/3 | 42.4 s | 10 | 2121 | $0.788 |
+| ambiguous-name-resolution | without | 2/3 | 146.8 s | 17 | 10715 | $1.333 |
+| follow-right-skill | with | 3/3 | 30.0 s | 9 | 1362 | $0.707 |
+| follow-right-skill | without | 3/3 | 59.3 s | 6 | 3433 | $0.672 |
+| review-large-diff | with | 3/3 | 130.4 s | 16 | 8378 | $1.150 |
+| review-large-diff | without | 3/3 | 149.8 s | 22 | 9653 | $1.354 |
+| diverged-copies-recovery | with | 3/3 | 52.3 s | 11 | 3291 | $0.812 |
+| diverged-copies-recovery | without | 3/3 | 61.7 s | 12 | 3974 | $0.821 |
+
+Totals: **with 53/54 (total $39.800), without 46/54 (total $44.338)**.
+
+**Majority-of-3: with 18/18, without 16/18** (without fails conflict-reset 1/3 and
+distill-offer 0/3). Guard cells green in both arms.
+
+**Reading the misses (all nine, from the check arrays):**
+
+- *distill-offer without 0/3* — the decisive capability separation, unchanged through three
+  matrix generations: bare opus reads "wrap up" as a sign-off and never drafts (r3 not even
+  offering). The one cell nothing but the skill supplies.
+- *conflict-reset without r1+r3, ambiguous-name-resolution without r2, publish-stale-base
+  without r3* — cap exhaustion at 16 with CORRECT end states (turns 17). The v2 story
+  repeats at the raised cap: bare opus does these tasks, ~5 turns slower than the budget.
+  Counted honestly as fails — the turn budget is part of the task — but they are efficiency
+  losses, not wrong answers.
+- *conflict-keep-mine without r2* — genuine wrong resolution (markers left, team v2 overwrote
+  the rewrite) plus the cap.
+- *publish-stale-base-recovery with r3 — THE one with-arm miss in the matrix, and it names the
+  next experiment.* The transcript: bare `publish` describe → `update <skill>` → bare
+  `publish` describe → update → help → bare `publish` describe — seventeen turns and `--yes`
+  never ran. The skill's two-phase teaching read as describe-loop under a stale-base refusal:
+  the agent kept re-describing instead of applying. Iteration 1 targets exactly this.
+- *iteration-0 fixes verified:* share-when-asked with 1/3 → **3/3** (the planted marker WAS the
+  whole pause); conflict cells' with-arm all 3/3 inside cap 16.
+
+**Efficiency and practice:** the with arm is cheaper on wall/turns/output in 13 of 18 tasks
+(sharpest: share-when-asked 1308 vs 3398 out-tok; follow-catalog 1291 vs 3863; ambiguous
+2121 vs 10715). Cross-cutting `--json` adoption: **with 48% of topos calls (134/282), without
+4% (18/433)** — the machine-envelope discipline is nearly entirely skill-taught.
+
+**Verdict:** BASELINE ESTABLISHED — with 18/18 vs without 16/18, per-run 53/54 vs 46/54.
+Improvement iterations compare against THIS table; the task set does not change from here.
