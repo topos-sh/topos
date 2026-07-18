@@ -162,8 +162,8 @@ function okStatusBody(command: string, status: string) {
 }
 
 const DENIED_ACTIONS = [
-  { code: "REQUEST_ACCESS", argv: [] },
-  { code: "CONTACT_ADMIN", argv: [] },
+  { code: "REQUEST_ACCESS", argv: [], mutates: false, needs_network: false },
+  { code: "CONTACT_ADMIN", argv: [], mutates: false, needs_network: false },
 ];
 
 function deniedBody(command: string, code: string) {

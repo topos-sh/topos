@@ -5,6 +5,8 @@
  * stores the WHOLE envelope, so a replay re-serves these bytes verbatim.
  */
 
+import { type NextAction, nextAction } from "./next-actions.server";
+
 const WIRE_SCHEMA_VERSION = 1;
 const JSON_HEADERS = { "content-type": "application/json" } as const;
 
@@ -56,11 +58,6 @@ export function buildReceipt(input: ReceiptInput): ReceiptShape {
     created_at: input.createdAt,
     ...(input.details === undefined ? {} : { details: input.details }),
   };
-}
-
-interface NextAction {
-  code: string;
-  argv: string[];
 }
 
 interface ErrorShape {
@@ -140,10 +137,7 @@ export function conflictEnvelope(args: {
   expectedGeneration: number;
   currentGeneration: number;
 }): Record<string, unknown> {
-  const retry: NextAction = {
-    code: "REBASE_AND_RETRY",
-    argv: ["topos", "publish", args.skillName],
-  };
+  const retry: NextAction = nextAction("REBASE_AND_RETRY", ["topos", "publish", args.skillName]);
   return errorReceiptEnvelope(
     args.command,
     {
@@ -170,8 +164,8 @@ export function deniedEnvelope(
   receipt: ReceiptShape,
 ): Record<string, unknown> {
   const nextActions: NextAction[] = [
-    { code: "REQUEST_ACCESS", argv: [] },
-    { code: "CONTACT_ADMIN", argv: [] },
+    nextAction("REQUEST_ACCESS", []),
+    nextAction("CONTACT_ADMIN", []),
   ];
   return errorReceiptEnvelope(
     command,

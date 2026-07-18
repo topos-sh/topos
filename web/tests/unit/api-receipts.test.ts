@@ -119,9 +119,10 @@ describe("deniedEnvelope + errorReceiptEnvelope", () => {
       receipt?: unknown;
       error: Record<string, unknown>;
     };
+    // The safety metadata mirrors the CLI's one rules module: asking a human is a no-op read.
     const actions = [
-      { code: "REQUEST_ACCESS", argv: [] },
-      { code: "CONTACT_ADMIN", argv: [] },
+      { code: "REQUEST_ACCESS", argv: [], mutates: false, needs_network: false },
+      { code: "CONTACT_ADMIN", argv: [], mutates: false, needs_network: false },
     ];
     expect(envelope.ok).toBe(false);
     expect(envelope.next_actions).toEqual(actions);

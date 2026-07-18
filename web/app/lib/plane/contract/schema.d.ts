@@ -450,6 +450,8 @@ export interface components {
          * @example REQUEST_ACCESS
          * @example RETRY
          * @example CONTACT_ADMIN
+         * @example FETCH_FULL_DIFF
+         * @example NEXT_PAGE
          */
         ActionCode: string;
         /**
@@ -638,12 +640,27 @@ export interface components {
         };
         /**
          * @description A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent
-         *     branch on the known set and still pass through unknowns.
+         *     branch on the known set and still pass through unknowns. The three safety fields are ADDITIVE
+         *     and optional (absent = unknown) — a producer fills them from its one rules module, never
+         *     per call site, so the classification cannot drift between surfaces.
          */
         NextAction: {
             /** @description A complete argv array — execute as-is (no TTY parsing). */
             argv: string[];
             code: components["schemas"]["ActionCode"];
+            /**
+             * @description Whether executing `argv` CHANGES state — local files (skill bytes, the sidecar) or shared
+             *     workspace state. Absent = unknown (e.g. a bare `RETRY`, whose safety is the retried
+             *     command's own).
+             */
+            mutates?: boolean | null;
+            /** @description Whether executing `argv` dials the plane. Absent = unknown. */
+            needs_network?: boolean | null;
+            /**
+             * @description A one-line caution for an action whose effect a human/agent should weigh before running
+             *     (team-visible moves, local discards). Absent = nothing to flag.
+             */
+            risk_note?: string | null;
         };
         /**
          * @description `POST /v1/workspaces/{ws}/notices/ack` body — acknowledge notices by id (person-scoped read-state;

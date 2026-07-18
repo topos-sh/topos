@@ -16,15 +16,16 @@
  * envelopes, exactly as the vault's `skip_serializing_if` drops them.
  */
 
+import { type NextAction, nextAction } from "./next-actions.server";
 import { internalError, uniformNotFound } from "./wire.server";
 
 const WIRE_SCHEMA_VERSION = 1;
 const JSON_HEADERS = { "content-type": "application/json" } as const;
 
 /** The `[RequestAccess, ContactAdmin]` recovery actions a DENIED carries (on both envelope + error). */
-const DENIED_NEXT_ACTIONS: { code: string; argv: string[] }[] = [
-  { code: "REQUEST_ACCESS", argv: [] },
-  { code: "CONTACT_ADMIN", argv: [] },
+const DENIED_NEXT_ACTIONS: NextAction[] = [
+  nextAction("REQUEST_ACCESS", []),
+  nextAction("CONTACT_ADMIN", []),
 ];
 
 /** A success envelope carrying a typed `data` — no error, no receipt (row ops have no receipt). */

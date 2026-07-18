@@ -10,6 +10,8 @@
  * belt, 500 for a store fault. Nothing here discloses what exists.
  */
 
+import { type NextAction, nextAction } from "./next-actions.server";
+
 const WIRE_SCHEMA_VERSION = 1;
 
 interface WireErrorShape {
@@ -18,7 +20,7 @@ interface WireErrorShape {
   retryable: boolean;
   affected: Record<string, never>;
   context: Record<string, unknown>;
-  next_actions: { code: string; argv: string[] }[];
+  next_actions: NextAction[];
 }
 
 function errorEnvelope(command: string, error: WireErrorShape): Record<string, unknown> {
@@ -71,7 +73,7 @@ export function badRequest(message: string): Response {
 
 /** A store/transport fault — flat and retryable, detail stays server-side (logged by the caller). */
 export function internalError(): Response {
-  const retry = { code: "RETRY", argv: [] as string[] };
+  const retry = nextAction("RETRY", []);
   return new Response(
     JSON.stringify(
       errorEnvelope("error", {
@@ -89,7 +91,7 @@ export function internalError(): Response {
 
 /** The frozen 429 — `Retry-After` + the RATE_LIMITED envelope, byte-shaped like the vault's. */
 export function rateLimited(retryAfterSeconds: number): Response {
-  const retry = { code: "RETRY", argv: [] as string[] };
+  const retry = nextAction("RETRY", []);
   return new Response(
     JSON.stringify(
       errorEnvelope("rate_limited", {

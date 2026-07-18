@@ -66,14 +66,14 @@ describe("the frozen 429", () => {
       ok: false,
       data: {},
       warnings: [],
-      next_actions: [{ code: "RETRY", argv: [] }],
+      next_actions: [{ code: "RETRY", argv: [], needs_network: true }],
       error: {
         code: "RATE_LIMITED",
         outcome: "RETRYABLE_FAILURE",
         retryable: true,
         affected: {},
         context: { retry_after_seconds: 7 },
-        next_actions: [{ code: "RETRY", argv: [] }],
+        next_actions: [{ code: "RETRY", argv: [], needs_network: true }],
       },
     });
   });
