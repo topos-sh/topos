@@ -439,6 +439,7 @@ pub(crate) fn list_with(
     // per-row follow notes are index-aligned with `tracked`, so they slice under the SAME page —
     // alignment is preserved by construction. An inactive page keeps the exact prior shape.
     let mut followed = followed;
+    let mut published_by_you: Vec<SkillEntry> = Vec::new();
     let mut tracked = tracked;
     let mut untracked = untracked;
     let mut remote_available = remote_available;
@@ -454,6 +455,7 @@ pub(crate) fn list_with(
             }
         };
         mark("followed", page.apply(&mut followed));
+        mark("published_by_you", page.apply(&mut published_by_you));
         mark("tracked", page.apply(&mut tracked));
         if let Some(e) = &mut enrollment {
             page.apply(&mut e.notes);
@@ -465,7 +467,7 @@ pub(crate) fn list_with(
     Ok(ListOutcome {
         data: ListData {
             followed,
-            published_by_you: Vec::new(),
+            published_by_you,
             tracked,
             untracked,
             remote_available,

@@ -409,25 +409,18 @@ pub fn run() -> ExitCode {
             offset,
         } => {
             let page = ops::RowPage::resolve(limit, offset, json, ops::DEFAULT_JSON_LIST_LIMIT);
-            // The complete NEXT_PAGE argv base — this same invocation, re-spelled (the page flags are
-            // appended by the finisher once the effective page is known).
-            let mut page_argv = vec!["topos".to_owned(), "list".to_owned()];
-            page_argv.extend(name.iter().cloned());
-            for (flag, on) in [
-                ("--remote", remote),
-                ("--tracked", tracked),
-                ("--footprint", footprint),
-            ] {
-                if on {
-                    page_argv.push(flag.to_owned());
-                }
-            }
-            for c in &channel {
-                page_argv.extend(["--channel".to_owned(), c.clone()]);
-            }
-            for s in &skill {
-                page_argv.extend(["--skill".to_owned(), s.clone()]);
-            }
+            // The complete NEXT_PAGE argv base — this same invocation, re-spelled with EVERY
+            // selector (incl. the global `--workspace`, which narrows the `--remote` catalog); the
+            // page flags are appended by the finisher once the effective page is known.
+            let page_argv = list_page_argv(
+                &name,
+                remote,
+                tracked,
+                footprint,
+                &channel,
+                &skill,
+                workspace.as_deref(),
+            );
             // The full row filter: positional names + the `--channel`/`--skill` selectors. A single bare
             // name keeps the classic exactly-one narrowing; richer forms resolve ALL-OR-NONE (an unmatched
             // name refuses the whole invocation) and filter the tracked rows.
@@ -589,7 +582,7 @@ pub fn run() -> ExitCode {
                 workspace.as_deref(),
                 budget,
             );
-            finish_review(json, cmd_name, result, &diag)
+            finish_review(json, cmd_name, result, workspace.as_deref(), &diag)
         }
         Command::Revert { skill, to, yes } => finish_revert(
             json,
@@ -1035,9 +1028,18 @@ fn finish_list(
                         .any(|b| (page.offset as u64).saturating_add(b.shown) < b.total),
                     page_argv,
                 );
+                // The stable-shape truncation warnings — a belt for a consumer that ignores the new
+                // typed markers: a capped enumeration is never mistakable for a complete one.
+                let mut warnings = out.warnings.clone();
+                for b in &out.data.truncated {
+                    warnings.push(format!(
+                        "LIST_TRUNCATED {}: {} of {} rows shown — the NEXT_PAGE next action pages on",
+                        b.bucket, b.shown, b.total
+                    ));
+                }
                 let value = serde_json::to_value(&out.data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
-                envelope.warnings = out.warnings;
+                envelope.warnings = warnings;
                 envelope.next_actions = next_actions;
                 println!("{}", render::to_json(&envelope));
             } else {
@@ -1047,6 +1049,42 @@ fn finish_list(
         }
         Err(e) => emit_err(json, command, &e, diag),
     }
+}
+
+/// The complete `topos list` argv this invocation re-spells for its NEXT_PAGE continuation — every
+/// selector preserved: the positional names, the mode flags, the repeatable `--channel`/`--skill`
+/// selectors, AND the global `--workspace` (already canonicalized to an id; the flag accepts it) —
+/// so the next page enumerates exactly the same view, never a widened one.
+fn list_page_argv(
+    names: &[String],
+    remote: bool,
+    tracked: bool,
+    footprint: bool,
+    channels: &[String],
+    skills: &[String],
+    workspace: Option<&str>,
+) -> Vec<String> {
+    let mut argv = vec!["topos".to_owned(), "list".to_owned()];
+    argv.extend(names.iter().cloned());
+    for (flag, on) in [
+        ("--remote", remote),
+        ("--tracked", tracked),
+        ("--footprint", footprint),
+    ] {
+        if on {
+            argv.push(flag.to_owned());
+        }
+    }
+    for c in channels {
+        argv.extend(["--channel".to_owned(), c.clone()]);
+    }
+    for s in skills {
+        argv.extend(["--skill".to_owned(), s.clone()]);
+    }
+    if let Some(w) = workspace {
+        argv.extend(["--workspace".to_owned(), w.to_owned()]);
+    }
+    argv
 }
 
 /// The NEXT_PAGE next action for a row-capped enumeration: the caller's COMPLETE argv re-spelled at
@@ -1088,7 +1126,13 @@ fn finish_diff(
     match result {
         Ok(data) => {
             if json {
+                let mut envelope_warnings = Vec::new();
                 let next_actions = if data.truncated {
+                    envelope_warnings.push(
+                        "DIFF_TRUNCATED: the emitted diff is partial (byte cap) — the \
+                         FETCH_FULL_DIFF next action re-runs it uncapped"
+                            .to_owned(),
+                    );
                     vec![crate::actions::next_action(
                         topos_types::ActionCode::FetchFullDiff,
                         full_argv,
@@ -1098,6 +1142,7 @@ fn finish_diff(
                 };
                 let value = serde_json::to_value(&data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
+                envelope.warnings = envelope_warnings;
                 envelope.next_actions = next_actions;
                 println!("{}", render::to_json(&envelope));
             } else {
@@ -1127,8 +1172,19 @@ fn finish_log(
                     data.truncated,
                     vec!["topos".to_owned(), "log".to_owned(), skill.to_owned()],
                 );
+                let mut warnings = Vec::new();
+                if data.truncated
+                    && let Some(total) = data.total
+                {
+                    warnings.push(format!(
+                        "LOG_TRUNCATED: {} of {total} events shown — the NEXT_PAGE next action \
+                         pages on",
+                        data.events.len()
+                    ));
+                }
                 let value = serde_json::to_value(&data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
+                envelope.warnings = warnings;
                 envelope.next_actions = next_actions;
                 println!("{}", render::to_json(&envelope));
             } else {
@@ -1623,11 +1679,14 @@ fn finish_invite(
     }
 }
 
-/// `review`'s finisher — the inbox, a target describe, or an applied verdict.
+/// `review`'s finisher — the inbox, a target describe, or an applied verdict. `workspace` is the
+/// invocation's global `--workspace` (canonicalized), preserved on the describe's FETCH_FULL_DIFF
+/// continuation so an ambiguous skill name re-resolves to the SAME workspace.
 fn finish_review(
     json: bool,
     command: &str,
     result: Result<ops::ReviewOutcome, ClientError>,
+    workspace: Option<&str>,
     diag: &Diag<'_>,
 ) -> ExitCode {
     match result {
@@ -1643,26 +1702,38 @@ fn finish_review(
         Ok(ops::ReviewOutcome::Describe { data, next_argvs }) => {
             if json {
                 let mut next_actions = render::describe_next_actions(next_argvs.clone());
+                let mut warnings = Vec::new();
                 // A byte-capped describe diff adds the full-fidelity escape: the SAME
-                // `current..<proposal>` diff through `topos diff`, uncapped.
+                // `current..<proposal>` diff through `topos diff`, uncapped — carrying the
+                // invocation's `--workspace` so an ambiguous name re-resolves identically.
                 if data.diff_truncated
                     && let Some((_, hash)) = data.proposal.rsplit_once('@')
                 {
+                    warnings.push(
+                        "DIFF_TRUNCATED: the describe's diff is partial (byte cap) — the \
+                         FETCH_FULL_DIFF next action re-runs it uncapped"
+                            .to_owned(),
+                    );
+                    let mut argv = vec![
+                        "topos".to_owned(),
+                        "diff".to_owned(),
+                        data.skill.clone(),
+                        format!("current..{hash}"),
+                        "--max-bytes".to_owned(),
+                        "0".to_owned(),
+                    ];
+                    if let Some(w) = workspace {
+                        argv.extend(["--workspace".to_owned(), w.to_owned()]);
+                    }
+                    argv.push("--json".to_owned());
                     next_actions.push(crate::actions::next_action(
                         topos_types::ActionCode::FetchFullDiff,
-                        vec![
-                            "topos".to_owned(),
-                            "diff".to_owned(),
-                            data.skill.clone(),
-                            format!("current..{hash}"),
-                            "--max-bytes".to_owned(),
-                            "0".to_owned(),
-                            "--json".to_owned(),
-                        ],
+                        argv,
                     ));
                 }
                 let value = serde_json::json!({ "describe": data });
                 let mut envelope = render::ok_envelope(command, value);
+                envelope.warnings = warnings;
                 envelope.next_actions = next_actions;
                 println!("{}", render::to_json(&envelope));
             } else {
@@ -2295,8 +2366,66 @@ fn list_discovery(tracked: bool) -> Option<ops::DiscoveryRoots> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_WEB_ORIGIN, build_pull_scope, resolve_web_origin};
-    use crate::ops::{PullScope, TargetMode, VersionRef};
+    use super::{
+        DEFAULT_WEB_ORIGIN, build_pull_scope, list_page_argv, next_page_action, resolve_web_origin,
+    };
+    use crate::ops::{PullScope, RowPage, TargetMode, VersionRef};
+
+    #[test]
+    fn list_page_argv_preserves_every_selector_including_workspace() {
+        // The NEXT_PAGE continuation must re-spell the WHOLE view — dropping `--workspace` would
+        // widen a narrowed `--remote` catalog to every joined workspace on the next page.
+        let argv = list_page_argv(
+            &["docs".to_owned()],
+            true,
+            false,
+            false,
+            &["eng".to_owned()],
+            &["deploy".to_owned()],
+            Some("w_acme"),
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "topos",
+                "list",
+                "docs",
+                "--remote",
+                "--channel",
+                "eng",
+                "--skill",
+                "deploy",
+                "--workspace",
+                "w_acme",
+            ]
+        );
+        // The bare local list re-spells bare.
+        assert_eq!(
+            list_page_argv(&[], false, false, false, &[], &[], None),
+            vec!["topos", "list"]
+        );
+    }
+
+    #[test]
+    fn next_page_action_advances_the_offset_and_keeps_the_page_size() {
+        let page = RowPage {
+            offset: 50,
+            limit: Some(50),
+        };
+        let actions = next_page_action(&page, true, vec!["topos".to_owned(), "list".to_owned()]);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].code.as_str(), "NEXT_PAGE");
+        assert_eq!(
+            actions[0].argv,
+            vec![
+                "topos", "list", "--limit", "50", "--offset", "100", "--json"
+            ]
+        );
+        // The action carries the rules module's read-only classification.
+        assert_eq!(actions[0].mutates, Some(false));
+        // Nothing past this page → no action at all.
+        assert!(next_page_action(&page, false, vec!["topos".to_owned()]).is_empty());
+    }
 
     #[test]
     fn web_origin_env_override_beats_the_compiled_default() {
