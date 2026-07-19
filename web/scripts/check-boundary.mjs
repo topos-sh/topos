@@ -220,6 +220,10 @@ const SESSIONLESS_ROUTES = new Set([
   "recovery",
   "healthz",
   "install",
+  // The `.sh` alias (same loader as /install) + the public agent-onboarding document: both
+  // constant public bytes, sessionless by design.
+  "install-sh",
+  "agent",
   "api.auth",
   "api.memberships",
   // The FACE layout tolerates anonymous (the constant teaser / landing renders with no session);
@@ -239,7 +243,11 @@ const SESSIONLESS_ROUTES = new Set([
   // The lane's catch-all answers the constant uniform 404 — it reads nothing.
   "api.v1.$",
 ]);
-const GUARD_CALL = /\brequire(?:Session|Member|WorkspaceOwner|Reviewer|DeviceActor)\s*\(/;
+// The guard family: the request-level require* mints plus memberInScope — the one
+// membership-or-404 resolution the face modules call on their signed-in arm (their anonymous
+// arm resolves the session itself, teaser-or-404, so the require* wrappers cannot front them).
+const GUARD_CALL =
+  /\b(?:require(?:Session|MemberInScope|Member|OwnerInScope|WorkspaceOwner|Reviewer|DeviceActor)|memberInScope)\s*\(/;
 const READS_DATA = /export\s+(?:async\s+)?(?:function|const)\s+(?:loader|action)\b/;
 for (const { rel, text, base } of files) {
   if (!rel.startsWith(ROUTES_DIR)) {

@@ -4,11 +4,7 @@ import { ChannelHeader } from "@/components/channel/channel-header";
 import { ChannelTabs } from "@/components/channel/channel-tabs";
 import { StepUpFields, StepUpMethodProvider } from "@/components/step-up";
 import { buttonClasses, Card, SectionHeading } from "@/components/ui";
-import {
-  notFound,
-  requireMemberInScope,
-  requireWorkspaceOwner,
-} from "@/lib/auth/guards.server";
+import { notFound, requireMemberInScope, requireWorkspaceOwner } from "@/lib/auth/guards.server";
 import { requireStepUp, requireTypedName, stepUpMethod } from "@/lib/auth/step-up.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import {

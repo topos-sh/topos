@@ -12,12 +12,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  actorFromSession,
-  memberInScope,
-  notFound,
-  requireMember,
-} from "@/lib/auth/guards.server";
+import { actorFromSession, memberInScope, notFound, requireMember } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import {

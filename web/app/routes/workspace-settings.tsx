@@ -37,7 +37,6 @@ function lastSetOf(row: AuditEventRow | undefined): LastSetLine | null {
 
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const { workspace, actor } = await requireMemberInScope(request, params);
-  const ws = workspace.id;
   // Management is a confirmed OWNER seat — the actor's role IS the seat table's.
   const isOwner = actor.role === "owner";
   // The registration knob governs sign-up only where the install IS the workspace (single

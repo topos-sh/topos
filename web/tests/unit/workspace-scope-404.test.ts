@@ -94,7 +94,9 @@ function pageRequest(path: string): Request {
 describe("a member PANEL page (channels index) — the existence blind, status AND body", () => {
   async function probe(ws: string): Promise<{ status: number; body: string }> {
     const { loader } = await import("@/routes/channels-index");
-    return outcome(() => (loader as RouteFn)({ request: pageRequest(`/${ws}/channels`), params: { ws } }));
+    return outcome(() =>
+      (loader as RouteFn)({ request: pageRequest(`/${ws}/channels`), params: { ws } }),
+    );
   }
 
   it("a signed-in NON-MEMBER on a real slug is byte-identical to an unknown slug (the 404)", async () => {
