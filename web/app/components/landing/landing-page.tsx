@@ -1,5 +1,6 @@
 import { Link } from "react-router";
 import { CommandBlock } from "@/components/command-block";
+import { CopyButton } from "@/components/copy-button";
 import { RoutingStar } from "@/components/landing/routing-star";
 import { TerminalDemo } from "@/components/landing/terminal-demo";
 
@@ -20,12 +21,33 @@ import { TerminalDemo } from "@/components/landing/terminal-demo";
  */
 
 const INSTALL = "curl -fsSL https://topos.sh/install | sh";
+const AGENT_SETUP_PROMPT = "Set up Topos for us: fetch https://topos.sh/agent and follow it.";
 const GITHUB = "https://github.com/topos-sh/topos";
 const WRAP = "mx-auto max-w-[1080px] px-6";
 const ULINK = "border-b border-hairline text-dim transition-colors hover:border-ink hover:text-ink";
 
 function InstallCommand() {
   return <CommandBlock command={INSTALL} />;
+}
+
+/**
+ * The primary CTA — agent-first: the paste-ready setup prompt on the glass surface, with the
+ * agent-conversation `❯` marker (the same phosphor voice the demo cards speak) in place of the
+ * shell `$`. The install one-liner stays as the secondary line beneath it.
+ */
+function AgentPromptBlock() {
+  return (
+    <div>
+      <p className="mb-2 font-display text-[10px] text-faint uppercase tracking-[0.12em]">
+        Paste into the agent you already have
+      </p>
+      <div className="flex max-w-full flex-wrap items-center gap-3.5 rounded-md bg-glass px-4 py-3 font-mono text-[13.5px] text-glass-ink">
+        <span className="select-none font-semibold text-accent-phos">❯</span>
+        <span className="min-w-0 flex-auto break-words">{AGENT_SETUP_PROMPT}</span>
+        <CopyButton text={AGENT_SETUP_PROMPT} ariaLabel="Copy the agent setup prompt" />
+      </div>
+    </div>
+  );
 }
 
 const VERBS: { tag: string; main?: boolean; prompt: string; out: string; ok: string }[] = [
@@ -173,8 +195,14 @@ export function LandingPage({
               <strong className="font-medium text-ink">improve them together</strong>: one
               teammate’s fix upgrades every agent on the team.
             </p>
-            <div className="mt-6 flex flex-wrap items-center gap-3.5">
-              <InstallCommand />
+            <div className="mt-6">
+              <AgentPromptBlock />
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-3.5">
+              <span className="min-w-0 break-words font-mono text-[12.5px] text-dim">
+                <span className="select-none text-faint">$ </span>
+                {INSTALL}
+              </span>
               <span className="text-[12.5px] text-faint">
                 Apache-2.0, macOS and Linux {"·"}{" "}
                 <a href="https://topos.sh/install" className={ULINK}>
@@ -288,6 +316,9 @@ export function LandingPage({
               Share your first skill in five minutes.
             </h2>
             <div className="mt-5">
+              <AgentPromptBlock />
+            </div>
+            <div className="mt-3">
               <InstallCommand />
             </div>
           </div>
