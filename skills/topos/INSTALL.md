@@ -7,7 +7,7 @@ runs it, or gives an explicit yes before you do. Never install anything unasked.
 ## Install the CLI
 
 ```sh
-curl -fsSL https://topos.sh/install.sh | sh
+curl -fsSL https://topos.sh/install | sh
 ```
 
 Installs the `topos` binary to `~/.local/bin` (no sudo) on macOS (Apple Silicon and Intel) and

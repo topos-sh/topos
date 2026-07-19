@@ -20,7 +20,7 @@ consent, content-addressed identity, and sync algorithm.
 Install the CLI:
 
 ```sh
-curl -fsSL https://topos.sh/install.sh | sh
+curl -fsSL https://topos.sh/install | sh
 ```
 
 **Share a skill with your team** — from a machine that has the skill locally:
@@ -59,7 +59,7 @@ topos review pr-describe@<hash> --approve   # a reviewer lands it
 ## Install
 
 ```sh
-curl -fsSL https://topos.sh/install.sh | sh
+curl -fsSL https://topos.sh/install | sh
 ```
 
 Installs the `topos` binary to `~/.local/bin` (no sudo). Platforms: macOS (Apple Silicon and Intel) and
@@ -324,6 +324,10 @@ Two volumes hold all durable state, and the **database is the source of truth fo
   can name a byte the snapshot missed.
 
 Nothing else lives on disk — there are no secret files to back up beside the volumes.
+
+At rest, the plane's signing key and enrollment secret are plaintext `0600` files inside its data
+volume. Disk or volume encryption is the operator's responsibility. If those files are lost, enrolled
+devices must re-enroll.
 
 ### Bring your own Postgres
 
