@@ -147,23 +147,40 @@ hash_file() {
 # fetch <url> <dest> — download one file; any failure returns non-zero and leaves no
 # partial file behind. curl: -f makes HTTP errors fail, -L follows GitHub's 302 to the
 # asset CDN, --retry rides out transient network blips. FETCH_RC keeps the tool's exit
-# code so a caller can tell an HTTP error (the server answered: 404 and friends — curl
-# exits 22, wget 8) from a genuine network failure (nothing answered).
+# code (curl exits 22 / wget 8 on ANY HTTP >= 400) and FETCH_HTTP_CODE the actual HTTP
+# status where the tool can report one (curl always; wget parsed from its server
+# response, possibly empty) — so a caller can tell "this URL does not exist" (404/410)
+# from "the server refused" (a rate limit, a 5xx) from a genuine network failure.
 FETCH_RC=0
+FETCH_HTTP_CODE=""
 fetch() {
   if [ "$FETCHER" = curl ]; then
-    curl -fSL --retry 3 -o "$2" "$1"; FETCH_RC=$?
+    # -w prints the LAST response's status on stdout even when -f fails the transfer;
+    # a pure transport failure prints 000.
+    FETCH_HTTP_CODE="$(curl -fSL --retry 3 -o "$2" -w '%{http_code}' "$1")"; FETCH_RC=$?
+    case "$FETCH_HTTP_CODE" in *[!0-9]*|"") FETCH_HTTP_CODE="" ;; 000) FETCH_HTTP_CODE="" ;; esac
   else
-    wget -q -O "$2" "$1"; FETCH_RC=$?
+    # -S writes the response headers to stderr; capture them to read the final status.
+    wget -nv -S -O "$2" "$1" 2>"$2.fetch-log"; FETCH_RC=$?
+    FETCH_HTTP_CODE="$(sed -n 's/^ *HTTP\/[0-9.]* \([0-9][0-9][0-9]\).*/\1/p' "$2.fetch-log" | tail -1)"
+    rm -f "$2.fetch-log"
   fi
   if [ "$FETCH_RC" -ne 0 ]; then rm -f "$2"; return 1; fi
   return 0
 }
 
-# Whether the last fetch failed with an HTTP error status (the server ANSWERED — the URL
-# does not exist) rather than a transport/network failure.
+# Whether the last fetch failed with an HTTP error status (the server ANSWERED) rather
+# than a transport/network failure.
 fetch_was_http_error() {
   if [ "$FETCHER" = curl ]; then [ "$FETCH_RC" -eq 22 ]; else [ "$FETCH_RC" -eq 8 ]; fi
+}
+
+# Whether that HTTP error specifically says the URL does not exist (404 gone-missing /
+# 410 gone) — the only statuses that mean "this release/asset is not published". An
+# unparseable status stays NOT-a-404, so a rate limit or 5xx is never misreported as a
+# missing asset.
+fetch_was_not_found() {
+  [ "$FETCH_HTTP_CODE" = "404" ] || [ "$FETCH_HTTP_CODE" = "410" ]
 }
 
 # ---------- URLs -----------------------------------------------------------------------
@@ -202,14 +219,20 @@ say "release: ${VERSION:-latest}"
 
 say "downloading: $URL_DIR/$ASSET"
 if ! fetch "$URL_DIR/$ASSET" "$TMP_DIR/$ASSET"; then
-  if fetch_was_http_error; then
-    # The server answered: the release (or this platform's asset) is not published there.
-    # Not a network problem — say what was looked for, exactly.
-    err "ERROR: no $ASSET found for release '${VERSION:-latest}'."
+  if fetch_was_http_error && fetch_was_not_found; then
+    # The server answered 404/410: the release (or this platform's asset) is not
+    # published there. Not a network problem — say what was looked for, exactly.
+    err "ERROR: no $ASSET found for release '${VERSION:-latest}' (HTTP $FETCH_HTTP_CODE)."
     err "  computed target: $TARGET"
     err "That release may not exist, or it does not ship a prebuilt binary for this target."
     err "Install docs + alternatives: https://topos.sh/install"
     err "Published releases:          https://github.com/topos-sh/topos/releases"
+  elif fetch_was_http_error; then
+    # The server answered with some OTHER error (a rate limit, a 5xx, an auth wall) —
+    # the asset may exist; retrying later is the likely fix.
+    err "ERROR: the server refused the download (HTTP ${FETCH_HTTP_CODE:-error})."
+    err "This is not a missing release — try again shortly."
+    err "Install docs + alternatives: https://topos.sh/install"
   else
     err "ERROR: could not download $ASSET from $URL_DIR"
     err "Check your network, then see: https://github.com/topos-sh/topos/releases"
