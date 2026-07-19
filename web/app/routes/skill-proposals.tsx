@@ -3,7 +3,7 @@ import { redirect, useLoaderData } from "react-router";
 import { type ProposalListItem, ProposalsSection } from "@/components/skill/proposals-section";
 import { SkillHeader } from "@/components/skill/skill-header";
 import { SkillTabs } from "@/components/skill/skill-tabs";
-import { notFound, requireMember, workspaceInScope } from "@/lib/auth/guards.server";
+import { notFound, requireMemberInScope } from "@/lib/auth/guards.server";
 import { proposalsOf, skillIndexRow } from "@/lib/db/queries.server";
 import { resolveSkillName } from "@/lib/db/resolve.server";
 import { useWsPath } from "@/lib/ws-path";
@@ -24,9 +24,8 @@ export function meta({ params }: { params: { skill?: string } }) {
  * count) and the open list agree by construction — they read the same table.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const workspace = await workspaceInScope(params);
+  const { workspace, actor } = await requireMemberInScope(request, params);
   const skill = params.skill as string;
-  const actor = await requireMember(request, workspace.id);
   const row = await skillIndexRow(actor, skill);
   if (row === undefined) {
     // A rename left an old name behind: follow the resolving hint to the live name; else 404.

@@ -6,9 +6,8 @@ import { StepUpFields, StepUpMethodProvider } from "@/components/step-up";
 import { buttonClasses, Card, SectionHeading } from "@/components/ui";
 import {
   notFound,
-  requireMember,
+  requireMemberInScope,
   requireWorkspaceOwner,
-  workspaceInScope,
 } from "@/lib/auth/guards.server";
 import { requireStepUp, requireTypedName, stepUpMethod } from "@/lib/auth/step-up.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
@@ -36,12 +35,11 @@ export function meta({ params }: { params: { channel?: string } }) {
  * so a member finds the tab without an existence oracle.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const workspace = await workspaceInScope(params);
+  const { actor } = await requireMemberInScope(request, params);
   const channel = params.channel;
   if (!channel) {
     notFound();
   }
-  const actor = await requireMember(request, workspace.id);
   const detail = await channelDetail(actor, channel);
   if (detail === undefined) {
     notFound();
@@ -65,17 +63,16 @@ type ChannelActionData =
  * every landed act in its own transaction; the route records the attempts it never sees.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
-  const workspace = await workspaceInScope(params);
+  // The membership FLOOR, hoisted above the intent dispatch: every intent below re-checks owner,
+  // and the unmatched-intent 400 must never answer a non-member — in multi tenancy `:ws` is a
+  // guessable public name slug, so a 400-vs-404 split would be a workspace-existence oracle the
+  // GET faces deliberately close.
+  const { workspace } = await requireMemberInScope(request, params);
   const ws = workspace.id;
   const channel = params.channel;
   if (!channel) {
     notFound();
   }
-  // The membership FLOOR, hoisted above the intent dispatch: every intent below re-checks owner,
-  // and the unmatched-intent 400 must never answer a non-member — in multi tenancy `:ws` is a
-  // guessable public name slug, so a 400-vs-404 split would be a workspace-existence oracle the
-  // GET faces deliberately close.
-  await requireMember(request, workspace.id);
   const formData = await request.formData();
   const intent = String(formData.get("intent") ?? "");
   // The owner ceremonies key on the IMMUTABLE channel_id the page was LOADED with (a hidden

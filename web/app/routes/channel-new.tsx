@@ -1,7 +1,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Link, redirect, useActionData } from "react-router";
 import { buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
-import { requireMember, workspaceInScope } from "@/lib/auth/guards.server";
+import { requireMemberInScope } from "@/lib/auth/guards.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import { type ChannelCreateOutcome, createChannel } from "@/lib/db/queries.channels.server";
 import { useWsPath } from "@/lib/ws-path";
@@ -18,8 +18,7 @@ export function meta({ params }: { params: { ws?: string } }) {
  * mint a group. The loader just guards; the form lives below.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const workspace = await workspaceInScope(params);
-  await requireMember(request, workspace.id);
+  await requireMemberInScope(request, params);
   return null;
 }
 
@@ -35,8 +34,7 @@ interface CreateChannelActionData {
  * transaction; the route records only the refusals the DAL typed back.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
-  const workspace = await workspaceInScope(params);
-  const actor = await requireMember(request, workspace.id);
+  const { workspace, actor } = await requireMemberInScope(request, params);
   const formData = await request.formData();
   const name = String(formData.get("name") ?? "").trim();
   let outcome: ChannelCreateOutcome;

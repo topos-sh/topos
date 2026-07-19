@@ -4,12 +4,7 @@ import { VersionFiles } from "@/components/browse/version-files";
 import { SkillHeader } from "@/components/skill/skill-header";
 import { SkillTabs } from "@/components/skill/skill-tabs";
 import { Card } from "@/components/ui";
-import {
-  actorFromSession,
-  notFound,
-  requireMember,
-  workspaceInScope,
-} from "@/lib/auth/guards.server";
+import { actorFromSession, memberInScope, notFound } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
 import { loadVersionFilesData } from "@/lib/browse/version-files.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
@@ -43,8 +38,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     // anonymous probe cannot tell a real skill from a nonexistent one (or from any other path).
     notFound();
   }
-  const workspace = await workspaceInScope(params);
-  const memberActor = await requireMember(request, workspace.id);
+  const { workspace, actor: memberActor } = await memberInScope(actor, params);
   const skill = params.skill as string;
   const row = await skillIndexRow(memberActor, skill);
   if (row === undefined) {

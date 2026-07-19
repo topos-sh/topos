@@ -3,7 +3,7 @@ import { Link, useLoaderData } from "react-router";
 import { relativeTime, shortDevice } from "@/components/format";
 import { SettingsTabs } from "@/components/settings-tabs";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading, ShortId } from "@/components/ui";
-import { requireMember, workspaceInScope } from "@/lib/auth/guards.server";
+import { requireMemberInScope } from "@/lib/auth/guards.server";
 import {
   type DetachedCopyRow,
   detachedCopiesOf,
@@ -29,8 +29,7 @@ export function meta({ params }: { params: { ws?: string } }) {
  * arm here: a device is a possession, revocation is self-only.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const workspace = await workspaceInScope(params);
-  const actor = await requireMember(request, workspace.id);
+  const { actor } = await requireMemberInScope(request, params);
   const [fleet, detached] = await Promise.all([fleetOf(actor), detachedCopiesOf(actor)]);
   return { fleet, detached };
 }

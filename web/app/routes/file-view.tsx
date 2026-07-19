@@ -5,7 +5,7 @@ import { BrowseEmpty, BrowseShell } from "@/components/browse/shell";
 import { ViewToggle } from "@/components/browse/view-toggle";
 import { Breadcrumbs } from "@/components/shell/breadcrumbs";
 import { Card, Chip } from "@/components/ui";
-import { notFound, requireMember, workspaceInScope } from "@/lib/auth/guards.server";
+import { notFound, requireMemberInScope } from "@/lib/auth/guards.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
 import { classifyBytes, decodeTextVerbatim } from "@/lib/diff/classify";
 import { MAX_BLOB_BYTES, MAX_HIGHLIGHT_BYTES } from "@/lib/diff/model";
@@ -59,14 +59,13 @@ type FileContent =
  * card.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const workspace = await workspaceInScope(params);
+  const { workspace, actor } = await requireMemberInScope(request, params);
   const ws = workspace.id;
   const skill = params.skill as string;
   const versionId = params.versionId as string;
   const splat = params["*"] ?? "";
   const raw = new URL(request.url).searchParams.get("view") === "raw";
 
-  const actor = await requireMember(request, ws);
   if (!HEX64.test(versionId)) {
     notFound();
   }

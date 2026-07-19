@@ -5,9 +5,9 @@ import { StepUpFields, StepUpMethodProvider } from "@/components/step-up";
 import { buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
 import {
   notFound,
-  requireMember,
+  requireMemberInScope,
+  requireOwnerInScope,
   requireWorkspaceOwner,
-  workspaceInScope,
 } from "@/lib/auth/guards.server";
 import { requireStepUp, stepUpMethod } from "@/lib/auth/step-up.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
@@ -43,12 +43,11 @@ type ProtectionChoice = "inherit" | "open" | "reviewed";
  * house 404.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const workspace = await workspaceInScope(params);
+  const { workspace, actor: owner } = await requireOwnerInScope(request, params);
   const skill = params.skill;
   if (!skill) {
     notFound();
   }
-  const owner = await requireWorkspaceOwner(request, workspace.id);
   const row = await skillIndexRow(owner, skill);
   if (row === undefined) {
     const resolved = await resolveSkillName(owner, skill);
@@ -84,17 +83,16 @@ interface SettingsFormError {
  * never see — refused step-ups, typed refusals, faults.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
-  const workspace = await workspaceInScope(params);
+  // The membership FLOOR, hoisted above the intent dispatch: every intent below requires at
+  // least a member (most re-check owner/reviewer themselves), and the unmatched-intent 400 must
+  // never answer a non-member — in multi tenancy `:ws` is a guessable public name slug, so a
+  // 400-vs-404 split would be a workspace-existence oracle the GET faces deliberately close.
+  const { workspace } = await requireMemberInScope(request, params);
   const ws = workspace.id;
   const skill = params.skill;
   if (!skill) {
     notFound();
   }
-  // The membership FLOOR, hoisted above the intent dispatch: every intent below requires at
-  // least a member (most re-check owner/reviewer themselves), and the unmatched-intent 400 must
-  // never answer a non-member — in multi tenancy `:ws` is a guessable public name slug, so a
-  // 400-vs-404 split would be a workspace-existence oracle the GET faces deliberately close.
-  await requireMember(request, workspace.id);
   const formData = await request.formData();
   const intent = String(formData.get("intent") ?? "");
   if (intent === "rename") {

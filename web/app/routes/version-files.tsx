@@ -4,7 +4,7 @@ import { BrowseShell } from "@/components/browse/shell";
 import { VersionFiles } from "@/components/browse/version-files";
 import { Breadcrumbs } from "@/components/shell/breadcrumbs";
 import { ShortId } from "@/components/ui";
-import { notFound, requireMember, workspaceInScope } from "@/lib/auth/guards.server";
+import { notFound, requireMemberInScope } from "@/lib/auth/guards.server";
 import { loadVersionFilesData } from "@/lib/browse/version-files.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
 import { custodyCurrent } from "@/lib/plane/reads.server";
@@ -31,11 +31,10 @@ export function meta({ params }: { params: { skill?: string; versionId?: string 
  * already happened in the guard.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const workspace = await workspaceInScope(params);
+  const { workspace, actor } = await requireMemberInScope(request, params);
   const ws = workspace.id;
   const skill = params.skill as string;
   const versionId = params.versionId as string;
-  const actor = await requireMember(request, ws);
   if (!HEX64.test(versionId)) {
     notFound();
   }

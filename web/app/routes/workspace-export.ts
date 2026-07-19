@@ -1,5 +1,5 @@
 import type { LoaderFunctionArgs } from "react-router";
-import { requireWorkspaceOwner, workspaceInScope } from "@/lib/auth/guards.server";
+import { requireOwnerInScope } from "@/lib/auth/guards.server";
 import { type SkillIndexRow, skillIndexOf } from "@/lib/db/queries.server";
 import { type ZipEntry, zipStream } from "@/lib/export/zip.server";
 import { custodyObjectCapped, custodyVersionMeta } from "@/lib/plane/reads.server";
@@ -10,7 +10,7 @@ import { custodyObjectCapped, custodyVersionMeta } from "@/lib/plane/reads.serve
  * route (loader only, no page) — a native download link on the Settings page points here.
  *
  * Authorization is an OWNER seat, resolved the SAME way its neighbor settings ceremonies are:
- * `workspaceInScope` then `requireWorkspaceOwner` (a non-owner — down to a signed-in stranger —
+ * `requireOwnerInScope` (a non-owner — down to a signed-in stranger —
  * is the uniform 404, never a 403; a signed-out visitor is bounced to login). Exporting every
  * skill at once is a workspace-wide act, so it sits at the owner grade the Settings page gates on.
  *
@@ -46,8 +46,7 @@ interface ExportManifest {
 }
 
 export async function loader({ request, params }: LoaderFunctionArgs): Promise<Response> {
-  const workspace = await workspaceInScope(params);
-  const actor = await requireWorkspaceOwner(request, workspace.id);
+  const { workspace, actor } = await requireOwnerInScope(request, params);
 
   const generatedAt = new Date();
   // The catalog IS the app's own rows; only skills holding a CURRENT version are exportable

@@ -20,8 +20,8 @@ import { Card } from "@/components/ui";
 import {
   notFound,
   requireMember,
+  requireMemberInScope,
   requireReviewer,
-  workspaceInScope,
 } from "@/lib/auth/guards.server";
 import {
   inFinalTx,
@@ -98,11 +98,10 @@ interface RenderedDiffFile {
  * stays a plain synchronous component.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const workspace = await workspaceInScope(params);
+  const { workspace, actor } = await requireMemberInScope(request, params);
   const ws = workspace.id;
   const skill = params.skill as string;
   const versionId = params.versionId as string;
-  const actor = await requireMember(request, ws);
   if (!VERSION_ID.test(versionId)) {
     notFound();
   }
@@ -324,15 +323,14 @@ export interface CommentFormState {
  * fresh diff / thread simply re-renders.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
-  const workspace = await workspaceInScope(params);
-  const ws = workspace.id;
-  const skill = params.skill as string;
-  const versionId = params.versionId as string;
   // The membership FLOOR, hoisted above the intent dispatch: every intent below requires at
   // least a member (most re-check owner/reviewer themselves), and the unmatched-intent 400 must
   // never answer a non-member — in multi tenancy `:ws` is a guessable public name slug, so a
   // 400-vs-404 split would be a workspace-existence oracle the GET faces deliberately close.
-  await requireMember(request, workspace.id);
+  const { workspace } = await requireMemberInScope(request, params);
+  const ws = workspace.id;
+  const skill = params.skill as string;
+  const versionId = params.versionId as string;
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");
 

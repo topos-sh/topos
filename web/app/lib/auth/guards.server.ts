@@ -107,6 +107,69 @@ export async function workspaceInScope(params: { ws?: string }): Promise<ScopedW
   return ws;
 }
 
+/** A membership-resolved workspace scope: the workspace row + the admitted actor, together. */
+export interface ScopedMember {
+  workspace: ScopedWorkspace;
+  actor: MemberActor;
+}
+
+/**
+ * THE membership-or-404 resolution every workspace-scoped page runs — the one place the
+ * slug→workspace→seat chain is written. Order matters for the existence blind: the caller
+ * resolves its SESSION first (requireMemberInScope below, or a face's own anonymous split), so
+ * by the time this runs the only remaining outcomes are the canonical page (a seat) or the
+ * uniform 404 (unknown slug and seatless visitor alike — same throw, same body, no oracle).
+ */
+export async function memberInScope(
+  actor: UserActor,
+  params: { ws?: string },
+): Promise<ScopedMember> {
+  const workspace = await workspaceInScope(params);
+  const admission = resolveAdmission(await seatOf(actor.userId, workspace.id));
+  if (admission.kind === "miss") {
+    notFound();
+  }
+  return {
+    workspace,
+    actor: {
+      userId: actor.userId,
+      display: actor.display,
+      workspaceId: workspace.id,
+      role: admission.role,
+    } as MemberActor,
+  };
+}
+
+/**
+ * The workspace-scoped guard for member-only loaders/actions: session FIRST (an anonymous or
+ * invalid-session request bounces to the constant /login BEFORE any workspace read, so a real
+ * slug and an invented one answer byte-identically), then the one memberInScope resolution
+ * (unknown slug and non-member land the same uniform 404).
+ */
+export async function requireMemberInScope(
+  request: Request,
+  params: { ws?: string },
+): Promise<ScopedMember> {
+  const session = await requireSession(request);
+  const actor = actorFromSession(session);
+  if (!actor) {
+    throw redirect("/login");
+  }
+  return memberInScope(actor, params);
+}
+
+/** requireMemberInScope, then the owner gate — for pages owner-gated from the top. 404 below owner. */
+export async function requireOwnerInScope(
+  request: Request,
+  params: { ws?: string },
+): Promise<{ workspace: ScopedWorkspace; actor: OwnerActor }> {
+  const { workspace, actor } = await requireMemberInScope(request, params);
+  if (actor.role !== "owner") {
+    notFound();
+  }
+  return { workspace, actor: actor as OwnerActor };
+}
+
 /** The signed-out bounce for loaders/actions. */
 export async function requireSession(request: Request): Promise<SessionData> {
   const session = await getAuth().api.getSession({ headers: request.headers });

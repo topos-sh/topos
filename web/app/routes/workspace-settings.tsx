@@ -10,7 +10,7 @@ import { SettingsTabs } from "@/components/settings-tabs";
 import { StepUpMethodProvider } from "@/components/step-up";
 import { buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
 import { composition } from "@/composition.server";
-import { requireMember, requireWorkspaceOwner, workspaceInScope } from "@/lib/auth/guards.server";
+import { requireMemberInScope, requireWorkspaceOwner } from "@/lib/auth/guards.server";
 import { requireStepUp, stepUpMethod } from "@/lib/auth/step-up.server";
 import { type AuditEventRow, lastAuditEventOfKind, recordAdminEvent } from "@/lib/db/audit.server";
 import {
@@ -36,9 +36,8 @@ function lastSetOf(row: AuditEventRow | undefined): LastSetLine | null {
 }
 
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const workspace = await workspaceInScope(params);
+  const { workspace, actor } = await requireMemberInScope(request, params);
   const ws = workspace.id;
-  const actor = await requireMember(request, ws);
   // Management is a confirmed OWNER seat — the actor's role IS the seat table's.
   const isOwner = actor.role === "owner";
   // The registration knob governs sign-up only where the install IS the workspace (single
@@ -86,13 +85,12 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
  * transaction. Membership admin lives on its own page (the members route).
  */
 export async function action({ request, params }: ActionFunctionArgs) {
-  const workspace = await workspaceInScope(params);
-  const ws = workspace.id;
   // The membership FLOOR, hoisted above the intent dispatch: every intent below requires at
   // least a member (most re-check owner/reviewer themselves), and the unmatched-intent 400 must
   // never answer a non-member — in multi tenancy `:ws` is a guessable public name slug, so a
   // 400-vs-404 split would be a workspace-existence oracle the GET faces deliberately close.
-  await requireMember(request, workspace.id);
+  const { workspace } = await requireMemberInScope(request, params);
+  const ws = workspace.id;
   const formData = await request.formData();
   const intent = String(formData.get("intent") ?? "");
   if (intent === "set-review-required") {

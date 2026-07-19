@@ -14,9 +14,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   actorFromSession,
+  memberInScope,
   notFound,
   requireMember,
-  workspaceInScope,
 } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
@@ -60,8 +60,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     // anonymous probe cannot tell a real channel from a nonexistent one (or from any other path).
     notFound();
   }
-  const workspace = await workspaceInScope(params);
-  const memberActor = await requireMember(request, workspace.id);
+  const { workspace, actor: memberActor } = await memberInScope(actor, params);
   const channel = params.channel;
   if (!channel) {
     notFound();
@@ -98,17 +97,22 @@ type SkillCurationActionData =
  * the route records only the faults it never sees.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
-  const workspace = await workspaceInScope(params);
+  // The face posture, POST included: an anonymous submit gets the same uniform 404 the GET face
+  // answers (face-shell mounts no login-bounce middleware), and the membership FLOOR is hoisted
+  // above the intent dispatch — every intent re-reads its member actor, and the unmatched-intent
+  // 400 must never answer a non-member — in multi tenancy `:ws` is a guessable public name slug,
+  // so a 400-vs-404 split would be a workspace-existence oracle the GET faces deliberately close.
+  const session = await getAuth().api.getSession({ headers: request.headers });
+  const sessionActor = actorFromSession(session);
+  if (sessionActor === null) {
+    notFound();
+  }
+  const { workspace } = await memberInScope(sessionActor, params);
   const ws = workspace.id;
   const channel = params.channel;
   if (!channel) {
     notFound();
   }
-  // The membership FLOOR, hoisted above the intent dispatch: every intent re-reads its member
-  // actor, and the unmatched-intent 400 must never answer a non-member — in multi tenancy `:ws`
-  // is a guessable public name slug, so a 400-vs-404 split would be a workspace-existence oracle
-  // the GET faces deliberately close.
-  await requireMember(request, workspace.id);
   const formData = await request.formData();
   const intent = String(formData.get("intent") ?? "");
   // Both intents key on the IMMUTABLE channel_id the page was LOADED with (a hidden field), like

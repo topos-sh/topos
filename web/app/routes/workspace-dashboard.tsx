@@ -8,7 +8,7 @@ import { ResourcePage } from "@/components/resource-page";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading, ShortId } from "@/components/ui";
 import { composition } from "@/composition.server";
 import { serverEnv } from "@/env.server";
-import { actorFromSession, requireMember, workspaceInScope } from "@/lib/auth/guards.server";
+import { actorFromSession, memberInScope } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
 import { theWorkspace } from "@/lib/db/identity.server";
 import { rosterOf } from "@/lib/db/queries.roster.server";
@@ -61,9 +61,9 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     return { face: "landing" as const, awaitingOwner, setupLine: `${origin}/claim?code=…` };
   }
 
-  // Signed in: resolve the workspace in scope, then the member gate (a non-member 404s here).
-  const workspace = await workspaceInScope(params);
-  const memberActor = await requireMember(request, workspace.id);
+  // Signed in: the one membership-or-404 resolution (an unknown slug and a non-member land the
+  // same uniform 404 here).
+  const { workspace, actor: memberActor } = await memberInScope(actor, params);
   const [index, roster] = await Promise.all([
     skillIndexOf(memberActor, workspace.id),
     // Direct seat rows: a seat IS membership, so the count is the roster's length.

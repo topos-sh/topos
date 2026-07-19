@@ -11,7 +11,11 @@ import { RemoveMemberForm } from "@/components/members/remove-member-form";
 import { RoleForm } from "@/components/members/role-form";
 import { StepUpMethodProvider } from "@/components/step-up";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading } from "@/components/ui";
-import { requireMember, requireWorkspaceOwner, workspaceInScope } from "@/lib/auth/guards.server";
+import {
+  requireMember,
+  requireMemberInScope,
+  requireWorkspaceOwner,
+} from "@/lib/auth/guards.server";
 import { requireStepUp, stepUpMethod } from "@/lib/auth/step-up.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import { removeSeat, type SeatMutationRefusal, setSeatRole } from "@/lib/db/identity.server";
@@ -52,8 +56,7 @@ function lapseLabel(expiresAt: Date | null, now: number): string {
 }
 
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const workspace = await workspaceInScope(params);
-  const actor = await requireMember(request, workspace.id);
+  const { workspace, actor } = await requireMemberInScope(request, params);
   const isOwner = actor.role === "owner";
   const [roster, pending, policy] = await Promise.all([
     rosterOf(actor),
@@ -93,13 +96,12 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
  * attempts the data layer never sees — refused step-ups, mangled forms, faults.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
-  const workspace = await workspaceInScope(params);
-  const ws = workspace.id;
   // The membership FLOOR, hoisted above the intent dispatch: every intent below requires at
   // least a member (most re-check owner/reviewer themselves), and the unmatched-intent 400 must
   // never answer a non-member — in multi tenancy `:ws` is a guessable public name slug, so a
   // 400-vs-404 split would be a workspace-existence oracle the GET faces deliberately close.
-  await requireMember(request, workspace.id);
+  const { workspace } = await requireMemberInScope(request, params);
+  const ws = workspace.id;
   const formData = await request.formData();
   const intent = String(formData.get("intent") ?? "");
   if (intent === "invite") {

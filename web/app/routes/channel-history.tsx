@@ -4,7 +4,7 @@ import { ChannelHeader } from "@/components/channel/channel-header";
 import { ChannelTabs } from "@/components/channel/channel-tabs";
 import { relativeTime } from "@/components/format";
 import { Card, Chip } from "@/components/ui";
-import { notFound, requireMember, workspaceInScope } from "@/lib/auth/guards.server";
+import { notFound, requireMemberInScope } from "@/lib/auth/guards.server";
 import { type AuditEventRow, auditEventsForSubject } from "@/lib/db/audit.server";
 import { channelDetail } from "@/lib/db/queries.channels.server";
 import { useWsPath } from "@/lib/ws-path";
@@ -24,12 +24,11 @@ export function meta({ params }: { params: { channel?: string } }) {
  * re-surfaced here after the row disappears.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const workspace = await workspaceInScope(params);
+  const { actor } = await requireMemberInScope(request, params);
   const channel = params.channel;
   if (!channel) {
     notFound();
   }
-  const actor = await requireMember(request, workspace.id);
   const detail = await channelDetail(actor, channel);
   if (detail === undefined) {
     notFound();

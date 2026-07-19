@@ -4,7 +4,7 @@ import { ChannelHeader } from "@/components/channel/channel-header";
 import { ChannelTabs } from "@/components/channel/channel-tabs";
 import { relativeTime } from "@/components/format";
 import { buttonClasses, Card, SectionHeading } from "@/components/ui";
-import { notFound, requireMember, workspaceInScope } from "@/lib/auth/guards.server";
+import { notFound, requireMember, requireMemberInScope } from "@/lib/auth/guards.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import {
   type ChannelDetail as ChannelDetailData,
@@ -25,12 +25,11 @@ export function meta({ params }: { params: { channel?: string } }) {
  * order as every channel page: requireMember before any data, then the DB read as the uniform 404.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const workspace = await workspaceInScope(params);
+  const { actor } = await requireMemberInScope(request, params);
   const channel = params.channel;
   if (!channel) {
     notFound();
   }
-  const actor = await requireMember(request, workspace.id);
   const detail = await channelDetail(actor, channel);
   if (detail === undefined) {
     notFound();
@@ -47,16 +46,15 @@ type StanceActionData = { form: "stance"; error: string } | { form: "unknown"; e
  * audit row of every landed act in its own transaction; the route records the faults it never sees.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
-  const workspace = await workspaceInScope(params);
+  // The membership FLOOR, hoisted above the intent dispatch: the unmatched-intent 400 must never
+  // answer a non-member — in multi tenancy `:ws` is a guessable public name slug, so a 400-vs-404
+  // split would be a workspace-existence oracle the GET faces deliberately close.
+  const { workspace } = await requireMemberInScope(request, params);
   const ws = workspace.id;
   const channel = params.channel;
   if (!channel) {
     notFound();
   }
-  // The membership FLOOR, hoisted above the intent dispatch: the unmatched-intent 400 must never
-  // answer a non-member — in multi tenancy `:ws` is a guessable public name slug, so a 400-vs-404
-  // split would be a workspace-existence oracle the GET faces deliberately close.
-  await requireMember(request, workspace.id);
   const formData = await request.formData();
   const intent = String(formData.get("intent") ?? "");
   if (intent === "leave-default") {
