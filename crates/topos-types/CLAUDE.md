@@ -40,8 +40,10 @@ gen-schema, `topos-plane` for its OpenAPI) enable it; every other consumer compi
 
 Per-verb `data` shapes: `pull`/`list`/`diff` are spec-PINNED; the rest are marked **INFERRED**
 (additive-only). `WireError.code` is an **open** string vocabulary by design. `NextAction` carries
-three OPTIONAL safety fields (`mutates` / `needs_network` / `risk_note` — absent = unknown), filled
-by the producer's one rules module (`topos::actions`), never per call site. The byte-budget /
+three OPTIONAL safety fields (`mutates` / `needs_network` / `risk_note` — absent = unknown) plus
+the ADDITIVE `needs` list — the `<placeholder>` names an argv TEMPLATE still requires before it can
+execute (empty/absent = executable as-is) — all filled by the producer's one construction fn
+(`topos::actions::next_action`), never per call site. The byte-budget /
 row-page markers (`DiffData.truncated`+`files`, `LogData.truncated`+`total`, `ListData.truncated`,
 `ReviewDescribeData.diff_truncated`) and the in-memory `MergePreview`
 (`PullSkill.merge_preview`, `PublishDescribeData.merge_preview`) are all ADDITIVE and omit when

@@ -185,6 +185,25 @@ pub fn cli_ref_md() -> String {
          network blip so a session never fails to start.\n\n",
     );
 
+    // The JSON contract — the envelope's shape, the next-action grammar (incl. the `needs`
+    // placeholder list), and where the full schemas live. Rendered here so `docs/cli.md` and the
+    // built-in skill's `reference.md` describe the same contract the binary emits.
+    out.push_str(
+        "## The `--json` envelope\n\n\
+         Every `--json` run prints exactly one envelope object on stdout: `schema_version` (1), \
+         `command`, `ok`, the per-verb `data` payload, `warnings` (strings), `next_actions`, and — \
+         on `ok: false` — `error` (`code`, `outcome`, `retryable`, and its own `next_actions` \
+         mirror). Each entry in `next_actions` is a machine-actionable step: `code` (an open \
+         vocabulary — execute an unknown code via its argv, never reject it), `argv` (a complete \
+         argv array), optional safety metadata (`mutates`, `needs_network`, `risk_note`; absent = \
+         unknown), and `needs` — the placeholder names the argv template still requires before it \
+         can execute (e.g. `\"workspace-address\"` for an argv token `<workspace-address>`; \
+         substitute your value for each named `<placeholder>`, then run it). An action without \
+         `needs` is executable as-is. Errors whose prose names a concrete `topos` command carry \
+         the same command structurally in `next_actions`. The full JSON-Schemas live under \
+         `contracts/schemas/` with golden examples under `contracts/fixtures/json/`.\n\n",
+    );
+
     // Global options — rendered from the root command's own args (the `--json` + `--workspace` flags).
     let globals: Vec<&clap::Arg> = root
         .get_arguments()

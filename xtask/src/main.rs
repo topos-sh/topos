@@ -1269,8 +1269,32 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
+    // The UNENROLLED bare `update` — an honest empty sweep that is really a dead-end: nothing is
+    // followed because nothing CAN be. The join fix rides `next_actions` as an argv TEMPLATE whose
+    // `needs` names the placeholder the caller must fill (`<workspace-address>`).
+    let update_not_enrolled = JsonEnvelope {
+        schema_version: 1,
+        command: "update".to_owned(),
+        ok: true,
+        data: serde_json::to_value(PullData {
+            skills: vec![],
+            proposals_awaiting: 0,
+            notices: vec![],
+            sync: vec![],
+        })
+        .expect("PullData serializes"),
+        warnings: vec![],
+        next_actions: vec![topos::actions::next_action(
+            ActionCode::from("FOLLOW_WORKSPACE".to_owned()),
+            argv(&["topos", "follow", "<workspace-address>", "--json"]),
+        )],
+        receipt: None,
+        error: None,
+    };
+
     vec![
         ("json/status.ok", emit_json(&status_ok)),
+        ("json/update.not-enrolled", emit_json(&update_not_enrolled)),
         ("json/pull.ok", emit_json(&pull_ok)),
         ("json/pull.merged", emit_json(&pull_merged)),
         ("json/pull.conflicted", emit_json(&pull_conflicted)),

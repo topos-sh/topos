@@ -4,6 +4,10 @@
 
 `topos` is the client an agent drives non-interactively. Every mutating verb is TWO-PHASE: a bare invocation DESCRIBES what would change (nothing is written), and `--yes` applies it in one shot (`revert` is the exception — `--yes` there also acknowledges a no-op). `--json` works on every verb and prints exactly one envelope on stdout (never a prompt). The exit status is one of three classes: `0` on success, `1` on a domain refusal or a failed operation (the envelope's `ok` + `error.outcome` distinguish a refusal from a transport fault), and `2` on a usage error (an unknown flag or a missing argument). The session-start auto-update hook runs `topos update --quiet`, which stays silent except a freshness one-liner and exits `0` on a network blip so a session never fails to start.
 
+## The `--json` envelope
+
+Every `--json` run prints exactly one envelope object on stdout: `schema_version` (1), `command`, `ok`, the per-verb `data` payload, `warnings` (strings), `next_actions`, and — on `ok: false` — `error` (`code`, `outcome`, `retryable`, and its own `next_actions` mirror). Each entry in `next_actions` is a machine-actionable step: `code` (an open vocabulary — execute an unknown code via its argv, never reject it), `argv` (a complete argv array), optional safety metadata (`mutates`, `needs_network`, `risk_note`; absent = unknown), and `needs` — the placeholder names the argv template still requires before it can execute (e.g. `"workspace-address"` for an argv token `<workspace-address>`; substitute your value for each named `<placeholder>`, then run it). An action without `needs` is executable as-is. Errors whose prose names a concrete `topos` command carry the same command structurally in `next_actions`. The full JSON-Schemas live under `contracts/schemas/` with golden examples under `contracts/fixtures/json/`.
+
 ## Global options
 
 These work before or after any verb.

@@ -173,6 +173,15 @@ pub(crate) enum ClientError {
     /// malformed link). The message is fixed text or a user-supplied token-free description.
     #[error("enrollment failed: {0}")]
     Enrollment(String),
+    /// The ONE not-enrolled refusal every credentialed verb shares: this install has no plane (or
+    /// no membership) to act against. The fix is stated in prose AND mirrored structurally — the
+    /// envelope carries a `FOLLOW_WORKSPACE` next action whose argv template `needs` the
+    /// workspace address. Same wire code as the enrollment family (agents branch the same).
+    #[error(
+        "not enrolled — run `topos follow <workspace-address>` first (ask a teammate for your \
+         workspace address, or create a workspace at https://topos.sh)"
+    )]
+    NotEnrolled,
     /// The optional `@<digest>` consent pin did not match the digest recomputed over the bytes being
     /// shipped — refused BEFORE signing or sending (the disclosure/integrity gate; never a silent
     /// mode-flip). The agent re-discloses (via `diff`) and re-pins the exact digest.
@@ -382,6 +391,8 @@ impl ClientError {
             ClientError::UnknownGoBackVersion { .. } => "UNKNOWN_GOBACK_VERSION",
             ClientError::Plane(_) => "PLANE_ERROR",
             ClientError::Enrollment(_) => "ENROLLMENT_FAILED",
+            // The shared not-enrolled refusal keeps the enrollment family's code.
+            ClientError::NotEnrolled => "ENROLLMENT_FAILED",
             ClientError::ApprovalMismatch { .. } => "CONSENT_MISMATCH",
             ClientError::Conflict { .. } => "CONFLICT",
             ClientError::Denied(_) => "DENIED",

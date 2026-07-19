@@ -87,9 +87,7 @@ fn review_inbox(
     workspace: Option<&str>,
 ) -> Result<ReviewIndexData, ClientError> {
     let (base_url, universe) = build_universe_via(ctx, connectors.directory)?;
-    let base_url = base_url.ok_or_else(|| {
-        ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
-    })?;
+    let base_url = base_url.ok_or(ClientError::NotEnrolled)?;
     // Fold the caller's principal to the canonical form so the outbox match is address-shape-agnostic.
     let me_principal = enroll::read_user(ctx.fs, &ctx.layout)?
         .and_then(|u| u.principal)
@@ -148,9 +146,7 @@ fn review_describe(
     workspace: Option<&str>,
     budget: super::DiffBudget,
 ) -> Result<ReviewOutcome, ClientError> {
-    let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
-        ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
-    })?;
+    let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or(ClientError::NotEnrolled)?;
     // A target is `<skill>` (its one open proposal) or `<skill>@<hash>` (a specific one).
     let (skill_name, wanted_hash) = match target.split_once('@') {
         Some((s, h)) if !s.is_empty() && !h.is_empty() => (s.to_owned(), Some(h.to_owned())),
@@ -279,9 +275,7 @@ pub(crate) fn review(
          `publish --propose` output or `topos list <skill>`)",
     )?;
 
-    let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
-        ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
-    })?;
+    let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or(ClientError::NotEnrolled)?;
     // Resolve the proposal's skill (a `--workspace` filter disambiguates a name shared across
     // workspaces). Prefer the STRICT local resolve — a followed skill binds to its OWN follow-entry
     // workspace, and the fresh-current read + candidate fetch use its read creds. When the name matches no

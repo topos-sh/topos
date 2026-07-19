@@ -2796,6 +2796,13 @@
             ],
             "description": "Whether executing `argv` CHANGES state — local files (skill bytes, the sidecar) or shared\nworkspace state. Absent = unknown (e.g. a bare `RETRY`, whose safety is the retried\ncommand's own)."
           },
+          "needs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The placeholder names the `argv` template still needs filled before it can execute — one\nentry per distinct `<name>` token part (e.g. `\"workspace-address\"` for an argv carrying\n`<workspace-address>`). Empty/absent = the argv is complete and executable as-is. ADDITIVE."
+          },
           "needs_network": {
             "type": [
               "boolean",

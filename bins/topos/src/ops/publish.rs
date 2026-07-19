@@ -156,9 +156,7 @@ pub(crate) fn publish_describe(
         Err(e) => return Err(e),
     };
 
-    let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
-        ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
-    })?;
+    let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or(ClientError::NotEnrolled)?;
     let (id, lock) = resolve_skill_in_workspace(ctx, &skill_name, workspace)?;
     let workspace_id = write_workspace_for_skill(ctx, id.as_str(), workspace)?;
     let sp = ctx.layout.published(&id);

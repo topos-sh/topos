@@ -66,9 +66,7 @@ pub(crate) fn invite(
     yes: bool,
 ) -> Result<InviteOutcome, ClientError> {
     // Require enrollment: the pinned plane's base URL comes from what `follow` wrote.
-    let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
-        ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
-    })?;
+    let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or(ClientError::NotEnrolled)?;
     // Pick the workspace (the invitation's scope) from the enrolled `user.json` memberships:
     // `--workspace` (name or id) when the install has joined several, else the sole one. `instance.json` carries
     // the plane but no workspace, so a present-instance-but-no-user state is a partial enrollment we guide

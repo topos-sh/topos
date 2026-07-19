@@ -48,9 +48,7 @@ pub(crate) fn protect(
 ) -> Result<ProtectOutcome, ClientError> {
     let _ = workspace; // the grammar's qualified path / a unique bare name already scopes the target
     let (base_url, universe) = build_universe_via(ctx, connectors.directory)?;
-    let base_url = base_url.ok_or_else(|| {
-        ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
-    })?;
+    let base_url = base_url.ok_or(ClientError::NotEnrolled)?;
 
     let parsed = resolve::parse_target(target)?;
     let resolution = resolve::resolve_one(&universe, &parsed, resolve::KindScope::SUBSCRIBABLE)?

@@ -13,7 +13,8 @@
 
 use topos_types::{ActionCode, NextAction};
 
-/// Build a [`NextAction`], filling the safety metadata from the one rules table.
+/// Build a [`NextAction`], filling the safety metadata from the one rules table and the `needs`
+/// placeholder list from the argv itself.
 #[must_use]
 pub fn next_action(code: ActionCode, argv: Vec<String>) -> NextAction {
     let Safety {
@@ -21,13 +22,36 @@ pub fn next_action(code: ActionCode, argv: Vec<String>) -> NextAction {
         needs_network,
         risk_note,
     } = safety(&code, &argv);
+    let needs = needs_of(&argv);
     NextAction {
         code,
         argv,
         mutates,
         needs_network,
         risk_note,
+        needs,
     }
+}
+
+/// The placeholder names embedded in `argv` (`<name>`, whole tokens or token parts like
+/// `./<dir>`), deduped in first-appearance order — the values the caller must supply before the
+/// argv can execute. Derived HERE, in the one construction fn, so no call site can emit a
+/// template without declaring its holes.
+fn needs_of(argv: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for token in argv {
+        let mut rest = token.as_str();
+        while let Some(start) = rest.find('<') {
+            let after = &rest[start + 1..];
+            let Some(end) = after.find('>') else { break };
+            let name = &after[..end];
+            if !name.is_empty() && !out.iter().any(|n| n == name) {
+                out.push(name.to_owned());
+            }
+            rest = &after[end + 1..];
+        }
+    }
+    out
 }
 
 /// The classified safety of one action. `None` = unknown (deliberately absent from the envelope).
@@ -99,6 +123,30 @@ fn safety(code: &ActionCode, argv: &[String]) -> Safety {
         // The paste-ready `--yes` of a two-phase describe: applying ALWAYS mutates (that is its
         // point); whether it dials — and what deserves a caution — is the verb's.
         "APPLY_DESCRIBED" => apply_described(argv),
+        // The unenrolled dead-ends' join pointer (`topos follow <workspace-address>` — usually a
+        // template whose `needs` names the address): following dials, and a fresh install's
+        // follow ENROLLS this device (a credential is stored once the browser approval lands).
+        "FOLLOW_WORKSPACE" => Safety::new(
+            Some(true),
+            Some(true),
+            Some(
+                "enrolls this device when not yet enrolled (browser approval; a credential is stored)",
+            ),
+        ),
+        // The signed-out pointer: `auth login` re-runs the device flow.
+        "SIGN_IN" => Safety::new(
+            Some(true),
+            Some(true),
+            Some("re-mints this device's credential (browser approval)"),
+        ),
+        // A refusal's prose-named fix, mirrored verbatim (`render::mirror_prose_commands`). The
+        // argv is the whole story; only the read-only verbs are classifiable from it.
+        "RUN_COMMAND" => match verb(argv) {
+            Some("list") | Some("log") | Some("diff") | Some("status") => {
+                Safety::new(Some(false), None, None)
+            }
+            _ => Safety::new(None, None, None),
+        },
         // An unrecognized code stays fully unknown — never guessed.
         _ => Safety::new(None, None, None),
     }
@@ -247,6 +295,64 @@ mod tests {
                 "{code} has no classification"
             );
         }
+    }
+
+    #[test]
+    fn needs_lists_every_placeholder_and_stays_empty_on_a_concrete_argv() {
+        // A template argv declares its holes — whole-token and embedded placeholders alike,
+        // deduped in first-appearance order.
+        let template = next_action(
+            ActionCode::from("FOLLOW_WORKSPACE".to_owned()),
+            argv(&["topos", "follow", "<workspace-address>", "--json"]),
+        );
+        assert_eq!(template.needs, vec!["workspace-address"]);
+        let embedded = next_action(
+            ActionCode::from("RUN_COMMAND".to_owned()),
+            argv(&["topos", "add", "./<dir>", "--json"]),
+        );
+        assert_eq!(embedded.needs, vec!["dir"]);
+        // A concrete argv carries no needs (and the field serializes away entirely).
+        let concrete = next_action(
+            ActionCode::ApplyWaitingUpdate,
+            argv(&["topos", "update", "deploy", "--json"]),
+        );
+        assert!(concrete.needs.is_empty());
+        let v = serde_json::to_value(&concrete).unwrap();
+        assert!(
+            v.get("needs").is_none(),
+            "empty needs is absent on the wire"
+        );
+    }
+
+    #[test]
+    fn the_join_and_sign_in_codes_carry_their_classification() {
+        let follow = next_action(
+            ActionCode::from("FOLLOW_WORKSPACE".to_owned()),
+            argv(&["topos", "follow", "<workspace-address>", "--json"]),
+        );
+        assert_eq!(
+            (follow.mutates, follow.needs_network),
+            (Some(true), Some(true))
+        );
+        let login = next_action(
+            ActionCode::from("SIGN_IN".to_owned()),
+            argv(&["topos", "auth", "login", "--json"]),
+        );
+        assert_eq!(
+            (login.mutates, login.needs_network),
+            (Some(true), Some(true))
+        );
+        // A mirrored read-only fix classifies as a read; anything else stays honestly unknown.
+        let read = next_action(
+            ActionCode::from("RUN_COMMAND".to_owned()),
+            argv(&["topos", "diff", "deploy", "--json"]),
+        );
+        assert_eq!(read.mutates, Some(false));
+        let write = next_action(
+            ActionCode::from("RUN_COMMAND".to_owned()),
+            argv(&["topos", "publish", "deploy", "--json"]),
+        );
+        assert_eq!((write.mutates, write.needs_network), (None, None));
     }
 
     #[test]

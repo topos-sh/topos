@@ -488,7 +488,7 @@ fn resume(
 ) -> Result<FollowOutcome, ClientError> {
     let wal = enroll::read_wal(ctx.fs, &ctx.layout)?.ok_or_else(|| {
         ClientError::Enrollment(
-            "no enrollment in progress; run `follow <workspace-address>` first".into(),
+            "no enrollment in progress; run `topos follow <workspace-address>` first".into(),
         )
     })?;
     // A login-owned flow belongs to `auth login` (the same ownership rule holds in reverse there) —

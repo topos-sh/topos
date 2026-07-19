@@ -152,8 +152,80 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
                 vec!["topos".into(), "self-update".into()],
             ),
         ],
-        _ => Vec::new(),
+        // The shared not-enrolled refusal: the join command as a TEMPLATE — its argv carries the
+        // `<workspace-address>` placeholder and `needs` names it, so an agent substitutes and runs
+        // instead of parsing prose.
+        ClientError::NotEnrolled => vec![crate::actions::next_action(
+            ActionCode::from("FOLLOW_WORKSPACE".to_owned()),
+            vec![
+                "topos".into(),
+                "follow".into(),
+                "<workspace-address>".into(),
+                "--json".into(),
+            ],
+        )],
+        // "upgrade topos" in prose is `topos self-update` structurally.
+        ClientError::UnknownSchemaVersion { .. } => vec![crate::actions::next_action(
+            ActionCode::from("UPDATE_CLI".to_owned()),
+            vec!["topos".into(), "self-update".into()],
+        )],
+        // Divergent per-placement edits: the prose names the loss-led discard; mirror it (the
+        // bare `--reset` DESCRIBES — nothing is dropped without its own `--yes`).
+        ClientError::PlacementsDiverged { skill, .. } => vec![crate::actions::next_action(
+            ActionCode::ResolveDivergedDraft,
+            vec![
+                "topos".into(),
+                "update".into(),
+                skill.clone(),
+                "--reset".into(),
+                "--json".into(),
+            ],
+        )],
+        // Everything else: any refusal whose PROSE names a concrete `topos …` command mirrors it
+        // structurally — the sweep rule, applied at the one fall-through instead of per variant.
+        other => mirror_prose_commands(&safe_message(other)),
     }
+}
+
+/// Mirror the concrete `topos …` commands an error's shown PROSE names into structural next
+/// actions — the fall-through rule for the error envelope: whenever a refusal tells a human "run
+/// `topos X`", the agent gets the same fix as an executable argv. Backtick-quoted spans starting
+/// with `topos ` are lifted verbatim (template placeholders like `<workspace-address>` ride the
+/// argv and surface in `needs`); `--json` is appended so the mirrored command answers on the
+/// agent surface; duplicates collapse. Codes: the join door reads `FOLLOW_WORKSPACE`, a sign-in
+/// `SIGN_IN`, a binary update `UPDATE_CLI`, anything else the generic `RUN_COMMAND`.
+fn mirror_prose_commands(message: &str) -> Vec<NextAction> {
+    let mut out: Vec<NextAction> = Vec::new();
+    let mut rest = message;
+    while let Some(start) = rest.find('`') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('`') else { break };
+        let span = &after[..end];
+        rest = &after[end + 1..];
+        let mut argv: Vec<String> = span.split_whitespace().map(str::to_owned).collect();
+        if argv.first().map(String::as_str) != Some("topos") || argv.len() < 2 {
+            continue;
+        }
+        if !argv.iter().any(|t| t == "--json") {
+            argv.push("--json".to_owned());
+        }
+        if out.iter().any(|a| a.argv == argv) {
+            continue;
+        }
+        let code = match argv.get(1).map(String::as_str) {
+            Some("follow") if argv.iter().any(|t| t.contains("<workspace-address>")) => {
+                "FOLLOW_WORKSPACE"
+            }
+            Some("auth") if argv.get(2).map(String::as_str) == Some("login") => "SIGN_IN",
+            Some("self-update") => "UPDATE_CLI",
+            _ => "RUN_COMMAND",
+        };
+        out.push(crate::actions::next_action(
+            ActionCode::from(code.to_owned()),
+            argv,
+        ));
+    }
+    out
 }
 
 /// The success-path next actions for `follow`: a pending enrollment ⇒ re-invoke `follow` (re-invoking IS
@@ -1376,6 +1448,36 @@ pub(crate) fn welcome_tty(d: &topos_types::results::StatusData) -> String {
     )
 }
 
+/// The signed-out `auth status` next actions — the machine half of the prose fix below: a
+/// never-enrolled install gets the join TEMPLATE (its `needs` names the workspace address); an
+/// enrolled-but-signed-out one gets the concrete `auth login`.
+pub(crate) fn auth_status_next_actions(d: &crate::ops::AuthStatusData) -> Vec<NextAction> {
+    if d.signed_in {
+        return Vec::new();
+    }
+    if d.server.is_none() && d.workspaces.is_empty() {
+        vec![crate::actions::next_action(
+            ActionCode::from("FOLLOW_WORKSPACE".to_owned()),
+            vec![
+                "topos".into(),
+                "follow".into(),
+                "<workspace-address>".into(),
+                "--json".into(),
+            ],
+        )]
+    } else {
+        vec![crate::actions::next_action(
+            ActionCode::from("SIGN_IN".to_owned()),
+            vec![
+                "topos".into(),
+                "auth".into(),
+                "login".into(),
+                "--json".into(),
+            ],
+        )]
+    }
+}
+
 pub(crate) fn auth_status_tty(d: &crate::ops::AuthStatusData) -> String {
     let mut s = match (&d.principal, d.signed_in) {
         (Some(p), true) => format!("Signed in as {p}"),
@@ -1384,6 +1486,17 @@ pub(crate) fn auth_status_tty(d: &crate::ops::AuthStatusData) -> String {
     };
     if let Some(server) = &d.server {
         s.push_str(&format!("\nserver: {server}"));
+    }
+    // Signed out: state the fix in prose (mirrored structurally by the envelope's next actions).
+    if !d.signed_in {
+        if d.server.is_none() && d.workspaces.is_empty() {
+            s.push_str(
+                "\nnot enrolled — join with `topos follow <workspace-address>` (ask a teammate \
+                 for the address)",
+            );
+        } else {
+            s.push_str("\nsign back in with `topos auth login`");
+        }
     }
     for ws in &d.workspaces {
         let label = ws.display_name.as_deref().unwrap_or(&ws.workspace_id);
@@ -2154,7 +2267,10 @@ mod tests {
 
     use crate::ops::{FollowNote, ListEnrollment, ListOutcome};
 
-    use super::{follow_tty, list_tty, log_tty, publish_tty, pull_tty, status_tty, welcome_tty};
+    use super::{
+        auth_status_next_actions, auth_status_tty, follow_tty, list_tty, log_tty, publish_tty,
+        pull_tty, safe_message, status_tty, welcome_tty,
+    };
 
     fn row(name: &str, action: PullAction) -> PullSkill {
         PullSkill {
@@ -2770,6 +2886,116 @@ mod tests {
             "{welcome}"
         );
         assert!(welcome.contains("https://topos.sh"), "{welcome}");
+    }
+
+    #[test]
+    fn not_enrolled_carries_the_join_template_with_its_needs() {
+        let actions = super::next_actions(&crate::error::ClientError::NotEnrolled);
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert_eq!(actions[0].code.as_str(), "FOLLOW_WORKSPACE");
+        assert_eq!(
+            actions[0].argv,
+            vec!["topos", "follow", "<workspace-address>", "--json"]
+        );
+        assert_eq!(actions[0].needs, vec!["workspace-address"]);
+        // The prose states the same fix (never a structural mirror without the human half).
+        let msg = safe_message(&crate::error::ClientError::NotEnrolled);
+        assert!(msg.contains("`topos follow <workspace-address>`"), "{msg}");
+    }
+
+    #[test]
+    fn prose_named_commands_mirror_structurally_on_the_fall_through() {
+        // PATH_NOT_NAME's prose names the concrete `topos add ./<arg>` fix — the envelope mirrors it.
+        let actions = super::next_actions(&crate::error::ClientError::PathNotName {
+            arg: "deploy".to_owned(),
+        });
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert_eq!(actions[0].code.as_str(), "RUN_COMMAND");
+        assert_eq!(actions[0].argv, vec!["topos", "add", "./deploy", "--json"]);
+        assert!(actions[0].needs.is_empty());
+
+        // A sign-in-in-progress refusal mirrors `topos auth login` under its own code.
+        let actions = super::next_actions(&crate::error::ClientError::Enrollment(
+            "a sign-in is in progress; re-run `topos auth login` to finish it first".to_owned(),
+        ));
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert_eq!(actions[0].code.as_str(), "SIGN_IN");
+        assert_eq!(actions[0].argv, vec!["topos", "auth", "login", "--json"]);
+
+        // An expired flow mirrors the join template, needs and all.
+        let actions = super::next_actions(&crate::error::ClientError::Enrollment(
+            "the enrollment flow expired; start over with `topos follow <workspace-address>`"
+                .to_owned(),
+        ));
+        assert_eq!(actions[0].code.as_str(), "FOLLOW_WORKSPACE");
+        assert_eq!(actions[0].needs, vec!["workspace-address"]);
+
+        // "upgrade topos" is `topos self-update`, structurally.
+        let actions = super::next_actions(&crate::error::ClientError::UnknownSchemaVersion {
+            found: 9,
+            max: 1,
+        });
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert_eq!(actions[0].code.as_str(), "UPDATE_CLI");
+
+        // Divergent placements name the loss-led reset (a describe — nothing dropped yet).
+        let actions = super::next_actions(&crate::error::ClientError::PlacementsDiverged {
+            skill: "deploy".to_owned(),
+            paths: vec!["/a".into(), "/b".into()],
+        });
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert_eq!(actions[0].code.as_str(), "RESOLVE_DIVERGED_DRAFT");
+        assert!(actions[0].argv.iter().any(|t| t == "--reset"));
+
+        // A message without a backticked `topos …` command mirrors nothing.
+        assert!(super::next_actions(&crate::error::ClientError::EmptyBundle).is_empty());
+    }
+
+    #[test]
+    fn auth_status_signed_out_carries_the_matching_fix() {
+        use crate::ops::AuthStatusData;
+        let fresh = AuthStatusData {
+            server: None,
+            principal: None,
+            device_id: None,
+            signed_in: false,
+            workspaces: Vec::new(),
+            hook_armed: false,
+            reporting: Vec::new(),
+        };
+        let actions = auth_status_next_actions(&fresh);
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert_eq!(actions[0].code.as_str(), "FOLLOW_WORKSPACE");
+        assert_eq!(actions[0].needs, vec!["workspace-address"]);
+        let text = auth_status_tty(&fresh);
+        assert!(
+            text.contains("`topos follow <workspace-address>`"),
+            "{text}"
+        );
+
+        // Enrolled but signed out: the fix is the concrete `auth login`.
+        let signed_out = AuthStatusData {
+            server: Some("https://topos.sh/api".to_owned()),
+            ..fresh
+        };
+        let actions = auth_status_next_actions(&signed_out);
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert_eq!(actions[0].code.as_str(), "SIGN_IN");
+        assert!(actions[0].needs.is_empty());
+        let text = auth_status_tty(&signed_out);
+        assert!(text.contains("`topos auth login`"), "{text}");
+
+        // Signed in: nothing to fix.
+        let signed_in = AuthStatusData {
+            signed_in: true,
+            server: Some("https://topos.sh/api".to_owned()),
+            principal: None,
+            device_id: None,
+            workspaces: Vec::new(),
+            hook_armed: true,
+            reporting: Vec::new(),
+        };
+        assert!(auth_status_next_actions(&signed_in).is_empty());
     }
 
     #[test]

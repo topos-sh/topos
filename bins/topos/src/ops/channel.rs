@@ -76,9 +76,7 @@ pub(crate) fn channel(
     }
 
     let (base_url, universe) = build_universe_via(ctx, connectors.directory)?;
-    let base_url = base_url.ok_or_else(|| {
-        ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
-    })?;
+    let base_url = base_url.ok_or(ClientError::NotEnrolled)?;
 
     // Resolve EVERY skill ALL-OR-NONE (SKILLS scope; `--workspace` narrows a shared name).
     let scope = workspace_scope(&universe, workspace);

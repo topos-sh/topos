@@ -63,9 +63,7 @@ pub(crate) fn revert(
         "`--to` must be a 64-char lowercase hex version id (or a unique prefix of at least 8 chars)",
     )?;
 
-    let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
-        ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
-    })?;
+    let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or(ClientError::NotEnrolled)?;
 
     // The `--workspace` filter disambiguates a name shared across workspaces; the SIGNED scope is the
     // skill's OWN follow-entry workspace (the forward-revert commit is built against that workspace's live

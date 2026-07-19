@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "command": "update",
+  "ok": true,
+  "data": {
+    "proposals_awaiting": 0,
+    "skills": []
+  },
+  "warnings": [],
+  "next_actions": [
+    {
+      "code": "FOLLOW_WORKSPACE",
+      "argv": [
+        "topos",
+        "follow",
+        "<workspace-address>",
+        "--json"
+      ],
+      "mutates": true,
+      "needs_network": true,
+      "risk_note": "enrolls this device when not yet enrolled (browser approval; a credential is stored)",
+      "needs": [
+        "workspace-address"
+      ]
+    }
+  ]
+}

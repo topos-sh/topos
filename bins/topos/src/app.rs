@@ -857,7 +857,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                     Err(e) => emit_err(false, cmd_name, &e, &diag),
                 }
             } else {
-                finish_pull(json, cmd_name, result, &diag)
+                finish_pull(json, cmd_name, result, enrollment.is_some(), &diag)
             }
         }
         Command::Remove { skill, agent, yes } => {
@@ -954,13 +954,9 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 AuthCmd::Logout { yes } => {
                     finish_logout(json, cmd_name, ops::logout(&ctx, &connectors, yes), &diag)
                 }
-                AuthCmd::Status => finish(
-                    json,
-                    cmd_name,
-                    ops::status(&ctx, &connectors),
-                    render::auth_status_tty,
-                    &diag,
-                ),
+                AuthCmd::Status => {
+                    finish_auth_status(json, cmd_name, ops::status(&ctx, &connectors), &diag)
+                }
             }
         }
         // Dispatched BEFORE state recovery/enrollment loading above — corrupt local state must never
@@ -1050,6 +1046,32 @@ fn finish<T: Serialize>(
     }
 }
 
+/// `auth status`'s finisher — like [`finish`], plus the signed-out fix as structural next actions
+/// (the prose half rides `auth_status_tty`): a never-enrolled install gets the join template, an
+/// enrolled-but-signed-out one the concrete `auth login`.
+fn finish_auth_status(
+    json: bool,
+    command: &str,
+    result: Result<ops::AuthStatusData, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(data) => {
+            if json {
+                let next_actions = render::auth_status_next_actions(&data);
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = next_actions;
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::auth_status_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
 /// `status`'s finisher — the one orientation envelope. An UNENROLLED snapshot carries the join
 /// next action (the argv is a template — its `<workspace-address>` placeholder is the caller's to
 /// fill); the TTY renders the full snapshot, or the short welcome on a bare `topos` from a fresh
@@ -1100,20 +1122,43 @@ fn finish_pull(
     json: bool,
     command: &str,
     result: Result<ops::PullOutcome, ClientError>,
+    enrolled: bool,
     diag: &Diag<'_>,
 ) -> ExitCode {
     match result {
         Ok(out) => {
+            // The UNENROLLED empty sweep is a dead-end without a pointer: nothing is followed
+            // because nothing CAN be — state the join fix in prose and mirror it structurally
+            // (the argv template's `needs` names the workspace address).
+            let unenrolled_dead_end = !enrolled && out.data.skills.is_empty();
             if json {
                 // Each WITHDRAWN skill carries a paste-ready `keep-as-yours` next action.
-                let next_actions = render::withdrawn_next_actions(&out.data);
+                let mut next_actions = render::withdrawn_next_actions(&out.data);
+                if unenrolled_dead_end {
+                    next_actions.push(crate::actions::next_action(
+                        topos_types::ActionCode::from("FOLLOW_WORKSPACE".to_owned()),
+                        vec![
+                            "topos".to_owned(),
+                            "follow".to_owned(),
+                            "<workspace-address>".to_owned(),
+                            "--json".to_owned(),
+                        ],
+                    ));
+                }
                 let value = serde_json::to_value(&out.data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
                 envelope.warnings = out.warnings;
                 envelope.next_actions = next_actions;
                 println!("{}", render::to_json(&envelope));
             } else {
-                println!("{}", render::pull_tty(&out.data, &out.warnings));
+                let mut text = render::pull_tty(&out.data, &out.warnings);
+                if unenrolled_dead_end {
+                    text.push_str(
+                        "\nNot enrolled — join your team with `topos follow \
+                         <workspace-address>` (ask a teammate for the address).",
+                    );
+                }
+                println!("{text}");
             }
             ExitCode::SUCCESS
         }
@@ -1324,9 +1369,7 @@ fn list_remote_inputs(
     fs: &dyn FsOps,
     layout: &Layout,
 ) -> Result<(String, Vec<(String, String)>), ClientError> {
-    let instance = enroll::read_instance(fs, layout)?.ok_or_else(|| {
-        ClientError::Enrollment("not enrolled; run `topos follow <link>` first".into())
-    })?;
+    let instance = enroll::read_instance(fs, layout)?.ok_or(ClientError::NotEnrolled)?;
     let memberships: Vec<(String, String)> = enroll::read_user(fs, layout)?
         .map(|u| {
             u.workspaces
@@ -1339,9 +1382,7 @@ fn list_remote_inputs(
         })
         .unwrap_or_default();
     if memberships.is_empty() {
-        return Err(ClientError::Enrollment(
-            "not enrolled in any workspace; run `topos follow <link>` first".into(),
-        ));
+        return Err(ClientError::NotEnrolled);
     }
     Ok((instance.base_url, memberships))
 }

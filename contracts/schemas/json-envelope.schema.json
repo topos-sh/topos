@@ -136,6 +136,13 @@
             "null"
           ]
         },
+        "needs": {
+          "description": "The placeholder names the `argv` template still needs filled before it can execute — one\nentry per distinct `<name>` token part (e.g. `\"workspace-address\"` for an argv carrying\n`<workspace-address>`). Empty/absent = the argv is complete and executable as-is. ADDITIVE.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "needs_network": {
           "description": "Whether executing `argv` dials the plane. Absent = unknown.",
           "type": [

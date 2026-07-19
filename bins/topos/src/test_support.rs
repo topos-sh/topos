@@ -848,7 +848,7 @@ impl FollowHarness {
         }
     }
 
-    /// Call 1: `topos follow <link>` — fetch the bootstrap, guard one-plane, device-authorize, write the pending WAL.
+    /// Call 1: `topos follow <workspace-address>` — fetch the bootstrap, guard one-plane, device-authorize, write the pending WAL.
     ///
     /// # Errors
     /// The follow op's typed error rendered to a string (a different-plane refusal / denied / transport failure).
@@ -856,7 +856,7 @@ impl FollowHarness {
         self.follow_with(link, false)
     }
 
-    /// Call 1 with an explicit adopt mode: `manual = true` is `follow <link> --manual` (confirm-each).
+    /// Call 1 with an explicit adopt mode: `manual = true` is `follow <workspace-address> --manual` (confirm-each).
     ///
     /// # Errors
     /// As [`follow`](Self::follow).

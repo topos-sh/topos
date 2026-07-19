@@ -707,7 +707,7 @@ impl PlaneSource for InertPlane {
         _known: Option<KnownCurrent>,
     ) -> Result<PointerFetch, PlaneError> {
         Err(PlaneError::Unavailable(
-            "not enrolled with a plane; run `topos follow <link>` first".into(),
+            "not enrolled with a plane; run `topos follow <workspace-address>` first".into(),
         ))
     }
     fn fetch_version(
@@ -716,7 +716,7 @@ impl PlaneSource for InertPlane {
         _version_id: [u8; 32],
     ) -> Result<FetchedVersion, PlaneError> {
         Err(PlaneError::Unavailable(
-            "not enrolled with a plane; run `topos follow <link>` first".into(),
+            "not enrolled with a plane; run `topos follow <workspace-address>` first".into(),
         ))
     }
 }
