@@ -126,6 +126,96 @@ mod tests {
         status_snapshot(&ctx).expect("status snapshot")
     }
 
+    /// Every file under `dir`, as `relative path → bytes` — the byte-identity oracle.
+    fn tree_bytes(dir: &PathBuf) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        fn walk(
+            root: &PathBuf,
+            dir: &PathBuf,
+            out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+        ) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(root, &path, out);
+                } else {
+                    let rel = path.strip_prefix(root).unwrap().to_path_buf();
+                    out.insert(rel, std::fs::read(&path).unwrap_or_default());
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(dir, dir, &mut out);
+        out
+    }
+
+    /// The read-only promise, proven byte-for-byte: a status run over a sidecar holding a
+    /// PENDING-RECOVERY fixture (an expired enrollment WAL the ordinary start-of-command sweep
+    /// would reap) leaves every byte in place — the snapshot AND the trigger probe (the exact
+    /// pre-recovery pair the composition root's fast path runs) write nothing, and the same
+    /// fixture is then shown POTENT: the recovery sweep the fast path skips does mutate it.
+    #[test]
+    fn status_leaves_a_pending_recovery_sidecar_byte_identical() {
+        let home = TempHome::new();
+        let fs = RealFs;
+        let layout = Layout::new(&home.0);
+        enroll::write_wal(
+            &fs,
+            &layout,
+            &enroll::PendingEnrollment {
+                schema_version: PERSISTED_SCHEMA_VERSION,
+                base_url: "https://topos.sh/api".to_owned(),
+                workspace_name: "acme".to_owned(),
+                intent: enroll::EnrollIntentDoc::Follow {
+                    target: None,
+                    mode: enroll::FollowModeDoc::Auto,
+                },
+                device_code: "dc_expired".to_owned(),
+                user_code: "XXXX-YYYY".to_owned(),
+                verification_uri_complete: "https://topos.sh/verify?code=XXXX-YYYY".to_owned(),
+                interval_secs: 5,
+                // Long expired — recovery would reap this WAL on any ordinary command.
+                expires_at_millis: 1_000,
+            },
+        )
+        .unwrap();
+
+        let before = tree_bytes(&home.0);
+        assert!(!before.is_empty(), "the fixture is on disk");
+
+        // The exact pair the composition root's pre-recovery fast path runs.
+        let harness = topos_harness::ClaudeCode::new(home.0.join(".claude"), &fs);
+        let ctx = Ctx {
+            fs: &fs,
+            ids: &RealIds,
+            clock: &RealClock,
+            device_id: String::new(),
+            layout: layout.clone(),
+            harness: &harness,
+            plane: &InertPlane,
+            follow: &InertFollow,
+            roots: None,
+        };
+        let data = status_snapshot(&ctx).expect("status snapshot");
+        assert!(!data.enrolled);
+        let _ = crate::ops::probe_detected(&home.0, None, &harness, &fs);
+        assert_eq!(
+            before,
+            tree_bytes(&home.0),
+            "a status run must leave the sidecar byte-identical"
+        );
+
+        // The fixture is potent: the sweep the fast path skips DOES mutate it (the WAL is reaped).
+        crate::sidecar::recover(&fs, &layout, i64::MAX).unwrap();
+        assert_ne!(
+            before,
+            tree_bytes(&home.0),
+            "the recovery sweep reaps the expired WAL — proving status really skipped it"
+        );
+    }
+
     #[test]
     fn a_fresh_install_reads_not_enrolled_with_nothing_followed() {
         let home = TempHome::new();

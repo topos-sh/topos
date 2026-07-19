@@ -336,8 +336,11 @@ are asserted byte-equal in tests.
   state probed READ-ONLY over the detected agents (the same adapters the arming sweep drives, minus
   every write; OpenClaw's live-scheduler probe is refused offline and reported as an explicit
   unknown), and the binary version. No network, no writes, and the passive version check is skipped
-  for it. A bare `topos` on a TTY renders the same snapshot (a fresh machine gets the three-line
-  welcome instead); piped/`--json` bare invocations keep the classic usage error (stderr, exit 2).
+  for it — it dispatches AHEAD of the start-of-command recovery sweep (like `uninstall`), and its
+  error path skips the diagnostics log, so a status run leaves even a pending-recovery sidecar
+  byte-identical (proven byte-for-byte in its test). A bare `topos` on a TTY renders the same
+  snapshot (a fresh machine gets the three-line welcome instead); piped/`--json` bare invocations
+  keep the classic usage error (stderr, exit 2).
 - **The hook posture + notices** (`ops/pull`, `sync_status`) — the delivery-driven reconcile writes
   `state/sync_status.json` (`{workspaces: {ws: {last_delivery_at, last_report_at,
   staleness_window_ms}}}` — a plain doc, no secret) on every successful delivery/report and mirrors

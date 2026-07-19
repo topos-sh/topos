@@ -151,6 +151,41 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
         return finish_uninstall(json, cmd_name, result, &diag);
     }
 
+    // `status` (and the bare-`topos` orientation that reuses it) also dispatches BEFORE the
+    // recovery sweep: the verb promises offline AND read-only, and recovery WRITES (it reaps an
+    // expired enrollment WAL, removes torn staging, repairs logs). Its finisher likewise never
+    // appends to the diagnostics log — a status run leaves the sidecar byte-identical, proven by
+    // `ops::status`'s pending-recovery-fixture test.
+    if let Command::Status = &command {
+        let inert_plane = crate::plane::InertPlane;
+        let inert_follow = crate::plane::InertFollow;
+        let ctx = Ctx {
+            fs: &fs,
+            ids: &ids,
+            clock: &clock,
+            device_id: String::new(),
+            layout: layout.clone(),
+            harness: harness.as_ref(),
+            plane: &inert_plane,
+            follow: &inert_follow,
+            roots: std::env::var_os("HOME").map(|h| crate::ctx::AgentRoots {
+                home: PathBuf::from(h),
+                cwd: std::env::current_dir().ok(),
+            }),
+        };
+        // The snapshot from local state; the trigger rows from the read-only probe at this root
+        // (the one layer holding the real config port + $HOME) — the same layering the arming
+        // receipts use, minus every write.
+        let result = ops::status_snapshot(&ctx).map(|mut data| {
+            if let Some(r) = &ctx.roots {
+                data.triggers =
+                    ops::probe_detected(&r.home, r.cwd.as_deref(), harness.as_ref(), &fs);
+            }
+            data
+        });
+        return finish_status(json, cmd_name, result, bare);
+    }
+
     // Recovery runs at the start of every command (it also abandons an expired, never-redeemed
     // enrollment WAL against the real wall clock).
     let now_millis = i64::try_from(clock.now_unix_millis()).unwrap_or(i64::MAX);
@@ -264,19 +299,8 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
     let web_origin = resolve_web_origin(std::env::var("TOPOS_PLANE_URL").ok());
 
     match command {
-        Command::Status => {
-            // Offline + read-only: the snapshot from local state, the trigger rows from the
-            // read-only probe at this root (the one layer holding the real config port + $HOME) —
-            // the same layering the arming receipts use, minus every write.
-            let result = ops::status_snapshot(&ctx).map(|mut data| {
-                if let Some(r) = &ctx.roots {
-                    data.triggers =
-                        ops::probe_detected(&r.home, r.cwd.as_deref(), harness.as_ref(), &fs);
-                }
-                data
-            });
-            finish_status(json, cmd_name, result, bare, &diag)
-        }
+        // Dispatched BEFORE state recovery above — the read-only promise admits no sweep write.
+        Command::Status => unreachable!("status dispatches before state recovery"),
         Command::Add {
             source,
             skill,
@@ -1098,13 +1122,13 @@ fn finish_auth_status(
 /// `status`'s finisher — the one orientation envelope. An UNENROLLED snapshot carries the join
 /// next action (the argv is a template — its `<workspace-address>` placeholder is the caller's to
 /// fill); the TTY renders the full snapshot, or the short welcome on a bare `topos` from a fresh
-/// machine.
+/// machine. Deliberately NO diagnostics channel: even the error path writes nothing (`status` is
+/// read-only end to end — the append-only log is a write).
 fn finish_status(
     json: bool,
     command: &str,
     result: Result<topos_types::results::StatusData, ClientError>,
     bare: bool,
-    diag: &Diag<'_>,
 ) -> ExitCode {
     match result {
         Ok(data) => {
@@ -1133,7 +1157,16 @@ fn finish_status(
             }
             ExitCode::SUCCESS
         }
-        Err(e) => emit_err(json, command, &e, diag),
+        // Read-only even on failure: the envelope/TTY error renders, but nothing is appended to
+        // the diagnostics log and no `details:` pointer is printed (there is no written detail).
+        Err(e) => {
+            if json {
+                println!("{}", render::to_json(&render::err_envelope(command, &e)));
+            } else {
+                eprintln!("{}", render::err_tty(&e));
+            }
+            ExitCode::FAILURE
+        }
     }
 }
 
