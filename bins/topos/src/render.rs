@@ -888,12 +888,22 @@ pub(crate) fn follow_tty(data: &FollowData, resumed: &[String]) -> String {
             s.push_str(&format!("\nserver: {plane}"));
         }
         // The code rides inside the URL (`verification_uri_complete`) — the human clicks it and
-        // cross-checks the SAME code on the approval page before approving.
+        // cross-checks the SAME code on the approval page before approving. This render surfaces
+        // only when the invocation ENDED still pending (a headless run, or a `--wait` cap that
+        // passed): the interactive path auto-polls to completion and never shows it, so the
+        // re-invoke line here is honest resume guidance, never a required post-approval step.
         s.push_str(&format!(
-            "\nOpen this URL to approve, then re-run `topos follow`:\n  {}\n  \
+            "\nOpen this URL to approve:\n  {}\n  \
              code: {} (confirm it matches the page before approving)",
             pending.verification_uri_complete, pending.user_code,
         ));
+        if let Some(exp) = &pending.expires_at {
+            s.push_str(&format!("\nThe code is valid until {exp}."));
+        }
+        s.push_str(
+            "\nStill waiting for the approval — re-run `topos follow` to keep waiting (nothing \
+             is lost; the same enrollment resumes).",
+        );
         return s;
     }
     // A completed enrollment.
@@ -1205,13 +1215,23 @@ pub(crate) fn unfollow_applied_tty(a: &crate::ops::UnfollowApplied) -> String {
     s
 }
 
-/// The pending login's TTY (the device-flow wait — the same shape as the follow wait).
+/// The pending login's TTY (the device-flow wait — the same shape as the follow wait). Surfaces
+/// only when the invocation ended still pending (the interactive path auto-polls to completion),
+/// so the re-invoke line is resume guidance, never a required post-approval step.
 pub(crate) fn login_pending_tty(p: &crate::ops::AuthLoginPending) -> String {
-    format!(
-        "Signing in to {}\nOpen this URL to approve, then re-run `topos auth login`:\n  {}\n  \
+    let mut s = format!(
+        "Signing in to {}\nOpen this URL to approve:\n  {}\n  \
          code: {} (confirm it matches the page before approving)",
         p.server, p.verification_uri_complete, p.user_code,
-    )
+    );
+    if let Some(exp) = &p.expires_at {
+        s.push_str(&format!("\nThe code is valid until {exp}."));
+    }
+    s.push_str(
+        "\nStill waiting for the approval — re-run `topos auth login` to keep waiting (nothing \
+         is lost; the same sign-in resumes).",
+    );
+    s
 }
 
 /// The completed login's TTY: the ONE re-minted device credential + the workspace it ran through.
@@ -2794,7 +2814,7 @@ mod tests {
             workspace_display_name: Some("Acme Inc".to_owned()),
             plane_base_url: Some("https://api.topos.sh".to_owned()),
             pending: Some(EnrollmentPending {
-                verification_uri_complete: "https://topos.sh/devices?code=WXYZ-1234".to_owned(),
+                verification_uri_complete: "https://topos.sh/verify?code=WXYZ-1234".to_owned(),
                 user_code: "WXYZ-1234".to_owned(),
                 expires_at: None,
                 interval_secs: Some(5),
@@ -2805,7 +2825,7 @@ mod tests {
         let text = follow_tty(&data, &[]);
         // The clickable URL is surfaced, plus the SHORT code to cross-check against the approval page.
         assert!(
-            text.contains("https://topos.sh/devices?code=WXYZ-1234"),
+            text.contains("https://topos.sh/verify?code=WXYZ-1234"),
             "{text}"
         );
         assert!(text.contains("code: WXYZ-1234"), "{text}");

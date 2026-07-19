@@ -470,7 +470,7 @@ impl EnrollSource for FakeAddressEnroll {
         Ok(DeviceAuthStart {
             device_code: "dc_secret".into(),
             user_code: "CODE".into(),
-            verification_uri_complete: format!("{}/verify/CODE", self.api_base),
+            verification_uri_complete: format!("{}/verify?code=CODE", self.api_base),
             expires_in_secs: 900,
             interval_secs: 5,
         })

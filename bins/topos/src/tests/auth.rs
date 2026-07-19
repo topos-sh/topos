@@ -204,7 +204,7 @@ impl EnrollSource for FakeEnroll {
         Ok(DeviceAuthStart {
             device_code: "dc_login".into(),
             user_code: "LOGN-1234".into(),
-            verification_uri_complete: format!("{API}/devices?code=LOGN-1234"),
+            verification_uri_complete: format!("{API}/verify?code=LOGN-1234"),
             expires_in_secs: 900,
             interval_secs: 7,
         })
@@ -464,7 +464,7 @@ fn a_follow_owned_wal_refuses_toward_follow() {
             },
             device_code: "dc_follow".to_owned(),
             user_code: "CODE".to_owned(),
-            verification_uri_complete: format!("{API}/devices?code=CODE"),
+            verification_uri_complete: format!("{API}/verify?code=CODE"),
             interval_secs: 5,
             expires_at_millis: i64::MAX,
         },

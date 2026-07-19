@@ -911,7 +911,7 @@ mod tests {
             },
             device_code: "dc_secret".to_owned(),
             user_code: "AAAA-BBBB".to_owned(),
-            verification_uri_complete: "https://topos.sh/devices?code=AAAA-BBBB".to_owned(),
+            verification_uri_complete: "https://topos.sh/verify?code=AAAA-BBBB".to_owned(),
             interval_secs: 5,
             expires_at_millis,
         }

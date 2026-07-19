@@ -741,7 +741,7 @@ fn pending_followdata(wal: &enroll::PendingEnrollment) -> FollowData {
 
 /// Epoch-millis → an RFC-3339 `YYYY-MM-DDTHH:MM:SSZ` string (UTC, second precision) — enough for the
 /// pending disclosure's expiry. Negative inputs clamp to the epoch.
-fn fmt_rfc3339_millis(millis: i64) -> String {
+pub(crate) fn fmt_rfc3339_millis(millis: i64) -> String {
     let secs = millis.max(0) as u64 / 1000;
     let (days, rem) = (secs / 86_400, secs % 86_400);
     let (y, m, d) = crate::render::civil_from_days(days as i64);

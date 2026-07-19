@@ -2096,6 +2096,9 @@ struct PendingDisclosure {
     user_code: String,
     /// The server's minimum poll interval, when disclosed (else the fallback cadence).
     interval_secs: Option<u64>,
+    /// When the device code expires (epoch millis), when disclosed — the countdown the live
+    /// waiting line shows.
+    expires_at_millis: Option<i64>,
 }
 
 impl PendingDisclosure {
@@ -2114,6 +2117,7 @@ fn follow_pending_disclosure(out: &ops::FollowOutcome) -> Option<PendingDisclosu
             verification_uri_complete: p.verification_uri_complete.clone(),
             user_code: p.user_code.clone(),
             interval_secs: p.interval_secs,
+            expires_at_millis: p.expires_at.as_deref().and_then(parse_rfc3339_utc_millis),
         }),
         _ => None,
     }
@@ -2126,9 +2130,63 @@ fn login_pending_disclosure(out: &ops::AuthLoginOutcome) -> Option<PendingDisclo
             verification_uri_complete: p.verification_uri_complete.clone(),
             user_code: p.user_code.clone(),
             interval_secs: Some(p.interval_secs),
+            expires_at_millis: p.expires_at.as_deref().and_then(parse_rfc3339_utc_millis),
         }),
         ops::AuthLoginOutcome::Done(_) => None,
     }
+}
+
+/// Parse the client's own RFC 3339 UTC spelling (`YYYY-MM-DDTHH:MM:SSZ` — what the pending
+/// disclosures carry) back to epoch millis. Anything else answers `None` (the waiting line then
+/// shows elapsed time only).
+fn parse_rfc3339_utc_millis(s: &str) -> Option<i64> {
+    let bytes = s.as_bytes();
+    if bytes.len() != 20 || bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' {
+        return None;
+    }
+    if bytes[13] != b':' || bytes[16] != b':' || bytes[19] != b'Z' {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| -> Option<i64> { s.get(r)?.parse().ok() };
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (hh, mm, ss) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    // Howard Hinnant's days-from-civil (the inverse of `render::civil_from_days`).
+    let yy = if m <= 2 { y - 1 } else { y };
+    let era = if yy >= 0 { yy } else { yy - 399 } / 400;
+    let yoe = yy - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some((days * 86_400 + hh * 3600 + mm * 60 + ss) * 1000)
+}
+
+/// One `m:ss` (or `h:mm:ss`) spelling of a millisecond span, floored at zero — the waiting line's
+/// honest time.
+fn fmt_span(millis: i64) -> String {
+    let secs = millis.max(0) / 1000;
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+/// The live waiting line: elapsed time since the wait began, plus the code's expiry countdown when
+/// known. Rewritten in place on a TTY; plain otherwise.
+fn waiting_line(now_millis: u64, started_millis: u64, expires_at_millis: Option<i64>) -> String {
+    let mut line = format!(
+        "Waiting for approval… {} elapsed",
+        fmt_span(i64::try_from(now_millis.saturating_sub(started_millis)).unwrap_or(i64::MAX))
+    );
+    if let Some(exp) = expires_at_millis {
+        let left = exp.saturating_sub(i64::try_from(now_millis).unwrap_or(i64::MAX));
+        line.push_str(&format!(" · code expires in {}", fmt_span(left)));
+    }
+    line
 }
 
 /// Whether this invocation blocks on a pending device-authorization, and until when.
@@ -2185,17 +2243,37 @@ fn block_on_pending<T>(
     };
 
     // The waiting disclosure on STDERR (stdout stays the clean final envelope/TTY): the clickable URL
-    // plus the short code the human cross-checks against the approval page.
+    // plus the short code the human cross-checks against the approval page, and the one line that
+    // makes the wait unscary — interrupting loses nothing.
     eprintln!(
         "Open this URL to approve:\n  {}\n  code: {} (confirm it matches the page)",
         disc.verification_uri_complete, disc.user_code,
     );
-    eprintln!("Waiting for approval…");
+    eprintln!(
+        "Ctrl-C is safe — the same command resumes this enrollment; `--wait <seconds>` caps the \
+         wait."
+    );
     let interval = disc.poll_interval();
+    // The live waiting line: honest time (elapsed + the code's expiry countdown), rewritten in
+    // place once a second when stderr is a TTY; a single plain line otherwise (no escape codes in
+    // a log file).
+    let live = {
+        use std::io::IsTerminal;
+        std::io::stderr().is_terminal()
+    };
+    let started = clock.now_unix_millis();
+    if !live {
+        eprintln!("{}", waiting_line(started, started, disc.expires_at_millis));
+    }
 
     // `last` is the most recent pending result, handed back verbatim if a numeric `--wait` deadline passes
     // (starts as `first`, so `--wait 0` returns immediately without polling again).
     let mut last = first;
+    let finish_line = |live: bool| {
+        if live {
+            eprintln!();
+        }
+    };
     loop {
         // Honor a numeric deadline precisely: stop the instant it passes (checked BEFORE sleeping, so a
         // short `--wait <n>` is not overshot by a whole poll interval).
@@ -2203,22 +2281,42 @@ fn block_on_pending<T>(
             .deadline_millis
             .is_some_and(|d| clock.now_unix_millis() >= d)
         {
+            finish_line(live);
             return last;
         }
-        // Sleep the poll interval, but never past the deadline.
+        // Sleep the poll interval, but never past the deadline — ticking the live line per second.
         let nap = match policy.deadline_millis {
             Some(d) => {
                 Duration::from_millis(d.saturating_sub(clock.now_unix_millis())).min(interval)
             }
             None => interval,
         };
-        std::thread::sleep(nap);
+        if live {
+            let nap_end = clock
+                .now_unix_millis()
+                .saturating_add(u64::try_from(nap.as_millis()).unwrap_or(u64::MAX));
+            loop {
+                let now = clock.now_unix_millis();
+                if now >= nap_end {
+                    break;
+                }
+                use std::io::Write;
+                eprint!("\r{}  ", waiting_line(now, started, disc.expires_at_millis));
+                let _ = std::io::stderr().flush();
+                std::thread::sleep(
+                    Duration::from_millis(nap_end.saturating_sub(now)).min(Duration::from_secs(1)),
+                );
+            }
+        } else {
+            std::thread::sleep(nap);
+        }
         let next = repoll();
         if matches!(&next, Ok(o) if pending_of(o).is_some()) {
             // Still waiting on the human — keep polling (the deadline is re-checked at the loop top).
             last = next;
         } else {
             // Settled (enrolled / published) or a terminal error (incl. the device code's expiry) — done.
+            finish_line(live);
             return next;
         }
     }
@@ -2525,9 +2623,45 @@ fn list_discovery(tracked: bool) -> Option<ops::DiscoveryRoots> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_WEB_ORIGIN, build_pull_scope, list_page_argv, next_page_action, resolve_web_origin,
+        DEFAULT_WEB_ORIGIN, build_pull_scope, fmt_span, list_page_argv, next_page_action,
+        parse_rfc3339_utc_millis, resolve_web_origin, waiting_line,
     };
     use crate::ops::{PullScope, RowPage, TargetMode, VersionRef};
+
+    #[test]
+    fn the_waiting_line_shows_honest_elapsed_and_expiry_time() {
+        // The RFC 3339 parser inverts the client's own spelling exactly.
+        assert_eq!(parse_rfc3339_utc_millis("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            parse_rfc3339_utc_millis("2026-06-25T00:15:00Z"),
+            Some(1_782_346_500_000)
+        );
+        // Round-trip against the emitter the disclosures use.
+        let millis = 1_782_346_500_000;
+        assert_eq!(
+            parse_rfc3339_utc_millis(&crate::ops::fmt_rfc3339_millis(millis)),
+            Some(millis)
+        );
+        for bad in ["", "2026-06-25", "2026-06-25T00:15:00", "not a date"] {
+            assert_eq!(parse_rfc3339_utc_millis(bad), None, "{bad}");
+        }
+
+        assert_eq!(fmt_span(7_000), "0:07");
+        assert_eq!(fmt_span(15 * 60_000 - 7_000), "14:53");
+        assert_eq!(fmt_span(3_600_000 + 61_000), "1:01:01");
+        assert_eq!(fmt_span(-5), "0:00", "a passed expiry never goes negative");
+
+        let line = waiting_line(1_000_000 + 7_000, 1_000_000, Some(1_007_000 + 893_000));
+        assert_eq!(
+            line,
+            "Waiting for approval… 0:07 elapsed · code expires in 14:53"
+        );
+        // No expiry known → elapsed only (never a guessed countdown).
+        assert_eq!(
+            waiting_line(1_000_000 + 7_000, 1_000_000, None),
+            "Waiting for approval… 0:07 elapsed"
+        );
+    }
 
     #[test]
     fn list_page_argv_preserves_every_selector_including_workspace() {

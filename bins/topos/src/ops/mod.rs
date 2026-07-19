@@ -70,6 +70,9 @@ pub(crate) use diff::{DiffBudget, diff};
 pub(crate) use follow::{
     FollowApplied, FollowConnectors, FollowDescribe, FollowOpts, FollowOutcome, Reattach, follow,
 };
+// Test-only re-export: the waiting-line parser round-trips against the disclosures' emitter.
+#[cfg(test)]
+pub(crate) use follow::fmt_rfc3339_millis;
 pub(crate) use invite::{InviteConnectors, InviteOutcome, invite};
 pub(crate) use list::{DiscoveryRoots, ListFilter, ListOutcome, RemoteScope, list_with};
 // The `Option<&str>` shim is a test-only convenience (the inline suites + the feature-gated e2e rig);

@@ -73,6 +73,9 @@ pub(crate) struct AuthLoginPending {
     pub user_code: String,
     /// The minimum poll interval, in seconds.
     pub interval_secs: u64,
+    /// When the device code expires (RFC 3339, UTC) — the honest wait ceiling. ADDITIVE.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
 /// The login outcome: still waiting on the browser, or done.
@@ -158,6 +161,7 @@ pub(crate) fn login(
         verification_uri_complete: start.verification_uri_complete,
         user_code: start.user_code,
         interval_secs: start.interval_secs,
+        expires_at: Some(super::follow::fmt_rfc3339_millis(expires_at)),
     }))
 }
 
@@ -175,6 +179,7 @@ fn resume_login(
             verification_uri_complete: wal.verification_uri_complete.clone(),
             user_code: wal.user_code.clone(),
             interval_secs: wal.interval_secs,
+            expires_at: Some(super::follow::fmt_rfc3339_millis(wal.expires_at_millis)),
         })),
         DeviceAuthPoll::Denied => {
             enroll::delete_wal(ctx.fs, &ctx.layout)?;

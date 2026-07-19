@@ -194,7 +194,7 @@ impl EnrollSource for FakeEnroll {
         Ok(DeviceAuthStart {
             device_code: "dc_secret".into(),
             user_code: "WXYZ-1234".into(),
-            verification_uri_complete: format!("{}/devices?code=WXYZ-1234", self.api_base),
+            verification_uri_complete: format!("{}/verify?code=WXYZ-1234", self.api_base),
             expires_in_secs: 900,
             interval_secs: 5,
         })
@@ -387,7 +387,7 @@ fn begin_writes_the_single_phase_wal_and_discloses_the_pending_url() {
     let pending = data.pending.expect("a pending device flow");
     assert_eq!(
         pending.verification_uri_complete,
-        format!("{API}/devices?code=WXYZ-1234")
+        format!("{API}/verify?code=WXYZ-1234")
     );
     assert_eq!(pending.user_code, "WXYZ-1234");
     assert_eq!(pending.interval_secs, Some(5));
@@ -473,7 +473,7 @@ fn resume_pending_re_emits_the_persisted_url_without_restarting() {
     let pending = data.pending.expect("still pending");
     assert_eq!(
         pending.verification_uri_complete,
-        format!("{API}/devices?code=WXYZ-1234"),
+        format!("{API}/verify?code=WXYZ-1234"),
         "the SERVER-built URL is re-emitted verbatim from the WAL"
     );
     let l = log.lock().unwrap();
@@ -606,7 +606,7 @@ fn a_login_owned_wal_refuses_toward_auth_login() {
             intent: enroll::EnrollIntentDoc::Login,
             device_code: "dc_login".to_owned(),
             user_code: "CODE".to_owned(),
-            verification_uri_complete: format!("{API}/devices?code=CODE"),
+            verification_uri_complete: format!("{API}/verify?code=CODE"),
             interval_secs: 5,
             expires_at_millis: i64::MAX,
         },
@@ -639,7 +639,7 @@ fn the_recovery_sweep_reaps_an_expired_wal_so_follow_starts_fresh() {
             },
             device_code: "dc_dead".to_owned(),
             user_code: "DEAD".to_owned(),
-            verification_uri_complete: format!("{API}/devices?code=DEAD"),
+            verification_uri_complete: format!("{API}/verify?code=DEAD"),
             interval_secs: 5,
             expires_at_millis: 1_000,
         },

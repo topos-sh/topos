@@ -1114,7 +1114,7 @@ mod tests {
             device_code: "dc_secret".to_owned(),
             user_code: "AAAA-BBBB".to_owned(),
             verification_uri: "https://topos.example/devices".to_owned(),
-            verification_uri_complete: "https://topos.example/devices?code=AAAA-BBBB".to_owned(),
+            verification_uri_complete: "https://topos.example/verify?code=AAAA-BBBB".to_owned(),
             expires_in_secs: 900,
             interval_secs: 5,
         };

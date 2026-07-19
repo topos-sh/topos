@@ -744,7 +744,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             workspace_display_name: None,
             plane_base_url: Some("https://topos.sh/api".to_owned()),
             pending: Some(EnrollmentPending {
-                verification_uri_complete: "https://topos.sh/devices?code=WXYZ-1234".to_owned(),
+                verification_uri_complete: "https://topos.sh/verify?code=WXYZ-1234".to_owned(),
                 user_code: "WXYZ-1234".to_owned(),
                 expires_at: Some("2026-06-25T00:15:00Z".to_owned()),
                 interval_secs: Some(5),
