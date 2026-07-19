@@ -205,19 +205,83 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
                 "--json".into(),
             ],
         )],
-        // Everything else: any refusal whose PROSE names a concrete `topos …` command mirrors it
-        // structurally — the sweep rule, applied at the one fall-through instead of per variant.
+        // The value-carrying fixes, TYPED: the runtime value rides as exactly ONE argv element,
+        // straight from the error variant's own field — never re-tokenized out of prose, so a
+        // hostile name containing whitespace or a `--flag` fragment stays one inert token.
+        ClientError::PathNotName { arg } => vec![crate::actions::next_action(
+            ActionCode::from("RUN_COMMAND".to_owned()),
+            vec![
+                "topos".into(),
+                "add".into(),
+                format!("./{arg}"),
+                "--json".into(),
+            ],
+        )],
+        ClientError::AlreadyTrackedName { name } => vec![crate::actions::next_action(
+            ActionCode::from("RUN_COMMAND".to_owned()),
+            vec!["topos".into(), "diff".into(), name.clone(), "--json".into()],
+        )],
+        ClientError::HarnessMismatch { name, .. } => vec![crate::actions::next_action(
+            ActionCode::from("RUN_COMMAND".to_owned()),
+            vec![
+                "topos".into(),
+                "publish".into(),
+                name.clone(),
+                "--json".into(),
+            ],
+        )],
+        ClientError::PlacementOccupied { path } => vec![crate::actions::next_action(
+            ActionCode::from("RUN_COMMAND".to_owned()),
+            vec!["topos".into(), "add".into(), path.clone(), "--json".into()],
+        )],
+        // Everything else: a refusal whose PROSE names one of the STATIC command spellings
+        // mirrors it structurally. Prose text is never tokenized into argv — see the allowlist.
         other => mirror_prose_commands(&safe_message(other)),
     }
 }
 
-/// Mirror the concrete `topos …` commands an error's shown PROSE names into structural next
+/// The STATIC command spellings a refusal's prose may name, each with its READY argv — the whole
+/// mirror vocabulary. The fall-through lifts a backticked span ONLY on a byte-exact match against
+/// this table, so the argv always comes from HERE (compile-time constants), never from tokenizing
+/// message text: prose that interpolates a runtime value (a path, a skill name typed by a user or
+/// found on disk) can never smuggle tokens — let alone a `--yes` — into an executable next
+/// action. An error whose fix needs a value gets a TYPED arm in [`next_actions`] instead, which
+/// pushes the value as one argv element.
+const STATIC_PROSE_COMMANDS: &[(&str, &str, &[&str])] = &[
+    (
+        "topos follow <workspace-address>",
+        "FOLLOW_WORKSPACE",
+        &["topos", "follow", "<workspace-address>", "--json"],
+    ),
+    (
+        "topos follow <server>/<workspace>",
+        "RUN_COMMAND",
+        &["topos", "follow", "<server>/<workspace>", "--json"],
+    ),
+    (
+        "topos auth login",
+        "SIGN_IN",
+        &["topos", "auth", "login", "--json"],
+    ),
+    (
+        "topos follow",
+        "RUN_COMMAND",
+        &["topos", "follow", "--json"],
+    ),
+    (
+        "topos update",
+        "UPDATE_SKILLS",
+        &["topos", "update", "--json"],
+    ),
+    ("topos self-update", "UPDATE_CLI", &["topos", "self-update"]),
+];
+
+/// Mirror the STATIC `topos …` commands an error's shown PROSE names into structural next
 /// actions — the fall-through rule for the error envelope: whenever a refusal tells a human "run
-/// `topos X`", the agent gets the same fix as an executable argv. Backtick-quoted spans starting
-/// with `topos ` are lifted verbatim (template placeholders like `<workspace-address>` ride the
-/// argv and surface in `needs`); `--json` is appended so the mirrored command answers on the
-/// agent surface; duplicates collapse. Codes: the join door reads `FOLLOW_WORKSPACE`, a sign-in
-/// `SIGN_IN`, a binary update `UPDATE_CLI`, anything else the generic `RUN_COMMAND`.
+/// `topos X`", the agent gets the same fix as an executable argv. Backtick-quoted spans are
+/// looked up in [`STATIC_PROSE_COMMANDS`] byte-for-byte (a non-matching span mirrors nothing);
+/// duplicates collapse. Template placeholders like `<workspace-address>` ride the const argv and
+/// surface in `needs`.
 fn mirror_prose_commands(message: &str) -> Vec<NextAction> {
     let mut out: Vec<NextAction> = Vec::new();
     let mut rest = message;
@@ -226,26 +290,16 @@ fn mirror_prose_commands(message: &str) -> Vec<NextAction> {
         let Some(end) = after.find('`') else { break };
         let span = &after[..end];
         rest = &after[end + 1..];
-        let mut argv: Vec<String> = span.split_whitespace().map(str::to_owned).collect();
-        if argv.first().map(String::as_str) != Some("topos") || argv.len() < 2 {
+        let Some((_, code, argv)) = STATIC_PROSE_COMMANDS.iter().find(|(s, _, _)| *s == span)
+        else {
             continue;
-        }
-        if !argv.iter().any(|t| t == "--json") {
-            argv.push("--json".to_owned());
-        }
+        };
+        let argv: Vec<String> = argv.iter().map(|t| (*t).to_owned()).collect();
         if out.iter().any(|a| a.argv == argv) {
             continue;
         }
-        let code = match argv.get(1).map(String::as_str) {
-            Some("follow") if argv.iter().any(|t| t.contains("<workspace-address>")) => {
-                "FOLLOW_WORKSPACE"
-            }
-            Some("auth") if argv.get(2).map(String::as_str) == Some("login") => "SIGN_IN",
-            Some("self-update") => "UPDATE_CLI",
-            _ => "RUN_COMMAND",
-        };
         out.push(crate::actions::next_action(
-            ActionCode::from(code.to_owned()),
+            ActionCode::from((*code).to_owned()),
             argv,
         ));
     }
@@ -2949,7 +3003,7 @@ mod tests {
 
     #[test]
     fn prose_named_commands_mirror_structurally_on_the_fall_through() {
-        // PATH_NOT_NAME's prose names the concrete `topos add ./<arg>` fix — the envelope mirrors it.
+        // PATH_NOT_NAME's fix is TYPED — the envelope carries the concrete `topos add ./<arg>`.
         let actions = super::next_actions(&crate::error::ClientError::PathNotName {
             arg: "deploy".to_owned(),
         });
@@ -3026,6 +3080,55 @@ mod tests {
             );
             assert!(actions.iter().all(|a| a.needs.is_empty()));
         }
+    }
+
+    #[test]
+    fn a_hostile_value_can_never_become_extra_argv_tokens() {
+        // The classic injection: a directory literally named "skill --yes". The typed arm pushes
+        // the value as ONE argv element — never re-tokenized — so no `--yes` token exists and the
+        // consent flag cannot be smuggled into an executable next action.
+        let actions = super::next_actions(&crate::error::ClientError::PathNotName {
+            arg: "skill --yes".to_owned(),
+        });
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert_eq!(
+            actions[0].argv,
+            vec!["topos", "add", "./skill --yes", "--json"],
+            "the hostile name stays one inert token"
+        );
+        assert!(!actions[0].argv.iter().any(|t| t == "--yes"), "{actions:?}");
+        // Same discipline on the other typed value arms.
+        let actions = super::next_actions(&crate::error::ClientError::HarnessMismatch {
+            name: "pwn --yes".to_owned(),
+            requested: "cursor".to_owned(),
+            tracked: "claude-code".to_owned(),
+        });
+        assert_eq!(
+            actions[0].argv,
+            vec!["topos", "publish", "pwn --yes", "--json"]
+        );
+        let actions = super::next_actions(&crate::error::ClientError::PlacementOccupied {
+            path: "/tmp/x --yes".to_owned(),
+        });
+        assert_eq!(
+            actions[0].argv,
+            vec!["topos", "add", "/tmp/x --yes", "--json"]
+        );
+
+        // And the prose mirror itself: a backticked command CONTAINING a runtime value matches
+        // nothing in the static allowlist, so it mirrors NOTHING — message text is never
+        // tokenized into argv.
+        let actions = super::mirror_prose_commands(
+            "adopt it in place (`topos add ./skill --yes`), or run `topos publish evil --yes`",
+        );
+        assert!(actions.is_empty(), "{actions:?}");
+        // The allowlist still lifts its exact static spellings.
+        let actions = super::mirror_prose_commands("run `topos follow <workspace-address>` first");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0].argv,
+            vec!["topos", "follow", "<workspace-address>", "--json"]
+        );
     }
 
     #[test]
