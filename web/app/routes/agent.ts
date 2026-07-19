@@ -55,7 +55,7 @@ session-start trigger runs \`topos update --quiet\` on this machine.
 
 ## 3. Verify
 
-    topos auth status   # who this machine is signed in as, per-workspace access health
+    topos status        # enrollment, workspaces, followed skills, trigger arm state
     topos list --json   # every managed skill, with source and status
 
 ## Driving topos afterwards
