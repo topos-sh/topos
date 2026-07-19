@@ -17,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0-rc.1" # first public release; members inherit via `version.workspace = true`
+version = "0.1.0" # first public release; members inherit via `version.workspace = true`
 edition = "2024"
 rust-version = "1.96"
 license = "Apache-2.0"
