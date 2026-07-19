@@ -78,6 +78,11 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
     route("verify", file("verify.tsx")),
     route("healthz", file("healthz.ts")),
     route("install", file("install.ts")),
+    // The `.sh`-suffixed alias shells expect — same loader, byte-identical bytes and headers;
+    // `/install` stays the canonical name.
+    route("install.sh", file("install-sh.ts")),
+    // The agent-onboarding document: what an agent told "set up Topos for us" fetches and follows.
+    route("agent", file("agent.ts")),
     route("api/auth/*", file("api.auth.ts")),
     // THE DEVICE LANE — `/api/v1` is the product's one public API, TERMINATING here since the
     // identity unification. `:ws` here is the opaque workspace ID (the wire/DB key), unchanged in

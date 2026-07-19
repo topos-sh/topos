@@ -17,11 +17,13 @@
  */
 export const OSS_TOP_LEVEL_SEGMENTS: readonly string[] = [
   "account",
+  "agent",
   "api",
   "app",
   "claim",
   "healthz",
   "install",
+  "install.sh",
   "login",
   "new",
   "recovery",
