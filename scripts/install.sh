@@ -146,13 +146,24 @@ hash_file() {
 
 # fetch <url> <dest> — download one file; any failure returns non-zero and leaves no
 # partial file behind. curl: -f makes HTTP errors fail, -L follows GitHub's 302 to the
-# asset CDN, --retry rides out transient network blips.
+# asset CDN, --retry rides out transient network blips. FETCH_RC keeps the tool's exit
+# code so a caller can tell an HTTP error (the server answered: 404 and friends — curl
+# exits 22, wget 8) from a genuine network failure (nothing answered).
+FETCH_RC=0
 fetch() {
   if [ "$FETCHER" = curl ]; then
-    curl -fSL --retry 3 -o "$2" "$1" || { rm -f "$2"; return 1; }
+    curl -fSL --retry 3 -o "$2" "$1"; FETCH_RC=$?
   else
-    wget -q -O "$2" "$1" || { rm -f "$2"; return 1; }
+    wget -q -O "$2" "$1"; FETCH_RC=$?
   fi
+  if [ "$FETCH_RC" -ne 0 ]; then rm -f "$2"; return 1; fi
+  return 0
+}
+
+# Whether the last fetch failed with an HTTP error status (the server ANSWERED — the URL
+# does not exist) rather than a transport/network failure.
+fetch_was_http_error() {
+  if [ "$FETCHER" = curl ]; then [ "$FETCH_RC" -eq 22 ]; else [ "$FETCH_RC" -eq 8 ]; fi
 }
 
 # ---------- URLs -----------------------------------------------------------------------
@@ -191,10 +202,14 @@ say "release: ${VERSION:-latest}"
 
 say "downloading: $URL_DIR/$ASSET"
 if ! fetch "$URL_DIR/$ASSET" "$TMP_DIR/$ASSET"; then
-  if [ -n "$VERSION" ]; then
-    err "ERROR: could not download $ASSET for release '$VERSION'."
-    err "That release — or its $ASSET asset — may not exist. Published releases:"
-    err "  https://github.com/topos-sh/topos/releases"
+  if fetch_was_http_error; then
+    # The server answered: the release (or this platform's asset) is not published there.
+    # Not a network problem — say what was looked for, exactly.
+    err "ERROR: no $ASSET found for release '${VERSION:-latest}'."
+    err "  computed target: $TARGET"
+    err "That release may not exist, or it does not ship a prebuilt binary for this target."
+    err "Install docs + alternatives: https://topos.sh/install"
+    err "Published releases:          https://github.com/topos-sh/topos/releases"
   else
     err "ERROR: could not download $ASSET from $URL_DIR"
     err "Check your network, then see: https://github.com/topos-sh/topos/releases"
