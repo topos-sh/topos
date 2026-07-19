@@ -32,7 +32,7 @@ import { workspaceById } from "@/lib/db/queries.server";
 import { sendInviteEmail } from "@/lib/mail/invite-mail.server";
 import { mailDelivery } from "@/lib/mail/transport.server";
 import { useWsPath } from "@/lib/ws-path";
-import { workspaceAddress } from "@/lib/ws-url.server";
+import { agentDocUrl, workspaceAddress } from "@/lib/ws-url.server";
 
 export function meta({ params }: { params: { ws?: string } }) {
   return [{ title: `Members · ${params.ws ?? "Workspace"}` }];
@@ -174,6 +174,7 @@ async function inviteIntent(request: Request, ws: string, formData: FormData) {
       await sendInviteEmail({
         to: email,
         address,
+        agentUrl: agentDocUrl(request),
         workspaceDisplayName: workspaceName,
         invitedBy: actor.display,
       });

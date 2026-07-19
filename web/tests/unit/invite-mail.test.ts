@@ -51,6 +51,8 @@ const INVITE = {
   // The FULL follow target (`<origin>/<name>`) the caller composes — the notice renders it
   // verbatim, never re-prepending an origin.
   address: "https://topos.example/acme-platform",
+  // The deployment's own agent-onboarding doc — the agent paste-block tells it to fetch this.
+  agentUrl: "https://topos.example/agent",
   invitedBy: "owner@example.com",
 };
 
@@ -111,6 +113,10 @@ describe("sendInviteEmail in test mode", () => {
       );
       // The terminal line renders the full address verbatim — no origin is ever doubled onto it.
       expect(recorded.text).toContain(`topos follow ${INVITE.address}`);
+      // The agent path is a complete paste-block: fetch the onboarding doc, then this address.
+      expect(recorded.text).toContain(
+        `Set up Topos for us: fetch ${INVITE.agentUrl} and follow it. Our workspace: ${INVITE.address}`,
+      );
       await expect(fs.access(path.join(dir, ".magic-links.jsonl"))).rejects.toThrow();
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {

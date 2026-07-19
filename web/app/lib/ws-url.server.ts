@@ -28,3 +28,12 @@ export function workspaceAddress(request: Request, workspaceName: string): strin
   const base = followBase(request);
   return composition.tenancy === "multi" ? `${base}/${workspaceName}` : base;
 }
+
+/**
+ * This deployment's own agent-onboarding document (`<origin>/agent`) — what an invite (or the
+ * dashboard checklist) tells a recipient's agent to fetch and follow. Same origin resolution as
+ * the follow address, so the two lines in one mail can never disagree.
+ */
+export function agentDocUrl(request: Request): string {
+  return `${followBase(request)}/agent`;
+}

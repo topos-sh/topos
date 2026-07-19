@@ -28,6 +28,8 @@ export interface InviteEmailInput {
    * complete follow target (the caller composes it from the public base); never a bare slug, never a
    * credential. */
   address: string;
+  /** The deployment's agent-onboarding doc (`<origin>/agent`) — the agent paste-block fetches it. */
+  agentUrl: string;
   /** The inviter's email (attribution). */
   invitedBy: string;
 }
@@ -46,20 +48,23 @@ export function inviteMailDelivery(): InviteMailDelivery {
  * only in the HTML mirror). `address` is ALREADY the full follow target (`<origin>/<name>`), so both
  * the primary line and the terminal line render `topos follow <address>` verbatim — no origin is
  * ever prepended. */
-function inviteLines({ workspaceDisplayName, address, invitedBy }: InviteEmailInput): {
+function inviteLines({ workspaceDisplayName, address, agentUrl, invitedBy }: InviteEmailInput): {
   subject: string;
   text: string;
   html: string;
 } {
   const subject = `You've been invited to ${workspaceDisplayName} on Topos`;
+  const agentPaste = `Set up Topos for us: fetch ${agentUrl} and follow it. Our workspace: ${address}`;
   const text =
     `${invitedBy} invited you to ${workspaceDisplayName} on Topos — shared skills for your AI agents.\n\n` +
-    `Ask your agent to join: have it follow ${address}\n\n` +
+    `Ask your agent to join — paste this to it:\n\n` +
+    `  ${agentPaste}\n\n` +
     `Or from a terminal: topos follow ${address}\n\n` +
     `If you weren't expecting this, you can ignore this email.\n`;
   const html =
     `<p>${escapeHtml(invitedBy)} invited you to <strong>${escapeHtml(workspaceDisplayName)}</strong> on Topos — shared skills for your AI agents.</p>` +
-    `<p>Ask your agent to join: have it follow <code>${escapeHtml(address)}</code></p>` +
+    `<p>Ask your agent to join — paste this to it:</p>` +
+    `<p><code>${escapeHtml(agentPaste)}</code></p>` +
     `<p>Or from a terminal: <code>topos follow ${escapeHtml(address)}</code></p>` +
     `<p>If you weren't expecting this, you can ignore this email.</p>`;
   return { subject, text, html };

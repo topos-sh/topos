@@ -54,6 +54,7 @@ describe("the dev outbox accumulates across mail kinds", () => {
         to: "carol@example.com",
         workspaceDisplayName: "Acme",
         address: "https://topos.example/acme",
+        agentUrl: "https://topos.example/agent",
         invitedBy: "owner@example.com",
       });
       await authMail.sendVerificationMail(

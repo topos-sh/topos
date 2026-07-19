@@ -5,7 +5,7 @@ import { badRequest, internalError, readCappedBody, uniformNotFound } from "@/li
 import { requireDeviceActor } from "@/lib/auth/guards.server";
 import { laneInvite, laneMe } from "@/lib/db/queries.lane.server";
 import { inviteMailDelivery, sendInviteEmail } from "@/lib/mail/invite-mail.server";
-import { workspaceAddress } from "@/lib/ws-url.server";
+import { agentDocUrl, workspaceAddress } from "@/lib/ws-url.server";
 
 /**
  * `POST /api/v1/workspaces/{ws}/invitations` — invitation as an INVITATION-ROW write: each
@@ -75,6 +75,7 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
       void sendInviteEmail({
         to,
         address,
+        agentUrl: agentDocUrl(request),
         workspaceDisplayName: me.displayName,
         invitedBy: actor.display,
       }).catch(() => {});
