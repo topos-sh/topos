@@ -68,7 +68,8 @@ pub(crate) use auth::{
 pub(crate) use channel::{ChannelConnectors, ChannelOutcome, channel};
 pub(crate) use diff::{DiffBudget, diff};
 pub(crate) use follow::{
-    FollowApplied, FollowConnectors, FollowDescribe, FollowOpts, FollowOutcome, Reattach, follow,
+    BarewordDecision, FollowApplied, FollowConnectors, FollowDescribe, FollowOpts, FollowOutcome,
+    Reattach, follow,
 };
 // Test-only re-export: the waiting-line parser round-trips against the disclosures' emitter.
 #[cfg(test)]

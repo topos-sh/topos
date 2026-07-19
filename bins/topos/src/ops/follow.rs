@@ -96,6 +96,25 @@ pub(crate) struct FollowConnectors<'a> {
     /// workspace>` on a fresh install) — the composition root resolves `TOPOS_PLANE_URL`, else the
     /// hosted default; the card fetch re-roots it onto the declared API base.
     pub web_origin: String,
+    /// The bareword-enroll consent seam: on an UNENROLLED install a bare `follow <name>` (no
+    /// slash — a workspace shorthand for the default server) asks BEFORE any device flow starts.
+    /// The composition root supplies the real TTY prompt (headless runs answer
+    /// [`BarewordDecision::Headless`], turning into the typed refusal); `--yes` short-circuits it.
+    pub confirm_bareword: &'a BarewordConfirm<'a>,
+}
+
+/// The consent callback for a bareword enrollment start: `(name, server) → decision`.
+pub(crate) type BarewordConfirm<'a> = dyn Fn(&str, &str) -> BarewordDecision + 'a;
+
+/// A bareword-enroll consent answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BarewordDecision {
+    /// The human confirmed at the prompt — start the device flow.
+    Proceed,
+    /// The human answered no — refuse, nothing dialed.
+    Declined,
+    /// No prompt is possible (headless / `--json`) — refuse toward `--yes` or the full address.
+    Headless,
 }
 
 /// The verb's outcome — one of the three surfaces `follow` can answer with.
@@ -599,6 +618,9 @@ struct EnrollIntent {
     host: Option<String>,
     workspace_name: String,
     target: enroll::FollowTargetDoc,
+    /// True when the target was a BARE word (no slash, no scheme) — the shape the unenrolled
+    /// consent guard gates before any device flow starts.
+    bareword: bool,
 }
 
 /// Whether an UNRESOLVED parsed target is shaped like a workspace address this install could enroll
@@ -640,6 +662,7 @@ fn enroll_intent(parsed: &ParsedTarget) -> Option<EnrollIntent> {
                 host: host.clone(),
                 workspace_name: workspace.clone(),
                 target,
+                bareword: false,
             })
         }
         ParsedTarget::Bare(name) if resolve::is_workspace_name(name) => Some(EnrollIntent {
@@ -649,6 +672,7 @@ fn enroll_intent(parsed: &ParsedTarget) -> Option<EnrollIntent> {
                 kind: enroll::FollowKindDoc::Workspace,
                 name: name.clone(),
             },
+            bareword: true,
         }),
         _ => None,
     }
@@ -806,6 +830,33 @@ fn subscribe_dispatch(
                 {
                     if universe.iter().any(|w| w.name == intent.workspace_name) {
                         return Err(resolve::not_found(&spec.token));
+                    }
+                    // The BAREWORD consent guard: on an UNENROLLED install a bare `follow <name>`
+                    // would silently start a device flow against the DEFAULT server. Ask first
+                    // (the composition root's TTY prompt); `--yes` is the headless consent; an
+                    // unconfirmable run refuses typed toward `--yes` / the full address form. An
+                    // ENROLLED install keeps its exact prior behavior (the pinned plane is the
+                    // context the bare word already lives in).
+                    if intent.bareword
+                        && enroll::read_instance(ctx.fs, &ctx.layout)?.is_none()
+                        && !opts.yes
+                    {
+                        let server = connectors.web_origin.trim_end_matches('/').to_owned();
+                        match (connectors.confirm_bareword)(&intent.workspace_name, &server) {
+                            BarewordDecision::Proceed => {}
+                            BarewordDecision::Declined => {
+                                return Err(ClientError::BarewordEnrollDeclined {
+                                    name: intent.workspace_name,
+                                    server,
+                                });
+                            }
+                            BarewordDecision::Headless => {
+                                return Err(ClientError::BarewordEnrollUnconfirmed {
+                                    name: intent.workspace_name,
+                                    server,
+                                });
+                            }
+                        }
                     }
                     return begin_address(ctx, connectors, intent, opts);
                 }

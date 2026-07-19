@@ -182,6 +182,23 @@ pub(crate) enum ClientError {
          workspace address, or create a workspace at https://topos.sh)"
     )]
     NotEnrolled,
+    /// A bareword `follow <name>` on an UNENROLLED install (no slash, no scheme — it reads as a
+    /// workspace on the DEFAULT server) refused to start a device flow without consent: the run
+    /// was headless (or the TTY prompt could not be asked), and no `--yes` rode the argv. The two
+    /// deliberate spellings are named in prose and mirrored in `next_actions`.
+    #[error(
+        "'{name}' looks like a workspace on {server} — enrolling this device needs explicit \
+         consent here: re-run with `--yes`, or spell the full address (`topos follow \
+         {server}/{name}`)"
+    )]
+    BarewordEnrollUnconfirmed { name: String, server: String },
+    /// The TTY half of the same guard: the human answered no at the confirm prompt. Nothing was
+    /// dialed, nothing changed.
+    #[error(
+        "not confirmed — nothing changed; to enroll this device with '{name}' on {server}, run \
+         `topos follow {server}/{name}` (or re-run and answer y)"
+    )]
+    BarewordEnrollDeclined { name: String, server: String },
     /// The optional `@<digest>` consent pin did not match the digest recomputed over the bytes being
     /// shipped — refused BEFORE signing or sending (the disclosure/integrity gate; never a silent
     /// mode-flip). The agent re-discloses (via `diff`) and re-pins the exact digest.
@@ -393,6 +410,10 @@ impl ClientError {
             ClientError::Enrollment(_) => "ENROLLMENT_FAILED",
             // The shared not-enrolled refusal keeps the enrollment family's code.
             ClientError::NotEnrolled => "ENROLLMENT_FAILED",
+            // The bareword-enroll guard: one code for both faces (headless refusal / TTY decline)
+            // — the agent branches the same and the argv fixes are identical.
+            ClientError::BarewordEnrollUnconfirmed { .. }
+            | ClientError::BarewordEnrollDeclined { .. } => "ENROLL_CONFIRM_REQUIRED",
             ClientError::ApprovalMismatch { .. } => "CONSENT_MISMATCH",
             ClientError::Conflict { .. } => "CONFLICT",
             ClientError::Denied(_) => "DENIED",

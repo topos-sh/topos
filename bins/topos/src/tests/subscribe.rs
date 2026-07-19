@@ -511,6 +511,9 @@ fn run_follow(
         directory: &dir_connect,
         delivery: &del_connect,
         web_origin: "https://topos.sh".to_owned(),
+        // The classic suites consent to a bareword enroll by construction (the guard has its
+        // own suite).
+        confirm_bareword: &|_, _| ops::BarewordDecision::Proceed,
     };
     ops::follow(&ctx, &connectors, targets, opts)
 }

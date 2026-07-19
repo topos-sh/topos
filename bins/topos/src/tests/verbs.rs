@@ -1415,6 +1415,9 @@ fn follow_approve_resumes_an_unfollowed_skill() {
         directory: &dir_connect2,
         delivery: &del_connect2,
         web_origin: "https://topos.sh".to_owned(),
+        // The classic suites consent to a bareword enroll by construction (the guard has its
+        // own suite).
+        confirm_bareword: &|_, _| ops::BarewordDecision::Proceed,
     };
     let (data, resumed) = match ops::follow(
         &ctx,

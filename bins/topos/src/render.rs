@@ -169,6 +169,30 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
             ActionCode::from("UPDATE_CLI".to_owned()),
             vec!["topos".into(), "self-update".into()],
         )],
+        // The bareword-enroll guard (headless refusal and TTY decline alike): the two DELIBERATE
+        // spellings, both fully concrete — the explicit address form, and the consented bareword.
+        ClientError::BarewordEnrollUnconfirmed { name, server }
+        | ClientError::BarewordEnrollDeclined { name, server } => vec![
+            crate::actions::next_action(
+                ActionCode::from("FOLLOW_WORKSPACE".to_owned()),
+                vec![
+                    "topos".into(),
+                    "follow".into(),
+                    format!("{server}/{name}"),
+                    "--json".into(),
+                ],
+            ),
+            crate::actions::next_action(
+                ActionCode::from("FOLLOW_WORKSPACE".to_owned()),
+                vec![
+                    "topos".into(),
+                    "follow".into(),
+                    name.clone(),
+                    "--yes".into(),
+                    "--json".into(),
+                ],
+            ),
+        ],
         // Divergent per-placement edits: the prose names the loss-led discard; mirror it (the
         // bare `--reset` DESCRIBES — nothing is dropped without its own `--yes`).
         ClientError::PlacementsDiverged { skill, .. } => vec![crate::actions::next_action(
@@ -2969,6 +2993,39 @@ mod tests {
 
         // A message without a backticked `topos …` command mirrors nothing.
         assert!(super::next_actions(&crate::error::ClientError::EmptyBundle).is_empty());
+    }
+
+    #[test]
+    fn the_bareword_guard_names_both_deliberate_spellings() {
+        for err in [
+            crate::error::ClientError::BarewordEnrollUnconfirmed {
+                name: "acme".to_owned(),
+                server: "https://topos.sh".to_owned(),
+            },
+            crate::error::ClientError::BarewordEnrollDeclined {
+                name: "acme".to_owned(),
+                server: "https://topos.sh".to_owned(),
+            },
+        ] {
+            let actions = super::next_actions(&err);
+            assert_eq!(actions.len(), 2, "{actions:?}");
+            assert!(
+                actions
+                    .iter()
+                    .all(|a| a.code.as_str() == "FOLLOW_WORKSPACE")
+            );
+            // Both spellings are CONCRETE (no template holes): the explicit address form and
+            // the consented bareword.
+            assert_eq!(
+                actions[0].argv,
+                vec!["topos", "follow", "https://topos.sh/acme", "--json"]
+            );
+            assert_eq!(
+                actions[1].argv,
+                vec!["topos", "follow", "acme", "--yes", "--json"]
+            );
+            assert!(actions.iter().all(|a| a.needs.is_empty()));
+        }
     }
 
     #[test]

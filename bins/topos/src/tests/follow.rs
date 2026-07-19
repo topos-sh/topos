@@ -328,6 +328,9 @@ fn run_follow(
         directory: &dir_connect,
         delivery: &del_connect,
         web_origin: "https://topos.sh".to_owned(),
+        // The classic suites consent to a bareword enroll by construction (the guard has its
+        // own suite).
+        confirm_bareword: &|_, _| ops::BarewordDecision::Proceed,
     };
     ops::follow(&ctx, &connectors, targets, opts)
 }
@@ -662,5 +665,171 @@ fn the_recovery_sweep_reaps_an_expired_wal_so_follow_starts_fresh() {
     assert!(
         !l.iter().any(|e| e == "poll"),
         "the dead code was never polled"
+    );
+}
+
+// =================================================================================================
+// The bareword-enroll consent guard: on an UNENROLLED install a bare `follow <name>` (no slash —
+// a workspace shorthand for the DEFAULT server) never starts a device flow silently. A TTY asks
+// first (the composition root's prompt rides the confirm seam); `--yes` is the headless consent;
+// an unconfirmable run refuses typed toward the two deliberate spellings. Enrolled installs and
+// full addresses keep their exact prior behavior.
+// =================================================================================================
+
+/// [`run_follow`] with an injected consent answer (the guard's own seam).
+fn run_follow_confirm(
+    rig: &Rig,
+    enroll_fake: &FakeEnroll,
+    targets: Vec<String>,
+    opts: ops::FollowOpts,
+    confirm: &dyn Fn(&str, &str) -> ops::BarewordDecision,
+) -> Result<ops::FollowOutcome, ClientError> {
+    crate::identity::load_or_create_device_id(&rig.fs, &rig.layout()).unwrap();
+    sidecar::recover(&rig.fs, &rig.layout(), FIXED_MILLIS as i64).unwrap();
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+    let enroll_connect = |_b: &str| -> Box<dyn EnrollSource> { Box::new(enroll_fake.clone()) };
+    let dir_connect = |_b: &str| -> Box<dyn DirectorySource> { Box::new(FakeDirectory) };
+    let del_connect = |_b: &str| -> Box<dyn ReconcileTransport> { Box::new(EmptyTransport) };
+    let connectors = ops::FollowConnectors {
+        enroll: &enroll_connect,
+        directory: &dir_connect,
+        delivery: &del_connect,
+        web_origin: "https://topos.sh".to_owned(),
+        confirm_bareword: confirm,
+    };
+    ops::follow(&ctx, &connectors, targets, opts)
+}
+
+#[test]
+fn a_headless_bareword_enroll_refuses_typed_with_both_spellings_and_dials_nothing() {
+    let rig = Rig::new("bareword-headless");
+    let log: CallLog = Arc::default();
+    let enroll_fake = FakeEnroll::new(log.clone(), vec![DeviceAuthPoll::Pending]);
+    let err = run_follow_confirm(
+        &rig,
+        &enroll_fake,
+        vec!["acme".to_owned()],
+        opts(false),
+        &|_, _| ops::BarewordDecision::Headless,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ClientError::BarewordEnrollUnconfirmed { .. }),
+        "{err:?}"
+    );
+    assert_eq!(err.code(), "ENROLL_CONFIRM_REQUIRED");
+    let msg = err.to_string();
+    assert!(msg.contains("--yes"), "{msg}");
+    assert!(msg.contains("https://topos.sh/acme"), "{msg}");
+    // Nothing dialed, nothing persisted — the refusal fires BEFORE the card fetch.
+    assert!(log.lock().unwrap().is_empty());
+    assert!(enroll::read_wal(&rig.fs, &rig.layout()).unwrap().is_none());
+}
+
+#[test]
+fn a_declined_prompt_refuses_and_dials_nothing() {
+    let rig = Rig::new("bareword-declined");
+    let log: CallLog = Arc::default();
+    let enroll_fake = FakeEnroll::new(log.clone(), vec![DeviceAuthPoll::Pending]);
+    let asked = std::sync::atomic::AtomicBool::new(false);
+    let err = run_follow_confirm(
+        &rig,
+        &enroll_fake,
+        vec!["acme".to_owned()],
+        opts(false),
+        &|name, server| {
+            assert_eq!(name, "acme");
+            assert_eq!(server, "https://topos.sh");
+            asked.store(true, std::sync::atomic::Ordering::SeqCst);
+            ops::BarewordDecision::Declined
+        },
+    )
+    .unwrap_err();
+    assert!(
+        asked.load(std::sync::atomic::Ordering::SeqCst),
+        "the prompt ran"
+    );
+    assert!(
+        matches!(err, ClientError::BarewordEnrollDeclined { .. }),
+        "{err:?}"
+    );
+    assert_eq!(err.code(), "ENROLL_CONFIRM_REQUIRED");
+    assert!(err.to_string().contains("nothing changed"), "{}", err);
+    assert!(log.lock().unwrap().is_empty());
+    assert!(enroll::read_wal(&rig.fs, &rig.layout()).unwrap().is_none());
+}
+
+#[test]
+fn yes_is_the_headless_consent_and_a_full_address_never_prompts() {
+    // `--yes` short-circuits the prompt entirely (a panicking confirm proves it is never asked).
+    let rig = Rig::new("bareword-yes");
+    let log: CallLog = Arc::default();
+    let enroll_fake = FakeEnroll::new(log.clone(), vec![DeviceAuthPoll::Pending]);
+    let out = run_follow_confirm(
+        &rig,
+        &enroll_fake,
+        vec!["acme".to_owned()],
+        opts(true),
+        &|_, _| panic!("--yes must never prompt"),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Data { data, .. } = out else {
+        panic!("the consented bareword begins the flow");
+    };
+    assert!(data.pending.is_some());
+
+    // A full `<server>/<workspace>` address is already explicit — no prompt either.
+    let rig = Rig::new("address-no-prompt");
+    let log: CallLog = Arc::default();
+    let enroll_fake = FakeEnroll::new(log.clone(), vec![DeviceAuthPoll::Pending]);
+    let out = run_follow_confirm(
+        &rig,
+        &enroll_fake,
+        vec!["https://topos.sh/acme".to_owned()],
+        opts(false),
+        &|_, _| panic!("a full address must never prompt"),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Data { data, .. } = out else {
+        panic!("the address begins the flow");
+    };
+    assert!(data.pending.is_some());
+}
+
+#[test]
+fn an_enrolled_install_keeps_its_prior_bareword_behavior() {
+    // Enrolled (instance.json pinned): a bareword that matches nothing locally still begins the
+    // device flow against the PINNED plane — the guard is for the fresh-machine default-server
+    // surprise only.
+    let rig = Rig::new("bareword-enrolled");
+    enroll::write_instance(
+        &rig.fs,
+        &rig.layout(),
+        &enroll::Instance {
+            schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+            base_url: API.to_owned(),
+        },
+    )
+    .unwrap();
+    let log: CallLog = Arc::default();
+    let enroll_fake = FakeEnroll::new(log.clone(), vec![DeviceAuthPoll::Pending]);
+    let out = run_follow_confirm(
+        &rig,
+        &enroll_fake,
+        vec!["ghost".to_owned()],
+        opts(false),
+        &|_, _| panic!("an enrolled install must never prompt"),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Data { data, .. } = out else {
+        panic!("the enrolled bareword begins the flow toward the pinned plane");
+    };
+    assert!(data.pending.is_some());
+    let l = log.lock().unwrap();
+    assert!(
+        l.iter().any(|e| e.starts_with("authorize ghost")),
+        "the flow ran against the pinned plane: {l:?}"
     );
 }

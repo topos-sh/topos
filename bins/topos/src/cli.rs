@@ -63,6 +63,9 @@ pub(crate) enum Command {
     /// approve — the device then holds ONE credential for everything your seats reach. `follow
     /// <skill>` on a KNOWN followed skill places its disclosed first-receive offer (or resumes a
     /// skill `unfollow` paused). While an enrollment is pending, re-invoking `follow` RESUMES it.
+    /// On a machine not yet enrolled, a bare NAME (no slash) reads as a workspace on the default
+    /// server and asks for confirmation before any enrollment starts — a TTY prompts; headless
+    /// runs pass `--yes` or spell the full `<server>/<workspace>` address.
     Follow {
         /// The follow targets (addresses, qualified paths, or names). Omitted, it resumes a
         /// pending enrollment.

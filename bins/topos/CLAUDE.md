@@ -88,6 +88,11 @@ renderer over the SAME typed outcomes (one value, two presentations).
   TWO-PHASE subscribe. Dispatched by shape (a pending WAL always wins — "re-invoking IS the resume";
   a KNOWN followed skill name wins over the address grammar; a retired `/i/` invite link refuses
   typed toward the workspace ADDRESS):
+  - **the bareword consent guard**: on an UNENROLLED install a bare `follow <name>` (no slash —
+    a workspace shorthand for the DEFAULT server) never starts a device flow silently: a TTY
+    confirms first (`[y/N]`, stderr), `--yes` is the headless consent, and an unconfirmable run
+    refuses typed (`ENROLL_CONFIRM_REQUIRED`, both deliberate spellings as next actions). An
+    enrolled install keeps its prior behavior (the pinned plane is the bare word's context);
   - **the ADDRESS flow** (`follow <workspace>`, `<server>/<ws>`, a bare SERVER origin
     `<server>` / `https://topos.example.com` / the schemeless `topos.example.com` — "the workspace
     that origin addresses", the single-tenant install form, an empty `workspace` on the wire,

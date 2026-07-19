@@ -729,6 +729,9 @@ impl FollowHarness {
             directory: &directory_connect,
             delivery: &delivery_connect,
             web_origin: "https://topos.sh".to_owned(),
+            // The e2e rigs enroll by full address (or consent by construction) — the bareword
+            // guard has its own unit suite.
+            confirm_bareword: &|_, _| ops::BarewordDecision::Proceed,
         };
         // Production's `Command::Follow` mints the host device id (writing `host.json`) before the op;
         // mirror that here.

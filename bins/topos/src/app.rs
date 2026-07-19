@@ -377,11 +377,34 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             // The transports are built per-base-URL (known only after the op parses the target /
             // the card / the WAL): the shared creds-free `ureq` enroll connector, the directory
             // (describe + rows) and the reconcile transport.
+            // The bareword-enroll consent prompt: only a real TTY (stdin AND stderr) may ask;
+            // `--json` and piped runs answer Headless, which the op turns into the typed refusal
+            // naming `--yes` and the full address form. The prompt rides stderr (stdout stays the
+            // clean render).
+            let confirm_bareword = |name: &str, server: &str| -> ops::BarewordDecision {
+                use std::io::{IsTerminal, Write};
+                if json || !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+                    return ops::BarewordDecision::Headless;
+                }
+                eprint!(
+                    "'{name}' looks like a workspace on {server} — enroll this device with it? [y/N] "
+                );
+                let _ = std::io::stderr().flush();
+                let mut line = String::new();
+                if std::io::stdin().read_line(&mut line).is_err() {
+                    return ops::BarewordDecision::Headless;
+                }
+                match line.trim() {
+                    "y" | "Y" | "yes" | "Yes" | "YES" => ops::BarewordDecision::Proceed,
+                    _ => ops::BarewordDecision::Declined,
+                }
+            };
             let connectors = ops::FollowConnectors {
                 enroll: &connect_enroll,
                 directory: &connect_directory,
                 delivery: &connect_delivery,
                 web_origin: web_origin.clone(),
+                confirm_bareword: &confirm_bareword,
             };
             let mk_opts = || ops::FollowOpts {
                 manual,
