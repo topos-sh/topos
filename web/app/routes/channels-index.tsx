@@ -34,22 +34,25 @@ export default function ChannelsIndex() {
           </Link>
         }
       />
-      {channels.length === 0 ? (
-        <p className="text-dim text-sm">No channels yet.</p>
-      ) : (
-        <section aria-labelledby="channels-heading" className="space-y-3">
-          <SectionHeading>
-            <span id="channels-heading">Channels</span>
-          </SectionHeading>
-          <Card className="overflow-hidden">
-            <ul>
-              {channels.map((channel) => (
-                <ChannelRow key={channel.channelId} channel={channel} />
-              ))}
-            </ul>
-          </Card>
-        </section>
-      )}
+      {/* No empty branch: a workspace is born with #everyone, so the list is never empty. */}
+      <section aria-labelledby="channels-heading" className="space-y-3">
+        <SectionHeading>
+          <span id="channels-heading">Channels</span>
+        </SectionHeading>
+        <Card className="overflow-hidden">
+          <ul>
+            {channels.map((channel) => (
+              <ChannelRow key={channel.channelId} channel={channel} />
+            ))}
+          </ul>
+        </Card>
+        {channels.length === 1 && channels[0]?.isDefault && (
+          <p className="text-faint text-sm">
+            Every workspace starts with <span className="font-mono">#everyone</span>. Create a
+            channel to share a set of skills with just the people who follow it.
+          </p>
+        )}
+      </section>
     </div>
   );
 }
