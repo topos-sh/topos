@@ -271,6 +271,16 @@ export async function detachedCopiesOf(actor: MemberActor): Promise<DetachedCopy
   return rows.map((r) => ({ ...r, display: r.display ?? "former member" }));
 }
 
+/** Live (non-revoked) devices held by this workspace's seated members — the onboarding probe. */
+export async function workspaceDeviceCount(actor: MemberActor): Promise<number> {
+  const rows = await getDb()
+    .select({ n: sql<number>`count(*)::int` })
+    .from(device)
+    .innerJoin(seat, and(eq(seat.workspaceId, actor.workspaceId), eq(seat.userId, device.userId)))
+    .where(sql`${device.revokedAt} IS NULL`);
+  return rows[0]?.n ?? 0;
+}
+
 /** Whether the actor holds any seat rows at all — the fleet page's empty-state probe. */
 export async function workspaceHasDevices(actor: MemberActor): Promise<boolean> {
   const rows = await getDb()

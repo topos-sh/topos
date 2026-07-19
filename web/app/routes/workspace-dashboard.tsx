@@ -4,6 +4,7 @@ import { NoSkills } from "@/components/empty-states";
 import { relativeTime } from "@/components/format";
 import { LandingPage } from "@/components/landing/landing-page";
 import { AddressBlock } from "@/components/members/address-block";
+import { OnboardingChecklist, type OnboardingState } from "@/components/onboarding-checklist";
 import { ResourcePage } from "@/components/resource-page";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading, ShortId } from "@/components/ui";
 import { composition } from "@/composition.server";
@@ -11,8 +12,10 @@ import { serverEnv } from "@/env.server";
 import { actorFromSession, memberInScope } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
 import { theWorkspace } from "@/lib/db/identity.server";
+import { workspaceDeviceCount } from "@/lib/db/queries.fleet.server";
 import { rosterOf } from "@/lib/db/queries.roster.server";
 import { type SkillIndexRow, skillIndexOf } from "@/lib/db/queries.server";
+import { followBase } from "@/lib/plane/follow-base.server";
 import { useWsPath } from "@/lib/ws-path";
 import { workspaceAddress } from "@/lib/ws-url.server";
 
@@ -64,11 +67,22 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   // Signed in: the one membership-or-404 resolution (an unknown slug and a non-member land the
   // same uniform 404 here).
   const { workspace, actor: memberActor } = await memberInScope(actor, params);
-  const [index, roster] = await Promise.all([
+  const [index, roster, deviceCount] = await Promise.all([
     skillIndexOf(memberActor, workspace.id),
     // Direct seat rows: a seat IS membership, so the count is the roster's length.
     rosterOf(memberActor),
+    workspaceDeviceCount(memberActor),
   ]);
+  // The onboarding checklist: live while the workspace is still getting going (nothing
+  // published yet, or fewer than two enrolled devices — one machine is not yet distribution),
+  // gone once every step is done, and gone once dismissed (a client-set cookie, read here so
+  // the choice never flickers at hydration).
+  const publishedSkillCount = index.filter((row) => row.versionId !== null).length;
+  const memberCount = roster.length;
+  const dismissCookie = `topos_onboard_dismissed_${workspace.id}`;
+  const dismissed = (request.headers.get("cookie") ?? "").includes(`${dismissCookie}=1`);
+  const allDone = deviceCount >= 1 && publishedSkillCount >= 1 && memberCount >= 2;
+  const showOnboarding = !dismissed && !allDone && (publishedSkillCount === 0 || deviceCount < 2);
   return {
     face: "page" as const,
     name: workspace.displayName,
@@ -76,7 +90,17 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     slug: workspace.name,
     shareAddress: workspaceAddress(request, workspace.name),
     index,
-    memberCount: roster.length,
+    memberCount,
+    onboarding: showOnboarding
+      ? {
+          dismissCookie,
+          origin: followBase(request),
+          shareAddress: workspaceAddress(request, workspace.name),
+          deviceCount,
+          publishedSkillCount,
+          memberCount,
+        }
+      : null,
   };
 }
 
@@ -106,12 +130,14 @@ function DashboardPage({
   shareAddress,
   index,
   memberCount,
+  onboarding,
 }: {
   name: string;
   slug: string;
   shareAddress: string;
   index: SkillIndexRow[];
   memberCount: number;
+  onboarding: OnboardingState | null;
 }) {
   const wsPath = useWsPath();
   return (
@@ -141,8 +167,14 @@ function DashboardPage({
         }
       />
 
+      {onboarding && <OnboardingChecklist state={onboarding} />}
+
       {index.length === 0 ? (
-        <NoSkills shareAddress={shareAddress} />
+        // While the checklist is up its publish step carries the same instructions the
+        // empty-state card would — showing both would say it twice.
+        onboarding ? null : (
+          <NoSkills shareAddress={shareAddress} />
+        )
       ) : (
         <section aria-labelledby="skill-index-heading" className="space-y-3">
           <div className="flex items-center justify-between gap-3">

@@ -17,12 +17,17 @@ import {
  * `<skill>` and `<path-to-skill-directory>`. ONE component so the dialog and the dashboard's
  * empty-state card can never drift.
  */
+/** The one publish agent-prompt line — shared with the dashboard's onboarding checklist. */
+export const AGENT_PUBLISH_PROMPT = "Share my <skill> skill with the team on Topos — publish it.";
+/** The manual publish command that pairs with it. */
+export const PUBLISH_COMMAND = "topos publish <path-to-skill-directory>";
+
 export function PublishInstructions({ shareAddress }: { shareAddress: string }) {
   const agentHeadingId = useId();
   const cliHeadingId = useId();
-  const agentPrompt = "Share my <skill> skill with the team on Topos — publish it.";
+  const agentPrompt = AGENT_PUBLISH_PROMPT;
   const followCommand = `topos follow ${shareAddress}`;
-  const publishCommand = "topos publish <path-to-skill-directory>";
+  const publishCommand = PUBLISH_COMMAND;
   return (
     <>
       <section aria-labelledby={agentHeadingId} className="space-y-2">
