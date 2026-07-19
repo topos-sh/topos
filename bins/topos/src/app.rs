@@ -31,8 +31,14 @@ use crate::{enroll, identity, logfile, ops, render};
 /// state dir the command just deleted), or on a failed command.
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
-    let check = version_check_applies(&cli.command) && ops::version_check_env_allows();
-    let code = run_command(cli);
+    // No subcommand: on a TTY, orient (the status snapshot / the unenrolled welcome, exit 0);
+    // piped or under `--json`, keep the classic usage error (stderr, exit 2) so scripts fail
+    // loudly. The version nag never rides the bare invocation — orientation stays offline.
+    let Some(command) = cli.command else {
+        return run_bare(cli.json, cli.workspace);
+    };
+    let check = version_check_applies(&command) && ops::version_check_env_allows();
+    let code = run_command(cli.json, cli.workspace, command, false);
     if check && code == ExitCode::SUCCESS {
         let fs = RealFs;
         let clock = RealClock;
@@ -58,17 +64,36 @@ fn version_check_applies(command: &Command) -> bool {
             | Command::Upgrade
             | Command::Uninstall { .. }
             | Command::Update { quiet: true, .. }
+            // `status` promises "offline, nothing dialed" — the passive probe would break it.
+            | Command::Status
     )
 }
 
+/// The bare `topos` invocation (no subcommand). A TTY gets the orientation render — the same
+/// snapshot `topos status` computes, with the unenrolled welcome as its short form — and exit 0.
+/// Anything scripted (piped stdout, or `--json`) keeps the classic clap usage error on stderr with
+/// exit 2, so automation that forgot a verb still fails loudly.
+fn run_bare(json: bool, workspace: Option<String>) -> ExitCode {
+    use std::io::IsTerminal;
+    if json || !std::io::stdout().is_terminal() {
+        let mut cmd = crate::cli::cli_command();
+        let err = cmd.error(
+            clap::error::ErrorKind::MissingSubcommand,
+            "'topos' requires a subcommand but one was not provided",
+        );
+        let _ = err.print();
+        return ExitCode::from(2);
+    }
+    run_command(false, workspace, Command::Status, true)
+}
+
 /// Parse-free dispatch: wire the real seams, run recovery, dispatch the verb, emit the outcome.
-fn run_command(cli: Cli) -> ExitCode {
-    let json = cli.json;
+/// `bare` marks the no-subcommand TTY orientation (it only softens `status`'s render on a fresh
+/// machine — the welcome instead of the full snapshot).
+fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bool) -> ExitCode {
     // The global `--workspace` — which workspace the ambient write verbs act in (and the filter that
     // disambiguates a skill name shared across workspaces). Optional; inferred with a single workspace.
     // Canonicalized below (name → id) once the layout exists, so every consumer keeps id semantics.
-    let workspace = cli.workspace;
-    let command = cli.command;
     let cmd_name = command.name();
 
     let fs = RealFs;
@@ -239,6 +264,19 @@ fn run_command(cli: Cli) -> ExitCode {
     let web_origin = resolve_web_origin(std::env::var("TOPOS_PLANE_URL").ok());
 
     match command {
+        Command::Status => {
+            // Offline + read-only: the snapshot from local state, the trigger rows from the
+            // read-only probe at this root (the one layer holding the real config port + $HOME) —
+            // the same layering the arming receipts use, minus every write.
+            let result = ops::status_snapshot(&ctx).map(|mut data| {
+                if let Some(r) = &ctx.roots {
+                    data.triggers =
+                        ops::probe_detected(&r.home, r.cwd.as_deref(), harness.as_ref(), &fs);
+                }
+                data
+            });
+            finish_status(json, cmd_name, result, bare, &diag)
+        }
         Command::Add {
             source,
             skill,
@@ -1005,6 +1043,48 @@ fn finish<T: Serialize>(
                 println!("{}", render::to_json(&render::ok_envelope(command, value)));
             } else {
                 println!("{}", tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
+/// `status`'s finisher — the one orientation envelope. An UNENROLLED snapshot carries the join
+/// next action (the argv is a template — its `<workspace-address>` placeholder is the caller's to
+/// fill); the TTY renders the full snapshot, or the short welcome on a bare `topos` from a fresh
+/// machine.
+fn finish_status(
+    json: bool,
+    command: &str,
+    result: Result<topos_types::results::StatusData, ClientError>,
+    bare: bool,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(data) => {
+            if json {
+                let next_actions = if data.enrolled {
+                    Vec::new()
+                } else {
+                    vec![crate::actions::next_action(
+                        topos_types::ActionCode::from("FOLLOW_WORKSPACE".to_owned()),
+                        vec![
+                            "topos".to_owned(),
+                            "follow".to_owned(),
+                            "<workspace-address>".to_owned(),
+                            "--json".to_owned(),
+                        ],
+                    )]
+                };
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = next_actions;
+                println!("{}", render::to_json(&envelope));
+            } else if bare && !data.enrolled {
+                println!("{}", render::welcome_tty(&data));
+            } else {
+                println!("{}", render::status_tty(&data));
             }
             ExitCode::SUCCESS
         }

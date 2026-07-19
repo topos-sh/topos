@@ -15,6 +15,15 @@ These work before or after any verb.
 
 ## Self-scoped verbs
 
+### `topos status`
+
+```
+topos status
+```
+
+Show where this install stands — enrollment, sign-in, followed skills, pending first-receive offers, per-agent auto-update trigger state, and the binary version. Entirely offline (nothing is dialed) and read-only (nothing is armed or repaired). A bare `topos` on a TTY renders the same snapshot
+
+
 ### `topos follow`
 
 ```

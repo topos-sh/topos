@@ -238,6 +238,10 @@ fn schemas() -> Vec<(&'static str, String)> {
             "keep-as-yours-data",
             emit(schemars::schema_for!(topos_types::results::KeepAsYoursData)),
         ),
+        (
+            "status-data",
+            emit(schemars::schema_for!(topos_types::results::StatusData)),
+        ),
         // On-disk persisted client documents.
         (
             "persisted-sync",
@@ -402,7 +406,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         FollowOffer, InviteReadData, ListData, LogData, MergePreview, MergePreviewVerdict,
         MergeReport, Offer, ProtectData, PublishDescribeData, PublishGate, PullAction, PullData,
         PullSkill, RemoveData, RemoveItem, RemoveKind, ReviewIndexData, ReviewIndexEntry,
-        SkillEntry, UnfollowData, WorkspaceSyncReport,
+        SkillEntry, StatusData, StatusTrigger, StatusWorkspace, UnfollowData, WorkspaceSyncReport,
     };
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
 
@@ -1224,7 +1228,49 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
+    // `status` — the offline orientation snapshot: an enrolled, signed-in install with one
+    // first-receive offer still awaiting consent and the read-only trigger rows (OpenClaw's
+    // presence needs a live scheduler query, so its row is an honest unknown).
+    let status_ok = JsonEnvelope {
+        schema_version: 1,
+        command: "status".to_owned(),
+        ok: true,
+        data: serde_json::to_value(StatusData {
+            version: "0.1.0".to_owned(),
+            enrolled: true,
+            server: Some("https://topos.sh/api".to_owned()),
+            signed_in: true,
+            workspaces: vec![StatusWorkspace {
+                workspace_id: "w_demo".to_owned(),
+                name: "demo".to_owned(),
+                display_name: "Demo".to_owned(),
+            }],
+            followed_skills: 2,
+            pending_offers: Some(1),
+            triggers: vec![
+                StatusTrigger {
+                    agent: "claude-code".to_owned(),
+                    armed: Some(true),
+                    note: None,
+                },
+                StatusTrigger {
+                    agent: "openclaw".to_owned(),
+                    armed: None,
+                    note: Some(
+                        "presence needs a live scheduler query — not probed offline".to_owned(),
+                    ),
+                },
+            ],
+        })
+        .expect("StatusData serializes"),
+        warnings: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
     vec![
+        ("json/status.ok", emit_json(&status_ok)),
         ("json/pull.ok", emit_json(&pull_ok)),
         ("json/pull.merged", emit_json(&pull_merged)),
         ("json/pull.conflicted", emit_json(&pull_conflicted)),

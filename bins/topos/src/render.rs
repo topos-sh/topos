@@ -1307,6 +1307,75 @@ pub(crate) fn logout_applied_tty(d: &crate::ops::AuthLogoutData) -> String {
 }
 
 /// `auth status`'s TTY — whoami, per-workspace health, hook health, reporting posture.
+/// The `status` snapshot's TTY — the one orientation read: version, enrollment/sign-in, follows +
+/// pending offers, and the per-agent trigger rows. Entirely from the offline snapshot.
+pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
+    let mut s = format!("topos {}", d.version);
+    match &d.server {
+        Some(server) => {
+            s.push_str(&format!(
+                "\nserver: {server} — {}",
+                if d.signed_in {
+                    "signed in"
+                } else {
+                    "signed out (`topos auth login` signs back in)"
+                }
+            ));
+            for ws in &d.workspaces {
+                s.push_str(&format!("\n  {} ({})", ws.display_name, ws.name));
+            }
+        }
+        None => s.push_str(
+            "\nnot enrolled — join your team with `topos follow <workspace-address>` (ask a \
+             teammate for the address), or create a workspace at https://topos.sh",
+        ),
+    }
+    s.push_str(&format!(
+        "\nfollowing: {} {}",
+        d.followed_skills,
+        if d.followed_skills == 1 {
+            "skill"
+        } else {
+            "skills"
+        }
+    ));
+    if let Some(p) = d.pending_offers
+        && p > 0
+    {
+        s.push_str(&format!(
+            " — {p} first-receive {} awaiting consent (`topos update` discloses {})",
+            if p == 1 { "offer" } else { "offers" },
+            if p == 1 { "it" } else { "them" },
+        ));
+    }
+    if !d.triggers.is_empty() {
+        s.push_str("\nauto-update triggers:");
+        for t in &d.triggers {
+            let state = match t.armed {
+                Some(true) => "armed",
+                Some(false) => "not armed",
+                None => "unknown",
+            };
+            s.push_str(&format!("\n  {}: {state}", t.agent));
+            if let Some(n) = &t.note {
+                s.push_str(&format!(" — {n}"));
+            }
+        }
+    }
+    s
+}
+
+/// The bare `topos` welcome on a fresh (unenrolled) machine — what topos is, in two lines, plus
+/// the two ways in. The enrolled bare invocation renders [`status_tty`] instead.
+pub(crate) fn welcome_tty(d: &topos_types::results::StatusData) -> String {
+    format!(
+        "topos {} — shared skills for AI agents: your team's behaviors, delivered to every \
+         agent and kept current.\nJoin your team:      topos follow <workspace-address>   (ask a \
+         teammate for the address)\nCreate a workspace:  https://topos.sh",
+        d.version
+    )
+}
+
 pub(crate) fn auth_status_tty(d: &crate::ops::AuthStatusData) -> String {
     let mut s = match (&d.principal, d.signed_in) {
         (Some(p), true) => format!("Signed in as {p}"),
@@ -2085,7 +2154,7 @@ mod tests {
 
     use crate::ops::{FollowNote, ListEnrollment, ListOutcome};
 
-    use super::{follow_tty, list_tty, log_tty, publish_tty, pull_tty};
+    use super::{follow_tty, list_tty, log_tty, publish_tty, pull_tty, status_tty, welcome_tty};
 
     fn row(name: &str, action: PullAction) -> PullSkill {
         PullSkill {
@@ -2625,6 +2694,82 @@ mod tests {
         );
         assert!(text.contains("code: WXYZ-1234"), "{text}");
         assert!(text.contains("confirm it matches the page"), "{text}");
+    }
+
+    #[test]
+    fn status_tty_renders_both_enrollment_faces() {
+        use topos_types::results::{StatusData, StatusTrigger, StatusWorkspace};
+        let enrolled = StatusData {
+            version: "0.1.0".to_owned(),
+            enrolled: true,
+            server: Some("https://topos.sh/api".to_owned()),
+            signed_in: true,
+            workspaces: vec![StatusWorkspace {
+                workspace_id: "w_demo".to_owned(),
+                name: "demo".to_owned(),
+                display_name: "Demo".to_owned(),
+            }],
+            followed_skills: 2,
+            pending_offers: Some(1),
+            triggers: vec![
+                StatusTrigger {
+                    agent: "claude-code".to_owned(),
+                    armed: Some(true),
+                    note: None,
+                },
+                StatusTrigger {
+                    agent: "openclaw".to_owned(),
+                    armed: None,
+                    note: Some("presence needs a live scheduler query".to_owned()),
+                },
+            ],
+        };
+        let text = status_tty(&enrolled);
+        assert!(text.contains("topos 0.1.0"), "{text}");
+        assert!(
+            text.contains("server: https://topos.sh/api — signed in"),
+            "{text}"
+        );
+        assert!(text.contains("Demo (demo)"), "{text}");
+        assert!(text.contains("following: 2 skills"), "{text}");
+        assert!(
+            text.contains("1 first-receive offer awaiting consent"),
+            "{text}"
+        );
+        assert!(text.contains("claude-code: armed"), "{text}");
+        assert!(
+            text.contains("openclaw: unknown — presence needs"),
+            "{text}"
+        );
+
+        // The unenrolled face states the fix in prose (join by address, or create a workspace).
+        let fresh = StatusData {
+            enrolled: false,
+            server: None,
+            signed_in: false,
+            workspaces: Vec::new(),
+            followed_skills: 0,
+            pending_offers: Some(0),
+            triggers: Vec::new(),
+            ..enrolled
+        };
+        let text = status_tty(&fresh);
+        assert!(text.contains("not enrolled"), "{text}");
+        assert!(
+            text.contains("`topos follow <workspace-address>`"),
+            "{text}"
+        );
+        assert!(text.contains("https://topos.sh"), "{text}");
+        assert!(text.contains("following: 0 skills"), "{text}");
+
+        // The bare-`topos` welcome stays three lines: what topos is + the two ways in.
+        let welcome = welcome_tty(&fresh);
+        assert_eq!(welcome.lines().count(), 3, "{welcome}");
+        assert!(
+            welcome.contains("topos follow <workspace-address>"),
+            "{welcome}"
+        );
+        assert!(welcome.contains("https://topos.sh"), "{welcome}");
     }
 
     #[test]

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "command": "status",
+  "ok": true,
+  "data": {
+    "enrolled": true,
+    "followed_skills": 2,
+    "pending_offers": 1,
+    "server": "https://topos.sh/api",
+    "signed_in": true,
+    "triggers": [
+      {
+        "agent": "claude-code",
+        "armed": true
+      },
+      {
+        "agent": "openclaw",
+        "note": "presence needs a live scheduler query — not probed offline"
+      }
+    ],
+    "version": "0.1.0",
+    "workspaces": [
+      {
+        "display_name": "Demo",
+        "name": "demo",
+        "workspace_id": "w_demo"
+      }
+    ]
+  },
+  "warnings": [],
+  "next_actions": []
+}

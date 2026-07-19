@@ -33,14 +33,22 @@ pub(crate) struct Cli {
     #[arg(long, global = true, value_name = "WORKSPACE")]
     pub(crate) workspace: Option<String>,
 
+    /// Optional so a bare `topos` can orient instead of erroring: on a TTY it renders the status
+    /// (or the unenrolled welcome) and exits 0; piped/scripted it keeps the classic usage error on
+    /// stderr with exit 2, so automation still fails loudly.
     #[command(subcommand)]
-    pub(crate) command: Command,
+    pub(crate) command: Option<Command>,
 }
 
 /// The verb tree. Ordered by scope (self-scoped, then team-scoped, then maintenance).
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
     // ---- Self-scoped (affect only you) ----
+    /// Show where this install stands — enrollment, sign-in, followed skills, pending
+    /// first-receive offers, per-agent auto-update trigger state, and the binary version.
+    /// Entirely offline (nothing is dialed) and read-only (nothing is armed or repaired).
+    /// A bare `topos` on a TTY renders the same snapshot.
+    Status,
     /// Follow a workspace, channel, or skill — enroll if needed, then subscribe two-phase (a bare
     /// invocation DESCRIBES what would land; `--yes` INSTALLS exactly what its own describe
     /// disclosed for the NAMED targets — a workspace target lands the whole delivered set, a
@@ -413,6 +421,7 @@ impl Command {
     /// The verb name carried in the `--json` envelope + receipt.
     pub(crate) fn name(&self) -> &'static str {
         match self {
+            Command::Status => "status",
             Command::Follow { .. } => "follow",
             Command::Unfollow { .. } => "unfollow",
             // `pull` is a hidden alias of `update` — the envelope always reads "update".
@@ -449,14 +458,31 @@ mod tests {
     }
 
     #[test]
+    fn status_parses_and_the_subcommand_is_optional() {
+        // `topos status` is the explicit orientation verb.
+        let out = Cli::try_parse_from(["topos", "status"]).unwrap();
+        assert!(matches!(out.command, Some(Command::Status)));
+        assert_eq!(out.command.unwrap().name(), "status");
+        // A bare `topos` parses (no subcommand) — the composition root decides between the TTY
+        // orientation render and the scripted usage error.
+        let bare = Cli::try_parse_from(["topos"]).unwrap();
+        assert!(bare.command.is_none());
+        let bare_json = Cli::try_parse_from(["topos", "--json"]).unwrap();
+        assert!(bare_json.command.is_none() && bare_json.json);
+    }
+
+    #[test]
     fn pull_is_a_hidden_alias_of_update() {
         // The armed hooks in the field run `topos pull --quiet`; it must parse as Update and read "update".
         let pull = Cli::try_parse_from(["topos", "pull", "--quiet"]).unwrap();
-        assert!(matches!(pull.command, Command::Update { quiet: true, .. }));
-        assert_eq!(pull.command.name(), "update");
+        assert!(matches!(
+            pull.command,
+            Some(Command::Update { quiet: true, .. })
+        ));
+        assert_eq!(pull.command.unwrap().name(), "update");
         // A targeted go-back over the alias parses too.
         let go_back = Cli::try_parse_from(["topos", "pull", "docs@abc"]).unwrap();
-        assert!(matches!(go_back.command, Command::Update { .. }));
+        assert!(matches!(go_back.command, Some(Command::Update { .. })));
     }
 
     #[test]
@@ -465,10 +491,10 @@ mod tests {
         let out = Cli::try_parse_from(["topos", "update", "docs", "--onto-current"]).unwrap();
         assert!(matches!(
             out.command,
-            Command::Update {
+            Some(Command::Update {
                 onto_current: true,
                 ..
-            }
+            })
         ));
     }
 
@@ -490,11 +516,11 @@ mod tests {
             .unwrap();
         assert!(matches!(
             out.command,
-            Command::Publish {
+            Some(Command::Publish {
                 message: Some(_),
                 to: Some(_),
                 ..
-            }
+            })
         ));
     }
 
@@ -542,8 +568,8 @@ mod tests {
     #[test]
     fn upgrade_is_a_hidden_disambiguation_subcommand() {
         let out = Cli::try_parse_from(["topos", "upgrade"]).unwrap();
-        assert!(matches!(out.command, Command::Upgrade));
-        assert_eq!(out.command.name(), "upgrade");
+        assert!(matches!(out.command, Some(Command::Upgrade)));
+        assert_eq!(out.command.unwrap().name(), "upgrade");
     }
 
     #[test]
@@ -551,19 +577,19 @@ mod tests {
         let follow_bare = Cli::try_parse_from(["topos", "follow", "--wait"]).unwrap();
         assert!(matches!(
             follow_bare.command,
-            Command::Follow {
+            Some(Command::Follow {
                 wait: Some(None),
                 ..
-            }
+            })
         ));
         let follow_valued =
             Cli::try_parse_from(["topos", "follow", "acme", "--wait", "300"]).unwrap();
         assert!(matches!(
             follow_valued.command,
-            Command::Follow {
+            Some(Command::Follow {
                 wait: Some(Some(300)),
                 ..
-            }
+            })
         ));
         // `publish` has no pending flow any more (an un-enrolled publish refuses typed), so no --wait.
         let removed = Cli::try_parse_from(["topos", "publish", "docs", "--wait"]).unwrap_err();
@@ -582,11 +608,11 @@ mod tests {
         .unwrap();
         assert!(matches!(
             out.command,
-            Command::Follow {
+            Some(Command::Follow {
                 yes: true,
                 prefix_dirname: true,
                 ..
-            }
+            })
         ));
     }
 
@@ -595,12 +621,12 @@ mod tests {
         let login = Cli::try_parse_from(["topos", "auth", "login", "--wait", "60"]).unwrap();
         assert!(matches!(
             login.command,
-            Command::Auth {
+            Some(Command::Auth {
                 cmd: super::AuthCmd::Login {
                     wait: Some(Some(60)),
                     ..
                 }
-            }
+            })
         ));
         // The account-switch `--yes` died with the per-account credential set (the identity is
         // whoever approves in the browser; the one credential is replaced wholesale).
@@ -609,9 +635,9 @@ mod tests {
         let logout = Cli::try_parse_from(["topos", "auth", "logout", "--yes"]).unwrap();
         assert!(matches!(
             logout.command,
-            Command::Auth {
+            Some(Command::Auth {
                 cmd: super::AuthCmd::Logout { yes: true }
-            }
+            })
         ));
     }
 }

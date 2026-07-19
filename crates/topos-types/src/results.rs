@@ -1076,6 +1076,67 @@ pub enum PublishGate {
     Proposal,
 }
 
+// =================================================================================================
+// INFERRED — `status` (the offline orientation snapshot).
+// =================================================================================================
+
+/// `status` result — the one orientation read: enrollment, sign-in, follow counts, per-agent
+/// trigger arm state, and the binary version. Computed ENTIRELY from local state (no network).
+/// **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct StatusData {
+    /// The `topos` binary's own version.
+    pub version: String,
+    /// Whether this install is enrolled with a plane (the enrollment doc exists).
+    pub enrolled: bool,
+    /// The pinned plane base URL, when enrolled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    /// Whether the device credential is stored (the signed-in state).
+    pub signed_in: bool,
+    /// The joined workspaces (empty when never enrolled).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspaces: Vec<StatusWorkspace>,
+    /// Skills this install currently follows (excluding per-device exclusions and unfollowed
+    /// copies).
+    pub followed_skills: u64,
+    /// First-receive offers awaiting consent (a followed skill whose bytes never landed here).
+    /// Absent = not cheaply knowable from local state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_offers: Option<u64>,
+    /// Per-agent auto-update trigger state, probed READ-ONLY over the detected agents (nothing is
+    /// armed or repaired by `status`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<StatusTrigger>,
+}
+
+/// One joined workspace in a [`StatusData`]. **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct StatusWorkspace {
+    pub workspace_id: String,
+    /// The ADDRESS name (what you joined by).
+    pub name: String,
+    pub display_name: String,
+}
+
+/// One detected agent's auto-update trigger presence in a [`StatusData`] — a read-only probe of
+/// the same artifact the arming sweep manages. **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct StatusTrigger {
+    /// The registry slug.
+    pub agent: String,
+    /// Provable presence of the topos trigger artifact right now. Absent = unknowable without a
+    /// live probe `status` refuses to run (a scheduler that must be dialed to answer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub armed: Option<bool>,
+    /// A short honesty note (e.g. why `armed` is unknown), when one is needed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

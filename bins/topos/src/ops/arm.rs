@@ -80,6 +80,57 @@ pub(crate) fn scrub_all(
     out
 }
 
+/// Probe the auto-update trigger of every DETECTED trigger-capable agent, READ-ONLY — the
+/// `status` half of the sweep above: the same detection, the same adapters, but only their
+/// provable-presence probes (nothing is armed, repaired, or scrubbed). The active adapter's row
+/// rides its own `trigger_present` (a config-footprint read); OpenClaw's presence needs a LIVE
+/// scheduler query, which an offline status refuses to run — its row answers `armed: None` with
+/// the reason. Placement-only harnesses have no trigger surface and no row.
+pub(crate) fn probe_detected(
+    home: &Path,
+    cwd: Option<&Path>,
+    active: &dyn HarnessAdapter,
+    cfg: &dyn ConfigStore,
+) -> Vec<topos_types::results::StatusTrigger> {
+    use topos_types::results::StatusTrigger;
+    let active_slug = active.id().slug();
+    let mut out = Vec::new();
+    for harness in registry::detected_harnesses(home, cwd) {
+        if harness.slug == active_slug {
+            out.push(StatusTrigger {
+                agent: active_slug.to_owned(),
+                armed: Some(active.trigger_present()),
+                note: None,
+            });
+        } else if let Some(adapter) = triggers::adapter_for_slug(harness.slug, home, cfg) {
+            out.push(StatusTrigger {
+                agent: harness.slug.to_owned(),
+                armed: Some(adapter.present()),
+                note: None,
+            });
+        } else if harness.slug == "hermes-agent" {
+            // The Hermes probe is the adapter's own config-footprint read (offline).
+            let hermes_home = std::env::var_os("HERMES_HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| home.join(".hermes"));
+            let adapter = Hermes::new(hermes_home, Hermes::resolve_accept_hooks(), cfg);
+            out.push(StatusTrigger {
+                agent: harness.slug.to_owned(),
+                armed: Some(adapter.trigger_present()),
+                note: None,
+            });
+        } else if harness.slug == "openclaw" {
+            out.push(StatusTrigger {
+                agent: harness.slug.to_owned(),
+                armed: None,
+                note: Some("presence needs a live scheduler query — not probed offline".to_owned()),
+            });
+        }
+        // Every other detected harness is placement-only — no trigger surface, no row.
+    }
+    out
+}
+
 /// What a sweep pass does per agent.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Action {
@@ -262,6 +313,36 @@ mod tests {
                 .keys()
                 .all(|p| p.starts_with(&home.0) || !p.starts_with(std::env::temp_dir())),
         );
+    }
+
+    /// The status probe is READ-ONLY: it reports presence over the same detection the arming
+    /// sweep uses, writes nothing, answers honestly per agent (an unarmed cursor probes `false`,
+    /// an armed one `true`), refuses OpenClaw's live scheduler query with an explicit unknown,
+    /// and gives a placement-only harness no row.
+    #[test]
+    fn probe_detected_is_read_only_and_honest_per_agent() {
+        let home = TempHome::new();
+        for d in [".cursor", ".augment", ".claude", ".openclaw"] {
+            std::fs::create_dir_all(home.0.join(d)).unwrap();
+        }
+        let cfg = MemConfig::default();
+        let active = topos_harness::ClaudeCode::new(home.0.join(".claude"), &cfg);
+
+        let out = probe_detected(&home.0, None, &active, &cfg);
+        let by = |slug: &str| out.iter().find(|r| r.agent == slug);
+        assert_eq!(by("claude-code").expect("active row").armed, Some(false));
+        assert_eq!(by("cursor").expect("cursor row").armed, Some(false));
+        let openclaw = by("openclaw").expect("openclaw row");
+        assert_eq!(openclaw.armed, None, "a live-only probe stays unknown");
+        assert!(openclaw.note.is_some(), "the unknown names its reason");
+        assert!(by("augment").is_none(), "placement-only ⇒ no trigger row");
+        assert!(cfg.files.borrow().is_empty(), "the probe writes nothing");
+
+        // Arm cursor through the real sweep, then the probe reports it present.
+        arm_detected(&home.0, None, "claude-code", &cfg, &NoBinary);
+        let out = probe_detected(&home.0, None, &active, &cfg);
+        let cursor = out.iter().find(|r| r.agent == "cursor").expect("cursor");
+        assert_eq!(cursor.armed, Some(true));
     }
 
     #[test]

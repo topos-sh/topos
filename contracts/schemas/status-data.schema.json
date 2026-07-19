@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StatusData",
+  "description": "`status` result — the one orientation read: enrollment, sign-in, follow counts, per-agent\ntrigger arm state, and the binary version. Computed ENTIRELY from local state (no network).\n**INFERRED** (additive-only).",
+  "type": "object",
+  "properties": {
+    "enrolled": {
+      "description": "Whether this install is enrolled with a plane (the enrollment doc exists).",
+      "type": "boolean"
+    },
+    "followed_skills": {
+      "description": "Skills this install currently follows (excluding per-device exclusions and unfollowed\ncopies).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "pending_offers": {
+      "description": "First-receive offers awaiting consent (a followed skill whose bytes never landed here).\nAbsent = not cheaply knowable from local state.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "server": {
+      "description": "The pinned plane base URL, when enrolled.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "signed_in": {
+      "description": "Whether the device credential is stored (the signed-in state).",
+      "type": "boolean"
+    },
+    "triggers": {
+      "description": "Per-agent auto-update trigger state, probed READ-ONLY over the detected agents (nothing is\narmed or repaired by `status`).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/StatusTrigger"
+      }
+    },
+    "version": {
+      "description": "The `topos` binary's own version.",
+      "type": "string"
+    },
+    "workspaces": {
+      "description": "The joined workspaces (empty when never enrolled).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/StatusWorkspace"
+      }
+    }
+  },
+  "required": [
+    "version",
+    "enrolled",
+    "signed_in",
+    "followed_skills"
+  ],
+  "$defs": {
+    "StatusTrigger": {
+      "description": "One detected agent's auto-update trigger presence in a [`StatusData`] — a read-only probe of\nthe same artifact the arming sweep manages. **INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "agent": {
+          "description": "The registry slug.",
+          "type": "string"
+        },
+        "armed": {
+          "description": "Provable presence of the topos trigger artifact right now. Absent = unknowable without a\nlive probe `status` refuses to run (a scheduler that must be dialed to answer).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "note": {
+          "description": "A short honesty note (e.g. why `armed` is unknown), when one is needed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agent"
+      ]
+    },
+    "StatusWorkspace": {
+      "description": "One joined workspace in a [`StatusData`]. **INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "display_name": {
+          "type": "string"
+        },
+        "name": {
+          "description": "The ADDRESS name (what you joined by).",
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_id",
+        "name",
+        "display_name"
+      ]
+    }
+  }
+}

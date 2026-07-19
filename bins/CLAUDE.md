@@ -3,7 +3,7 @@
 Each is a **lib + a thin bin**: the lib holds the logic (unit-testable without a binary), the bin is a thin
 composition root.
 
-- **`topos/`** — the CLIENT. The CLI an agent drives — 14 behavior verbs + 3 maintenance commands
+- **`topos/`** — the CLIENT. The CLI an agent drives — 15 behavior verbs + 3 maintenance commands
   (`self-update`, `auth`, the two-phase `uninstall`); the full reference is generated into `docs/cli.md`. Depends on the kernel +
   gitstore + the harness port. **Takes no dependency on `plane-store` / `sqlx`** — it is a thin sync tool,
   never an authority.

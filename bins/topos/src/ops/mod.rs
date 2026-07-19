@@ -37,6 +37,7 @@ mod remove;
 mod revert;
 mod review;
 mod self_update;
+mod status;
 pub(crate) mod sync_engine;
 mod unfollow;
 mod uninstall;
@@ -47,7 +48,7 @@ pub(crate) use add::{
     resolve_add_target, split_target, tracked_skill_at,
 };
 pub(crate) use agent_scope::{AgentScopeData, AgentScopeOutcome, exclude_agents};
-pub(crate) use arm::{arm_detected, scrub_all};
+pub(crate) use arm::{arm_detected, probe_detected, scrub_all};
 pub(crate) use builtin::{ensure_builtin, is_builtin};
 // The built-in suite drives the refresh seam + the restore verb fn + the provenance matcher
 // directly.
@@ -102,6 +103,7 @@ pub(crate) use remove::{RemoveConnectors, RemoveOutcome, remove};
 pub(crate) use revert::{RevertOutcome, revert};
 pub(crate) use review::{ReviewConnectors, ReviewOutcome, ReviewVerdict, review_dispatch};
 pub(crate) use self_update::{SelfUpdateAction, SelfUpdateOpts, SelfUpdateOutcome, self_update};
+pub(crate) use status::status_snapshot;
 pub(crate) use unfollow::{UnfollowConnectors, UnfollowOutcome, unfollow};
 pub(crate) use uninstall::{UninstallApplied, UninstallDescribe, UninstallOutcome, uninstall};
 pub(crate) use version_check::{version_check_env_allows, version_nag};

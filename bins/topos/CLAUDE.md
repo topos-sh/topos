@@ -324,6 +324,15 @@ are asserted byte-equal in tests.
   via a `GET /me` probe (healthy / "no access — revoked or removed" on the uniform 404 / unreachable
   / no credential), hook health (the adapter's config-entry probe), and the reporting posture from
   `state/sync_status.json`.
+- **The `status` verb + the bare `topos` orientation** (`ops/status`, `ops/arm::probe_detected`) —
+  the ONE offline orientation read: enrollment (server + joined workspaces), sign-in, followed-skill
+  and pending-first-receive-offer counts (from `follows.json` + the per-skill sync docs' all-zero
+  baseline; any unreadable doc makes the offer count honestly absent), per-agent auto-update trigger
+  state probed READ-ONLY over the detected agents (the same adapters the arming sweep drives, minus
+  every write; OpenClaw's live-scheduler probe is refused offline and reported as an explicit
+  unknown), and the binary version. No network, no writes, and the passive version check is skipped
+  for it. A bare `topos` on a TTY renders the same snapshot (a fresh machine gets the three-line
+  welcome instead); piped/`--json` bare invocations keep the classic usage error (stderr, exit 2).
 - **The hook posture + notices** (`ops/pull`, `sync_status`) — the delivery-driven reconcile writes
   `state/sync_status.json` (`{workspaces: {ws: {last_delivery_at, last_report_at,
   staleness_window_ms}}}` — a plain doc, no secret) on every successful delivery/report and mirrors
