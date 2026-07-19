@@ -654,6 +654,12 @@ export interface components {
              *     command's own).
              */
             mutates?: boolean | null;
+            /**
+             * @description The placeholder names the `argv` template still needs filled before it can execute — one
+             *     entry per distinct `<name>` token part (e.g. `"workspace-address"` for an argv carrying
+             *     `<workspace-address>`). Empty/absent = the argv is complete and executable as-is. ADDITIVE.
+             */
+            needs?: string[];
             /** @description Whether executing `argv` dials the plane. Absent = unknown. */
             needs_network?: boolean | null;
             /**
