@@ -365,12 +365,17 @@ are asserted byte-equal in tests.
   and no gate.
 
 - **The BUILT-IN `topos` skill** (`ops/builtin`, `cli_ref`, the repo-top-level `skills/topos/`
-  source) — the meta-skill that teaches an agent what topos is, how to drive it, and how to
+  source) — the meta-skill that teaches an agent what topos is, how to drive it, how to
   distill a session's own learnings into shared skills (origination: the capture bar,
-  describe-first consent, deepen-before-new). Its SOURCE is the repo-top-level `skills/topos/`
+  describe-first consent, deepen-before-new), and the team-genesis runbook ("set up topos for
+  our team": create at `/new` or self-host → enroll this machine by address with the
+  browser-approval handoff → `invite` → hand each teammate the same join line the publish
+  receipt prints; the frontmatter description carries the set-up/share-across-the-team
+  triggers). Its SOURCE is the repo-top-level `skills/topos/`
   dir — an authored `SKILL.md` (self-contained: a `topos --version` routing step offers the
   install path when the CLI is absent; NO version stamp, so the committed file is byte-identical
-  to what the binary places) + `INSTALL.md` (installer + join/start-fresh/self-host) + the
+  to what the binary places) + `INSTALL.md` (installer + join/start-fresh/self-host, with a
+  pointer at the live `/agent` walkthrough) + the
   committed generated `reference.md` — downloadable AS a skill straight from the public repo
   (`npx skills add`-style installers find it there; the frontmatter `name: topos` names the
   installed dir). The binary EMBEDS those same files (`include_str!`), and the bundle it places is
