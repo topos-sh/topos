@@ -114,6 +114,59 @@ export async function action({ request }: ActionFunctionArgs) {
 const INPUT =
   "block h-11 w-full rounded-md border border-line px-3 text-ink text-sm placeholder:text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25";
 
+/**
+ * The one pathname the action's SUCCESS redirect produces for a create POST, derived from the
+ * submission's own form data (the same fields the action reads): the `next` weave's pathname
+ * when the form carried one, else the created workspace's path — `/<slug>` (this module mounts
+ * only in MULTI tenancy). `null` when the form offers no success shape. `/login` is never a
+ * success destination: it is the action's stale-session auth bounce, and `login` is a reserved
+ * route segment so no created workspace can land there — it answers `null` even when the
+ * submitted slug spells it.
+ */
+export function createSuccessPathname(formData: FormData | undefined): string | null {
+  if (formData === undefined) {
+    return null;
+  }
+  const next = formData.get("next");
+  const slug = formData.get("slug");
+  const destination =
+    typeof next === "string" && next.length > 0
+      ? (next.split(/[?#]/, 1)[0] ?? "")
+      : typeof slug === "string" && slug.trim().length > 0
+        ? `/${slug.trim()}`
+        : "";
+  return destination.length === 0 || destination === "/login" ? null : destination;
+}
+
+/**
+ * TRUE exactly for the navigation moment that proves THIS page's create POST landed: our POST's
+ * loading phase heading to the pathname the action's success redirect produces for the submitted
+ * form. Navigation shape alone is NOT that proof — the action's `requireSession` bounces a stale
+ * session to /login before `createWorkspace` ever runs, and that bounce is ALSO a POST navigating
+ * away — so the destination must additionally match the success shape computed from the same
+ * form data the action reads. A failed action revalidates THIS location instead (never a
+ * navigation away), and the availability probe is a fetcher (never navigation state).
+ */
+export function isCreateSuccessNavigation(
+  navigation: {
+    state: "idle" | "loading" | "submitting";
+    formMethod?: string;
+    formData?: FormData;
+    location?: { pathname: string };
+  },
+  herePathname: string,
+): boolean {
+  if (
+    navigation.state !== "loading" ||
+    navigation.formMethod !== "POST" ||
+    navigation.location === undefined ||
+    navigation.location.pathname === herePathname
+  ) {
+    return false;
+  }
+  return navigation.location.pathname === createSuccessPathname(navigation.formData);
+}
+
 export default function WorkspaceNew() {
   const loaderData = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
@@ -150,22 +203,18 @@ function CreateForm({
   const check = useFetcher<typeof loader>();
 
   // The `workspace_created` ceremony announcement. A landed create REDIRECTS away (the action
-  // throws), so success is observable here only as our POST's loading phase heading somewhere
-  // ELSE — a failed action revalidates THIS location instead, and the availability probe is a
-  // fetcher (never navigation state). Ref-guarded so dev strict-mode's doubled effect and
-  // re-renders within the same navigation dispatch exactly once; the form unmounts on arrival,
-  // so the destination never replays it, and a failed attempt leaves the guard unset for the
-  // retry that does land.
+  // throws), so success is observable here only through the navigation — but ONLY when the
+  // destination is the one this submission's success redirect produces
+  // (isCreateSuccessNavigation): a stale session's auth bounce is also a POST heading elsewhere,
+  // and a false announcement of a workspace that does not exist is worse than none. Ref-guarded
+  // so dev strict-mode's doubled effect and re-renders within the same navigation dispatch
+  // exactly once; the form unmounts on arrival, so the destination never replays it, and a
+  // failed attempt leaves the guard unset for the retry that does land.
   const navigation = useNavigation();
   const location = useLocation();
   const announcedCreate = useRef(false);
   useEffect(() => {
-    if (
-      announcedCreate.current ||
-      navigation.state !== "loading" ||
-      navigation.formMethod !== "POST" ||
-      navigation.location.pathname === location.pathname
-    ) {
+    if (announcedCreate.current || !isCreateSuccessNavigation(navigation, location.pathname)) {
       return;
     }
     announcedCreate.current = true;
