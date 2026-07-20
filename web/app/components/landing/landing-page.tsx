@@ -1,8 +1,9 @@
+import { useState } from "react";
 import { Link } from "react-router";
-import { CommandBlock } from "@/components/command-block";
 import { CopyButton } from "@/components/copy-button";
 import { RoutingStar } from "@/components/landing/routing-star";
 import { TerminalDemo } from "@/components/landing/terminal-demo";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 /**
  * The public landing page ("Klein"): warm-gray print ground, near-black ink, links in ink,
@@ -24,27 +25,108 @@ const INSTALL = "curl -fsSL https://topos.sh/install | sh";
 const AGENT_SETUP_PROMPT = "Set up Topos for us: fetch https://topos.sh/agent and follow it.";
 const GITHUB = "https://github.com/topos-sh/topos";
 const WRAP = "mx-auto max-w-[1080px] px-6";
-const ULINK = "border-b border-hairline text-dim transition-colors hover:border-ink hover:text-ink";
 
-function InstallCommand() {
-  return <CommandBlock command={INSTALL} />;
+/** The GitHub mark (octicon path), sized by className, inked by currentColor. */
+function GitHubMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor" className={className}>
+      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
+    </svg>
+  );
 }
 
+const AGENT_TAB = {
+  value: "agent",
+  label: "Agent",
+  text: AGENT_SETUP_PROMPT,
+  copyLabel: "Copy the agent setup prompt",
+};
+const HUMAN_TAB = {
+  value: "human",
+  label: "Human",
+  text: INSTALL,
+  copyLabel: "Copy the install command",
+};
+const SETUP_TABS = [AGENT_TAB, HUMAN_TAB];
+
 /**
- * The primary CTA — agent-first: the paste-ready setup prompt on the glass surface, with the
- * agent-conversation `❯` marker (the same phosphor voice the demo cards speak) in place of the
- * shell `$`. The install one-liner stays as the secondary line beneath it.
+ * The one setup block: a glass command block whose header row carries small inline tabs by
+ * AUDIENCE — Agent (the paste-ready prompt) first, Human (the by-hand install) second — under
+ * one constant `❯` chip. Nothing outside the header changes shape on a switch: the label above
+ * is static, and both contents stay mounted in one grid cell (the inactive one invisible) so
+ * the block keeps the taller content's height and the hero never jumps. The WHOLE block is
+ * LIGHT: one panel2 field, header and body alike, ink command text, a bare accent ❯ leading
+ * the row, faint labels, a near-white panel pill on the active trigger — everything at the
+ * rounded-md control radius, the copy affordance in its light tone at the triggers' own
+ * compact size.
  */
-function AgentPromptBlock() {
+function SetupBlock({ label }: { label: string }) {
+  const [active, setActive] = useState(AGENT_TAB.value);
+  const current = SETUP_TABS.find((t) => t.value === active) ?? AGENT_TAB;
   return (
     <div>
       <p className="mb-2 font-display text-[10px] text-faint uppercase tracking-[0.12em]">
-        Paste into the agent you already have
+        {label}
       </p>
-      <div className="flex max-w-full flex-wrap items-center gap-3.5 rounded-md bg-glass px-4 py-3 font-mono text-[13.5px] text-glass-ink">
-        <span className="select-none font-semibold text-accent-phos">❯</span>
-        <span className="min-w-0 flex-auto break-words">{AGENT_SETUP_PROMPT}</span>
-        <CopyButton text={AGENT_SETUP_PROMPT} ariaLabel="Copy the agent setup prompt" />
+      <Tabs value={active} onValueChange={setActive}>
+        <div className="overflow-hidden rounded-md border border-line-soft bg-panel2">
+          <div className="flex items-center gap-2 border-line-soft border-b px-2.5 py-1.5">
+            <span className="flex-none select-none px-1 font-mono font-semibold text-[11px] text-accent">
+              ❯
+            </span>
+            <TabsList className="gap-1">
+              {SETUP_TABS.map((t) => (
+                <TabsTrigger
+                  key={t.value}
+                  value={t.value}
+                  className="rounded-md border border-transparent px-2 py-0.5 font-mono text-[11px] text-faint transition-colors hover:text-ink data-[state=active]:border-line data-[state=active]:bg-panel data-[state=active]:text-ink"
+                >
+                  {t.label}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+            <span className="ml-auto">
+              <CopyButton text={current.text} ariaLabel={current.copyLabel} tone="light" compact />
+            </span>
+          </div>
+          <div className="grid">
+            {SETUP_TABS.map((t) => (
+              <TabsContent
+                forceMount
+                key={t.value}
+                value={t.value}
+                className="col-start-1 row-start-1 data-[state=inactive]:invisible"
+              >
+                <p className="break-words px-4 py-3 font-mono text-[12.5px] text-ink">{t.text}</p>
+              </TabsContent>
+            ))}
+          </div>
+        </div>
+      </Tabs>
+    </div>
+  );
+}
+
+/**
+ * The hero's two paths, BOTH always visible: the agent path (the paste-ready prompt plus the
+ * install one-liner) and the browser path (a plain button; no terminal involved). The browser
+ * button speaks the deployment's tenancy: only a multi-tenant deployment creates workspaces;
+ * a single-tenant install signs in.
+ */
+function HeroPaths({ tenancy }: { tenancy: "single" | "multi" }) {
+  return (
+    <div className="mt-6">
+      <SetupBlock label="Set up Topos (macOS & Linux)" />
+      <div className="mt-6">
+        <p className="mb-2 font-display text-[10px] text-faint uppercase tracking-[0.12em]">
+          Or start in the browser
+        </p>
+        <Link
+          to={tenancy === "multi" ? "/new" : "/login"}
+          className="inline-block rounded-md bg-accent px-5 py-3 font-mono text-[13px] text-on-accent transition-colors hover:bg-accent-deep focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 active:scale-[0.98]"
+        >
+          {tenancy === "multi" ? "Create a workspace" : "Sign in"}
+        </Link>
       </div>
     </div>
   );
@@ -160,8 +242,15 @@ export function LandingPage({
             <a href="#vs" className="transition-colors hover:text-ink max-sm:hidden">
               Why Topos
             </a>
-            <a href={GITHUB} className="transition-colors hover:text-ink max-sm:hidden">
+            <a
+              href={GITHUB}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1.5 transition-colors hover:text-ink max-sm:hidden"
+            >
+              <GitHubMark className="h-4 w-4" />
               GitHub
+              <span className="sr-only"> (opens in a new tab)</span>
             </a>
             {tenancy === "multi" && (
               // In single tenancy the accent button below IS the sign-in — one affordance, no twin.
@@ -170,7 +259,7 @@ export function LandingPage({
               </Link>
             )}
             <Link
-              to="/login"
+              to={tenancy === "multi" ? "/new" : "/login"}
               className="rounded-md bg-accent px-3.5 py-2 font-mono text-[12.5px] text-on-accent transition-colors hover:bg-accent-deep focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 active:scale-[0.98]"
             >
               {tenancy === "multi" ? "Create a workspace" : "Sign in"}
@@ -195,27 +284,7 @@ export function LandingPage({
               <strong className="font-medium text-ink">improve them together</strong>: one
               teammate’s fix upgrades every agent on the team.
             </p>
-            <div className="mt-6">
-              <AgentPromptBlock />
-            </div>
-            <div className="mt-3 flex flex-wrap items-center gap-3.5">
-              <span className="min-w-0 break-words font-mono text-[12.5px] text-dim">
-                <span className="select-none text-faint">$ </span>
-                {INSTALL}
-              </span>
-              <span className="text-[12.5px] text-faint">
-                Apache-2.0, macOS and Linux {"·"}{" "}
-                <a href="https://topos.sh/install" className={ULINK}>
-                  read it first →
-                </a>
-              </span>
-            </div>
-            <p className="mt-3 text-[13px] text-faint">
-              No terminal?{" "}
-              <Link to="/login" className={ULINK}>
-                {tenancy === "multi" ? "Create a workspace →" : "Sign in →"}
-              </Link>
-            </p>
+            <HeroPaths tenancy={tenancy} />
           </div>
           <div className="mx-auto w-full max-w-[440px] lg:max-w-none">
             <RoutingStar />
@@ -257,7 +326,7 @@ export function LandingPage({
           <p className="mt-5 text-[13px] text-faint">
             Everything the agent does is a plain command you can run yourself: an open-source CLI (
             <code className="font-mono text-[12px] text-dim">
-              topos publish, join, follow, revert
+              topos publish, follow, update, revert
             </code>
             ) with <code className="font-mono text-[12px] text-dim">--json</code> output.
           </p>
@@ -316,25 +385,38 @@ export function LandingPage({
               Share your first skill in five minutes.
             </h2>
             <div className="mt-5">
-              <AgentPromptBlock />
-            </div>
-            <div className="mt-3">
-              <InstallCommand />
+              <SetupBlock label="Set up Topos (macOS & Linux)" />
             </div>
           </div>
           <div>
             <div className="mt-3 flex gap-6 text-[13px] text-faint">
-              <a href={GITHUB} className="transition-colors hover:text-ink">
+              <a
+                href={GITHUB}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-1.5 transition-colors hover:text-ink"
+              >
+                <GitHubMark className="h-3.5 w-3.5" />
                 GitHub
+                <span className="sr-only"> (opens in a new tab)</span>
               </a>
               <a
                 href={`${GITHUB}/blob/main/SECURITY.md`}
+                target="_blank"
+                rel="noreferrer"
                 className="transition-colors hover:text-ink"
               >
                 Security model
+                <span className="sr-only"> (opens in a new tab)</span>
               </a>
-              <a href={`${GITHUB}#readme`} className="transition-colors hover:text-ink">
+              <a
+                href={`${GITHUB}#readme`}
+                target="_blank"
+                rel="noreferrer"
+                className="transition-colors hover:text-ink"
+              >
                 Docs
+                <span className="sr-only"> (opens in a new tab)</span>
               </a>
               <Link to="/app" className="transition-colors hover:text-ink">
                 Sign in

@@ -7,9 +7,11 @@ import { CopyButton } from "@/components/copy-button";
  */
 export function CommandBlock({ command, copyLabel }: { command: string; copyLabel?: string }) {
   return (
-    <div className="flex max-w-full flex-wrap items-center gap-3.5 rounded-md bg-glass px-4 py-3 font-mono text-[13.5px] text-glass-ink">
-      <span className="select-none text-glass-faint">$</span>
-      <span className="min-w-0 flex-auto break-words">{command}</span>
+    <div className="flex max-w-full items-center gap-3.5 rounded-md bg-glass px-4 py-3 font-mono text-[13.5px] text-glass-ink">
+      <span className="flex min-w-0 flex-1 items-start gap-3.5">
+        <span className="select-none text-glass-faint">$</span>
+        <span className="min-w-0 flex-1 break-words">{command}</span>
+      </span>
       <CopyButton text={command} ariaLabel={copyLabel} />
     </div>
   );
