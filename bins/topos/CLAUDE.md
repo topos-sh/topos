@@ -482,7 +482,11 @@ are asserted byte-equal in tests.
     `everyone` on a GENESIS only — a bare republish alters no placement, so none is listed — annotated
     `curated: lands catalog-only; a curator places it afterwards` whenever the channel index the
     describe already reads resolves the placement target as curated against a member caller),
-    the audience (reach), the share line, the undo path, and the origin-demotion
+    the audience (reach), the share line, the teammate join line (`invite_line` — the
+    `Ask your agent: …` handoff composed from the workspace's server origin + address, rendered
+    `bring a teammate:`; the SAME line rides the landed apply receipt via a best-effort `me` read
+    after the publish settles, because the share line's skill page answers only for members and so
+    never recruits anyone), the undo path, and the origin-demotion
     note; a no-op (the draft equals the published current) is a typed `NO_CHANGES` — on BOTH the describe and
     the apply (`--yes`), keyed on a published `current` existing (not on follow-state), so even the genesis
     author's repeat publish is refused. The scan is local-first; the network is

@@ -662,6 +662,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             let result = ops::publish(
                 &ctx,
                 &connect_contribute,
+                Some(&connect_directory),
                 roots.as_ref(),
                 &target,
                 propose,

@@ -1022,6 +1022,11 @@ fn fixtures() -> Vec<(&'static str, String)> {
             is_revert: false,
             reach: Some(12),
             share_line: Some("https://topos.sh/acme/skills/deploy".to_owned()),
+            invite_line: Some(
+                "Ask your agent: \"Set up Topos for us: fetch https://topos.sh/agent and follow \
+                 it. Our workspace: https://topos.sh/acme\""
+                    .to_owned(),
+            ),
             undo: Some("a".repeat(64)),
             origin_note: None,
             placement_note: None,

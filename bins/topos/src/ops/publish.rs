@@ -69,6 +69,7 @@ const GENESIS: u64 = 0;
 pub(crate) fn publish(
     ctx: &Ctx<'_>,
     connect: &ContributeConnect<'_>,
+    directory: Option<&DirectoryConnect<'_>>,
     roots: Option<&DiscoveryRoots>,
     target: &str,
     propose: bool,
@@ -95,6 +96,7 @@ pub(crate) fn publish(
     let outcome = enrolled_publish(
         ctx,
         connect,
+        directory,
         &skill_name,
         propose,
         channel,
@@ -273,6 +275,9 @@ pub(crate) fn publish_describe(
     let share_line = me
         .as_ref()
         .map(|m| format!("{}/skills/{}", m.address, skill_name));
+    // The teammate handoff — same source data as the share line (the members' deep link above
+    // 404s for a non-member, so recruiting a teammate takes this join line instead).
+    let invite_line = me.as_ref().map(|m| teammate_invite_line(&m.address));
     let undo = followed.then(|| format!("topos revert {skill_name} --to {}", lock.base_commit));
     // The predicted-conflict preview: when this copy is BEHIND the last-known observed `current`
     // (the apply would refuse with a locally-detected CONFLICT — pull to rebase first), dry-run the
@@ -318,6 +323,7 @@ pub(crate) fn publish_describe(
         is_revert: false,
         reach,
         share_line,
+        invite_line,
         undo,
         origin_note,
         placement_note,
@@ -498,11 +504,13 @@ fn stamp_added(mut outcome: PublishOutcome, added: Option<AddedNote>) -> Publish
 }
 
 /// The ENROLLED publish body. `pin` is the optional `@<digest>` consent — when present, the scanned
-/// bytes must match it; when absent, the computed digest ships as-is.
+/// bytes must match it; when absent, the computed digest ships as-is. `directory` feeds the receipt's
+/// teammate handoff line (a best-effort `me` read on a landed publish only — `None` skips it).
 #[allow(clippy::too_many_arguments)]
 fn enrolled_publish(
     ctx: &Ctx<'_>,
     connect: &ContributeConnect<'_>,
+    directory: Option<&DirectoryConnect<'_>>,
     skill_name: &str,
     propose: bool,
     channel: Option<&str>,
@@ -601,7 +609,44 @@ fn enrolled_publish(
     };
 
     let receipt = contribute::run_write(ctx, &*transport, &sp, &rec, None)?;
-    map_outcome(ctx, &sp, &lock, &map, &rec, &receipt, skill_name)
+    map_outcome(
+        ctx,
+        &sp,
+        &lock,
+        &map,
+        &rec,
+        &receipt,
+        skill_name,
+        directory,
+        &instance.base_url,
+    )
+}
+
+/// The teammate handoff line — the one paste-ready instruction that brings a teammate's machine
+/// into the workspace: their agent fetches the server's live walkthrough (`<origin>/agent`) and
+/// follows it toward the workspace ADDRESS. Composed from the same `me.address` the share line
+/// reads; the origin is the address minus its workspace path (a single-tenant address IS its
+/// origin). The share line (`<address>/skills/<name>`) stays the members' deep link — it answers
+/// only for people already in the workspace, so it is never the recruiting artifact.
+fn teammate_invite_line(address: &str) -> String {
+    let origin = server_origin(address);
+    format!(
+        "Ask your agent: \"Set up Topos for us: fetch {origin}/agent and follow it. \
+         Our workspace: {address}\""
+    )
+}
+
+/// The server ORIGIN of a workspace address: scheme + host (+ port), the address cut at the first
+/// path segment. A single-tenant address carries no workspace path, so it already IS the origin.
+fn server_origin(address: &str) -> &str {
+    match address.find("://") {
+        Some(scheme) => match address[scheme + 3..].find('/') {
+            Some(path) => &address[..scheme + 3 + path],
+            None => address,
+        },
+        // A schemeless address (not the server-built shape, but never panic on it): host only.
+        None => address.split('/').next().unwrap_or(address),
+    }
 }
 
 /// Split the single positional `target` into `(skill, Option<consent-digest>)`. A trailing `@<digest>` is
@@ -740,6 +785,8 @@ fn build_publish_op(
 }
 
 /// Map the plane's typed write outcome to a [`PublishOutcome`] (or a typed [`ClientError`]).
+/// `directory` + `base_url` feed the landed receipt's teammate handoff line — a best-effort `me`
+/// read AFTER the publish settled (a failed read leaves the line absent; the outcome is untouched).
 #[allow(clippy::too_many_arguments)]
 fn map_outcome(
     ctx: &Ctx<'_>,
@@ -749,6 +796,8 @@ fn map_outcome(
     rec: &OpRecord,
     receipt: &WriteReceipt,
     skill_name: &str,
+    directory: Option<&DirectoryConnect<'_>>,
+    base_url: &str,
 ) -> Result<PublishOutcome, ClientError> {
     match receipt.outcome() {
         TerminalOutcome::Ok => {
@@ -770,6 +819,15 @@ fn map_outcome(
                 == Some("curated_role_required");
             let placement_withheld =
                 withheld.then(|| rec.channel.clone().unwrap_or_else(|| "everyone".to_owned()));
+            // The teammate handoff line on the landed receipt — the same `me.address` source the
+            // describe's share line reads, fetched best-effort AFTER the publish settled (a failed
+            // read just leaves the line off; it never fails a landed publish).
+            let invite_line = directory.and_then(|connect| {
+                (connect)(base_url)
+                    .me(&rec.workspace_id)
+                    .ok()
+                    .map(|m| teammate_invite_line(&m.address))
+            });
             Ok(PublishOutcome::Published(PublishData {
                 skill_id: rec.skill_id.clone(),
                 name: skill_name.to_owned(),
@@ -778,6 +836,7 @@ fn map_outcome(
                 current_generation: new_gen,
                 added: None,
                 placement_withheld,
+                invite_line,
             }))
         }
         TerminalOutcome::NeedsReview => Ok(PublishOutcome::Proposed(ProposeData {
@@ -805,4 +864,40 @@ fn denied_code(receipt: &WriteReceipt) -> String {
         .as_ref()
         .map(|e| e.code.clone())
         .unwrap_or_else(|| "DENIED".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{server_origin, teammate_invite_line};
+
+    #[test]
+    fn a_workspace_address_cuts_to_its_server_origin() {
+        // The multi-tenant shape: the address carries the workspace slug — the origin drops it.
+        assert_eq!(server_origin("https://topos.sh/acme"), "https://topos.sh");
+        // A port stays part of the origin.
+        assert_eq!(
+            server_origin("https://topos.example.com:8443/eng"),
+            "https://topos.example.com:8443"
+        );
+        // The single-tenant shape: the install IS its one workspace — the address IS the origin.
+        assert_eq!(
+            server_origin("https://topos.example.com"),
+            "https://topos.example.com"
+        );
+    }
+
+    #[test]
+    fn the_teammate_handoff_composes_the_exact_join_line() {
+        assert_eq!(
+            teammate_invite_line("https://topos.sh/acme"),
+            "Ask your agent: \"Set up Topos for us: fetch https://topos.sh/agent and follow it. \
+             Our workspace: https://topos.sh/acme\""
+        );
+        // Single-tenant: fetch the origin's walkthrough, follow the origin itself.
+        assert_eq!(
+            teammate_invite_line("https://topos.example.com"),
+            "Ask your agent: \"Set up Topos for us: fetch https://topos.example.com/agent and \
+             follow it. Our workspace: https://topos.example.com\""
+        );
+    }
 }
