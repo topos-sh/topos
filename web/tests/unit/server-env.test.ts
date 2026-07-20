@@ -19,6 +19,7 @@ const REQUIRED: Record<string, string> = {
 const SCHEMA_KEYS = [
   ...Object.keys(REQUIRED),
   "INSTALL_SH_PATH",
+  "BUILTIN_SKILL_DIR",
   "APP_ENV",
   "TOPOS_WEB_RATELIMIT",
   "TOPOS_PUBLIC_URL",
@@ -47,6 +48,7 @@ describe("serverEnv", () => {
     const env = await parseWith(REQUIRED);
     expect(env.APP_ENV).toBe("development");
     expect(env.INSTALL_SH_PATH).toBe("../scripts/install.sh");
+    expect(env.BUILTIN_SKILL_DIR).toBe("../skills/topos");
     expect(env.PLANE_INTERNAL_TOKEN).toBe("internal-token-value");
   });
 

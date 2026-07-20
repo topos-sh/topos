@@ -16,6 +16,7 @@
  * fails when this list and the table drift — add a route, update this list, or CI stays red.
  */
 export const OSS_TOP_LEVEL_SEGMENTS: readonly string[] = [
+  ".well-known",
   "account",
   "agent",
   "api",
@@ -24,6 +25,7 @@ export const OSS_TOP_LEVEL_SEGMENTS: readonly string[] = [
   "healthz",
   "install",
   "install.sh",
+  "llms.txt",
   "login",
   "new",
   "recovery",

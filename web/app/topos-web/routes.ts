@@ -83,6 +83,15 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
     route("install.sh", file("install-sh.ts")),
     // The agent-onboarding document: what an agent told "set up Topos for us" fetches and follows.
     route("agent", file("agent.ts")),
+    // The machine-discovery lane: llms.txt (the site guide convention) + the agent-skills
+    // discovery index, whose ONE entry is the repo's downloadable `topos` skill. The skill's
+    // three files serve under the SAME well-known base so relative sibling references resolve;
+    // `.well-known/skills/` is the earlier index spelling, aliased byte-identically. All four
+    // are deployment-scoped resource routes — origin-rooted in BOTH tenancy modes.
+    route("llms.txt", file("llms-txt.ts")),
+    route(".well-known/agent-skills/index.json", file("agent-skills-index.ts")),
+    route(".well-known/agent-skills/topos/:file", file("agent-skills-file.ts")),
+    route(".well-known/skills/index.json", file("agent-skills-index-legacy.ts")),
     route("api/auth/*", file("api.auth.ts")),
     // THE DEVICE LANE — `/api/v1` is the product's one public API, TERMINATING here since the
     // identity unification. `:ws` here is the opaque workspace ID (the wire/DB key), unchanged in
