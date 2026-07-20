@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect, useRef } from "react";
 import {
   type ActionFunctionArgs,
   data,
@@ -14,6 +14,7 @@ import { buttonClasses } from "@/components/ui";
 import { composition } from "@/composition.server";
 import { actorFromSession, notFound, requireSession } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
+import { announceCeremony } from "@/lib/ceremony-event";
 import { approveDeviceAuth, denyDeviceAuth, pendingDeviceAuth } from "@/lib/db/identity.server";
 import { membershipsFor } from "@/lib/db/queries.server";
 
@@ -109,6 +110,24 @@ const INPUT =
 export default function VerifyPage() {
   const { code, pending, multi } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
+
+  // The `device_approved` ceremony announcement, fired ONCE when the approval-success state
+  // renders. Ref-guarded so dev strict-mode's doubled effect and re-renders of the same
+  // success never re-dispatch; leaving the success state (a fresh lookup) re-arms it for the
+  // next distinct approval.
+  const approved = actionData?.kind === "approved";
+  const announcedApproval = useRef(false);
+  useEffect(() => {
+    if (!approved) {
+      announcedApproval.current = false;
+      return;
+    }
+    if (announcedApproval.current) {
+      return;
+    }
+    announcedApproval.current = true;
+    announceCeremony("device_approved");
+  }, [approved]);
 
   if (actionData?.kind === "approved") {
     return (

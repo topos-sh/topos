@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CommandBlock } from "@/components/command-block";
 import { AGENT_PUBLISH_PROMPT, PUBLISH_COMMAND } from "@/components/shell/publish-dialog";
 import { SectionHeading } from "@/components/ui";
+import { announceCeremony, newlyCompleted } from "@/lib/ceremony-event";
 
 /**
  * The dashboard's onboarding checklist — three live steps whose checkmarks derive from real
@@ -94,15 +95,48 @@ function Step({
 
 export function OnboardingChecklist({ state }: { state: OnboardingState }) {
   const [dismissed, setDismissed] = useState(false);
+  const { origin, shareAddress, deviceCount, publishedSkillCount, memberCount } = state;
+
+  // Ceremony announcements for steps FLIPPING to complete within this page lifetime: the first
+  // observation is a silent baseline (a step already done at mount announces nothing), and each
+  // later observation announces only the false→true flips `newlyCompleted` names — so a
+  // revalidation that completes a step dispatches once, and an unchanged re-run (dev
+  // strict-mode's doubled effect included) dispatches nothing. The published-skills step's
+  // 0→done flip additionally announces `first_publish_seen`.
+  const deviceDone = deviceCount >= 1;
+  const publishDone = publishedSkillCount >= 1;
+  const inviteDone = memberCount >= 2;
+  const seenSteps = useRef<Record<string, boolean> | null>(null);
+  useEffect(() => {
+    const now = {
+      enroll_device: deviceDone,
+      publish_skill: publishDone,
+      invite_teammate: inviteDone,
+    };
+    for (const step of newlyCompleted(seenSteps.current, now)) {
+      announceCeremony("checklist_step_completed", { step });
+      if (step === "publish_skill") {
+        announceCeremony("first_publish_seen");
+      }
+    }
+    seenSteps.current = now;
+  }, [deviceDone, publishDone, inviteDone]);
+
+  const announcedDismiss = useRef(false);
   if (dismissed) {
     return null;
   }
   const dismiss = () => {
     // biome-ignore lint/suspicious/noDocumentCookie: the deliberate lightweight dismiss — one first-party preference cookie the loader reads back (no Cookie Store dependency).
     document.cookie = `${state.dismissCookie}=1; path=/; max-age=31536000; samesite=lax`;
+    // Announce the dismissal ONCE — the ref absorbs a double-click racing the re-render that
+    // removes the section.
+    if (!announcedDismiss.current) {
+      announcedDismiss.current = true;
+      announceCeremony("checklist_dismissed");
+    }
     setDismissed(true);
   };
-  const { origin, shareAddress, deviceCount, publishedSkillCount, memberCount } = state;
   return (
     <section aria-labelledby="onboarding-heading" className="space-y-3">
       <div className="flex items-center justify-between gap-3">
