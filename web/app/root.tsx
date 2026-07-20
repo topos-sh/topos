@@ -25,7 +25,16 @@ import {
 import appStylesHref from "./app.css?url";
 import { ErrorScreen } from "./components/error-screen";
 
-export const links: LinksFunction = () => [{ rel: "stylesheet", href: appStylesHref }];
+export const links: LinksFunction = () => [
+  // The Topos mark (see web/public/): SVG first for modern browsers, .ico for legacy, the opaque
+  // square PNGs for iOS home-screen and the PWA manifest. Link descriptors from every matched route
+  // aggregate, so these render on every page regardless of a page's own `meta`.
+  { rel: "icon", href: "/favicon.ico", sizes: "32x32" },
+  { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },
+  { rel: "apple-touch-icon", href: "/apple-touch-icon.png" },
+  { rel: "manifest", href: "/site.webmanifest" },
+  { rel: "stylesheet", href: appStylesHref },
+];
 
 /**
  * The one root-level knob the shell reads: the optional GTM container id. Read straight off
@@ -75,6 +84,8 @@ export function Layout({ children }: { children: ReactNode }) {
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        {/* Klein blue — tints the mobile browser chrome + the installed PWA to the brand. */}
+        <meta name="theme-color" content="#002fa7" />
         {gtmId !== null && (
           <script
             // biome-ignore lint/security/noDangerouslySetInnerHtml: the GTM loader is Google's constant snippet with the env-shape-checked id JSON-stringified in — nothing request- or user-derived.
