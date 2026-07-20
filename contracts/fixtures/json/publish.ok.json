@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "command": "publish",
+  "ok": true,
+  "data": {
+    "bundle_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "current_generation": 43,
+    "invite_line": "Ask your agent: \"Set up Topos for us: fetch https://topos.sh/agent and follow it. Our workspace: https://topos.sh/acme\"",
+    "name": "deploy",
+    "skill_id": "s_deploy",
+    "version_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "warnings": [],
+  "next_actions": []
+}

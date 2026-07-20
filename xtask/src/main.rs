@@ -404,8 +404,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
         AddData, ChannelAction, ChannelData, ChannelItem, ChannelItemOutcome, Conflict,
         ConflictPathReport, DiffData, DiffPatchInfo, DiffSource, EnrollmentPending, FollowData,
         FollowOffer, InviteReadData, ListData, LogData, MergePreview, MergePreviewVerdict,
-        MergeReport, Offer, ProtectData, PublishDescribeData, PublishGate, PullAction, PullData,
-        PullSkill, RemoveData, RemoveItem, RemoveKind, ReviewIndexData, ReviewIndexEntry,
+        MergeReport, Offer, ProtectData, PublishData, PublishDescribeData, PublishGate, PullAction,
+        PullData, PullSkill, RemoveData, RemoveItem, RemoveKind, ReviewIndexData, ReviewIndexEntry,
         SkillEntry, StatusData, StatusTrigger, StatusWorkspace, UnfollowData, WorkspaceSyncReport,
     };
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
@@ -1043,6 +1043,35 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
+    // `publish <skill> --yes` LANDED — the public SUCCESS envelope: the moved pointer's facts plus
+    // the teammate handoff line (`invite_line`) the landed receipt carries via the best-effort
+    // post-publish `me` read (the additive field omits when that read fails or the address does
+    // not validate — the publish itself is unaffected).
+    let publish_ok = JsonEnvelope {
+        schema_version: 1,
+        command: "publish".to_owned(),
+        ok: true,
+        data: serde_json::to_value(PublishData {
+            skill_id: "s_deploy".to_owned(),
+            name: "deploy".to_owned(),
+            version_id: "d".repeat(64),
+            bundle_digest: "b".repeat(64),
+            current_generation: 43,
+            added: None,
+            placement_withheld: None,
+            invite_line: Some(
+                "Ask your agent: \"Set up Topos for us: fetch https://topos.sh/agent and follow \
+                 it. Our workspace: https://topos.sh/acme\""
+                    .to_owned(),
+            ),
+        })
+        .expect("PublishData serializes"),
+        warnings: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
     // `publish <skill>` when the draft equals `current` — the NEGATIVE `NO_CHANGES` refusal (a permanent
     // failure: there is nothing to ship, so no retry helps).
     let publish_no_changes = JsonEnvelope {
@@ -1320,6 +1349,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ("json/review.inbox", emit_json(&review_inbox)),
         ("json/invite.read", emit_json(&invite_read)),
         ("json/publish.describe", emit_json(&publish_describe)),
+        ("json/publish.ok", emit_json(&publish_ok)),
         ("json/publish.no-changes", emit_json(&publish_no_changes)),
         ("json/update.stale", emit_json(&update_stale)),
         ("json/update.diverged", emit_json(&update_diverged)),
