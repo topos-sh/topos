@@ -753,6 +753,13 @@ export interface components {
              */
             current_generation: number;
             /**
+             * @description The paste-able teammate handoff line (`Ask your agent: …`) — the join instruction that
+             *     brings a teammate's machine into the workspace, composed from the workspace's server
+             *     origin + address. Absent when the address is not known (a best-effort read — the publish
+             *     itself is unaffected). **INFERRED** (additive-only).
+             */
+            invite_line?: string | null;
+            /**
              * @description The skill's NAME — the handle humans speak and the TTY success line leads with
              *     (`Published <name>@…`); the opaque `skill_id` above stays the machine key.
              */
