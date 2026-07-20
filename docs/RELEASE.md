@@ -34,10 +34,12 @@ check an item off in the same change that lands it.
       one `topos follow <claim-link>` seats the first owner. The README's self-host walkthrough shows it.
 - [x] **TLS posture**: the plane serves plain HTTP — the reverse-proxy termination pattern is documented as
       the supported deployment in the README's self-hosting section. DONE.
-- [x] **At-rest key posture**: the plane signing key + enrollment secret are plaintext `0600` files
-      (at-rest encryption not implemented). Accepted for v0, and now stated as fact in the README's
-      self-hosting Backups section (disk/volume encryption is the operator's; losing the files means
-      re-enrolling devices).
+- [x] **At-rest key posture**: the server holds no key files — the vault is identity-free and the
+      internal-lane bearer arrives via environment, never disk. The one at-rest secret is the CLIENT's
+      device credential (`~/.topos/identity/credentials.json`, plaintext `0600`; at-rest encryption not
+      implemented). Accepted for v0, stated as fact in the README's self-hosting Backups section
+      (disk/volume encryption is the operator's; a lost or leaked credential is handled by revoke +
+      re-enroll).
 
 ## Release signing (minisign)
 
