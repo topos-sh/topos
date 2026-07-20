@@ -1,6 +1,6 @@
 ---
 name: topos
-description: Manage this machine's shared team skills with the topos CLI — see what is managed, update it, follow more, and share local improvements back to the team. Use when editing any skill in a skills directory, when asked about team skills, skill updates, or sharing a skill, when a change you made to a shared process is worth giving back, or when you have just worked something out in this session — a hard-won fix, a corrected approach, a reusable workflow — that a teammate could use as a skill. Also use when a team's shared skills are wanted on a machine that does not have topos yet — this skill covers installing it.
+description: Manage this machine's shared team skills with the topos CLI — see what is managed, update it, follow more, and share local improvements back. Use when asked to set up topos for our team or to share prompts/skills across the team, when editing any skill in a skills directory, when asked about team skills, skill updates, or sharing a skill, when a change to a shared process is worth giving back, or when this session worked something out — a hard-won fix, a corrected approach, a reusable workflow — a teammate could use as a skill. Also use when a team's shared skills are wanted on a machine that does not have topos yet — this skill covers installing it.
 metadata:
   topos: builtin
 ---
@@ -101,6 +101,28 @@ topos unfollow <skill>            # stop following on every machine of yours
 
 People ops (roster, roles, leaving) live in the workspace web app; `topos invite <email>` is
 the one roster verb here.
+
+## Setting up topos for a team (no workspace yet)
+
+When your human says "set up topos for our team", run the whole path — it is four steps, and
+the only browser moments are theirs:
+
+1. Create the workspace at <https://topos.sh/new> (they sign up and pick a name in the
+   browser), or self-host per `INSTALL.md`. The address — `topos.sh/<name>` — is the
+   workspace's one handle: enrollment, invites, and every publish receipt all speak it.
+2. Enroll THIS machine: `topos follow <address>`. Show your human the printed approval URL —
+   they open it in a browser and approve; never approve in their place. Re-invoking `follow`
+   polls once; `--wait <seconds>` blocks with a cap. Then run the printed
+   `topos follow <address> --yes` — that lands what the workspace offers.
+3. Seat teammates: `topos invite <email>` per person (bare describes, `--yes` sends).
+4. Hand each teammate the join line for their own agent — an invite seats them, but only this
+   line brings their machine in:
+
+   Ask your agent: "Set up Topos for us: fetch <server-origin>/agent and follow it. Our workspace: <address>"
+
+   Fill in real values (`https://topos.sh/agent` and `topos.sh/<name>` on the hosted server) —
+   every publish receipt prints the line ready-made. Do not hand out a skill-page URL instead:
+   it answers only for members.
 
 ## This skill itself
 

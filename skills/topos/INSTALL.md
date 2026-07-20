@@ -4,6 +4,9 @@
 One consent rule governs this whole page: propose the command and say what it does — the human
 runs it, or gives an explicit yes before you do. Never install anything unasked.
 
+The freshest version of this walkthrough is served live at <https://topos.sh/agent> (every
+topos server serves its own at `/agent`); this page stands alone when you cannot fetch it.
+
 ## Install the CLI
 
 ```sh
