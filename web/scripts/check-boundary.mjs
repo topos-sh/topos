@@ -14,9 +14,15 @@
  *     hashing spelling `sha256(convert_to(` (SQL text, not a TS call) and the stored-hash
  *     COLUMN identifiers (`*_sha256` / `*Sha256`). `bundle_digest`/`bundleDigest` stay allowed —
  *     they DISPLAY the vault's recorded consent value.
+ *     A THIRD carve-out is scoped to ONE named module: app/lib/agent-skills.server.ts may
+ *     spell createHash/sha256/digest( — it computes the sha256 the agent-skills discovery
+ *     index ADVERTISES for the public skill bytes this same process serves. No secret is
+ *     hashed and nothing signs (the digest exists for the READER to verify); every other
+ *     crypto identifier stays banned there too.
  *  2. The (node:)crypto module specifier and `randomBytes` are allowed ONLY in
  *     app/lib/db/identity.server.ts and app/lib/auth/recovery.server.ts — the two mints of
- *     random SECRETS/ids (randomness is this tier's; hashing stays in Postgres/better-auth).
+ *     random SECRETS/ids (randomness is this tier's; hashing stays in Postgres/better-auth) —
+ *     plus the specifier (never randomBytes) in the public-digest module above.
  *     No process.getBuiltinModule escape hatch anywhere.
  *  3. Transport containment: PLANE_INTERNAL_URL only in app/env.server.ts +
  *     app/lib/plane/client.server.ts; `fetch(` inside app/lib/plane/ only in client.server.ts;
@@ -110,6 +116,14 @@ const CRYPTO_MINT_ALLOWED = new Set([
   join("app", "lib", "db", "identity.server.ts"),
   join("app", "lib", "auth", "recovery.server.ts"),
 ]);
+/**
+ * The ONE sanctioned public-bytes digest: the agent-skills discovery module hashes the built-in
+ * skill's PUBLIC bytes — the same bytes this process serves under /.well-known/agent-skills — so
+ * the index it advertises cannot drift from what is served. No secret, no signing; only the hash
+ * spellings — createHash/sha256/digest( — are exempt HERE; ed25519/sign(/hmac/subtle stay banned.
+ */
+const PUBLIC_DIGEST_ALLOWED = new Set([join("app", "lib", "agent-skills.server.ts")]);
+const HASH_ONLY_EXEMPT = new Set(["createHash", "sha256"]);
 for (const { rel, text } of files) {
   // The carve-outs, stripped before scanning:
   //  - bundle_digest/bundleDigest DISPLAY the vault's recorded consent value;
@@ -125,14 +139,18 @@ for (const { rel, text } of files) {
     // `sha256` identifier — a TS-side hash call — is deliberately not covered and still fails.
     .replaceAll(/[A-Za-z0-9_]+_sha256[A-Za-z0-9_]*/g, "")
     .replaceAll(/[A-Za-z0-9_]*Sha256[A-Za-z0-9_]*/g, "");
+  const hashExempt = PUBLIC_DIGEST_ALLOWED.has(rel);
   for (const [regex, name] of HARD_ZERO) {
+    if (hashExempt && HASH_ONLY_EXEMPT.has(name)) {
+      continue;
+    }
     if (regex.test(carved)) {
       fail(rel, `forbidden identifier: ${name}`);
     }
   }
   // Ban DIGEST COMPUTATION (a `digest(` / `.digest(` finalizer call), not the word — which
   // legitimately names the displayed `bundle_digest`/`bundleDigest` value and appears in prose.
-  if (/\bdigest\s*\(/i.test(carved)) {
+  if (!hashExempt && /\bdigest\s*\(/i.test(carved)) {
     fail(
       rel,
       "forbidden: a digest( computation (only bundle_digest/bundleDigest display is allowed)",
@@ -145,7 +163,11 @@ for (const { rel, text } of files) {
 
 // 2. the (node:)crypto module specifier confined to the two mints; no builtin escape hatch
 for (const { rel, text } of files) {
-  if (/["'`](?:node:)?crypto["'`]/.test(text) && !CRYPTO_MINT_ALLOWED.has(rel)) {
+  if (
+    /["'`](?:node:)?crypto["'`]/.test(text) &&
+    !CRYPTO_MINT_ALLOWED.has(rel) &&
+    !PUBLIC_DIGEST_ALLOWED.has(rel)
+  ) {
     fail(rel, "a (node:)crypto module specifier outside the two random-secret mints");
   }
   if (/\bgetBuiltinModule\b/.test(text)) {
@@ -224,6 +246,12 @@ const SESSIONLESS_ROUTES = new Set([
   // constant public bytes, sessionless by design.
   "install-sh",
   "agent",
+  // The machine-discovery lane: llms.txt + the agent-skills discovery index, its legacy
+  // spelling, and the built-in skill's files — all constant public bytes, sessionless by design.
+  "llms-txt",
+  "agent-skills-index",
+  "agent-skills-index-legacy",
+  "agent-skills-file",
   "api.auth",
   "api.memberships",
   // The FACE layout tolerates anonymous (the constant teaser / landing renders with no session);

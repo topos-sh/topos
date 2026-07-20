@@ -20,6 +20,12 @@ const serverSchema = z.object({
   PLANE_INTERNAL_TOKEN: z.string().min(1),
   /** Path the /install route serves; defaults to the repo's own installer. */
   INSTALL_SH_PATH: z.string().default("../scripts/install.sh"),
+  /**
+   * Directory the /.well-known/agent-skills routes serve the built-in `topos` skill from;
+   * defaults to the repo's own source (resolved, like INSTALL_SH_PATH, against the process
+   * working directory — an absolute path wins).
+   */
+  BUILTIN_SKILL_DIR: z.string().default("../skills/topos"),
   APP_ENV: z.enum(["production", "development", "test"]).default("development"),
   /** The `/api/v1` door's rate belt (the vault's own belt retired with its public listener). */
   TOPOS_WEB_RATELIMIT: z.enum(["on", "off"]).default("on"),

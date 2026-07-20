@@ -52,6 +52,20 @@ describe("OSS_TOP_LEVEL_SEGMENTS ↔ the route table", () => {
     expect(multi).toEqual([...OSS_TOP_LEVEL_SEGMENTS].sort());
   });
 
+  it("the machine-discovery lane is deployment-scoped: origin-rooted in BOTH tenancy modes", () => {
+    // llms.txt and the .well-known lane describe the DEPLOYMENT, not a workspace — they must
+    // resolve at the origin root whichever grammar the composition mounts.
+    for (const tenancy of ["single", "multi"] as const) {
+      const paths = ossRoutes({ tenancy })
+        .map((entry) => entry.path)
+        .filter((p): p is string => typeof p === "string");
+      expect(paths).toContain("llms.txt");
+      expect(paths).toContain(".well-known/agent-skills/index.json");
+      expect(paths).toContain(".well-known/agent-skills/topos/:file");
+      expect(paths).toContain(".well-known/skills/index.json");
+    }
+  });
+
   it("reserves no segment that no route uses: each non-multi-only entry is a real single-mode route", () => {
     const single = topLevelStatics(ossRoutes({ tenancy: "single" }));
     const multi = topLevelStatics(ossRoutes({ tenancy: "multi" }));

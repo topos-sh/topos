@@ -154,6 +154,17 @@ existence oracle. A browser on an ALIAS origin is 301'd to the canonical one (`T
 uniform miss/fault surface is the root ErrorBoundary → `app/components/error-screen.tsx` (a Klein-voiced
 404/500 page carrying no `error.data`, path, or stack — so every 404 is byte-constant).
 
+**The machine-discovery lane** — four deployment-scoped resource routes, origin-rooted in BOTH
+tenancy modes (they describe the deployment, never a workspace): `/llms.txt` (the site-guide
+convention — a static constant, the agent.ts posture) and `/.well-known/agent-skills/index.json`,
+the agent-skills discovery index whose ONE entry is the repo's downloadable built-in `topos` skill;
+the skill's three files serve under the same well-known base (`…/agent-skills/topos/<file>`) so
+sibling references resolve, and `/.well-known/skills/index.json` aliases the index byte-identically.
+The advertised sha256 is computed in `app/lib/agent-skills.server.ts` from the SAME process-lifetime
+read the routes serve — no generation script, no committed digest, drift impossible — and that
+module is the ONE sanctioned digest computation in this tier (carved out by name in
+`check-boundary.mjs`; it hashes public bytes, never a secret).
+
 **The signed-in surface:** a workspace dashboard, the skill browser, the rendered review UI (unified diff +
 Approve/Reject + comments + one-click revert), the verification page, the create/join flows, and the ADMIN
 surfaces — the roster page in full (invite / role change / remove / self-serve leave, sole-owner-fenced),
