@@ -8,11 +8,12 @@ import { serverEnv } from "@/env.server";
  * (BUILTIN_SKILL_DIR, resolved relative to the process working directory — the install.ts
  * posture), read ONCE per process. The `/.well-known/agent-skills/` routes serve these exact
  * bytes, and the index digest is computed here FROM THE SAME READ — no generation script, no
- * committed digest, so the advertised sha256 and the served bytes cannot drift.
+ * committed digest, so the advertised SHA-256 and the served bytes cannot drift.
  *
- * This is the one sanctioned digest computation in this tier (carved out by name in
- * check-boundary.mjs): it hashes PUBLIC bytes this same process serves, for the READER to
- * verify against — no secret is hashed and nothing signs.
+ * This is the one sanctioned digest computation in this tier (carved out as ONE exact
+ * expression in check-boundary.mjs — anything past that pinned form fails the gate here too):
+ * it hashes PUBLIC bytes this same process serves, for the READER to verify against — no
+ * secret is hashed and nothing signs.
  */
 
 /** The three files of the built-in `topos` skill — SKILL.md first (the index's one entry). */

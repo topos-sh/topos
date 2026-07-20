@@ -14,11 +14,14 @@
  *     hashing spelling `sha256(convert_to(` (SQL text, not a TS call) and the stored-hash
  *     COLUMN identifiers (`*_sha256` / `*Sha256`). `bundle_digest`/`bundleDigest` stay allowed —
  *     they DISPLAY the vault's recorded consent value.
- *     A THIRD carve-out is scoped to ONE named module: app/lib/agent-skills.server.ts may
- *     spell createHash/sha256/digest( — it computes the sha256 the agent-skills discovery
- *     index ADVERTISES for the public skill bytes this same process serves. No secret is
- *     hashed and nothing signs (the digest exists for the READER to verify); every other
- *     crypto identifier stays banned there too.
+ *     A THIRD carve-out is ONE EXACT EXPRESSION in ONE named module:
+ *     app/lib/agent-skills.server.ts may spell the advertised-digest template
+ *     `sha256:${createHash("sha256").update(<ident>).digest("hex")}` plus the bare createHash
+ *     import that feeds it — ONCE each. It computes the sha256 the agent-skills discovery
+ *     index ADVERTISES for the public skill bytes this same process serves; no secret is
+ *     hashed and nothing signs (the digest exists for the READER to verify). Anything past
+ *     the pinned form — a second call site, another algorithm, a userland sha256, hmac/sign/
+ *     subtle — fails there too.
  *  2. The (node:)crypto module specifier and `randomBytes` are allowed ONLY in
  *     app/lib/db/identity.server.ts and app/lib/auth/recovery.server.ts — the two mints of
  *     random SECRETS/ids (randomness is this tier's; hashing stays in Postgres/better-auth) —
@@ -119,18 +122,23 @@ const CRYPTO_MINT_ALLOWED = new Set([
 /**
  * The ONE sanctioned public-bytes digest: the agent-skills discovery module hashes the built-in
  * skill's PUBLIC bytes — the same bytes this process serves under /.well-known/agent-skills — so
- * the index it advertises cannot drift from what is served. No secret, no signing; only the hash
- * spellings — createHash/sha256/digest( — are exempt HERE; ed25519/sign(/hmac/subtle stay banned.
+ * the index it advertises cannot drift from what is served. No secret, no signing. The carve-out
+ * is the EXACT expression, not the spellings: the single advertised-digest template plus the bare
+ * createHash import that feeds it, each stripped ONCE before the scan — so a second call site,
+ * a different algorithm (createHash("sha1")), a userland sha256, or any other crypto identifier
+ * (hmac/sign/subtle/ed25519) still fails in this module too.
  */
 const PUBLIC_DIGEST_ALLOWED = new Set([join("app", "lib", "agent-skills.server.ts")]);
-const HASH_ONLY_EXEMPT = new Set(["createHash", "sha256"]);
+const SANCTIONED_DIGEST_EXPR =
+  /`sha256:\$\{createHash\("sha256"\)\.update\([A-Za-z_$][\w$]*\)\.digest\("hex"\)\}`/;
+const SANCTIONED_DIGEST_IMPORT = 'import { createHash } from "node:crypto";';
 for (const { rel, text } of files) {
   // The carve-outs, stripped before scanning:
   //  - bundle_digest/bundleDigest DISPLAY the vault's recorded consent value;
   //  - `sha256(convert_to(` is the POSTGRES hashing spelling inside SQL text (TS has no such
   //    function — presented secrets are hashed in the database, never here);
   //  - `*_sha256`/`*Sha256` name the STORED-HASH columns those statements compare against.
-  const carved = text
+  let carved = text
     .replaceAll(/bundle_digest|bundleDigest/g, "")
     .replaceAll(/sha256\(convert_to\(/g, "")
     // The identity mint's named builder of that SQL fragment (still zero TS hashing).
@@ -139,18 +147,20 @@ for (const { rel, text } of files) {
     // `sha256` identifier — a TS-side hash call — is deliberately not covered and still fails.
     .replaceAll(/[A-Za-z0-9_]+_sha256[A-Za-z0-9_]*/g, "")
     .replaceAll(/[A-Za-z0-9_]*Sha256[A-Za-z0-9_]*/g, "");
-  const hashExempt = PUBLIC_DIGEST_ALLOWED.has(rel);
+  if (PUBLIC_DIGEST_ALLOWED.has(rel)) {
+    // Strip the FIRST occurrence of each sanctioned expression only (non-global `replace`) —
+    // a second spelling of either is a violation and stays in the scanned text, so the full
+    // rule set below still fires on it.
+    carved = carved.replace(SANCTIONED_DIGEST_EXPR, "").replace(SANCTIONED_DIGEST_IMPORT, "");
+  }
   for (const [regex, name] of HARD_ZERO) {
-    if (hashExempt && HASH_ONLY_EXEMPT.has(name)) {
-      continue;
-    }
     if (regex.test(carved)) {
       fail(rel, `forbidden identifier: ${name}`);
     }
   }
   // Ban DIGEST COMPUTATION (a `digest(` / `.digest(` finalizer call), not the word — which
   // legitimately names the displayed `bundle_digest`/`bundleDigest` value and appears in prose.
-  if (!hashExempt && /\bdigest\s*\(/i.test(carved)) {
+  if (/\bdigest\s*\(/i.test(carved)) {
     fail(
       rel,
       "forbidden: a digest( computation (only bundle_digest/bundleDigest display is allowed)",

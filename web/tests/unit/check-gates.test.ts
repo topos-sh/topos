@@ -118,6 +118,73 @@ describe("check-boundary self-test", () => {
   });
 });
 
+describe("check-boundary agent-skills digest carve-out (one exact expression)", () => {
+  // The sanctioned shape — the ONLY thing the named module may spell: one bare createHash
+  // import plus one advertised-digest template, exactly as agent-skills.server.ts uses them.
+  const SANCTIONED =
+    'import { createHash } from "node:crypto";\n' +
+    "const digestOf = (skillMd: Buffer) =>\n" +
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: the template IS the fixture under test.
+    '  `sha256:${createHash("sha256").update(skillMd).digest("hex")}`;\n';
+  const MODULE = join("lib", "agent-skills.server.ts");
+
+  it("passes the exact sanctioned expression in the named module", () => {
+    const app = fixtureApp({ [MODULE]: SANCTIONED });
+    expect(runGate(BOUNDARY, app).code).toBe(0);
+  });
+
+  it('fires on createHash("sha1") — the algorithm is pinned', () => {
+    const app = fixtureApp({
+      [MODULE]:
+        'import { createHash } from "node:crypto";\n' +
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: the template IS the fixture under test.
+        'const d = `sha256:${createHash("sha1").update(skillMd).digest("hex")}`;\n',
+    });
+    const run = runGate(BOUNDARY, app);
+    expect(run.code).toBe(1);
+    expect(run.output).toContain("createHash");
+  });
+
+  it("fires on a SECOND createHash call site — the expression is allowed once", () => {
+    const app = fixtureApp({
+      [MODULE]:
+        SANCTIONED +
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: the template IS the fixture under test.
+        'const again = `sha256:${createHash("sha256").update(other).digest("hex")}`;\n',
+    });
+    const run = runGate(BOUNDARY, app);
+    expect(run.code).toBe(1);
+    expect(run.output).toContain("createHash");
+  });
+
+  it("fires on createHmac in that module", () => {
+    const app = fixtureApp({
+      [MODULE]: `${SANCTIONED}import { createHmac } from "node:crypto";\n`,
+    });
+    const run = runGate(BOUNDARY, app);
+    expect(run.code).toBe(1);
+    expect(run.output).toContain("createHmac");
+  });
+
+  it("fires on sign( in that module", () => {
+    const app = fixtureApp({
+      [MODULE]: `${SANCTIONED}const s = sign(payload);\n`,
+    });
+    const run = runGate(BOUNDARY, app);
+    expect(run.code).toBe(1);
+    expect(run.output).toContain("sign(");
+  });
+
+  it("fires on a userland sha256 spelling in that module", () => {
+    const app = fixtureApp({
+      [MODULE]: 'import { sha256 } from "./vendored";\nconst h = sha256(bytes);\n',
+    });
+    const run = runGate(BOUNDARY, app);
+    expect(run.code).toBe(1);
+    expect(run.output).toContain("sha256");
+  });
+});
+
 describe("check-email-authz self-test", () => {
   it("passes a clean fixture (email as display data)", () => {
     const app = fixtureApp({
