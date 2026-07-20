@@ -7,13 +7,15 @@ A layer for AI agents to **share their behaviors** across a team — so every ag
 same company processes and everyone gets a consistent experience. A *behavior* (a "skill") is a bundle of
 files (`SKILL.md` + scripts + reference docs); the **whole bundle** is the unit of trust.
 
-Two programs in one Apache-2.0 workspace:
+Three programs in one Apache-2.0 repository:
 
 - **`topos`** — the local CLI an agent drives to add, follow, publish, and update behaviors.
 - **`topos-plane`** — the self-hostable sharing server (a library + a thin binary).
+- **`@topos/web`** — the product web app (the one public surface when self-hosting): sign-in, the
+  dashboard, the review UI, and the device API.
 
-They share one trust kernel, `topos-core`: the single, auditable implementation of the byte-exact digest,
-consent, content-addressed identity, and sync algorithm.
+The two Rust programs share one trust kernel, `topos-core`: the single, auditable implementation of the
+byte-exact digest, consent, content-addressed identity, and sync algorithm.
 
 ## Quickstart
 
@@ -65,6 +67,10 @@ curl -fsSL https://topos.sh/install | sh
 Installs the `topos` binary to `~/.local/bin` (no sudo). Platforms: macOS (Apple Silicon and Intel) and
 Linux (x86_64 and arm64 — static musl, any distro, no runtime deps). On Windows, run it inside
 [WSL2](https://learn.microsoft.com/windows/wsl/install).
+
+No CLI yet? `npx skills add topos-sh/topos` installs just the built-in
+[`topos` skill](#the-built-in-topos-skill) (docs, no binary) into your agent's skills directory — its
+`INSTALL.md` walks the agent to the full install above.
 
 The installer verifies a SHA-256 checksum downloaded over TLS and refuses to install on a mismatch (this
 proves transit integrity and cannot be disabled). For origin integrity, verify the Sigstore build-provenance
@@ -122,6 +128,21 @@ the same three files (`SKILL.md`, the generated `reference.md`, and `INSTALL.md`
 installing the CLI). If you later install topos, one explicit `topos follow topos --yes` hands the
 downloaded copy to it — recognized by its provenance marker, its bytes snapshotted first, kept
 current from then on. Nothing takes over a pre-existing directory silently.
+
+## For agents
+
+Reading this as an agent? Fetch [topos.sh/agent](https://topos.sh/agent) (or `/agent` on any
+self-hosted origin) — the setup walkthrough written for you. Teams: paste this into your repo's
+`AGENTS.md` so every agent knows where the shared skills live:
+
+```md
+## Team skills
+
+This team shares agent skills through topos. Check `topos list` to see what is managed here, and
+prefer those skills for team processes. If you improve one — or work out something reusable —
+offer to share it back (`topos publish`, or `publish --propose` where review is required). No
+`topos` on this machine yet? Follow https://topos.sh/agent to set it up.
+```
 
 ## Skill discovery across harnesses
 
@@ -325,9 +346,9 @@ Two volumes hold all durable state, and the **database is the source of truth fo
 
 Nothing else lives on disk — there are no secret files to back up beside the volumes.
 
-At rest, the plane's signing key and enrollment secret are plaintext `0600` files inside its data
-volume. Disk or volume encryption is the operator's responsibility. If those files are lost, enrolled
-devices must re-enroll.
+The one at-rest secret is client-side: each enrolled device's bearer credential lives on that machine
+(`~/.topos/identity/credentials.json`, `0600`) — losing it just means re-enrolling that device. Disk or
+volume encryption on the server is the operator's responsibility.
 
 ### Bring your own Postgres
 
