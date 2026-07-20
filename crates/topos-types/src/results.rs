@@ -675,6 +675,12 @@ pub struct PublishData {
     /// (`topos channel add <channel> <skill>`). **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement_withheld: Option<String>,
+    /// The paste-able teammate handoff line (`Ask your agent: …`) — the join instruction that
+    /// brings a teammate's machine into the workspace, composed from the workspace's server
+    /// origin + address. Absent when the address is not known (a best-effort read — the publish
+    /// itself is unaffected). **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invite_line: Option<String>,
 }
 
 /// The disclosure a `publish` attaches when it ADDED the skill to topos before shipping — the auto-add
@@ -1041,8 +1047,14 @@ pub struct PublishDescribeData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reach: Option<u64>,
     /// The paste-able share line (`<address>/skills/<name>`), when the workspace address is known.
+    /// A members' deep link — it answers only for people already in the workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_line: Option<String>,
+    /// The paste-able teammate handoff line (`Ask your agent: …`) — the join instruction that
+    /// brings a teammate's machine into the workspace, composed from the workspace's server
+    /// origin + address (the same read as `share_line`). **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invite_line: Option<String>,
     /// The undo path — the version `revert --to` restores to get back here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undo: Option<String>,
@@ -1179,6 +1191,7 @@ mod tests {
             current_generation: 1,
             added: None,
             placement_withheld: None,
+            invite_line: None,
         };
         let v = serde_json::to_value(&done).unwrap();
         assert_eq!(v["version_id"], "a".repeat(64));
@@ -1187,6 +1200,10 @@ mod tests {
         assert!(
             v.get("placement_withheld").is_none(),
             "an absent withheld placement omits"
+        );
+        assert!(
+            v.get("invite_line").is_none(),
+            "an absent teammate handoff omits"
         );
         let back: PublishData = serde_json::from_value(v).unwrap();
         assert_eq!(back.bundle_digest, "c".repeat(64));

@@ -1901,6 +1901,9 @@ pub(crate) fn publish_describe_tty(
     if let Some(line) = &data.share_line {
         s.push_str(&format!("\n  share: {line}"));
     }
+    if let Some(line) = &data.invite_line {
+        s.push_str(&format!("\n  bring a teammate: {line}"));
+    }
     if let Some(undo) = &data.undo {
         s.push_str(&format!("\n  undo: {undo}"));
     }
@@ -1935,6 +1938,11 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
              owner). The skill is in the catalog; a curator places it: `topos channel add {ch} {}`.",
             data.name,
         ));
+    }
+    // The teammate handoff, after the confirmation: the one line to hand someone not yet in the
+    // workspace (the skill page URL answers only for members, so it never recruits anyone).
+    if let Some(line) = &data.invite_line {
+        out.push_str(&format!("\nbring a teammate: {line}"));
     }
     out
 }
@@ -2406,6 +2414,7 @@ mod tests {
             current_generation: 3,
             added: None,
             placement_withheld: None,
+            invite_line: None,
         });
         assert!(line.starts_with("Published smoke-notes@"), "{line}");
         assert!(
@@ -2424,6 +2433,7 @@ mod tests {
             current_generation: 1,
             added: None,
             placement_withheld: Some("everyone".to_owned()),
+            invite_line: None,
         });
         assert!(line.starts_with("Published smoke-notes@"), "{line}");
         assert!(
@@ -2434,6 +2444,66 @@ mod tests {
             line.contains("`topos channel add everyone smoke-notes`"),
             "the curator's way in is named: {line}"
         );
+    }
+
+    #[test]
+    fn publish_tty_carries_the_teammate_handoff_after_the_confirmation() {
+        // The apply receipt hands the author the ONE line that brings a teammate in — after the
+        // published confirmation, never before it (the success stays the lead).
+        let invite = "Ask your agent: \"Set up Topos for us: fetch https://topos.sh/agent and \
+                      follow it. Our workspace: https://topos.sh/acme\"";
+        let line = publish_tty(&PublishData {
+            skill_id: "topos_a1b2c3".to_owned(),
+            name: "smoke-notes".to_owned(),
+            version_id: "a".repeat(64),
+            bundle_digest: "c".repeat(64),
+            current_generation: 3,
+            added: None,
+            placement_withheld: None,
+            invite_line: Some(invite.to_owned()),
+        });
+        assert!(line.starts_with("Published smoke-notes@"), "{line}");
+        let handoff = format!("\nbring a teammate: {invite}");
+        assert!(
+            line.ends_with(&handoff),
+            "the handoff line follows the confirmation: {line}"
+        );
+    }
+
+    #[test]
+    fn publish_describe_tty_labels_the_teammate_handoff_next_to_the_share_line() {
+        use topos_types::results::{PublishDescribeData, PublishGate};
+        let invite = "Ask your agent: \"Set up Topos for us: fetch https://topos.sh/agent and \
+                      follow it. Our workspace: https://topos.sh/acme\"";
+        let s = super::publish_describe_tty(
+            &PublishDescribeData {
+                skill: "deploy".to_owned(),
+                skill_id: "s_deploy".to_owned(),
+                workspace_id: "w_acme".to_owned(),
+                workspace_display_name: Some("Acme".to_owned()),
+                bundle_digest: "b".repeat(64),
+                placements: vec!["everyone".to_owned()],
+                gate: PublishGate::Lands,
+                is_revert: false,
+                reach: Some(12),
+                share_line: Some("https://topos.sh/acme/skills/deploy".to_owned()),
+                invite_line: Some(invite.to_owned()),
+                undo: None,
+                origin_note: None,
+                placement_note: None,
+                merge_preview: None,
+            },
+            &["topos".to_owned(), "publish".to_owned(), "--yes".to_owned()],
+        );
+        let share_at = s.find("share: ").expect("the share line renders");
+        let invite_at = s
+            .find("bring a teammate: ")
+            .expect("the handoff line renders");
+        assert!(
+            invite_at > share_at,
+            "the handoff sits next to (after) the share line: {s}"
+        );
+        assert!(s.contains(invite), "the exact join line renders: {s}");
     }
 
     #[test]

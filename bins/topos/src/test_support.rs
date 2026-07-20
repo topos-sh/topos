@@ -2053,6 +2053,7 @@ impl FollowHarness {
             match ops::publish(
                 &ctx,
                 &contribute,
+                None, // directory — the rig asserts the publish outcome, not the handoff line
                 None, // roots — the harness adopts the skill before publishing (no auto-add)
                 approve,
                 propose,
@@ -2529,8 +2530,10 @@ impl ContributeHarness {
     pub fn publish(&self, propose: bool, approve: &str) -> Result<PublishResult, String> {
         self.with_write_ctx(|ctx, contribute, governance| {
             let _ = governance;
-            match ops::publish(ctx, contribute, None, approve, propose, None, None, None)
-                .map_err(|e| e.to_string())?
+            match ops::publish(
+                ctx, contribute, None, None, approve, propose, None, None, None,
+            )
+            .map_err(|e| e.to_string())?
             {
                 ops::PublishOutcome::Published(d) => Ok(PublishResult::Published(d)),
                 ops::PublishOutcome::Proposed(d) => Ok(PublishResult::Proposed(d)),

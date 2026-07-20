@@ -1640,7 +1640,10 @@ fn genesis_author_first_publish(rig: &Rig, src: &Scratch) -> String {
 
     let ok = OkPublish::new(1);
     let connect = |_b: &str| -> Box<dyn ContributeSource> { Box::new(ok.clone()) };
-    let out = ops::publish(&ctx, &connect, None, "deploy", false, None, None, None).unwrap();
+    let out = ops::publish(
+        &ctx, &connect, None, None, "deploy", false, None, None, None,
+    )
+    .unwrap();
     assert!(
         matches!(out, ops::PublishOutcome::Published(_)),
         "the genesis author's first publish lands current"
@@ -1668,7 +1671,10 @@ fn a_genesis_authors_repeat_publish_refuses_no_changes_and_writes_no_wal() {
     let inert_p = InertPlane;
     let inert_f = InertFollow;
     let ctx = rig.ctx(&inert_p, &inert_f);
-    let err = ops::publish(&ctx, &connect, None, "deploy", false, None, None, None).unwrap_err();
+    let err = ops::publish(
+        &ctx, &connect, None, None, "deploy", false, None, None, None,
+    )
+    .unwrap_err();
     assert!(
         matches!(err, ClientError::NoChanges { .. }),
         "a repeat identical publish is NO_CHANGES, got {err:?}"
@@ -1744,7 +1750,8 @@ fn a_genesis_authors_identical_propose_refuses_no_changes() {
     let inert_p = InertPlane;
     let inert_f = InertFollow;
     let ctx = rig.ctx(&inert_p, &inert_f);
-    let err = ops::publish(&ctx, &connect, None, "deploy", true, None, None, None).unwrap_err();
+    let err =
+        ops::publish(&ctx, &connect, None, None, "deploy", true, None, None, None).unwrap_err();
     assert!(
         matches!(err, ClientError::NoChanges { .. }),
         "an identical --propose is NO_CHANGES, got {err:?}"
@@ -1774,7 +1781,10 @@ fn editing_the_draft_lets_a_second_publish_land() {
     let inert_p = InertPlane;
     let inert_f = InertFollow;
     let ctx = rig.ctx(&inert_p, &inert_f);
-    let out = ops::publish(&ctx, &connect, None, "deploy", false, None, None, None).unwrap();
+    let out = ops::publish(
+        &ctx, &connect, None, None, "deploy", false, None, None, None,
+    )
+    .unwrap();
     assert!(
         matches!(out, ops::PublishOutcome::Published(_)),
         "an edited draft publishes again (not a no-op)"
@@ -1784,6 +1794,92 @@ fn editing_the_draft_lets_a_second_publish_land() {
         1,
         "the edited publish reached the wire"
     );
+}
+
+/// The exact teammate handoff the acme fixture address composes — the join line a non-member's
+/// agent can follow (the share line's skill page answers only for members).
+const ACME_INVITE_LINE: &str = "Ask your agent: \"Set up Topos for us: fetch \
+                                https://topos.sh/agent and follow it. Our workspace: \
+                                https://topos.sh/acme\"";
+
+#[test]
+fn a_landed_publish_carries_the_teammate_handoff_line() {
+    // The APPLY receipt hands the author the join line — composed from the same `me.address` the
+    // describe's share line reads, fetched best-effort after the publish settled.
+    let rig = Rig::new("pub-invite");
+    let src = Scratch::new("pub-invite-src");
+    rig.seed_enrolled("alice@acme.com");
+    let skill_dir = src.0.join("deploy");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: deploy\ndescription: base\n---\n# deploy\n",
+    )
+    .unwrap();
+
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+    ops::add(&ctx, &skill_dir).unwrap();
+
+    let ok = OkPublish::new(1);
+    let connect = |_b: &str| -> Box<dyn ContributeSource> { Box::new(ok.clone()) };
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let dir = FakeDir::new(log);
+    let dir_c = dir_connect(&dir);
+    let out = ops::publish(
+        &ctx,
+        &connect,
+        Some(&dir_c),
+        None,
+        "deploy",
+        false,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let ops::PublishOutcome::Published(data) = out else {
+        panic!("the genesis publish lands current");
+    };
+    assert_eq!(data.invite_line.as_deref(), Some(ACME_INVITE_LINE));
+}
+
+#[test]
+fn a_publish_describe_carries_the_teammate_handoff_line() {
+    // The DESCRIBE composes the same join line from the same `me` read as the share line — the
+    // origin is the address minus its workspace path.
+    let rig = Rig::new("pd-invite");
+    let src = Scratch::new("pd-invite-src");
+    rig.seed_enrolled("alice@acme.com");
+    let skill_dir = src.0.join("deploy");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: deploy\ndescription: base\n---\n# deploy\n",
+    )
+    .unwrap();
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+    ops::add(&ctx, &skill_dir).unwrap();
+
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let dir = FakeDir::new(log);
+    let dir_c = dir_connect(&dir);
+    let del = FakeDelivery { snapshot: None };
+    let del_c = |_b: &str| -> Box<dyn ReconcileTransport> { Box::new(del.clone()) };
+    let connectors = ops::PublishDescribeConnectors {
+        directory: &dir_c,
+        delivery: &del_c,
+    };
+    let data = ops::publish_describe(&ctx, &connectors, None, "deploy", false, None, None)
+        .expect("describe succeeds");
+    assert_eq!(
+        data.share_line.as_deref(),
+        Some("https://topos.sh/acme/skills/deploy")
+    );
+    assert_eq!(data.invite_line.as_deref(), Some(ACME_INVITE_LINE));
 }
 
 // ---------------------------------------------------------------------------------------------

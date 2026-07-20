@@ -13,6 +13,13 @@
       "description": "The gate outcome: an OPEN bundle lands directly; a REVIEWED one becomes a proposal.",
       "$ref": "#/$defs/PublishGate"
     },
+    "invite_line": {
+      "description": "The paste-able teammate handoff line (`Ask your agent: …`) — the join instruction that\nbrings a teammate's machine into the workspace, composed from the workspace's server\norigin + address (the same read as `share_line`). **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "is_revert": {
       "description": "Whether this publish restores an ancestor's bytes (a revert-shaped publish, same gate).",
       "type": "boolean"
@@ -59,7 +66,7 @@
       "minimum": 0
     },
     "share_line": {
-      "description": "The paste-able share line (`<address>/skills/<name>`), when the workspace address is known.",
+      "description": "The paste-able share line (`<address>/skills/<name>`), when the workspace address is known.\nA members' deep link — it answers only for people already in the workspace.",
       "type": [
         "string",
         "null"

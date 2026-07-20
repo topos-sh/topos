@@ -5,6 +5,7 @@
   "data": {
     "bundle_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "gate": "lands",
+    "invite_line": "Ask your agent: \"Set up Topos for us: fetch https://topos.sh/agent and follow it. Our workspace: https://topos.sh/acme\"",
     "is_revert": false,
     "placements": [
       "everyone"
