@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   type ActionFunctionArgs,
   data,
@@ -9,10 +9,13 @@ import {
   useActionData,
   useFetcher,
   useLoaderData,
+  useLocation,
+  useNavigation,
 } from "react-router";
 import { buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
 import { actorFromSession, notFound, requireSession, safeNextPath } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
+import { announceCeremony } from "@/lib/ceremony-event";
 import { createWorkspace, workspaceNameAvailable } from "@/lib/db/workspace-create.server";
 import { destinationPathname } from "@/lib/destination-path";
 import { followBase } from "@/lib/plane/follow-base.server";
@@ -145,6 +148,29 @@ function CreateForm({
   // Once the person edits the address by hand we stop re-deriving it from the display name.
   const [slugEdited, setSlugEdited] = useState(false);
   const check = useFetcher<typeof loader>();
+
+  // The `workspace_created` ceremony announcement. A landed create REDIRECTS away (the action
+  // throws), so success is observable here only as our POST's loading phase heading somewhere
+  // ELSE — a failed action revalidates THIS location instead, and the availability probe is a
+  // fetcher (never navigation state). Ref-guarded so dev strict-mode's doubled effect and
+  // re-renders within the same navigation dispatch exactly once; the form unmounts on arrival,
+  // so the destination never replays it, and a failed attempt leaves the guard unset for the
+  // retry that does land.
+  const navigation = useNavigation();
+  const location = useLocation();
+  const announcedCreate = useRef(false);
+  useEffect(() => {
+    if (
+      announcedCreate.current ||
+      navigation.state !== "loading" ||
+      navigation.formMethod !== "POST" ||
+      navigation.location.pathname === location.pathname
+    ) {
+      return;
+    }
+    announcedCreate.current = true;
+    announceCeremony("workspace_created");
+  }, [navigation, location.pathname]);
 
   // Debounced live-availability read: one request per settled slug, and the answer carries the
   // slug it is for (`name`) so a stale reply for an earlier keystroke is ignored.
