@@ -111,9 +111,9 @@ the only browser moments are theirs:
    browser), or self-host per `INSTALL.md`. The address — `topos.sh/<name>` — is the
    workspace's one handle: enrollment, invites, and every publish receipt all speak it.
 2. Enroll THIS machine: `topos follow <address>`. Show your human the printed approval URL —
-   they open it in a browser and approve; never approve in their place. Re-invoking `follow`
-   polls once; `--wait <seconds>` blocks with a cap. Then run the printed
-   `topos follow <address> --yes` — that lands what the workspace offers.
+   they open it in a browser and approve; never approve in their place. Piped runs print the
+   approval URL and return; re-invoke `follow` to poll, `--wait <seconds>` to block with a cap.
+   Then run the printed `topos follow <address> --yes` — that lands what the workspace offers.
 3. Seat teammates: `topos invite <email>` per person (bare describes, `--yes` sends).
 4. Hand each teammate the join line for their own agent — an invite seats them, but only this
    line brings their machine in:

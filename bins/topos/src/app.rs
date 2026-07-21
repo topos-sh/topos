@@ -446,26 +446,38 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             // `follow` by hand), unless this is a headless `--json` run without `--wait` (which must not
             // hang). The interactive block only ever RESUMES (no targets + the pending WAL drives it) —
             // and the resumed invocation keeps THIS invocation's flags, so a `--yes` carries through
-            // the wait into the apply.
-            let policy = WaitPolicy::resolve(json, wait, &clock);
-            // The zero-typing loopback: only for an interactive wait, only when a local browser
-            // is plausible (never over SSH / headless / `TOPOS_NO_BROWSER`), and only when a
-            // pending WAL exists to derive the flow's challenge from. Everything else keeps the
-            // typed-code fallback untouched.
+            // the wait into the apply. A PIPED stdout without an explicit `--wait` never blocks:
+            // the instructions print, the single poll answers, and the exit-0 pending document
+            // carries the resume next-action — an agent harness would otherwise stare at a silent
+            // long poll it cannot see into.
+            let stdout_tty = {
+                use std::io::IsTerminal;
+                std::io::stdout().is_terminal()
+            };
+            let policy = WaitPolicy::resolve(json, wait, stdout_tty, &clock);
+            // The zero-typing loopback: only for an interactive blocking wait (the listener must
+            // outlive the human's click — a TTY, or an explicit `--wait` on a pipe), only when a
+            // local browser is plausible (never over SSH / headless / `TOPOS_NO_BROWSER`), and
+            // only when a pending WAL exists to derive the flow's challenge from. Everything else
+            // keeps the typed-code fallback untouched.
             let loopback_plan = if policy.block && !json {
                 let interactive = {
                     use std::io::IsTerminal;
                     std::io::stderr().is_terminal()
                 };
-                ops::loopback::choose_browser(&ops::loopback::BrowserEnv::detect(interactive))
-                    .and_then(|opener| {
-                        let wal = crate::enroll::read_wal(&fs, &ctx.layout).ok().flatten()?;
-                        Some(LoopbackPlan {
-                            opener,
-                            runner: &fs,
-                            challenge: ops::device_challenge(&wal.device_code),
-                        })
+                ops::loopback::choose_browser(&ops::loopback::BrowserEnv::detect(
+                    interactive,
+                    stdout_tty,
+                    wait.is_some(),
+                ))
+                .and_then(|opener| {
+                    let wal = crate::enroll::read_wal(&fs, &ctx.layout).ok().flatten()?;
+                    Some(LoopbackPlan {
+                        opener,
+                        runner: &fs,
+                        challenge: ops::device_challenge(&wal.device_code),
                     })
+                })
             } else {
                 None
             };
@@ -1018,10 +1030,14 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                         server_url.as_deref(),
                         workspace.as_deref(),
                     );
-                    // The same blocking idiom as `follow`: interactive (or `--wait`) runs re-poll
-                    // until the browser approval settles; a headless `--json` run without `--wait`
-                    // returns the pending state and never hangs.
-                    let policy = WaitPolicy::resolve(json, wait, &clock);
+                    // The same blocking idiom as `follow`: a TTY (or `--wait`) run re-polls
+                    // until the browser approval settles; a `--json` or PIPED run without
+                    // `--wait` returns the pending state and never hangs.
+                    let stdout_tty = {
+                        use std::io::IsTerminal;
+                        std::io::stdout().is_terminal()
+                    };
+                    let policy = WaitPolicy::resolve(json, wait, stdout_tty, &clock);
                     let result = block_on_pending(
                         &clock,
                         &policy,
@@ -2287,9 +2303,13 @@ fn waiting_line(now_millis: u64, started_millis: u64, expires_at_millis: Option<
 }
 
 /// Whether this invocation blocks on a pending device-authorization, and until when.
-/// - `block == false` — never block (a headless `--json` run without `--wait`): return the first result.
-/// - `deadline_millis == None` — block until the device code's own TTL ends it (interactive default, or a
-///   bare `--wait`).
+/// - `block == false` — never block: print the approval instructions (or emit the `--json`
+///   pending document with its resume next-action) and exit 0 after the single poll the
+///   invocation itself performed. This is the default whenever NOBODY IS WATCHING A TERMINAL —
+///   a `--json` run, or a PIPED stdout (an agent harness surfaces output only when a command
+///   exits, so the human blocking wait would read as a silent quarter-hour hang there).
+/// - `deadline_millis == None` — block until the device code's own TTL ends it (the TTY default,
+///   or a bare `--wait`).
 /// - `deadline_millis == Some(t)` — block until settled or the wall clock passes `t` (`--wait <seconds>`),
 ///   whichever comes first.
 struct WaitPolicy {
@@ -2298,11 +2318,14 @@ struct WaitPolicy {
 }
 
 impl WaitPolicy {
-    /// Derive the policy from `--json` and the `--wait [<seconds>]` flag: block when interactive (`!json`)
-    /// OR when `--wait` was given in any form; a numeric `--wait <seconds>` sets a wall-clock deadline.
-    fn resolve(json: bool, wait: Option<Option<u64>>, clock: &dyn Clock) -> Self {
+    /// Derive the policy from `--json`, the `--wait [<seconds>]` flag, and whether STDOUT is a
+    /// terminal: block when a human watches a TTY (`!json && stdout_tty`) OR when `--wait` was
+    /// given in any form (the explicit opt-in — it works piped, so an agent may choose the
+    /// one-command blocking enrollment deliberately); a numeric `--wait <seconds>` sets a
+    /// wall-clock deadline.
+    fn resolve(json: bool, wait: Option<Option<u64>>, stdout_tty: bool, clock: &dyn Clock) -> Self {
         Self {
-            block: !json || wait.is_some(),
+            block: (!json && stdout_tty) || wait.is_some(),
             deadline_millis: match wait {
                 Some(Some(secs)) => Some(
                     clock
@@ -2768,10 +2791,96 @@ fn list_discovery(tracked: bool) -> Option<ops::DiscoveryRoots> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_WEB_ORIGIN, build_pull_scope, fmt_span, list_page_argv, next_page_action,
-        parse_rfc3339_utc_millis, resolve_web_origin, waiting_line,
+        DEFAULT_WEB_ORIGIN, PendingDisclosure, WaitPolicy, block_on_pending, build_pull_scope,
+        fmt_span, list_page_argv, next_page_action, parse_rfc3339_utc_millis, resolve_web_origin,
+        waiting_line,
     };
+    use crate::ids::Clock;
     use crate::ops::{PullScope, RowPage, TargetMode, VersionRef};
+
+    struct TestClock(u64);
+    impl Clock for TestClock {
+        fn now_unix_millis(&self) -> u64 {
+            self.0
+        }
+    }
+
+    #[test]
+    fn the_wait_policy_blocks_only_for_a_watched_terminal_or_an_explicit_wait() {
+        let clock = TestClock(1_000);
+        // The human default: a TTY without --json blocks until the code's own expiry.
+        assert!(WaitPolicy::resolve(false, None, true, &clock).block);
+        // The agent default: a PIPED stdout without --wait never blocks — the harness only
+        // surfaces output on exit, so the long poll would read as a silent hang.
+        assert!(!WaitPolicy::resolve(false, None, false, &clock).block);
+        // --json inherits the same non-blocking default on both faces.
+        assert!(!WaitPolicy::resolve(true, None, false, &clock).block);
+        assert!(!WaitPolicy::resolve(true, None, true, &clock).block);
+        // --wait is the explicit opt-in and works piped, bare or capped.
+        assert!(WaitPolicy::resolve(false, Some(None), false, &clock).block);
+        assert!(WaitPolicy::resolve(true, Some(Some(30)), false, &clock).block);
+        // The numeric cap sets the wall-clock deadline; the bare form has none.
+        assert_eq!(
+            WaitPolicy::resolve(false, Some(Some(30)), false, &clock).deadline_millis,
+            Some(31_000)
+        );
+        assert_eq!(
+            WaitPolicy::resolve(false, Some(None), false, &clock).deadline_millis,
+            None
+        );
+    }
+
+    #[test]
+    fn a_non_blocking_wait_returns_the_first_pending_result_without_a_single_repoll() {
+        let clock = TestClock(0);
+        let policy = WaitPolicy {
+            block: false,
+            deadline_millis: None,
+        };
+        let pending = Ok::<_, crate::error::ClientError>("pending-marker");
+        let out = block_on_pending(
+            &clock,
+            &policy,
+            pending,
+            |_| {
+                Some(PendingDisclosure {
+                    verification_uri: "https://x/verify".into(),
+                    user_code: "AB12-CD34".into(),
+                    interval_secs: Some(5),
+                    expires_at_millis: None,
+                })
+            },
+            None,
+            || panic!("a non-blocking wait must never re-poll"),
+        );
+        assert_eq!(out.unwrap(), "pending-marker");
+    }
+
+    #[test]
+    fn a_zero_second_wait_cap_returns_the_pending_result_at_the_deadline() {
+        // `--wait 0`: block resolves true, the deadline is already NOW — the loop's top check
+        // returns the last pending result without sleeping a poll interval.
+        let clock = TestClock(5_000);
+        let policy = WaitPolicy::resolve(true, Some(Some(0)), false, &clock);
+        assert!(policy.block);
+        let pending = Ok::<_, crate::error::ClientError>("still-pending");
+        let out = block_on_pending(
+            &clock,
+            &policy,
+            pending,
+            |_| {
+                Some(PendingDisclosure {
+                    verification_uri: "https://x/verify".into(),
+                    user_code: "AB12-CD34".into(),
+                    interval_secs: Some(5),
+                    expires_at_millis: None,
+                })
+            },
+            None,
+            || panic!("the elapsed deadline never re-polls"),
+        );
+        assert_eq!(out.unwrap(), "still-pending");
+    }
 
     #[test]
     fn the_waiting_line_shows_honest_elapsed_and_expiry_time() {
