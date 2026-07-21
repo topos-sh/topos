@@ -36,6 +36,7 @@ import { isWorkspaceNameShape } from "@/lib/workspace-name";
  */
 const BODY_CAP = 8 * 1024;
 const MAX_REQUESTED_NAME = 200;
+const MAX_INVITE_TOKEN = 512;
 
 export async function action({ request }: ActionFunctionArgs): Promise<Response> {
   const belted = checkBelt(request);
@@ -55,7 +56,7 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   } catch {
     return badRequest("malformed JSON body");
   }
-  const body = parsed as { requested_name?: unknown; workspace?: unknown };
+  const body = parsed as { requested_name?: unknown; workspace?: unknown; invite_token?: unknown };
   if (
     typeof parsed !== "object" ||
     parsed === null ||
@@ -65,6 +66,17 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     typeof body.workspace !== "string"
   ) {
     return badRequest("malformed device authorize body");
+  }
+  // The optional invitation token a `follow <invite-url>` enrollment carries: recorded (as its
+  // hash) UNVALIDATED — this start is unauthenticated and must not be a token oracle. The
+  // approval resolves it under its own fence.
+  if (
+    body.invite_token !== undefined &&
+    (typeof body.invite_token !== "string" ||
+      body.invite_token.length === 0 ||
+      body.invite_token.length > MAX_INVITE_TOKEN)
+  ) {
+    return badRequest("malformed device authorize body: invite_token");
   }
 
   let requestedWorkspace: string;
@@ -87,13 +99,19 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     requestedWorkspace = ws.name;
   }
 
-  const flow = await startDeviceAuth(body.requested_name.trim(), requestedWorkspace);
+  const flow = await startDeviceAuth(
+    body.requested_name.trim(),
+    requestedWorkspace,
+    body.invite_token as string | undefined,
+  );
   const origin = followBase(request);
+  // The code never enters ANY URL: the CLI prints the bare /verify address and the short code
+  // on separate lines, and the human types the code into the page's POST form (the retired
+  // `verification_uri_complete` embedded it in a GET — a leak into history/logs, gone).
   return Response.json({
     device_code: flow.deviceCode,
     user_code: flow.userCode,
     verification_uri: `${origin}/verify`,
-    verification_uri_complete: `${origin}/verify?code=${encodeURIComponent(flow.userCode)}`,
     expires_in_secs: flow.expiresInSecs,
     interval_secs: DEVICE_AUTH_POLL_INTERVAL_SECS,
   });

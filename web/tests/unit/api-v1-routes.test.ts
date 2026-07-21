@@ -1206,12 +1206,9 @@ describe("device authorize + token", () => {
       "interval_secs",
       "user_code",
       "verification_uri",
-      "verification_uri_complete",
     ]);
+    // The code never enters ANY URL — the bare /verify address is all the wire carries.
     expect(flow.verification_uri).toBe("http://x/verify");
-    expect(flow.verification_uri_complete).toBe(
-      `http://x/verify?code=${encodeURIComponent(flow.user_code as string)}`,
-    );
     expect(flow.expires_in_secs).toBe(900);
     expect(flow.interval_secs).toBe(5);
 

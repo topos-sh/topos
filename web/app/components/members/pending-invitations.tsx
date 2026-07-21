@@ -3,10 +3,12 @@ import { useFetcher } from "react-router";
 import { StepUpFields } from "@/components/step-up";
 import { buttonClasses, Card, Chip, SectionHeading } from "@/components/ui";
 
-/** One pending invitation as the members page renders it (loader-shaped; lapse pre-computed). */
+/** One open invitation as the members page renders it (loader-shaped; lapse pre-computed). */
 export interface PendingInvitationView {
   id: string;
   email: string;
+  /** 'pending' (a live claim) or 'declined' (the recorded "no thanks" — re-invitable). */
+  status: "pending" | "declined";
   invitedByDisplay: string;
   /** "lapses in 6 days" / "lapsed" — computed in the loader so hydration re-reads no clock. */
   lapse: string;
@@ -21,10 +23,12 @@ interface RevokeInvitationActionData {
 }
 
 /**
- * The claims-in-flight panel: invitations that no user has bound yet. Every member may see the
- * list (who was invited is roster-adjacent fact, not a secret); the REVOKE arm is owner-only
- * and a step-up ceremony. Re-inviting an address is just inviting it again — the pending row
- * upserts and the 7-day clock re-arms, so there is no separate resend control here.
+ * The claims-in-flight panel: invitations that no user has bound yet, plus DECLINED ones — the
+ * recorded "no thanks" the inviter should see (re-inviting the address supersedes it). Every
+ * member may see the list (who was invited is roster-adjacent fact, not a secret); the REVOKE
+ * arm is owner-only, pending-only, and a step-up ceremony. Re-inviting an address is just
+ * inviting it again — the pending row upserts, a fresh link mails, and the 7-day clock re-arms,
+ * so there is no separate resend control here.
  */
 export function PendingInvitations({
   invitations,
@@ -43,8 +47,8 @@ export function PendingInvitations({
           <span id="invitations-heading">Pending invitations</span>
         </SectionHeading>
         <p className="text-dim text-sm">
-          Each becomes a seat the moment its address signs up and verifies the mailbox. Invite an
-          address again to resend and re-arm its clock.
+          Each becomes a seat the moment its address accepts the mailed link (or signs up and
+          verifies the mailbox). Invite an address again to mail a fresh link and re-arm its clock.
         </p>
       </div>
       <Card className="overflow-hidden">
@@ -55,11 +59,16 @@ export function PendingInvitations({
               className="flex min-h-12 flex-wrap items-center gap-x-4 gap-y-2 border-line-soft border-b px-4 py-3 last:border-b-0"
             >
               <span className="text-ink text-sm">{invitation.email}</span>
-              <Chip tone="pending">pending</Chip>
+              {invitation.status === "pending" ? (
+                <Chip tone="pending">pending</Chip>
+              ) : (
+                <Chip tone="unverified">declined</Chip>
+              )}
               <span className="text-faint text-xs">
-                invited by {invitation.invitedByDisplay} · {invitation.lapse}
+                invited by {invitation.invitedByDisplay}
+                {invitation.status === "pending" ? ` · ${invitation.lapse}` : ""}
               </span>
-              {isOwner && (
+              {isOwner && invitation.status === "pending" && (
                 <span className="ml-auto">
                   <RevokeInvitationForm invitationId={invitation.id} email={invitation.email} />
                 </span>

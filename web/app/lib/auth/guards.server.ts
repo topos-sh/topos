@@ -1,7 +1,14 @@
 import { data, redirect } from "react-router";
 import { composition } from "@/composition.server";
 import { bearerToken, uniformNotFound } from "@/lib/api/wire.server";
-import { deviceActor, seatOf, theWorkspace, workspaceByName } from "@/lib/db/identity.server";
+import {
+  deviceActor,
+  devicePerson,
+  type SessionAccount,
+  seatOf,
+  theWorkspace,
+  workspaceByName,
+} from "@/lib/db/identity.server";
 import { personDisplay } from "@/lib/person-display";
 import { getAuth } from "./server";
 
@@ -298,4 +305,23 @@ export async function requireDeviceActor(
     deviceId: row.deviceId,
     role: row.role,
   } as DeviceActor;
+}
+
+/**
+ * The PERSON-scoped device guard: credential → device → user, NO seat requirement — for the
+ * one lane op whose caller by definition has no seat yet (accepting an invitation from an
+ * already-enrolled device). The email facts ride along because the invitation ceremony fences
+ * on them, resolved from the trusted user row — never a client field. Every miss is the same
+ * uniform wire 404 the seated guard answers.
+ */
+export async function requireDevicePerson(request: Request): Promise<SessionAccount> {
+  const credential = bearerToken(request);
+  if (credential === null) {
+    throw uniformNotFound();
+  }
+  const row = await devicePerson(credential);
+  if (row === null) {
+    throw uniformNotFound();
+  }
+  return row;
 }

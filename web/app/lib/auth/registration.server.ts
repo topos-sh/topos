@@ -22,6 +22,9 @@ import { mailDelivery } from "@/lib/mail/transport.server";
  *       the deployment can actually verify it (unarmed SMTP ⇒ inviting is disabled AND a
  *       leftover invitation admits nothing — the old self-asserted-email impersonation hole
  *       stays closed);
+ *   (b2) the invitation-REDEMPTION ceremony — the invite page resolved a live single-use link
+ *       token and mints the invited address's account inside [`withInvitationCeremony`]: the
+ *       token's delivery to that mailbox is the proof, so no second mail round-trip gates it;
  *   (c) in SINGLE tenancy only, the operator knob `workspace.registration = 'open'` on THE
  *       one workspace this install serves, off by default.
  * Everything else gets ONE constant, non-enumerating refusal — the same answer whether the
@@ -39,11 +42,21 @@ import { mailDelivery } from "@/lib/mail/transport.server";
  * accidentally reopen registration.
  */
 
-const ceremonyContext = new AsyncLocalStorage<{ ceremony: "claim" }>();
+const ceremonyContext = new AsyncLocalStorage<{ ceremony: "claim" | "invitation" }>();
 
 /** The claim ceremony wraps its internal sign-up call so the create hook admits it. */
 export function withRegistrationCeremony<T>(fn: () => Promise<T>): Promise<T> {
   return ceremonyContext.run({ ceremony: "claim" }, fn);
+}
+
+/**
+ * The invitation-redemption ceremony wraps ITS account mint the same way: the invite page has
+ * already resolved a live single-use token before it creates the invited email's account, so
+ * the create hook admits exactly that one sign-up — a ceremony wrapper, never an email check,
+ * and never a policy the hook re-derives (the token's delivery to the mailbox is the proof).
+ */
+export function withInvitationCeremony<T>(fn: () => Promise<T>): Promise<T> {
+  return ceremonyContext.run({ ceremony: "invitation" }, fn);
 }
 
 /** The one refusal string every closed path answers with (non-enumerating by sameness). */
@@ -55,6 +68,8 @@ export function registrationDecision(facts: {
   policy: "gated" | "open";
   tenancy: "single" | "multi";
   inClaimCeremony: boolean;
+  /** True inside the invitation-redemption ceremony: a live invite token already resolved. */
+  inInvitationCeremony: boolean;
   /** The single-tenant workspace's own knob; ALWAYS null in multi (never consulted there). */
   registrationKnob: "invite_only" | "open" | null;
   pendingInvitation: boolean;
@@ -63,7 +78,7 @@ export function registrationDecision(facts: {
   if (facts.policy === "open") {
     return "allow";
   }
-  if (facts.inClaimCeremony) {
+  if (facts.inClaimCeremony || facts.inInvitationCeremony) {
     return "allow";
   }
   // The workspace knob opens sign-up only where the install IS the workspace: a knob scoped
@@ -109,7 +124,8 @@ export async function assertRegistrationAllowed(email: string): Promise<void> {
   if (composition.registration === "open") {
     return;
   }
-  if (ceremonyContext.getStore()?.ceremony === "claim") {
+  const ceremony = ceremonyContext.getStore()?.ceremony;
+  if (ceremony === "claim" || ceremony === "invitation") {
     return;
   }
   const lowered = email.trim().toLowerCase();
@@ -125,6 +141,7 @@ export async function assertRegistrationAllowed(email: string): Promise<void> {
     policy: "gated",
     tenancy,
     inClaimCeremony: false,
+    inInvitationCeremony: false,
     registrationKnob,
     pendingInvitation: await hasPendingInvitation(lowered, invitationScope),
     mailArmed: mailDelivery().canSend,

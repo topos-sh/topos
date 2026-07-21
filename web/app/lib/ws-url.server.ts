@@ -37,3 +37,15 @@ export function workspaceAddress(request: Request, workspaceName: string): strin
 export function agentDocUrl(request: Request): string {
   return `${followBase(request)}/agent`;
 }
+
+/**
+ * The tokened invitation URL the invite mail carries — worth ONE invitation, never an account.
+ * Single tenancy → origin-rooted `/invite/<token>`; multi → `<origin>/<name>/invite/<token>`.
+ * Same origin resolution as the follow address (`followBase`), so the browser link, the agent
+ * paste-block, and the terminal line in one mail all root identically.
+ */
+export function inviteUrl(request: Request, workspaceName: string, token: string): string {
+  const base = followBase(request);
+  const root = composition.tenancy === "multi" ? `${base}/${workspaceName}` : base;
+  return `${root}/invite/${token}`;
+}

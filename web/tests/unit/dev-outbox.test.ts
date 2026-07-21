@@ -53,7 +53,7 @@ describe("the dev outbox accumulates across mail kinds", () => {
       await invite.sendInviteEmail({
         to: "carol@example.com",
         workspaceDisplayName: "Acme",
-        address: "https://topos.example/acme",
+        inviteUrl: "https://topos.example/invite/tok-abc",
         agentUrl: "https://topos.example/agent",
         invitedBy: "owner@example.com",
       });
