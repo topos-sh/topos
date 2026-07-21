@@ -93,6 +93,8 @@ pub(crate) enum Command {
         manual: bool,
         /// Block until the browser approval settles, finishing enrollment in ONE command. Bare `--wait`
         /// waits until the code expires; `--wait <seconds>` caps the wait. Put `--wait` AFTER any positional.
+        /// A TTY blocks by default; a PIPED run without `--wait` prints the approval URL and returns
+        /// immediately — re-invoke `follow` to poll, or pass `--wait` to block.
         #[arg(long, value_name = "SECONDS", num_args = 0..=1)]
         wait: Option<Option<u64>>,
     },
@@ -408,7 +410,8 @@ pub(crate) enum AuthCmd {
         #[arg(value_name = "SERVER_URL")]
         server_url: Option<String>,
         /// Block until the browser approval settles in ONE command. Bare `--wait` waits until the
-        /// code expires; `--wait <seconds>` caps the wait.
+        /// code expires; `--wait <seconds>` caps the wait. A TTY blocks by default; a PIPED run
+        /// without `--wait` prints the approval URL and returns — re-invoke to poll.
         #[arg(long, value_name = "SECONDS", num_args = 0..=1)]
         wait: Option<Option<u64>>,
     },

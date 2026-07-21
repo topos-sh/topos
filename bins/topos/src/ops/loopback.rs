@@ -152,6 +152,12 @@ pub(crate) fn approval_url(base: &str, challenge: &str, port: u16, state: &str) 
 pub(crate) struct BrowserEnv {
     /// A human is watching (TTY stderr, not `--json`).
     pub interactive: bool,
+    /// STDOUT is a terminal — the wait may block indefinitely (a piped run without an explicit
+    /// `--wait` exits after one poll, so a loopback ceremony there would be orphaned).
+    pub stdout_tty: bool,
+    /// `--wait` was given in any form — the caller explicitly opted into a blocking wait, so the
+    /// process stays alive to receive the redirect even when piped.
+    pub explicit_wait: bool,
     /// An SSH session (`SSH_CONNECTION`/`SSH_TTY`) — the browser would open on the wrong machine.
     pub ssh: bool,
     /// `TOPOS_NO_BROWSER` set — the explicit opt-out.
@@ -163,11 +169,14 @@ pub(crate) struct BrowserEnv {
 }
 
 impl BrowserEnv {
-    /// Snapshot the real process environment (`interactive` is the caller's fact).
-    pub(crate) fn detect(interactive: bool) -> Self {
+    /// Snapshot the real process environment (`interactive` / `stdout_tty` / `explicit_wait` are
+    /// the caller's facts).
+    pub(crate) fn detect(interactive: bool, stdout_tty: bool, explicit_wait: bool) -> Self {
         let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
         Self {
             interactive,
+            stdout_tty,
+            explicit_wait,
             ssh: set("SSH_CONNECTION") || set("SSH_TTY"),
             suppressed: set("TOPOS_NO_BROWSER"),
             macos: cfg!(target_os = "macos"),
@@ -177,10 +186,15 @@ impl BrowserEnv {
 }
 
 /// Choose the browser opener, or `None` for the typed-code fallback. Pure and table-tested:
-/// headless / `--json` / SSH / opted-out never open anything; macOS uses `open`; a graphical
-/// unix session uses `xdg-open`; anything else falls back.
+/// headless / `--json` / SSH / opted-out never open anything, and a PIPED run without an explicit
+/// `--wait` never does either — the loopback ceremony needs the process to outlive the human's
+/// click, and the piped default exits after one poll. macOS uses `open`; a graphical unix session
+/// uses `xdg-open`; anything else falls back.
 pub(crate) fn choose_browser(env: &BrowserEnv) -> Option<&'static str> {
     if !env.interactive || env.ssh || env.suppressed {
+        return None;
+    }
+    if !env.stdout_tty && !env.explicit_wait {
         return None;
     }
     if env.macos {
@@ -198,6 +212,8 @@ mod tests {
 
     fn env(
         interactive: bool,
+        stdout_tty: bool,
+        explicit_wait: bool,
         ssh: bool,
         suppressed: bool,
         macos: bool,
@@ -205,6 +221,8 @@ mod tests {
     ) -> BrowserEnv {
         BrowserEnv {
             interactive,
+            stdout_tty,
+            explicit_wait,
             ssh,
             suppressed,
             macos,
@@ -214,19 +232,58 @@ mod tests {
 
     #[test]
     fn browser_selection_is_a_pure_table() {
-        // Interactive macOS opens; SSH / suppressed / headless never do.
+        // A full TTY on macOS / a graphical unix opens; SSH / suppressed / headless never do.
         assert_eq!(
-            choose_browser(&env(true, false, false, true, false)),
+            choose_browser(&env(true, true, false, false, false, true, false)),
             Some("open")
         );
         assert_eq!(
-            choose_browser(&env(true, false, false, false, true)),
+            choose_browser(&env(true, true, false, false, false, false, true)),
             Some("xdg-open")
         );
-        assert_eq!(choose_browser(&env(true, false, false, false, false)), None);
-        assert_eq!(choose_browser(&env(false, false, false, true, true)), None);
-        assert_eq!(choose_browser(&env(true, true, false, true, true)), None);
-        assert_eq!(choose_browser(&env(true, false, true, true, true)), None);
+        assert_eq!(
+            choose_browser(&env(true, true, false, false, false, false, false)),
+            None
+        );
+        assert_eq!(
+            choose_browser(&env(false, true, false, false, false, true, true)),
+            None
+        );
+        assert_eq!(
+            choose_browser(&env(true, true, false, true, false, true, true)),
+            None
+        );
+        assert_eq!(
+            choose_browser(&env(true, true, false, false, true, true, true)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_piped_run_opens_no_browser_unless_wait_was_explicit() {
+        // Piped stdout, no --wait: the wait exits after one poll, so a loopback ceremony would be
+        // orphaned — never open. An explicit --wait keeps the process alive → the loopback may run.
+        assert_eq!(
+            choose_browser(&env(true, false, false, false, false, true, true)),
+            None
+        );
+        assert_eq!(
+            choose_browser(&env(true, false, true, false, false, true, false)),
+            Some("open")
+        );
+        assert_eq!(
+            choose_browser(&env(true, false, true, false, false, false, true)),
+            Some("xdg-open")
+        );
+        // --wait does not override the harder refusals (SSH / opt-out / non-interactive).
+        assert_eq!(
+            choose_browser(&env(true, false, true, true, false, true, true)),
+            None
+        );
+        assert_eq!(
+            choose_browser(&env(false, false, true, false, false, true, true)),
+            None
+        );
     }
 
     #[test]

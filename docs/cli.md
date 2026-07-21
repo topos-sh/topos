@@ -45,7 +45,7 @@ Follow a workspace, channel, or skill — enroll if needed, then subscribe two-p
 | `--yes` |  |  | Apply the described subscription (the one-shot consent). Bare = describe only |
 | `--prefix-dirname` |  |  | Install a dirname-colliding skill under `<workspace>.<name>` instead of declining it |
 | `--manual` |  |  | Adopt followed skills in confirm-each mode (a one-tap accept per new version) instead of auto |
-| `--wait` | `<SECONDS>` |  | Block until the browser approval settles, finishing enrollment in ONE command. Bare `--wait` waits until the code expires; `--wait <seconds>` caps the wait. Put `--wait` AFTER any positional |
+| `--wait` | `<SECONDS>` |  | Block until the browser approval settles, finishing enrollment in ONE command. Bare `--wait` waits until the code expires; `--wait <seconds>` caps the wait. Put `--wait` AFTER any positional. A TTY blocks by default; a PIPED run without `--wait` prints the approval URL and returns immediately — re-invoke `follow` to poll, or pass `--wait` to block |
 
 
 ### `topos unfollow`
@@ -299,7 +299,7 @@ Re-enroll this machine (the same browser-approval device flow `follow` runs, min
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
 | `[SERVER_URL]` |  |  | The server URL to sign in to (optional; the enrolled plane, else the hosted default) |
-| `--wait` | `<SECONDS>` |  | Block until the browser approval settles in ONE command. Bare `--wait` waits until the code expires; `--wait <seconds>` caps the wait |
+| `--wait` | `<SECONDS>` |  | Block until the browser approval settles in ONE command. Bare `--wait` waits until the code expires; `--wait <seconds>` caps the wait. A TTY blocks by default; a PIPED run without `--wait` prints the approval URL and returns — re-invoke to poll |
 
 
 #### `topos auth logout`
