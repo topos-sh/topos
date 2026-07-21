@@ -115,6 +115,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   }
 
   return {
+    isOwner: actor.role === "owner",
     wsName: workspace.name,
     skill,
     currentShort: row.versionId !== null ? row.versionId.slice(0, 12) : "—",
@@ -315,6 +316,7 @@ export default function SkillHistoryPage() {
     currentShort,
     displayName,
     kind,
+    isOwner,
     openProposals,
     history,
     canPurge,
@@ -335,6 +337,7 @@ export default function SkillHistoryPage() {
           basePath={wsPath(`skills/${skill}`)}
           active="history"
           openProposals={openProposals}
+          showSettings={isOwner}
         />
         <HistorySection skill={skill} data={history} />
         <PurgeSection skill={skill} data={history} canPurge={canPurge} />

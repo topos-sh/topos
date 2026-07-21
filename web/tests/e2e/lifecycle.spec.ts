@@ -144,7 +144,7 @@ test("archive retires the skill: the base name frees, the catalog drops it, the 
 
 test("unarchive restores the base name exactly", async ({ page }) => {
   await theWorkspace();
-  await gotoSettled(page, `/archive`);
+  await gotoSettled(page, `/settings/archive`);
 
   await page.getByText("Unarchive…", { exact: true }).click();
   await page.locator(`#unarchive-${SKILL.id}-password`).fill(E2E_PASSWORD);

@@ -207,7 +207,10 @@ module is the ONE sanctioned digest computation in this tier (carved out by name
 **The signed-in surface:** a workspace dashboard, the skill browser, the rendered review UI (unified diff +
 Approve/Reject + comments + one-click revert), the verification page, the create/join flows, and the ADMIN
 surfaces — the roster page in full (invite / role change / remove / self-serve leave, sole-owner-fenced),
-the skill lifecycle ceremonies (archive / unarchive / delete / purge / rename-with-redirect), the
+the skill lifecycle ceremonies (archive / unarchive / delete / purge / rename-with-redirect —
+discoverable: the skill pages share one tab row, Current · Proposals · History plus an OWNER-ONLY
+**Settings** tab rendered from each loader's own owner fact, while the settings route re-guards
+regardless), the
 channel pages — TABBED into **Skills** (the face, hosting in-app curation: whoever may curate — any
 member of an open channel, reviewer+ of a curated one — adds/removes the channel's skill references
 through the same core the device lane runs) · **Members** · **History** · **Settings** (the owner
@@ -217,8 +220,10 @@ default · invite policy · staleness window · the `registration` knob · an OW
 **export** — a `settings/export` resource route streaming a zip of every skill at its current version
 plus a `manifest.json`, one object at a time through the custody transport's verified reads) and
 **Devices** (the workspace fleet
-view: staleness + the named blind spots — detached copies, removed-upstream rows, stale devices), both under
-one shared tab header (`app/components/settings-tabs.tsx`) at `settings` / `settings/devices`), the "your
+view: staleness + the named blind spots — detached copies, removed-upstream rows, stale devices) and
+**Archive** (the archived-skills list with the unarchive/delete ceremonies), all under
+one shared tab header (`app/components/settings-tabs.tsx`) at `settings` / `settings/devices` /
+`settings/archive`), the "your
 devices" self-service list, and the first-run claim. It renders state read from its own `web` schema and,
 read-only, from the vault's `plane` schema; it holds no signing key, computes no digest, and initiates no
 device-signed write — publishing stays on the enrolled device.

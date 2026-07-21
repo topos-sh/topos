@@ -3,17 +3,19 @@ import { cn } from "@/lib/utils";
 import { useWsPath } from "@/lib/ws-path";
 
 /**
- * The Settings section's tab header, shared VERBATIM by both settings route modules so the two
- * can't drift: General (the workspace policy page) and Devices (the read-only workspace fleet).
- * The URLs stay exactly as they are — `settings` and `settings/devices` — built through the tenancy
- * hook, so the tabs are origin-rooted in single and `/:ws`-nested in multi with no per-page
- * branching. The active tab carries `aria-current="page"`.
+ * The Settings section's tab header, shared VERBATIM by the settings route modules so they
+ * can't drift: General (the workspace policy page), Devices (the read-only workspace fleet), and
+ * Archive (the archived-skills list with the delete ceremony). The URLs — `settings`,
+ * `settings/devices`, `settings/archive` — are built through the tenancy hook, so the tabs are
+ * origin-rooted in single and `/:ws`-nested in multi with no per-page branching. The active tab
+ * carries `aria-current="page"`.
  */
-export function SettingsTabs({ active }: { active: "general" | "devices" }) {
+export function SettingsTabs({ active }: { active: "general" | "devices" | "archive" }) {
   const wsPath = useWsPath();
   const tabs = [
     { id: "general", label: "General", href: wsPath("settings") },
     { id: "devices", label: "Devices", href: wsPath("settings/devices") },
+    { id: "archive", label: "Archive", href: wsPath("settings/archive") },
   ] as const;
   return (
     <nav aria-label="Settings sections" className="flex gap-1 border-line-soft border-b">

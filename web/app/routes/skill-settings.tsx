@@ -1,8 +1,10 @@
 import { useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, redirect, useFetcher, useLoaderData } from "react-router";
+import { SkillHeader } from "@/components/skill/skill-header";
+import { SkillTabs } from "@/components/skill/skill-tabs";
 import { StepUpFields, StepUpMethodProvider } from "@/components/step-up";
-import { buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
+import { buttonClasses, Card, SectionHeading } from "@/components/ui";
 import {
   notFound,
   requireMemberInScope,
@@ -20,6 +22,7 @@ import { workspacePolicyOf } from "@/lib/db/queries.policy.server";
 import { bundleById, skillIndexRow } from "@/lib/db/queries.server";
 import { resolveSkillName } from "@/lib/db/resolve.server";
 import { isValidSkillName, renameDeniedCopy, SKILL_NAME_MAX } from "@/lib/plane/lifecycle-copy";
+import { useWsPath } from "@/lib/ws-path";
 import { wsPathServer } from "@/lib/ws-url.server";
 
 /** The verbatim boundary the archive ceremony must state — what archiving costs and what it keeps. */
@@ -64,6 +67,10 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   return {
     wsName: workspace.name,
     skill: row.name,
+    currentShort: row.versionId !== null ? row.versionId.slice(0, 12) : "—",
+    displayName: row.displayName,
+    kind: row.kind,
+    openProposals: row.openProposals,
     protection: (pinned ?? "inherit") as ProtectionChoice,
     protectionDefault: policy.protectionDefault,
     stepUpMethod: await stepUpMethod(owner.userId),
@@ -203,7 +210,7 @@ async function archiveIntent(
     });
   }
   if (outcome.outcome === "archived") {
-    throw redirect(wsPathServer(wsName, "archive"));
+    throw redirect(wsPathServer(wsName, "settings/archive"));
   }
   await recordAdminEvent(owner, {
     kind: "skill_archived",
@@ -263,14 +270,33 @@ async function protectionIntent(request: Request, ws: string, skill: string, for
 }
 
 export default function SkillSettings() {
-  const { wsName, skill, protection, protectionDefault, stepUpMethod } =
-    useLoaderData<typeof loader>();
+  const {
+    wsName,
+    skill,
+    currentShort,
+    displayName,
+    kind,
+    openProposals,
+    protection,
+    protectionDefault,
+    stepUpMethod,
+  } = useLoaderData<typeof loader>();
+  const wsPath = useWsPath();
   return (
     <StepUpMethodProvider method={stepUpMethod}>
       <div className="space-y-8">
-        <PageHeader
-          title={`${skill} settings`}
-          meta={<code className="font-mono">{wsName}</code>}
+        <SkillHeader
+          ws={wsName}
+          skill={skill}
+          currentShort={currentShort}
+          displayName={displayName}
+          kind={kind}
+        />
+        <SkillTabs
+          basePath={wsPath(`skills/${skill}`)}
+          active="settings"
+          openProposals={openProposals}
+          showSettings
         />
         <ProtectionCeremony
           skill={skill}

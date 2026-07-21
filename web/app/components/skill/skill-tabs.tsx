@@ -1,26 +1,31 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router";
 
-type ActiveTab = "current" | "proposals" | "history";
+type ActiveTab = "current" | "proposals" | "history" | "settings";
 
 /**
- * The skill's section switcher — Current / Proposals / History as PURE LINKS (no client state).
+ * The skill's section switcher — Current / Proposals / History (+ Settings for owners) as PURE
+ * LINKS (no client state).
  * Each tab is a real route, so the active tab is decided by whichever page renders this bar, every
  * tab is a shareable URL, and switching is an ordinary navigation with blocking SSR. The active tab
  * reads pressed — ink text under a 2px accent underline; the rest stay quiet (dim) until hovered.
  * Both variants carry a `border-b-2` (accent vs transparent) so the row height never shifts as
  * the active tab moves. `openProposals` decorates the Proposals label with a small count.
  * `basePath` is the catalog-name-keyed skill URL the caller built through `useWsPath` (origin-rooted
- * in single tenancy, `/<slug>`-nested in multi).
+ * in single tenancy, `/<slug>`-nested in multi). `showSettings` renders the owner-only Settings
+ * tab — the caller passes its loader's own owner fact; the settings ROUTE re-guards regardless
+ * (the tab is discoverability, never the gate).
  */
 export function SkillTabs({
   basePath,
   active,
   openProposals = 0,
+  showSettings = false,
 }: {
   basePath: string;
   active: ActiveTab;
   openProposals?: number;
+  showSettings?: boolean;
 }) {
   return (
     <nav aria-label="Skill sections" className="flex border-line-soft border-b">
@@ -38,6 +43,11 @@ export function SkillTabs({
       <Tab to={`${basePath}/history`} isActive={active === "history"}>
         History
       </Tab>
+      {showSettings && (
+        <Tab to={`${basePath}/settings`} isActive={active === "settings"}>
+          Settings
+        </Tab>
+      )}
     </nav>
   );
 }
