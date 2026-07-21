@@ -43,6 +43,16 @@ export function agentDocUrl(request: Request): string {
  * Single tenancy → origin-rooted `/invite/<token>`; multi → `<origin>/<name>/invite/<token>`.
  * Same origin resolution as the follow address (`followBase`), so the browser link, the agent
  * paste-block, and the terminal line in one mail all root identically.
+ *
+ * SECURITY — this is a CAPABILITY url: the token in it is the invitation. Its trust is only as
+ * good as the origin it roots at, so a deployment that admits invitations MUST pin
+ * `TOPOS_PUBLIC_URL` (the canonical origin `followBase` then returns). Absent that pin,
+ * `followBase` falls back to the request's own Host — the same app-wide posture the claim link
+ * and the device-flow verification URL already carry — and behind a proxy that forwards
+ * arbitrary Host headers an authenticated inviter could root the mailed link at a host they
+ * control, phishing the invitee's click for the token. The compose stack and every hosted
+ * deployment set `TOPOS_PUBLIC_URL`; a single-node install serving one trusted origin is safe
+ * because there is no other host to forge.
  */
 export function inviteUrl(request: Request, workspaceName: string, token: string): string {
   const base = followBase(request);

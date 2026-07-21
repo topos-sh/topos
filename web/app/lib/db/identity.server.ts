@@ -475,74 +475,103 @@ async function seatedFlowWorkspaceTx(
  * step-up gate runs in the ROUTE before this is called — approval mints a credential that
  * acts as you.
  */
+/** The in-transaction abort sentinel: an approval that cannot complete must ROLL BACK any
+ * invitation accept it already made (a bare `return null` from a Drizzle transaction COMMITS —
+ * only a throw rolls back). Thrown inside the fence, caught at the boundary → the uniform null.
+ */
+const APPROVE_ABORT = Symbol("device-approve-abort");
+
 export async function approveDeviceAuth(
   userCode: string,
   approver: { userId: string; display: string },
 ): Promise<{ deviceId: string; requestedName: string } | null> {
-  return await getDb().transaction(async (tx) => {
-    const rows = await tx.execute(
-      sql`SELECT id, requested_name, requested_workspace, device_code_sha256,
-                 invite_token_sha256
-          FROM ${deviceAuthSession}
-          WHERE user_code = ${userCode} AND status = 'pending' AND expires_at > now()
-          FOR UPDATE`,
-    );
-    const row = rows.rows[0] as
-      | {
-          id: string;
-          requested_name: string;
-          requested_workspace: string;
-          device_code_sha256: Buffer;
-          invite_token_sha256: Buffer | null;
-        }
-      | undefined;
-    if (!row) {
-      return null;
-    }
-    // The invitation weave: a flow that carries an invite token accepts the invitation INSIDE
-    // this same fence when the approver is its rightful addressee — so a typed-code approval
-    // (never having visited the invitation page) still lands sign-in → accept → approve as one
-    // act, and the seat requirement below then finds the seat the accept just wrote. A token
-    // that resolves to nothing, or an approver the accept fences refuse (wrong account,
-    // unverified mailbox), changes NOTHING here — the seat check stays the sole authority.
-    if (row.invite_token_sha256 !== null) {
-      const inv = await lockPendingInvitationTx(
-        tx,
-        sql`i.token_sha256 = ${row.invite_token_sha256}`,
+  try {
+    return await getDb().transaction(async (tx) => {
+      const rows = await tx.execute(
+        sql`SELECT id, requested_name, requested_workspace, device_code_sha256,
+                   invite_token_sha256
+            FROM ${deviceAuthSession}
+            WHERE user_code = ${userCode} AND status = 'pending' AND expires_at > now()
+            FOR UPDATE`,
       );
-      if (inv !== null) {
-        await acceptInvitationTx(tx, inv, await sessionAccountTx(tx, approver), {
-          mailboxProven: false,
-        });
+      const row = rows.rows[0] as
+        | {
+            id: string;
+            requested_name: string;
+            requested_workspace: string;
+            device_code_sha256: Buffer;
+            invite_token_sha256: Buffer | null;
+          }
+        | undefined;
+      if (!row) {
+        return null;
       }
-    }
-    const resolved = await seatedFlowWorkspaceTx(tx, row.requested_workspace, approver.userId);
-    if (resolved === null) {
+      // The invitation weave: a flow that carries an invite token accepts the invitation INSIDE
+      // this same fence when the approver is its rightful addressee — so a typed-code approval
+      // (never having visited the invitation page) still lands sign-in → accept → approve as one
+      // act, and the seat requirement below then finds the seat the accept just wrote. A token
+      // that resolves to nothing, or an approver the accept fences refuse (wrong account,
+      // unverified mailbox), seats nothing.
+      let acceptedWorkspaceId: string | null = null;
+      if (row.invite_token_sha256 !== null) {
+        const inv = await lockPendingInvitationTx(
+          tx,
+          sql`i.token_sha256 = ${row.invite_token_sha256}`,
+        );
+        if (inv !== null) {
+          const outcome = await acceptInvitationTx(tx, inv, await sessionAccountTx(tx, approver), {
+            mailboxProven: false,
+          });
+          if (outcome.outcome === "accepted") {
+            acceptedWorkspaceId = outcome.workspaceId;
+          }
+        }
+      }
+      const resolved = await seatedFlowWorkspaceTx(tx, row.requested_workspace, approver.userId);
+      // The seat is the sole authority — a seatless approver's approval cannot complete. But an
+      // invite-weave accept may have already seated + consumed inside this tx, so a bare return
+      // would COMMIT that while the poll reports refused: throw to roll it back instead.
+      if (resolved === null) {
+        throw APPROVE_ABORT;
+      }
+      // Consistency: an accepted invitation must be for the SAME workspace this approval
+      // resolves to — otherwise the accept seated + consumed in a workspace the device is not
+      // being approved toward (a crafted flow: invite for A, requested_workspace naming B).
+      // Roll the whole thing back rather than commit a split-brain enrollment.
+      if (acceptedWorkspaceId !== null && acceptedWorkspaceId !== resolved.workspaceId) {
+        throw APPROVE_ABORT;
+      }
+      const deviceId = mintDeviceId();
+      await tx.insert(device).values({
+        id: deviceId,
+        userId: approver.userId,
+        displayName: row.requested_name,
+        credentialSha256: row.device_code_sha256,
+      });
+      await tx.execute(
+        sql`UPDATE ${deviceAuthSession}
+            SET status = 'approved', approved_by = ${approver.userId}, device_id = ${deviceId},
+                approved_workspace_id = ${resolved.workspaceId}
+            WHERE id = ${row.id}`,
+      );
+      await auditInTx(tx, {
+        workspaceId: resolved.workspaceId,
+        actor: { userId: approver.userId, display: approver.display },
+        kind: "device_approved",
+        subject: deviceId,
+        outcome: "ok",
+        details: { requestedName: row.requested_name },
+      });
+      return { deviceId, requestedName: row.requested_name };
+    });
+  } catch (error) {
+    // The clean-refusal rollback surfaces as the uniform null (the same answer an expired code
+    // gets); any other error is a real fault and propagates.
+    if (error === APPROVE_ABORT) {
       return null;
     }
-    const deviceId = mintDeviceId();
-    await tx.insert(device).values({
-      id: deviceId,
-      userId: approver.userId,
-      displayName: row.requested_name,
-      credentialSha256: row.device_code_sha256,
-    });
-    await tx.execute(
-      sql`UPDATE ${deviceAuthSession}
-          SET status = 'approved', approved_by = ${approver.userId}, device_id = ${deviceId},
-              approved_workspace_id = ${resolved.workspaceId}
-          WHERE id = ${row.id}`,
-    );
-    await auditInTx(tx, {
-      workspaceId: resolved.workspaceId,
-      actor: { userId: approver.userId, display: approver.display },
-      kind: "device_approved",
-      subject: deviceId,
-      outcome: "ok",
-      details: { requestedName: row.requested_name },
-    });
-    return { deviceId, requestedName: row.requested_name };
-  });
+    throw error;
+  }
 }
 
 /**
