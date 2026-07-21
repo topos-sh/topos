@@ -103,9 +103,7 @@ describe("mint + view", () => {
        WHERE email = 'expired@x.test'`,
       [],
     );
-    const { invitationByToken, acceptInvitationByToken } = await import(
-      "@/lib/db/identity.server"
-    );
+    const { invitationByToken, acceptInvitationByToken } = await import("@/lib/db/identity.server");
     expect(await invitationByToken(token)).toBeNull();
     await verifiedUser("u_expired", "expired@x.test");
     const result = await acceptInvitationByToken(
@@ -233,9 +231,7 @@ describe("accept", () => {
   it("the wrong account never accepts — and consumes nothing", async () => {
     const token = await invite("intended@x.test");
     await verifiedUser("u_intruder", "someoneelse@x.test");
-    const { acceptInvitationByToken, invitationByToken } = await import(
-      "@/lib/db/identity.server"
-    );
+    const { acceptInvitationByToken, invitationByToken } = await import("@/lib/db/identity.server");
     const result = await acceptInvitationByToken(
       token,
       { userId: "u_intruder", display: "I" },
@@ -278,10 +274,7 @@ describe("decline", () => {
     // Dead afterwards — and declining again answers the same constant miss.
     expect(await invitationByToken(token)).toBeNull();
     expect(await declineInvitationByToken(token)).toBe("gone");
-    const rows = await db.q(
-      `SELECT status FROM web.invitation WHERE email = 'decline@x.test'`,
-      [],
-    );
+    const rows = await db.q(`SELECT status FROM web.invitation WHERE email = 'decline@x.test'`, []);
     expect(rows[0]?.status).toBe("declined");
     // Re-inviting supersedes the declined record with a fresh pending row.
     const fresh = await invite("decline@x.test");
