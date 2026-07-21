@@ -9,9 +9,12 @@ resource addresses/protocol card, and the `/api/v1` device lane over its own `we
 of an in-process vault (`topos_plane::router` — pure byte custody, the bearer-gated `/internal/v1`
 lane, no public face). Identity is ONE `user.id`: the harness claims the boot-minted workspace,
 signs people in with cookie sessions, and approves every device flow at the real `/verify` ceremony
-(a plain signed-in accept — no step-up) — the same HTTP a browser would send. SMTP stays UNSET in every suite:
-the whole enrolled loop must work with zero mail delivery. Per-crate unit + generative tests live in
-their crates; this directory is for what only a cross-crate composed run can prove.
+(a plain signed-in accept — no step-up) — the same HTTP a browser would send. SMTP stays UNSET in the
+default suites (the whole enrolled loop must work with zero mail delivery); the invitation-redemption
+suite alone runs `start_stack_mailed` — dummy relay coordinates that `APP_ENV=test` never dials, but
+which flip the mail-rung gates on (inviting, the passwordless account mint), with every mail recorded
+to `web/.invite-emails.jsonl` / the dev outbox instead of sent. Per-crate unit + generative tests live
+in their crates; this directory is for what only a cross-crate composed run can prove.
 
 ## Layout (what actually exists)
 
@@ -104,6 +107,16 @@ their crates; this directory is for what only a cross-crate composed run can pro
   row inserted directly, a credential seated in workspace A gets the uniform wire 404 on EVERY
   workspace-B route (reads and row-op writes), byte-identical to a workspace that never existed
   and to a wrong path — no oracle in any direction; the A lane is untouched.
+- **`tests/invite_redemption_e2e.rs`** — the terminal-first invited person, mail-armed: a lane
+  invite with a first-destination SKILL hint mails the tokened link; `topos follow <invite-url>`
+  starts the device flow CARRYING the token (the browser destination is the invitation page + the
+  flow challenge — the code never rides a URL); ONE browser visit (driven raw) mints the account
+  passwordlessly (born verified — the token's delivery is the proof), consumes the invitation,
+  seats the person, writes the hint follow, and continues into `/verify` where the challenge
+  resolves the card and the now-seated invitee approves; the granted resume DESCRIBES the hinted
+  skill (no local follow row, no bytes) and only the `--yes` apply lands the genesis byte-exact.
+  Plus the already-enrolled arm: a member's device consuming an invite URL accepts DIRECTLY over
+  the device lane (no browser, no new device row) and continues into the hint's describe.
 - **`tests/claim_e2e.rs`** — the first-boot claim door: the printed link (the
   `TOPOS_SETUP_LINK_FILE` mirror) claims once — first account, first owner seat, signed in — and
   the consumed code is then the SAME uniform miss as a wrong code (GET and POST, byte-for-byte;

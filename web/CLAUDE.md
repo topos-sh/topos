@@ -8,7 +8,8 @@ app is its one caller.
 
 **The device lane terminates here.** Every `/api/v1/…` path is answered in this tier — there is no splat
 forwarder to the vault anymore. The row ops (delivery · the fleet report · me/channels/reach ·
-subscriptions/follows · curation · exclusions · protection · notices ack · invitations) are Drizzle
+subscriptions/follows · curation · exclusions · protection · notices ack · invitations · the
+person-scoped invitation accept) are Drizzle
 queries against this app's OWN `web` schema, behind the device-credential guard (`requireDeviceActor` —
 the presented `Authorization: Bearer` resolved credential → device → person → seat, the hash computed IN
 Postgres, so this tier still holds zero crypto). The **byte/pointer** ops of a publish-family verb
@@ -51,20 +52,58 @@ transaction, FOR UPDATE-fenced or single-statement-atomic, audit row inside):
 - **The claim** (`claim.tsx` → `consumeClaim`): one atomic UPDATE consumes the code and seats the first
   **owner** (email + password). Single-use by construction.
 - **The gh-style device flow** (`verify.tsx` + `api.v1.device-authorize`/`api.v1.device-token`;
-  `startDeviceAuth`/`pollDeviceAuth`/`approveDeviceAuth`): the CLI prints "open `<origin>/verify` and
-  enter AB12-CD34" and polls; the signed-in person approves with a **plain accept** — a live session
-  plus the explicit approve click IS the whole ceremony (no step-up) — minting the device (owned by
-  that person) + its ONE bearer credential (the device code is promoted to the credential — same
-  plaintext, same stored hash). The flow row records the workspace ADDRESS SLUG the authorize call
-  named; multi tenancy shape-checks that slug only (an unauthenticated start is never a
-  workspace-existence oracle — the workspace may be created mid-flow), and approval resolves it under
-  the tenancy grammar and requires the approver's SEAT in the resolved workspace, inside the same
-  FOR-UPDATE fence — a missing workspace or a seatless approver gets the same uniform refusal an
-  expired code does. On a multi-tenant deployment a signed-in approver with zero seats anywhere is
-  first woven through workspace creation (`/verify` redirects to `/new` carrying itself as `next` +
-  the flow's slug as a `name` prefill). The signed-out loader bounce carries the code as `next`, so a
-  password OR a magic-link sign-in both return to finish the approval. Revocation is self-service,
-  immediate, and FINAL (a DB trigger refuses any un-revoke).
+  `startDeviceAuth`/`pollDeviceAuth`/`approveDeviceAuth`): the CLI prints the BARE `<origin>/verify`
+  and the short code on SEPARATE lines (the code never rides a URL — the retired code-embedding
+  `verification_uri_complete` left the wire) and polls; `/verify` is TWO-STATE — a POST code-lookup
+  form, then the resolved card showing the requesting device, the code for the glance-check, and
+  EVERY workspace the credential will reach (the approver's seats + the one being joined) — and the
+  signed-in person approves with a **plain accept** — a live session plus the explicit approve click
+  IS the whole ceremony (no step-up) — minting the device (owned by that person) + its ONE bearer
+  credential (the device code is promoted to the credential — same plaintext, same stored hash). The
+  flow row records the workspace ADDRESS SLUG the authorize call named — and, when the enrollment
+  came from `follow <invite-url>`, the invite token's hash (recorded UNVALIDATED — the start is
+  never a token oracle); the approval weaves accept-the-invitation into its own fence when the
+  approver is the invitation's addressee, and the granted poll decorates the invitation's
+  first-destination `hint`. Multi tenancy shape-checks the slug only (an unauthenticated start is
+  never a workspace-existence oracle — the workspace may be created mid-flow), and approval resolves
+  it under the tenancy grammar and requires the approver's SEAT in the resolved workspace, inside
+  the same FOR-UPDATE fence — a missing workspace or a seatless approver gets the same uniform
+  refusal an expired code does. On a multi-tenant deployment a signed-in approver with zero seats
+  anywhere is first woven through workspace creation (`/verify` redirects to `/new` carrying itself
+  as `next` + the flow's slug as a `name` prefill) — unless the flow carries an invitation, whose
+  accept will seat them right there. The LOOPBACK arrival (the CLI auto-opened the page): the URL
+  carries `device` — hex of the flow's device-code HASH, resolving the card with zero typing — plus
+  `port`/`state` naming the CLI's ephemeral 127.0.0.1 listener; the approve/deny outcome returns as
+  ONE state-bound localhost redirect (nothing sensitive rides it — the CLI's poll stays the source
+  of truth). The signed-out loader bounce carries the page (validated params only) as `next`.
+  Revocation is self-service, immediate, and FINAL (a DB trigger refuses any un-revoke).
+- **The tokened invitation** (`invite-redeem.tsx` at `/invite/<token>` — `/<ws>/invite/<token>` in
+  multi — + the ceremonies in `identity.server.ts`): inviting mints a long single-use token per
+  address (only its SHA-256 stored — the claim-code pattern; 7-day lapse; re-inviting mints a fresh
+  token over the pending row, killing the old link; revoke kills it too), optionally carrying ONE
+  first-destination hint (a bundle or channel of its own workspace, composite-FK-pinned with a
+  per-column SET NULL). The link travels ONLY in the invitation mail (three CTAs, in order: the
+  browser link, the agent paste-block, the terminal `topos follow <invite-url>` line — hint-led);
+  the inviter's receipts carry the workspace address, never the token. The page is GET-safe
+  (viewing never consumes) and branches on the ONE sanctioned email-binding predicate beside
+  `bindInvitedSeats`: signed in as the invited address → one-click accept; no such account → the
+  page MINTS it (email locked to the invited address; PASSWORDLESS through Better Auth's own
+  magic-link door when the mail rung exists — the token's delivery IS the mailbox proof, so the
+  account is born verified with no verification mail; a password field on password-only
+  deployments) inside the invitation registration ceremony; signed in as someone else → the switch
+  page (names the invited address, offers sign-out-and-return, never accepts); an unverified squat
+  on the invited address → one mailbox round-trip first; already a member → redirect into the
+  workspace (nothing consumed). ACCEPT is ONE FOR-UPDATE-fenced transaction beside
+  `bindInvitedSeats`: consume the token, write the seat, apply the hint effects AFTER the seat
+  (`bundle_subscription` 'following' / `channel_member`), audit — the hint SUBSCRIBES; nothing
+  lands on any device from a web accept. DECLINE is recorded (the members page shows it;
+  re-invitable) and deliberately session-less (token possession is the proof). Every dead token —
+  invalid, expired, revoked, used — renders ONE constant page naming neither workspace nor email,
+  behind the public-read belt. An already-enrolled device accepts with no browser at
+  `POST /api/v1/invitations/accept` behind `requireDevicePerson` (credential → device → user,
+  seat-LESS by construction). The skill FACE carries an invite affordance minting a
+  skill-hinted invitation. The legacy sign-up auto-bind (`bindInvitedSeats` on
+  `afterEmailVerification`) stays unchanged beside all of this.
 - **Recovery** (`app/lib/auth/recovery.server.ts` + `scripts/mint-recovery-code.mjs`): reset mail when
   SMTP is armed; a mail-less solo owner runs the one-shot box-side script to print a single-use recovery
   code (machine control is the proof).

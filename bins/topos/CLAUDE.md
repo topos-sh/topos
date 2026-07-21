@@ -114,6 +114,23 @@ renderer over the SAME typed outcomes (one value, two presentations).
     WAL → arms the auto-update trigger, and the flow CONTINUES into the intent's describe/apply in the
     same invocation. There is no post-grant fence phase: an approved flow re-answers the same
     granted poll, so a crash mid-persist recovers by re-polling;
+  - **the INVITE-URL flow** (`follow <invite-url>` — `<origin>[/<ws>]/invite/<token>`, the
+    invitation mail's terminal line verbatim): an UNENROLLED install starts the ordinary device
+    flow CARRYING the token (`invite_token` on the authorize body; the flow row records its hash)
+    and the browser destination becomes the INVITATION page itself — account/sign-in → accept →
+    the device approval woven into one visit — carrying the flow's device-code CHALLENGE (hex
+    sha256; `ops::device_challenge`) so the approval card resolves with zero typing while the
+    short code never rides a URL; the granted poll's `hint` decoration then steers the
+    post-enrollment subscribe at the invited-to skill/channel through the ordinary two-phase
+    describe. An ENROLLED install accepts DIRECTLY over the device lane
+    (`DirectorySource::accept_invitation`, person-scoped — no browser, no second flow) and
+    continues into the same describe; a different plane keeps the wrong-server refusal. The
+    pending disclosure everywhere is TWO LINES — the bare URL, then the code (`Open:` / `Code:`);
+    and when a wait is interactive with a local browser plausible (`ops/loopback` — a pure,
+    table-tested chooser: never SSH/headless; `TOPOS_NO_BROWSER` opts out) the wait binds an
+    ephemeral 127.0.0.1 listener (std `TcpListener` — no server crate), auto-opens the approval
+    page with state-bound return coordinates, and the page's single-use redirect wakes the next
+    poll — the poll stays the source of truth, so a failed open degrades to the typed wait;
   - **the classic skill path** (`follow <skill>[@<hash>]`) — the I-TOFU accept / the paused-entry
     resume, unchanged.
   The SUBSCRIBE is two-phase: bare = a DESCRIBE (`GET /me` + `/channels` + the catalog + `/delivery`
@@ -458,10 +475,13 @@ are asserted byte-equal in tests.
     a level that does not apply to the kind is a typed usage error. The describe carries the audience — the
     reach (people) for a skill, the channel's member count — plus the pending-proposals-survive note on a
     skill loosening; `OWNER_ROLE_REQUIRED` / `REVIEWER_ROLE_REQUIRED` surface typed, naming the role.
-  - **`invite`** (`ops/invite`) — the roster write is now two-phase, and a BARE `invite` (no emails) is a
-    no-mutation `/me` read (the workspace address + invite policy + "nothing was sent or changed"). Emails
-    without `--yes` describe (who gets seated, the channel pre-placements, the mail-or-paste note); `--yes`
-    POSTs the folded-email invitation. (The `/i/`-link mint is retired — joining is `follow <address>`.)
+  - **`invite`** (`ops/invite`) — two-phase; a BARE `invite` (no emails) is a no-mutation `/me`
+    read (the workspace address + invite policy + "nothing was sent or changed"). Emails without
+    `--yes` describe (who gets invited, the optional first-destination hint, the mailed-link note);
+    `--yes` POSTs the folded emails + at most ONE hint — `--skill <name>` OR `--channel <name>` —
+    and the SERVER mails each address its single-use invite link (the token never appears in the
+    receipt; the mailbox is its one channel). Joining is `follow <invite-url>` (or the plain
+    workspace address).
   - **`review`** (`ops/review`) — a bare `review` is the review INBOX/OUTBOX across every enrolled workspace
     (`GET /proposals` per ws; author-message FIRST; the outbox is your own proposals, split by the
     server-computed `yours` — user-id equality server-side; the `user.json` principal match stays only as
