@@ -217,6 +217,7 @@ fn spawn_app(
     plane_base: &str,
     app_port: u16,
     link_file: &std::path::Path,
+    mail_armed: bool,
 ) -> AppServer {
     let web_dir = repo_root().join("web");
     let build = web_dir.join("build").join("server").join("index.js");
@@ -234,8 +235,8 @@ fn spawn_app(
         .join("@react-router")
         .join("serve")
         .join("bin.cjs");
-    let child = std::process::Command::new("node")
-        .arg(&serve_bin)
+    let mut cmd = std::process::Command::new("node");
+    cmd.arg(&serve_bin)
         .arg("./build/server/index.js")
         .current_dir(&web_dir)
         .env("PORT", app_port.to_string())
@@ -252,8 +253,20 @@ fn spawn_app(
         .env("TOPOS_WEB_RATELIMIT", "off")
         .env("TOPOS_WORKSPACE_NAME", WS_NAME)
         .env("TOPOS_SETUP_CODE", SETUP_CODE)
-        .env("TOPOS_SETUP_LINK_FILE", link_file)
-        // SMTP stays UNSET throughout: the whole enrolled loop must work with zero mail delivery.
+        .env("TOPOS_SETUP_LINK_FILE", link_file);
+    if mail_armed {
+        // Dummy relay coordinates: `APP_ENV=test` records every mail to the dev outbox files in
+        // the web dir and never dials a socket — but an ARMED transport flips the mail-rung
+        // gates on (inviting requires it, and the invitation page's account mint goes
+        // passwordless through the magic-link rung the composition arms alongside it). The
+        // default suites stay SMTP-UNSET: the whole enrolled loop must work with zero delivery.
+        cmd.env("TOPOS_MAIL_SMTP_HOST", "127.0.0.1")
+            .env("TOPOS_MAIL_SMTP_PORT", "2525")
+            .env("TOPOS_MAIL_SMTP_USER", "e2e")
+            .env("TOPOS_MAIL_SMTP_PASS", "e2e")
+            .env("TOPOS_MAIL_SMTP_FROM", "Topos <no-reply@e2e.test>");
+    }
+    let child = cmd
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
         .spawn()
@@ -306,10 +319,12 @@ pub(crate) struct Session {
     cookies: Mutex<BTreeMap<String, String>>,
 }
 
-/// A response the session hands back: the status + the body text (empty when unreadable).
+/// A response the session hands back: the status + the body text (empty when unreadable) + the
+/// redirect target when the answer was one (redirects are OFF — a 302 is an asserted outcome).
 pub(crate) struct HttpAnswer {
     pub(crate) status: u16,
     pub(crate) body: String,
+    pub(crate) location: Option<String>,
 }
 
 fn blocking_agent() -> ureq::Agent {
@@ -374,13 +389,22 @@ impl Session {
     fn read(&self, mut resp: ureq::http::Response<ureq::Body>) -> HttpAnswer {
         self.absorb_cookies(&resp);
         let status = resp.status().as_u16();
+        let location = resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
         let mut body = String::new();
         let _ = resp
             .body_mut()
             .as_reader()
             .take(4 * 1024 * 1024)
             .read_to_string(&mut body);
-        HttpAnswer { status, body }
+        HttpAnswer {
+            status,
+            body,
+            location,
+        }
     }
 
     /// GET a path (an in-app path like `/login`, or `?`-suffixed) with the browser `Accept`.
@@ -479,6 +503,17 @@ pub(crate) struct Stack {
 /// of it, and poke ONE document request so first-boot setup mints the workspace (with the preset
 /// claim code). The workspace is returned UNCLAIMED — `claim_owner` is the first ceremony.
 pub(crate) fn start_stack(tag: &str) -> Stack {
+    start_stack_with(tag, false)
+}
+
+/// [`start_stack`] with the app's mail transport ARMED (dummy coordinates; `APP_ENV=test` records
+/// to the web dir's dev outbox files instead of dialing) — for the invitation-redemption suite,
+/// whose invite ceremony and passwordless account mint both ride the mail rung.
+pub(crate) fn start_stack_mailed(tag: &str) -> Stack {
+    start_stack_with(tag, true)
+}
+
+fn start_stack_with(tag: &str, mail_armed: bool) -> Stack {
     let dir = Scratch::new("topos-e2e", tag);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -506,7 +541,13 @@ pub(crate) fn start_stack(tag: &str) -> Stack {
 
     let app_port = free_port();
     let setup_link_file = dir.0.join("setup-link.txt");
-    let app = spawn_app(&web_url, &plane_base, app_port, &setup_link_file);
+    let app = spawn_app(
+        &web_url,
+        &plane_base,
+        app_port,
+        &setup_link_file,
+        mail_armed,
+    );
     let origin = app.origin.clone();
     let api_base = format!("{origin}/api");
 
@@ -726,7 +767,11 @@ impl Stack {
             .as_reader()
             .take(4 * 1024 * 1024)
             .read_to_string(&mut text);
-        HttpAnswer { status, body: text }
+        HttpAnswer {
+            status,
+            body: text,
+            location: None,
+        }
     }
 
     /// GET a device-lane path (e.g. `/v1/workspaces/{ws}/delivery`) under `credential`.
