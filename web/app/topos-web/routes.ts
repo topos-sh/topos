@@ -157,7 +157,7 @@ function memberWorkspaceChildren(
 ): RouteConfigEntry[] {
   const children: RouteConfigEntry[] = [
     route("members", file("workspace-members.tsx")),
-    route("archive", file("workspace-archive.tsx")),
+    route("settings/archive", file("workspace-archive.tsx")),
     route("settings", file("workspace-settings.tsx")),
     // The workspace's device view (staleness + blind spots) — a tab of the Settings page.
     route("settings/devices", file("fleet.tsx")),

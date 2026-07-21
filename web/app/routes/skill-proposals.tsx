@@ -49,6 +49,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   }));
 
   return {
+    isOwner: actor.role === "owner",
     wsName: workspace.name,
     skill,
     currentShort: row.versionId !== null ? row.versionId.slice(0, 12) : "—",
@@ -60,7 +61,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 }
 
 export default function SkillProposalsPage() {
-  const { wsName, skill, currentShort, displayName, kind, openProposals, proposals } =
+  const { isOwner, wsName, skill, currentShort, displayName, kind, openProposals, proposals } =
     useLoaderData<typeof loader>();
   const wsPath = useWsPath();
   return (
@@ -76,6 +77,7 @@ export default function SkillProposalsPage() {
         basePath={wsPath(`skills/${skill}`)}
         active="proposals"
         openProposals={openProposals}
+        showSettings={isOwner}
       />
       <ProposalsSection skill={skill} proposals={proposals} />
     </div>

@@ -204,6 +204,7 @@ function SkillCurrentContent({
         basePath={wsPath(`skills/${skill}`)}
         active="current"
         openProposals={openProposals}
+        showSettings={isOwner}
       />
       {versionId !== null && versionFiles !== null ? (
         <VersionFiles skill={skill} versionId={versionId} currentChip {...versionFiles} />

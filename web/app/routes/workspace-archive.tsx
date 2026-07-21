@@ -1,5 +1,6 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Form, useActionData, useFetcher, useLoaderData, useNavigation } from "react-router";
+import { SettingsTabs } from "@/components/settings-tabs";
 import { StepUpFields, StepUpMethodProvider } from "@/components/step-up";
 import { buttonClasses, Card, PageHeader } from "@/components/ui";
 import { requireMemberInScope, requireWorkspaceOwner } from "@/lib/auth/guards.server";
@@ -211,7 +212,8 @@ export default function WorkspaceArchive() {
   return (
     <StepUpMethodProvider method={stepUpMethod}>
       <div className="space-y-6">
-        <PageHeader title="Archived skills" meta={<code className="font-mono">{wsName}</code>} />
+        <PageHeader title="Archive" meta={<code className="font-mono">{wsName}</code>} />
+        <SettingsTabs active="archive" />
         {deleted !== null && (
           <Card className="px-4 py-3">
             <p className="text-dim text-sm" role="status">
