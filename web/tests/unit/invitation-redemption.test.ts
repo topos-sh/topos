@@ -45,7 +45,7 @@ async function invite(
   hint: { bundleId?: string; channelId?: string } = {},
 ): Promise<string> {
   const { createInvitations } = await import("@/lib/db/queries.roster.server");
-  const outcome = await createInvitations(asMember(ws, INVITER, "owner"), [email], "members", hint);
+  const outcome = await createInvitations(asMember(ws, INVITER, "owner"), [email], hint);
   if (outcome.outcome !== "invited") {
     throw new Error(`invite refused: ${outcome.outcome}`);
   }

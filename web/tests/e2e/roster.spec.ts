@@ -5,7 +5,7 @@ import { gotoSettled, signIn } from "./sign-in";
 
 /**
  * The members page (/workspaces/:ws/members) over the ONE seat table. Every membership act
- * lives here: INVITE (member-level, mail-armed — an invitation row + the notice mail, never a
+ * lives here: INVITE (owner-only, mail-armed — an invitation row + the notice mail, never a
  * seat), REVOKE-INVITATION (owner-only, no step-up — non-destructive like the invite),
  * ROLE CHANGE / REMOVE (owner + step-up), LEAVE (the member's own step-up act), and the
  * LAST-OWNER fence that refuses orphaning the workspace. The proof of every landed act is the
@@ -70,7 +70,7 @@ test("invite lands an invitation row + the notice mail; the owner revokes with o
   await theWorkspace();
   await gotoSettled(page, `/members`);
 
-  // INVITE — member-level, no step-up (non-destructive; the invitation seats nobody).
+  // INVITE — owner-only, no step-up (non-destructive; the invitation seats nobody).
   await page.getByLabel("Invite by email").fill(INVITED);
   await page.getByRole("button", { name: "Invite", exact: true }).click();
   await expect(page.getByRole("status").filter({ hasText: `Invited ${INVITED}` })).toBeVisible();

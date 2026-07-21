@@ -63,15 +63,11 @@ describe("foldInviteEmail (the canonical fold)", () => {
 });
 
 describe("createInvitations", () => {
-  it("seats pending 7-day claims (folded emails), audited; the members policy admits a member", async () => {
+  it("an owner seats pending 7-day claims (folded emails), audited", async () => {
     const queries = await q();
     const before = Date.now();
     expect(
-      await queries.createInvitations(
-        asMember(wsId, "u_ana", "member", "Ana"),
-        ["New@Acme.COM"],
-        "members",
-      ),
+      await queries.createInvitations(asMember(wsId, "u_ana", "owner", "Ana"), ["New@Acme.COM"]),
     ).toMatchObject({ outcome: "invited" });
     const rows = await db.q<{
       email: string;
@@ -98,45 +94,38 @@ describe("createInvitations", () => {
     expect(audit).toHaveLength(1);
   });
 
-  it("under an owners-only policy a plain member is owner_role_required — nothing written", async () => {
+  it("a plain member is owner_role_required — inviting is owner-only, nothing written", async () => {
     const queries = await q();
     expect(
-      await queries.createInvitations(asMember(wsId, "u_ana"), ["gate@acme.com"], "owners"),
+      await queries.createInvitations(asMember(wsId, "u_ana"), ["gate@acme.com"]),
     ).toMatchObject({ outcome: "owner_role_required" });
     expect(
-      await queries.createInvitations(
-        asMember(wsId, "u_owner", "owner"),
-        ["gate@acme.com"],
-        "owners",
-      ),
+      await queries.createInvitations(asMember(wsId, "u_owner", "owner"), ["gate@acme.com"]),
     ).toMatchObject({ outcome: "invited" });
   });
 
   it("a malformed address folds to bad_email — the whole batch refuses, nothing written", async () => {
     const queries = await q();
     expect(
-      await queries.createInvitations(
-        asMember(wsId, "u_ana"),
-        ["ok@acme.com", "bad email"],
-        "members",
-      ),
+      await queries.createInvitations(asMember(wsId, "u_ana", "owner"), [
+        "ok@acme.com",
+        "bad email",
+      ]),
     ).toMatchObject({ outcome: "bad_email" });
     expect(await db.q(`SELECT 1 FROM web.invitation WHERE email = 'ok@acme.com'`)).toHaveLength(0);
   });
 
   it("a re-invite re-arms the lapse clock and the inviter through the pending partial-unique upsert", async () => {
     const queries = await q();
-    // Age the pending row artificially, then re-invite as a different member.
+    // Age the pending row artificially, then re-invite as a different owner.
     await db.q(
       `UPDATE web.invitation SET expires_at = now() + interval '1 day', invited_by = 'u_ana'
        WHERE email = 'new@acme.com'`,
     );
     expect(
-      await queries.createInvitations(
-        asMember(wsId, "u_owner", "owner", "Owner"),
-        ["new@acme.com"],
-        "members",
-      ),
+      await queries.createInvitations(asMember(wsId, "u_owner", "owner", "Owner"), [
+        "new@acme.com",
+      ]),
     ).toMatchObject({ outcome: "invited" });
     const rows = await db.q<{ invited_by: string; fresh: boolean; n: string }>(
       `SELECT invited_by, expires_at > now() + interval '6 days' AS fresh,
@@ -194,11 +183,7 @@ describe("bindInvitedSeats (the verified sign-up's binding leg)", () => {
     const queries = await q();
     const identity = await import("@/lib/db/identity.server");
     expect(
-      await queries.createInvitations(
-        asMember(wsId, "u_owner", "owner"),
-        ["late@acme.com"],
-        "members",
-      ),
+      await queries.createInvitations(asMember(wsId, "u_owner", "owner"), ["late@acme.com"]),
     ).toMatchObject({ outcome: "invited" });
     await db.q(
       `UPDATE web.invitation SET expires_at = now() - interval '1 minute' WHERE email = 'late@acme.com'`,

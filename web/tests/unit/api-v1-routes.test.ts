@@ -343,7 +343,6 @@ describe("describe reads", () => {
       address: "http://x",
       principal: "Owner",
       role: "owner",
-      invite_policy: "members",
     });
   });
 
@@ -361,7 +360,6 @@ describe("describe reads", () => {
       principal: "Member",
       role: "member",
       invited_by: "owner@example.com",
-      invite_policy: "members",
     });
   });
 

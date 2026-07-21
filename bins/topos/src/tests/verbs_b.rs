@@ -289,7 +289,6 @@ impl DirectorySource for FakeDir {
             principal: "alice@acme.com".into(),
             role: self.role.clone(),
             invited_by: None,
-            invite_policy: "members".into(),
         })
     }
     fn channels_index(&self, _ws: &str) -> Result<WireChannelIndex, ClientError> {
@@ -770,7 +769,6 @@ fn invite_bare_reads_address_and_policy_and_changes_nothing() {
     match out {
         ops::InviteOutcome::Read(data) => {
             assert_eq!(data.address, "https://topos.sh/acme");
-            assert_eq!(data.invite_policy, "members");
             assert!(!data.changed);
         }
         _ => panic!("a bare invite is a read"),

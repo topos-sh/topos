@@ -1,7 +1,6 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Link, useLoaderData } from "react-router";
 import { AddressBlock } from "@/components/members/address-block";
-import { InvitePolicyPanel } from "@/components/policy/invite-policy-panel";
 import type { LastSetLine } from "@/components/policy/last-set-line";
 import { RegistrationPanel } from "@/components/policy/registration-panel";
 import { ReviewRequiredPanel } from "@/components/policy/review-required-panel";
@@ -14,7 +13,6 @@ import { requireMemberInScope, requireWorkspaceOwner } from "@/lib/auth/guards.s
 import { requireStepUp, stepUpMethod } from "@/lib/auth/step-up.server";
 import { type AuditEventRow, lastAuditEventOfKind, recordAdminEvent } from "@/lib/db/audit.server";
 import {
-  setInvitePolicy,
   setRegistration,
   setStalenessWindow,
   workspacePolicyOf,
@@ -46,10 +44,9 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   // The knobs are plain columns on the ONE workspace row; the column DEFAULTs are the canonical
   // fallbacks, so a fresh install shows the true defaults, never a blank. The "last set by"
   // lines read the audit ledger — the same rows the setters land in their own transactions.
-  const [policy, lastReview, lastInvite, lastStaleness, lastRegistration] = await Promise.all([
+  const [policy, lastReview, lastStaleness, lastRegistration] = await Promise.all([
     workspacePolicyOf(actor),
     lastAuditEventOfKind(actor, "policy_review_default"),
-    lastAuditEventOfKind(actor, "policy_invite"),
     lastAuditEventOfKind(actor, "policy_staleness"),
     registrationGoverns
       ? lastAuditEventOfKind(actor, "policy_registration")
@@ -62,12 +59,10 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     shareAddress: workspaceAddress(request, workspace.name),
     stepUpMethod: await stepUpMethod(actor.userId),
     reviewRequired: policy.protectionDefault === "reviewed",
-    invitePolicy: policy.invitePolicy,
     stalenessWindowMs: policy.stalenessWindowMs,
     registration: policy.registration,
     lastSet: {
       review: lastSetOf(lastReview),
-      invite: lastSetOf(lastInvite),
       staleness: lastSetOf(lastStaleness),
       registration: lastSetOf(lastRegistration),
     },
@@ -94,9 +89,6 @@ export async function action({ request, params }: ActionFunctionArgs) {
   const intent = String(formData.get("intent") ?? "");
   if (intent === "set-review-required") {
     return reviewRequiredIntent(request, ws, formData);
-  }
-  if (intent === "set-invite-policy") {
-    return invitePolicyIntent(request, ws, formData);
   }
   if (intent === "set-staleness-window") {
     return stalenessWindowIntent(request, ws, formData);
@@ -178,18 +170,6 @@ async function reviewRequiredIntent(request: Request, ws: string, formData: Form
   return { intent: "set-review-required" as const, ...result };
 }
 
-/** Who may invite — 'members' (any member) or 'owners'. */
-async function invitePolicyIntent(request: Request, ws: string, formData: FormData) {
-  const policy = String(formData.get("invite_policy") ?? "");
-  const result = await knobIntent(request, ws, formData, {
-    auditKind: "policy_invite",
-    detail: policy,
-    run: (owner) => setInvitePolicy(owner, policy),
-    deniedError: () => "Choose members or owners.",
-  });
-  return { intent: "set-invite-policy" as const, ...result };
-}
-
 /** The staleness window — entered in days, converted to milliseconds at hour granularity. */
 async function stalenessWindowIntent(request: Request, ws: string, formData: FormData) {
   const days = Number(formData.get("staleness_days") ?? "");
@@ -225,7 +205,6 @@ export default function WorkspaceSettings() {
     shareAddress,
     stepUpMethod,
     reviewRequired,
-    invitePolicy,
     stalenessWindowMs,
     registration,
     lastSet,
@@ -252,7 +231,6 @@ export default function WorkspaceSettings() {
           reviewRequired={reviewRequired}
           lastSet={lastSet.review}
         />
-        <InvitePolicyPanel isOwner={isOwner} invitePolicy={invitePolicy} lastSet={lastSet.invite} />
         <StalenessWindowPanel
           isOwner={isOwner}
           stalenessWindowMs={stalenessWindowMs}

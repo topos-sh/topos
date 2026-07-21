@@ -17,20 +17,18 @@ interface SkillInviteReply {
 /**
  * "Invite a teammate to this skill" — a quiet, collapsed affordance on the skill face. A member
  * expands it to a single-email form; submitting mints an invitation whose FIRST destination is
- * THIS skill, so the mail leads with the skill and the invitee lands looking at it. Inviting is a
- * member op the workspace's invite-policy gates, and it REQUIRES armed mail (the invitation's
- * identity proof is a mailbox round-trip) — so when mail is unarmed, or the policy restricts
- * inviting to owners and the viewer is a plain member, the expanded panel says so honestly
- * instead of offering a form that can only fail. The action re-checks both regardless of what
- * this renders, and its refusals surface here too (a policy can change between render and submit).
+ * THIS skill, so the mail leads with the skill and the invitee lands looking at it. Inviting is
+ * OWNER-ONLY, and it REQUIRES armed mail (the invitation's identity proof is a mailbox
+ * round-trip) — so when mail is unarmed, or the viewer is not an owner, the expanded panel says
+ * so honestly instead of offering a form that can only fail. The action re-checks both
+ * regardless of what this renders, and its refusals surface here too (a role can change between
+ * render and submit).
  */
 export function SkillInviteAffordance({
   mailArmed,
-  invitePolicy,
   isOwner,
 }: {
   mailArmed: boolean;
-  invitePolicy: "members" | "owners";
   isOwner: boolean;
 }) {
   const fetcher = useFetcher<SkillInviteReply>();
@@ -63,7 +61,7 @@ export function SkillInviteAffordance({
     );
   }
 
-  const restricted = invitePolicy === "owners" && !isOwner;
+  const restricted = !isOwner;
   return (
     <Card className="space-y-3 px-4 py-3">
       <div className="flex items-center justify-between gap-2">
@@ -85,9 +83,7 @@ export function SkillInviteAffordance({
           proof is a mailbox round-trip.
         </p>
       ) : restricted ? (
-        <p className="text-dim text-sm">
-          Inviting is restricted to owners in this workspace (the invite-policy knob in settings).
-        </p>
+        <p className="text-dim text-sm">Only a workspace owner can invite (and revoke) members.</p>
       ) : (
         <>
           <fetcher.Form ref={formRef} method="post" className="flex flex-wrap items-end gap-2">

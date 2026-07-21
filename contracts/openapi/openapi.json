@@ -1546,7 +1546,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The caller's own membership (identity + address + role + inviter + invite policy).",
+            "description": "The caller's own membership (identity + address + role + inviter).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2800,7 +2800,7 @@
       },
       "InvitationRequest": {
         "type": "object",
-        "description": "`POST /v1/workspaces/{ws}/invitations` body — invitation as an INVITATION-ROW write: each email\nbecomes a pending 7-day claim redeemable through the single-use link the server MAILS (the token\nnever appears in this exchange — the mailbox is its one channel). At most ONE optional\nfirst-destination hint (a skill or a channel of this workspace) rides the invitation and is\ndelivered by the accept. No role field — every CLI invitee starts as a member (roles are raised\nlater, on the web). Member-level unless the workspace's invite policy restricts inviting to\nowners.",
+        "description": "`POST /v1/workspaces/{ws}/invitations` body — invitation as an INVITATION-ROW write: each email\nbecomes a pending 7-day claim redeemable through the single-use link the server MAILS (the token\nnever appears in this exchange — the mailbox is its one channel). At most ONE optional\nfirst-destination hint (a skill or a channel of this workspace) rides the invitation and is\ndelivered by the accept. No role field — every CLI invitee starts as a member (roles are raised\nlater, on the web). Owner-only: only a workspace owner may send (and revoke) invitations.",
         "required": [
           "emails"
         ],
@@ -3951,8 +3951,7 @@
           "display_name",
           "address",
           "principal",
-          "role",
-          "invite_policy"
+          "role"
         ],
         "properties": {
           "address": {
@@ -3962,10 +3961,6 @@
           "display_name": {
             "type": "string",
             "description": "The workspace's display name."
-          },
-          "invite_policy": {
-            "type": "string",
-            "description": "The workspace's invite policy (`members` or `owners`)."
           },
           "invited_by": {
             "type": [

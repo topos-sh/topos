@@ -16,7 +16,6 @@ import {
 import { getAuth } from "@/lib/auth/server";
 import { loadVersionFilesData } from "@/lib/browse/version-files.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
-import { workspacePolicyOf } from "@/lib/db/queries.policy.server";
 import { createInvitations, foldInviteEmail } from "@/lib/db/queries.roster.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
 import { resolveSkillName } from "@/lib/db/resolve.server";
@@ -63,12 +62,10 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     notFound();
   }
 
-  const [policy, versionFiles] = await Promise.all([
-    workspacePolicyOf(memberActor),
+  const versionFiles =
     row.versionId !== null
-      ? loadVersionFilesData(memberActor, row.skillId, row.versionId)
-      : Promise.resolve(null),
-  ]);
+      ? await loadVersionFilesData(memberActor, row.skillId, row.versionId)
+      : null;
 
   return {
     face: "page" as const,
@@ -81,10 +78,9 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     versionId: row.versionId,
     versionFiles,
     // The invite affordance's gates, resolved once here and never re-read client-side: armed mail
-    // is the invitation's identity rung, and the invite-policy decides whether a plain member may
-    // invite at all — the same two facts the members page surfaces.
+    // is the invitation's identity rung, and inviting is owner-only — the same two facts the
+    // members page surfaces.
     mailArmed: mailDelivery().canSend,
-    invitePolicy: policy.invitePolicy,
     isOwner: memberActor.role === "owner",
   };
 }
@@ -95,7 +91,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
  * never carries into an action — with the member scope the face itself requires (an anonymous
  * request bounces to the constant /login before any skill read; a non-member and an unknown slug
  * land the same uniform 404). Member scope is the FLOOR; the invite branch re-reads the
- * invite-policy against the actor's role itself. An unmatched intent is a 400 that only a member
+ * owner gate against the actor's role itself. An unmatched intent is a 400 that only a member
  * can ever reach.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
@@ -109,8 +105,8 @@ export async function action({ request, params }: ActionFunctionArgs) {
 }
 
 /**
- * Invite a teammate to THIS skill. Inviting is a member op the invite-policy gates (createInvitations
- * runs that gate against the actor's role) and it REQUIRES armed mail — the invitation's identity
+ * Invite a teammate to THIS skill. Inviting is owner-only (createInvitations runs that gate
+ * against the actor's role) and it REQUIRES armed mail — the invitation's identity
  * proof is a mailbox round-trip, so an unarmed deployment refuses honestly instead of seating a
  * claim nobody can prove. The skill's catalog row supplies the invitation's first-destination hint
  * (the bundle id stored on the row) AND the display facts the mail's subject/opening line lead with;
@@ -137,8 +133,7 @@ async function inviteToSkillIntent(
     return { intent: "invite" as const, status: "error" as const, submittedEmail: raw };
   }
 
-  const policy = await workspacePolicyOf(actor);
-  const outcome = await createInvitations(actor, [folded], policy.invitePolicy, {
+  const outcome = await createInvitations(actor, [folded], {
     bundleId: row.skillId,
   });
   if (outcome.outcome === "owner_role_required") {
@@ -187,7 +182,6 @@ function SkillCurrentContent({
   versionId,
   versionFiles,
   mailArmed,
-  invitePolicy,
   isOwner,
 }: Extract<Awaited<ReturnType<typeof loader>>, { face: "page" }>) {
   const wsPath = useWsPath();
@@ -216,7 +210,7 @@ function SkillCurrentContent({
           </p>
         </Card>
       )}
-      <SkillInviteAffordance mailArmed={mailArmed} invitePolicy={invitePolicy} isOwner={isOwner} />
+      <SkillInviteAffordance mailArmed={mailArmed} isOwner={isOwner} />
     </div>
   );
 }

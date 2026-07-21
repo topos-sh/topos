@@ -151,7 +151,8 @@ renderer over the SAME typed outcomes (one value, two presentations).
   behind injectable factories, so the whole flow is tested over fakes with no HTTP.
 - **The `invite` verb** (`ops/invite`, `plane_http::UreqDeviceClient`) — the two-phase roster write
   (`POST /v1/workspaces/{ws}/invitations` under the ONE device Bearer credential; the server resolves
-  credential → device → user → the invite-policy gate; the acting device is never a body field).
+  credential → device → user → the owner gate — inviting is owner-only; the acting device is never a
+  body field).
   **Nothing is signed** (git/GitHub-level trust). Emails are folded to the canonical ASCII-lowercase
   form ONCE before the wire body (the server re-folds at its parse boundary), so the roster rows
   carry one identity per human; there is no invite link and no role field — joining is
@@ -475,8 +476,8 @@ are asserted byte-equal in tests.
     a level that does not apply to the kind is a typed usage error. The describe carries the audience — the
     reach (people) for a skill, the channel's member count — plus the pending-proposals-survive note on a
     skill loosening; `OWNER_ROLE_REQUIRED` / `REVIEWER_ROLE_REQUIRED` surface typed, naming the role.
-  - **`invite`** (`ops/invite`) — two-phase; a BARE `invite` (no emails) is a no-mutation `/me`
-    read (the workspace address + invite policy + "nothing was sent or changed"). Emails without
+  - **`invite`** (`ops/invite`) — two-phase, owner-only server-side; a BARE `invite` (no emails) is a
+    no-mutation `/me` read (the workspace address + "nothing was sent or changed"). Emails without
     `--yes` describe (who gets invited, the optional first-destination hint, the mailed-link note);
     `--yes` POSTs the folded emails + at most ONE hint — `--skill <name>` OR `--channel <name>` —
     and the SERVER mails each address its single-use invite link (the token never appears in the

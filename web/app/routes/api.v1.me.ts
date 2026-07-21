@@ -7,7 +7,7 @@ import { workspaceAddress } from "@/lib/ws-url.server";
 
 /**
  * `GET /api/v1/workspaces/{ws}/me` — the caller's own membership (identity + address + role +
- * inviter + invite policy). Per-member and hot — never cacheable. The share ADDRESS follows the
+ * inviter). Per-member and hot — never cacheable. The share ADDRESS follows the
  * deployment's grammar (bare origin in single tenancy, `<origin>/<name>` in multi) — the CLI
  * follows exactly what it emits; the request origin IS the base (the app is the door). `invited_by` is
  * OMITTED for a genesis seat (never serialized as null); `principal` carries the acting
@@ -30,7 +30,6 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
     address: workspaceAddress(request, row.name),
     principal: actor.display,
     role: row.role,
-    invite_policy: row.invitePolicy,
     ...(row.invitedBy !== null ? { invited_by: row.invitedBy } : {}),
   };
   return Response.json(body, { headers: NO_STORE });

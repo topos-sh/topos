@@ -677,8 +677,7 @@ pub struct DeviceAuthPollResponse {
 /// never appears in this exchange — the mailbox is its one channel). At most ONE optional
 /// first-destination hint (a skill or a channel of this workspace) rides the invitation and is
 /// delivered by the accept. No role field — every CLI invitee starts as a member (roles are raised
-/// later, on the web). Member-level unless the workspace's invite policy restricts inviting to
-/// owners.
+/// later, on the web). Owner-only: only a workspace owner may send (and revoke) invitations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -835,8 +834,6 @@ pub struct WireMe {
     /// Who invited this principal (absent for a genesis owner).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invited_by: Option<String>,
-    /// The workspace's invite policy (`members` or `owners`).
-    pub invite_policy: String,
 }
 
 /// One skill reference inside a channel entry.

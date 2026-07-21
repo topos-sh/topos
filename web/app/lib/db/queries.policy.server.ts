@@ -8,13 +8,12 @@ import { workspace } from "@/lib/db/schema.app";
  * The WORKSPACE-POLICY data access — the settings page's knobs, now plain columns on the app's
  * OWN `web.workspace` row (the old guarded setter functions and the separate policy table are
  * gone; there is exactly one row per install and its DEFAULTs are the canonical fallbacks, so
- * no reader re-derives "members" or 604800000 anywhere). Reads take a MemberActor; writes take
+ * no reader re-derives 604800000 anywhere). Reads take a MemberActor; writes take
  * the OwnerActor brand as the gate (step-up runs in the route) and land their audit row in the
  * SAME transaction.
  */
 
 export interface WorkspacePolicy {
-  invitePolicy: "members" | "owners";
   stalenessWindowMs: number;
   /** The protection DEFAULT an unpinned bundle inherits (`reviewed` = review-required). */
   protectionDefault: "open" | "reviewed";
@@ -25,7 +24,6 @@ export interface WorkspacePolicy {
 export async function workspacePolicyOf(actor: MemberActor): Promise<WorkspacePolicy> {
   const rows = await getDb()
     .select({
-      invitePolicy: workspace.invitePolicy,
       stalenessWindowMs: workspace.stalenessWindowMs,
       protectionDefault: workspace.protectionDefault,
       registration: workspace.registration,
@@ -38,15 +36,10 @@ export async function workspacePolicyOf(actor: MemberActor): Promise<WorkspacePo
     throw new Error("workspace row missing for a member actor");
   }
   return {
-    invitePolicy: row.invitePolicy as WorkspacePolicy["invitePolicy"],
     stalenessWindowMs: row.stalenessWindowMs,
     protectionDefault: row.protectionDefault as WorkspacePolicy["protectionDefault"],
     registration: row.registration as WorkspacePolicy["registration"],
   };
-}
-
-export async function invitePolicyOf(actor: MemberActor): Promise<"members" | "owners"> {
-  return (await workspacePolicyOf(actor)).invitePolicy;
 }
 
 export async function stalenessWindowOf(actor: MemberActor): Promise<number> {
@@ -70,20 +63,6 @@ async function setKnob(
       outcome: "ok",
     });
   });
-}
-
-export type InvitePolicyOutcome = "set" | "bad_policy";
-
-/** Set who may invite: 'members' (any member) or 'owners' (owners only). */
-export async function setInvitePolicy(
-  actor: OwnerActor,
-  policy: string,
-): Promise<InvitePolicyOutcome> {
-  if (policy !== "members" && policy !== "owners") {
-    return "bad_policy";
-  }
-  await setKnob(actor, { invitePolicy: policy }, "policy_invite", policy);
-  return "set";
 }
 
 export type StalenessWindowOutcome = "set" | "bad_window";

@@ -31,7 +31,7 @@ use topos_types::{JsonEnvelope, WireCurrentRecord};
         ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
     ),
     responses(
-        (status = 200, description = "The caller's own membership (identity + address + role + inviter + invite policy).", body = WireMe),
+        (status = 200, description = "The caller's own membership (identity + address + role + inviter).", body = WireMe),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),

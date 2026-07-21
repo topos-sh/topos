@@ -625,8 +625,7 @@ export interface components {
          *     never appears in this exchange — the mailbox is its one channel). At most ONE optional
          *     first-destination hint (a skill or a channel of this workspace) rides the invitation and is
          *     delivered by the accept. No role field — every CLI invitee starts as a member (roles are raised
-         *     later, on the web). Member-level unless the workspace's invite policy restricts inviting to
-         *     owners.
+         *     later, on the web). Owner-only: only a workspace owner may send (and revoke) invitations.
          */
         InvitationRequest: {
             /**
@@ -1258,8 +1257,6 @@ export interface components {
             address: string;
             /** @description The workspace's display name. */
             display_name: string;
-            /** @description The workspace's invite policy (`members` or `owners`). */
-            invite_policy: string;
             /** @description Who invited this principal (absent for a genesis owner). */
             invited_by?: string | null;
             /** @description The workspace's ADDRESS name. */
@@ -2599,7 +2596,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The caller's own membership (identity + address + role + inviter + invite policy). */
+            /** @description The caller's own membership (identity + address + role + inviter). */
             200: {
                 headers: {
                     [name: string]: unknown;

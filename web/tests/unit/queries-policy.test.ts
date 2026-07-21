@@ -49,32 +49,11 @@ describe("workspacePolicyOf (the reads)", () => {
   it("answers the boot-minted defaults — no reader re-derives them anywhere", async () => {
     const queries = await q();
     expect(await queries.workspacePolicyOf(asMember(wsId, "u_owner"))).toEqual({
-      invitePolicy: "members",
       stalenessWindowMs: DEFAULT_WINDOW_MS,
       protectionDefault: "open",
       registration: "invite_only",
     });
-    expect(await queries.invitePolicyOf(asMember(wsId, "u_owner"))).toBe("members");
     expect(await queries.stalenessWindowOf(asMember(wsId, "u_owner"))).toBe(DEFAULT_WINDOW_MS);
-  });
-});
-
-describe("setInvitePolicy", () => {
-  it("sets 'owners' and back, an audit row per act; refuses any other value with no write", async () => {
-    const queries = await q();
-    expect(await queries.setInvitePolicy(asOwner(wsId, "u_owner", "Owner"), "owners")).toBe("set");
-    expect(await queries.invitePolicyOf(asMember(wsId, "u_owner"))).toBe("owners");
-    expect(await queries.setInvitePolicy(asOwner(wsId, "u_owner", "Owner"), "members")).toBe("set");
-    expect(await queries.invitePolicyOf(asMember(wsId, "u_owner"))).toBe("members");
-
-    expect(await queries.setInvitePolicy(asOwner(wsId, "u_owner", "Owner"), "everyone")).toBe(
-      "bad_policy",
-    );
-    expect(await queries.invitePolicyOf(asMember(wsId, "u_owner"))).toBe("members");
-    expect(await auditRows("policy_invite")).toEqual([
-      { subject: "owners", outcome: "ok" },
-      { subject: "members", outcome: "ok" },
-    ]);
   });
 });
 

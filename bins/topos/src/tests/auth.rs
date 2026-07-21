@@ -248,7 +248,6 @@ impl DirectorySource for FakeDirectory {
             principal: "alice@acme.com".into(),
             role: "owner".into(),
             invited_by: None,
-            invite_policy: "members".into(),
         })
     }
     fn channels_index(&self, _ws: &str) -> Result<WireChannelIndex, ClientError> {

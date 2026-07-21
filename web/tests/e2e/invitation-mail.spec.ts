@@ -16,7 +16,7 @@ import { adminQuery, latestMail, theWorkspace } from "./seed";
  *    (bindInvitedSeats on the mailbox round-trip) — the invited member lands in the shell.
  */
 
-const REFUSAL = "Sign-up is not open on this server. Ask a member to invite you.";
+const REFUSAL = "Sign-up is not open on this server. Ask a workspace owner to invite you.";
 // Fresh per run: a reused local database must never hand this walk a pre-existing account.
 const INVITEE = `invitee-${Date.now().toString(36)}@example.com`;
 
