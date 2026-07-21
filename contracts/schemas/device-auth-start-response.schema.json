@@ -25,11 +25,7 @@
       "type": "string"
     },
     "verification_uri": {
-      "description": "The approval URL a signed-in human visits.",
-      "type": "string"
-    },
-    "verification_uri_complete": {
-      "description": "The approval URL with the user code already embedded — the one link to open; a client uses\nit VERBATIM when present.",
+      "description": "The approval URL a signed-in human visits. The code NEVER rides a URL: the client prints\nthis bare address and the short code on separate lines, and the page's lookup is a POST.",
       "type": "string"
     }
   },
@@ -37,7 +33,6 @@
     "device_code",
     "user_code",
     "verification_uri",
-    "verification_uri_complete",
     "expires_in_secs",
     "interval_secs"
   ]

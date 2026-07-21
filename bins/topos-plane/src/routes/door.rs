@@ -15,10 +15,10 @@
 
 use topos_types::requests::{
     DeviceAuthPollRequest, DeviceAuthPollResponse, DeviceAuthStartRequest, DeviceAuthStartResponse,
-    DeviceRevokeRequest, InvitationRequest, NoticeAckRequest, ProposeRequest, ProtectionSetRequest,
-    PublishRequest, RevertRequest, ReviewRequest, WireAppliedReport, WireChannelIndex,
-    WireDelivery, WireMe, WireProposalIndex, WireProposalList, WireReach, WireSkillIndex,
-    WireSkillLog, WireVersionMeta,
+    DeviceRevokeRequest, InvitationRequest, InviteAcceptRequest, NoticeAckRequest, ProposeRequest,
+    ProtectionSetRequest, PublishRequest, RevertRequest, ReviewRequest, WireAppliedReport,
+    WireChannelIndex, WireDelivery, WireMe, WireProposalIndex, WireProposalList, WireReach,
+    WireSkillIndex, WireSkillLog, WireVersionMeta,
 };
 use topos_types::{JsonEnvelope, WireCurrentRecord};
 
@@ -271,7 +271,7 @@ pub(crate) fn ack_notices() {}
         ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
     ),
     responses(
-        (status = 200, description = "The invitation receipt — OK carries the InvitationData (address + invited + the honest mailed flag); a policy refusal is a 200 DENIED OWNER_ROLE_REQUIRED, an unknown channel a 200 DENIED UNKNOWN_CHANNEL.", body = JsonEnvelope),
+        (status = 200, description = "The invitation receipt — OK carries the InvitationData (address + invited + the honest mailed flag; the tokened invite link travels ONLY in the mail); a policy refusal is a 200 DENIED OWNER_ROLE_REQUIRED, an unresolvable hint a 200 DENIED UNKNOWN_SKILL / UNKNOWN_CHANNEL, an unarmed mail transport a 200 DENIED MAIL_NOT_CONFIGURED.", body = JsonEnvelope),
         (status = 400, description = "Malformed body or a malformed invitee email.", body = JsonEnvelope),
         (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
@@ -324,7 +324,7 @@ pub(crate) fn put_report() {}
     tag = "enrollment",
     request_body = DeviceAuthStartRequest,
     responses(
-        (status = 200, description = "The device-authorization grant: the secret device_code to poll with (promoted to the device's ONE bearer credential on approval), the human-facing user_code, and the approval URLs.", body = DeviceAuthStartResponse),
+        (status = 200, description = "The device-authorization grant: the secret device_code to poll with (promoted to the device's ONE bearer credential on approval), the human-facing user_code, and the BARE approval URL (the code never rides a URL; the approval page's lookup is a POST). An invite_token in the body is recorded on the flow unvalidated — never a token oracle.", body = DeviceAuthStartResponse),
         (status = 400, description = "Malformed body.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Internal fault.", body = JsonEnvelope),
@@ -338,13 +338,29 @@ pub(crate) fn device_auth_start() {}
     tag = "enrollment",
     request_body = DeviceAuthPollRequest,
     responses(
-        (status = 200, description = "The poll status; `granted` carries the ONE bearer credential (the promoted device code), the device id, and the joined workspace.", body = DeviceAuthPollResponse),
+        (status = 200, description = "The poll status; `granted` carries the ONE bearer credential (the promoted device code), the device id, the joined workspace, and — when the flow carried an invitation naming one — the first-destination hint.", body = DeviceAuthPollResponse),
         (status = 400, description = "Malformed body.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Internal fault.", body = JsonEnvelope),
     ),
 )]
 pub(crate) fn device_auth_poll() {}
+
+#[utoipa::path(
+    post,
+    path = "/v1/invitations/accept",
+    tag = "enrollment",
+    request_body = InviteAcceptRequest,
+    params(("Authorization" = String, Header, description = "`Bearer <device credential>` — PERSON-scoped: the caller has no seat in the invitation's workspace yet.")),
+    responses(
+        (status = 200, description = "OK carries the InviteAcceptData (the joined workspace + the optional first-destination hint); the ceremony fences answer 200 DENIED INVITE_OTHER_ACCOUNT / EMAIL_UNVERIFIED (no address is ever echoed).", body = JsonEnvelope),
+        (status = 400, description = "Malformed body.", body = JsonEnvelope),
+        (status = 404, description = "Missing/blank credential, a revoked device, or a dead token — invalid, expired, revoked, or already consumed (indistinguishable).", body = JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
+        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
+    ),
+)]
+pub(crate) fn invite_accept() {}
 
 // ── the writes (publish / propose / revert / review) ─────────────────────────────────────────────
 

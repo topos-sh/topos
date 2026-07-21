@@ -277,6 +277,23 @@ pub(crate) trait DirectorySource {
     /// fault; [`ClientError::WireInvalid`] on a malformed body.
     fn me(&self, workspace_id: &str) -> Result<WireMe, ClientError>;
 
+    /// `POST /v1/invitations/accept` — the ALREADY-ENROLLED device consuming an invite URL: the
+    /// credential authenticates the person (no seat exists yet, so this is the one PERSON-scoped
+    /// call on this transport — no workspace id anywhere). The OK answer carries the joined
+    /// workspace + the optional first-destination hint; the invitation's own fences may refuse
+    /// typed (wrong account / unverified mailbox), and a dead token is the uniform 404. Defaulted
+    /// so read-only fakes need no arm.
+    ///
+    /// # Errors
+    /// [`ClientError::TargetNotFound`] on a dead token; [`ClientError::PlaneTerminal`] on a fence
+    /// refusal; [`ClientError::Plane`]/[`ClientError::WireInvalid`] on transport/parse faults.
+    fn accept_invitation(&self, token: &str) -> Result<InviteAccepted, ClientError> {
+        let _ = token;
+        Err(ClientError::Plane(
+            "this transport serves no invitation accept".into(),
+        ))
+    }
+
     /// `GET /v1/workspaces/{ws}/channels` — the channel index with the caller's membership marked.
     ///
     /// # Errors
@@ -426,10 +443,10 @@ pub(crate) struct DeviceAuthStart {
     /// **SECRET** — the device code the client polls with (promoted server-side to the device's ONE
     /// bearer credential on approval). Redacted in `Debug`, never logged / in a URL.
     pub device_code: String,
-    /// The short human-facing code the approval page displays (a cross-check, never typed as a secret).
+    /// The short human-facing code the approval page asks for and displays back (the glance-check).
     pub user_code: String,
-    /// The approval URL with the user code already embedded — used VERBATIM.
-    pub verification_uri_complete: String,
+    /// The BARE approval URL — printed beside the code on its own line; the code never rides a URL.
+    pub verification_uri: String,
     /// The flow lifetime, in seconds.
     pub expires_in_secs: u64,
     /// The minimum poll interval, in seconds.
@@ -441,7 +458,7 @@ impl std::fmt::Debug for DeviceAuthStart {
         f.debug_struct("DeviceAuthStart")
             .field("device_code", &"<redacted>")
             .field("user_code", &self.user_code)
-            .field("verification_uri_complete", &self.verification_uri_complete)
+            .field("verification_uri", &self.verification_uri)
             .field("expires_in_secs", &self.expires_in_secs)
             .field("interval_secs", &self.interval_secs)
             .finish()
@@ -459,6 +476,23 @@ pub(crate) struct EnrolledWorkspace {
     pub display_name: String,
 }
 
+/// The first-destination hint an accepted invitation named — the post-enrollment subscribe's
+/// target (`kind` is the catalog's tag — `skill` today — or the literal `channel`).
+#[derive(Debug, Clone)]
+pub(crate) struct GrantHint {
+    pub kind: String,
+    pub name: String,
+}
+
+/// The direct-accept answer (`POST /v1/invitations/accept`): the joined workspace + the optional
+/// first-destination hint. The already-held device credential now reaches the workspace — no new
+/// secret arrives.
+#[derive(Debug, Clone)]
+pub(crate) struct InviteAccepted {
+    pub workspace: EnrolledWorkspace,
+    pub hint: Option<GrantHint>,
+}
+
 /// A GRANTED device-authorization poll: the device's ONE bearer credential (the promoted device code),
 /// the registered device's id, and the joined workspace. Hand-written `Debug` redacts the credential.
 #[derive(Clone)]
@@ -469,6 +503,9 @@ pub(crate) struct EnrolledGrant {
     pub device_id: String,
     /// The joined workspace.
     pub workspace: EnrolledWorkspace,
+    /// The invitation's first-destination hint — present when the flow carried an invite token
+    /// whose (now accepted) invitation named one.
+    pub hint: Option<GrantHint>,
 }
 
 impl std::fmt::Debug for EnrolledGrant {
@@ -477,6 +514,7 @@ impl std::fmt::Debug for EnrolledGrant {
             .field("credential", &"<redacted>")
             .field("device_id", &self.device_id)
             .field("workspace", &self.workspace)
+            .field("hint", &self.hint)
             .finish()
     }
 }
@@ -514,7 +552,9 @@ pub(crate) trait EnrollSource {
     /// `POST /v1/device/authorize` — begin a device-authorization toward the workspace named by its
     /// ADDRESS slug (whether the name exists is never disclosed here — an unknown name runs the same
     /// flow to the same uniform denial). `requested_name` is the human-readable device name shown on
-    /// the approval page (a confused-deputy aid, not authority).
+    /// the approval page (a confused-deputy aid, not authority). `invite_token` is the invitation
+    /// link's token when this enrollment came from `follow <invite-url>` — recorded on the flow so
+    /// the approval weaves the accept in; never validated at this unauthenticated start.
     ///
     /// # Errors
     /// [`ClientError::Plane`] on a transport fault / non-OK status; [`ClientError::WireInvalid`] on a
@@ -523,6 +563,7 @@ pub(crate) trait EnrollSource {
         &self,
         workspace: &str,
         requested_name: &str,
+        invite_token: Option<&str>,
     ) -> Result<DeviceAuthStart, ClientError>;
 
     /// `POST /v1/device/token` — one poll of the flow. The poll STATE (pending / denied / expired /

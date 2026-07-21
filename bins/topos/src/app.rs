@@ -448,10 +448,35 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             // and the resumed invocation keeps THIS invocation's flags, so a `--yes` carries through
             // the wait into the apply.
             let policy = WaitPolicy::resolve(json, wait, &clock);
-            let result =
-                block_on_pending(&clock, &policy, first, follow_pending_disclosure, || {
-                    ops::follow(&ctx, &connectors, Vec::new(), mk_opts())
-                });
+            // The zero-typing loopback: only for an interactive wait, only when a local browser
+            // is plausible (never over SSH / headless / `TOPOS_NO_BROWSER`), and only when a
+            // pending WAL exists to derive the flow's challenge from. Everything else keeps the
+            // typed-code fallback untouched.
+            let loopback_plan = if policy.block && !json {
+                let interactive = {
+                    use std::io::IsTerminal;
+                    std::io::stderr().is_terminal()
+                };
+                ops::loopback::choose_browser(&ops::loopback::BrowserEnv::detect(interactive))
+                    .and_then(|opener| {
+                        let wal = crate::enroll::read_wal(&fs, &ctx.layout).ok().flatten()?;
+                        Some(LoopbackPlan {
+                            opener,
+                            runner: &fs,
+                            challenge: ops::device_challenge(&wal.device_code),
+                        })
+                    })
+            } else {
+                None
+            };
+            let result = block_on_pending(
+                &clock,
+                &policy,
+                first,
+                follow_pending_disclosure,
+                loopback_plan,
+                || ops::follow(&ctx, &connectors, Vec::new(), mk_opts()),
+            );
             // The breadth arming sweep rides the enrollment receipt: the promote armed the active
             // adapter (`currency`); every OTHER detected agent's trigger is armed here at the
             // composition root, and the per-agent outcomes ride the same payload honestly.
@@ -510,6 +535,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
         }
         Command::Invite {
             email,
+            skill,
             channel,
             yes,
         } => {
@@ -517,7 +543,15 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 governance: &connect_governance,
                 directory: &connect_directory,
             };
-            let result = ops::invite(&ctx, &connectors, email, channel, workspace.as_deref(), yes);
+            let result = ops::invite(
+                &ctx,
+                &connectors,
+                email,
+                skill,
+                channel,
+                workspace.as_deref(),
+                yes,
+            );
             finish_invite(json, cmd_name, result, &diag)
         }
         Command::List {
@@ -988,15 +1022,21 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                     // until the browser approval settles; a headless `--json` run without `--wait`
                     // returns the pending state and never hangs.
                     let policy = WaitPolicy::resolve(json, wait, &clock);
-                    let result =
-                        block_on_pending(&clock, &policy, first, login_pending_disclosure, || {
+                    let result = block_on_pending(
+                        &clock,
+                        &policy,
+                        first,
+                        login_pending_disclosure,
+                        None,
+                        || {
                             ops::login(
                                 &ctx,
                                 &connectors,
                                 server_url.as_deref(),
                                 workspace.as_deref(),
                             )
-                        });
+                        },
+                    );
                     finish_login(json, cmd_name, result, &diag)
                 }
                 AuthCmd::Logout { yes } => {
@@ -2145,11 +2185,11 @@ fn finish_logout(
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// A pending device-authorization's human-facing disclosure — the clickable URL (the
-/// `verification_uri_complete`, which embeds the code) plus the short cross-check code and the
+/// `verification_uri`, which embeds the code) plus the short cross-check code and the
 /// server's minimum poll interval. Extracted from either verb's pending outcome so
 /// [`block_on_pending`] can print it once, generically.
 struct PendingDisclosure {
-    verification_uri_complete: String,
+    verification_uri: String,
     user_code: String,
     /// The server's minimum poll interval, when disclosed (else the fallback cadence).
     interval_secs: Option<u64>,
@@ -2171,7 +2211,7 @@ impl PendingDisclosure {
 fn follow_pending_disclosure(out: &ops::FollowOutcome) -> Option<PendingDisclosure> {
     match out {
         ops::FollowOutcome::Data { data, .. } => data.pending.as_ref().map(|p| PendingDisclosure {
-            verification_uri_complete: p.verification_uri_complete.clone(),
+            verification_uri: p.verification_uri.clone(),
             user_code: p.user_code.clone(),
             interval_secs: p.interval_secs,
             expires_at_millis: p.expires_at.as_deref().and_then(parse_rfc3339_utc_millis),
@@ -2184,7 +2224,7 @@ fn follow_pending_disclosure(out: &ops::FollowOutcome) -> Option<PendingDisclosu
 fn login_pending_disclosure(out: &ops::AuthLoginOutcome) -> Option<PendingDisclosure> {
     match out {
         ops::AuthLoginOutcome::Pending(p) => Some(PendingDisclosure {
-            verification_uri_complete: p.verification_uri_complete.clone(),
+            verification_uri: p.verification_uri.clone(),
             user_code: p.user_code.clone(),
             interval_secs: Some(p.interval_secs),
             expires_at_millis: p.expires_at.as_deref().and_then(parse_rfc3339_utc_millis),
@@ -2275,17 +2315,32 @@ impl WaitPolicy {
     }
 }
 
+/// The zero-typing browser plan a follow enrollment's wait may carry: which opener to spawn, the
+/// runner that spawns it, and the flow's device-code CHALLENGE (hex sha256 — identifies the flow
+/// on the approval page's URL without revealing anything; the code itself never rides a URL).
+struct LoopbackPlan<'a> {
+    opener: &'static str,
+    runner: &'a dyn topos_harness::CommandRunner,
+    challenge: String,
+}
+
 /// Block on a pending device-authorization until it settles, an optional deadline passes, or the device
 /// code's own expiry ends it with a terminal error — so a person never re-invokes the command by hand. The
 /// disclosure prints to STDERR once (stdout stays the clean final render). `pending_of` extracts the
 /// disclosure (None ⇒ not pending ⇒ return as-is); `repoll` re-invokes the op, which RESUMES via its
 /// on-disk WAL. A `policy.block == false` (headless `--json` without `--wait`) returns the first result
 /// untouched — a headless agent must not hang.
+///
+/// With a `loopback` plan, the wait ALSO binds an ephemeral 127.0.0.1 listener and auto-opens the
+/// approval page carrying the state-bound return coordinates — the browser's redirect wakes the
+/// next poll immediately (zero typing); the poll stays the source of truth, so a failed open or a
+/// lost redirect degrades to the typed-code wait already printed above it.
 fn block_on_pending<T>(
     clock: &dyn Clock,
     policy: &WaitPolicy,
     first: Result<T, ClientError>,
     pending_of: impl Fn(&T) -> Option<PendingDisclosure>,
+    loopback: Option<LoopbackPlan<'_>>,
     mut repoll: impl FnMut() -> Result<T, ClientError>,
 ) -> Result<T, ClientError> {
     if !policy.block {
@@ -2299,17 +2354,38 @@ fn block_on_pending<T>(
         return first;
     };
 
-    // The waiting disclosure on STDERR (stdout stays the clean final envelope/TTY): the clickable URL
-    // plus the short code the human cross-checks against the approval page, and the one line that
-    // makes the wait unscary — interrupting loses nothing.
+    // The waiting disclosure on STDERR (stdout stays the clean final envelope/TTY): the URL and
+    // the short code on separate lines (the code never rides a URL), and the one line that makes
+    // the wait unscary — interrupting loses nothing.
     eprintln!(
-        "Open this URL to approve:\n  {}\n  code: {} (confirm it matches the page)",
-        disc.verification_uri_complete, disc.user_code,
+        "Open: {}\nCode: {} (the page shows the same code — confirm it matches)",
+        disc.verification_uri, disc.user_code,
     );
     eprintln!(
         "Ctrl-C is safe — the same command resumes this enrollment; `--wait <seconds>` caps the \
          wait."
     );
+    // The loopback arm: bind, auto-open, and let the redirect wake the poll. Every fault here is
+    // silent — the typed-code lines above already carry the whole ceremony.
+    let mut listener = loopback.and_then(|plan| {
+        let state = uuid::Uuid::new_v4().simple().to_string();
+        let bound = ops::loopback::LoopbackListener::bind(state.clone()).ok()?;
+        let url = ops::loopback::approval_url(
+            &disc.verification_uri,
+            &plan.challenge,
+            bound.port(),
+            &state,
+        );
+        let opened = plan
+            .runner
+            .run(plan.opener, &[url.as_str()])
+            .map(|out| out.success)
+            .unwrap_or(false);
+        if opened {
+            eprintln!("Opening your browser to approve — or use the URL and code above.");
+        }
+        opened.then_some(bound)
+    });
     let interval = disc.poll_interval();
     // The live waiting line: honest time (elapsed + the code's expiry countdown), rewritten in
     // place once a second when stderr is a TTY; a single plain line otherwise (no escape codes in
@@ -2352,17 +2428,29 @@ fn block_on_pending<T>(
             let nap_end = clock
                 .now_unix_millis()
                 .saturating_add(u64::try_from(nap.as_millis()).unwrap_or(u64::MAX));
+            // With a listener armed, tick in short slices so the browser's redirect wakes the
+            // poll near-instantly; a lone terminal keeps the calm one-second cadence.
+            let slice = if listener.is_some() {
+                Duration::from_millis(250)
+            } else {
+                Duration::from_secs(1)
+            };
             loop {
                 let now = clock.now_unix_millis();
                 if now >= nap_end {
                     break;
                 }
+                if let Some(bound) = &listener
+                    && bound.try_receive().is_some()
+                {
+                    // The redirect landed (single-use — stop listening) → poll NOW.
+                    listener = None;
+                    break;
+                }
                 use std::io::Write;
                 eprint!("\r{}  ", waiting_line(now, started, disc.expires_at_millis));
                 let _ = std::io::stderr().flush();
-                std::thread::sleep(
-                    Duration::from_millis(nap_end.saturating_sub(now)).min(Duration::from_secs(1)),
-                );
+                std::thread::sleep(Duration::from_millis(nap_end.saturating_sub(now)).min(slice));
             }
         } else {
             std::thread::sleep(nap);

@@ -578,15 +578,18 @@ pub struct BreadthTriggerReport {
     pub note: Option<String>,
 }
 
-/// A pending device-authorization a `follow` surfaced — the human visits `verification_uri_complete` (which
-/// embeds the `user_code`), then the client re-polls. **INFERRED.**
+/// A pending device-authorization a `follow` surfaced — the human opens `verification_uri` and
+/// enters `user_code` there (or the invitation page the URI names weaves them through); the client
+/// re-polls. The code never rides a URL. **INFERRED.**
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct EnrollmentPending {
-    /// The verification URL with the `user_code` embedded — the human opens it to approve the session.
-    pub verification_uri_complete: String,
-    /// The short human-facing code embedded in `verification_uri_complete` (a cross-check against the
-    /// approval page — the human clicks the URL; the code is never typed as a secret).
+    /// The page the human opens to approve the session — the bare approval address (or, for an
+    /// invitation enrollment, the invitation page that weaves accept + approval). Never embeds the
+    /// code.
+    pub verification_uri: String,
+    /// The short human-facing code the approval page asks for and displays back (the glance-check
+    /// against this terminal — never typed as a secret, never part of a URL).
     pub user_code: String,
     /// The session expiry as an RFC-3339 string, if it expires.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -993,8 +996,8 @@ pub struct InviteReadData {
     pub changed: bool,
 }
 
-/// `invite <email>...` (bare, no `--yes`) — the describe: who gets seated, the channel pre-placements,
-/// and the mail-or-paste note. **INFERRED.**
+/// `invite <email>...` (bare, no `--yes`) — the describe: who gets invited, the optional
+/// first-destination hint, and the mailed-link note. **INFERRED.**
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct InviteDescribeData {
@@ -1002,9 +1005,12 @@ pub struct InviteDescribeData {
     pub invite_policy: String,
     /// The emails that would be seated (canonical form).
     pub seat: Vec<String>,
-    /// The channels each invitee would be pre-placed into.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub channels: Vec<String>,
+    /// The first-destination SKILL hint the invitation would carry (at most one of skill/channel).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
+    /// The first-destination CHANNEL hint the invitation would carry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
 }
 
 /// `update --reset <skill>` — discard a local draft back to the followed `current` (or an imported

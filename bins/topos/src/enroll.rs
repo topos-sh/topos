@@ -340,7 +340,8 @@ pub(crate) struct PendingEnrollment {
     /// The short user code (the cross-check shown on the approval page).
     pub user_code: String,
     /// The SERVER-built approval URL with the code embedded — re-emitted verbatim while pending.
-    pub verification_uri_complete: String,
+    #[serde(alias = "verification_uri_complete")]
+    pub verification_uri: String,
     /// The minimum poll interval, in seconds.
     pub interval_secs: u64,
     /// The flow expiry as epoch-millis — the recovery sweep abandons a WAL past this.
@@ -358,7 +359,7 @@ impl std::fmt::Debug for PendingEnrollment {
             .field("intent", &self.intent)
             .field("device_code", &"<redacted>")
             .field("user_code", &self.user_code)
-            .field("verification_uri_complete", &self.verification_uri_complete)
+            .field("verification_uri", &self.verification_uri)
             .field("interval_secs", &self.interval_secs)
             .field("expires_at_millis", &self.expires_at_millis)
             .finish()
@@ -911,7 +912,7 @@ mod tests {
             },
             device_code: "dc_secret".to_owned(),
             user_code: "AAAA-BBBB".to_owned(),
-            verification_uri_complete: "https://topos.sh/verify?code=AAAA-BBBB".to_owned(),
+            verification_uri: "https://topos.sh/verify".to_owned(),
             interval_secs: 5,
             expires_at_millis,
         }

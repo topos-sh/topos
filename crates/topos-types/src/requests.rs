@@ -548,6 +548,11 @@ pub struct DeviceAuthStartRequest {
     /// EMPTY string names "the workspace the origin itself addresses" (single-tenant installs, where
     /// the origin IS its one workspace); a non-empty value is the address slug as today.
     pub workspace: String,
+    /// The invitation-link token a `follow <invite-url>` enrollment carries. Recorded on the flow
+    /// (as its hash) UNVALIDATED — this unauthenticated start is never a token oracle; the approval
+    /// ceremony resolves it and weaves the invitation accept into its own fence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invite_token: Option<String>,
 }
 
 /// `POST /v1/device/authorize` response — the device-authorization grant (RFC-8628-shaped names).
@@ -563,11 +568,9 @@ pub struct DeviceAuthStartResponse {
     /// The short human-facing code the approval page displays (a cross-check, never typed as a
     /// secret).
     pub user_code: String,
-    /// The approval URL a signed-in human visits.
+    /// The approval URL a signed-in human visits. The code NEVER rides a URL: the client prints
+    /// this bare address and the short code on separate lines, and the page's lookup is a POST.
     pub verification_uri: String,
-    /// The approval URL with the user code already embedded — the one link to open; a client uses
-    /// it VERBATIM when present.
-    pub verification_uri_complete: String,
     /// The flow lifetime, in seconds.
     pub expires_in_secs: u64,
     /// The minimum poll interval, in seconds.
@@ -602,6 +605,22 @@ pub enum DeviceAuthPollStatus {
     Expired,
     /// Approved — `credential`, `device_id`, and `workspace` are present.
     Granted,
+}
+
+/// The first-destination HINT an accepted invitation named — decorated onto a `granted` poll (and
+/// the direct-accept answer) so the enrolled client's post-accept subscribe can target it. `kind`
+/// is the bundle catalog's own tag (`skill` today) or the literal `channel` — displayed and routed
+/// on, never trusted as authority.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct DeviceAuthHint {
+    /// What the hinted thing is: the catalog's `kind` tag, or `channel`.
+    pub kind: String,
+    /// The hinted bundle's or channel's name in the joined workspace.
+    pub name: String,
 }
 
 /// The workspace context a `granted` poll carries — everything the CLI needs to record what it
@@ -641,6 +660,10 @@ pub struct DeviceAuthPollResponse {
     /// The joined workspace — present ONLY when `status` is `granted`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<DeviceAuthWorkspace>,
+    /// The invitation's first-destination hint — present only on a `granted` poll whose flow
+    /// carried an invite token naming one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<DeviceAuthHint>,
 }
 
 // =================================================================================================
@@ -649,11 +672,13 @@ pub struct DeviceAuthPollResponse {
 // role matrix — never a body field); the op is derived from the route + body. `op_id` is a UUIDv4.
 // =================================================================================================
 
-/// `POST /v1/workspaces/{ws}/invitations` body — invitation as a ROSTER WRITE: seat each email as an
-/// invited member (recording who invited whom) and optionally pre-place the person into channels.
-/// There is no invite link and no role field — every CLI invitee starts as a member (roles are raised
-/// later, on the web), and joining is `follow <address>` plus proof of the invited email. Member-level
-/// unless the workspace's invite policy restricts inviting to owners.
+/// `POST /v1/workspaces/{ws}/invitations` body — invitation as an INVITATION-ROW write: each email
+/// becomes a pending 7-day claim redeemable through the single-use link the server MAILS (the token
+/// never appears in this exchange — the mailbox is its one channel). At most ONE optional
+/// first-destination hint (a skill or a channel of this workspace) rides the invitation and is
+/// delivered by the accept. No role field — every CLI invitee starts as a member (roles are raised
+/// later, on the web). Member-level unless the workspace's invite policy restricts inviting to
+/// owners.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -662,14 +687,19 @@ pub struct DeviceAuthPollResponse {
 pub struct InvitationRequest {
     /// The emails to seat as invited members (folded to the canonical lowercase form server-side).
     pub emails: Vec<String>,
-    /// Channel names to pre-place each invitee into (re-inviting restores placements; the structural
-    /// `everyone` needs no placement and is accepted as a no-op).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub channels: Vec<String>,
+    /// The first-destination SKILL hint (a bundle name in this workspace). At most one of
+    /// `skill`/`channel` may be set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
+    /// The first-destination CHANNEL hint (a channel name in this workspace). At most one of
+    /// `skill`/`channel` may be set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
 }
 
-/// `POST /v1/workspaces/{ws}/invitations` success `data` — what the inviter pastes onward: the workspace
-/// ADDRESS (the whole invitation besides the roster rows themselves).
+/// `POST /v1/workspaces/{ws}/invitations` success `data` — what the inviter pastes onward: the
+/// workspace ADDRESS. Deliberately NOT the tokened link: the link travels only in the invitation
+/// mail, so the inviter's receipt can never stand in for the invitee's mailbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -682,6 +712,36 @@ pub struct InvitationData {
     pub invited: Vec<String>,
     /// Whether invitation mail was sent server-side (`true` only when the server can send mail).
     pub mailed: bool,
+}
+
+/// `POST /v1/invitations/accept` body — the ALREADY-ENROLLED device consuming an invite URL: the
+/// bearer credential authenticates the person (seat-LESS by construction — the caller has no seat
+/// in the invitation's workspace yet), and the token names the invitation. The same ceremony
+/// fences as the browser accept apply; an invalid/expired/consumed token answers the uniform 404.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct InviteAcceptRequest {
+    /// The invitation-link token (the mailed single-use secret).
+    pub token: String,
+}
+
+/// `POST /v1/invitations/accept` success `data` — the joined workspace + the optional
+/// first-destination hint the client's post-accept subscribe targets. Nothing lands on any device
+/// from this accept: bytes still move only through the device-side two-phase describe/consent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct InviteAcceptData {
+    /// The workspace the accept seated the person in.
+    pub workspace: DeviceAuthWorkspace,
+    /// The invitation's first-destination hint, when it named one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<DeviceAuthHint>,
 }
 
 /// `DELETE /v1/workspaces/{ws}/devices` body — revoke a registered device key (owner, or the device's own
@@ -1088,6 +1148,7 @@ mod tests {
             credential: None,
             device_id: None,
             workspace: None,
+            hint: None,
         };
         let v = serde_json::to_value(&pending).unwrap();
         assert_eq!(v["status"], "pending");
@@ -1103,6 +1164,10 @@ mod tests {
                 name: "acme".to_owned(),
                 display_name: "Acme".to_owned(),
             }),
+            hint: Some(DeviceAuthHint {
+                kind: "skill".to_owned(),
+                name: "deploy".to_owned(),
+            }),
         };
         let v = serde_json::to_value(&granted).unwrap();
         assert_eq!(v["status"], "granted");
@@ -1113,8 +1178,7 @@ mod tests {
         let start = DeviceAuthStartResponse {
             device_code: "dc_secret".to_owned(),
             user_code: "AAAA-BBBB".to_owned(),
-            verification_uri: "https://topos.example/devices".to_owned(),
-            verification_uri_complete: "https://topos.example/verify?code=AAAA-BBBB".to_owned(),
+            verification_uri: "https://topos.example/verify".to_owned(),
             expires_in_secs: 900,
             interval_secs: 5,
         };
@@ -1252,22 +1316,28 @@ mod tests {
 
     #[test]
     fn invitation_bodies_round_trip() {
-        // The invitation is a roster write: emails + optional channel pre-placements, no role
-        // field (every CLI invitee starts as a member) and no link (the address is the answer).
+        // The invitation body: emails + at most one first-destination hint, no role field (every
+        // CLI invitee starts as a member) and no token anywhere (the link travels only in mail).
         let req = InvitationRequest {
             emails: vec!["alice@acme.com".to_owned()],
-            channels: vec!["ops".to_owned()],
+            skill: None,
+            channel: Some("ops".to_owned()),
         };
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v["emails"][0], "alice@acme.com");
-        assert_eq!(v["channels"][0], "ops");
+        assert_eq!(v["channel"], "ops");
+        assert!(v.get("skill").is_none(), "an unset hint omits");
         // The acting device rides the Authorization header — never a body field.
         assert!(v.get("device_key_id").is_none() && v.get("credential").is_none());
         assert!(v.get("role").is_none(), "invitations mint members only");
-        // Channels omit when empty (skip_serializing_if) and default on the way in.
+        assert!(
+            v.get("token").is_none(),
+            "no token ever rides this exchange"
+        );
+        // The hints omit when unset (skip_serializing_if) and default on the way in.
         let bare: InvitationRequest =
             serde_json::from_value(serde_json::json!({ "emails": ["bob@acme.com"] })).unwrap();
-        assert!(bare.channels.is_empty());
+        assert!(bare.skill.is_none() && bare.channel.is_none());
         let data = InvitationData {
             address: "https://topos.example/acme".to_owned(),
             invited: vec!["alice@acme.com".to_owned()],

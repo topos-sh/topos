@@ -254,12 +254,13 @@ Set a skill's (or channel's) protection level. Bare tightens to `reviewed` (skil
 topos invite [OPTIONS] [EMAIL]...
 ```
 
-Seat emails as invited members of the workspace (a roster write). Every CLI invitee starts as a member; joining is `follow <address>` plus proof of the invited email. Requires prior enrollment. A bare `invite` (no emails) reads the workspace address + policy (lands later)
+Invite emails into the workspace. Each address gets a mailed single-use invite link (accept in the browser, hand the mail's paste-block to an agent, or `topos follow <invite-url>`); every CLI invitee starts as a member. Requires prior enrollment. A bare `invite` (no emails) reads the workspace address + policy
 
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
-| `[EMAIL]...` |  |  | The emails to invite (folded to canonical form; seeded onto the roster as `invited`) |
-| `--channel` | `<NAME>` |  | Pre-place each invitee into this channel (repeatable) |
+| `[EMAIL]...` |  |  | The emails to invite (folded to canonical form; each becomes a pending 7-day claim) |
+| `--skill` | `<NAME>` |  | Lead the invitation with this SKILL — accepting follows it for the invitee (at most one of --skill/--channel) |
+| `--channel` | `<NAME>` |  | Lead the invitation with this CHANNEL — accepting joins the invitee to it |
 | `--yes` |  |  | Apply without the describe step. Parses today; the two-phase describe lands later |
 
 ## Maintenance

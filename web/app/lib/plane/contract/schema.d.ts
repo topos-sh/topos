@@ -485,6 +485,18 @@ export interface components {
              */
             version_id: string;
         };
+        /**
+         * @description The first-destination HINT an accepted invitation named — decorated onto a `granted` poll (and
+         *     the direct-accept answer) so the enrolled client's post-accept subscribe can target it. `kind`
+         *     is the bundle catalog's own tag (`skill` today) or the literal `channel` — displayed and routed
+         *     on, never trusted as authority.
+         */
+        DeviceAuthHint: {
+            /** @description What the hinted thing is: the catalog's `kind` tag, or `channel`. */
+            kind: string;
+            /** @description The hinted bundle's or channel's name in the joined workspace. */
+            name: string;
+        };
         /** @description `POST /v1/device/token` body — poll a device-authorization flow for its outcome. */
         DeviceAuthPollRequest: {
             /** @description The SECRET device code from `device/authorize`. */
@@ -503,6 +515,7 @@ export interface components {
             credential?: string | null;
             /** @description The registered device's id — present ONLY when `status` is `granted`. */
             device_id?: string | null;
+            hint?: null | components["schemas"]["DeviceAuthHint"];
             /** @description The poll status. */
             status: components["schemas"]["DeviceAuthPollStatus"];
             workspace?: null | components["schemas"]["DeviceAuthWorkspace"];
@@ -519,6 +532,12 @@ export interface components {
          *     the same flow to the same uniform denial.
          */
         DeviceAuthStartRequest: {
+            /**
+             * @description The invitation-link token a `follow <invite-url>` enrollment carries. Recorded on the flow
+             *     (as its hash) UNVALIDATED — this unauthenticated start is never a token oracle; the approval
+             *     ceremony resolves it and weaves the invitation accept into its own fence.
+             */
+            invite_token?: string | null;
             /**
              * @description A human-readable device name shown on the approval page (a confused-deputy guard, not
              *     authority) and kept as the device's display name once approved.
@@ -553,13 +572,11 @@ export interface components {
              *     secret).
              */
             user_code: string;
-            /** @description The approval URL a signed-in human visits. */
-            verification_uri: string;
             /**
-             * @description The approval URL with the user code already embedded — the one link to open; a client uses
-             *     it VERBATIM when present.
+             * @description The approval URL a signed-in human visits. The code NEVER rides a URL: the client prints
+             *     this bare address and the short code on separate lines, and the page's lookup is a POST.
              */
-            verification_uri_complete: string;
+            verification_uri: string;
         };
         /**
          * @description The workspace context a `granted` poll carries — everything the CLI needs to record what it
@@ -590,8 +607,9 @@ export interface components {
             workspace_id: string;
         };
         /**
-         * @description `POST /v1/workspaces/{ws}/invitations` success `data` — what the inviter pastes onward: the workspace
-         *     ADDRESS (the whole invitation besides the roster rows themselves).
+         * @description `POST /v1/workspaces/{ws}/invitations` success `data` — what the inviter pastes onward: the
+         *     workspace ADDRESS. Deliberately NOT the tokened link: the link travels only in the invitation
+         *     mail, so the inviter's receipt can never stand in for the invitee's mailbox.
          */
         InvitationData: {
             /** @description The workspace address (the share link — it carries nothing; the roster is the lock). */
@@ -602,20 +620,47 @@ export interface components {
             mailed: boolean;
         };
         /**
-         * @description `POST /v1/workspaces/{ws}/invitations` body — invitation as a ROSTER WRITE: seat each email as an
-         *     invited member (recording who invited whom) and optionally pre-place the person into channels.
-         *     There is no invite link and no role field — every CLI invitee starts as a member (roles are raised
-         *     later, on the web), and joining is `follow <address>` plus proof of the invited email. Member-level
-         *     unless the workspace's invite policy restricts inviting to owners.
+         * @description `POST /v1/workspaces/{ws}/invitations` body — invitation as an INVITATION-ROW write: each email
+         *     becomes a pending 7-day claim redeemable through the single-use link the server MAILS (the token
+         *     never appears in this exchange — the mailbox is its one channel). At most ONE optional
+         *     first-destination hint (a skill or a channel of this workspace) rides the invitation and is
+         *     delivered by the accept. No role field — every CLI invitee starts as a member (roles are raised
+         *     later, on the web). Member-level unless the workspace's invite policy restricts inviting to
+         *     owners.
          */
         InvitationRequest: {
             /**
-             * @description Channel names to pre-place each invitee into (re-inviting restores placements; the structural
-             *     `everyone` needs no placement and is accepted as a no-op).
+             * @description The first-destination CHANNEL hint (a channel name in this workspace). At most one of
+             *     `skill`/`channel` may be set.
              */
-            channels?: string[];
+            channel?: string | null;
             /** @description The emails to seat as invited members (folded to the canonical lowercase form server-side). */
             emails: string[];
+            /**
+             * @description The first-destination SKILL hint (a bundle name in this workspace). At most one of
+             *     `skill`/`channel` may be set.
+             */
+            skill?: string | null;
+        };
+        /**
+         * @description `POST /v1/invitations/accept` success `data` — the joined workspace + the optional
+         *     first-destination hint the client's post-accept subscribe targets. Nothing lands on any device
+         *     from this accept: bytes still move only through the device-side two-phase describe/consent.
+         */
+        InviteAcceptData: {
+            hint?: null | components["schemas"]["DeviceAuthHint"];
+            /** @description The workspace the accept seated the person in. */
+            workspace: components["schemas"]["DeviceAuthWorkspace"];
+        };
+        /**
+         * @description `POST /v1/invitations/accept` body — the ALREADY-ENROLLED device consuming an invite URL: the
+         *     bearer credential authenticates the person (seat-LESS by construction — the caller has no seat
+         *     in the invitation's workspace yet), and the token names the invitation. The same ceremony
+         *     fences as the browser accept apply; an invalid/expired/consumed token answers the uniform 404.
+         */
+        InviteAcceptRequest: {
+            /** @description The invitation-link token (the mailed single-use secret). */
+            token: string;
         };
         /**
          * @description The one common envelope every verb emits. Never prompts; prose (TTY) is rendered from the
@@ -1503,7 +1548,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The device-authorization grant: the secret device_code to poll with (promoted to the device's ONE bearer credential on approval), the human-facing user_code, and the approval URLs. */
+            /** @description The device-authorization grant: the secret device_code to poll with (promoted to the device's ONE bearer credential on approval), the human-facing user_code, and the BARE approval URL (the code never rides a URL; the approval page's lookup is a POST). An invite_token in the body is recorded on the flow unvalidated — never a token oracle. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1554,7 +1599,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The poll status; `granted` carries the ONE bearer credential (the promoted device code), the device id, and the joined workspace. */
+            /** @description The poll status; `granted` carries the ONE bearer credential (the promoted device code), the device id, the joined workspace, and — when the flow carried an invitation naming one — the first-destination hint. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2492,7 +2537,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The invitation receipt — OK carries the InvitationData (address + invited + the honest mailed flag); a policy refusal is a 200 DENIED OWNER_ROLE_REQUIRED, an unknown channel a 200 DENIED UNKNOWN_CHANNEL. */
+            /** @description The invitation receipt — OK carries the InvitationData (address + invited + the honest mailed flag; the tokened invite link travels ONLY in the mail); a policy refusal is a 200 DENIED OWNER_ROLE_REQUIRED, an unresolvable hint a 200 DENIED UNKNOWN_SKILL / UNKNOWN_CHANNEL, an unarmed mail transport a 200 DENIED MAIL_NOT_CONFIGURED. */
             200: {
                 headers: {
                     [name: string]: unknown;

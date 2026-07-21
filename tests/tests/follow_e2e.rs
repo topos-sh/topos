@@ -119,9 +119,9 @@ fn e2e_real_follow_enrolls_describes_and_lands_the_first_skill() {
     assert!(!pending.enrolled, "call 1 only begins enrollment");
     let handle = pending.pending.expect("the pending verification handle");
     assert!(
-        handle.verification_uri_complete.starts_with(&stack.origin),
+        handle.verification_uri.starts_with(&stack.origin),
         "the approval URL rides this origin: {}",
-        handle.verification_uri_complete
+        handle.verification_uri
     );
     assert!(
         client.wal_exists(),
@@ -241,9 +241,9 @@ fn e2e_follow_by_bare_origin_enrolls_describes_and_delivers() {
     assert!(!pending.enrolled, "call 1 only begins enrollment");
     let handle = pending.pending.expect("the pending verification handle");
     assert!(
-        handle.verification_uri_complete.starts_with(&stack.origin),
+        handle.verification_uri.starts_with(&stack.origin),
         "the approval URL rides this origin: {}",
-        handle.verification_uri_complete
+        handle.verification_uri
     );
     assert!(client.wal_exists(), "the pending WAL is written");
 

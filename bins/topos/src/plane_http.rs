@@ -35,8 +35,8 @@ use crate::error::ClientError;
 use crate::plane::{
     CatalogSource, ContributeSource, DeviceAuthPoll, DeviceAuthStart, DirectorySource,
     EnrollSource, EnrolledGrant, EnrolledWorkspace, FetchedFile, FetchedVersion, FollowContext,
-    FollowSource, GovernanceSource, KnownCurrent, PlaneError, PlaneSource, PointerFetch,
-    WriteReceipt,
+    FollowSource, GovernanceSource, InviteAccepted, KnownCurrent, PlaneError, PlaneSource,
+    PointerFetch, WriteReceipt,
 };
 
 /// Fail fast establishing a connection (a dead plane must not hang the session-start sweep).
@@ -660,10 +660,12 @@ impl EnrollSource for UreqDeviceClient {
         &self,
         workspace: &str,
         requested_name: &str,
+        invite_token: Option<&str>,
     ) -> Result<DeviceAuthStart, ClientError> {
         let body = serde_json::to_value(DeviceAuthStartRequest {
             requested_name: requested_name.to_owned(),
             workspace: workspace.to_owned(),
+            invite_token: invite_token.map(str::to_owned),
         })
         .map_err(|e| ClientError::Corrupt(format!("authorize body: {e}")))?;
         let url = format!("{}/v1/device/authorize", self.base_url);
@@ -679,7 +681,7 @@ impl EnrollSource for UreqDeviceClient {
         Ok(DeviceAuthStart {
             device_code: resp.device_code,
             user_code: resp.user_code,
-            verification_uri_complete: resp.verification_uri_complete,
+            verification_uri: resp.verification_uri,
             expires_in_secs: resp.expires_in_secs,
             interval_secs: resp.interval_secs,
         })
@@ -735,6 +737,10 @@ fn map_poll_response(status: u16, bytes: &[u8]) -> Result<DeviceAuthPoll, Client
                     name: workspace.name,
                     display_name: workspace.display_name,
                 },
+                hint: resp.hint.map(|h| crate::plane::GrantHint {
+                    kind: h.kind,
+                    name: h.name,
+                }),
             })
         }
     })
@@ -828,6 +834,44 @@ fn map_invite_envelope(status: u16, bytes: &[u8]) -> Result<InvitationData, Clie
     }
     serde_json::from_value(env.data)
         .map_err(|e| ClientError::WireInvalid(format!("invitation data is malformed: {e}")))
+}
+
+/// Map the invite-accept **200 envelope** to the typed [`InviteAccepted`]: `ok` carries the joined
+/// workspace + hint; `!ok` is the typed refusal (wrong account / unverified — carried verbatim so
+/// the verb explains without echoing any address). **Pure** (bytes in), unit-testable.
+fn map_invite_accept_envelope(bytes: &[u8]) -> Result<InviteAccepted, ClientError> {
+    let env: JsonEnvelope = serde_json::from_slice(bytes).map_err(|e| {
+        ClientError::WireInvalid(format!("invite accept envelope is malformed: {e}"))
+    })?;
+    if !env.ok {
+        return Err(match env.error {
+            Some(e) => ClientError::PlaneTerminal {
+                outcome: e.outcome,
+                code: e.code,
+                retryable: e.retryable,
+            },
+            None => ClientError::PlaneTerminal {
+                outcome: TerminalOutcome::Denied,
+                code: "DENIED".to_owned(),
+                retryable: false,
+            },
+        });
+    }
+    let data: topos_types::requests::InviteAcceptData = serde_json::from_value(env.data)
+        .map_err(|e| ClientError::WireInvalid(format!("invite accept data is malformed: {e}")))?;
+    crate::id::validate_workspace_id(&data.workspace.workspace_id)
+        .map_err(crate::id::wire_flavor)?;
+    Ok(InviteAccepted {
+        workspace: EnrolledWorkspace {
+            workspace_id: data.workspace.workspace_id,
+            name: data.workspace.name,
+            display_name: data.workspace.display_name,
+        },
+        hint: data.hint.map(|h| crate::plane::GrantHint {
+            kind: h.kind,
+            name: h.name,
+        }),
+    })
 }
 
 // =================================================================================================
@@ -1080,6 +1124,37 @@ impl DirectorySource for UreqDeviceClient {
             "membership describe",
             workspace_id,
         )
+    }
+
+    fn accept_invitation(&self, token: &str) -> Result<InviteAccepted, ClientError> {
+        // Person-scoped: the ONE device credential authenticates; there is no workspace id (the
+        // caller has no seat in the invitation's workspace yet — that is the point).
+        let credential = self.credential_for("")?;
+        let url = format!("{}/v1/invitations/accept", self.base_url);
+        let body = serde_json::json!({ "token": token });
+        let payload = serde_json::to_vec(&body)
+            .map_err(|_| ClientError::Corrupt("invite accept: could not serialize".to_owned()))?;
+        let resp = self
+            .agent
+            .post(&url)
+            .header("authorization", &format!("Bearer {credential}"))
+            .header("content-type", "application/json")
+            .send(payload.as_slice())
+            .map_err(|e| ClientError::Plane(format!("invite accept: {e}")))?;
+        let status = resp.status().as_u16();
+        match classify(status) {
+            HttpClass::Ok => {
+                let bytes = read_body(resp).map_err(plane_err)?;
+                map_invite_accept_envelope(&bytes)
+            }
+            // The uniform non-answer: a dead token and an unknown route read the same.
+            HttpClass::NotFound => Err(ClientError::TargetNotFound {
+                target: "invitation".to_owned(),
+            }),
+            HttpClass::NotModified | HttpClass::Other => {
+                Err(ClientError::Plane(format!("invite accept: HTTP {status}")))
+            }
+        }
     }
 
     fn channels_index(&self, workspace_id: &str) -> Result<WireChannelIndex, ClientError> {

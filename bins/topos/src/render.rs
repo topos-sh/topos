@@ -965,15 +965,16 @@ pub(crate) fn follow_tty(data: &FollowData, resumed: &[String]) -> String {
         if let Some(plane) = &data.plane_base_url {
             s.push_str(&format!("\nserver: {plane}"));
         }
-        // The code rides inside the URL (`verification_uri_complete`) — the human clicks it and
-        // cross-checks the SAME code on the approval page before approving. This render surfaces
-        // only when the invocation ENDED still pending (a headless run, or a `--wait` cap that
-        // passed): the interactive path auto-polls to completion and never shows it, so the
-        // re-invoke line here is honest resume guidance, never a required post-approval step.
+        // The URL and the code print on SEPARATE lines — the code never rides a URL. The human
+        // opens the page (an invitation enrollment's page weaves account → accept → approval)
+        // and checks the code shown there against this one. This render surfaces only when the
+        // invocation ENDED still pending (a headless run, or a `--wait` cap that passed): the
+        // interactive path auto-polls to completion and never shows it, so the re-invoke line
+        // here is honest resume guidance, never a required post-approval step.
         s.push_str(&format!(
-            "\nOpen this URL to approve:\n  {}\n  \
-             code: {} (confirm it matches the page before approving)",
-            pending.verification_uri_complete, pending.user_code,
+            "\nOpen: {}\nCode: {} (the page shows the same code — confirm it matches before \
+             approving)",
+            pending.verification_uri, pending.user_code,
         ));
         if let Some(exp) = &pending.expires_at {
             s.push_str(&format!("\nThe code is valid until {exp}."));
@@ -1298,9 +1299,9 @@ pub(crate) fn unfollow_applied_tty(a: &crate::ops::UnfollowApplied) -> String {
 /// so the re-invoke line is resume guidance, never a required post-approval step.
 pub(crate) fn login_pending_tty(p: &crate::ops::AuthLoginPending) -> String {
     let mut s = format!(
-        "Signing in to {}\nOpen this URL to approve:\n  {}\n  \
-         code: {} (confirm it matches the page before approving)",
-        p.server, p.verification_uri_complete, p.user_code,
+        "Signing in to {}\nOpen: {}\nCode: {} (the page shows the same code — confirm it \
+         matches before approving)",
+        p.server, p.verification_uri, p.user_code,
     );
     if let Some(exp) = &p.expires_at {
         s.push_str(&format!("\nThe code is valid until {exp}."));
@@ -1799,25 +1800,29 @@ pub(crate) fn invite_read_tty(data: &topos_types::results::InviteReadData) -> St
     )
 }
 
-/// The `invite <email>...` DESCRIBE's TTY — who gets seated, the pre-placements, the mail-or-paste note.
+/// The `invite <email>...` DESCRIBE's TTY — who gets invited, the hint, the mailed-link note.
 pub(crate) fn invite_describe_tty(
     data: &topos_types::results::InviteDescribeData,
     yes_argv: &[String],
 ) -> String {
-    let mut s = format!("Would seat as invited members of {}:", data.address);
+    let mut s = format!("Would invite into {}:", data.address);
     for e in &data.seat {
         s.push_str(&format!("\n  {e}"));
     }
-    if !data.channels.is_empty() {
+    if let Some(skill) = &data.skill {
         s.push_str(&format!(
-            "\nPre-placed into channels: #{}",
-            data.channels.join(", #")
+            "\nLeads with the {skill} skill — accepting follows it for them."
         ));
     }
-    s.push_str(&format!(
-        "\nThey join at {} — the server mails them if it can, otherwise paste the address to them.",
-        data.address
-    ));
+    if let Some(channel) = &data.channel {
+        s.push_str(&format!(
+            "\nLeads with #{channel} — accepting joins them to it."
+        ));
+    }
+    s.push_str(
+        "\nEach address gets a mailed single-use invite link (browser, agent paste-block, or \
+         `topos follow <invite-url>`).",
+    );
     s.push_str(&format!(
         "\nNothing has changed yet — apply with:\n  {}",
         argv_line(yes_argv)
@@ -2962,7 +2967,7 @@ mod tests {
             workspace_display_name: Some("Acme Inc".to_owned()),
             plane_base_url: Some("https://api.topos.sh".to_owned()),
             pending: Some(EnrollmentPending {
-                verification_uri_complete: "https://topos.sh/verify?code=WXYZ-1234".to_owned(),
+                verification_uri: "https://topos.sh/verify".to_owned(),
                 user_code: "WXYZ-1234".to_owned(),
                 expires_at: None,
                 interval_secs: Some(5),
@@ -2971,13 +2976,11 @@ mod tests {
             triggers: Vec::new(),
         };
         let text = follow_tty(&data, &[]);
-        // The clickable URL is surfaced, plus the SHORT code to cross-check against the approval page.
-        assert!(
-            text.contains("https://topos.sh/verify?code=WXYZ-1234"),
-            "{text}"
-        );
-        assert!(text.contains("code: WXYZ-1234"), "{text}");
-        assert!(text.contains("confirm it matches the page"), "{text}");
+        // The bare URL and the SHORT code surface on SEPARATE lines — the code never rides a URL.
+        assert!(text.contains("Open: https://topos.sh/verify"), "{text}");
+        assert!(text.contains("Code: WXYZ-1234"), "{text}");
+        assert!(!text.contains("verify?code="), "{text}");
+        assert!(text.contains("confirm it matches"), "{text}");
     }
 
     #[test]

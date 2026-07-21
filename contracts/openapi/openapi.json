@@ -27,7 +27,7 @@
         },
         "responses": {
           "200": {
-            "description": "The device-authorization grant: the secret device_code to poll with (promoted to the device's ONE bearer credential on approval), the human-facing user_code, and the approval URLs.",
+            "description": "The device-authorization grant: the secret device_code to poll with (promoted to the device's ONE bearer credential on approval), the human-facing user_code, and the BARE approval URL (the code never rides a URL; the approval page's lookup is a POST). An invite_token in the body is recorded on the flow unvalidated — never a token oracle.",
             "content": {
               "application/json": {
                 "schema": {
@@ -87,7 +87,7 @@
         },
         "responses": {
           "200": {
-            "description": "The poll status; `granted` carries the ONE bearer credential (the promoted device code), the device id, and the joined workspace.",
+            "description": "The poll status; `granted` carries the ONE bearer credential (the promoted device code), the device id, the joined workspace, and — when the flow carried an invitation naming one — the first-destination hint.",
             "content": {
               "application/json": {
                 "schema": {
@@ -118,6 +118,87 @@
           },
           "500": {
             "description": "Internal fault.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/invitations/accept": {
+      "post": {
+        "tags": [
+          "enrollment"
+        ],
+        "operationId": "invite_accept",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "`Bearer <device credential>` — PERSON-scoped: the caller has no seat in the invitation's workspace yet.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InviteAcceptRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK carries the InviteAcceptData (the joined workspace + the optional first-destination hint); the ceremony fences answer 200 DENIED INVITE_OTHER_ACCOUNT / EMAIL_UNVERIFIED (no address is ever echoed).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Missing/blank credential, a revoked device, or a dead token — invalid, expired, revoked, or already consumed (indistinguishable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (Retry-After header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Integrity / internal store fault.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1385,7 +1466,7 @@
         },
         "responses": {
           "200": {
-            "description": "The invitation receipt — OK carries the InvitationData (address + invited + the honest mailed flag); a policy refusal is a 200 DENIED OWNER_ROLE_REQUIRED, an unknown channel a 200 DENIED UNKNOWN_CHANNEL.",
+            "description": "The invitation receipt — OK carries the InvitationData (address + invited + the honest mailed flag; the tokened invite link travels ONLY in the mail); a policy refusal is a 200 DENIED OWNER_ROLE_REQUIRED, an unresolvable hint a 200 DENIED UNKNOWN_SKILL / UNKNOWN_CHANNEL, an unarmed mail transport a 200 DENIED MAIL_NOT_CONFIGURED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2493,6 +2574,24 @@
           }
         }
       },
+      "DeviceAuthHint": {
+        "type": "object",
+        "description": "The first-destination HINT an accepted invitation named — decorated onto a `granted` poll (and\nthe direct-accept answer) so the enrolled client's post-accept subscribe can target it. `kind`\nis the bundle catalog's own tag (`skill` today) or the literal `channel` — displayed and routed\non, never trusted as authority.",
+        "required": [
+          "kind",
+          "name"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "What the hinted thing is: the catalog's `kind` tag, or `channel`."
+          },
+          "name": {
+            "type": "string",
+            "description": "The hinted bundle's or channel's name in the joined workspace."
+          }
+        }
+      },
       "DeviceAuthPollRequest": {
         "type": "object",
         "description": "`POST /v1/device/token` body — poll a device-authorization flow for its outcome.",
@@ -2526,6 +2625,17 @@
               "null"
             ],
             "description": "The registered device's id — present ONLY when `status` is `granted`."
+          },
+          "hint": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DeviceAuthHint",
+                "description": "The invitation's first-destination hint — present only on a `granted` poll whose flow\ncarried an invite token naming one."
+              }
+            ]
           },
           "status": {
             "$ref": "#/components/schemas/DeviceAuthPollStatus",
@@ -2562,6 +2672,13 @@
           "workspace"
         ],
         "properties": {
+          "invite_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The invitation-link token a `follow <invite-url>` enrollment carries. Recorded on the flow\n(as its hash) UNVALIDATED — this unauthenticated start is never a token oracle; the approval\nceremony resolves it and weaves the invitation accept into its own fence."
+          },
           "requested_name": {
             "type": "string",
             "description": "A human-readable device name shown on the approval page (a confused-deputy guard, not\nauthority) and kept as the device's display name once approved."
@@ -2579,7 +2696,6 @@
           "device_code",
           "user_code",
           "verification_uri",
-          "verification_uri_complete",
           "expires_in_secs",
           "interval_secs"
         ],
@@ -2606,11 +2722,7 @@
           },
           "verification_uri": {
             "type": "string",
-            "description": "The approval URL a signed-in human visits."
-          },
-          "verification_uri_complete": {
-            "type": "string",
-            "description": "The approval URL with the user code already embedded — the one link to open; a client uses\nit VERBATIM when present."
+            "description": "The approval URL a signed-in human visits. The code NEVER rides a URL: the client prints\nthis bare address and the short code on separate lines, and the page's lookup is a POST."
           }
         }
       },
@@ -2662,7 +2774,7 @@
       },
       "InvitationData": {
         "type": "object",
-        "description": "`POST /v1/workspaces/{ws}/invitations` success `data` — what the inviter pastes onward: the workspace\nADDRESS (the whole invitation besides the roster rows themselves).",
+        "description": "`POST /v1/workspaces/{ws}/invitations` success `data` — what the inviter pastes onward: the\nworkspace ADDRESS. Deliberately NOT the tokened link: the link travels only in the invitation\nmail, so the inviter's receipt can never stand in for the invitee's mailbox.",
         "required": [
           "address",
           "invited",
@@ -2688,17 +2800,17 @@
       },
       "InvitationRequest": {
         "type": "object",
-        "description": "`POST /v1/workspaces/{ws}/invitations` body — invitation as a ROSTER WRITE: seat each email as an\ninvited member (recording who invited whom) and optionally pre-place the person into channels.\nThere is no invite link and no role field — every CLI invitee starts as a member (roles are raised\nlater, on the web), and joining is `follow <address>` plus proof of the invited email. Member-level\nunless the workspace's invite policy restricts inviting to owners.",
+        "description": "`POST /v1/workspaces/{ws}/invitations` body — invitation as an INVITATION-ROW write: each email\nbecomes a pending 7-day claim redeemable through the single-use link the server MAILS (the token\nnever appears in this exchange — the mailbox is its one channel). At most ONE optional\nfirst-destination hint (a skill or a channel of this workspace) rides the invitation and is\ndelivered by the accept. No role field — every CLI invitee starts as a member (roles are raised\nlater, on the web). Member-level unless the workspace's invite policy restricts inviting to\nowners.",
         "required": [
           "emails"
         ],
         "properties": {
-          "channels": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Channel names to pre-place each invitee into (re-inviting restores placements; the structural\n`everyone` needs no placement and is accepted as a no-op)."
+          "channel": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The first-destination CHANNEL hint (a channel name in this workspace). At most one of\n`skill`/`channel` may be set."
           },
           "emails": {
             "type": "array",
@@ -2706,6 +2818,50 @@
               "type": "string"
             },
             "description": "The emails to seat as invited members (folded to the canonical lowercase form server-side)."
+          },
+          "skill": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The first-destination SKILL hint (a bundle name in this workspace). At most one of\n`skill`/`channel` may be set."
+          }
+        }
+      },
+      "InviteAcceptData": {
+        "type": "object",
+        "description": "`POST /v1/invitations/accept` success `data` — the joined workspace + the optional\nfirst-destination hint the client's post-accept subscribe targets. Nothing lands on any device\nfrom this accept: bytes still move only through the device-side two-phase describe/consent.",
+        "required": [
+          "workspace"
+        ],
+        "properties": {
+          "hint": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DeviceAuthHint",
+                "description": "The invitation's first-destination hint, when it named one."
+              }
+            ]
+          },
+          "workspace": {
+            "$ref": "#/components/schemas/DeviceAuthWorkspace",
+            "description": "The workspace the accept seated the person in."
+          }
+        }
+      },
+      "InviteAcceptRequest": {
+        "type": "object",
+        "description": "`POST /v1/invitations/accept` body — the ALREADY-ENROLLED device consuming an invite URL: the\nbearer credential authenticates the person (seat-LESS by construction — the caller has no seat\nin the invitation's workspace yet), and the token names the invitation. The same ceremony\nfences as the browser accept apply; an invalid/expired/consumed token answers the uniform 404.",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "The invitation-link token (the mailed single-use secret)."
           }
         }
       },

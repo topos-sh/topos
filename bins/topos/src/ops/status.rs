@@ -174,7 +174,7 @@ mod tests {
                 },
                 device_code: "dc_expired".to_owned(),
                 user_code: "XXXX-YYYY".to_owned(),
-                verification_uri_complete: "https://topos.sh/verify?code=XXXX-YYYY".to_owned(),
+                verification_uri: "https://topos.sh/verify".to_owned(),
                 interval_secs: 5,
                 // Long expired — recovery would reap this WAL on any ordinary command.
                 expires_at_millis: 1_000,

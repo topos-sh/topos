@@ -190,6 +190,18 @@ fn schemas() -> Vec<(&'static str, String)> {
             "invitation-data",
             emit(schemars::schema_for!(topos_types::requests::InvitationData)),
         ),
+        (
+            "invite-accept-request",
+            emit(schemars::schema_for!(
+                topos_types::requests::InviteAcceptRequest
+            )),
+        ),
+        (
+            "invite-accept-data",
+            emit(schemars::schema_for!(
+                topos_types::requests::InviteAcceptData
+            )),
+        ),
         // The adopted verb describe/apply `data` payloads (the two-phase surface: a bare mutating verb
         // returns the describe, `--yes` returns it applied).
         (
@@ -744,7 +756,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             workspace_display_name: None,
             plane_base_url: Some("https://topos.sh/api".to_owned()),
             pending: Some(EnrollmentPending {
-                verification_uri_complete: "https://topos.sh/verify?code=WXYZ-1234".to_owned(),
+                // The bare approval page + the code on its own field — the code never rides a URL.
+                verification_uri: "https://topos.sh/verify".to_owned(),
                 user_code: "WXYZ-1234".to_owned(),
                 expires_at: Some("2026-06-25T00:15:00Z".to_owned()),
                 interval_secs: Some(5),

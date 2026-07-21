@@ -28,6 +28,7 @@ mod follow;
 mod invite;
 mod list;
 mod log;
+pub(crate) mod loopback;
 mod merge_resolve;
 mod protect;
 mod publish;
@@ -69,7 +70,7 @@ pub(crate) use channel::{ChannelConnectors, ChannelOutcome, channel};
 pub(crate) use diff::{DiffBudget, diff};
 pub(crate) use follow::{
     BarewordDecision, FollowApplied, FollowConnectors, FollowDescribe, FollowOpts, FollowOutcome,
-    Reattach, follow,
+    Reattach, device_challenge, follow,
 };
 // Test-only re-export: the waiting-line parser round-trips against the disclosures' emitter.
 #[cfg(test)]
