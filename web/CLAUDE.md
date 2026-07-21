@@ -156,7 +156,9 @@ Every attempt lands an `admin_event` audit row, refused step-ups included. The g
 reach of its act stay matched IN THE DATABASE: the account page's step-up-LESS device sign-out is
 SELF-ONLY (a device is a possession; no owner arm reaches into someone else's pocket), fenced in
 `revokeOwnDevice`. The `/verify` device-approve is also step-up-LESS — a live session plus the explicit
-approve click is the whole ceremony there.
+approve click is the whole ceremony there. Revoking a pending invitation is step-up-LESS too —
+non-destructive like the invite it undoes (the row flips to revoked; re-inviting mints a fresh link), so
+the owner gate + the audited act is the whole ceremony on the members page.
 
 **Mail — ONE transport, whole product.** `app/lib/mail/transport.server.ts` is the only module allowed to
 hold an SMTP client; every product mail rides it — the invite notice (`invite-mail.server.ts`), the
