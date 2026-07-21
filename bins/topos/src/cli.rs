@@ -340,15 +340,20 @@ pub(crate) enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Seat emails as invited members of the workspace (a roster write). Every CLI invitee starts as a
-    /// member; joining is `follow <address>` plus proof of the invited email. Requires prior enrollment.
-    /// A bare `invite` (no emails) reads the workspace address + policy (lands later).
+    /// Invite emails into the workspace. Each address gets a mailed single-use invite link (accept in
+    /// the browser, hand the mail's paste-block to an agent, or `topos follow <invite-url>`); every
+    /// CLI invitee starts as a member. Requires prior enrollment. A bare `invite` (no emails) reads
+    /// the workspace address + policy.
     Invite {
-        /// The emails to invite (folded to canonical form; seeded onto the roster as `invited`).
+        /// The emails to invite (folded to canonical form; each becomes a pending 7-day claim).
         email: Vec<String>,
-        /// Pre-place each invitee into this channel (repeatable).
+        /// Lead the invitation with this SKILL — accepting follows it for the invitee (at most one
+        /// of --skill/--channel).
+        #[arg(long, value_name = "NAME", conflicts_with = "channel")]
+        skill: Option<String>,
+        /// Lead the invitation with this CHANNEL — accepting joins the invitee to it.
         #[arg(long, value_name = "NAME")]
-        channel: Vec<String>,
+        channel: Option<String>,
         /// Apply without the describe step. Parses today; the two-phase describe lands later.
         #[arg(long)]
         yes: bool,

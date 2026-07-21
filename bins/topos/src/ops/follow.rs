@@ -4,7 +4,7 @@
 //! - **`follow <workspace-address>`** (call 1) — card-fetch the address, re-root onto the declared API
 //!   base, guard one-plane-per-install, start a device authorization
 //!   (`POST /v1/device/authorize {requested_name, workspace}`), write a `0600` WAL, and return the
-//!   pending disclosure ("open `verification_uri_complete`, enter the code").
+//!   pending disclosure ("open `verification_uri`, enter the code").
 //! - **re-invoking `follow`** (call 2) — with a pending enrollment WAL on disk, re-invoking `follow`
 //!   (with any target, or none) RESUMES it — "re-invoking IS the resume": poll `/v1/device/token`
 //!   once; on a granted poll the answer carries the device's ONE bearer credential (the promoted
@@ -390,7 +390,21 @@ pub(crate) fn follow(
         && opts.skills.is_empty()
         && let [single] = targets.as_slice()
     {
-        // 2) A retired `/i/` invite link. Checked BEFORE `@` so a link carrying userinfo
+        // 2a) A TOKENED invitation URL (`<origin>[/<ws>]/invite/<token>` — what the invitation
+        // mail's terminal line pastes). Checked before `@` for the same reason as the retired
+        // `/i/` links below. An enrolled install accepts directly over the device lane; an
+        // unenrolled one starts the device flow CARRYING the token.
+        if single.contains("/invite/") {
+            let Some((origin, workspace_slug, link)) = parse_invite_url(single) else {
+                return Err(ClientError::InvalidArgument(
+                    "that looks like an invitation link, but not one this tool can read — paste \
+                     the invite URL from the mail verbatim"
+                        .into(),
+                ));
+            };
+            return follow_invite_url(ctx, connectors, &origin, &workspace_slug, link, &opts);
+        }
+        // 2b) A retired `/i/` invite link. Checked BEFORE `@` so a link carrying userinfo
         // (`https://u@host/i/tok`) or a query param (`?x=a@b`) is never misread as `<skill>@<hash>`.
         if single.contains("/i/") {
             return Err(ClientError::Enrollment(
@@ -539,13 +553,21 @@ fn resume(
         }
         // Granted: the poll carries the device's ONE credential + the AUTHORITATIVE workspace (the
         // requested name was only ever a request; unknown/not-yours died at the uniform denial).
-        // Persist, then CONTINUE into the recorded follow intent in this same invocation.
+        // Persist, then CONTINUE into the recorded follow intent in this same invocation. An
+        // invitation grant's HINT wins over the recorded target — an invite enrollment records
+        // only the workspace (the hint is server truth the approval resolved), so the subscribe
+        // describes the invited-to thing first.
         DeviceAuthPoll::Granted(grant) => {
             persist_enrollment(ctx, &wal.base_url, &grant)?;
-            let target = recorded_target.unwrap_or(enroll::FollowTargetDoc {
-                kind: enroll::FollowKindDoc::Workspace,
-                name: wal.workspace_name.clone(),
-            });
+            let target = grant
+                .hint
+                .as_ref()
+                .map(hint_target)
+                .or(recorded_target)
+                .unwrap_or(enroll::FollowTargetDoc {
+                    kind: enroll::FollowKindDoc::Workspace,
+                    name: wal.workspace_name.clone(),
+                });
             // The original invocation's `--manual` rode the WAL; honor it on a resume that omits the
             // flag (a fresh flag still wins — the resumed invocation's consent is the current one).
             let mut opts = opts.clone();
@@ -612,6 +634,26 @@ pub(super) fn persist_enrollment(
 // persists → the two-phase subscribe (describe / `--yes` apply).
 // =================================================================================================
 
+/// The invitation link a `follow <invite-url>` enrollment carries: the mailed single-use token
+/// plus the page URL itself (the browser destination that weaves account → accept → approval).
+/// Hand-written `Debug` — the token is a secret (worth one invitation) and never logs.
+#[derive(Clone)]
+pub(super) struct InviteLink {
+    /// **SECRET** — the invitation token (the URL's last path segment).
+    pub token: String,
+    /// The full invitation page URL, as pasted (scheme included; no query).
+    pub url: String,
+}
+
+impl std::fmt::Debug for InviteLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InviteLink")
+            .field("token", &"<redacted>")
+            .field("url", &"<invite url redacted>")
+            .finish()
+    }
+}
+
 /// The enroll intent an unresolved single target may fold in: the workspace ADDRESS name, the
 /// follow intent to continue into, and the explicit host when the target was a full URL.
 struct EnrollIntent {
@@ -621,6 +663,60 @@ struct EnrollIntent {
     /// True when the target was a BARE word (no slash, no scheme) — the shape the unenrolled
     /// consent guard gates before any device flow starts.
     bareword: bool,
+    /// The invitation link, when the target was an invite URL — rides the device-authorize start
+    /// (the flow row records it) and swaps the browser destination to the invitation page.
+    invite: Option<InviteLink>,
+}
+
+/// Parse an invitation URL — `<origin>/invite/<token>` (single tenancy) or
+/// `<origin>/<ws>/invite/<token>` (multi) — into its origin, workspace slug (`""` for the
+/// origin-rooted form), and token. A schemeless dotted host reads as `https://` (the same
+/// disambiguation the address grammar applies). `None` = not an invite URL shape.
+pub(super) fn parse_invite_url(raw: &str) -> Option<(String, String, InviteLink)> {
+    let (origin, path) = split_origin(raw)?;
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let (workspace, token) = match segments.as_slice() {
+        ["invite", token] => (String::new(), (*token).to_owned()),
+        [ws, "invite", token] if resolve::is_workspace_name(ws) => {
+            ((*ws).to_owned(), (*token).to_owned())
+        }
+        _ => return None,
+    };
+    if token.is_empty() || token.contains(['?', '#']) {
+        return None;
+    }
+    let url = if workspace.is_empty() {
+        format!("{origin}/invite/{token}")
+    } else {
+        format!("{origin}/{workspace}/invite/{token}")
+    };
+    Some((origin, workspace, InviteLink { token, url }))
+}
+
+/// Split a pasted URL into `(origin, path)`: an explicit `http(s)://` scheme, or a schemeless
+/// DOTTED first segment read as `https://` (the dot disambiguates a host from a slug). Any query
+/// or fragment is dropped before the path splits.
+fn split_origin(raw: &str) -> Option<(String, String)> {
+    let raw = raw.split(['?', '#']).next().unwrap_or(raw);
+    let (scheme, rest) = if let Some(rest) = raw.strip_prefix("https://") {
+        ("https", rest)
+    } else if let Some(rest) = raw.strip_prefix("http://") {
+        ("http", rest)
+    } else {
+        let first = raw.split('/').next().unwrap_or("");
+        if !first.contains('.') {
+            return None;
+        }
+        ("https", raw)
+    };
+    let (host, path) = match rest.split_once('/') {
+        Some((h, p)) => (h, p.to_owned()),
+        None => (rest, String::new()),
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some((format!("{scheme}://{host}"), path))
 }
 
 /// Whether an UNRESOLVED parsed target is shaped like a workspace address this install could enroll
@@ -663,6 +759,7 @@ fn enroll_intent(parsed: &ParsedTarget) -> Option<EnrollIntent> {
                 workspace_name: workspace.clone(),
                 target,
                 bareword: false,
+                invite: None,
             })
         }
         ParsedTarget::Bare(name) if resolve::is_workspace_name(name) => Some(EnrollIntent {
@@ -673,6 +770,7 @@ fn enroll_intent(parsed: &ParsedTarget) -> Option<EnrollIntent> {
                 name: name.clone(),
             },
             bareword: true,
+            invite: None,
         }),
         _ => None,
     }
@@ -708,11 +806,28 @@ fn begin_address(
     let base_url = resolve_api_base(&origin, &card.api_base_url)?;
     guard_one_plane(ctx, &base_url)?;
 
-    let start = (connectors.enroll)(&base_url)
-        .device_auth_start(&intent.workspace_name, &machine_name())?;
+    let start = (connectors.enroll)(&base_url).device_auth_start(
+        &intent.workspace_name,
+        &machine_name(),
+        intent.invite.as_ref().map(|i| i.token.as_str()),
+    )?;
     let expires_at = now_millis(ctx).saturating_add(
         i64::try_from(start.expires_in_secs.saturating_mul(1000)).unwrap_or(i64::MAX),
     );
+    // The browser destination. A PLAIN enrollment prints the server's bare approval page (the
+    // human types the code there — it never rides a URL). An INVITATION enrollment points at the
+    // invitation page instead — account/sign-in → accept → approval as ONE visit — carrying the
+    // flow's device-code HASH as the `device` challenge, so the approval card resolves with zero
+    // typing after the accept (the hash identifies the flow; a preimage is infeasible, and the
+    // code itself still never enters a URL).
+    let verification_uri = match &intent.invite {
+        Some(link) => format!(
+            "{}?device={}",
+            link.url,
+            device_challenge(&start.device_code)
+        ),
+        None => start.verification_uri,
+    };
     let wal = enroll::PendingEnrollment {
         schema_version: PERSISTED_SCHEMA_VERSION,
         base_url,
@@ -727,7 +842,7 @@ fn begin_address(
         },
         device_code: start.device_code,
         user_code: start.user_code,
-        verification_uri_complete: start.verification_uri_complete,
+        verification_uri,
         interval_secs: start.interval_secs,
         expires_at_millis: expires_at,
     };
@@ -735,9 +850,100 @@ fn begin_address(
     Ok(FollowOutcome::plain(pending_followdata(&wal)))
 }
 
+/// The loopback/weave CHALLENGE: hex of the device code's SHA-256 — the same value the server
+/// keys the flow row by, so it identifies the pending request in a URL without carrying any
+/// secret (the code stays off every URL; the device code itself never leaves the WAL).
+pub(crate) fn device_challenge(device_code: &str) -> String {
+    to_hex(&topos_core::digest::sha256(device_code.as_bytes()))
+}
+
+/// The follow target an invitation's first-destination hint names (`channel` → a channel join;
+/// anything else — the catalog's `kind` tag — a direct skill follow).
+fn hint_target(hint: &crate::plane::GrantHint) -> enroll::FollowTargetDoc {
+    enroll::FollowTargetDoc {
+        kind: if hint.kind == "channel" {
+            enroll::FollowKindDoc::Channel
+        } else {
+            enroll::FollowKindDoc::Skill
+        },
+        name: hint.name.clone(),
+    }
+}
+
+/// `follow <invite-url>` — the terminal-first invited person. ENROLLED at the same plane: accept
+/// directly over the device lane (the credential authenticates; no browser) and continue into the
+/// hinted target's describe. Enrolled ELSEWHERE: the wrong-server refusal. UNENROLLED: the
+/// ordinary device flow CARRYING the token — the browser weave (invitation page → /verify) does
+/// account + accept + approval in one visit, and the granted poll's hint steers the subscribe.
+fn follow_invite_url(
+    ctx: &Ctx<'_>,
+    connectors: &FollowConnectors<'_>,
+    origin: &str,
+    workspace_slug: &str,
+    link: InviteLink,
+    opts: &FollowOpts,
+) -> Result<FollowOutcome, ClientError> {
+    if enroll::read_instance(ctx.fs, &ctx.layout)?.is_some() {
+        // The card is fetched at the BARE origin — the invite URL (a capability) never rides a
+        // card probe, and the card is constant on every path anyway.
+        let card = (connectors.enroll)(origin).fetch_card(origin)?;
+        let base_url = resolve_api_base(origin, &card.api_base_url)?;
+        guard_one_plane(ctx, &base_url)?;
+        // Already enrolled here: the device lane accepts directly — the credential already acts
+        // as its person, and the fresh seat extends its reach the moment the accept commits.
+        let directory = (connectors.directory)(&base_url);
+        let accepted = directory.accept_invitation(&link.token)?;
+        let mut user = enroll::read_user(ctx.fs, &ctx.layout)?.unwrap_or_default();
+        user.schema_version = PERSISTED_SCHEMA_VERSION;
+        enroll::upsert_membership(
+            &mut user,
+            enroll::Membership {
+                workspace_id: accepted.workspace.workspace_id.clone(),
+                name: accepted.workspace.name.clone(),
+                display_name: accepted.workspace.display_name.clone(),
+                enrolled_at: now_millis(ctx),
+            },
+        );
+        enroll::write_user(ctx.fs, &ctx.layout, &user)?;
+        let target = match &accepted.hint {
+            Some(hint) => hint_target(hint),
+            None => enroll::FollowTargetDoc {
+                kind: enroll::FollowKindDoc::Workspace,
+                name: accepted.workspace.name.clone(),
+            },
+        };
+        return continue_into_target(
+            ctx,
+            connectors,
+            &base_url,
+            &accepted.workspace.workspace_id,
+            &target,
+            opts,
+        );
+    }
+
+    // Unenrolled: the device flow carries the token; the intent's recorded target is the
+    // workspace (the granted poll's hint refines it at resume).
+    begin_address(
+        ctx,
+        connectors,
+        EnrollIntent {
+            host: Some(origin.to_owned()),
+            workspace_name: workspace_slug.to_owned(),
+            target: enroll::FollowTargetDoc {
+                kind: enroll::FollowKindDoc::Workspace,
+                name: workspace_slug.to_owned(),
+            },
+            bareword: false,
+            invite: Some(link),
+        },
+        opts,
+    )
+}
+
 /// The pending `FollowData` an enrollment surfaces (there is no workspace ID yet — the requested
 /// ADDRESS name rides the disclosure slot; the id arrives with the grant). The human opens
-/// `verification_uri_complete` and cross-checks the code; the agent re-invokes `follow` to poll.
+/// `verification_uri` and cross-checks the code; the agent re-invokes `follow` to poll.
 /// An ORIGIN enrollment has no requested name — the plane base stands in for the disclosure, so the
 /// slot never reads as an empty string.
 fn pending_followdata(wal: &enroll::PendingEnrollment) -> FollowData {
@@ -753,7 +959,7 @@ fn pending_followdata(wal: &enroll::PendingEnrollment) -> FollowData {
         workspace_display_name: None,
         plane_base_url: Some(wal.base_url.clone()),
         pending: Some(EnrollmentPending {
-            verification_uri_complete: wal.verification_uri_complete.clone(),
+            verification_uri: wal.verification_uri.clone(),
             user_code: wal.user_code.clone(),
             expires_at: Some(fmt_rfc3339_millis(wal.expires_at_millis)),
             interval_secs: Some(wal.interval_secs),
@@ -2037,7 +2243,9 @@ fn now_millis(ctx: &Ctx<'_>) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{machine_name, resolve_api_base, validate_base_url};
+    use super::{
+        device_challenge, machine_name, parse_invite_url, resolve_api_base, validate_base_url,
+    };
 
     /// The device name shown on the approval page derives from the HOST (no key material exists to
     /// fingerprint) and always carries the recognizable `topos CLI` prefix.
@@ -2110,5 +2318,50 @@ mod tests {
         ] {
             assert!(validate_base_url(bad).is_err(), "must refuse {bad:?}");
         }
+    }
+
+    #[test]
+    fn invite_urls_parse_in_both_tenancy_shapes() {
+        // Origin-rooted (single tenancy): empty workspace slug.
+        let (origin, ws, link) = parse_invite_url("https://topos.sh/invite/tok_abc").unwrap();
+        assert_eq!(origin, "https://topos.sh");
+        assert_eq!(ws, "");
+        assert_eq!(link.token, "tok_abc");
+        assert_eq!(link.url, "https://topos.sh/invite/tok_abc");
+        // Workspace-nested (multi tenancy).
+        let (origin, ws, link) =
+            parse_invite_url("https://topos.example/acme/invite/tok_xyz").unwrap();
+        assert_eq!(origin, "https://topos.example");
+        assert_eq!(ws, "acme");
+        assert_eq!(link.url, "https://topos.example/acme/invite/tok_xyz");
+        // A schemeless DOTTED host reads as https (the mail's terminal line survives a lossy paste).
+        let (origin, _, link) = parse_invite_url("topos.sh/invite/tok_a").unwrap();
+        assert_eq!(origin, "https://topos.sh");
+        assert_eq!(link.token, "tok_a");
+        // A trailing query/fragment is dropped, never folded into the token.
+        let (_, _, link) = parse_invite_url("https://topos.sh/invite/tok_b?utm=x#frag").unwrap();
+        assert_eq!(link.token, "tok_b");
+    }
+
+    #[test]
+    fn non_invite_shapes_do_not_parse_as_invite_urls() {
+        for bad in [
+            "https://topos.sh/invite",             // no token
+            "https://topos.sh/a/b/invite/tok",     // too deep
+            "https://topos.sh/UPPER/invite/tok",   // not a workspace slug
+            "https://topos.sh/acme/skills/deploy", // a resource address
+            "bare-word",                           // no host
+        ] {
+            assert!(parse_invite_url(bad).is_none(), "must not parse {bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_device_challenge_is_the_hex_sha256_of_the_device_code() {
+        let challenge = device_challenge("dc_secret");
+        assert_eq!(challenge.len(), 64);
+        assert!(challenge.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(challenge, device_challenge("dc_secret"), "deterministic");
+        assert_ne!(challenge, device_challenge("dc_other"));
     }
 }

@@ -766,7 +766,7 @@ fn invite_bare_reads_address_and_policy_and_changes_nothing() {
     let inert_p = InertPlane;
     let inert_f = InertFollow;
     let ctx = rig.ctx(&inert_p, &inert_f);
-    let out = ops::invite(&ctx, &connectors, Vec::new(), Vec::new(), None, false).unwrap();
+    let out = ops::invite(&ctx, &connectors, Vec::new(), None, None, None, false).unwrap();
     match out {
         ops::InviteOutcome::Read(data) => {
             assert_eq!(data.address, "https://topos.sh/acme");
@@ -804,27 +804,40 @@ fn invite_with_emails_describes_then_applies_and_folds() {
         &ctx,
         &connectors,
         emails.clone(),
-        vec!["eng".into()],
+        None,
+        Some("eng".into()),
         None,
         false,
     )
     .unwrap();
     match out {
-        ops::InviteOutcome::Described { describe, .. } => {
+        ops::InviteOutcome::Described { describe, yes_argv } => {
             assert_eq!(describe.seat, vec!["bob@acme.com".to_owned()]);
-            assert_eq!(describe.channels, vec!["eng".to_owned()]);
+            assert_eq!(describe.channel.as_deref(), Some("eng"));
+            assert!(describe.skill.is_none());
+            // The apply argv re-spells the hint.
+            assert!(yes_argv.iter().any(|a| a == "--channel"));
         }
         _ => panic!("emails without --yes describe"),
     }
     assert!(captured.lock().unwrap().is_none());
 
     // Apply (--yes): the folded wire body reaches the transport.
-    let out = ops::invite(&ctx, &connectors, emails, vec!["eng".into()], None, true).unwrap();
+    let out = ops::invite(
+        &ctx,
+        &connectors,
+        emails,
+        None,
+        Some("eng".into()),
+        None,
+        true,
+    )
+    .unwrap();
     assert!(matches!(out, ops::InviteOutcome::Applied(_)));
     let (ws, body) = captured.lock().unwrap().clone().unwrap();
     assert_eq!(ws, WS);
     assert_eq!(body.emails, vec!["bob@acme.com".to_owned()]);
-    assert_eq!(body.channels, vec!["eng".to_owned()]);
+    assert_eq!(body.channel.as_deref(), Some("eng"));
 }
 
 // ---------------------------------------------------------------------------------------------

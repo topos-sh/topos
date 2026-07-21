@@ -9,14 +9,15 @@
 use utoipa::OpenApi;
 
 use topos_types::requests::{
-    DeviceAuthPollRequest, DeviceAuthPollResponse, DeviceAuthPollStatus, DeviceAuthStartRequest,
-    DeviceAuthStartResponse, DeviceAuthWorkspace, DeviceRevokeRequest, InvitationData,
-    InvitationRequest, NoticeAckRequest, ProposeRequest, ProtectionSetRequest, PublishRequest,
-    RevertRequest, ReviewRequest, WireAppliedReport, WireAppliedSkill, WireCandidate,
-    WireChannelEntry, WireChannelIndex, WireChannelSkill, WireDelivery, WireDeliverySkill,
-    WireFile, WireFileMode, WireLogProposal, WireLogVersion, WireMe, WireNotice, WireOpenProposal,
-    WireProposalEntry, WireProposalIndex, WireProposalList, WireProtocolCard, WireReach,
-    WireSkillIndex, WireSkillIndexEntry, WireSkillLog, WireVersionFile, WireVersionMeta, WireVia,
+    DeviceAuthHint, DeviceAuthPollRequest, DeviceAuthPollResponse, DeviceAuthPollStatus,
+    DeviceAuthStartRequest, DeviceAuthStartResponse, DeviceAuthWorkspace, DeviceRevokeRequest,
+    InvitationData, InvitationRequest, InviteAcceptData, InviteAcceptRequest, NoticeAckRequest,
+    ProposeRequest, ProtectionSetRequest, PublishRequest, RevertRequest, ReviewRequest,
+    WireAppliedReport, WireAppliedSkill, WireCandidate, WireChannelEntry, WireChannelIndex,
+    WireChannelSkill, WireDelivery, WireDeliverySkill, WireFile, WireFileMode, WireLogProposal,
+    WireLogVersion, WireMe, WireNotice, WireOpenProposal, WireProposalEntry, WireProposalIndex,
+    WireProposalList, WireProtocolCard, WireReach, WireSkillIndex, WireSkillIndexEntry,
+    WireSkillLog, WireVersionFile, WireVersionMeta, WireVia,
 };
 use topos_types::results::{ProposeData, PublishData, RevertData, ReviewData, ReviewDecision};
 use topos_types::{
@@ -63,9 +64,10 @@ use topos_types::{
         crate::routes::door::set_channel_protection,
         crate::routes::door::ack_notices,
         crate::routes::door::invite,
-        // Enrollment: the device-auth flow.
+        // Enrollment: the device-auth flow + the enrolled device's invitation accept.
         crate::routes::door::device_auth_start,
         crate::routes::door::device_auth_poll,
+        crate::routes::door::invite_accept,
         // Governance: the device revoke (the CLI logout wire).
         crate::routes::door::revoke_device,
     ),
@@ -130,13 +132,16 @@ use topos_types::{
         RevertData,
         ReviewData,
         ReviewDecision,
-        // The device-auth flow.
+        // The device-auth flow + the invitation accept.
         DeviceAuthStartRequest,
         DeviceAuthStartResponse,
         DeviceAuthPollRequest,
         DeviceAuthPollResponse,
         DeviceAuthPollStatus,
         DeviceAuthWorkspace,
+        DeviceAuthHint,
+        InviteAcceptRequest,
+        InviteAcceptData,
         // Governance request DTOs.
         DeviceRevokeRequest,
     )),

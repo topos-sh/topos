@@ -69,7 +69,7 @@ pub(crate) struct AuthLoginData {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct AuthLoginPending {
     pub server: String,
-    pub verification_uri_complete: String,
+    pub verification_uri: String,
     pub user_code: String,
     /// The minimum poll interval, in seconds.
     pub interval_secs: u64,
@@ -138,8 +138,11 @@ pub(crate) fn login(
     let base_url = resolve_api_base(&origin, &card.api_base_url)?;
     guard_one_plane(ctx, &base_url)?;
 
-    let start =
-        (connectors.enroll)(&base_url).device_auth_start(&membership.name, &machine_name())?;
+    let start = (connectors.enroll)(&base_url).device_auth_start(
+        &membership.name,
+        &machine_name(),
+        None,
+    )?;
     let now = i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX);
     let expires_at = now.saturating_add(
         i64::try_from(start.expires_in_secs.saturating_mul(1000)).unwrap_or(i64::MAX),
@@ -151,14 +154,14 @@ pub(crate) fn login(
         intent: enroll::EnrollIntentDoc::Login,
         device_code: start.device_code,
         user_code: start.user_code.clone(),
-        verification_uri_complete: start.verification_uri_complete.clone(),
+        verification_uri: start.verification_uri.clone(),
         interval_secs: start.interval_secs,
         expires_at_millis: expires_at,
     };
     enroll::write_wal(ctx.fs, &ctx.layout, &wal)?;
     Ok(AuthLoginOutcome::Pending(AuthLoginPending {
         server: base_url,
-        verification_uri_complete: start.verification_uri_complete,
+        verification_uri: start.verification_uri,
         user_code: start.user_code,
         interval_secs: start.interval_secs,
         expires_at: Some(super::follow::fmt_rfc3339_millis(expires_at)),
@@ -176,7 +179,7 @@ fn resume_login(
     match enroll_src.device_auth_poll(&wal.device_code)? {
         DeviceAuthPoll::Pending => Ok(AuthLoginOutcome::Pending(AuthLoginPending {
             server: wal.base_url.clone(),
-            verification_uri_complete: wal.verification_uri_complete.clone(),
+            verification_uri: wal.verification_uri.clone(),
             user_code: wal.user_code.clone(),
             interval_secs: wal.interval_secs,
             expires_at: Some(super::follow::fmt_rfc3339_millis(wal.expires_at_millis)),

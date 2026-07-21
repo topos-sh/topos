@@ -462,6 +462,7 @@ impl EnrollSource for FakeAddressEnroll {
         &self,
         workspace: &str,
         _requested_name: &str,
+        _invite_token: Option<&str>,
     ) -> Result<DeviceAuthStart, ClientError> {
         self.log
             .lock()
@@ -470,7 +471,7 @@ impl EnrollSource for FakeAddressEnroll {
         Ok(DeviceAuthStart {
             device_code: "dc_secret".into(),
             user_code: "CODE".into(),
-            verification_uri_complete: format!("{}/verify?code=CODE", self.api_base),
+            verification_uri: format!("{}/verify", self.api_base),
             expires_in_secs: 900,
             interval_secs: 5,
         })
@@ -478,6 +479,7 @@ impl EnrollSource for FakeAddressEnroll {
     fn device_auth_poll(&self, _dc: &str) -> Result<DeviceAuthPoll, ClientError> {
         self.log.lock().unwrap().push("poll".to_owned());
         Ok(DeviceAuthPoll::Granted(EnrolledGrant {
+            hint: None,
             credential: "devc_secret".into(),
             device_id: "dev_1".into(),
             workspace: EnrolledWorkspace {

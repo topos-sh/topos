@@ -160,6 +160,7 @@ impl FakeEnroll {
     }
     fn granted() -> DeviceAuthPoll {
         DeviceAuthPoll::Granted(EnrolledGrant {
+            hint: None,
             credential: "devc_secret".into(),
             device_id: "dev_1".into(),
             workspace: EnrolledWorkspace {
@@ -186,15 +187,18 @@ impl EnrollSource for FakeEnroll {
         &self,
         workspace: &str,
         requested_name: &str,
+        invite_token: Option<&str>,
     ) -> Result<DeviceAuthStart, ClientError> {
-        self.log
-            .lock()
-            .unwrap()
-            .push(format!("authorize {workspace} as {requested_name}"));
+        self.log.lock().unwrap().push(match invite_token {
+            // The log records the token VERBATIM so the suite can assert exactly what rode the
+            // wire (a fake — nothing is secret here).
+            Some(token) => format!("authorize {workspace} as {requested_name} + invite {token}"),
+            None => format!("authorize {workspace} as {requested_name}"),
+        });
         Ok(DeviceAuthStart {
             device_code: "dc_secret".into(),
             user_code: "WXYZ-1234".into(),
-            verification_uri_complete: format!("{}/verify?code=WXYZ-1234", self.api_base),
+            verification_uri: format!("{}/verify", self.api_base),
             expires_in_secs: 900,
             interval_secs: 5,
         })
@@ -388,10 +392,8 @@ fn begin_writes_the_single_phase_wal_and_discloses_the_pending_url() {
     };
     assert!(!data.enrolled);
     let pending = data.pending.expect("a pending device flow");
-    assert_eq!(
-        pending.verification_uri_complete,
-        format!("{API}/verify?code=WXYZ-1234")
-    );
+    // The BARE approval page — the code rides its own field, never a URL.
+    assert_eq!(pending.verification_uri, format!("{API}/verify"));
     assert_eq!(pending.user_code, "WXYZ-1234");
     assert_eq!(pending.interval_secs, Some(5));
     assert_eq!(data.plane_base_url.as_deref(), Some(API), "re-rooted");
@@ -475,8 +477,8 @@ fn resume_pending_re_emits_the_persisted_url_without_restarting() {
     };
     let pending = data.pending.expect("still pending");
     assert_eq!(
-        pending.verification_uri_complete,
-        format!("{API}/verify?code=WXYZ-1234"),
+        pending.verification_uri,
+        format!("{API}/verify"),
         "the SERVER-built URL is re-emitted verbatim from the WAL"
     );
     let l = log.lock().unwrap();
@@ -568,6 +570,7 @@ fn a_second_workspace_grant_replaces_the_credential_and_adds_a_membership() {
     let second = FakeEnroll {
         polls: Arc::new(Mutex::new(
             vec![DeviceAuthPoll::Granted(EnrolledGrant {
+                hint: None,
                 credential: "devc_two".into(),
                 device_id: "dev_2".into(),
                 workspace: EnrolledWorkspace {
@@ -609,7 +612,7 @@ fn a_login_owned_wal_refuses_toward_auth_login() {
             intent: enroll::EnrollIntentDoc::Login,
             device_code: "dc_login".to_owned(),
             user_code: "CODE".to_owned(),
-            verification_uri_complete: format!("{API}/verify?code=CODE"),
+            verification_uri: format!("{API}/verify"),
             interval_secs: 5,
             expires_at_millis: i64::MAX,
         },
@@ -642,7 +645,7 @@ fn the_recovery_sweep_reaps_an_expired_wal_so_follow_starts_fresh() {
             },
             device_code: "dc_dead".to_owned(),
             user_code: "DEAD".to_owned(),
-            verification_uri_complete: format!("{API}/verify?code=DEAD"),
+            verification_uri: format!("{API}/verify"),
             interval_secs: 5,
             expires_at_millis: 1_000,
         },
@@ -831,5 +834,326 @@ fn an_enrolled_install_keeps_its_prior_bareword_behavior() {
     assert!(
         l.iter().any(|e| e.starts_with("authorize ghost")),
         "the flow ran against the pinned plane: {l:?}"
+    );
+}
+
+// =================================================================================================
+// The tokened invitation URL — `follow <invite-url>`: an unenrolled install starts the device flow
+// CARRYING the token (the browser destination becomes the invitation page + the flow challenge);
+// a granted flow's HINT steers the post-enrollment subscribe; an enrolled install accepts directly
+// over the device lane with no browser at all.
+// =================================================================================================
+
+/// A directory whose catalog carries the hinted skill and whose `accept_invitation` is armed —
+/// the invite-URL suites' universe (the classic [`FakeDirectory`] serves the plain flows).
+#[derive(Clone)]
+struct InviteDirectory {
+    log: CallLog,
+    hint: Option<crate::plane::GrantHint>,
+}
+impl DirectorySource for InviteDirectory {
+    fn me(&self, ws: &str) -> Result<WireMe, ClientError> {
+        FakeDirectory.me(ws)
+    }
+    fn accept_invitation(&self, token: &str) -> Result<crate::plane::InviteAccepted, ClientError> {
+        self.log.lock().unwrap().push(format!("accept {token}"));
+        Ok(crate::plane::InviteAccepted {
+            workspace: EnrolledWorkspace {
+                workspace_id: WS.into(),
+                name: "acme".into(),
+                display_name: "Acme Inc".into(),
+            },
+            hint: self.hint.clone(),
+        })
+    }
+    fn channels_index(&self, ws: &str) -> Result<WireChannelIndex, ClientError> {
+        FakeDirectory.channels_index(ws)
+    }
+    fn skills_index(&self, _ws: &str) -> Result<WireSkillIndex, ClientError> {
+        Ok(WireSkillIndex {
+            skills: vec![topos_types::requests::WireSkillIndexEntry {
+                skill_id: "s_deploy".into(),
+                name: "deploy".into(),
+                kind: "skill".into(),
+                display_name: None,
+                status: "active".into(),
+                version_id: "a".repeat(64),
+                bundle_digest: "b".repeat(64),
+                generation: 1,
+                updated_at: 0,
+                open_proposals: 0,
+            }],
+        })
+    }
+    fn proposals_index(&self, _ws: &str) -> Result<WireProposalIndex, ClientError> {
+        unreachable!()
+    }
+    fn skill_log(&self, _ws: &str, _s: &str) -> Result<WireSkillLog, ClientError> {
+        unreachable!()
+    }
+    fn reach(&self, _ws: &str, _s: &str) -> Result<WireReach, ClientError> {
+        unreachable!()
+    }
+    fn follow_skill(&self, _ws: &str, _s: &str) -> Result<(), ClientError> {
+        self.log.lock().unwrap().push("follow_skill".into());
+        Ok(())
+    }
+    fn unfollow_skill(&self, _ws: &str, _s: &str) -> Result<(), ClientError> {
+        unreachable!()
+    }
+    fn channel_join(&self, _ws: &str, _c: &str) -> Result<(), ClientError> {
+        unreachable!()
+    }
+    fn channel_leave(&self, _ws: &str, _c: &str) -> Result<(), ClientError> {
+        unreachable!()
+    }
+    fn channel_place(&self, _ws: &str, _c: &str, _s: &str) -> Result<(), ClientError> {
+        unreachable!()
+    }
+    fn channel_unplace(&self, _ws: &str, _c: &str, _s: &str) -> Result<(), ClientError> {
+        unreachable!()
+    }
+    fn exclude_device(&self, _ws: &str, _s: &str) -> Result<(), ClientError> {
+        unreachable!()
+    }
+    fn protect_skill(&self, _ws: &str, _s: &str, _l: &str) -> Result<(), ClientError> {
+        unreachable!()
+    }
+    fn protect_channel(&self, _ws: &str, _c: &str, _l: &str) -> Result<(), ClientError> {
+        unreachable!()
+    }
+    fn ack_notices(&self, _ws: &str, _ids: &[String]) -> Result<(), ClientError> {
+        unreachable!()
+    }
+}
+
+fn run_follow_invite(
+    rig: &Rig,
+    enroll_fake: &FakeEnroll,
+    directory: &InviteDirectory,
+    targets: Vec<String>,
+    opts: ops::FollowOpts,
+) -> Result<ops::FollowOutcome, ClientError> {
+    crate::identity::load_or_create_device_id(&rig.fs, &rig.layout()).unwrap();
+    sidecar::recover(&rig.fs, &rig.layout(), FIXED_MILLIS as i64).unwrap();
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+    let enroll_connect = |_b: &str| -> Box<dyn EnrollSource> { Box::new(enroll_fake.clone()) };
+    let dir_connect = |_b: &str| -> Box<dyn DirectorySource> { Box::new(directory.clone()) };
+    let del_connect = |_b: &str| -> Box<dyn ReconcileTransport> { Box::new(EmptyTransport) };
+    let connectors = ops::FollowConnectors {
+        enroll: &enroll_connect,
+        directory: &dir_connect,
+        delivery: &del_connect,
+        web_origin: "https://topos.sh".to_owned(),
+        confirm_bareword: &|_, _| panic!("an invite URL never prompts the bareword guard"),
+    };
+    ops::follow(&ctx, &connectors, targets, opts)
+}
+
+#[test]
+fn an_invite_url_starts_the_flow_carrying_the_token_and_weaves_the_browser_destination() {
+    let rig = Rig::new("inv-url-begin");
+    let log: CallLog = Arc::default();
+    let enroll_fake = FakeEnroll::new(log.clone(), vec![DeviceAuthPoll::Pending]);
+    let directory = InviteDirectory {
+        log: log.clone(),
+        hint: None,
+    };
+    let out = run_follow_invite(
+        &rig,
+        &enroll_fake,
+        &directory,
+        vec!["https://topos.sh/invite/tok_abc123".to_owned()],
+        opts(false),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Data { data, .. } = out else {
+        panic!("an unenrolled invite URL answers the pending wire payload");
+    };
+    let pending = data.pending.expect("a pending device flow");
+    // The browser destination is the INVITATION page (the one-visit weave), carrying the flow's
+    // device-code CHALLENGE — never the code, never the server's bare /verify.
+    let challenge = ops::device_challenge("dc_secret");
+    assert_eq!(
+        pending.verification_uri,
+        format!("https://topos.sh/invite/tok_abc123?device={challenge}")
+    );
+    {
+        let l = log.lock().unwrap();
+        // The card probe hits the BARE origin — the token never rides a card fetch.
+        assert!(l.iter().any(|e| e == "card https://topos.sh"), "{l:?}");
+        // The token rode the authorize start (the flow row records it server-side); the
+        // origin-rooted form names no workspace slug.
+        assert!(
+            l.iter()
+                .any(|e| e.starts_with("authorize  as topos CLI")
+                    && e.ends_with("+ invite tok_abc123")),
+            "{l:?}"
+        );
+    }
+    // The WAL records the weave destination; the multi-shape slug variant parses too.
+    let wal = enroll::read_wal(&rig.fs, &rig.layout()).unwrap().unwrap();
+    assert_eq!(wal.workspace_name, "");
+    assert!(wal.verification_uri.contains("/invite/tok_abc123?device="));
+}
+
+#[test]
+fn a_multi_tenant_invite_url_names_its_workspace_slug() {
+    let rig = Rig::new("inv-url-multi");
+    let log: CallLog = Arc::default();
+    let enroll_fake = FakeEnroll::new(log.clone(), vec![DeviceAuthPoll::Pending]);
+    let directory = InviteDirectory {
+        log: log.clone(),
+        hint: None,
+    };
+    run_follow_invite(
+        &rig,
+        &enroll_fake,
+        &directory,
+        vec!["https://topos.sh/acme/invite/tok_xyz".to_owned()],
+        opts(false),
+    )
+    .unwrap();
+    let l = log.lock().unwrap();
+    assert!(
+        l.iter().any(
+            |e| e.starts_with("authorize acme as topos CLI") && e.ends_with("+ invite tok_xyz")
+        ),
+        "{l:?}"
+    );
+}
+
+#[test]
+fn a_granted_invite_flow_continues_into_the_hinted_skill() {
+    let rig = Rig::new("inv-url-hint");
+    let log: CallLog = Arc::default();
+    let granted_with_hint = DeviceAuthPoll::Granted(EnrolledGrant {
+        hint: Some(crate::plane::GrantHint {
+            kind: "skill".into(),
+            name: "deploy".into(),
+        }),
+        credential: "devc_secret".into(),
+        device_id: "dev_1".into(),
+        workspace: EnrolledWorkspace {
+            workspace_id: WS.into(),
+            name: "acme".into(),
+            display_name: "Acme Inc".into(),
+        },
+    });
+    let enroll_fake = FakeEnroll::new(log.clone(), vec![granted_with_hint]);
+    let directory = InviteDirectory {
+        log: log.clone(),
+        hint: None,
+    };
+    // Call 1: begin (pending WAL). The fake's scripted poll then grants on the resume.
+    let pending_fake = FakeEnroll::new(log.clone(), vec![DeviceAuthPoll::Pending]);
+    run_follow_invite(
+        &rig,
+        &pending_fake,
+        &directory,
+        vec!["https://topos.sh/invite/tok_hint".to_owned()],
+        opts(false),
+    )
+    .unwrap();
+    // Call 2: the resume persists the grant and continues INTO THE HINT — the describe targets
+    // the invited-to skill, not the whole workspace.
+    let out = run_follow_invite(&rig, &enroll_fake, &directory, Vec::new(), opts(false)).unwrap();
+    let ops::FollowOutcome::Described { describe, .. } = out else {
+        panic!("a granted resume continues into the two-phase describe, got {out:?}");
+    };
+    assert_eq!(describe.targets.len(), 1);
+    assert_eq!(describe.targets[0].kind, "skill");
+    assert_eq!(describe.targets[0].name, "deploy");
+    assert!(describe.enrolled_now);
+}
+
+#[test]
+fn an_enrolled_install_accepts_directly_and_continues_into_the_hint() {
+    let rig = Rig::new("inv-url-direct2");
+    let log: CallLog = Arc::default();
+    let directory = InviteDirectory {
+        log: log.clone(),
+        hint: Some(crate::plane::GrantHint {
+            kind: "skill".into(),
+            name: "deploy".into(),
+        }),
+    };
+    // Seed the enrolled state directly (instance + credentials + membership), as a granted
+    // flow's persist would have.
+    crate::identity::load_or_create_device_id(&rig.fs, &rig.layout()).unwrap();
+    enroll::write_instance(
+        &rig.fs,
+        &rig.layout(),
+        &enroll::Instance {
+            schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+            base_url: API.to_owned(),
+        },
+    )
+    .unwrap();
+    enroll::write_credentials(&rig.fs, &rig.layout(), "devc_secret", "dev_1").unwrap();
+
+    let enroll_fake = FakeEnroll::new(log.clone(), vec![DeviceAuthPoll::Pending]);
+    let out = run_follow_invite(
+        &rig,
+        &enroll_fake,
+        &directory,
+        vec!["https://topos.sh/invite/tok_direct".to_owned()],
+        opts(false),
+    )
+    .unwrap();
+    // No device flow started — the accept rode the device lane, and the describe targets the hint.
+    let ops::FollowOutcome::Described { describe, .. } = out else {
+        panic!("the direct accept continues into the two-phase describe, got {out:?}");
+    };
+    assert_eq!(describe.targets[0].name, "deploy");
+    {
+        let l = log.lock().unwrap();
+        assert!(l.iter().any(|e| e == "accept tok_direct"), "{l:?}");
+        assert!(
+            !l.iter().any(|e| e.starts_with("authorize")),
+            "no device flow starts on an enrolled install: {l:?}"
+        );
+    }
+    // The membership persisted (the credential now reaches the joined workspace).
+    let user = enroll::read_user(&rig.fs, &rig.layout()).unwrap().unwrap();
+    assert!(user.workspaces.iter().any(|m| m.workspace_id == WS));
+    // No WAL exists — nothing to resume.
+    assert!(enroll::read_wal(&rig.fs, &rig.layout()).unwrap().is_none());
+}
+
+#[test]
+fn an_invite_url_for_a_different_plane_refuses_toward_the_second_install_hatch() {
+    let rig = Rig::new("inv-url-wrong");
+    let log: CallLog = Arc::default();
+    let directory = InviteDirectory {
+        log: log.clone(),
+        hint: None,
+    };
+    crate::identity::load_or_create_device_id(&rig.fs, &rig.layout()).unwrap();
+    enroll::write_instance(
+        &rig.fs,
+        &rig.layout(),
+        &enroll::Instance {
+            schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+            base_url: "https://api.other.test".to_owned(),
+        },
+    )
+    .unwrap();
+    let enroll_fake = FakeEnroll::new(log.clone(), vec![DeviceAuthPoll::Pending]);
+    let err = run_follow_invite(
+        &rig,
+        &enroll_fake,
+        &directory,
+        vec!["https://topos.sh/invite/tok_wrong".to_owned()],
+        opts(false),
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("TOPOS_HOME"), "{msg}");
+    assert!(
+        !log.lock().unwrap().iter().any(|e| e.starts_with("accept")),
+        "nothing was accepted across planes"
     );
 }

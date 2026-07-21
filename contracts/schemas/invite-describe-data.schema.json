@@ -1,18 +1,18 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "InviteDescribeData",
-  "description": "`invite <email>...` (bare, no `--yes`) — the describe: who gets seated, the channel pre-placements,\nand the mail-or-paste note. **INFERRED.**",
+  "description": "`invite <email>...` (bare, no `--yes`) — the describe: who gets invited, the optional\nfirst-destination hint, and the mailed-link note. **INFERRED.**",
   "type": "object",
   "properties": {
     "address": {
       "type": "string"
     },
-    "channels": {
-      "description": "The channels each invitee would be pre-placed into.",
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
+    "channel": {
+      "description": "The first-destination CHANNEL hint the invitation would carry.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "invite_policy": {
       "type": "string"
@@ -23,6 +23,13 @@
       "items": {
         "type": "string"
       }
+    },
+    "skill": {
+      "description": "The first-destination SKILL hint the invitation would carry (at most one of skill/channel).",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [

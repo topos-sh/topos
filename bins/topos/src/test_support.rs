@@ -1633,7 +1633,8 @@ impl FollowHarness {
         ids
     }
 
-    /// Drive `invite <emails>... [--channel <c>]... --yes` and return the FULL applied invitation:
+    /// Drive `invite <emails>... [--channel <c>] --yes` (the first channel, if any, rides as the
+    /// single first-destination hint) and return the FULL applied invitation:
     /// `(address, invited, mailed)` — `mailed` is the server's honest can-deliver flag (false on a
     /// plane with no SMTP relay; the inviter pastes the address by hand).
     ///
@@ -1660,7 +1661,8 @@ impl FollowHarness {
                 ctx,
                 &connectors,
                 emails.iter().map(|e| (*e).to_owned()).collect(),
-                channels.iter().map(|c| (*c).to_owned()).collect(),
+                None,
+                channels.first().map(|c| (*c).to_owned()),
                 None,
                 true,
             )? {
@@ -2139,7 +2141,8 @@ impl FollowHarness {
                 &ctx,
                 &connectors,
                 vec![email.to_owned()],
-                Vec::new(),
+                None,
+                None,
                 workspace,
                 true,
             )

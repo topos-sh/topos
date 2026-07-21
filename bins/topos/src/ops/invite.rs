@@ -1,10 +1,14 @@
-//! `invite [EMAIL]... [--channel <N>]...` — seat emails as invited members of the workspace.
+//! `invite [EMAIL]... [--skill <N> | --channel <N>]` — invite emails into the workspace.
 //!
-//! An invitation is a ROSTER WRITE: `POST /v1/workspaces/{ws}/invitations` under the workspace Bearer
-//! credential seats each email as an `invited` member (recording who invited whom) and optionally
-//! pre-places each invitee into channels. There is no invite link and no role — every CLI invitee starts
-//! as a member (roles are raised later, on the web); joining is `follow <address>` plus proof of the
-//! invited email. Member-level unless the workspace's invite policy restricts inviting to owners.
+//! An invitation is an INVITATION-ROW write: `POST /v1/workspaces/{ws}/invitations` under the
+//! workspace Bearer credential seats each email as a pending 7-day claim, and the SERVER mails each
+//! address its single-use invite link (the token never appears in this exchange — the mailbox is
+//! its one channel; the receipt carries the workspace address only). At most ONE optional
+//! first-destination hint — `--skill <name>` or `--channel <name>` — rides the invitation: the
+//! accept subscribes it (the seat first, then the follow/membership, one transaction server-side),
+//! and the invitee's post-enrollment describe targets it. No role field — every CLI invitee starts
+//! as a member (roles are raised later, on the web). Member-level unless the workspace's invite
+//! policy restricts inviting to owners.
 //!
 //! Requires prior enrollment: the plane (`base_url`) and the workspace (`workspace_id`) come from the
 //! sidecar `follow` wrote; the acting device rides the transport's ONE **Bearer credential** (the
@@ -61,10 +65,16 @@ pub(crate) fn invite(
     ctx: &Ctx<'_>,
     connectors: &InviteConnectors<'_>,
     emails: Vec<String>,
-    channels: Vec<String>,
+    skill: Option<String>,
+    channel: Option<String>,
     workspace: Option<&str>,
     yes: bool,
 ) -> Result<InviteOutcome, ClientError> {
+    if skill.is_some() && channel.is_some() {
+        return Err(ClientError::InvalidArgument(
+            "an invitation carries at most one first destination — `--skill` OR `--channel`".into(),
+        ));
+    }
     // Require enrollment: the pinned plane's base URL comes from what `follow` wrote.
     let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or(ClientError::NotEnrolled)?;
     // Pick the workspace (the invitation's scope) from the enrolled `user.json` memberships:
@@ -106,7 +116,11 @@ pub(crate) fn invite(
         let me = (connectors.directory)(&instance.base_url).me(&workspace_id)?;
         let mut yes_argv = vec!["topos".to_owned(), "invite".to_owned()];
         yes_argv.extend(emails.iter().cloned());
-        for c in &channels {
+        if let Some(s) = &skill {
+            yes_argv.push("--skill".to_owned());
+            yes_argv.push(s.clone());
+        }
+        if let Some(c) = &channel {
             yes_argv.push("--channel".to_owned());
             yes_argv.push(c.clone());
         }
@@ -116,7 +130,8 @@ pub(crate) fn invite(
                 address: me.address,
                 invite_policy: me.invite_policy,
                 seat: emails,
-                channels,
+                skill,
+                channel,
             },
             yes_argv,
         });
@@ -124,9 +139,14 @@ pub(crate) fn invite(
 
     // ---- APPLY (`--yes`) ----
     // POST the invitation under the workspace Bearer credential (the transport looks it up by
-    // `workspace_id`; the plane resolves the credential's registry row → principal → the invite-policy
-    // gate). The workspace id rides the URL path; the body carries only the emails + channel pre-placements.
-    let body = InvitationRequest { emails, channels };
+    // `workspace_id`; the plane resolves the credential's registry row → principal → the
+    // invite-policy gate). The workspace id rides the URL path; the body carries the emails + the
+    // optional hint.
+    let body = InvitationRequest {
+        emails,
+        skill,
+        channel,
+    };
     let transport = (connectors.governance)(&instance.base_url);
     Ok(InviteOutcome::Applied(
         transport.invite(&workspace_id, body)?,

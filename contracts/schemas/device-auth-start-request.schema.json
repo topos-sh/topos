@@ -4,6 +4,13 @@
   "description": "`POST /v1/device/authorize` body — begin a device-authorization flow toward a workspace named by\nits address slug. Whether the name exists is never disclosed on this route: an unknown name runs\nthe same flow to the same uniform denial.",
   "type": "object",
   "properties": {
+    "invite_token": {
+      "description": "The invitation-link token a `follow <invite-url>` enrollment carries. Recorded on the flow\n(as its hash) UNVALIDATED — this unauthenticated start is never a token oracle; the approval\nceremony resolves it and weaves the invitation accept into its own fence.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "requested_name": {
       "description": "A human-readable device name shown on the approval page (a confused-deputy guard, not\nauthority) and kept as the device's display name once approved.",
       "type": "string"

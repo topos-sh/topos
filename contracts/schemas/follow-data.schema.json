@@ -126,7 +126,7 @@
       ]
     },
     "EnrollmentPending": {
-      "description": "A pending device-authorization a `follow` surfaced — the human visits `verification_uri_complete` (which\nembeds the `user_code`), then the client re-polls. **INFERRED.**",
+      "description": "A pending device-authorization a `follow` surfaced — the human opens `verification_uri` and\nenters `user_code` there (or the invitation page the URI names weaves them through); the client\nre-polls. The code never rides a URL. **INFERRED.**",
       "type": "object",
       "properties": {
         "expires_at": {
@@ -146,16 +146,16 @@
           "minimum": 0
         },
         "user_code": {
-          "description": "The short human-facing code embedded in `verification_uri_complete` (a cross-check against the\napproval page — the human clicks the URL; the code is never typed as a secret).",
+          "description": "The short human-facing code the approval page asks for and displays back (the glance-check\nagainst this terminal — never typed as a secret, never part of a URL).",
           "type": "string"
         },
-        "verification_uri_complete": {
-          "description": "The verification URL with the `user_code` embedded — the human opens it to approve the session.",
+        "verification_uri": {
+          "description": "The page the human opens to approve the session — the bare approval address (or, for an\ninvitation enrollment, the invitation page that weaves accept + approval). Never embeds the\ncode.",
           "type": "string"
         }
       },
       "required": [
-        "verification_uri_complete",
+        "verification_uri",
         "user_code"
       ]
     },

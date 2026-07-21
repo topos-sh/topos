@@ -8,7 +8,7 @@
       "expires_at": "2026-06-25T00:15:00Z",
       "interval_secs": 5,
       "user_code": "WXYZ-1234",
-      "verification_uri_complete": "https://topos.sh/verify?code=WXYZ-1234"
+      "verification_uri": "https://topos.sh/verify"
     },
     "plane_base_url": "https://topos.sh/api",
     "workspace_id": "acme"

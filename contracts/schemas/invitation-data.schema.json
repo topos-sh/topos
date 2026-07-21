@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "InvitationData",
-  "description": "`POST /v1/workspaces/{ws}/invitations` success `data` — what the inviter pastes onward: the workspace\nADDRESS (the whole invitation besides the roster rows themselves).",
+  "description": "`POST /v1/workspaces/{ws}/invitations` success `data` — what the inviter pastes onward: the\nworkspace ADDRESS. Deliberately NOT the tokened link: the link travels only in the invitation\nmail, so the inviter's receipt can never stand in for the invitee's mailbox.",
   "type": "object",
   "properties": {
     "address": {
