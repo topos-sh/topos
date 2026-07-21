@@ -124,9 +124,9 @@ ceremony script (`scripts/mint-release-key.sh`) prints the full procedure.
 
 ## Versioning and cutting a release
 
-Topos follows [semantic versioning](https://semver.org). Pre-1.0 (the `0.x` line): a `0.MINOR` bump
-carries features and behavior changes; a `0.x.PATCH` bump carries fixes only. Release candidates are
-`vX.Y.Z-rc.N`.
+Topos follows [semantic versioning](https://semver.org). Pre-1.0 (the `0.x` line): releases bump the
+PATCH — features, behavior changes, and fixes alike; a `0.MINOR` bump is reserved for milestone or
+compatibility-breaking shifts. Release candidates are `vX.Y.Z-rc.N`.
 
 **How the version is derived.** `topos --version` prints `CARGO_PKG_VERSION`, which is the workspace
 `[workspace.package] version` in the root `Cargo.toml` (both binaries inherit it via
