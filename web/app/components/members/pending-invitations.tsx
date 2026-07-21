@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { useFetcher } from "react-router";
-import { StepUpFields } from "@/components/step-up";
 import { buttonClasses, Card, Chip, SectionHeading } from "@/components/ui";
 
 /** One open invitation as the members page renders it (loader-shaped; lapse pre-computed). */
@@ -17,18 +16,17 @@ export interface PendingInvitationView {
 /** The members route's typed reply for `intent=revoke-invitation`. */
 interface RevokeInvitationActionData {
   intent: "revoke-invitation";
-  status: "revoked" | "missing" | "step_up" | "error";
+  status: "revoked" | "missing" | "error";
   invitationId: string;
-  error?: string;
 }
 
 /**
  * The claims-in-flight panel: invitations that no user has bound yet, plus DECLINED ones — the
  * recorded "no thanks" the inviter should see (re-inviting the address supersedes it). Every
  * member may see the list (who was invited is roster-adjacent fact, not a secret); the REVOKE
- * arm is owner-only, pending-only, and a step-up ceremony. Re-inviting an address is just
- * inviting it again — the pending row upserts, a fresh link mails, and the 7-day clock re-arms,
- * so there is no separate resend control here.
+ * arm is owner-only and pending-only — no step-up, matching the invite (both non-destructive).
+ * Re-inviting an address is just inviting it again — the pending row upserts, a fresh link
+ * mails, and the 7-day clock re-arms, so there is no separate resend control here.
  */
 export function PendingInvitations({
   invitations,
@@ -82,8 +80,9 @@ export function PendingInvitations({
 }
 
 /**
- * The per-invitation revoke — owner + step-up: the un-invite before anyone binds the claim. A
- * landed revoke revalidates the row away; refusals render inline.
+ * The per-invitation revoke — owner-only, one inline confirm, no re-authentication: the
+ * un-invite before anyone binds the claim. A landed revoke revalidates the row away; refusals
+ * render inline.
  */
 function RevokeInvitationForm({ invitationId, email }: { invitationId: string; email: string }) {
   const fetcher = useFetcher<RevokeInvitationActionData>();
@@ -110,12 +109,6 @@ function RevokeInvitationForm({ invitationId, email }: { invitationId: string; e
         Revoke the invitation for <span className="font-medium text-ink">{email}</span>? Signing up
         under it will no longer seat them.
       </p>
-      <StepUpFields idPrefix={`revoke-invitation-${invitationId}`} />
-      {state?.status === "step_up" && (
-        <p className="text-red-700 text-xs" role="alert">
-          {state.error}
-        </p>
-      )}
       {state?.status === "missing" && (
         <p className="text-red-700 text-xs" role="alert">
           This invitation is no longer pending — reload to see the current list.

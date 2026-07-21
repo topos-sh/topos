@@ -90,9 +90,10 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
  * ONE action, dispatched on the hidden `intent`. Each branch RE-GUARDS itself (a loader gate
  * never extends to an action), and each re-guards at its own grade: inviting is a member op the
  * invite-policy gates; revoking an invitation, removing a seat, and role changes are owner-only;
- * leaving is the signed-in member's own act. Every seat mutation and the invitation revoke are
- * STEP-UP ceremonies (a fresh password re-entry, verified immediately before the act); invite
- * stays ungated (member-level, non-destructive). The data layer emits the audit row of every
+ * leaving is the signed-in member's own act. Every seat mutation is a STEP-UP ceremony (a fresh
+ * password re-entry, verified immediately before the act); invite and revoke-invitation stay
+ * ungated (both non-destructive — an invitation seats nobody, and revoking one destroys nothing
+ * a re-invite can't re-mint). The data layer emits the audit row of every
  * landed act (and the last-owner refusals) inside its own transaction; the route records the
  * attempts the data layer never sees — refused step-ups, mangled forms, faults.
  */
@@ -186,27 +187,16 @@ async function inviteIntent(request: Request, ws: string, formData: FormData) {
   return { intent: "invite" as const, status: "invited" as const, invited: emails, emailSent };
 }
 
-/** Revoking a pending invitation — owner + step-up; the un-invite before anyone binds it. */
+/**
+ * Revoking a pending invitation — owner-only, step-up-LESS: the un-invite before anyone binds
+ * it. Like the invite itself it is non-destructive (the row flips to revoked; re-inviting mints
+ * a fresh link), so the owner gate + the audited act is the whole ceremony.
+ */
 async function revokeInvitationIntent(request: Request, ws: string, formData: FormData) {
   const owner = await requireWorkspaceOwner(request, ws);
   const invitationId = String(formData.get("invitation_id") ?? "").trim();
   if (invitationId.length === 0) {
     return { intent: "revoke-invitation" as const, status: "error" as const, invitationId };
-  }
-  const stepUp = await requireStepUp(request, formData);
-  if (!stepUp.ok) {
-    await recordAdminEvent(owner, {
-      kind: "invitation_revoked",
-      subject: invitationId,
-      detail: "step_up",
-      outcome: "denied",
-    });
-    return {
-      intent: "revoke-invitation" as const,
-      status: "step_up" as const,
-      invitationId,
-      error: stepUp.error,
-    };
   }
   let outcome: "revoked" | "missing";
   try {

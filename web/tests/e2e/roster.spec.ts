@@ -6,9 +6,10 @@ import { gotoSettled, signIn } from "./sign-in";
 /**
  * The members page (/workspaces/:ws/members) over the ONE seat table. Every membership act
  * lives here: INVITE (member-level, mail-armed — an invitation row + the notice mail, never a
- * seat), REVOKE-INVITATION / ROLE CHANGE / REMOVE (owner + step-up), LEAVE (the member's own
- * step-up act), and the LAST-OWNER fence that refuses orphaning the workspace. The proof of
- * every landed act is the `web` row; a wrong password writes NOTHING.
+ * seat), REVOKE-INVITATION (owner-only, no step-up — non-destructive like the invite),
+ * ROLE CHANGE / REMOVE (owner + step-up), LEAVE (the member's own step-up act), and the
+ * LAST-OWNER fence that refuses orphaning the workspace. The proof of every landed act is the
+ * `web` row; a wrong password writes NOTHING.
  *
  * The suite's default identity is the claimed OWNER; the two seeded members are this file's
  * own. Serial — the mutating tests keep a deterministic order.
@@ -63,7 +64,7 @@ test("the members page: the roster rows, the address block, and the sole owner's
   await expect(page.getByText(FOLLOW_LINE).first()).toBeVisible();
 });
 
-test("invite lands an invitation row + the notice mail; revoke needs owner step-up", async ({
+test("invite lands an invitation row + the notice mail; the owner revokes with one confirm", async ({
   page,
 }) => {
   await theWorkspace();
@@ -89,21 +90,10 @@ test("invite lands an invitation row + the notice mail; revoke needs owner step-
   const mail = await latestMail("invite", INVITED);
   expect(mail.text).toContain(FOLLOW_LINE);
 
-  // REVOKE — owner + step-up. A wrong password refuses and the row stands…
+  // REVOKE — owner-only, no password re-entry: the inline confirm alone flips the row to
+  // revoked and it revalidates away.
   await invRow.getByRole("button", { name: "Revoke" }).click();
-  await invRow.getByLabel("Confirm with your password").fill("wrong-password-9999");
-  await invRow.getByRole("button", { name: "Revoke invitation" }).click();
-  await expect(invRow.getByRole("alert")).toContainText("Password check failed");
-  expect(
-    (
-      await adminQuery<{ status: string }>(`select status from web.invitation where email = $1`, [
-        INVITED,
-      ])
-    )[0]?.status,
-  ).toBe("pending");
-
-  // …the right one flips it to revoked and the row revalidates away.
-  await invRow.getByLabel("Confirm with your password").fill(E2E_PASSWORD);
+  await expect(invRow.getByLabel("Confirm with your password")).toHaveCount(0);
   await invRow.getByRole("button", { name: "Revoke invitation" }).click();
   await expect(page.getByRole("listitem").filter({ hasText: INVITED })).toHaveCount(0);
   expect(
