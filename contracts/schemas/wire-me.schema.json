@@ -12,10 +12,6 @@
       "description": "The workspace's display name.",
       "type": "string"
     },
-    "invite_policy": {
-      "description": "The workspace's invite policy (`members` or `owners`).",
-      "type": "string"
-    },
     "invited_by": {
       "description": "Who invited this principal (absent for a genesis owner).",
       "type": [
@@ -46,7 +42,6 @@
     "display_name",
     "address",
     "principal",
-    "role",
-    "invite_policy"
+    "role"
   ]
 }

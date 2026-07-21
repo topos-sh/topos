@@ -7,17 +7,17 @@
 //! first-destination hint — `--skill <name>` or `--channel <name>` — rides the invitation: the
 //! accept subscribes it (the seat first, then the follow/membership, one transaction server-side),
 //! and the invitee's post-enrollment describe targets it. No role field — every CLI invitee starts
-//! as a member (roles are raised later, on the web). Member-level unless the workspace's invite
-//! policy restricts inviting to owners.
+//! as a member (roles are raised later, on the web). Owner-only: only a workspace owner may send
+//! (and revoke) invitations.
 //!
 //! Requires prior enrollment: the plane (`base_url`) and the workspace (`workspace_id`) come from the
 //! sidecar `follow` wrote; the acting device rides the transport's ONE **Bearer credential** (the
-//! server resolves credential → device → user → the invite-policy gate). Nothing is signed —
+//! server resolves credential → device → user → the owner gate). Nothing is signed —
 //! the trust level is git/GitHub-level. Emails are folded to the canonical (ASCII-lowercase)
 //! form so the roster rows carry one identity per human.
 //!
-//! Bare `invite` (no emails) is the no-mutation read (address + policy) — a MARKED SEAM until the two-phase
-//! describe leg lands.
+//! Bare `invite` (no emails) is the no-mutation read (the workspace address) — a MARKED SEAM until
+//! the two-phase describe leg lands.
 
 use topos_types::requests::{InvitationData, InvitationRequest};
 use topos_types::results::{InviteDescribeData, InviteReadData};
@@ -43,7 +43,7 @@ pub(crate) struct InviteConnectors<'a> {
 /// The verb's outcome — a bare read (no emails), a describe (emails, no `--yes`), or an apply (`--yes`).
 #[derive(Debug)]
 pub(crate) enum InviteOutcome {
-    /// `invite` with no emails — the no-mutation address/policy read.
+    /// `invite` with no emails — the no-mutation address read.
     Read(InviteReadData),
     /// `invite <email>...` without `--yes` — who gets seated, the pre-placements, the mail-or-paste note.
     Described {
@@ -55,7 +55,7 @@ pub(crate) enum InviteOutcome {
 }
 
 /// Seat `emails` as invited members of the workspace (two-phase), or — with no emails — read the
-/// workspace address + invite policy and change nothing.
+/// workspace address and change nothing.
 ///
 /// # Errors
 /// [`ClientError::Enrollment`] if not enrolled (no `instance.json`) or the workspace can't be inferred
@@ -92,13 +92,12 @@ pub(crate) fn invite(
         .workspace_id
         .clone();
 
-    // Bare `invite` (no emails) is the no-mutation read (the workspace address + invite policy): a single
-    // `/me` read, nothing sent, nothing changed.
+    // Bare `invite` (no emails) is the no-mutation read (the workspace address): a single `/me`
+    // read, nothing sent, nothing changed.
     if emails.is_empty() {
         let me = (connectors.directory)(&instance.base_url).me(&workspace_id)?;
         return Ok(InviteOutcome::Read(InviteReadData {
             address: me.address,
-            invite_policy: me.invite_policy,
             changed: false,
         }));
     }
@@ -111,7 +110,7 @@ pub(crate) fn invite(
         .map(|e| enroll::canonical_principal(e))
         .collect();
 
-    // The describe reads `/me` for the address + policy the two-phase surface discloses (nothing mutates).
+    // The describe reads `/me` for the address the two-phase surface discloses (nothing mutates).
     if !yes {
         let me = (connectors.directory)(&instance.base_url).me(&workspace_id)?;
         let mut yes_argv = vec!["topos".to_owned(), "invite".to_owned()];
@@ -128,7 +127,6 @@ pub(crate) fn invite(
         return Ok(InviteOutcome::Described {
             describe: InviteDescribeData {
                 address: me.address,
-                invite_policy: me.invite_policy,
                 seat: emails,
                 skill,
                 channel,
@@ -140,7 +138,7 @@ pub(crate) fn invite(
     // ---- APPLY (`--yes`) ----
     // POST the invitation under the workspace Bearer credential (the transport looks it up by
     // `workspace_id`; the plane resolves the credential's registry row → principal → the
-    // invite-policy gate). The workspace id rides the URL path; the body carries the emails + the
+    // owner gate). The workspace id rides the URL path; the body carries the emails + the
     // optional hint.
     let body = InvitationRequest {
         emails,

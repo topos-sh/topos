@@ -18,20 +18,13 @@ interface InviteActionData {
  * The invite-by-email form. An invitation is a claim on a FUTURE user: the invitee proves the
  * mailbox at sign-up and the claim becomes a seat — so inviting REQUIRES armed mail, and an
  * unarmed deployment renders this form DISABLED with the honest configure-mail prompt instead
- * of pretending. Every invitee starts as a MEMBER (roles are raised later in the roster, so
+ * of pretending. Inviting is OWNER-ONLY (like revoking — a non-owner sees the honest note, and
+ * the data layer re-checks regardless). Every invitee starts as a MEMBER (roles are raised later in the roster, so
  * there is no role picker); invitations lapse after 7 days, and re-inviting the same address
  * re-arms the clock — resending IS inviting again. Posts `intent=invite` with one or more
  * addresses (space/comma separated) in the `emails` field.
  */
-export function InviteMemberForm({
-  mailArmed,
-  invitePolicy,
-  isOwner,
-}: {
-  mailArmed: boolean;
-  invitePolicy: "members" | "owners";
-  isOwner: boolean;
-}) {
+export function InviteMemberForm({ mailArmed, isOwner }: { mailArmed: boolean; isOwner: boolean }) {
   const fetcher = useFetcher<InviteActionData>();
   const pending = fetcher.state !== "idle";
   const state = fetcher.data;
@@ -53,11 +46,9 @@ export function InviteMemberForm({
       </p>
     );
   }
-  if (invitePolicy === "owners" && !isOwner) {
+  if (!isOwner) {
     return (
-      <p className="text-dim text-sm">
-        Inviting is restricted to owners in this workspace (the invite-policy knob in settings).
-      </p>
+      <p className="text-dim text-sm">Only a workspace owner can invite (and revoke) members.</p>
     );
   }
 

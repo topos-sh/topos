@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "InviteReadData",
-  "description": "`invite` (bare, no emails) — the no-mutation read of the workspace address + invite policy.\n**INFERRED.**",
+  "description": "`invite` (bare, no emails) — the no-mutation read of the workspace address. **INFERRED.**",
   "type": "object",
   "properties": {
     "address": {
@@ -11,15 +11,10 @@
     "changed": {
       "description": "Always `false` — a bare read sends nothing and changes nothing.",
       "type": "boolean"
-    },
-    "invite_policy": {
-      "description": "The workspace's invite policy (`members` / `owners`) — who may invite.",
-      "type": "string"
     }
   },
   "required": [
     "address",
-    "invite_policy",
     "changed"
   ]
 }

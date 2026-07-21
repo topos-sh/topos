@@ -3,7 +3,7 @@ import { adminQuery, ensureBundle, latestMail, theWorkspace } from "./seed";
 import { gotoSettled } from "./sign-in";
 
 /**
- * The skill face's "invite a teammate to this skill" affordance. A member expands the quiet
+ * The skill face's "invite a teammate to this skill" affordance. An owner expands the quiet
  * button into a one-email form; submitting mints an invitation whose FIRST destination is THIS
  * skill — the invitation row carries the skill's bundle id as its hint, and the notice mail leads
  * with the skill in its subject. The suite runs MAIL-ARMED (all five TOPOS_MAIL_SMTP_* point at

@@ -291,13 +291,12 @@ export interface LaneMe {
   role: string;
   /** The inviter's login address, when the seat records one (display attribution only). */
   invitedBy: string | null;
-  invitePolicy: string;
 }
 
 /** The caller's own membership facts (`GET /me`). */
 export async function laneMe(actor: DeviceActor): Promise<LaneMe | null> {
   const rows = await getDb().execute(sql`
-    SELECT w.name, w.display_name, w.invite_policy, s.role, iu.email AS invited_by
+    SELECT w.name, w.display_name, s.role, iu.email AS invited_by
     FROM web.workspace w
     JOIN web.seat s ON s.workspace_id = w.id AND s.user_id = ${actor.userId}
     LEFT JOIN web."user" iu ON iu.id = s.invited_by
@@ -307,7 +306,6 @@ export async function laneMe(actor: DeviceActor): Promise<LaneMe | null> {
     | {
         name: string;
         display_name: string;
-        invite_policy: string;
         role: string;
         invited_by: string | null;
       }
@@ -320,7 +318,6 @@ export async function laneMe(actor: DeviceActor): Promise<LaneMe | null> {
     displayName: row.display_name,
     role: row.role,
     invitedBy: row.invited_by,
-    invitePolicy: row.invite_policy,
   };
 }
 
@@ -820,8 +817,8 @@ export type LaneInviteOutcome =
   | { outcome: "bad_email" };
 
 /**
- * The device lane's invitation write. The invite-policy gate runs against the actor's seat
- * role. The optional FIRST-DESTINATION hint (at most one — a skill or a channel of this
+ * The device lane's invitation write. Inviting is OWNER-ONLY — the gate runs against the
+ * actor's seat role. The optional FIRST-DESTINATION hint (at most one — a skill or a channel of this
  * workspace, named by the caller) must resolve (all-or-none), lands on the invitation row, and
  * is delivered by the accept ceremony: the seat first, then the direct follow / channel
  * membership in the same transaction. Each invitation mints a fresh single-use link token
@@ -841,15 +838,10 @@ export async function laneInvite(
     }
     folded.push(canonical);
   }
+  if (actor.role !== "owner") {
+    return { outcome: "owner_role_required" };
+  }
   return await getDb().transaction(async (tx) => {
-    const wsRows = await tx
-      .select({ invitePolicy: workspace.invitePolicy })
-      .from(workspace)
-      .where(eq(workspace.id, ws))
-      .limit(1);
-    if (wsRows[0]?.invitePolicy === "owners" && actor.role !== "owner") {
-      return { outcome: "owner_role_required" };
-    }
     let hintBundleId: string | null = null;
     let hintChannelId: string | null = null;
     if (hint.skill !== undefined) {

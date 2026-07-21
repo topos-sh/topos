@@ -1786,17 +1786,12 @@ pub(crate) fn protect_applied_tty(data: &topos_types::results::ProtectData) -> S
     format!("Set {} '{}' to `{}`.", data.kind, data.target, data.level)
 }
 
-/// The bare `invite` read's TTY — the workspace address + invite policy, and the explicit no-op note.
+/// The bare `invite` read's TTY — the workspace address and the explicit no-op note.
 pub(crate) fn invite_read_tty(data: &topos_types::results::InviteReadData) -> String {
-    let who = if data.invite_policy == "owners" {
-        "owners"
-    } else {
-        "any member"
-    };
     format!(
-        "Workspace address: {}\nInvite policy: {} ({who} may invite).\nNothing was sent or changed \
-         — pass emails to invite (`topos invite <email>...`).",
-        data.address, data.invite_policy
+        "Workspace address: {}\nInviting is owner-only.\nNothing was sent or changed — pass emails \
+         to invite (`topos invite <email>...`).",
+        data.address
     )
 }
 

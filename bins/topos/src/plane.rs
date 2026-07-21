@@ -578,7 +578,7 @@ pub(crate) trait EnrollSource {
 // ---------------------------------------------------------------------------------------------
 // The governance-write seam — the invitation roster-write, behind a port so the `invite` tests run
 // against a fake WITHOUT HTTP. The acting device rides the workspace Bearer credential (the in-txn authz
-// resolves its registry row → principal → the invite-policy gate); the workspace id is a URL path segment
+// resolves its registry row → principal → the owner gate); the workspace id is a URL path segment
 // (the body carries none). The base URL is baked in when the connector builds it from `instance.json`. The
 // real impl is `crate::plane_http::UreqDeviceClient`; the fake lives in the invite tests.
 // ---------------------------------------------------------------------------------------------

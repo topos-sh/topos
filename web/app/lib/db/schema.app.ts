@@ -151,7 +151,6 @@ export const workspace = webSchema.table(
     /** Unclaimed carries a live setup-code hash; claimed carries none (CHECK below). */
     claimCodeSha256: bytea("claim_code_sha256"),
     claimedAt: timestamp("claimed_at", { withTimezone: true }),
-    invitePolicy: text("invite_policy").default("members").notNull(),
     protectionDefault: text("protection_default").default("open").notNull(),
     /**
      * Milliseconds, deliberately: the sole consumer is this tier (interval would round-trip
@@ -176,7 +175,6 @@ export const workspace = webSchema.table(
       "workspace_claim_code_sha256_check",
       sql`${table.claimCodeSha256} is null or octet_length(${table.claimCodeSha256}) = 32`,
     ),
-    check("workspace_invite_policy_check", sql`${table.invitePolicy} in ('members', 'owners')`),
     check(
       "workspace_protection_default_check",
       sql`${table.protectionDefault} in ('open', 'reviewed')`,

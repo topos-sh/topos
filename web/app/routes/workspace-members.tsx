@@ -19,7 +19,6 @@ import {
 import { requireStepUp, stepUpMethod } from "@/lib/auth/step-up.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import { removeSeat, type SeatMutationRefusal, setSeatRole } from "@/lib/db/identity.server";
-import { workspacePolicyOf } from "@/lib/db/queries.policy.server";
 import {
   createInvitations,
   foldInviteEmail,
@@ -58,11 +57,7 @@ function lapseLabel(expiresAt: Date | null, now: number): string {
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const { workspace, actor } = await requireMemberInScope(request, params);
   const isOwner = actor.role === "owner";
-  const [roster, pending, policy] = await Promise.all([
-    rosterOf(actor),
-    pendingInvitationsOf(actor),
-    workspacePolicyOf(actor),
-  ]);
+  const [roster, pending] = await Promise.all([rosterOf(actor), pendingInvitationsOf(actor)]);
   const displayByUserId = new Map(roster.map((seat) => [seat.userId, seat.display]));
   const now = Date.now();
   const invitations: PendingInvitationView[] = pending.map((inv) => ({
@@ -79,7 +74,6 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     roster,
     invitations,
     mailArmed: mailDelivery().canSend,
-    invitePolicy: policy.invitePolicy,
     slug: workspace.name,
     shareAddress: workspaceAddress(request, workspace.name),
     stepUpMethod: await stepUpMethod(actor.userId),
@@ -88,12 +82,12 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 
 /**
  * ONE action, dispatched on the hidden `intent`. Each branch RE-GUARDS itself (a loader gate
- * never extends to an action), and each re-guards at its own grade: inviting is a member op the
- * invite-policy gates; revoking an invitation, removing a seat, and role changes are owner-only;
- * leaving is the signed-in member's own act. Every seat mutation is a STEP-UP ceremony (a fresh
- * password re-entry, verified immediately before the act); invite and revoke-invitation stay
- * ungated (both non-destructive — an invitation seats nobody, and revoking one destroys nothing
- * a re-invite can't re-mint). The data layer emits the audit row of every
+ * never extends to an action), and each re-guards at its own grade: inviting, revoking an
+ * invitation, removing a seat, and role changes are owner-only; leaving is the signed-in
+ * member's own act. Every seat mutation is a STEP-UP ceremony (a fresh password re-entry,
+ * verified immediately before the act); invite and revoke-invitation carry no step-up (both
+ * non-destructive — an invitation seats nobody, and revoking one destroys nothing a re-invite
+ * can't re-mint). The data layer emits the audit row of every
  * landed act (and the last-owner refusals) inside its own transaction; the route records the
  * attempts the data layer never sees — refused step-ups, mangled forms, faults.
  */
@@ -125,11 +119,11 @@ export async function action({ request, params }: ActionFunctionArgs) {
 }
 
 /**
- * Invitation is a member op gated by the workspace's invite-policy (createInvitations runs the
- * gate against the actor's role) — and it REQUIRES armed mail: the invitation's identity proof
- * is a mailbox round-trip, so an unarmed deployment refuses honestly instead of seating a claim
- * nobody can prove. Re-inviting an already-pending address upserts the row and re-arms the
- * 7-day clock — resending IS inviting again.
+ * Invitation is OWNER-ONLY (createInvitations runs the gate against the actor's role) — and it
+ * REQUIRES armed mail: the invitation's identity proof is a mailbox round-trip, so an unarmed
+ * deployment refuses honestly instead of seating a claim nobody can prove. Re-inviting an
+ * already-pending address upserts the row and re-arms the 7-day clock — resending IS inviting
+ * again.
  */
 async function inviteIntent(request: Request, ws: string, formData: FormData) {
   const actor = await requireMember(request, ws);
@@ -150,8 +144,7 @@ async function inviteIntent(request: Request, ws: string, formData: FormData) {
     return { intent: "invite" as const, status: "error" as const, submittedEmails: raw };
   }
 
-  const policy = await workspacePolicyOf(actor);
-  const outcome = await createInvitations(actor, emails, policy.invitePolicy);
+  const outcome = await createInvitations(actor, emails);
   if (outcome.outcome === "owner_role_required") {
     await recordAdminEvent(actor, {
       kind: "invitation_created",
@@ -339,17 +332,8 @@ async function leaveIntent(request: Request, ws: string, formData: FormData) {
 }
 
 export default function WorkspaceMembers() {
-  const {
-    isOwner,
-    selfUserId,
-    roster,
-    invitations,
-    mailArmed,
-    invitePolicy,
-    slug,
-    shareAddress,
-    stepUpMethod,
-  } = useLoaderData<typeof loader>();
+  const { isOwner, selfUserId, roster, invitations, mailArmed, slug, shareAddress, stepUpMethod } =
+    useLoaderData<typeof loader>();
   const wsPath = useWsPath();
   return (
     <StepUpMethodProvider method={stepUpMethod}>
@@ -368,7 +352,6 @@ export default function WorkspaceMembers() {
           isOwner={isOwner}
           selfUserId={selfUserId}
           mailArmed={mailArmed}
-          invitePolicy={invitePolicy}
         />
         <PendingInvitations invitations={invitations} isOwner={isOwner} />
         <section aria-labelledby="share-heading" className="space-y-3">
@@ -391,8 +374,8 @@ export default function WorkspaceMembers() {
 
 /**
  * The roster panel: the seat table rendered as people — display name, login address, role.
- * Every member may attempt an invite (the invite-policy gates it); role and removal controls
- * render only for a confirmed OWNER, keyed by the seat's USER ID. The SOLE owner's own seat
+ * Inviting is owner-only (a non-owner sees the honest note instead of the form); role and
+ * removal controls render only for a confirmed OWNER, keyed by the seat's USER ID. The SOLE owner's own seat
  * carries neither (nothing safe to do — you can't remove or demote the last owner; the honest
  * lockout the data layer also enforces). Ownership transfers by promoting another seat first.
  */
@@ -401,13 +384,11 @@ function MembersSection({
   isOwner,
   selfUserId,
   mailArmed,
-  invitePolicy,
 }: {
   roster: RosterSeat[];
   isOwner: boolean;
   selfUserId: string;
   mailArmed: boolean;
-  invitePolicy: "members" | "owners";
 }) {
   const ownerCount = roster.filter((s) => s.role === "owner").length;
   return (
@@ -451,7 +432,7 @@ function MembersSection({
           {roster.length === 0 && <li className="px-4 py-3 text-faint text-sm">No seats yet.</li>}
         </ul>
       </Card>
-      <InviteMemberForm mailArmed={mailArmed} invitePolicy={invitePolicy} isOwner={isOwner} />
+      <InviteMemberForm mailArmed={mailArmed} isOwner={isOwner} />
     </section>
   );
 }

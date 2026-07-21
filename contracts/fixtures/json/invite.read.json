@@ -4,8 +4,7 @@
   "ok": true,
   "data": {
     "address": "https://topos.sh/acme",
-    "changed": false,
-    "invite_policy": "members"
+    "changed": false
   },
   "warnings": [],
   "next_actions": []

@@ -61,7 +61,7 @@ export function withInvitationCeremony<T>(fn: () => Promise<T>): Promise<T> {
 
 /** The one refusal string every closed path answers with (non-enumerating by sameness). */
 export const REGISTRATION_REFUSED =
-  "Sign-up is not open on this server. Ask a member to invite you.";
+  "Sign-up is not open on this server. Ask a workspace owner to invite you.";
 
 /** Pure decision, unit-testable: may THIS email register, given the observable facts? */
 export function registrationDecision(facts: {

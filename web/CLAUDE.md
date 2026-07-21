@@ -218,7 +218,7 @@ member of an open channel, reviewer+ of a curated one — adds/removes the chann
 through the same core the device lane runs) · **Members** · **History** · **Settings** (the owner
 rename/delete ceremonies) under one shared tab header (`app/components/channel/channel-tabs.tsx`) —
 the **Settings** page — TABBED into **General** (the workspace policy: review
-default · invite policy · staleness window · the `registration` knob · an OWNER-ONLY whole-catalog
+default · staleness window · the `registration` knob · an OWNER-ONLY whole-catalog
 **export** — a `settings/export` resource route streaming a zip of every skill at its current version
 plus a `manifest.json`, one object at a time through the custody transport's verified reads) and
 **Devices** (the workspace fleet

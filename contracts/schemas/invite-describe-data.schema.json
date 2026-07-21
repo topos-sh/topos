@@ -14,9 +14,6 @@
         "null"
       ]
     },
-    "invite_policy": {
-      "type": "string"
-    },
     "seat": {
       "description": "The emails that would be seated (canonical form).",
       "type": "array",
@@ -34,7 +31,6 @@
   },
   "required": [
     "address",
-    "invite_policy",
     "seat"
   ]
 }

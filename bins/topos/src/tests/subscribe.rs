@@ -201,7 +201,6 @@ impl FakeDirectory {
                 principal: "alice@acme.com".into(),
                 role: "member".into(),
                 invited_by: Some("robert@acme.com".into()),
-                invite_policy: "members".into(),
             },
             channels: vec![
                 channel_entry("everyone", true, true, &[]),

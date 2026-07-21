@@ -983,15 +983,12 @@ pub struct ReviewDescribeData {
     pub diff_truncated: bool,
 }
 
-/// `invite` (bare, no emails) — the no-mutation read of the workspace address + invite policy.
-/// **INFERRED.**
+/// `invite` (bare, no emails) — the no-mutation read of the workspace address. **INFERRED.**
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct InviteReadData {
     /// The workspace address teammates paste to join.
     pub address: String,
-    /// The workspace's invite policy (`members` / `owners`) — who may invite.
-    pub invite_policy: String,
     /// Always `false` — a bare read sends nothing and changes nothing.
     pub changed: bool,
 }
@@ -1002,7 +999,6 @@ pub struct InviteReadData {
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct InviteDescribeData {
     pub address: String,
-    pub invite_policy: String,
     /// The emails that would be seated (canonical form).
     pub seat: Vec<String>,
     /// The first-destination SKILL hint the invitation would carry (at most one of skill/channel).

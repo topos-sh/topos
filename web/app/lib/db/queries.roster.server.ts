@@ -111,17 +111,16 @@ export function foldInviteEmail(email: string): string | null {
  * Seat one or more addresses as PENDING invitations (7-day lapse; re-inviting upserts onto the
  * pending partial-unique, re-arms the clock + the inviter attribution, and mints a FRESH link
  * token — the old link dies with its hash). A prior DECLINED row for the address is superseded
- * (deleted; the audit trail keeps the record). The invite-policy gate runs HERE against the
- * actor's role (policy 'owners' refuses a plain member); the mail-armed gate and the notice
- * send run in the route. Every write lands its audit row in the same transaction.
+ * (deleted; the audit trail keeps the record). The OWNER gate runs HERE against the actor's
+ * role (inviting is owner-only, like revoking); the mail-armed gate and the notice send run in
+ * the route. Every write lands its audit row in the same transaction.
  */
 export async function createInvitations(
   actor: MemberActor,
   emails: string[],
-  invitePolicy: "members" | "owners",
   hint: InviteHintRef = {},
 ): Promise<InviteOutcome> {
-  if (invitePolicy === "owners" && actor.role !== "owner") {
+  if (actor.role !== "owner") {
     return { outcome: "owner_role_required" };
   }
   const folded: string[] = [];

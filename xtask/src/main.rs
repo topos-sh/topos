@@ -1000,7 +1000,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
-    // `invite` (bare, no emails) — the no-mutation read of the workspace address + invite policy
+    // `invite` (bare, no emails) — the no-mutation read of the workspace address
     // (`changed: false` — nothing was sent).
     let invite_read = JsonEnvelope {
         schema_version: 1,
@@ -1008,7 +1008,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ok: true,
         data: serde_json::to_value(InviteReadData {
             address: "https://topos.sh/acme".to_owned(),
-            invite_policy: "members".to_owned(),
             changed: false,
         })
         .expect("InviteReadData serializes"),

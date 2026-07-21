@@ -5,7 +5,7 @@ import { gotoSettled, signIn } from "./sign-in";
 
 /**
  * The WORKSPACE-POLICY surface on /workspaces/:ws/settings: four owner-only knobs — the review
- * gate (the protection default), the invite policy, the fleet staleness window, and the
+ * gate (the protection default), the fleet staleness window, and the
  * registration knob — each a STEP-UP ceremony (the owner re-enters their password inside the
  * form, verified immediately before the write). The proof of every landed change is the
  * `web.workspace` column; a wrong password writes NOTHING. The audit ledger feeds each knob's
@@ -22,7 +22,7 @@ test.describe.configure({ mode: "serial" });
 
 async function resetKnobs(): Promise<void> {
   await adminQuery(
-    `update web.workspace set protection_default = 'open', invite_policy = 'members',
+    `update web.workspace set protection_default = 'open',
        staleness_window_ms = 604800000, registration = 'open'`,
   );
 }
@@ -71,21 +71,6 @@ test("the review gate demands step-up; the switch flips only with the right pass
   await gotoSettled(page, `/settings`);
   await expect(page.getByRole("switch")).toHaveAttribute("aria-checked", "true");
   await expect(page.getByText(/Last set: ON, by reviewer/)).toBeVisible();
-});
-
-test("the invite policy flips to owners-only behind step-up and persists", async ({ page }) => {
-  await theWorkspace();
-  await gotoSettled(page, `/settings`);
-
-  await expect(page.getByRole("radio", { name: "Any member can invite" })).toBeChecked();
-  await page.getByRole("radio", { name: "Only owners can invite" }).check();
-  await page.getByLabel("Confirm with your password").fill(E2E_PASSWORD);
-  await page.getByRole("button", { name: "Save invite policy" }).click();
-
-  await expect.poll(async () => knob("invite_policy")).toBe("owners");
-  await gotoSettled(page, `/settings`);
-  await expect(page.getByRole("radio", { name: "Only owners can invite" })).toBeChecked();
-  await expect(page.getByText(/Last set: owners only, by reviewer/)).toBeVisible();
 });
 
 test("the staleness window converts days to milliseconds and persists", async ({ page }) => {
