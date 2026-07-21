@@ -387,6 +387,35 @@ describe("the device-flow weave", () => {
     expect(await identity.invitationByToken(token)).not.toBeNull();
   });
 
+  it("a failed approval rolls back the invitation accept — never a split-brain commit", async () => {
+    // The invited person IS the addressee (the accept would seat them), but the flow's device
+    // code has already been made unresolvable (past expiry) so the approval's own liveness gate
+    // refuses under the lock. The accept must NOT commit while the poll reports refused.
+    const token = await invite("rollback@x.test");
+    await verifiedUser("u_rollback", "rollback@x.test");
+    const identity = await import("@/lib/db/identity.server");
+    const flow = await identity.startDeviceAuth("laptop", "", token);
+    // Expire the flow after minting (the FOR-UPDATE liveness gate then finds no live row → the
+    // whole approval — accept included — rolls back).
+    await db.q(
+      `UPDATE web.device_auth_session SET expires_at = now() - interval '1 minute'
+       WHERE user_code = $1`,
+      [flow.userCode],
+    );
+    const approved = await identity.approveDeviceAuth(flow.userCode, {
+      userId: "u_rollback",
+      display: "R",
+    });
+    expect(approved).toBeNull();
+    // The invitation is STILL pending (never consumed) and no seat was written.
+    expect(await identity.invitationByToken(token)).not.toBeNull();
+    const seat = await db.q(
+      `SELECT 1 FROM web.seat s JOIN web."user" u ON u.id = s.user_id WHERE u.email = 'rollback@x.test'`,
+      [],
+    );
+    expect(seat.length).toBe(0);
+  });
+
   it("devicePerson resolves a credential seat-lessly, fail-closed", async () => {
     const identity = await import("@/lib/db/identity.server");
     await seedUser(db, "u_dev", "Dev", "dev@x.test");
