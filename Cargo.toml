@@ -17,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1" # members inherit via `version.workspace = true`; bump to match the tag before tagging
+version = "0.2.0" # members inherit via `version.workspace = true`; bump to match the tag before tagging
 edition = "2024"
 rust-version = "1.96"
 license = "Apache-2.0"
