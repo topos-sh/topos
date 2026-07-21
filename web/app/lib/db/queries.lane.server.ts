@@ -12,6 +12,8 @@ import {
   entitledBundlesSql,
   mintChannelId,
   mintInvitationId,
+  mintInviteToken,
+  supersedeDeclinedInvitationTx,
 } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
 import { personDisplayLeftSql } from "@/lib/db/person-display.server";
@@ -809,26 +811,33 @@ export async function laneAckNotices(actor: DeviceActor, ids: string[]): Promise
 
 // ── Invitations (a claim on a FUTURE user; requires armed mail — the route gates that) ─────
 
-export type LaneInviteOutcome = "invited" | "owner_role_required" | "unknown_channel" | "bad_email";
+/** The device lane's minted invitations (folded address + fresh link token per address). */
+export type LaneInviteOutcome =
+  | { outcome: "invited"; minted: { email: string; token: string }[] }
+  | { outcome: "owner_role_required" }
+  | { outcome: "unknown_skill" }
+  | { outcome: "unknown_channel" }
+  | { outcome: "bad_email" };
 
 /**
  * The device lane's invitation write. The invite-policy gate runs against the actor's seat
- * role; every named channel must exist (resolve-all-or-apply-none — the old refusal, kept).
- * Channel PRE-PLACEMENT is gone with the identity unification: memberships are seat-anchored,
- * and an invitee has no seat until the verified sign-up binds one — the names are validated
- * and recorded on the audit row only.
+ * role. The optional FIRST-DESTINATION hint (at most one — a skill or a channel of this
+ * workspace, named by the caller) must resolve (all-or-none), lands on the invitation row, and
+ * is delivered by the accept ceremony: the seat first, then the direct follow / channel
+ * membership in the same transaction. Each invitation mints a fresh single-use link token
+ * (hash-stored); re-inviting an address supersedes its old link and any declined record.
  */
 export async function laneInvite(
   actor: DeviceActor,
   emails: string[],
-  channels: string[],
+  hint: { skill?: string; channel?: string },
 ): Promise<LaneInviteOutcome> {
   const ws = actor.workspaceId;
   const folded: string[] = [];
   for (const email of emails) {
     const canonical = foldInviteEmail(email);
     if (canonical === null) {
-      return "bad_email";
+      return { outcome: "bad_email" };
     }
     folded.push(canonical);
   }
@@ -839,25 +848,50 @@ export async function laneInvite(
       .where(eq(workspace.id, ws))
       .limit(1);
     if (wsRows[0]?.invitePolicy === "owners" && actor.role !== "owner") {
-      return "owner_role_required";
+      return { outcome: "owner_role_required" };
     }
-    for (const name of channels) {
+    let hintBundleId: string | null = null;
+    let hintChannelId: string | null = null;
+    if (hint.skill !== undefined) {
+      const rows = await tx
+        .select({ id: bundle.id })
+        .from(bundle)
+        .where(
+          and(eq(bundle.workspaceId, ws), eq(bundle.name, hint.skill), eq(bundle.status, "active")),
+        )
+        .limit(1);
+      if (rows.length === 0) {
+        return { outcome: "unknown_skill" };
+      }
+      hintBundleId = rows[0]?.id ?? null;
+    } else if (hint.channel !== undefined) {
       const rows = await tx
         .select({ id: channel.id })
         .from(channel)
-        .where(and(eq(channel.workspaceId, ws), eq(channel.name, name)))
+        .where(and(eq(channel.workspaceId, ws), eq(channel.name, hint.channel)))
         .limit(1);
       if (rows.length === 0) {
-        return "unknown_channel";
+        return { outcome: "unknown_channel" };
       }
+      hintChannelId = rows[0]?.id ?? null;
     }
     const expiresAt = new Date(Date.now() + INVITATION_TTL_MS);
+    const minted: { email: string; token: string }[] = [];
     for (const email of folded) {
+      const token = mintInviteToken();
+      await supersedeDeclinedInvitationTx(tx, ws, email);
       await tx.execute(sql`
-        insert into ${invitation} (id, workspace_id, email, role, status, invited_by, expires_at)
-        values (${mintInvitationId()}, ${ws}, ${email}, 'member', 'pending', ${actor.userId}, ${expiresAt})
+        insert into ${invitation}
+          (id, workspace_id, email, role, status, invited_by, expires_at,
+           token_sha256, hint_bundle_id, hint_channel_id)
+        values (${mintInvitationId()}, ${ws}, ${email}, 'member', 'pending', ${actor.userId},
+                ${expiresAt}, sha256(convert_to(${token}, 'UTF8')),
+                ${hintBundleId}, ${hintChannelId})
         on conflict (email, workspace_id) where status = 'pending'
         do update set invited_by = excluded.invited_by, expires_at = excluded.expires_at,
+                      token_sha256 = excluded.token_sha256,
+                      hint_bundle_id = excluded.hint_bundle_id,
+                      hint_channel_id = excluded.hint_channel_id,
                       created_at = now()
       `);
       await auditInTx(tx, {
@@ -866,10 +900,14 @@ export async function laneInvite(
         kind: "invitation_created",
         subject: email,
         outcome: "ok",
-        details: channels.length > 0 ? { channels } : {},
+        details: {
+          ...(hint.skill !== undefined ? { hint: { kind: "skill", name: hint.skill } } : {}),
+          ...(hint.channel !== undefined ? { hint: { kind: "channel", name: hint.channel } } : {}),
+        },
       });
+      minted.push({ email, token });
     }
-    return "invited";
+    return { outcome: "invited", minted };
   });
 }
 

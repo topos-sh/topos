@@ -278,6 +278,10 @@ const SESSIONLESS_ROUTES = new Set([
   // it); the belt is their gate and the flow rows are single-use, short-TTL.
   "api.v1.device-authorize",
   "api.v1.device-token",
+  // The tokened invitation page: sessionless BY DESIGN (the mailed single-use token is the
+  // proof; anonymous viewing + the account-minting accept are the point), uniform constant
+  // page on a miss, public-read belted.
+  "invite-redeem",
   // The lane's catch-all answers the constant uniform 404 — it reads nothing.
   "api.v1.$",
 ]);
@@ -285,7 +289,7 @@ const SESSIONLESS_ROUTES = new Set([
 // membership-or-404 resolution the face modules call on their signed-in arm (their anonymous
 // arm resolves the session itself, teaser-or-404, so the require* wrappers cannot front them).
 const GUARD_CALL =
-  /\b(?:require(?:Session|MemberInScope|Member|OwnerInScope|WorkspaceOwner|Reviewer|DeviceActor)|memberInScope)\s*\(/;
+  /\b(?:require(?:Session|MemberInScope|Member|OwnerInScope|WorkspaceOwner|Reviewer|DeviceActor|DevicePerson)|memberInScope)\s*\(/;
 const READS_DATA = /export\s+(?:async\s+)?(?:function|const)\s+(?:loader|action)\b/;
 for (const { rel, text, base } of files) {
   if (!rel.startsWith(ROUTES_DIR)) {

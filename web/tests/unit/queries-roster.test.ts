@@ -72,7 +72,7 @@ describe("createInvitations", () => {
         ["New@Acme.COM"],
         "members",
       ),
-    ).toBe("invited");
+    ).toMatchObject({ outcome: "invited" });
     const rows = await db.q<{
       email: string;
       status: string;
@@ -102,14 +102,14 @@ describe("createInvitations", () => {
     const queries = await q();
     expect(
       await queries.createInvitations(asMember(wsId, "u_ana"), ["gate@acme.com"], "owners"),
-    ).toBe("owner_role_required");
+    ).toMatchObject({ outcome: "owner_role_required" });
     expect(
       await queries.createInvitations(
         asMember(wsId, "u_owner", "owner"),
         ["gate@acme.com"],
         "owners",
       ),
-    ).toBe("invited");
+    ).toMatchObject({ outcome: "invited" });
   });
 
   it("a malformed address folds to bad_email — the whole batch refuses, nothing written", async () => {
@@ -120,7 +120,7 @@ describe("createInvitations", () => {
         ["ok@acme.com", "bad email"],
         "members",
       ),
-    ).toBe("bad_email");
+    ).toMatchObject({ outcome: "bad_email" });
     expect(await db.q(`SELECT 1 FROM web.invitation WHERE email = 'ok@acme.com'`)).toHaveLength(0);
   });
 
@@ -137,7 +137,7 @@ describe("createInvitations", () => {
         ["new@acme.com"],
         "members",
       ),
-    ).toBe("invited");
+    ).toMatchObject({ outcome: "invited" });
     const rows = await db.q<{ invited_by: string; fresh: boolean; n: string }>(
       `SELECT invited_by, expires_at > now() + interval '6 days' AS fresh,
               (SELECT count(*)::text FROM web.invitation WHERE email = 'new@acme.com') AS n
@@ -199,7 +199,7 @@ describe("bindInvitedSeats (the verified sign-up's binding leg)", () => {
         ["late@acme.com"],
         "members",
       ),
-    ).toBe("invited");
+    ).toMatchObject({ outcome: "invited" });
     await db.q(
       `UPDATE web.invitation SET expires_at = now() - interval '1 minute' WHERE email = 'late@acme.com'`,
     );

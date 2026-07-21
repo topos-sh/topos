@@ -32,7 +32,7 @@ import { workspaceById } from "@/lib/db/queries.server";
 import { sendInviteEmail } from "@/lib/mail/invite-mail.server";
 import { mailDelivery } from "@/lib/mail/transport.server";
 import { useWsPath } from "@/lib/ws-path";
-import { agentDocUrl, workspaceAddress } from "@/lib/ws-url.server";
+import { agentDocUrl, inviteUrl, workspaceAddress } from "@/lib/ws-url.server";
 
 export function meta({ params }: { params: { ws?: string } }) {
   return [{ title: `Members · ${params.ws ?? "Workspace"}` }];
@@ -68,6 +68,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   const invitations: PendingInvitationView[] = pending.map((inv) => ({
     id: inv.id,
     email: inv.email,
+    status: inv.status === "declined" ? ("declined" as const) : ("pending" as const),
     invitedByDisplay:
       inv.invitedBy !== null ? (displayByUserId.get(inv.invitedBy) ?? "a former member") : "—",
     lapse: lapseLabel(inv.expiresAt, now),
@@ -150,7 +151,7 @@ async function inviteIntent(request: Request, ws: string, formData: FormData) {
 
   const policy = await workspacePolicyOf(actor);
   const outcome = await createInvitations(actor, emails, policy.invitePolicy);
-  if (outcome === "owner_role_required") {
+  if (outcome.outcome === "owner_role_required") {
     await recordAdminEvent(actor, {
       kind: "invitation_created",
       subject: emails.join(", "),
@@ -159,21 +160,21 @@ async function inviteIntent(request: Request, ws: string, formData: FormData) {
     });
     return { intent: "invite" as const, status: "owner_required" as const, submittedEmails: raw };
   }
-  if (outcome !== "invited") {
+  if (outcome.outcome !== "invited") {
     return { intent: "invite" as const, status: "error" as const, submittedEmails: raw };
   }
 
-  // The notice mail, per address. A send fault never loses the invitation — the row stands and
-  // re-inviting resends — but the reply says honestly when nothing went out.
+  // The invitation mail, per address — it carries the single-use invite LINK (the inviter's own
+  // surfaces never show it). A send fault never loses the invitation — the row stands and
+  // re-inviting mints a fresh link — but the reply says honestly when nothing went out.
   const workspace = await workspaceById(actor, ws);
-  const address = workspaceAddress(request, workspace?.name ?? ws);
   const workspaceName = workspace?.displayName ?? ws;
   let emailSent = true;
   try {
-    for (const email of emails) {
+    for (const one of outcome.minted) {
       await sendInviteEmail({
-        to: email,
-        address,
+        to: one.email,
+        inviteUrl: inviteUrl(request, workspace?.name ?? ws, one.token),
         agentUrl: agentDocUrl(request),
         workspaceDisplayName: workspaceName,
         invitedBy: actor.display,

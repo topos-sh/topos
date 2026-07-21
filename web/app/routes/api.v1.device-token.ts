@@ -47,6 +47,9 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   }
   const ws =
     result.approvedWorkspaceId === null ? null : await workspaceRowById(result.approvedWorkspaceId);
+  // `hint` decorates a grant whose flow carried an invitation naming a first destination — the
+  // CLI's post-enrollment subscribe targets it (else the workspace set), through the ordinary
+  // two-phase describe.
   return Response.json({
     status: "granted",
     credential: deviceCode,
@@ -60,6 +63,7 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
             display_name: ws.displayName,
           },
         }),
+    ...(result.hint === null ? {} : { hint: result.hint }),
   });
 }
 

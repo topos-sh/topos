@@ -281,6 +281,10 @@ export const DEVICE_AUTH_EXPIRES_IN_SECS = DEVICE_AUTH_TTL_MS / 1000;
 export async function startDeviceAuth(
   requestedName: string,
   requestedWorkspace: string,
+  /** The invite-link token a `follow <invite-url>` enrollment carries — hashed and RECORDED,
+   * never validated here (the unauthenticated start must not be a token oracle); the approval
+   * resolves it under its own fence. */
+  inviteToken?: string,
 ): Promise<{ deviceCode: string; userCode: string; expiresInSecs: number }> {
   const db = getDb();
   // Opportunistic reap: every new enrollment first clears expired ceremony rows (there is no
@@ -298,6 +302,9 @@ export async function startDeviceAuth(
         deviceCodeSha256: sql`${sha256OfText(deviceCode)}` as never,
         requestedName,
         requestedWorkspace,
+        ...(inviteToken === undefined
+          ? {}
+          : { inviteTokenSha256: sql`${sha256OfText(inviteToken)}` as never }),
         expiresAt,
       });
       return { deviceCode, userCode, expiresInSecs: DEVICE_AUTH_EXPIRES_IN_SECS };
@@ -311,6 +318,13 @@ export async function startDeviceAuth(
   throw new Error("device auth start: user_code space exhausted");
 }
 
+/** The first-destination hint an accepted invitation carried, decorated onto a granted poll
+ * (`kind` is the bundle catalog's own tag — 'skill' today — or the literal 'channel'). */
+export interface DeviceGrantHint {
+  kind: string;
+  name: string;
+}
+
 export type DevicePollResult =
   | { status: "pending" }
   | { status: "denied" }
@@ -322,6 +336,8 @@ export type DevicePollResult =
        * route's `workspace` decoration reads this immutable id, so a slug rename or a
        * delete+recreate inside the TTL can never re-point a granted flow. */
       approvedWorkspaceId: string | null;
+      /** The invitation hint, when the flow carried a token whose invitation names one. */
+      hint: DeviceGrantHint | null;
     };
 
 /**
@@ -335,7 +351,8 @@ export type DevicePollResult =
  */
 export async function pollDeviceAuth(deviceCode: string): Promise<DevicePollResult> {
   const rows = await getDb().execute(
-    sql`SELECT status, device_id, approved_workspace_id, expires_at < now() AS expired
+    sql`SELECT status, device_id, approved_workspace_id, invite_token_sha256,
+               expires_at < now() AS expired
         FROM ${deviceAuthSession}
         WHERE device_code_sha256 = ${sha256OfText(deviceCode)}`,
   );
@@ -344,6 +361,7 @@ export async function pollDeviceAuth(deviceCode: string): Promise<DevicePollResu
         status: string;
         device_id: string | null;
         approved_workspace_id: string | null;
+        invite_token_sha256: Buffer | null;
         expired: boolean;
       }
     | undefined;
@@ -360,10 +378,41 @@ export async function pollDeviceAuth(deviceCode: string): Promise<DevicePollResu
       status: "granted",
       deviceId: row.device_id,
       approvedWorkspaceId: row.approved_workspace_id,
+      hint:
+        row.invite_token_sha256 === null ? null : await inviteHintByHash(row.invite_token_sha256),
     };
   }
   // pending — expired pending is terminal (the human never approved in time).
   return row.expired ? { status: "expired" } : { status: "pending" };
+}
+
+/**
+ * The first-destination hint of the invitation a token hash names — ANY status (a granted
+ * flow's invitation was consumed by its own approval), the hinted thing resolved to its
+ * display name, active bundles only. The token hash is retained on the row for exactly this
+ * read.
+ */
+async function inviteHintByHash(tokenSha256: Buffer): Promise<DeviceGrantHint | null> {
+  const rows = await getDb().execute(
+    sql`SELECT b.kind AS bundle_kind, b.name AS bundle_name, c.name AS channel_name
+        FROM web.invitation i
+        LEFT JOIN web.bundle b ON b.id = i.hint_bundle_id AND b.status = 'active'
+        LEFT JOIN web.channel c ON c.id = i.hint_channel_id
+        WHERE i.token_sha256 = ${tokenSha256}`,
+  );
+  const row = rows.rows[0] as
+    | { bundle_kind: string | null; bundle_name: string | null; channel_name: string | null }
+    | undefined;
+  if (!row) {
+    return null;
+  }
+  if (row.bundle_name !== null) {
+    return { kind: row.bundle_kind ?? "skill", name: row.bundle_name };
+  }
+  if (row.channel_name !== null) {
+    return { kind: "channel", name: row.channel_name };
+  }
+  return null;
 }
 
 /**
@@ -432,7 +481,8 @@ export async function approveDeviceAuth(
 ): Promise<{ deviceId: string; requestedName: string } | null> {
   return await getDb().transaction(async (tx) => {
     const rows = await tx.execute(
-      sql`SELECT id, requested_name, requested_workspace, device_code_sha256
+      sql`SELECT id, requested_name, requested_workspace, device_code_sha256,
+                 invite_token_sha256
           FROM ${deviceAuthSession}
           WHERE user_code = ${userCode} AND status = 'pending' AND expires_at > now()
           FOR UPDATE`,
@@ -443,10 +493,28 @@ export async function approveDeviceAuth(
           requested_name: string;
           requested_workspace: string;
           device_code_sha256: Buffer;
+          invite_token_sha256: Buffer | null;
         }
       | undefined;
     if (!row) {
       return null;
+    }
+    // The invitation weave: a flow that carries an invite token accepts the invitation INSIDE
+    // this same fence when the approver is its rightful addressee — so a typed-code approval
+    // (never having visited the invitation page) still lands sign-in → accept → approve as one
+    // act, and the seat requirement below then finds the seat the accept just wrote. A token
+    // that resolves to nothing, or an approver the accept fences refuse (wrong account,
+    // unverified mailbox), changes NOTHING here — the seat check stays the sole authority.
+    if (row.invite_token_sha256 !== null) {
+      const inv = await lockPendingInvitationTx(
+        tx,
+        sql`i.token_sha256 = ${row.invite_token_sha256}`,
+      );
+      if (inv !== null) {
+        await acceptInvitationTx(tx, inv, await sessionAccountTx(tx, approver), {
+          mailboxProven: false,
+        });
+      }
     }
     const resolved = await seatedFlowWorkspaceTx(tx, row.requested_workspace, approver.userId);
     if (resolved === null) {
@@ -514,18 +582,69 @@ export async function denyDeviceAuth(
   });
 }
 
+/** The verify page's resolved request: what is asking, the code for the glance-check, and —
+ * when the flow carries an invite token that still resolves — the workspace the invitation
+ * would join (disclosed to the code-holder, who is the token-holder's own terminal). */
+export interface PendingDeviceAuthView {
+  requestedName: string;
+  requestedWorkspace: string;
+  userCode: string;
+  inviteWorkspace: { name: string; displayName: string } | null;
+}
+
 /** The verify page's lookup: the pending request a typed user_code names (display only). */
-export async function pendingDeviceAuth(
-  userCode: string,
-): Promise<{ requestedName: string; requestedWorkspace: string } | null> {
+export async function pendingDeviceAuth(userCode: string): Promise<PendingDeviceAuthView | null> {
+  return pendingDeviceAuthWhere(sql`user_code = ${userCode}`);
+}
+
+/**
+ * The loopback auto-open's lookup: the pending request whose device-code HASH the CLI put in
+ * the URL it opened (hex of the same SHA-256 this store already keys the row by — the code
+ * itself never enters a URL; a preimage is infeasible, so the challenge identifies without
+ * revealing). A malformed challenge is simply a miss.
+ */
+export async function pendingDeviceAuthByChallenge(
+  challengeHex: string,
+): Promise<PendingDeviceAuthView | null> {
+  if (!/^[0-9a-f]{64}$/.test(challengeHex)) {
+    return null;
+  }
+  return pendingDeviceAuthWhere(sql`device_code_sha256 = decode(${challengeHex}, 'hex')`);
+}
+
+async function pendingDeviceAuthWhere(
+  cond: ReturnType<typeof sql>,
+): Promise<PendingDeviceAuthView | null> {
   const rows = await getDb().execute(
-    sql`SELECT requested_name, requested_workspace FROM ${deviceAuthSession}
-        WHERE user_code = ${userCode} AND status = 'pending' AND expires_at > now()`,
+    sql`SELECT s.requested_name, s.requested_workspace, s.user_code,
+               w.name AS invite_ws_name, w.display_name AS invite_ws_display
+        FROM ${deviceAuthSession} s
+        LEFT JOIN web.invitation i ON i.token_sha256 = s.invite_token_sha256
+          AND i.status = 'pending' AND (i.expires_at IS NULL OR i.expires_at > now())
+        LEFT JOIN ${workspace} w ON w.id = i.workspace_id
+        WHERE ${cond} AND s.status = 'pending' AND s.expires_at > now()`,
   );
-  const row = rows.rows[0] as { requested_name: string; requested_workspace: string } | undefined;
-  return row
-    ? { requestedName: row.requested_name, requestedWorkspace: row.requested_workspace }
-    : null;
+  const row = rows.rows[0] as
+    | {
+        requested_name: string;
+        requested_workspace: string;
+        user_code: string;
+        invite_ws_name: string | null;
+        invite_ws_display: string | null;
+      }
+    | undefined;
+  if (!row) {
+    return null;
+  }
+  return {
+    requestedName: row.requested_name,
+    requestedWorkspace: row.requested_workspace,
+    userCode: row.user_code,
+    inviteWorkspace:
+      row.invite_ws_name === null
+        ? null
+        : { name: row.invite_ws_name, displayName: row.invite_ws_display ?? row.invite_ws_name },
+  };
 }
 
 // ── Step-up email confirmation (the password-less admin-ceremony rung) ──────────────────────
@@ -719,6 +838,436 @@ export async function bindInvitedSeats(
     }
     return bound;
   });
+}
+
+// ── The tokened invitation ceremonies (view · accept · decline) ─────────────────────────────
+//
+// The invite LINK is worth one invitation, never an account or a credential: viewing never
+// consumes (GET-safe for scanners), and the accept binds to the INVITED EMAIL's account — the
+// one sanctioned email comparison beside bindInvitedSeats above. Only the token's SHA-256 is
+// stored (the claim-code pattern); the plaintext travels in the invitation mail alone.
+
+/** Mint the single-use invite-link token (32 random bytes, base64url — URL-path-safe). The
+ * caller stores only its hash; the plaintext goes into the mailed link. */
+export function mintInviteToken(): string {
+  return mintSecret();
+}
+
+/**
+ * Supersede a DECLINED invitation record for an address being re-invited, inside the
+ * inviter's transaction — the audit trail keeps the permanent record; the members page stays
+ * clean. Email-keyed BY DESIGN (the same key the pending upsert conflicts on), which is why
+ * this row op lives here in the sanctioned module and not in the DAL.
+ */
+export async function supersedeDeclinedInvitationTx(
+  tx: Tx,
+  workspaceId: string,
+  email: string,
+): Promise<void> {
+  await tx.execute(
+    sql`DELETE FROM web.invitation
+        WHERE workspace_id = ${workspaceId} AND email = ${email} AND status = 'declined'`,
+  );
+}
+
+/** What the invitation page shows BEFORE accept: who invited, where to, the role, and what it
+ * delivers. Resolved only for a live (pending, unexpired) token — every other state is the one
+ * constant page, so nothing here leaks on a miss. */
+export interface InvitationView {
+  workspaceId: string;
+  workspaceName: string;
+  workspaceDisplayName: string;
+  /** The invited address (shown to the token-holder — the mailbox the link was sent to). */
+  email: string;
+  role: string;
+  inviterDisplay: string | null;
+  /** The first-destination hint (`kind` = the bundle catalog's tag, or 'channel'). */
+  hint: DeviceGrantHint | null;
+  /** Active bundles the default channels deliver to every member — the pre-accept summary. */
+  deliveredCount: number;
+  /** The default channels delivering them (usually just 'everyone'). */
+  viaChannels: string[];
+}
+
+/** The invitation a live token names, for the pre-accept summary. Null = the constant page. */
+export async function invitationByToken(token: string): Promise<InvitationView | null> {
+  const rows = await getDb().execute(
+    sql`SELECT i.workspace_id, i.email, i.role, w.name, w.display_name,
+               COALESCE(NULLIF(btrim(u.name), ''), u.email) AS inviter_display,
+               b.kind AS bundle_kind, b.name AS bundle_name, c.name AS channel_name
+        FROM web.invitation i
+        JOIN ${workspace} w ON w.id = i.workspace_id
+        LEFT JOIN web."user" u ON u.id = i.invited_by
+        LEFT JOIN web.bundle b ON b.id = i.hint_bundle_id AND b.status = 'active'
+        LEFT JOIN web.channel c ON c.id = i.hint_channel_id
+        WHERE i.token_sha256 = ${sha256OfText(token)} AND i.status = 'pending'
+          AND (i.expires_at IS NULL OR i.expires_at > now())`,
+  );
+  const row = rows.rows[0] as
+    | {
+        workspace_id: string;
+        email: string;
+        role: string;
+        name: string;
+        display_name: string;
+        inviter_display: string | null;
+        bundle_kind: string | null;
+        bundle_name: string | null;
+        channel_name: string | null;
+      }
+    | undefined;
+  if (!row) {
+    return null;
+  }
+  const delivered = await getDb().execute(
+    sql`SELECT c.name, count(DISTINCT cb.bundle_id)::int AS bundles
+        FROM web.channel c
+        JOIN web.channel_bundle cb ON cb.channel_id = c.id
+        JOIN web.bundle b ON b.id = cb.bundle_id AND b.status = 'active'
+        WHERE c.workspace_id = ${row.workspace_id} AND c.is_default
+        GROUP BY c.name`,
+  );
+  const via = delivered.rows as { name: string; bundles: number }[];
+  return {
+    workspaceId: row.workspace_id,
+    workspaceName: row.name,
+    workspaceDisplayName: row.display_name,
+    email: row.email,
+    role: row.role,
+    inviterDisplay: row.inviter_display,
+    hint:
+      row.bundle_name !== null
+        ? { kind: row.bundle_kind ?? "skill", name: row.bundle_name }
+        : row.channel_name !== null
+          ? { kind: "channel", name: row.channel_name }
+          : null,
+    deliveredCount: via.reduce((n, r) => n + r.bundles, 0),
+    viaChannels: via.map((r) => r.name),
+  };
+}
+
+/**
+ * Which arm the invitation page shows a visitor — decided HERE so the email-binding predicate
+ * never leaves this module (the route renders branches, it compares nothing):
+ *  - `anon_new` — no session, no account under the invited address: the account-minting accept;
+ *  - `anon_existing` — no session, the address has an account: sign in first, then return;
+ *  - `match` — signed in AS the invited address, mailbox proven: the one-click accept;
+ *  - `match_unverified` — signed in as the invited address but the mailbox was never proven:
+ *     one verification round-trip first (the true owner passes; a squatter cannot);
+ *  - `other` — signed in as a DIFFERENT account: the switch page (never accepts as current);
+ *  - `member` — signed in as the invited address AND already seated: redirect into the
+ *     workspace (the loader's redirect; nothing consumed on a GET).
+ */
+export type InvitationPageBranch =
+  | "anon_new"
+  | "anon_existing"
+  | "match"
+  | "match_unverified"
+  | "other"
+  | "member";
+
+/** The invitation page's whole server-side read: the view + the visitor's branch. */
+export async function invitationPageView(
+  token: string,
+  sessionUserId: string | null,
+): Promise<{ view: InvitationView; branch: InvitationPageBranch } | null> {
+  const view = await invitationByToken(token);
+  if (view === null) {
+    return null;
+  }
+  if (sessionUserId === null) {
+    const rows = await getDb().execute(
+      sql`SELECT 1 FROM web."user" WHERE lower(email) = ${view.email} LIMIT 1`,
+    );
+    return { view, branch: rows.rows.length > 0 ? "anon_existing" : "anon_new" };
+  }
+  const rows = await getDb().execute(
+    sql`SELECT email, email_verified FROM web."user" WHERE id = ${sessionUserId}`,
+  );
+  const row = rows.rows[0] as { email: string; email_verified: boolean } | undefined;
+  if (!row || row.email.trim().toLowerCase() !== view.email) {
+    return { view, branch: "other" };
+  }
+  const seated = await seatOf(sessionUserId, view.workspaceId);
+  if (seated !== undefined) {
+    return { view, branch: "member" };
+  }
+  return { view, branch: row.email_verified ? "match" : "match_unverified" };
+}
+
+/** The session account an accept fences against — email + its verification state alongside the
+ * branded actor facts. Resolved server-side from the user id, never from a form. */
+export interface SessionAccount {
+  userId: string;
+  display: string;
+  email: string;
+  emailVerified: boolean;
+}
+
+/** Read the acting account's email facts inside the caller's transaction (a deleted user reads
+ * as an empty account no invitation can match — fail-closed). */
+async function sessionAccountTx(
+  tx: Tx,
+  actor: { userId: string; display: string },
+): Promise<SessionAccount> {
+  const rows = await tx.execute(
+    sql`SELECT email, email_verified FROM web."user" WHERE id = ${actor.userId}`,
+  );
+  const row = rows.rows[0] as { email: string; email_verified: boolean } | undefined;
+  return {
+    userId: actor.userId,
+    display: actor.display,
+    email: row?.email ?? "",
+    emailVerified: row?.email_verified ?? false,
+  };
+}
+
+/** The row an accept/decline fence locks. */
+interface LockedInvitation {
+  id: string;
+  workspaceId: string;
+  email: string;
+  role: string;
+  invitedBy: string | null;
+  hintBundleId: string | null;
+  hintChannelId: string | null;
+}
+
+/** Lock ONE live (pending, unexpired) invitation row by an arbitrary predicate — the shared
+ * FOR-UPDATE fence of accept, decline, and the device-approval weave. */
+async function lockPendingInvitationTx(
+  tx: Tx,
+  cond: ReturnType<typeof sql>,
+): Promise<LockedInvitation | null> {
+  const rows = await tx.execute(
+    sql`SELECT i.id, i.workspace_id, i.email, i.role, i.invited_by,
+               i.hint_bundle_id, i.hint_channel_id
+        FROM web.invitation i
+        WHERE ${cond} AND i.status = 'pending'
+          AND (i.expires_at IS NULL OR i.expires_at > now())
+        FOR UPDATE`,
+  );
+  const row = rows.rows[0] as
+    | {
+        id: string;
+        workspace_id: string;
+        email: string;
+        role: string;
+        invited_by: string | null;
+        hint_bundle_id: string | null;
+        hint_channel_id: string | null;
+      }
+    | undefined;
+  if (!row) {
+    return null;
+  }
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    email: row.email,
+    role: row.role,
+    invitedBy: row.invited_by,
+    hintBundleId: row.hint_bundle_id,
+    hintChannelId: row.hint_channel_id,
+  };
+}
+
+export type InviteAcceptOutcome =
+  /** Consumed + seated (or already seated) — the landing facts ride along. */
+  | {
+      outcome: "accepted";
+      workspaceId: string;
+      workspaceName: string;
+      workspaceDisplayName: string;
+      hint: DeviceGrantHint | null;
+      alreadyMember: boolean;
+    }
+  /** No live invitation under this token — the one constant page. */
+  | { outcome: "gone" }
+  /** The session account is not the invited address — the switch page; never accepts. */
+  | { outcome: "wrong_account" }
+  /** The invited address's account never proved its mailbox — one round-trip first (the true
+   * owner passes; a squatter cannot). */
+  | { outcome: "unverified" };
+
+/**
+ * FENCE — the invitation accept, ONE transaction beside bindInvitedSeats: the email-binding
+ * predicate, the unverified-squat fence, consume the row, write the seat, apply the hint
+ * effects AFTER the seat (the seat-anchoring invariant: a follow without the workspace stays
+ * unrepresentable), audit — all under the caller's FOR-UPDATE lock on the invitation row, so
+ * two racing accepts serialize and exactly one consumes.
+ *
+ * `mailboxProven` marks the account-minting path, where possession of the mailed token IS the
+ * mailbox proof: the fence is satisfied and the account's email_verified flips true here.
+ */
+async function acceptInvitationTx(
+  tx: Tx,
+  inv: LockedInvitation,
+  account: SessionAccount,
+  opts: { mailboxProven: boolean },
+): Promise<InviteAcceptOutcome> {
+  if (account.email.trim().toLowerCase() !== inv.email) {
+    return { outcome: "wrong_account" };
+  }
+  if (!account.emailVerified && !opts.mailboxProven) {
+    return { outcome: "unverified" };
+  }
+  if (opts.mailboxProven && !account.emailVerified) {
+    await tx.execute(sql`UPDATE web."user" SET email_verified = true WHERE id = ${account.userId}`);
+  }
+  await tx.execute(
+    sql`UPDATE web.invitation
+        SET status = 'accepted', accepted_by = ${account.userId}, accepted_at = now()
+        WHERE id = ${inv.id}`,
+  );
+  const seated = await tx.execute(
+    sql`INSERT INTO ${seat} (workspace_id, user_id, role, invited_by)
+        VALUES (${inv.workspaceId}, ${account.userId}, ${inv.role}, ${inv.invitedBy})
+        ON CONFLICT (workspace_id, user_id) DO NOTHING
+        RETURNING user_id`,
+  );
+  const alreadyMember = seated.rows.length === 0;
+  // Hint effects — AFTER the seat row, same transaction. The hinted thing may have been
+  // deleted since the invite (the FK cleared the column) or archived; then nothing lands.
+  let hint: DeviceGrantHint | null = null;
+  if (inv.hintBundleId !== null) {
+    const named = await tx.execute(
+      sql`SELECT kind, name FROM web.bundle
+          WHERE id = ${inv.hintBundleId} AND workspace_id = ${inv.workspaceId}
+            AND status = 'active'`,
+    );
+    const row = named.rows[0] as { kind: string; name: string } | undefined;
+    if (row) {
+      await tx.execute(
+        sql`INSERT INTO web.bundle_subscription (user_id, workspace_id, bundle_id, state)
+            VALUES (${account.userId}, ${inv.workspaceId}, ${inv.hintBundleId}, 'following')
+            ON CONFLICT (user_id, bundle_id)
+            DO UPDATE SET state = 'following', updated_at = now()`,
+      );
+      hint = { kind: row.kind, name: row.name };
+    }
+  } else if (inv.hintChannelId !== null) {
+    const named = await tx.execute(
+      sql`SELECT name FROM web.channel
+          WHERE id = ${inv.hintChannelId} AND workspace_id = ${inv.workspaceId}`,
+    );
+    const row = named.rows[0] as { name: string } | undefined;
+    if (row) {
+      await tx.execute(
+        sql`INSERT INTO web.channel_member (channel_id, workspace_id, user_id, added_by)
+            VALUES (${inv.hintChannelId}, ${inv.workspaceId}, ${account.userId},
+                    ${inv.invitedBy})
+            ON CONFLICT (channel_id, user_id) DO NOTHING`,
+      );
+      hint = { kind: "channel", name: row.name };
+    }
+  }
+  await auditInTx(tx, {
+    workspaceId: inv.workspaceId,
+    actor: { userId: account.userId, display: account.display },
+    kind: "invitation_accepted",
+    subject: inv.email,
+    outcome: "ok",
+    details: { role: inv.role, ...(hint === null ? {} : { hint }) },
+  });
+  const ws = await tx.execute(
+    sql`SELECT name, display_name FROM ${workspace} WHERE id = ${inv.workspaceId}`,
+  );
+  const wsRow = ws.rows[0] as { name: string; display_name: string } | undefined;
+  return {
+    outcome: "accepted",
+    workspaceId: inv.workspaceId,
+    workspaceName: wsRow?.name ?? "",
+    workspaceDisplayName: wsRow?.display_name ?? wsRow?.name ?? "",
+    hint,
+    alreadyMember,
+  };
+}
+
+/** The invitation page's accept: lock the live row by token, run the fence. */
+export async function acceptInvitationByToken(
+  token: string,
+  actor: { userId: string; display: string },
+  opts: { mailboxProven: boolean },
+): Promise<InviteAcceptOutcome> {
+  return await getDb().transaction(async (tx) => {
+    const inv = await lockPendingInvitationTx(tx, sql`i.token_sha256 = ${sha256OfText(token)}`);
+    if (inv === null) {
+      return { outcome: "gone" };
+    }
+    return acceptInvitationTx(tx, inv, await sessionAccountTx(tx, actor), opts);
+  });
+}
+
+/**
+ * Decline — recorded (the inviter sees it; re-inviting mints a fresh row), and deliberately
+ * SESSION-LESS: possession of the mailed token is the same proof the account mint accepts, and
+ * demanding an account to say "no thanks" would be hostile. Uniform miss otherwise.
+ */
+export async function declineInvitationByToken(token: string): Promise<"declined" | "gone"> {
+  return await getDb().transaction(async (tx) => {
+    const inv = await lockPendingInvitationTx(tx, sql`i.token_sha256 = ${sha256OfText(token)}`);
+    if (inv === null) {
+      return "gone";
+    }
+    await tx.execute(sql`UPDATE web.invitation SET status = 'declined' WHERE id = ${inv.id}`);
+    await auditInTx(tx, {
+      workspaceId: inv.workspaceId,
+      actor: { display: inv.email },
+      kind: "invitation_declined",
+      subject: inv.email,
+      outcome: "ok",
+    });
+    return "declined";
+  });
+}
+
+/**
+ * The PERSON-scoped device resolve: credential → device → user, NO seat requirement — the
+ * guard of the device lane's invitation accept, where the caller by definition has no seat yet
+ * in the invitation's workspace. Fail-closed on a revoked device; last_seen_at rides along.
+ */
+export async function devicePerson(credential: string): Promise<SessionAccount | null> {
+  const rows = await getDb().execute(
+    sql`UPDATE ${device} d SET last_seen_at = now()
+        FROM web."user" u
+        WHERE d.credential_sha256 = ${sha256OfText(credential)}
+          AND d.revoked_at IS NULL
+          AND u.id = d.user_id
+        RETURNING d.user_id,
+          COALESCE(NULLIF(btrim(u.name), ''), u.email) AS user_display,
+          u.email, u.email_verified`,
+  );
+  const row = rows.rows[0] as
+    | { user_id: string; user_display: string; email: string; email_verified: boolean }
+    | undefined;
+  if (!row) {
+    return null;
+  }
+  return {
+    userId: row.user_id,
+    display: row.user_display,
+    email: row.email,
+    emailVerified: row.email_verified,
+  };
+}
+
+/**
+ * The passwordless account mint's bridge: park a single-use sign-in token in Better Auth's own
+ * verification store, shaped exactly as the magic-link plugin's verify endpoint consumes it —
+ * so the invitation page can mint the invited email's account + session THROUGH Better Auth's
+ * own door (hooks included) without sending any mail: the invite token's delivery to that
+ * mailbox already IS the proof. Short TTL; consumed atomically by the verify call.
+ */
+export async function mintInvitationSignIn(email: string): Promise<string> {
+  const token = mintSecret();
+  const expiresAt = new Date(Date.now() + 2 * 60 * 1000);
+  await getDb().execute(
+    sql`INSERT INTO web.verification (id, identifier, value, expires_at)
+        VALUES (${`iv_${randomBytes(16).toString("hex")}`}, ${token},
+                ${JSON.stringify({ email })}, ${expiresAt})`,
+  );
+  return token;
 }
 
 /** The admission read: the seat a user holds in a workspace (undefined = no admission). */

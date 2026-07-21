@@ -74,6 +74,12 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
     // `claim` is a reserved top-level segment that answers the house 404, so the `:ws` face can't
     // swallow it and it discloses nothing.
     tenancy === "multi" ? route("claim", file("reserved.tsx")) : route("claim", file("claim.tsx")),
+    // The tokened invitation page — GET-safe viewing, explicit accept/decline POSTs. Origin-
+    // rooted in single tenancy; nested under the workspace slug in multi (the static `invite`
+    // segment outranks the face routes' params, so no face ever swallows it).
+    tenancy === "multi"
+      ? route(":ws/invite/:token", file("invite-redeem.tsx"))
+      : route("invite/:token", file("invite-redeem.tsx")),
     // The ONE approve ceremony: a signed-in human confirms a device flow by its user code.
     route("verify", file("verify.tsx")),
     route("healthz", file("healthz.ts")),
@@ -98,6 +104,8 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
     // both tenancy modes. Static segments outrank the splat, which answers the uniform wire 404.
     route("api/v1/device/authorize", file("api.v1.device-authorize.ts")),
     route("api/v1/device/token", file("api.v1.device-token.ts")),
+    // The already-enrolled device's invite-URL accept — person-scoped (seat-less by design).
+    route("api/v1/invitations/accept", file("api.v1.invitation-accept.ts")),
     route("api/v1/publish", file("api.v1.publish.ts")),
     route("api/v1/proposals", file("api.v1.propose.ts")),
     route("api/v1/reverts", file("api.v1.reverts.ts")),

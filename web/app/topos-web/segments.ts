@@ -49,6 +49,9 @@ export const FUTURE_RESERVED_SEGMENTS: readonly string[] = [
   "download",
   "help",
   "internal",
+  // In multi tenancy invitation pages nest under the workspace slug (`/<ws>/invite/<token>`),
+  // but the bare word stays reserved so no workspace address reads like an invitation door.
+  "invite",
   "legal",
   "mail",
   "oss",

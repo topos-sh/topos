@@ -105,6 +105,12 @@ export const deviceAuthSession = webSchema.table(
      * mutable slug (a rename or delete+recreate inside the TTL must not re-point the flow).
      */
     approvedWorkspaceId: text("approved_workspace_id"),
+    /**
+     * SHA-256 of the invitation token a `follow <invite-url>` enrollment carries — recorded
+     * UNVALIDATED at the unauthenticated start (no token oracle); the approval resolves it
+     * under its own fence and weaves accept-the-invitation into the same transaction.
+     */
+    inviteTokenSha256: bytea("invite_token_sha256"),
     status: text("status").default("pending").notNull(),
     approvedBy: text("approved_by").references(() => user.id, { onDelete: "set null" }),
     deviceId: text("device_id").references(() => device.id, { onDelete: "cascade" }),
@@ -117,6 +123,10 @@ export const deviceAuthSession = webSchema.table(
     check(
       "device_auth_session_device_code_sha256_check",
       sql`octet_length(${table.deviceCodeSha256}) = 32`,
+    ),
+    check(
+      "device_auth_session_invite_token_sha256_check",
+      sql`${table.inviteTokenSha256} is null or octet_length(${table.inviteTokenSha256}) = 32`,
     ),
     check(
       "device_auth_session_status_check",
@@ -201,8 +211,15 @@ export const seat = webSchema.table(
 );
 
 /**
- * A claim on a FUTURE user; requires armed SMTP; binds at verified sign-up → seat.
- * expires_at NULL = does not lapse; the ceremony sets the product's actual policy.
+ * A claim on a FUTURE user; requires armed SMTP; binds at verified sign-up → seat, OR redeems
+ * through the tokened invite link (only the token's SHA-256 is stored — the claim-code
+ * pattern; re-inviting mints a fresh token over the pending row, killing the old link).
+ * expires_at NULL = does not lapse; the ceremony sets the product's actual policy. An
+ * invitation may carry ONE optional first-destination hint — a bundle OR a channel of its own
+ * workspace (at most one; workspace coherence FK-pinned in the migration's raw SQL with a
+ * per-column SET NULL, so deleting the hinted thing clears the hint and never the invitation).
+ * The token hash is KEPT after consumption: the device-flow grant looks the accepted
+ * invitation up by it to decorate the hint.
  */
 export const invitation = webSchema.table(
   "invitation",
@@ -214,6 +231,11 @@ export const invitation = webSchema.table(
     email: text("email").notNull(),
     role: text("role").default("member").notNull(),
     status: text("status").default("pending").notNull(),
+    /** SHA-256 of the single-use invite-link token; the plaintext travels only in the mail. */
+    tokenSha256: bytea("token_sha256").unique(),
+    /** The optional first-destination hint: at most one of the two references is set. */
+    hintBundleId: text("hint_bundle_id"),
+    hintChannelId: text("hint_channel_id"),
     invitedBy: text("invited_by").references(() => user.id, { onDelete: "set null" }),
     acceptedBy: text("accepted_by").references(() => user.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -227,7 +249,18 @@ export const invitation = webSchema.table(
       .where(sql`status = 'pending'`),
     check("invitation_email_check", sql`${table.email} = lower(${table.email})`),
     check("invitation_role_check", sql`${table.role} in ('owner', 'reviewer', 'member')`),
-    check("invitation_status_check", sql`${table.status} in ('pending', 'accepted', 'revoked')`),
+    check(
+      "invitation_status_check",
+      sql`${table.status} in ('pending', 'accepted', 'revoked', 'declined')`,
+    ),
+    check(
+      "invitation_token_sha256_check",
+      sql`${table.tokenSha256} is null or octet_length(${table.tokenSha256}) = 32`,
+    ),
+    check(
+      "invitation_hint_one_check",
+      sql`${table.hintBundleId} is null or ${table.hintChannelId} is null`,
+    ),
     // Anchored on accepted_at, NOT accepted_by: accepted_by is SET NULL on user deletion,
     // and a CHECK on it would make that deletion impossible.
     check(

@@ -139,6 +139,8 @@ describe("the device flow", () => {
     expect(await identity.pendingDeviceAuth(flow.userCode)).toEqual({
       requestedName: "laptop",
       requestedWorkspace: "",
+      userCode: flow.userCode,
+      inviteWorkspace: null,
     });
     const approved = await identity.approveDeviceAuth(flow.userCode, {
       userId: owner,
@@ -411,6 +413,7 @@ describe("registrationDecision", () => {
                     policy,
                     tenancy,
                     inClaimCeremony,
+                    inInvitationCeremony: false,
                     registrationKnob,
                     pendingInvitation,
                     mailArmed,
@@ -434,6 +437,7 @@ describe("registrationDecision", () => {
         policy: "gated",
         tenancy: "multi",
         inClaimCeremony: false,
+        inInvitationCeremony: false,
         registrationKnob: "open",
         pendingInvitation: false,
         mailArmed: true,
@@ -445,6 +449,7 @@ describe("registrationDecision", () => {
         policy: "gated",
         tenancy: "single",
         inClaimCeremony: false,
+        inInvitationCeremony: false,
         registrationKnob: "invite_only",
         pendingInvitation: true,
         mailArmed: false,
@@ -456,6 +461,7 @@ describe("registrationDecision", () => {
         policy: "open",
         tenancy: "multi",
         inClaimCeremony: false,
+        inInvitationCeremony: false,
         registrationKnob: null,
         pendingInvitation: false,
         mailArmed: false,

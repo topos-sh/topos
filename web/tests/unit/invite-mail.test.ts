@@ -8,9 +8,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
  * OWN file, NEVER `.magic-links.jsonl` (whose reader parses every line of its file and would hand
  * a sign-in flow the wrong thing). Delivery rides the ONE transport: without the five
  * `TOPOS_MAIL_SMTP_*`, production is a deliberate no-op and `inviteMailDelivery().canSend` is
- * false; with them, production really sends. The notice carries the workspace ADDRESS + display
- * name — the full `<origin>/<name>` follow target rendered verbatim (never re-prefixed), never a
- * tokened link.
+ * false; with them, production really sends. The mail carries the TOKENED invite URL through
+ * three CTAs in a fixed order — the browser link first, the agent paste-block second, the
+ * terminal `topos follow` line third — and a hinted invitation leads with its first
+ * destination.
  */
 
 const { sendMailSpy, createTransportSpy } = vi.hoisted(() => {
@@ -48,9 +49,8 @@ async function importInviteMail(appEnv: string, smtp: Record<string, string> = {
 const INVITE = {
   to: "newbie@example.com",
   workspaceDisplayName: "Acme Platform",
-  // The FULL follow target (`<origin>/<name>`) the caller composes — the notice renders it
-  // verbatim, never re-prepending an origin.
-  address: "https://topos.example/acme-platform",
+  // The tokened invitation URL the caller composes — every CTA renders it verbatim.
+  inviteUrl: "https://topos.example/invite/tok-0123456789",
   // The deployment's own agent-onboarding doc — the agent paste-block tells it to fetch this.
   agentUrl: "https://topos.example/agent",
   invitedBy: "owner@example.com",
@@ -78,7 +78,7 @@ describe("inviteMailDelivery", () => {
 });
 
 describe("sendInviteEmail in test mode", () => {
-  it("appends {to,address,...} to .invite-emails.jsonl — never .magic-links.jsonl, never a send", async () => {
+  it("appends {to,inviteUrl,...} to .invite-emails.jsonl — never .magic-links.jsonl, never a send", async () => {
     const mail = await importInviteMail("test");
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
@@ -94,12 +94,9 @@ describe("sendInviteEmail in test mode", () => {
       const parsed = JSON.parse(lines[0] as string);
       expect(parsed).toMatchObject({
         to: INVITE.to,
-        address: INVITE.address,
+        inviteUrl: INVITE.inviteUrl,
         workspaceDisplayName: INVITE.workspaceDisplayName,
       });
-      // The address is the plain follow target — no tokened link machinery of any kind.
-      expect(lines[0]).not.toContain("/i/");
-      expect(lines[0]).not.toContain("token");
       // The accumulating dev outbox carries the FULL rendered mail, kind-tagged.
       const outbox = (await fs.readFile(path.join(dir, ".outbox.jsonl"), "utf8"))
         .trim()
@@ -108,15 +105,16 @@ describe("sendInviteEmail in test mode", () => {
       const recorded = JSON.parse(outbox[0] as string);
       expect(recorded.kind).toBe("invite");
       expect(recorded.to).toBe(INVITE.to);
-      expect(recorded.subject).toBe(
-        `You've been invited to ${INVITE.workspaceDisplayName} on Topos`,
+      expect(recorded.subject).toBe(`You're invited to ${INVITE.workspaceDisplayName} on Topos`);
+      // The three CTAs, in the decided order: browser link, agent paste-block, terminal line.
+      const browserAt = recorded.text.indexOf(`  ${INVITE.inviteUrl}`);
+      const agentAt = recorded.text.indexOf(
+        `Set up Topos for us: fetch ${INVITE.agentUrl} and follow it. Our invite: ${INVITE.inviteUrl}`,
       );
-      // The terminal line renders the full address verbatim — no origin is ever doubled onto it.
-      expect(recorded.text).toContain(`topos follow ${INVITE.address}`);
-      // The agent path is a complete paste-block: fetch the onboarding doc, then this address.
-      expect(recorded.text).toContain(
-        `Set up Topos for us: fetch ${INVITE.agentUrl} and follow it. Our workspace: ${INVITE.address}`,
-      );
+      const terminalAt = recorded.text.indexOf(`topos follow ${INVITE.inviteUrl}`);
+      expect(browserAt).toBeGreaterThan(-1);
+      expect(agentAt).toBeGreaterThan(browserAt);
+      expect(terminalAt).toBeGreaterThan(agentAt);
       await expect(fs.access(path.join(dir, ".magic-links.jsonl"))).rejects.toThrow();
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
@@ -148,7 +146,7 @@ describe("sendInviteEmail in production mode", () => {
     }
   });
 
-  it("really sends with the transport armed — the address in body, user-entered fields escaped in HTML", async () => {
+  it("really sends with the transport armed — the link in body, user-entered fields escaped in HTML", async () => {
     const mail = await importInviteMail("production", SMTP_ENV);
     await mail.sendInviteEmail({ ...INVITE, workspaceDisplayName: "Acme <Platform>" });
     expect(sendMailSpy).toHaveBeenCalledTimes(1);
@@ -159,10 +157,19 @@ describe("sendInviteEmail in production mode", () => {
       html?: string;
     };
     expect(message.to).toBe(INVITE.to);
-    expect(message.subject).toBe("You've been invited to Acme <Platform> on Topos");
-    expect(message.text).toContain(`topos follow ${INVITE.address}`);
-    // The notice carries the plain follow address — never a tokened link.
-    expect(message.text).not.toContain("/i/");
+    expect(message.subject).toBe("You're invited to Acme <Platform> on Topos");
+    expect(message.text).toContain(`topos follow ${INVITE.inviteUrl}`);
     expect(message.html).toContain("Acme &lt;Platform&gt;");
+  });
+
+  it("a hinted invitation leads with its first destination — subject and opening line", async () => {
+    const mail = await importInviteMail("production", SMTP_ENV);
+    await mail.sendInviteEmail({ ...INVITE, hint: { kind: "skill", name: "deploy" } });
+    expect(sendMailSpy).toHaveBeenCalledTimes(1);
+    const message = sendMailSpy.mock.calls[0]?.[0] as { subject: string; text: string };
+    expect(message.subject).toBe(
+      `You're invited to ${INVITE.workspaceDisplayName} on Topos — starting with the deploy skill`,
+    );
+    expect(message.text).toContain("First up: the deploy skill.");
   });
 });
