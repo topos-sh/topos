@@ -108,6 +108,27 @@ function acceptLanding(
   return wsPathServer(workspaceName);
 }
 
+/**
+ * This page's own address, rebuilt from scratch: the request pathname is normalized (React
+ * Router's single-fetch client requests address `<path>.data`, and a redirect built from that
+ * raw pathname would compound the suffix into a broken token) and only the VALIDATED
+ * pass-through params ride the query — never whatever else the URL carried.
+ */
+function selfInvitePath(url: URL, device: DeviceParams | null): string {
+  const pathname = url.pathname.replace(/\.data$/, "");
+  if (device === null) {
+    return pathname;
+  }
+  const qs = new URLSearchParams({ device: device.device });
+  if (device.port !== null) {
+    qs.set("port", device.port);
+  }
+  if (device.state !== null) {
+    qs.set("state", device.state);
+  }
+  return `${pathname}?${qs.toString()}`;
+}
+
 export async function loader({ request, params }: LoaderFunctionArgs) {
   requireBelt(request);
   const token = params.token ?? "";
@@ -128,8 +149,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   return {
     state: "view" as const,
     branch,
-    /** This page's own path+query — the sign-in return target, computed server-side. */
-    selfPath: `${url.pathname}${url.search}`,
+    /** This page's own path (+ validated params) — the sign-in return target. */
+    selfPath: selfInvitePath(url, device),
     // The invited address is shown to the token-holder (it is their own mailbox' mail);
     // the session's own email backs the switch page's "you are signed in as".
     invitedEmail: view.email,
@@ -154,7 +175,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
   const token = params.token ?? "";
   const url = new URL(request.url);
   const device = deviceParamsFrom(url);
-  const self = `${url.pathname}${url.search}`;
+  const self = selfInvitePath(url, device);
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");
   const auth = getAuth();
