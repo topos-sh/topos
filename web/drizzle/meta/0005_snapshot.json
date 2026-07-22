@@ -1,5 +1,5 @@
 {
-  "id": "c5c67698-33f7-453c-8953-b8cbd4f1bff5",
+  "id": "ba5ed7aa-1b98-4626-b2bc-73b39bcb9a7f",
   "prevId": "965a617d-4163-4eb8-b2fe-584b44be8823",
   "version": "7",
   "dialect": "postgresql",
@@ -2347,6 +2347,10 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
+        "mail_event_kind_check": {
+          "name": "mail_event_kind_check",
+          "value": "\"web\".\"mail_event\".\"kind\" in ('magic-link', 'invite', 'auth-verify', 'auth-reset')"
+        },
         "mail_event_outcome_check": {
           "name": "mail_event_outcome_check",
           "value": "\"web\".\"mail_event\".\"outcome\" in ('ok', 'failed')"

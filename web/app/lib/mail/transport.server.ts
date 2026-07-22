@@ -1,7 +1,7 @@
 import type { Transporter } from "nodemailer";
 import nodemailer from "nodemailer";
 import { serverEnv } from "@/env.server";
-import { recordMailEvent } from "@/lib/db/mail-log.server";
+import { type MailEventKind, recordMailEvent } from "@/lib/db/mail-log.server";
 
 /**
  * The ONE outbound-mail transport — every mail the product sends (the invite notice, the
@@ -22,8 +22,10 @@ import { recordMailEvent } from "@/lib/db/mail-log.server";
  * The log follows the same redaction rule — no subject, body, or relay text ever lands in it.
  */
 
-/** Which product flow produced a mail — rides the message, tags its log row + dev-outbox line. */
-export type MailKind = "magic-link" | "invite" | "auth-verify" | "auth-reset";
+/** Which product flow produced a mail — rides the message, tags its log row + dev-outbox line.
+ * ONE vocabulary end-to-end: the union is defined beside the log writer (whose table CHECK
+ * carries the same values), so a caller cannot mint a kind the log would refuse. */
+export type MailKind = MailEventKind;
 
 export interface MailMessage {
   kind: MailKind;

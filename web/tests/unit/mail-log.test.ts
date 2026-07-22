@@ -64,12 +64,21 @@ describe("the mail_event send log", () => {
     ]);
   });
 
-  it("records the no-transport refusal too — a failed attempt with the 'unconfigured' code", async () => {
-    const { recordMailEvent } = await import("@/lib/db/mail-log.server");
-    await recordMailEvent("magic-link", "person@example.com", {
-      outcome: "failed",
-      code: "unconfigured",
-    });
+  it("records the REAL no-transport refusal — sendMail with SMTP unset lands 'unconfigured'", async () => {
+    // Disarm the transport for real: end the current pool (no leaked handles), drop the five
+    // SMTP variables, and re-import the module graph so the memoized env re-parses.
+    // DATABASE_URL still points at the scratch database, so the fresh pool the fresh DAL
+    // opens writes the same real table.
+    const { getPool } = await import("@/lib/db/index.server");
+    await getPool().end();
+    vi.resetModules();
+    for (const key of Object.keys(SMTP_ENV)) {
+      delete process.env[key];
+    }
+    const { sendMail } = await import("@/lib/mail/transport.server");
+    await expect(
+      sendMail({ kind: "magic-link", to: "person@example.com", subject: "s", text: "t" }),
+    ).rejects.toThrow("mail transport is not configured");
     const last = (await rows()).at(-1);
     expect(last).toEqual({
       kind: "magic-link",

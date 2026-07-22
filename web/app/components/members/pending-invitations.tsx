@@ -24,7 +24,8 @@ interface RevokeInvitationActionData {
  * The claims-in-flight panel: invitations that no user has bound yet, plus DECLINED ones — the
  * recorded "no thanks" the inviter should see (re-inviting the address supersedes it). Every
  * member may see the list (who was invited is roster-adjacent fact, not a secret); the REVOKE
- * arm is owner-only and pending-only — no confirmation, matching the invite (both non-destructive).
+ * arm is owner-only and pending-only, behind its own small two-step confirm panel (an inline
+ * expand, no re-authentication — like the invite it undoes, both non-destructive).
  * Re-inviting an address is just inviting it again — the pending row upserts, a fresh link
  * mails, and the 7-day clock re-arms, so there is no separate resend control here.
  */

@@ -770,6 +770,12 @@ export const mailEvent = webSchema.table(
   },
   (table) => [
     index("mail_event_time_idx").on(table.createdAt),
+    // The closed kind vocabulary — mirrors MAIL_EVENT_KINDS in mail-log.server.ts, so a drifted
+    // caller refuses at the boundary instead of polluting the log.
+    check(
+      "mail_event_kind_check",
+      sql`${table.kind} in ('magic-link', 'invite', 'auth-verify', 'auth-reset')`,
+    ),
     check("mail_event_outcome_check", sql`${table.outcome} in ('ok', 'failed')`),
     check(
       "mail_event_code_check",

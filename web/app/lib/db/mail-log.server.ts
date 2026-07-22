@@ -15,12 +15,17 @@ import { mailEvent } from "@/lib/db/schema.app";
  * or fail — the send itself.
  */
 
+/** The CLOSED kind vocabulary — one entry per product mail flow. The table's CHECK carries the
+ * same four values, so a drifted kind refuses at the boundary instead of polluting the log. */
+export const MAIL_EVENT_KINDS = ["magic-link", "invite", "auth-verify", "auth-reset"] as const;
+export type MailEventKind = (typeof MAIL_EVENT_KINDS)[number];
+
 export type MailEventOutcome =
   | { outcome: "ok" }
   | { outcome: "failed"; code: "unconfigured" | "send_failed" };
 
 export async function recordMailEvent(
-  kind: string,
+  kind: MailEventKind,
   recipient: string,
   result: MailEventOutcome,
 ): Promise<void> {

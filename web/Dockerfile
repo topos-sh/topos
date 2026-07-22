@@ -46,7 +46,7 @@ RUN bun run build
 FROM node:22-bookworm-slim@sha256:53ada149d435c38b14476cb57e4a7da73c15595aba79bd6971b547ceb6d018bf AS runtime
 WORKDIR /app/web
 
-# APP_ENV=production arms the server-tier belts (the step-up + sign-in rate limiters). PORT/HOST are what
+# APP_ENV=production arms the server-tier belts (the sign-in + write rate limiters). PORT/HOST are what
 # react-router-serve binds. INSTALL_SH_PATH is pinned ABSOLUTE so the `/install` route never depends on the
 # process cwd — it also equals the checkout default `../scripts/install.sh` resolved from this WORKDIR, so
 # nothing drifts. The app parses its env LAZILY (first request), so a missing runtime secret fails a request

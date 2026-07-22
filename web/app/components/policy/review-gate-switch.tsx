@@ -22,7 +22,7 @@ export function ReviewGateSwitch({ checked }: { checked: boolean }) {
   const [staged, setStaged] = useState(checked);
   const pending = fetcher.state !== "idle";
   const dirty = staged !== checked;
-  // Any error the action returned (wrong password, a role refusal) — shown while the edit is open.
+  // Any error the action returned (a server fault, a refusal) — shown while the edit is open.
   const error = fetcher.data?.error;
   return (
     <fetcher.Form method="post" className="space-y-3">

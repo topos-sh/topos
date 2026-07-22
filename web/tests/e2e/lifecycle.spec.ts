@@ -68,18 +68,21 @@ test("rename: an in-place confirm renames (id-keyed) and the old name redirects"
   await theWorkspace();
   await gotoSettled(page, `/skills/${SKILL.name}/settings`);
 
-  // Rename is an in-place confirm — no password. Filling the field then arming leaves the value
-  // intact; arming alone writes nothing.
+  // Rename is an in-place confirm — no password. The Enter-key path may NOT skip it: the
+  // resting control is the form's default button with an intercepted activation, so a keyboard
+  // submit from the text field ARMS instead of renaming (the implicit-submission bypass
+  // regression). Arming alone writes nothing.
   await page.locator("#rename-new-name").fill(RENAMED);
-  await page.getByRole("button", { name: "Rename skill" }).click();
+  await page.locator("#rename-new-name").press("Enter");
   await expect(page.getByRole("button", { name: "Rename — confirm?" })).toBeVisible();
   expect(
     (await adminQuery<{ name: string }>(`select name from web.bundle where id = $1`, [SKILL.id]))[0]
       ?.name,
   ).toBe(SKILL.name);
 
-  // Confirm renames (id-keyed) and redirects to the new name's settings.
-  await page.getByRole("button", { name: "Rename — confirm?" }).click();
+  // The second activation confirms — arming moved focus onto the armed submit, so a second
+  // Enter is the confirm. Renames (id-keyed) and redirects to the new name's settings.
+  await page.getByRole("button", { name: "Rename — confirm?" }).press("Enter");
   await page.waitForURL(`**/skills/${RENAMED}/settings`);
   const row = await adminQuery<{ name: string }>(`select name from web.bundle where id = $1`, [
     SKILL.id,

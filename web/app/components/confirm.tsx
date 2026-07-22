@@ -52,12 +52,16 @@ export function ConfirmNameField({ typedName, idPrefix }: { typedName: string; i
 const ARM_TIMEOUT_MS = 8000;
 
 /**
- * The in-place confirm button. At rest it renders `label` as a plain (non-submitting) button;
- * the first activation ARMS it — the control swaps in place to `confirmLabel` (a real submit)
- * beside a Cancel — and the second activation submits the enclosing form. Arming auto-reverts
- * when focus leaves the pair, after [`ARM_TIMEOUT_MS`], or the moment a submit goes pending,
- * so the control always returns to rest on its own. One component, used identically by every
- * non-typed ceremony control.
+ * The in-place confirm button. At rest it renders `label` as the form's SUBMIT button whose
+ * activation is intercepted — the first activation (click, or Enter anywhere in the form: as
+ * the default button it also catches the browser's implicit submission, so a keyboard submit
+ * cannot skip the ceremony) ARMS it, performing nothing. Armed, the control swaps in place to
+ * `confirmLabel` (a real submit) beside a Cancel — the second activation submits the enclosing
+ * form, exactly once (a synchronous latch swallows a double-activation before the fetcher's
+ * pending state can catch up). Arming auto-reverts when focus leaves the pair, after
+ * [`ARM_TIMEOUT_MS`], or the moment a submit goes pending, so the control always returns to
+ * rest on its own. One component, used identically by every non-typed ceremony control; each
+ * ceremony form carries at most one.
  */
 export function ConfirmButton({
   label,
@@ -78,11 +82,16 @@ export function ConfirmButton({
   const [armed, setArmed] = useState(false);
   const containerRef = useRef<HTMLSpanElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
+  // The double-activation latch: set synchronously on the confirming activation, so a second
+  // click/Enter in the instant before the fetcher reports pending cannot post twice.
+  const submittedRef = useRef(false);
 
   // Arming moves focus onto the confirm submit (the arming button unmounts under the pointer),
-  // which also keeps the blur watcher below honest during the swap.
+  // which also keeps the blur watcher below honest during the swap — and re-opens the latch
+  // for this fresh arm.
   useEffect(() => {
     if (armed) {
+      submittedRef.current = false;
       confirmRef.current?.focus();
     }
   }, [armed]);
@@ -116,11 +125,16 @@ export function ConfirmButton({
   }
 
   if (!armed) {
+    // type="submit" so this is the form's DEFAULT button — Enter in any of the form's fields
+    // routes through it — while the intercepted activation turns every such submit into an ARM.
     return (
       <button
-        type="button"
+        type="submit"
         disabled={pending}
-        onClick={() => setArmed(true)}
+        onClick={(event) => {
+          event.preventDefault();
+          setArmed(true);
+        }}
         className={buttonClasses(tone)}
       >
         {pending ? (pendingLabel ?? label) : label}
@@ -129,7 +143,21 @@ export function ConfirmButton({
   }
   return (
     <span ref={containerRef} className="inline-flex items-center gap-2">
-      <button ref={confirmRef} type="submit" onBlur={handleBlur} className={buttonClasses(tone)}>
+      <button
+        ref={confirmRef}
+        type="submit"
+        onClick={(event) => {
+          // The latch: the first activation posts; anything after it (before pending disarms
+          // the control) is swallowed instead of enqueuing a duplicate action.
+          if (submittedRef.current) {
+            event.preventDefault();
+            return;
+          }
+          submittedRef.current = true;
+        }}
+        onBlur={handleBlur}
+        className={buttonClasses(tone)}
+      >
         {confirmLabel ?? `${label} — confirm?`}
       </button>
       <button
