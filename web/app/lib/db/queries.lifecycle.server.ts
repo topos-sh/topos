@@ -10,7 +10,7 @@ import { deleteBundleBytes, purgeVersionBytes } from "@/lib/plane/custody.server
  * The bundle LIFECYCLE data access — the owner ceremonies (archive / unarchive / delete /
  * purge / rename) as app-tier row transactions over `web.bundle` (+ the name hints), PLUS the
  * custody byte calls where bytes actually drop (purge, delete). The OwnerActor brand is the
- * gate (step-up runs in the route); every row write lands its audit in the same transaction.
+ * gate (the route re-guards as owner); every row write lands its audit in the same transaction.
  *
  * Lifecycle: active → archived → deleted. Archiving renames (`<name>-archived-<date>`,
  * counter on same-day repeats) FREEING the base name — id-keyed follows and references make a
@@ -351,8 +351,8 @@ export type ProtectionOutcome = { outcome: "set" } | { outcome: "unknown_skill" 
 
 /**
  * Pin (or unpin) ONE bundle's protection: 'open'/'reviewed' overrides the workspace default,
- * null returns the bundle to inheriting it. The OwnerActor brand is the gate (step-up runs in
- * the route); the publish gate and the review four-eyes check both read the resolved cascade.
+ * null returns the bundle to inheriting it. The OwnerActor brand is the gate (the route re-guards
+ * as owner); the publish gate and the review four-eyes check both read the resolved cascade.
  */
 export async function setBundleProtection(
   actor: OwnerActor,

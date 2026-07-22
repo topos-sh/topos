@@ -2,10 +2,10 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, redirect, useFetcher, useLoaderData } from "react-router";
 import { ChannelHeader } from "@/components/channel/channel-header";
 import { ChannelTabs } from "@/components/channel/channel-tabs";
-import { StepUpFields, StepUpMethodProvider } from "@/components/step-up";
+import { ConfirmButton, ConfirmNameField } from "@/components/confirm";
 import { buttonClasses, Card, SectionHeading } from "@/components/ui";
+import { requireTypedName } from "@/lib/auth/ceremony.server";
 import { notFound, requireMemberInScope, requireWorkspaceOwner } from "@/lib/auth/guards.server";
-import { requireStepUp, requireTypedName, stepUpMethod } from "@/lib/auth/step-up.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import {
   type ChannelDeleteOutcome,
@@ -25,7 +25,7 @@ export function meta({ params }: { params: { channel?: string } }) {
 /**
  * The channel's SETTINGS tab — a member-only sibling of the Skills face that hosts the owner
  * existence-ceremonies. What renders depends on the viewer and the channel: an owner on a named
- * channel gets rename + delete (each step-up gated; delete also types the channel name); an owner
+ * channel gets rename (an in-place confirm) + delete (type the channel name to confirm); an owner
  * on the default `everyone` channel gets the read-only structural note; any non-owner gets a quiet
  * read-only note. The page itself is member-visible — the controls, not the page, are owner-gated —
  * so a member finds the tab without an existence oracle.
@@ -43,7 +43,6 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   return {
     detail,
     isOwner: actor.role === "owner",
-    stepUpMethod: await stepUpMethod(actor.userId),
   };
 }
 
@@ -55,8 +54,9 @@ type ChannelActionData =
 
 /**
  * The owner ceremonies, dispatched on the hidden `intent`. Rename and delete RE-GUARD with the
- * owner gate and run the step-up ceremony BEFORE any write. The data layer lands the audit row of
- * every landed act in its own transaction; the route records the attempts it never sees.
+ * owner gate — the whole gate, no re-authentication — and delete additionally requires typing the
+ * channel name before any write. The data layer lands the audit row of every landed act in its
+ * own transaction; the route records the attempts it never sees.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
   // The membership FLOOR, hoisted above the intent dispatch: every intent below re-checks owner,
@@ -109,8 +109,8 @@ function deleteErrorCopy(outcome: ChannelDeleteOutcome): string {
 }
 
 /**
- * RENAME — owner + step-up. On success redirect to the renamed channel's settings; the ceremony's
- * own outcome codes (bad_name / name_taken / builtin) surface inline otherwise.
+ * RENAME — owner-only. On success redirect to the renamed channel's settings; the ceremony's own
+ * outcome codes (bad_name / name_taken / builtin) surface inline otherwise.
  */
 async function renameChannelIntent(
   request: Request,
@@ -121,16 +121,6 @@ async function renameChannelIntent(
 ) {
   const owner = await requireWorkspaceOwner(request, ws);
   const newName = String(formData.get("new_name") ?? "").trim();
-  const stepUp = await requireStepUp(request, formData);
-  if (!stepUp.ok) {
-    await recordAdminEvent(owner, {
-      kind: "channel_renamed",
-      subject: channelId,
-      detail: "step_up",
-      outcome: "denied",
-    });
-    return data<ChannelActionData>({ form: "rename", error: stepUp.error }, { status: 400 });
-  }
   let outcome: ChannelRenameOutcome;
   try {
     outcome = await renameChannel(owner, channelId, newName);
@@ -161,7 +151,7 @@ async function renameChannelIntent(
 }
 
 /**
- * DELETE — owner + step-up + type-the-channel-name. On success redirect to the channels index.
+ * DELETE — owner-only + type-the-channel-name. On success redirect to the channels index.
  * Deleting stops delivery THROUGH this channel only; skills another channel or a direct follow
  * still delivers keep flowing, and devices keep their local copies (an upstream withdrawal).
  */
@@ -173,16 +163,6 @@ async function deleteChannelIntent(
   formData: FormData,
 ) {
   const owner = await requireWorkspaceOwner(request, ws);
-  const stepUp = await requireStepUp(request, formData);
-  if (!stepUp.ok) {
-    await recordAdminEvent(owner, {
-      kind: "channel_deleted",
-      subject: channelId,
-      detail: "step_up",
-      outcome: "denied",
-    });
-    return data<ChannelActionData>({ form: "delete", error: stepUp.error }, { status: 400 });
-  }
   const row = await channelRowById(owner, channelId);
   if (row === undefined) {
     return data<ChannelActionData>(
@@ -232,21 +212,19 @@ async function deleteChannelIntent(
 }
 
 export default function ChannelSettings() {
-  const { detail, isOwner, stepUpMethod } = useLoaderData<typeof loader>();
+  const { detail, isOwner } = useLoaderData<typeof loader>();
   const wsPath = useWsPath();
   return (
-    <StepUpMethodProvider method={stepUpMethod}>
-      <div className="space-y-6">
-        <ChannelHeader name={detail.name} mode={detail.mode} isDefault={detail.isDefault} />
-        <ChannelTabs basePath={wsPath(`channels/${detail.name}`)} active="settings" />
-        <SettingsContent
-          isOwner={isOwner}
-          isDefault={detail.isDefault}
-          channelName={detail.name}
-          channelId={detail.channelId}
-        />
-      </div>
-    </StepUpMethodProvider>
+    <div className="space-y-6">
+      <ChannelHeader name={detail.name} mode={detail.mode} isDefault={detail.isDefault} />
+      <ChannelTabs basePath={wsPath(`channels/${detail.name}`)} active="settings" />
+      <SettingsContent
+        isOwner={isOwner}
+        isDefault={detail.isDefault}
+        channelName={detail.name}
+        channelId={detail.channelId}
+      />
+    </div>
   );
 }
 
@@ -273,7 +251,7 @@ function SettingsContent({
       <SectionHeading>
         <span id="settings-heading">Owner controls</span>
       </SectionHeading>
-      <RenameChannelForm channel={channelName} channelId={channelId} />
+      <RenameChannelForm channelId={channelId} />
       <DeleteChannelForm channel={channelName} channelId={channelId} />
     </section>
   );
@@ -308,8 +286,8 @@ function BuiltinAdminNote() {
   );
 }
 
-/** The rename ceremony — step-up + the new name; the ceremony's outcome codes surface inline. */
-function RenameChannelForm({ channel, channelId }: { channel: string; channelId: string }) {
+/** The rename ceremony — an in-place confirm + the new name; the ceremony's outcome codes surface inline. */
+function RenameChannelForm({ channelId }: { channelId: string }) {
   const fetcher = useFetcher<ChannelActionData>();
   const pending = fetcher.state !== "idle";
   const error = fetcher.data?.form === "rename" ? fetcher.data.error : undefined;
@@ -337,21 +315,24 @@ function RenameChannelForm({ channel, channelId }: { channel: string; channelId:
             className="block h-11 w-full min-w-56 rounded-md border border-line px-3 text-ink text-sm placeholder:text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
           />
         </label>
-        <StepUpFields idPrefix={`rename-${channel}`} />
         {error && (
           <p className="text-red-600 text-sm" role="alert">
             {error}
           </p>
         )}
-        <button type="submit" disabled={pending} className={`${buttonClasses("quiet")} min-h-11`}>
-          {pending ? "Renaming…" : "Rename channel"}
-        </button>
+        <ConfirmButton
+          label="Rename channel"
+          confirmLabel="Rename — confirm?"
+          tone="quiet"
+          pendingLabel="Renaming…"
+          pending={pending}
+        />
       </fetcher.Form>
     </Card>
   );
 }
 
-/** The delete ceremony — step-up + type-the-name; the copy states the semantics honestly. */
+/** The delete ceremony — type-the-name; the copy states the semantics honestly. */
 function DeleteChannelForm({ channel, channelId }: { channel: string; channelId: string }) {
   const fetcher = useFetcher<ChannelActionData>();
   const pending = fetcher.state !== "idle";
@@ -369,7 +350,7 @@ function DeleteChannelForm({ channel, channelId }: { channel: string; channelId:
       <fetcher.Form method="post" className="space-y-3">
         <input type="hidden" name="intent" value="delete-channel" />
         <input type="hidden" name="channel_id" value={channelId} />
-        <StepUpFields idPrefix={`delete-${channel}`} typedName={channel} />
+        <ConfirmNameField typedName={channel} idPrefix={`delete-${channel}`} />
         {error && (
           <p className="text-red-600 text-sm" role="alert">
             {error}

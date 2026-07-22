@@ -117,8 +117,9 @@ vault cannot read `web` at all. `scripts/check-db-grants.sh` proves the cross-la
 role.
 
 **The device flow** is a GitHub-style approval. `topos follow <workspace-address>` (or `topos auth login`)
-prints "open `<origin>/verify` and enter AB12-CD34"; the signed-in person approves it behind a password
-re-entry (step-up), and approval mints the device — owned by that person — and its **one bearer credential**.
+prints "open `<origin>/verify` and enter AB12-CD34"; the signed-in person approves it with a plain signed-in
+accept (the approval page names the device being enrolled and every workspace the credential will reach), and
+approval mints the device — owned by that person — and its **one bearer credential**.
 The credential is stored only as its SHA-256 on the device row and presented as `Authorization: Bearer` on the
 device lane (`/api/v1/…`), which the app serves itself: `requireDeviceActor` resolves credential → device →
 person → seat in one query, fail-closed, so a revoked device or an unseated person loses access the instant

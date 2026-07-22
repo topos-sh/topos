@@ -1,14 +1,12 @@
 import { useEffect, useState } from "react";
 import { useFetcher } from "react-router";
-import { StepUpFields } from "@/components/step-up";
+import { ConfirmButton } from "@/components/confirm";
 import { buttonClasses } from "@/components/ui";
 
 /** The members route's typed reply for `intent=set-role`. */
 interface RoleActionData {
   intent: "set-role";
-  status: "ok" | "sole_owner" | "missing" | "step_up" | "error";
-  /** The step-up failure copy — rendered inline on a wrong password / rate limit. */
-  error?: string;
+  status: "ok" | "sole_owner" | "missing" | "error";
 }
 
 type SeatRole = "owner" | "reviewer" | "member";
@@ -17,13 +15,14 @@ type SeatRole = "owner" | "reviewer" | "member";
 const ROLE_OPTIONS: SeatRole[] = ["member", "reviewer", "owner"];
 
 /**
- * The per-seat role control — a STEP-UP ceremony keyed by the seat's USER ID (the one
- * identity; the display name is what a human reads). Collapsed, it is a quiet button;
- * expanded, it is a small panel with a role select (preselected to the seat's current role)
- * and the acting owner's password re-entry. A landed change revalidates the row and the role
- * chip re-renders, so the panel closes itself. The data layer refuses demoting the sole owner
- * (`last_owner`) — surfaced honestly here as "the workspace must keep an owner", never
- * swallowed.
+ * The per-seat role control — a guard-gated audited act keyed by the seat's USER ID (the one
+ * identity; the display name is what a human reads). Collapsed, it is a quiet button; expanded,
+ * it is a small panel with a role select (preselected to the seat's current role). Saving is a
+ * lightweight in-place confirm — the first click arms ("Save — confirm?"), the second posts — so
+ * a peer's role never changes on a stray click and no re-authentication stands in the way. A
+ * landed change revalidates the row and the role chip re-renders, so the panel closes itself. The
+ * data layer refuses demoting the sole owner (`last_owner`) — surfaced honestly here as "the
+ * workspace must keep an owner", never swallowed.
  */
 export function RoleForm({
   userId,
@@ -68,7 +67,7 @@ export function RoleForm({
           id={`role-${userId}-select`}
           name="role"
           // Keyed by the current role so a landed change re-seeds the default cleanly on the next
-          // open; uncontrolled so an unsaved pick survives a wrong-password re-render.
+          // open; uncontrolled so an unsaved pick survives a re-render.
           key={role}
           defaultValue={role}
           className="block h-11 w-full rounded-md border border-line px-3 text-sm text-ink focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
@@ -80,12 +79,6 @@ export function RoleForm({
           ))}
         </select>
       </label>
-      <StepUpFields idPrefix={`role-${userId}`} />
-      {state?.status === "step_up" && (
-        <p className="text-red-700 text-xs" role="alert">
-          {state.error}
-        </p>
-      )}
       {state?.status === "sole_owner" && (
         <p className="text-red-700 text-xs" role="alert">
           The workspace must keep an owner. Make another member an owner first.
@@ -102,9 +95,12 @@ export function RoleForm({
         </p>
       )}
       <div className="flex items-center gap-2">
-        <button type="submit" disabled={pending} className={buttonClasses("primary")}>
-          {pending ? "Saving…" : "Save role"}
-        </button>
+        <ConfirmButton
+          label="Save role"
+          confirmLabel="Save — confirm?"
+          tone="primary"
+          pending={pending}
+        />
         <button type="button" onClick={() => setOpen(false)} className={buttonClasses("quiet")}>
           Cancel
         </button>

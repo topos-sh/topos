@@ -21,6 +21,7 @@ import { escapeHtml, sendMail } from "@/lib/mail/transport.server";
 export async function sendMagicLinkEmail(args: { email: string; url: string }): Promise<void> {
   const { email, url } = args;
   const message: MailMessage = {
+    kind: "magic-link",
     to: email,
     subject: "Sign in to Topos",
     text:
@@ -37,7 +38,7 @@ export async function sendMagicLinkEmail(args: { email: string; url: string }): 
   if (appEnv !== "production") {
     const line = `${JSON.stringify({ email, url })}\n`;
     await fs.appendFile(path.join(process.cwd(), ".magic-links.jsonl"), line, "utf8");
-    await recordDevMail("magic-link", message);
+    await recordDevMail(message);
     if (appEnv === "development") {
       // biome-ignore lint/suspicious/noConsole: the deliberate dev-only sign-in surface.
       console.log(`\n  Magic link for ${email} (dev — mail suppressed): ${url}\n`);

@@ -6,8 +6,8 @@
 //! - a consumed code and a wrong code are the SAME uniform miss (GET and POST, byte-identical) —
 //!   the door is single-use by construction and never an oracle;
 //! - registration stays CLOSED (one constant, non-enumerating refusal) until the owner flips the
-//!   knob through the REAL settings ceremony (step-up gated, audit-rowed); an uninvited sign-up
-//!   then lands an ACCOUNT — never a seat.
+//!   knob through the REAL settings ceremony (owner-guarded, audit-rowed) — a non-owner's same post
+//!   moves nothing; an uninvited sign-up then lands an ACCOUNT — never a seat.
 
 mod common;
 
@@ -119,31 +119,12 @@ fn e2e_the_registration_knob_admits_an_uninvited_signup_only_after_the_ceremony(
         "the login page carries the constant refusal copy"
     );
 
-    // A WRONG step-up cannot flip the knob (the ceremony re-authenticates the actor). The settings
-    // page is origin-rooted in single-tenant mode, and its step-up rung is UNCHANGED.
-    let bad = owner.post_form(
-        "/settings",
-        &[
-            ("intent", "set-registration"),
-            ("registration", "open"),
-            ("stepup_password", "not-the-password"),
-        ],
-    );
-    assert_eq!(bad.status, 200, "a refused step-up renders the form error");
-    assert_eq!(
-        stack.text_witness("SELECT registration FROM web.workspace"),
-        Some("invite_only".to_owned()),
-        "the knob did not move on a refused step-up"
-    );
-
-    // The REAL ceremony: owner session + step-up → the knob flips, the audit row lands.
+    // The REAL ceremony: the owner's live session + the role guard → the knob flips, the audit row
+    // lands. There is no re-authentication rung; the owner's session and seat ARE the authorization
+    // (a policy save is a plain submit — the destructive ceremonies are the ones that confirm).
     let flipped = owner.post_form(
         "/settings",
-        &[
-            ("intent", "set-registration"),
-            ("registration", "open"),
-            ("stepup_password", common::PASSWORD),
-        ],
+        &[("intent", "set-registration"), ("registration", "open")],
     );
     assert_eq!(flipped.status, 200, "the ceremony lands: {}", flipped.body);
     assert_eq!(
@@ -168,5 +149,24 @@ fn e2e_the_registration_knob_admits_an_uninvited_signup_only_after_the_ceremony(
         )),
         0,
         "an open-registration account receives no seat"
+    );
+
+    // The knob is a ROLE-gated act, not a re-authentication one: a signed-in NON-OWNER cannot move
+    // it. `add_member` mints a seated member (registration is already open, so its arrangement-open
+    // is a harmless re-set); the member posts the same intent trying to CLOSE the knob, and the ROW
+    // stays open. A non-owner's post is the uniform 404 (a miss, never a 403) — so witness the row,
+    // not the reply.
+    let member = stack.add_member("dave@acme.test", "member");
+    member.post_form(
+        "/settings",
+        &[
+            ("intent", "set-registration"),
+            ("registration", "invite_only"),
+        ],
+    );
+    assert_eq!(
+        stack.text_witness("SELECT registration FROM web.workspace"),
+        Some("open".to_owned()),
+        "a non-owner member cannot move the registration knob"
     );
 }

@@ -42,7 +42,7 @@ type StanceActionData = { form: "stance"; error: string } | { form: "unknown"; e
 
 /**
  * The default channel's self-service stance — the signed-in member's OWN leave/rejoin, member-level
- * and deliberately step-up-less (it moves nobody's delivery but their own). The data layer lands the
+ * and deliberately unconfirmed (it moves nobody's delivery but their own). The data layer lands the
  * audit row of every landed act in its own transaction; the route records the faults it never sees.
  */
 export async function action({ request, params }: ActionFunctionArgs) {

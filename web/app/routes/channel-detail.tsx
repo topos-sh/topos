@@ -86,7 +86,7 @@ type SkillCurationActionData =
 
 /**
  * The channel-face curation, dispatched on the hidden `intent`: add or remove a bundle reference.
- * Both are MEMBER-level and step-up-less — the same grade as the CLI's create-on-first-use
+ * Both are MEMBER-level and unconfirmed — the same grade as the CLI's create-on-first-use
  * placement — with the curated-channel role gate enforced by the data layer, not the route. The
  * DAL lands the skill_added / skill_removed audit row of every landed act in its own transaction;
  * the route records only the faults it never sees.

@@ -4,14 +4,13 @@ import { HistorySection, type HistorySectionData } from "@/components/skill/hist
 import { type PurgeActionData, PurgeSection } from "@/components/skill/purge-section";
 import { SkillHeader } from "@/components/skill/skill-header";
 import { SkillTabs } from "@/components/skill/skill-tabs";
-import { StepUpMethodProvider } from "@/components/step-up";
+import { requireTypedName } from "@/lib/auth/ceremony.server";
 import {
   notFound,
   requireMemberInScope,
   requireReviewer,
   requireWorkspaceOwner,
 } from "@/lib/auth/guards.server";
-import { requireStepUp, requireTypedName, stepUpMethod } from "@/lib/auth/step-up.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import { purgeVersion } from "@/lib/db/queries.lifecycle.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
@@ -125,16 +124,15 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     history,
     // The purge affordance is a workspace-OWNER ceremony; a plain member/reviewer never sees it.
     canPurge: actor.role === "owner",
-    stepUpMethod: await stepUpMethod(actor.userId),
   };
 }
 
 /**
  * The History tab's writes, dispatched on the hidden `intent`: REVERT (owner|reviewer roll-back
  * to a known-good version — a forward move the vault expresses as a new commit carrying the good
- * tree) and PURGE (an owner-only ceremony that drops one past version's bytes, gated by step-up +
- * typing the skill name). Each branch RE-GUARDS itself; React Router revalidates the loader after
- * either — no explicit invalidation.
+ * tree; worn as a client-side in-place confirm) and PURGE (an owner-only ceremony that drops one
+ * past version's bytes, gated by typing the skill name). Each branch RE-GUARDS itself; React
+ * Router revalidates the loader after either — no explicit invalidation.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
   // The membership FLOOR, hoisted above the intent dispatch: every intent below requires at
@@ -224,12 +222,12 @@ async function revertAction(request: Request, ws: string, skill: string, form: F
 }
 
 /**
- * The per-version PURGE ceremony — OWNER-only (requireWorkspaceOwner), step-up +
- * type-the-skill-name gated. It drops ONE past version's bytes server-side; the hash stays as a
- * tombstone. The ceremony refuses the CURRENT version (`is_current`) — the UI also hides the
- * control on the head row — and re-purging is idempotent. The ceremony lands its own audit row;
- * the route records the attempts it never sees (refused step-ups, typed-name misses, refusals).
- * Keys on the immutable skill id, never the catalog name.
+ * The per-version PURGE ceremony — OWNER-only (requireWorkspaceOwner), type-the-skill-name gated.
+ * It drops ONE past version's bytes server-side; the hash stays as a tombstone. The ceremony
+ * refuses the CURRENT version (`is_current`) — the UI also hides the control on the head row —
+ * and re-purging is idempotent. The ceremony lands its own audit row; the route records the
+ * attempts it never sees (typed-name misses, refusals). Keys on the immutable skill id, never the
+ * catalog name.
  */
 async function purgeAction(request: Request, ws: string, skill: string, form: FormData) {
   const owner = await requireWorkspaceOwner(request, ws);
@@ -238,21 +236,6 @@ async function purgeAction(request: Request, ws: string, skill: string, form: Fo
     .toLowerCase();
   const short = versionId.slice(0, 12);
 
-  const stepUp = await requireStepUp(request, form);
-  if (!stepUp.ok) {
-    await recordAdminEvent(owner, {
-      kind: "version_purged",
-      subject: skill,
-      detail: "step_up",
-      outcome: "denied",
-    });
-    return data<PurgeActionData>({
-      intent: "purge",
-      status: "denied",
-      versionId,
-      message: stepUp.error,
-    });
-  }
   const row = await skillIndexRow(owner, skill);
   if (row === undefined) {
     return data<PurgeActionData>({ intent: "purge", status: "error", versionId });
@@ -320,28 +303,25 @@ export default function SkillHistoryPage() {
     openProposals,
     history,
     canPurge,
-    stepUpMethod,
   } = useLoaderData<typeof loader>();
   const wsPath = useWsPath();
   return (
-    <StepUpMethodProvider method={stepUpMethod}>
-      <div className="space-y-6">
-        <SkillHeader
-          ws={wsName}
-          skill={skill}
-          currentShort={currentShort}
-          displayName={displayName}
-          kind={kind}
-        />
-        <SkillTabs
-          basePath={wsPath(`skills/${skill}`)}
-          active="history"
-          openProposals={openProposals}
-          showSettings={isOwner}
-        />
-        <HistorySection skill={skill} data={history} />
-        <PurgeSection skill={skill} data={history} canPurge={canPurge} />
-      </div>
-    </StepUpMethodProvider>
+    <div className="space-y-6">
+      <SkillHeader
+        ws={wsName}
+        skill={skill}
+        currentShort={currentShort}
+        displayName={displayName}
+        kind={kind}
+      />
+      <SkillTabs
+        basePath={wsPath(`skills/${skill}`)}
+        active="history"
+        openProposals={openProposals}
+        showSettings={isOwner}
+      />
+      <HistorySection skill={skill} data={history} />
+      <PurgeSection skill={skill} data={history} canPurge={canPurge} />
+    </div>
   );
 }

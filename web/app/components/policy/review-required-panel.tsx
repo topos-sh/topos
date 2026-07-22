@@ -4,7 +4,7 @@ import { Card, SectionHeading } from "@/components/ui";
 
 /**
  * The review-required gate — the workspace's protection DEFAULT (`reviewed`/`open`), what an
- * unpinned skill inherits. An owner sees the step-up switch; a non-owner member sees the
+ * unpinned skill inherits. An owner sees the switch; a non-owner member sees the
  * current value read-only with role-honest copy. The "last set by" line reads the audit ledger
  * — the same rows the setter lands in its own transaction.
  */

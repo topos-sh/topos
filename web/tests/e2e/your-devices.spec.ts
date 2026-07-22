@@ -5,8 +5,8 @@ import { signIn } from "./sign-in";
 /**
  * The account-level device list (/account/devices). A device is a POSSESSION of one user now:
  * the page lists the signed-in person's OWN rows — nobody else's, whatever workspace they share
- * — and offers a self sign-out (no step-up: signing out your own device is the escape hatch,
- * not a ceremony over someone else's access). Revocation is FINAL — a DB trigger refuses any
+ * — and offers a self sign-out (a plain one-click act: signing out your own device is the escape
+ * hatch, not a ceremony over someone else's access). Revocation is FINAL — a DB trigger refuses any
  * un-revoke, so there is deliberately NO un-revoke UI to test.
  *
  * A DEDICATED identity owns this spec's rows (the suite's other specs mint devices for the

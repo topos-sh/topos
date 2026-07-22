@@ -472,8 +472,8 @@ async function seatedFlowWorkspaceTx(
  * device row (owned by the approver, credential hash = the device_code hash), and flip the
  * row to approved. An unresolvable workspace or a seatless approver returns null — the same
  * answer an expired code gets, so the ceremony is no existence or membership oracle. The
- * step-up gate runs in the ROUTE before this is called — approval mints a credential that
- * acts as you.
+ * approver's session gate runs in the ROUTE before this is called — approval mints a credential
+ * that acts as you.
  */
 /** The in-transaction abort sentinel: an approval that cannot complete must ROLL BACK any
  * invitation accept it already made (a bare `return null` from a Drizzle transaction COMMITS —
@@ -674,64 +674,6 @@ async function pendingDeviceAuthWhere(
         ? null
         : { name: row.invite_ws_name, displayName: row.invite_ws_display ?? row.invite_ws_name },
   };
-}
-
-// ── Step-up email confirmation (the password-less admin-ceremony rung) ──────────────────────
-
-const STEP_UP_TTL_MS = 10 * 60 * 1000;
-
-/** Namespaced per user AND per ceremony page, so a step-up token never collides with Better
- * Auth's own verification rows (email verification, magic links, reset), a consume only ever
- * touches this person's, and a token mailed for ONE ceremony page cannot be spent on another
- * (the reach of an act and the grade of its ceremony stay matched — a link requested on the
- * members page proves nothing toward a purge). `scope` is the ceremony page's pathname. */
-const stepUpIdentifier = (userId: string, scope: string) => `step-up:${userId}:${scope}`;
-
-/**
- * Mint a single-use step-up confirmation token for a password-less account and store ONLY its
- * hash (SHA-256 computed IN Postgres, hex-encoded into the text `verification.value`) under a
- * per-user, per-ceremony-page identifier with a short TTL. The prior token for this user+page is
- * dropped first, so at most one confirmation link is ever live per ceremony. Returns the
- * plaintext — which only ever leaves as the mailed link. Randomness is this tier's; the digest
- * is the database's.
- */
-export async function mintStepUpConfirmation(userId: string, scope: string): Promise<string> {
-  const token = mintSecret();
-  const identifier = stepUpIdentifier(userId, scope);
-  const expiresAt = new Date(Date.now() + STEP_UP_TTL_MS);
-  await getDb().transaction(async (tx) => {
-    await tx.execute(sql`DELETE FROM web.verification WHERE identifier = ${identifier}`);
-    await tx.execute(
-      sql`INSERT INTO web.verification (id, identifier, value, expires_at)
-          VALUES (${`su_${randomBytes(16).toString("hex")}`}, ${identifier},
-                  encode(${sha256OfText(token)}, 'hex'), ${expiresAt})`,
-    );
-  });
-  return token;
-}
-
-/**
- * Consume a presented step-up token: ONE atomic DELETE … RETURNING, so a token is usable at most
- * once and only before expiry, and only under its own user's identifier for the SAME ceremony
- * page it was minted on (a foreign token, or one minted for a different ceremony, misses).
- * Single-use by construction — the row is gone the instant it matches.
- */
-export async function consumeStepUpConfirmation(
-  userId: string,
-  scope: string,
-  token: string,
-): Promise<boolean> {
-  if (token.length === 0) {
-    return false;
-  }
-  const rows = await getDb().execute(
-    sql`DELETE FROM web.verification
-        WHERE identifier = ${stepUpIdentifier(userId, scope)}
-          AND value = encode(${sha256OfText(token)}, 'hex')
-          AND expires_at > now()
-        RETURNING id`,
-  );
-  return rows.rows.length > 0;
 }
 
 // ── The device lane's actor resolve ─────────────────────────────────────────────────────────

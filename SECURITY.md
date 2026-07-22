@@ -52,17 +52,23 @@ The ceremonies that mint identity:
   address is unknown, uninvited, expired, or already taken. The rule runs as a database hook under every
   sign-up path, so a new auth method cannot reopen it by accident.
 - **Device enrollment** is a GitHub-style flow: the CLI prints "open `<origin>/verify` and enter AB12-CD34";
-  the signed-in person approves it **behind a password re-entry (step-up)**, which mints the device (owned
-  by that person) and its one bearer credential. Revocation is self-service, immediate, and final.
+  the signed-in person approves it with **a plain signed-in accept** — the live session plus the explicit
+  approve click — which mints the device (owned by that person) and its one bearer credential. Revocation is
+  self-service, immediate, and final.
 - **Password recovery** sends reset mail when SMTP is armed; a mail-less solo owner runs a one-shot
   container command that prints a single-use recovery code (`web/scripts/mint-recovery-code.mjs`) — machine
   control on the box is the proof.
 
-**Step-up** re-authentication guards every admin ceremony: the person re-enters their account password
-immediately before the act (verified against the live session's account with the auth library's own
-hasher), and destructive ceremonies additionally require typing the resource's exact name. It is
-deliberately stateless — there is no sudo window to steal — and every attempt, refusals included, lands an
-audit row.
+**Confirmation** guards every admin ceremony in proportion to its reach — a live authenticated session
+plus the role gate is what authorizes the act; there is no separate re-authentication step to steal.
+Destructive ceremonies (skill delete, version purge, channel delete) additionally require typing the
+resource's exact name; acts with cross-person reach carry an explicit in-place confirmation in the UI; and
+routine policy saves are plain submits. Every attempt, refusals included, lands an audit row.
+
+**Outbound mail is logged metadata-only.** The one mail transport records a `mail_event` for every send
+attempt — the kind, the recipient, and the outcome (ok or a coarse failure code) — and never the subject,
+the body, or the relay response, because a message body can carry a live credential (an invite token, a
+reset link).
 
 ## The vault
 

@@ -1,5 +1,5 @@
 import { useFetcher } from "react-router";
-import { buttonClasses } from "@/components/ui";
+import { ConfirmButton } from "@/components/confirm";
 
 /** The action's typed reply on the skill-history route (intent=revert). */
 interface RevertActionData {
@@ -9,16 +9,15 @@ interface RevertActionData {
 }
 
 /**
- * The per-row "Roll back to this version" control on a non-current history row, rendered only
- * for a viewer whose seat can decide (owner|reviewer). The confirm step lives behind a
- * collapsible so a roll back is deliberate, never a stray click. The hidden
- * `expected_generation` binds the LIVE current generation the history page rendered against —
- * the server refuses a moved pointer instead of rolling back over something the reviewer
- * didn't see, and that same CAS makes an accidental double-submit refuse honestly (the first
- * one moved the pointer). `good_version_id` is this row's target (the history route reads
- * ws + skill from the URL). The button disables while the fetcher is in flight. A success or
- * conflict revalidates the page; the state below is the fallback copy for outcomes that leave
- * this control mounted.
+ * The per-row "Roll back to this version" control on a non-current history row, rendered only for
+ * a viewer whose seat can decide (owner|reviewer). It wears a lightweight in-place confirm so a
+ * roll back is deliberate, never a stray click — the first click arms ("Roll back — confirm?"),
+ * the second posts. The hidden `expected_generation` binds the LIVE current generation the history
+ * page rendered against — the server refuses a moved pointer instead of rolling back over
+ * something the reviewer didn't see, and that same CAS makes an accidental double-submit refuse
+ * honestly (the first one moved the pointer). `good_version_id` is this row's target (the history
+ * route reads ws + skill from the URL). A success or conflict revalidates the page; the state
+ * below is the fallback copy for outcomes that leave this control mounted.
  */
 export function RevertControl({
   good,
@@ -34,11 +33,8 @@ export function RevertControl({
   const state = fetcher.data;
 
   return (
-    <details className="group">
-      <summary className="cursor-pointer select-none font-mono text-xs text-faint hover:text-ink">
-        Roll back to this version…
-      </summary>
-      <fetcher.Form method="post" className="mt-2 flex flex-col gap-2">
+    <div>
+      <fetcher.Form method="post" className="flex flex-col gap-2">
         <input type="hidden" name="intent" value="revert" />
         <input type="hidden" name="expected_generation" value={expectedGeneration} />
         <input type="hidden" name="good_version_id" value={good} />
@@ -47,9 +43,13 @@ export function RevertControl({
           move, nothing is deleted; you can roll forward again.
         </p>
         <div>
-          <button type="submit" disabled={pending} className={`${buttonClasses("quiet")} min-h-9`}>
-            {pending ? "Rolling back…" : "Roll back to this version"}
-          </button>
+          <ConfirmButton
+            label="Roll back to this version"
+            confirmLabel="Roll back — confirm?"
+            tone="quiet"
+            pendingLabel="Rolling back…"
+            pending={pending}
+          />
         </div>
       </fetcher.Form>
       {state?.status === "reverted" && (
@@ -73,6 +73,6 @@ export function RevertControl({
           That didn&apos;t go through — nothing was rolled back. A retry is safe.
         </p>
       )}
-    </details>
+    </div>
   );
 }

@@ -192,7 +192,7 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   if (intent === "approve") {
-    // No step-up: the live session + this explicit approve click is the whole ceremony. The
+    // No re-authentication: the live session + this explicit approve click is the whole ceremony. The
     // ceremony itself resolves the flow's workspace and requires the approver's seat in it —
     // accepting a carried invitation first when the approver is its addressee — and a refusal
     // is indistinguishable from an expired code.

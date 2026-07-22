@@ -9,7 +9,7 @@ resource addresses/protocol card, and the `/api/v1` device lane over its own `we
 of an in-process vault (`topos_plane::router` — pure byte custody, the bearer-gated `/internal/v1`
 lane, no public face). Identity is ONE `user.id`: the harness claims the boot-minted workspace,
 signs people in with cookie sessions, and approves every device flow at the real `/verify` ceremony
-(a plain signed-in accept — no step-up) — the same HTTP a browser would send. SMTP stays UNSET in the
+(a plain signed-in accept) — the same HTTP a browser would send. SMTP stays UNSET in the
 default suites (the whole enrolled loop must work with zero mail delivery); the invitation-redemption
 suite alone runs `start_stack_mailed` — dummy relay coordinates that `APP_ENV=test` never dials, but
 which flip the mail-rung gates on (inviting, the passwordless account mint), with every mail recorded
@@ -35,7 +35,7 @@ in their crates; this directory is for what only a cross-crate composed run can 
   - **HTTP ceremonies** (`Session` — a manual-cookie-jar `ureq` browser stand-in): `claim_owner`
     (GET+POST `/claim` with the preset code → the signed-in first owner), `sign_in`/`sign_up`
     (better-auth's own REST rungs, Origin header included), `approve_device`/`deny_device` (the
-    `/verify` action — a plain signed-in accept, no step-up field), `enroll_begin_and_approve` (the CLI's
+    `/verify` action — a plain signed-in accept, no re-authentication field), `enroll_begin_and_approve` (the CLI's
     `follow` call 1 + the human approval — the caller resumes), and `mint_device` (a probe
     credential over the real device flow, for wire-level lane calls the CLI has no verb for);
   - **the raw device lane** (`device_get`/`device_put`/`device_delete`/`device_post_json` —
@@ -100,7 +100,7 @@ in their crates; this directory is for what only a cross-crate composed run can 
   next request under the dead credential 404s), is FINAL (the un-revoke UPDATE is refused by the
   DB trigger), and re-enrolling recovers; the CLI's `auth logout` best-effort-revokes its device
   and deletes the credential doc while every byte stays; a seat removal through the app's members
-  ceremony (step-up) writes the detach records and ends delivery IN THE SAME REQUEST — the removed
+  ceremony writes the detach records and ends delivery IN THE SAME REQUEST — the removed
   member's sweep fails CLOSED into a freeze (placements intact, the quiet hook exit-0 with its
   one-liner) and resumes when re-seated.
 - **`tests/cross_workspace_e2e.rs`** — the cross-workspace refusal probe: with a second workspace
@@ -121,9 +121,10 @@ in their crates; this directory is for what only a cross-crate composed run can 
   `TOPOS_SETUP_LINK_FILE` mirror) claims once — first account, first owner seat, signed in — and
   the consumed code is then the SAME uniform miss as a wrong code (GET and POST, byte-for-byte;
   the spent-code POST creates nothing). Registration: closed by default with ONE constant
-  non-enumerating refusal (the login page carries the copy; the wire names no cause), a refused
-  step-up cannot flip the knob, the REAL settings ceremony flips it (audit-rowed), and the
-  admitted uninvited sign-up lands an ACCOUNT — never a seat.
+  non-enumerating refusal (the login page carries the copy; the wire names no cause), the REAL
+  owner settings ceremony flips it (a plain owner-guarded save, audit-rowed) while a signed-in
+  non-owner member's same post moves nothing, and the admitted uninvited sign-up lands an
+  ACCOUNT — never a seat.
 
 ## Running it
 

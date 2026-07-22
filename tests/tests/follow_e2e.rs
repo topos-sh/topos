@@ -4,8 +4,9 @@
 //! protocol card is fetched over the real socket and asserted on BOTH faces (JSON carries
 //! `api_base_url`; markdown is the constant agent hand-off, no path echo), `follow` starts the
 //! gh-style device flow (call 1 pends with the user code + the `0600` WAL), a SIGNED-IN person
-//! approves at the real `/verify` ceremony (session cookie + step-up password — the browser half,
-//! driven over HTTP), and the re-invoked `follow` polls granted → persists the ONE bearer credential
+//! approves at the real `/verify` ceremony (a plain signed-in accept — session cookie + the explicit
+//! approve click, the browser half driven over HTTP), and the re-invoked `follow` polls granted →
+//! persists the ONE bearer credential
 //! → continues into the two-phase DESCRIBE and the `--yes` apply that lands `everyone`'s genesis
 //! byte-exact (incl. the executable bit).
 //!
@@ -128,7 +129,7 @@ fn e2e_real_follow_enrolls_describes_and_lands_the_first_skill() {
         "the pending WAL is written (0600 resume journal)"
     );
 
-    // The human half: the signed-in member approves at /verify (step-up gated).
+    // The human half: the signed-in member approves at /verify — a plain signed-in accept.
     stack.approve_device(&member, &handle.user_code);
 
     // Call 2 — re-invoke `topos follow`: poll granted → persist the ONE credential → the DESCRIBE.
@@ -247,7 +248,7 @@ fn e2e_follow_by_bare_origin_enrolls_describes_and_delivers() {
     );
     assert!(client.wal_exists(), "the pending WAL is written");
 
-    // The signed-in member approves (a plain accept — no step-up).
+    // The signed-in member approves (a plain signed-in accept).
     stack.approve_device(&member, &handle.user_code);
 
     // Call 2 — re-invoke: poll granted → persist → DESCRIBE. The AUTHORITATIVE workspace (never the
@@ -568,7 +569,8 @@ fn e2e_a_denied_approval_is_the_uniform_ask_an_owner_refusal() {
     let pending = client.follow(&stack.address()).expect("follow call 1");
     let user_code = pending.pending.expect("pending handle").user_code;
 
-    // The person at /verify denies — destroys the pending request, mints nothing (no step-up).
+    // The person at /verify denies — a plain signed-in deny, destroying the pending request and
+    // minting nothing.
     stack.deny_device(&owner, &user_code);
 
     // The resume polls the terminal denial: the ask-an-owner guidance, and NO enrollment state.

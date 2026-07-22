@@ -1,15 +1,13 @@
 import { expect, test } from "@playwright/test";
-import { E2E_PASSWORD } from "./env";
 import { adminQuery, ensureSeatedUser, theWorkspace } from "./seed";
 import { gotoSettled, signIn } from "./sign-in";
 
 /**
- * The WORKSPACE-POLICY surface on /workspaces/:ws/settings: four owner-only knobs — the review
- * gate (the protection default), the fleet staleness window, and the
- * registration knob — each a STEP-UP ceremony (the owner re-enters their password inside the
- * form, verified immediately before the write). The proof of every landed change is the
- * `web.workspace` column; a wrong password writes NOTHING. The audit ledger feeds each knob's
- * "last set by" line.
+ * The WORKSPACE-POLICY surface on /workspaces/:ws/settings: three owner-only knobs — the review
+ * gate (the protection default), the fleet staleness window, and the registration knob — each a
+ * dirty-reveal Save/Cancel form that writes IMMEDIATELY (the owner guard is the whole ceremony;
+ * there is no password re-entry). The proof of every landed change is the `web.workspace` column;
+ * a staged-but-unsaved edit writes NOTHING. The audit ledger feeds each knob's "last set by" line.
  *
  * The suite's default identity is the claimed OWNER. Each test resets the knobs to the column
  * defaults first, so ordering never matters; afterAll leaves them at defaults for later specs
@@ -42,7 +40,7 @@ test.afterAll(async () => {
   await resetKnobs();
 });
 
-test("the review gate demands step-up; the switch flips only with the right password", async ({
+test("the review gate stages on flip and lands only on Save; the flip alone writes nothing", async ({
   page,
 }) => {
   await theWorkspace();
@@ -52,20 +50,14 @@ test("the review gate demands step-up; the switch flips only with the right pass
   await expect(gate).toBeVisible();
   await expect(gate).toHaveAttribute("aria-checked", "false"); // the column default
 
-  // Flipping the switch stages the change and reveals the confirm — the click alone writes
-  // nothing.
+  // Flipping the switch stages the change and reveals the Save/Cancel pair — the flip alone
+  // writes nothing.
   await gate.click();
-  await expect(page.getByLabel("Confirm with your password")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Require review" })).toBeVisible();
   expect(await knob("protection_default")).toBe("open");
 
-  // A WRONG password refuses; the row is unchanged.
-  await page.getByLabel("Confirm with your password").fill("wrong-password-9999");
-  await page.getByRole("button", { name: "Require review" }).click();
-  await expect(page.getByRole("alert")).toContainText("Password check failed");
-  expect(await knob("protection_default")).toBe("open");
-
-  // The right password lands it, and the audit ledger feeds the "last set by" line.
-  await page.getByLabel("Confirm with your password").fill(E2E_PASSWORD);
+  // Save lands it immediately (the owner guard is the whole ceremony — no re-authentication), and
+  // the audit ledger feeds the "last set by" line.
   await page.getByRole("button", { name: "Require review" }).click();
   await expect.poll(async () => knob("protection_default")).toBe("reviewed");
   await gotoSettled(page, `/settings`);
@@ -80,8 +72,7 @@ test("the staleness window converts days to milliseconds and persists", async ({
   const days = page.getByLabel("Staleness window (days)");
   await expect(days).toHaveValue("7"); // the 7-day column default
   await days.fill("14");
-  await expect(page.getByLabel("Confirm with your password")).toBeVisible();
-  await page.getByLabel("Confirm with your password").fill(E2E_PASSWORD);
+  // Editing reveals the dirty Save; it writes immediately (no password re-entry).
   await page.getByRole("button", { name: "Save staleness window" }).click();
 
   await expect.poll(async () => knob("staleness_window_ms")).toBe(FOURTEEN_DAYS_MS);
@@ -89,15 +80,14 @@ test("the staleness window converts days to milliseconds and persists", async ({
   await expect(page.getByLabel("Staleness window (days)")).toHaveValue("14");
 });
 
-test("the registration knob closes sign-up behind step-up", async ({ page }) => {
+test("the registration knob closes sign-up with one Save", async ({ page }) => {
   await theWorkspace();
   await gotoSettled(page, `/settings`);
 
-  // The suite runs registration-open (auth.setup); close it through the ceremony.
+  // The suite runs registration-open (auth.setup); close it through the dirty-reveal Save.
   await page
     .getByRole("radio", { name: "Invite-only — sign-up requires a pending invitation" })
     .check();
-  await page.getByLabel("Confirm with your password").fill(E2E_PASSWORD);
   await page.getByRole("button", { name: "Require an invitation" }).click();
 
   await expect.poll(async () => knob("registration")).toBe("invite_only");

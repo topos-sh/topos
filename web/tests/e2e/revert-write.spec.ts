@@ -13,8 +13,8 @@ import { gotoSettled, signIn } from "./sign-in";
 
 /**
  * The browser team-revert: a reviewer rolls a skill's current back to a known-good ancestor.
- * The affordance rides the History tab — one collapsible confirm per NON-current row,
- * owner|reviewer only — and the write is the vault's FORWARD revert: a server-constructed
+ * The affordance rides the History tab — one in-place confirm per NON-current row (arm, then
+ * confirm), owner|reviewer only — and the write is the vault's FORWARD revert: a server-constructed
  * commit carrying the good tree, CAS-bound to the generation the page rendered against. A
  * plain member never sees the control; a stale generation surfaces the honest conflict note
  * and rolls nothing back.
@@ -79,16 +79,16 @@ test("a reviewer rolls back: the confirm, one exact wire POST, the forward move 
   await signIn(page, REVIEWER);
   await gotoSettled(page, `/skills/${SKILL.name}/history`);
 
-  // The non-current ancestor row carries the collapsible roll-back control; the head does not.
-  const summary = page.getByText("Roll back to this version…");
-  await expect(summary).toHaveCount(1);
-  await summary.click();
+  // The non-current ancestor row carries the in-place roll-back confirm; the head does not.
+  const rollBack = page.getByRole("button", { name: "Roll back to this version" });
+  await expect(rollBack).toHaveCount(1);
 
-  // The confirm step names the honest consequence before firing.
+  // The always-visible copy names the honest consequence; arming then reveals the confirm.
   await expect(
     page.getByText("a forward move, nothing is deleted", { exact: false }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Roll back to this version" }).click();
+  await rollBack.click();
+  await page.getByRole("button", { name: "Roll back — confirm?" }).click();
 
   // The success copy renders in the still-mounted control…
   await expect(
@@ -130,17 +130,20 @@ test("a plain member sees no roll-back control on a non-current row", async ({ p
 
   const history = page.getByRole("region", { name: "History" });
   await expect(history.getByText(staleGoodId.slice(0, 12), { exact: true })).toBeVisible();
-  await expect(page.getByText("Roll back to this version…")).toHaveCount(0);
+  // A member gets neither the confirm button nor its always-visible copy.
   await expect(page.getByRole("button", { name: "Roll back to this version" })).toHaveCount(0);
+  await expect(page.getByText("a forward move, nothing is deleted", { exact: false })).toHaveCount(
+    0,
+  );
 });
 
 test("a stale generation renders the conflict note, nothing rolled back", async ({ page }) => {
   const ws = await theWorkspace();
   await signIn(page, REVIEWER);
   await gotoSettled(page, `/skills/${STALE.name}/history`);
-  await page.getByText("Roll back to this version…").click();
 
-  // The pointer moves UNDER the open page (a concurrent publish through the custody lane).
+  // The pointer moves UNDER the open page (a concurrent publish through the custody lane) — the
+  // page still holds the generation-1 the roll-back's hidden CAS binding rendered against.
   const raced = await page.request.post(
     `http://127.0.0.1:${PLANE_PORT}/internal/v1/workspaces/${ws.id}/bundles/${STALE.id}/publish`,
     {
@@ -162,7 +165,9 @@ test("a stale generation renders the conflict note, nothing rolled back", async 
   );
   expect(raced.ok()).toBe(true);
 
+  // Arm + confirm the roll-back — its hidden expected_generation still binds the stale gen-1.
   await page.getByRole("button", { name: "Roll back to this version" }).click();
+  await page.getByRole("button", { name: "Roll back — confirm?" }).click();
 
   // The vault's CAS refused the stale binding — the control shows the honest moved-pointer
   // note, and the recorded call proves the refusal was a real wire round-trip.

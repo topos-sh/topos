@@ -10,8 +10,8 @@ import { getDb } from "@/lib/db/index.server";
  * the web container) mints a short-lived code, stores ONLY its SHA-256 in the Better Auth
  * `verification` table (identifier `topos-recovery:<user id>`), and prints the plaintext to
  * the operator's terminal. The public /recovery form accepts the code + a new password;
- * consuming it re-hashes the password with Better Auth's own hasher (the one sign-in and
- * step-up verify against — no second implementation) and deletes the row. With SMTP armed,
+ * consuming it re-hashes the password with Better Auth's own hasher (the one sign-in
+ * verifies against — no second implementation) and deletes the row. With SMTP armed,
  * the standard reset-mail rung exists too; this hatch stays available either way.
  */
 

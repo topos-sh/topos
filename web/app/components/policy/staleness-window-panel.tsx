@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useFetcher } from "react-router";
 import { type LastSetLine, LastSetNote } from "@/components/policy/last-set-line";
-import { StepUpConfirm } from "@/components/policy/step-up-confirm";
+import { SaveControls } from "@/components/policy/save-controls";
 import { Card, SectionHeading } from "@/components/ui";
 
 interface StalenessFetcherData {
@@ -21,8 +21,8 @@ const FIELD_CLASSES =
 /**
  * The fleet clock: how long a device may go without reporting before the fleet page calls it
  * stale. Entered in DAYS (hour granularity is fine — the action rounds to the nearest hour and
- * converts to milliseconds; the database bounds it to 1ms .. 366 days). An owner edits it behind a
- * step-up confirm; a non-owner sees the current window read-only.
+ * converts to milliseconds; the database bounds it to 1ms .. 366 days). An owner edits it and
+ * saves (the owner guard is the whole ceremony); a non-owner sees the current window read-only.
  */
 export function StalenessWindowPanel({
   isOwner,
@@ -92,8 +92,7 @@ function StalenessWindowControl({ initialDays }: { initialDays: string }) {
         Between 1 hour and 366 days. Hour granularity is fine (0.5 = 12 hours).
       </p>
       {dirty && (
-        <StepUpConfirm
-          idPrefix="staleness-window"
+        <SaveControls
           saveLabel="Save staleness window"
           pending={pending}
           error={error}

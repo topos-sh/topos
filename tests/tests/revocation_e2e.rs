@@ -153,18 +153,13 @@ fn e2e_seat_removal_ends_delivery_in_the_same_request() {
         200
     );
 
-    // The owner REMOVES the seat through the app's members ceremony (step-up gated). The detach
-    // records + the seat delete land in ONE transaction — delivery ends in this request.
+    // The owner REMOVES the seat through the app's members ceremony — an owner-guarded act that
+    // wears a client-side in-place confirm in the UI; server-side it is the role guard + the
+    // audited act, no re-authentication field. The detach records + the seat delete land in ONE
+    // transaction — delivery ends in this request.
     let member_id = stack.user_id(MEMBER_EMAIL);
-    // The members page is origin-rooted in single-tenant mode; its step-up rung is UNCHANGED.
-    let removed = owner.post_form(
-        "/members",
-        &[
-            ("intent", "remove"),
-            ("user_id", &member_id),
-            ("stepup_password", common::PASSWORD),
-        ],
-    );
+    // The members page is origin-rooted in single-tenant mode.
+    let removed = owner.post_form("/members", &[("intent", "remove"), ("user_id", &member_id)]);
     assert_eq!(
         removed.status, 200,
         "the removal ceremony lands: {}",

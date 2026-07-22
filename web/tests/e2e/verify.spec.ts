@@ -99,7 +99,8 @@ test("approve is a plain signed-in accept: the click mints the credential the po
   await expect(page.getByText(flow.user_code, { exact: false }).first()).toBeVisible();
   await expect(page.getByText("acts with your seat in:", { exact: false })).toBeVisible();
 
-  // A live session plus the explicit click is the whole ceremony — no step-up, no password.
+  // A plain signed-in accept — the click alone mints the credential; approval needs no extra
+  // confirmation.
   await page.getByRole("button", { name: "Approve “e2e-laptop”" }).click();
   await expect(page.getByRole("heading", { name: "Device connected" })).toBeVisible();
 
@@ -125,9 +126,7 @@ test("approve is a plain signed-in accept: the click mints the credential the po
   expect(rePoll.credential).toBe(flow.device_code);
 });
 
-test("deny destroys the pending request and mints nothing — no step-up needed", async ({
-  page,
-}) => {
+test("deny destroys the pending request and mints nothing", async ({ page }) => {
   const flow = await startDeviceFlow(page, "e2e-stranger");
   await lookUp(page, flow.user_code);
   await expect(page.getByText("“e2e-stranger”", { exact: true })).toBeVisible();

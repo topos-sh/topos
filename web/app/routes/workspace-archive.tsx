@@ -1,10 +1,10 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Form, useActionData, useFetcher, useLoaderData, useNavigation } from "react-router";
+import { ConfirmButton, ConfirmNameField } from "@/components/confirm";
 import { SettingsTabs } from "@/components/settings-tabs";
-import { StepUpFields, StepUpMethodProvider } from "@/components/step-up";
 import { buttonClasses, Card, PageHeader } from "@/components/ui";
+import { requireTypedName } from "@/lib/auth/ceremony.server";
 import { requireMemberInScope, requireWorkspaceOwner } from "@/lib/auth/guards.server";
-import { requireStepUp, requireTypedName, stepUpMethod } from "@/lib/auth/step-up.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import {
   archivedSkillById,
@@ -31,7 +31,6 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   return {
     wsName: workspace.name,
     isOwner: actor.role === "owner",
-    stepUpMethod: await stepUpMethod(actor.userId),
     archived: archived.map((row) => ({
       skillId: row.skillId,
       name: row.name,
@@ -48,11 +47,11 @@ type ArchiveActionData =
   | { op: "delete"; skillId: string; status: "refused"; message: string };
 
 /**
- * The two owner ceremonies, dispatched on the hidden `intent`. Each RE-GUARDS as owner,
- * re-proves the password (step-up), and — for DELETE — requires typing the ARCHIVED name
- * (re-read from the database, never trusted from the form). The ceremonies land their own audit
- * rows in-transaction; the route records the attempts they never see — refused step-ups, typed
- * names that miss, faults.
+ * The two owner ceremonies, dispatched on the hidden `intent`. Each RE-GUARDS as owner — the
+ * owner guard is the whole gate (no re-authentication) — and DELETE additionally requires typing
+ * the ARCHIVED name (re-read from the database, never trusted from the form); unarchive wears a
+ * client-side in-place confirm. The ceremonies land their own audit rows in-transaction; the
+ * route records the attempts they never see — typed names that miss, faults.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
   // The membership FLOOR, hoisted above the intent dispatch: every intent below requires at
@@ -80,16 +79,6 @@ async function unarchiveIntent(request: Request, ws: string, formData: FormData)
   const skillId = String(formData.get("skill_id") ?? "");
   const row = await archivedSkillById(owner, skillId);
   const subject = row?.name ?? skillId;
-  const stepUp = await requireStepUp(request, formData);
-  if (!stepUp.ok) {
-    await recordAdminEvent(owner, {
-      kind: "skill_unarchived",
-      subject,
-      detail: "step_up",
-      outcome: "denied",
-    });
-    return data<ArchiveActionData>({ op: "unarchive", skillId, message: stepUp.error });
-  }
   if (row === undefined) {
     return data<ArchiveActionData>({
       op: "unarchive",
@@ -129,21 +118,6 @@ async function deleteIntent(request: Request, ws: string, formData: FormData) {
   const skillId = String(formData.get("skill_id") ?? "");
   const row = await archivedSkillById(owner, skillId);
   const subject = row?.name ?? skillId;
-  const stepUp = await requireStepUp(request, formData);
-  if (!stepUp.ok) {
-    await recordAdminEvent(owner, {
-      kind: "skill_deleted",
-      subject,
-      detail: "step_up",
-      outcome: "denied",
-    });
-    return data<ArchiveActionData>({
-      op: "delete",
-      skillId,
-      status: "refused",
-      message: stepUp.error,
-    });
-  }
   if (row === undefined) {
     return data<ArchiveActionData>({
       op: "delete",
@@ -205,40 +179,38 @@ async function deleteIntent(request: Request, ws: string, formData: FormData) {
 }
 
 export default function WorkspaceArchive() {
-  const { wsName, isOwner, archived, stepUpMethod } = useLoaderData<typeof loader>();
+  const { wsName, isOwner, archived } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const deleted =
     actionData?.op === "delete" && actionData.status === "deleted" ? actionData : null;
   return (
-    <StepUpMethodProvider method={stepUpMethod}>
-      <div className="space-y-6">
-        <PageHeader title="Archive" meta={<code className="font-mono">{wsName}</code>} />
-        <SettingsTabs active="archive" />
-        {deleted !== null && (
-          <Card className="px-4 py-3">
-            <p className="text-dim text-sm" role="status">
-              Deleted <span className="font-mono text-ink">{deleted.name}</span>.{" "}
-              {deleted.bytesDropped
-                ? "Its bytes are reclaimed from the server; the row stays as a tombstone so history survives."
-                : "The row is tombstoned; the byte reclaim faulted and will be retried — running the delete again is safe."}
-            </p>
-          </Card>
-        )}
-        {archived.length === 0 ? (
-          <Card className="px-4 py-3">
-            <p className="text-dim text-sm">
-              Nothing archived. Retiring a skill from its settings page moves it here.
-            </p>
-          </Card>
-        ) : (
-          <ul className="space-y-3">
-            {archived.map((row) => (
-              <ArchivedRow key={row.skillId} row={row} isOwner={isOwner} />
-            ))}
-          </ul>
-        )}
-      </div>
-    </StepUpMethodProvider>
+    <div className="space-y-6">
+      <PageHeader title="Archive" meta={<code className="font-mono">{wsName}</code>} />
+      <SettingsTabs active="archive" />
+      {deleted !== null && (
+        <Card className="px-4 py-3">
+          <p className="text-dim text-sm" role="status">
+            Deleted <span className="font-mono text-ink">{deleted.name}</span>.{" "}
+            {deleted.bytesDropped
+              ? "Its bytes are reclaimed from the server; the row stays as a tombstone so history survives."
+              : "The row is tombstoned; the byte reclaim faulted and will be retried — running the delete again is safe."}
+          </p>
+        </Card>
+      )}
+      {archived.length === 0 ? (
+        <Card className="px-4 py-3">
+          <p className="text-dim text-sm">
+            Nothing archived. Retiring a skill from its settings page moves it here.
+          </p>
+        </Card>
+      ) : (
+        <ul className="space-y-3">
+          {archived.map((row) => (
+            <ArchivedRow key={row.skillId} row={row} isOwner={isOwner} />
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -293,16 +265,19 @@ function UnarchiveControl({ skillId }: { skillId: string }) {
           Restores the base name and puts the skill back in the catalog. If the name was reused
           since, this is refused — rename after unarchiving.
         </p>
-        <StepUpFields idPrefix={`unarchive-${skillId}`} />
         {message !== undefined && message.length > 0 && (
           <p className="text-red-600 text-sm" role="alert">
             {message}
           </p>
         )}
         <div>
-          <button type="submit" disabled={pending} className={buttonClasses("quiet")}>
-            {pending ? "Unarchiving…" : "Unarchive"}
-          </button>
+          <ConfirmButton
+            label="Unarchive"
+            confirmLabel="Unarchive — confirm?"
+            tone="quiet"
+            pendingLabel="Unarchiving…"
+            pending={pending}
+          />
         </div>
       </fetcher.Form>
     </details>
@@ -338,7 +313,7 @@ function DeleteControl({ skillId, archivedName }: { skillId: string; archivedNam
           Deletion drops this skill&apos;s bytes from the server. It cannot recall the copies
           devices already hold — the fleet page shows who still holds them.
         </p>
-        <StepUpFields idPrefix={`delete-${skillId}`} typedName={archivedName} />
+        <ConfirmNameField typedName={archivedName} idPrefix={`delete-${skillId}`} />
         {message !== undefined && (
           <p className="text-red-600 text-sm" role="alert">
             {message}

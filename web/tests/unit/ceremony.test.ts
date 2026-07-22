@@ -1,16 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { requireTypedName, STEP_UP_CONFIRM_FIELD } from "@/lib/auth/step-up.server";
+import { CONFIRM_NAME_FIELD, requireTypedName } from "@/lib/auth/ceremony.server";
 
 /**
- * The PURE half of the step-up gate — `requireTypedName`, the destructive ceremonies' type-the-name
- * second factor. The password-verifying `requireStepUp` needs a live Better Auth session + request
- * headers, so it is covered by the e2e suite; this exercises the exact-match rule on its own.
+ * The destructive ceremonies' confirmation of intent — `requireTypedName`, the type-the-name
+ * gate (ceremonies confirm, they don't re-authenticate). This exercises the exact-match rule
+ * on its own; the route wiring is covered by the e2e suites.
  */
 
 function confirmForm(value?: string): FormData {
   const form = new FormData();
   if (value !== undefined) {
-    form.set(STEP_UP_CONFIRM_FIELD, value);
+    form.set(CONFIRM_NAME_FIELD, value);
   }
   return form;
 }

@@ -18,6 +18,10 @@ const { sendMailSpy, createTransportSpy } = vi.hoisted(() => {
 });
 vi.mock("nodemailer", () => ({ default: { createTransport: createTransportSpy } }));
 
+// The transport's metadata-only send log writes through the DAL — mocked away so this suite
+// stays DB-free (the scratch-DB mail-log suite pins the real rows).
+vi.mock("@/lib/db/mail-log.server", () => ({ recordMailEvent: vi.fn(async () => {}) }));
+
 const BASE_ENV: Record<string, string> = {
   DATABASE_URL: "postgres://user:pass@localhost:5439/db",
   BETTER_AUTH_SECRET: "0123456789abcdef0123456789abcdef",

@@ -28,8 +28,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
 }
 
 /**
- * Self sign-out — the GitHub-sessions "sign this device out" pattern. It is NOT step-up gated:
- * the destructive-ceremony gates protect OTHER people's access, and this is the person's own
+ * Self sign-out — the GitHub-sessions "sign this device out" pattern. It carries no confirmation:
+ * the ceremonies over OTHER people's access wear one, and this is the person's own
  * escape hatch — self-only by construction (the DAL's WHERE clause matches only the actor's
  * own device rows, so a foreign id answers the same as an unknown one). Final: the database
  * trigger refuses any un-revoke; re-enrolling is the recovery. The audit row lands inside the
@@ -111,8 +111,8 @@ function NoDevices() {
 
 /**
  * One device row. An active device carries its name, enrollment, and last-seen line plus a
- * "Sign out" button (no step-up — signing out your own device is the escape hatch, not a
- * destructive ceremony over someone else's access). A signed-out device is greyed and carries
+ * "Sign out" button (no confirmation — signing out your own device is the escape hatch, not a
+ * ceremony over someone else's access). A signed-out device is greyed and carries
  * the re-enroll hint instead.
  */
 function DeviceRow({ device }: { device: AccountDevice }) {

@@ -1,17 +1,17 @@
 import { useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, redirect, useFetcher, useLoaderData } from "react-router";
+import { ConfirmButton } from "@/components/confirm";
+import { SaveControls } from "@/components/policy/save-controls";
 import { SkillHeader } from "@/components/skill/skill-header";
 import { SkillTabs } from "@/components/skill/skill-tabs";
-import { StepUpFields, StepUpMethodProvider } from "@/components/step-up";
-import { buttonClasses, Card, SectionHeading } from "@/components/ui";
+import { Card, SectionHeading } from "@/components/ui";
 import {
   notFound,
   requireMemberInScope,
   requireOwnerInScope,
   requireWorkspaceOwner,
 } from "@/lib/auth/guards.server";
-import { requireStepUp, stepUpMethod } from "@/lib/auth/step-up.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import {
   archiveBundle,
@@ -73,7 +73,6 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     openProposals: row.openProposals,
     protection: (pinned ?? "inherit") as ProtectionChoice,
     protectionDefault: policy.protectionDefault,
-    stepUpMethod: await stepUpMethod(owner.userId),
   };
 }
 
@@ -84,10 +83,11 @@ interface SettingsFormError {
 }
 
 /**
- * The ceremonies, dispatched on the hidden `intent`. Each RE-GUARDS as owner, re-proves the
- * password (step-up), then runs the app-tier ceremony keyed on the immutable skill id. The
- * ceremonies land their own audit rows in-transaction; the route records the attempts they
- * never see — refused step-ups, typed refusals, faults.
+ * The ceremonies, dispatched on the hidden `intent`. Each RE-GUARDS as owner, then runs the
+ * app-tier ceremony keyed on the immutable skill id — the owner guard is the whole gate (no
+ * re-authentication); rename and archive wear a client-side in-place confirm. The ceremonies land
+ * their own audit rows in-transaction; the route records the attempts they never see — typed
+ * refusals, faults.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
   // The membership FLOOR, hoisted above the intent dispatch: every intent below requires at
@@ -106,7 +106,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
     return renameIntent(request, ws, workspace.name, skill, formData);
   }
   if (intent === "archive") {
-    return archiveIntent(request, ws, workspace.name, skill, formData);
+    return archiveIntent(request, ws, workspace.name, skill);
   }
   if (intent === "set-protection") {
     return protectionIntent(request, ws, skill, formData);
@@ -122,16 +122,6 @@ async function renameIntent(
   formData: FormData,
 ) {
   const owner = await requireWorkspaceOwner(request, ws);
-  const stepUp = await requireStepUp(request, formData);
-  if (!stepUp.ok) {
-    await recordAdminEvent(owner, {
-      kind: "skill_renamed",
-      subject: skill,
-      detail: "step_up",
-      outcome: "denied",
-    });
-    return data<SettingsFormError>({ form: "rename", message: stepUp.error });
-  }
   const newName = String(formData.get("new_name") ?? "").trim();
   if (!isValidSkillName(newName)) {
     await recordAdminEvent(owner, {
@@ -173,24 +163,8 @@ async function renameIntent(
   return data<SettingsFormError>({ form: "rename", message: renameDeniedCopy(outcome.outcome) });
 }
 
-async function archiveIntent(
-  request: Request,
-  ws: string,
-  wsName: string,
-  skill: string,
-  formData: FormData,
-) {
+async function archiveIntent(request: Request, ws: string, wsName: string, skill: string) {
   const owner = await requireWorkspaceOwner(request, ws);
-  const stepUp = await requireStepUp(request, formData);
-  if (!stepUp.ok) {
-    await recordAdminEvent(owner, {
-      kind: "skill_archived",
-      subject: skill,
-      detail: "step_up",
-      outcome: "denied",
-    });
-    return data<SettingsFormError>({ form: "archive", message: stepUp.error });
-  }
   const row = await skillIndexRow(owner, skill);
   if (row === undefined) {
     return data<SettingsFormError>({ form: "archive", message: "This skill no longer exists." });
@@ -227,22 +201,12 @@ async function archiveIntent(
   });
 }
 
-/** The protection pin — owner + step-up; 'inherit' clears the pin back to the workspace default. */
+/** The protection pin — owner-only; 'inherit' clears the pin back to the workspace default. */
 async function protectionIntent(request: Request, ws: string, skill: string, formData: FormData) {
   const owner = await requireWorkspaceOwner(request, ws);
   const choice = String(formData.get("protection") ?? "");
   if (choice !== "inherit" && choice !== "open" && choice !== "reviewed") {
     return data<SettingsFormError>({ form: "protection", message: "Unknown protection value." });
-  }
-  const stepUp = await requireStepUp(request, formData);
-  if (!stepUp.ok) {
-    await recordAdminEvent(owner, {
-      kind: "skill_protection",
-      subject: skill,
-      detail: "step_up",
-      outcome: "denied",
-    });
-    return data<SettingsFormError>({ form: "protection", message: stepUp.error });
   }
   const row = await skillIndexRow(owner, skill);
   if (row === undefined) {
@@ -279,34 +243,31 @@ export default function SkillSettings() {
     openProposals,
     protection,
     protectionDefault,
-    stepUpMethod,
   } = useLoaderData<typeof loader>();
   const wsPath = useWsPath();
   return (
-    <StepUpMethodProvider method={stepUpMethod}>
-      <div className="space-y-8">
-        <SkillHeader
-          ws={wsName}
-          skill={skill}
-          currentShort={currentShort}
-          displayName={displayName}
-          kind={kind}
-        />
-        <SkillTabs
-          basePath={wsPath(`skills/${skill}`)}
-          active="settings"
-          openProposals={openProposals}
-          showSettings
-        />
-        <ProtectionCeremony
-          skill={skill}
-          protection={protection}
-          protectionDefault={protectionDefault}
-        />
-        <RenameCeremony skill={skill} />
-        <ArchiveCeremony skill={skill} />
-      </div>
-    </StepUpMethodProvider>
+    <div className="space-y-8">
+      <SkillHeader
+        ws={wsName}
+        skill={skill}
+        currentShort={currentShort}
+        displayName={displayName}
+        kind={kind}
+      />
+      <SkillTabs
+        basePath={wsPath(`skills/${skill}`)}
+        active="settings"
+        openProposals={openProposals}
+        showSettings
+      />
+      <ProtectionCeremony
+        skill={skill}
+        protection={protection}
+        protectionDefault={protectionDefault}
+      />
+      <RenameCeremony skill={skill} />
+      <ArchiveCeremony skill={skill} />
+    </div>
   );
 }
 
@@ -317,9 +278,9 @@ const PROTECTION_LABEL: Record<ProtectionChoice, string> = {
 };
 
 /**
- * The protection pin. `checked` is the stored pin ('inherit' = no pin); the staged choice
- * reveals the step-up confirm only when it differs, so the knob at rest shows no password
- * prompt. The copy names the cascade honestly: the pin overrides the workspace default, and
+ * The protection pin. `protection` is the stored pin ('inherit' = no pin); the staged choice
+ * reveals the dirty-reveal Save/Cancel only when it differs, so the knob at rest shows no
+ * controls. The copy names the cascade honestly: the pin overrides the workspace default, and
  * clearing it returns to inheriting.
  */
 function ProtectionCeremony({
@@ -374,27 +335,12 @@ function ProtectionCeremony({
             ))}
           </fieldset>
           {dirty && (
-            <div className="space-y-3 border-line-soft border-t pt-3">
-              <StepUpFields idPrefix="protection" />
-              {error !== undefined && (
-                <p className="text-red-600 text-sm" role="alert">
-                  {error}
-                </p>
-              )}
-              <div className="flex items-center gap-2">
-                <button type="submit" disabled={pending} className={buttonClasses("primary")}>
-                  {pending ? "Saving…" : "Save protection"}
-                </button>
-                <button
-                  type="button"
-                  disabled={pending}
-                  onClick={() => setStaged(protection)}
-                  className={buttonClasses("quiet")}
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
+            <SaveControls
+              saveLabel="Save protection"
+              pending={pending}
+              error={error}
+              onCancel={() => setStaged(protection)}
+            />
           )}
         </fetcher.Form>
       </Card>
@@ -434,16 +380,19 @@ function RenameCeremony({ skill }: { skill: string }) {
               className="block h-11 w-full min-w-56 rounded-md border border-line px-3 text-ink text-sm placeholder:text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
             />
           </label>
-          <StepUpFields idPrefix="rename" />
           {error !== undefined && (
             <p className="text-red-600 text-sm" role="alert">
               {error}
             </p>
           )}
           <div>
-            <button type="submit" disabled={pending} className={buttonClasses("primary")}>
-              {pending ? "Renaming…" : "Rename skill"}
-            </button>
+            <ConfirmButton
+              label="Rename skill"
+              confirmLabel="Rename — confirm?"
+              tone="primary"
+              pendingLabel="Renaming…"
+              pending={pending}
+            />
           </div>
         </fetcher.Form>
       </Card>
@@ -468,16 +417,19 @@ function ArchiveCeremony({ skill }: { skill: string }) {
         </p>
         <fetcher.Form method="post" className="space-y-3">
           <input type="hidden" name="intent" value="archive" />
-          <StepUpFields idPrefix="archive" />
           {error !== undefined && (
             <p className="text-red-600 text-sm" role="alert">
               {error}
             </p>
           )}
           <div>
-            <button type="submit" disabled={pending} className={buttonClasses("danger")}>
-              {pending ? "Archiving…" : `Archive ${skill}`}
-            </button>
+            <ConfirmButton
+              label={`Archive ${skill}`}
+              confirmLabel="Archive — confirm?"
+              tone="danger"
+              pendingLabel="Archiving…"
+              pending={pending}
+            />
           </div>
         </fetcher.Form>
       </Card>

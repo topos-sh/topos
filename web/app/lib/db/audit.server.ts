@@ -6,7 +6,7 @@ import { auditEvent } from "@/lib/db/schema.app";
 /**
  * The admin ceremonies' audit writer + the history pages' reader, over the ONE `audit_event`
  * ledger (which absorbed the old per-surface event tables). ONE row per attempt, whatever the
- * outcome (a refused step-up is as much a fact as a landed act; the trail must show both).
+ * outcome (a refused attempt is as much a fact as a landed act; the trail must show both).
  * Kinds are an open vocabulary; subjects name the target (a user id, a bundle or channel name,
  * a device id). recordAdminEvent never throws into a ceremony: recording is best-effort by
  * design — an audit fault must not mask the act's own outcome. (Data-layer MUTATIONS emit

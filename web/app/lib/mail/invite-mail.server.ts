@@ -102,7 +102,7 @@ export async function sendInviteEmail(input: InviteEmailInput): Promise<void> {
       return;
     }
     const { subject, text, html } = inviteLines(input);
-    await sendMail({ to: input.to, subject, text, html });
+    await sendMail({ kind: "invite", to: input.to, subject, text, html });
     return;
   }
   // Dev/test: record the notice to its OWN file so a flow can assert it (never a send, never the
@@ -112,7 +112,7 @@ export async function sendInviteEmail(input: InviteEmailInput): Promise<void> {
   const line = `${JSON.stringify({ to, workspaceDisplayName, inviteUrl, invitedBy, ...(hint === undefined ? {} : { hint }) })}\n`;
   await fs.appendFile(path.join(process.cwd(), ".invite-emails.jsonl"), line, "utf8");
   const { subject, text, html } = inviteLines(input);
-  await recordDevMail("invite", { to, subject, text, html });
+  await recordDevMail({ kind: "invite", to, subject, text, html });
   if (appEnv === "development") {
     // biome-ignore lint/suspicious/noConsole: the deliberate dev-only invite surface.
     console.log(`\n  Invite for ${to} (dev — mail suppressed): ${inviteUrl}\n`);

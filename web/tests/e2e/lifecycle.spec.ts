@@ -1,13 +1,14 @@
 import { expect, test } from "@playwright/test";
 import { SKILL_MD_V1, SKILL_MD_V2 } from "../fixtures/plane/data.mjs";
-import { E2E_PASSWORD } from "./env";
 import { adminQuery, custodyCalls, ensureBundle, seedCustody, theWorkspace } from "./seed";
 import { gotoSettled } from "./sign-in";
 
 /**
  * The SKILL LIFECYCLE ceremonies: rename + protection pin + archive (skill settings), unarchive
- * + delete (the archive page), and per-version purge (the history tab) — every one an OWNER
- * step-up ceremony, the destructive ones also gated by typing a name. All app-tier row
+ * + delete (the archive page), and per-version purge (the history tab) — every one an OWNER act
+ * gated by the owner guard alone (no re-authentication). Rename, archive, and unarchive wear a
+ * lightweight IN-PLACE confirm (arm, then confirm); the destructive ones (delete, purge)
+ * additionally require typing the resource's exact name before a plain submit. All app-tier row
  * transactions over `web.bundle` now, keyed on the immutable skill id; only the byte halves
  * (delete's bundle drop, the purge) reach the vault, and the recorded custody calls prove
  * exactly those. The suite's default identity is the claimed OWNER. Serial — one identity's
@@ -61,26 +62,24 @@ test.beforeAll(async () => {
   goodId = seeded[1]?.versions[0]?.version_id as string;
 });
 
-test("rename: a wrong step-up password writes nothing; the right one renames and the old name redirects", async ({
+test("rename: an in-place confirm renames (id-keyed) and the old name redirects", async ({
   page,
 }) => {
   await theWorkspace();
   await gotoSettled(page, `/skills/${SKILL.name}/settings`);
 
-  // A WRONG password: the ceremony refuses at step-up — nothing is written.
+  // Rename is an in-place confirm — no password. Filling the field then arming leaves the value
+  // intact; arming alone writes nothing.
   await page.locator("#rename-new-name").fill(RENAMED);
-  await page.locator("#rename-password").fill("not-the-password");
   await page.getByRole("button", { name: "Rename skill" }).click();
-  await expect(page.getByRole("alert")).toContainText("Password check failed");
+  await expect(page.getByRole("button", { name: "Rename — confirm?" })).toBeVisible();
   expect(
     (await adminQuery<{ name: string }>(`select name from web.bundle where id = $1`, [SKILL.id]))[0]
       ?.name,
   ).toBe(SKILL.name);
 
-  // The RIGHT password renames (id-keyed) and redirects to the new name's settings.
-  await page.locator("#rename-new-name").fill(RENAMED);
-  await page.locator("#rename-password").fill(E2E_PASSWORD);
-  await page.getByRole("button", { name: "Rename skill" }).click();
+  // Confirm renames (id-keyed) and redirects to the new name's settings.
+  await page.getByRole("button", { name: "Rename — confirm?" }).click();
   await page.waitForURL(`**/skills/${RENAMED}/settings`);
   const row = await adminQuery<{ name: string }>(`select name from web.bundle where id = $1`, [
     SKILL.id,
@@ -97,13 +96,12 @@ test("rename: a wrong step-up password writes nothing; the right one renames and
   await page.waitForURL(`**/skills/${RENAMED}`);
 });
 
-test("the protection pin: owner + step-up flips the bundle to reviewed", async ({ page }) => {
+test("the protection pin: an owner Save flips the bundle to reviewed", async ({ page }) => {
   await theWorkspace();
   await gotoSettled(page, `/skills/${RENAMED}/settings`);
 
   await page.getByRole("radio", { name: /Reviewed — a member's publish/ }).check();
-  // Three ceremonies on this page carry password fields; target the protection form's own.
-  await page.locator("#protection-password").fill(E2E_PASSWORD);
+  // Choosing a new value reveals the dirty Save; it writes immediately (no password re-entry).
   await page.getByRole("button", { name: "Save protection" }).click();
   await expect
     .poll(
@@ -124,8 +122,9 @@ test("archive retires the skill: the base name frees, the catalog drops it, the 
   await theWorkspace();
   await gotoSettled(page, `/skills/${RENAMED}/settings`);
 
-  await page.locator("#archive-password").fill(E2E_PASSWORD);
+  // Archive is an in-place confirm — arm, then confirm.
   await page.getByRole("button", { name: `Archive ${RENAMED}` }).click();
+  await page.getByRole("button", { name: "Archive — confirm?" }).click();
   await page.waitForURL(`**/archive`);
 
   const row = await adminQuery<{ status: string; name: string; base_name: string }>(
@@ -147,8 +146,9 @@ test("unarchive restores the base name exactly", async ({ page }) => {
   await gotoSettled(page, `/settings/archive`);
 
   await page.getByText("Unarchive…", { exact: true }).click();
-  await page.locator(`#unarchive-${SKILL.id}-password`).fill(E2E_PASSWORD);
+  // Unarchive is an in-place confirm — arm, then confirm.
   await page.getByRole("button", { name: "Unarchive", exact: true }).click();
+  await page.getByRole("button", { name: "Unarchive — confirm?" }).click();
 
   // A landed unarchive revalidates the row off the archive list…
   await expect(page.getByText(`${RENAMED}-archived-`, { exact: false })).toHaveCount(0);
@@ -167,8 +167,8 @@ test("delete is archive-first + typed-name gated; the tombstone stays, the bytes
   await theWorkspace();
   // Archive again — deletion is a step further than archive, never a shortcut around it.
   await gotoSettled(page, `/skills/${RENAMED}/settings`);
-  await page.locator("#archive-password").fill(E2E_PASSWORD);
   await page.getByRole("button", { name: `Archive ${RENAMED}` }).click();
+  await page.getByRole("button", { name: "Archive — confirm?" }).click();
   await page.waitForURL(`**/archive`);
   const archivedName = (
     await adminQuery<{ name: string }>(`select name from web.bundle where id = $1`, [SKILL.id])
@@ -176,18 +176,15 @@ test("delete is archive-first + typed-name gated; the tombstone stays, the bytes
 
   await page.getByText("Delete permanently…", { exact: true }).click();
   const confirm = page.locator(`#delete-${SKILL.id}-confirm`);
-  const password = page.locator(`#delete-${SKILL.id}-password`);
 
-  // The WRONG name (with the right password) is refused by the typed-name gate — no byte drop.
+  // The WRONG name is refused by the typed-name gate — no byte drop.
   await confirm.fill("not-the-name");
-  await password.fill(E2E_PASSWORD);
   await page.getByRole("button", { name: "Delete permanently" }).click();
   await expect(page.getByText(/Type the exact name/)).toBeVisible();
   expect(await custodyCalls({ route: "delete-bundle", bundle: SKILL.id })).toHaveLength(0);
 
   // The EXACT archived name: the tombstone lands, then the vault drops the whole custody.
   await confirm.fill(archivedName);
-  await password.fill(E2E_PASSWORD);
   await page.getByRole("button", { name: "Delete permanently" }).click();
   await expect(page.getByText(`Deleted ${archivedName}`, { exact: false })).toBeVisible();
   await expect(page.getByText("Its bytes are reclaimed from the server")).toBeVisible();
@@ -217,7 +214,6 @@ test("purge drops ONE past version's bytes; the hash stays a tombstone and histo
 
   const short = goodId.slice(0, 12);
   await page.locator(`#purge-${short}-confirm`).fill(PURGE_SKILL.name);
-  await page.locator(`#purge-${short}-password`).fill(E2E_PASSWORD);
   await page.getByRole("button", { name: "Purge this version" }).click();
   await expect(
     page.getByText("Purged — this version's bytes are gone from the server"),

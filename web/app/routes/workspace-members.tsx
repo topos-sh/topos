@@ -9,14 +9,12 @@ import {
 } from "@/components/members/pending-invitations";
 import { RemoveMemberForm } from "@/components/members/remove-member-form";
 import { RoleForm } from "@/components/members/role-form";
-import { StepUpMethodProvider } from "@/components/step-up";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading } from "@/components/ui";
 import {
   requireMember,
   requireMemberInScope,
   requireWorkspaceOwner,
 } from "@/lib/auth/guards.server";
-import { requireStepUp, stepUpMethod } from "@/lib/auth/step-up.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import { removeSeat, type SeatMutationRefusal, setSeatRole } from "@/lib/db/identity.server";
 import {
@@ -76,7 +74,6 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     mailArmed: mailDelivery().canSend,
     slug: workspace.name,
     shareAddress: workspaceAddress(request, workspace.name),
-    stepUpMethod: await stepUpMethod(actor.userId),
   };
 }
 
@@ -84,12 +81,10 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
  * ONE action, dispatched on the hidden `intent`. Each branch RE-GUARDS itself (a loader gate
  * never extends to an action), and each re-guards at its own grade: inviting, revoking an
  * invitation, removing a seat, and role changes are owner-only; leaving is the signed-in
- * member's own act. Every seat mutation is a STEP-UP ceremony (a fresh password re-entry,
- * verified immediately before the act); invite and revoke-invitation carry no step-up (both
- * non-destructive — an invitation seats nobody, and revoking one destroys nothing a re-invite
- * can't re-mint). The data layer emits the audit row of every
- * landed act (and the last-owner refusals) inside its own transaction; the route records the
- * attempts the data layer never sees — refused step-ups, mangled forms, faults.
+ * member's own act. Seat mutations are guard-gated audited acts — no re-authentication; the
+ * peer-facing confirmation is a client-side in-place arm on the control. The data layer emits the
+ * audit row of every landed act (and the last-owner refusals) inside its own transaction; the
+ * route records the attempts the data layer never sees — mangled forms, faults.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
   // The membership FLOOR, hoisted above the intent dispatch: every intent below requires at
@@ -113,7 +108,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
     return setRoleIntent(request, ws, formData);
   }
   if (intent === "leave") {
-    return leaveIntent(request, ws, formData);
+    return leaveIntent(request, ws);
   }
   return data({ intent: "unknown" as const, status: "error" as const }, { status: 400 });
 }
@@ -181,7 +176,7 @@ async function inviteIntent(request: Request, ws: string, formData: FormData) {
 }
 
 /**
- * Revoking a pending invitation — owner-only, step-up-LESS: the un-invite before anyone binds
+ * Revoking a pending invitation — owner-only, unconfirmed: the un-invite before anyone binds
  * it. Like the invite itself it is non-destructive (the row flips to revoked; re-inviting mints
  * a fresh link), so the owner gate + the audited act is the whole ceremony.
  */
@@ -206,10 +201,10 @@ async function revokeInvitationIntent(request: Request, ws: string, formData: Fo
 }
 
 /**
- * Removing a seat is owner-only and a STEP-UP ceremony: guard → validate the target →
- * requireStepUp → the last-owner-fenced removeSeat (which writes the detach records and the
- * audit row in the same transaction). The target is the seat's USER ID — the one identity —
- * never an email.
+ * Removing a seat is an owner-only guard-gated act: guard → validate the target → the
+ * last-owner-fenced removeSeat (which writes the detach records and the audit row in the same
+ * transaction). The peer-facing confirmation is a client-side in-place arm. The target is the
+ * seat's USER ID — the one identity — never an email.
  */
 async function removeIntent(request: Request, ws: string, formData: FormData) {
   const owner = await requireWorkspaceOwner(request, ws);
@@ -217,16 +212,6 @@ async function removeIntent(request: Request, ws: string, formData: FormData) {
   if (targetUserId.length === 0) {
     await recordAdminEvent(owner, { kind: "member_removed", subject: "", outcome: "error" });
     return { intent: "remove" as const, status: "error" as const };
-  }
-  const stepUp = await requireStepUp(request, formData);
-  if (!stepUp.ok) {
-    await recordAdminEvent(owner, {
-      kind: "member_removed",
-      subject: targetUserId,
-      detail: "step_up",
-      outcome: "denied",
-    });
-    return { intent: "remove" as const, status: "step_up" as const, error: stepUp.error };
   }
   let outcome: SeatMutationRefusal | "ok";
   try {
@@ -250,9 +235,10 @@ async function removeIntent(request: Request, ws: string, formData: FormData) {
 }
 
 /**
- * Changing a seat's role is owner-only and a STEP-UP ceremony: guard → validate the role →
- * requireStepUp → the last-owner-fenced setSeatRole. Demoting the sole owner is refused inside
- * the same lock a concurrent demotion would need, and surfaces here as honest copy.
+ * Changing a seat's role is an owner-only guard-gated act: guard → validate the role → the
+ * last-owner-fenced setSeatRole. The peer-facing confirmation is a client-side in-place arm.
+ * Demoting the sole owner is refused inside the same lock a concurrent demotion would need, and
+ * surfaces here as honest copy.
  */
 async function setRoleIntent(request: Request, ws: string, formData: FormData) {
   const owner = await requireWorkspaceOwner(request, ws);
@@ -266,16 +252,6 @@ async function setRoleIntent(request: Request, ws: string, formData: FormData) {
       outcome: "error",
     });
     return { intent: "set-role" as const, status: "error" as const };
-  }
-  const stepUp = await requireStepUp(request, formData);
-  if (!stepUp.ok) {
-    await recordAdminEvent(owner, {
-      kind: "role_change",
-      subject: targetUserId,
-      detail: "step_up",
-      outcome: "denied",
-    });
-    return { intent: "set-role" as const, status: "step_up" as const, error: stepUp.error };
   }
   let outcome: SeatMutationRefusal | "ok";
   try {
@@ -299,23 +275,13 @@ async function setRoleIntent(request: Request, ws: string, formData: FormData) {
 }
 
 /**
- * The signed-in member leaving their OWN seat — a STEP-UP ceremony gated only by membership
- * (any member may leave themselves): guard → requireStepUp → removeSeat on the actor's own
- * user id. On success the seat is gone and the person is sent to the workspaces index. The
- * sole owner is refused honestly.
+ * The signed-in member leaving their OWN seat — a guard-gated act gated only by membership (any
+ * member may leave themselves): guard → removeSeat on the actor's own user id. The confirmation
+ * is a client-side in-place arm. On success the seat is gone and the person is sent to the
+ * workspaces index. The sole owner is refused honestly.
  */
-async function leaveIntent(request: Request, ws: string, formData: FormData) {
+async function leaveIntent(request: Request, ws: string) {
   const actor = await requireMember(request, ws);
-  const stepUp = await requireStepUp(request, formData);
-  if (!stepUp.ok) {
-    await recordAdminEvent(actor, {
-      kind: "leave",
-      subject: actor.userId,
-      detail: "step_up",
-      outcome: "denied",
-    });
-    return { intent: "leave" as const, status: "step_up" as const, error: stepUp.error };
-  }
   let outcome: SeatMutationRefusal | "ok";
   try {
     outcome = await removeSeat(actor, ws, actor.userId, "membership_removed");
@@ -332,43 +298,41 @@ async function leaveIntent(request: Request, ws: string, formData: FormData) {
 }
 
 export default function WorkspaceMembers() {
-  const { isOwner, selfUserId, roster, invitations, mailArmed, slug, shareAddress, stepUpMethod } =
+  const { isOwner, selfUserId, roster, invitations, mailArmed, slug, shareAddress } =
     useLoaderData<typeof loader>();
   const wsPath = useWsPath();
   return (
-    <StepUpMethodProvider method={stepUpMethod}>
-      <div className="space-y-8">
-        <PageHeader
-          title="Members"
-          meta={<code className="font-mono">{slug}</code>}
-          actions={
-            <Link to={wsPath("")} className={buttonClasses("quiet")}>
-              Back to workspace
-            </Link>
-          }
-        />
-        <MembersSection
-          roster={roster}
-          isOwner={isOwner}
-          selfUserId={selfUserId}
-          mailArmed={mailArmed}
-        />
-        <PendingInvitations invitations={invitations} isOwner={isOwner} />
-        <section aria-labelledby="share-heading" className="space-y-3">
-          <SectionHeading>
-            <span id="share-heading">Workspace address</span>
-          </SectionHeading>
-          <Card className="space-y-3 px-4 py-3">
-            <p className="text-dim text-sm">
-              Hand this to a teammate or another of your own devices — following it joins the
-              workspace.
-            </p>
-            <AddressBlock address={shareAddress} />
-          </Card>
-        </section>
-        <LeaveWorkspaceForm />
-      </div>
-    </StepUpMethodProvider>
+    <div className="space-y-8">
+      <PageHeader
+        title="Members"
+        meta={<code className="font-mono">{slug}</code>}
+        actions={
+          <Link to={wsPath("")} className={buttonClasses("quiet")}>
+            Back to workspace
+          </Link>
+        }
+      />
+      <MembersSection
+        roster={roster}
+        isOwner={isOwner}
+        selfUserId={selfUserId}
+        mailArmed={mailArmed}
+      />
+      <PendingInvitations invitations={invitations} isOwner={isOwner} />
+      <section aria-labelledby="share-heading" className="space-y-3">
+        <SectionHeading>
+          <span id="share-heading">Workspace address</span>
+        </SectionHeading>
+        <Card className="space-y-3 px-4 py-3">
+          <p className="text-dim text-sm">
+            Hand this to a teammate or another of your own devices — following it joins the
+            workspace.
+          </p>
+          <AddressBlock address={shareAddress} />
+        </Card>
+      </section>
+      <LeaveWorkspaceForm />
+    </div>
   );
 }
 
@@ -423,7 +387,7 @@ function MembersSection({
                   ) : (
                     <span className="ml-auto flex flex-wrap items-center justify-end gap-2">
                       <RoleForm userId={seat.userId} display={seat.display} role={seat.role} />
-                      <RemoveMemberForm userId={seat.userId} display={seat.display} />
+                      <RemoveMemberForm userId={seat.userId} />
                     </span>
                   ))}
               </li>

@@ -1,6 +1,6 @@
 import { useFetcher } from "react-router";
+import { ConfirmNameField } from "@/components/confirm";
 import type { HistorySectionData } from "@/components/skill/history-section";
-import { StepUpFields } from "@/components/step-up";
 import { buttonClasses, Card, SectionHeading, ShortId } from "@/components/ui";
 
 /** The skill-history route's action reply for an intent=purge submit (matched per version id). */
@@ -8,7 +8,7 @@ export interface PurgeActionData {
   intent: "purge";
   status: "purged" | "denied" | "error";
   versionId: string;
-  /** On `denied`: the display copy (a step-up/typed-name failure, or the vault's mapped reason). */
+  /** On `denied`: the display copy (a typed-name failure, or the vault's mapped reason). */
   message?: string;
 }
 
@@ -16,7 +16,7 @@ export interface PurgeActionData {
  * The OWNER-only purge affordance on the History tab — the "leak tool": it drops ONE past version's
  * bytes server-side while its hash stays in history as a tombstone. It never touches the CURRENT
  * version (that row is filtered out here, and the vault refuses `is_current` regardless). Each purge
- * is a deliberate ceremony: re-enter the password (step-up) AND type the skill's name. The control
+ * is a deliberate ceremony: type the skill's name to confirm. The control
  * lives in its own section rather than inside the history rows, so the shared history component stays
  * untouched; it lists the same non-current versions the walk found.
  */
@@ -74,7 +74,7 @@ function PurgeControl({ skill, versionId }: { skill: string; versionId: string }
       <fetcher.Form method="post" className="mt-2 space-y-3">
         <input type="hidden" name="intent" value="purge" />
         <input type="hidden" name="version_id" value={versionId} />
-        <StepUpFields idPrefix={`purge-${versionId.slice(0, 12)}`} typedName={skill} />
+        <ConfirmNameField typedName={skill} idPrefix={`purge-${versionId.slice(0, 12)}`} />
         {state?.status === "purged" && (
           <p className="text-dim text-sm" role="status">
             Purged — this version&apos;s bytes are gone from the server; its hash stays as a

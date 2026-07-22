@@ -1,6 +1,7 @@
 import type { Transporter } from "nodemailer";
 import nodemailer from "nodemailer";
 import { serverEnv } from "@/env.server";
+import { recordMailEvent } from "@/lib/db/mail-log.server";
 
 /**
  * The ONE outbound-mail transport — every mail the product sends (the invite notice, the
@@ -15,9 +16,17 @@ import { serverEnv } from "@/env.server";
  * get one coarse error, and each flow's own contract says what a lost mail means (an invite's
  * rows + the address stand, a magic-link request surfaces the provider's failure to the login
  * form).
+ *
+ * Every send ATTEMPT lands one metadata-only `mail_event` row (lib/db/mail-log.server.ts —
+ * the DAL's one actor-less system write): kind, recipient, ok/failed, at most a coarse code.
+ * The log follows the same redaction rule — no subject, body, or relay text ever lands in it.
  */
 
+/** Which product flow produced a mail — rides the message, tags its log row + dev-outbox line. */
+export type MailKind = "magic-link" | "invite" | "auth-verify" | "auth-reset";
+
 export interface MailMessage {
+  kind: MailKind;
   to: string;
   subject: string;
   text: string;
@@ -72,11 +81,16 @@ function transporter(settings: SmtpSettings): Transporter {
 /**
  * Send one mail through the configured relay. Throws a COARSE error when the transport is
  * unconfigured or the relay refuses — never the message, the recipient, or the relay response
- * (a body can carry a live credential).
+ * (a body can carry a live credential). Every attempt — landed or not — is logged to the
+ * metadata-only `mail_event` table before this returns or throws.
  */
 export async function sendMail(message: MailMessage): Promise<void> {
   const settings = smtpSettings();
   if (settings === null) {
+    await recordMailEvent(message.kind, message.to, {
+      outcome: "failed",
+      code: "unconfigured",
+    });
     throw new Error("mail transport is not configured");
   }
   try {
@@ -90,8 +104,10 @@ export async function sendMail(message: MailMessage): Promise<void> {
   } catch {
     // Deliberately CAUSE-LESS: a relay error can echo the envelope (recipient, body preview) and
     // the body may carry a live credential — the caller learns only that the send failed.
+    await recordMailEvent(message.kind, message.to, { outcome: "failed", code: "send_failed" });
     throw new Error("mail send failed");
   }
+  await recordMailEvent(message.kind, message.to, { outcome: "ok" });
 }
 
 /** Escape a user-entered value for an HTML mail body (the invite/magic-link mirrors). */

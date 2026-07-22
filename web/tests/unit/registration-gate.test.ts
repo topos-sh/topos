@@ -14,8 +14,7 @@ import { installTestEnv } from "./helpers/test-env";
  * invited seat's own scoping (`bindInvitedSeats` binds only in the invitation's workspace).
  *
  * The file runs MAIL-ARMED (the five TOPOS_MAIL_SMTP_* set; nothing sends — the gate only
- * reads `canSend`); the unarmed refusal is covered by the pure decision table and the
- * step-up-token suite.
+ * reads `canSend`); the unarmed refusal is covered by the pure decision table.
  */
 
 let registrationPolicy: "gated" | "open" = "gated";

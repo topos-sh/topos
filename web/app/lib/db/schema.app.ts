@@ -748,6 +748,41 @@ export const auditEvent = webSchema.table(
 );
 
 /**
+ * The metadata-only mail send log — ONE row per send attempt through the one transport
+ * (transport.server.ts), so an operator surface can answer "did the invite mail send".
+ * DELIBERATELY metadata-only: kind, recipient, outcome, and at most a coarse machine code —
+ * NEVER the subject, body, token, or relay response (a mail body can carry a live credential,
+ * and the coarse-failure posture of the transport extends to its log). A SYSTEM write with no
+ * actor: mail leaves the server, not a workspace, so the row is server-global by design.
+ * Append-only by code discipline, like audit_event; no retention sweep yet.
+ */
+export const mailEvent = webSchema.table(
+  "mail_event",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    /** Which product flow produced the mail (invite / auth-verify / auth-reset / magic-link). */
+    kind: text("kind").notNull(),
+    recipient: text("recipient").notNull(),
+    outcome: text("outcome").notNull(),
+    /** The coarse machine code on a failure ('unconfigured' | 'send_failed') — never relay text. */
+    code: text("code"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("mail_event_time_idx").on(table.createdAt),
+    check("mail_event_outcome_check", sql`${table.outcome} in ('ok', 'failed')`),
+    check(
+      "mail_event_code_check",
+      sql`${table.code} is null or ${table.code} in ('unconfigured', 'send_failed')`,
+    ),
+    check(
+      "mail_event_code_on_failure_check",
+      sql`${table.outcome} = 'failed' or ${table.code} is null`,
+    ),
+  ],
+);
+
+/**
  * Device-op idempotency slots (same op_id replays the same outcome). Insert-once by code
  * discipline; the app's retention sweep deletes by age (the index below).
  */

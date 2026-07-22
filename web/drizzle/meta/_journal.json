@@ -36,6 +36,13 @@
       "when": 1784660250954,
       "tag": "0004_invite-owner-only",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1784675605186,
+      "tag": "0005_mail-event",
+      "breakpoints": true
     }
   ]
 }

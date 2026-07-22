@@ -13,7 +13,7 @@ export function meta({ params }: { params: { ws?: string } }) {
 
 /**
  * The channel CREATE form as its own Rails-style route (`channels/new`) — the index keeps the
- * list. Member-level and deliberately step-up-less (creating an empty group destroys nothing); the
+ * list. Member-level and deliberately unconfirmed (creating an empty group destroys nothing); the
  * same grade as the device lane's create-on-first-use, so the browser and the CLI agree on who may
  * mint a group. The loader just guards; the form lives below.
  */

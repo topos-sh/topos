@@ -657,7 +657,8 @@ impl Stack {
 
     /// Approve a pending device flow AS the sessioned person: the `/verify` ceremony's approve arm.
     /// This is a PLAIN signed-in accept — a live session plus the explicit approve click is the whole
-    /// ceremony (no step-up password; the password rung stays on the admin/settings ceremonies).
+    /// ceremony (no re-authentication; the admin ceremonies confirm in proportion to their reach, but
+    /// none re-authenticate).
     pub(crate) fn approve_device(&self, session: &Session, user_code: &str) {
         let answer = session.post_form("/verify", &[("intent", "approve"), ("code", user_code)]);
         assert_eq!(answer.status, 200, "the approve lands: {}", answer.body);
@@ -668,7 +669,7 @@ impl Stack {
         );
     }
 
-    /// Deny a pending device flow (no step-up — denying mints nothing).
+    /// Deny a pending device flow (a plain signed-in deny — denying mints nothing).
     pub(crate) fn deny_device(&self, session: &Session, user_code: &str) {
         let answer = session.post_form("/verify", &[("intent", "deny"), ("code", user_code)]);
         assert_eq!(answer.status, 200, "the deny lands: {}", answer.body);

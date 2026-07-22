@@ -14,6 +14,13 @@ const { sendMailSpy, createTransportSpy } = vi.hoisted(() => {
 });
 vi.mock("nodemailer", () => ({ default: { createTransport: createTransportSpy } }));
 
+// The metadata-only send log — mocked to a spy so this suite stays DB-free; the row shape and
+// the real insert are pinned by the scratch-DB mail-log suite.
+const { recordMailEventSpy } = vi.hoisted(() => ({
+  recordMailEventSpy: vi.fn(async () => {}),
+}));
+vi.mock("@/lib/db/mail-log.server", () => ({ recordMailEvent: recordMailEventSpy }));
+
 const BASE_ENV: Record<string, string> = {
   DATABASE_URL: "postgres://user:pass@localhost:5439/db",
   BETTER_AUTH_SECRET: "0123456789abcdef0123456789abcdef",
@@ -45,6 +52,7 @@ afterEach(() => {
   vi.unstubAllEnvs();
   sendMailSpy.mockClear();
   createTransportSpy.mockClear();
+  recordMailEventSpy.mockClear();
 });
 
 describe("mailDelivery", () => {
@@ -68,15 +76,25 @@ describe("mailDelivery", () => {
 describe("sendMail", () => {
   it("refuses coarse when unconfigured — no transport is ever half-built", async () => {
     const mail = await importTransport({});
-    await expect(mail.sendMail({ to: "a@b.c", subject: "s", text: "t" })).rejects.toThrow(
-      "mail transport is not configured",
-    );
+    await expect(
+      mail.sendMail({ kind: "invite", to: "a@b.c", subject: "s", text: "t" }),
+    ).rejects.toThrow("mail transport is not configured");
     expect(createTransportSpy).not.toHaveBeenCalled();
+    // Even the no-transport refusal is a logged attempt — metadata only.
+    expect(recordMailEventSpy).toHaveBeenCalledWith("invite", "a@b.c", {
+      outcome: "failed",
+      code: "unconfigured",
+    });
   });
 
   it("sends through the configured relay (465 ⇒ implicit TLS) with the configured from", async () => {
     const mail = await importTransport(SMTP_ENV);
-    await mail.sendMail({ to: "person@example.com", subject: "Hello", text: "Body" });
+    await mail.sendMail({
+      kind: "auth-verify",
+      to: "person@example.com",
+      subject: "Hello",
+      text: "Body",
+    });
     expect(createTransportSpy).toHaveBeenCalledWith({
       host: "smtp.example.com",
       port: 465,
@@ -89,6 +107,11 @@ describe("sendMail", () => {
       subject: "Hello",
       text: "Body",
     });
+    // The landed send logs ONE ok attempt (kind + recipient, nothing of the message).
+    expect(recordMailEventSpy).toHaveBeenCalledTimes(1);
+    expect(recordMailEventSpy).toHaveBeenCalledWith("auth-verify", "person@example.com", {
+      outcome: "ok",
+    });
   });
 
   it("maps a relay failure to ONE coarse error — never the recipient or the body", async () => {
@@ -97,6 +120,7 @@ describe("sendMail", () => {
       new Error("550 relay says: person@example.com rejected, body preview: secret-code-123"),
     );
     const failed = mail.sendMail({
+      kind: "magic-link",
       to: "person@example.com",
       subject: "s",
       text: "secret-code-123",
@@ -105,6 +129,12 @@ describe("sendMail", () => {
     await failed.catch((error: Error) => {
       expect(error.message).not.toContain("person@example.com");
       expect(error.message).not.toContain("secret-code-123");
+    });
+    // The refused relay logs ONE failed attempt with the coarse code — never the relay's text.
+    expect(recordMailEventSpy).toHaveBeenCalledTimes(1);
+    expect(recordMailEventSpy).toHaveBeenCalledWith("magic-link", "person@example.com", {
+      outcome: "failed",
+      code: "send_failed",
     });
   });
 });

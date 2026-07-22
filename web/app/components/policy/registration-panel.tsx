@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useFetcher } from "react-router";
 import { type LastSetLine, LastSetNote } from "@/components/policy/last-set-line";
-import { StepUpConfirm } from "@/components/policy/step-up-confirm";
+import { SaveControls } from "@/components/policy/save-controls";
 import { Card, SectionHeading } from "@/components/ui";
 
 interface RegistrationFetcherData {
@@ -15,7 +15,7 @@ type Registration = "invite_only" | "open";
  * default) admits only addresses holding a pending invitation; `open` disables that proof
  * entirely, and the copy says so without softening: anyone who can reach this origin may create
  * an account (a seat still requires an invitation or a claim — registration is the account
- * rung, not admission). Owner + step-up.
+ * rung, not admission). Owner-only.
  */
 export function RegistrationPanel({
   isOwner,
@@ -88,8 +88,7 @@ function RegistrationControl({ current }: { current: Registration }) {
         </label>
       </fieldset>
       {dirty && (
-        <StepUpConfirm
-          idPrefix="registration"
+        <SaveControls
           saveLabel={staged === "open" ? "Open registration" : "Require an invitation"}
           pending={pending}
           error={error}

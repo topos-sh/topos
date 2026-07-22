@@ -34,7 +34,10 @@ channel with per-person `channel_optout`), subscriptions (ONE `bundle_subscripti
 person per bundle), detachment records, notices with read-state, proposals + comments, op receipts, and
 the `audit_event` trail. The DATA ACCESS LAYER (`app/lib/db/queries*.server.ts`) is the one sanctioned
 door to `web` AND the read-only `plane` custody mirror; every function REQUIRES a branded actor as its
-first argument, and mutating ops emit their audit row in the SAME transaction. There are NO guarded
+first argument, and mutating ops emit their audit row in the SAME transaction. ONE named exception:
+the mail transport's `mail_event` send log (`mail-log.server.ts`) is a SYSTEM write with no actor —
+mail leaves the server, not a workspace, and the transport fires inside auth rungs where no workspace
+actor exists. There are NO guarded
 `topos_*` SQL functions and no plane row-writes — policy logic is written here, once, in TypeScript with
 the role gate carried by the actor's type.
 
@@ -58,7 +61,7 @@ transaction, FOR UPDATE-fenced or single-statement-atomic, audit row inside):
   form, then the resolved card showing the requesting device, the code for the glance-check, and
   EVERY workspace the credential will reach (the approver's seats + the one being joined) — and the
   signed-in person approves with a **plain accept** — a live session plus the explicit approve click
-  IS the whole ceremony (no step-up) — minting the device (owned by that person) + its ONE bearer
+  IS the whole ceremony — minting the device (owned by that person) + its ONE bearer
   credential (the device code is promoted to the credential — same plaintext, same stored hash). The
   flow row records the workspace ADDRESS SLUG the authorize call named — and, when the enrollment
   came from `follow <invite-url>`, the invite token's hash (recorded UNVALIDATED — the start is
@@ -139,26 +142,28 @@ the genesis suffix walks past it (`topos-2`), byte-identical to a collision, no 
 card — the same publish-from-your-agent instructions the panel's `+ new` skill dialog shows. In single
 tenancy `/new` does not mount (the house 404) and the seatless answer stays the 404.
 
-**Step-up** (`app/lib/auth/step-up.server.ts`). Every admin ceremony (roster mutations, skill lifecycle,
-purge, channel existence-admin, policy setters) re-authenticates immediately before the act. The RUNG is
-the person's step-up METHOD (`stepUpMethod`, resolved once per ceremony page and carried to the shared
-`<StepUpFields>` via a context provider): an account with a password re-enters it (verified with Better
-Auth's own hasher against the SESSION's account — never a form-supplied identity), the OSS default since
-every account is born with one. A password-LESS account (a magic-link/social deployment) confirms through
-the MAIL round-trip instead: `beginStepUpConfirmation` mints a single-use token, stores ONLY its
-Postgres-computed hash in Better Auth's `verification` table under a `step-up:<userId>` identifier with a
-~10-minute TTL, and mails a link back to the SAME ceremony page carrying `?stepup=<token>`; the submit
-then consumes that token in ONE atomic `DELETE … RETURNING`. No password AND no armed mail ⇒ a typed
-refusal (set a password or arm SMTP), never a silent dead end. Deliberately STATELESS whichever rung —
-no sudo window; the token authorizes exactly the one submission that carries it, once. Its own rate belt,
-armed by `APP_ENV`. The destructive ceremonies additionally require typing the resource's exact name.
-Every attempt lands an `admin_event` audit row, refused step-ups included. The grade of a ceremony and the
-reach of its act stay matched IN THE DATABASE: the account page's step-up-LESS device sign-out is
-SELF-ONLY (a device is a possession; no owner arm reaches into someone else's pocket), fenced in
-`revokeOwnDevice`. The `/verify` device-approve is also step-up-LESS — a live session plus the explicit
-approve click is the whole ceremony there. Revoking a pending invitation is step-up-LESS too —
-non-destructive like the invite it undoes (the row flips to revoked; re-inviting mints a fresh link), so
-the owner gate + the audited act is the whole ceremony on the members page.
+**Ceremonies confirm, they don't re-authenticate** (`app/lib/auth/ceremony.server.ts` +
+`app/components/confirm.tsx`). A live session plus the guard-minted role IS the authority for every
+admin ceremony (roster mutations, skill lifecycle, purge, channel existence-admin, policy setters);
+what a ceremony adds is CONFIRMATION of intent, proportional to its reach — the GitHub-shaped posture
+(sudo scopes to account credentials, not org admin):
+- **Destructive ceremonies** (delete a skill, purge a version, delete a channel) require typing the
+  resource's exact CURRENT name — `requireTypedName` against the name the server re-reads, never a
+  form-supplied expected value (`<ConfirmNameField>` is the visible half).
+- **Acts with cross-person reach** that aren't type-the-name gated (remove member, role change, leave,
+  revert, rename, archive/unarchive) wear the ONE shared in-place confirm (`<ConfirmButton>`): the
+  action control arms in place to a "— confirm?" + Cancel pair — deliberately NOT a modal — and
+  disarms on its own (focus leaves, ~8 s timeout, or the submit going pending). Arming performs
+  nothing; only the armed submit posts.
+- **Settings/policy form saves** are plain submits behind their dirty-reveal Save/Cancel
+  (`<SaveControls>`) — no added friction.
+Every attempt lands an `admin_event` audit row, refused typed names included. The grade of a ceremony
+and the reach of its act stay matched IN THE DATABASE: the account page's device sign-out is SELF-ONLY
+(a device is a possession; no owner arm reaches into someone else's pocket), fenced in
+`revokeOwnDevice`. The `/verify` device-approve is a plain signed-in accept — a live session plus the
+explicit approve click is the whole ceremony there. Revoking a pending invitation is the same grade as
+the invite it undoes (the row flips to revoked; re-inviting mints a fresh link), so the owner gate +
+the audited act is the whole ceremony on the members page.
 
 **Mail — ONE transport, whole product.** `app/lib/mail/transport.server.ts` is the only module allowed to
 hold an SMTP client; every product mail rides it — the invite notice (`invite-mail.server.ts`), the
@@ -167,7 +172,11 @@ verification + reset mails (`auth-mail.server.ts`), and a composition's magic li
 all-or-nothing; unarmed, `mailDelivery().canSend` is false and every flow keeps its honest no-send
 posture (and armed mail is the identity rung for a MULTI-USER install — inviting requires it). A send
 failure is COARSE — a body can carry a live credential, so no error ever echoes the message, the
-recipient, or the relay response.
+recipient, or the relay response. Every send ATTEMPT lands one metadata-only **`mail_event`** row
+(`app/lib/db/mail-log.server.ts` — the DAL's one actor-less system write): the message's `kind`, the
+recipient, ok/failed, and at most a coarse machine code — NEVER a subject, body, token, or relay
+response (the table has no column a message could land in). The log exists so an operator surface can
+answer "did the invite mail send"; this repo ships no reader for it.
 
 **Two URL grammars, one route table (`app/lib/ws-path.ts` + `app/lib/ws-url.server.ts`).** The
 signed-in surface addresses workspaces by a TENANCY mode the composition passes to

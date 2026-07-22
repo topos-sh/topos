@@ -9,7 +9,7 @@ import { workspace } from "@/lib/db/schema.app";
  * OWN `web.workspace` row (the old guarded setter functions and the separate policy table are
  * gone; there is exactly one row per install and its DEFAULTs are the canonical fallbacks, so
  * no reader re-derives 604800000 anywhere). Reads take a MemberActor; writes take
- * the OwnerActor brand as the gate (step-up runs in the route) and land their audit row in the
+ * the OwnerActor brand as the gate (the route re-guards as owner) and land their audit row in the
  * SAME transaction.
  */
 
@@ -86,7 +86,7 @@ export type RegistrationOutcome = "set" | "bad_value";
 
 /**
  * The registration knob — `invite_only` (the default) or `open`. `open` disables the
- * invitation proof: any address may sign itself up. Owner + step-up; the settings page carries
+ * invitation proof: any address may sign itself up. Owner-only; the settings page carries
  * the honest copy.
  */
 export async function setRegistration(

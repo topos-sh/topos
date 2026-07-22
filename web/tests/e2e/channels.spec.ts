@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { E2E_PASSWORD, MEMBER_EMAIL } from "./env";
+import { MEMBER_EMAIL } from "./env";
 import { adminQuery, ensureBundle, ensureSeatedUser, theWorkspace } from "./seed";
 import { gotoSettled, signIn } from "./sign-in";
 
@@ -9,7 +9,7 @@ import { gotoSettled, signIn } from "./sign-in";
  * (skill references), the Members tab (the default channel's self-service stance over
  * `channel_optout`; named channels' explicit rows), the id-keyed History tab that outlives a rename
  * and survives a delete in the ledger, and the Settings tab hosting the two owner
- * existence-ceremonies (rename + delete — step-up; delete also types the channel name) with a quiet
+ * existence-ceremonies (rename — an in-place confirm; delete — type the channel name) with a quiet
  * read-only note for non-owners.
  *
  * All rows live in the app's own `web` schema. The suite's default identity is the claimed OWNER;
@@ -139,7 +139,7 @@ test("the default channel's stance is self-service on the Members tab; Settings 
   await gotoSettled(page, `/channels/everyone/members`);
   await expect(page.getByText("You're in.", { exact: false })).toBeVisible();
 
-  // LEAVE — the member's own stance, deliberately step-up-less.
+  // LEAVE — the member's own stance, a plain one-click toggle (no confirmation ceremony).
   await page.getByRole("button", { name: "Leave everyone" }).click();
   await expect(page.getByText("You've opted out", { exact: false })).toBeVisible();
   const optedOut = await adminQuery<{ n: string }>(
@@ -166,7 +166,7 @@ test("the default channel's stance is self-service on the Members tab; Settings 
   await expect(page.getByRole("button", { name: "Delete channel" })).toHaveCount(0);
 });
 
-test("rename on the Settings tab is step-up gated: a wrong password refuses; the right one lands the new URL, id unchanged", async ({
+test("rename on the Settings tab is an in-place confirm: it lands the new URL, id unchanged", async ({
   page,
 }) => {
   const ws = await theWorkspace();
@@ -178,20 +178,17 @@ test("rename on the Settings tab is step-up gated: a wrong password refuses; the
 
   await gotoSettled(page, `/channels/${GUILD}/settings`);
   await page.getByLabel("New name").fill(RENAMED);
-  // Two ceremonies on this page carry password fields; target the rename form's own.
-  await page.locator(`#rename-${GUILD}-password`).fill("wrong-password-9999");
+  // Rename is an in-place confirm — no password. Arming leaves the field intact and writes nothing.
   await page.getByRole("button", { name: "Rename channel" }).click();
-  await expect(page.getByRole("alert")).toContainText("Password check failed");
+  await expect(page.getByRole("button", { name: "Rename — confirm?" })).toBeVisible();
   const unchanged = await adminQuery<{ name: string }>(
     `select name from web.channel where id = $1`,
     [channelId],
   );
   expect(unchanged[0]?.name).toBe(GUILD);
 
-  await page.getByLabel("New name").fill(RENAMED);
-  await page.locator(`#rename-${GUILD}-password`).fill(E2E_PASSWORD);
-  await page.getByRole("button", { name: "Rename channel" }).click();
-  // A landed rename redirects to the RENAMED channel's own settings tab.
+  // Confirm lands the rename and redirects to the RENAMED channel's own settings tab.
+  await page.getByRole("button", { name: "Rename — confirm?" }).click();
   await page.waitForURL((u) => u.pathname.endsWith(`/channels/${RENAMED}/settings`));
   await expect(page.getByRole("heading", { name: RENAMED })).toBeVisible();
   // The immutable channel id never moved; only the name did — references and history survive.
@@ -219,16 +216,14 @@ test("delete on the Settings tab types the channel name; the ledger keeps the tr
   await gotoSettled(page, `/channels/${DOOMED}/history`);
   await expect(page.getByText("Channel created")).toBeVisible();
 
-  // The WRONG typed name (with the right password) is refused by the typed-name gate.
+  // The WRONG typed name is refused by the typed-name gate.
   await gotoSettled(page, `/channels/${DOOMED}/settings`);
   await page.locator(`#delete-${DOOMED}-confirm`).fill("not-the-name");
-  await page.locator(`#delete-${DOOMED}-password`).fill(E2E_PASSWORD);
   await page.getByRole("button", { name: "Delete channel" }).click();
   await expect(page.getByRole("alert")).toContainText(/Type the exact name/);
 
-  // The EXACT name + the password land the delete; the index no longer lists it.
+  // The EXACT name lands the delete; the index no longer lists it.
   await page.locator(`#delete-${DOOMED}-confirm`).fill(DOOMED);
-  await page.locator(`#delete-${DOOMED}-password`).fill(E2E_PASSWORD);
   await page.getByRole("button", { name: "Delete channel" }).click();
   await page.waitForURL((u) => u.pathname.endsWith("/channels"));
   await expect(

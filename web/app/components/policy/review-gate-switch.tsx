@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useFetcher } from "react-router";
-import { StepUpConfirm } from "@/components/policy/step-up-confirm";
+import { SaveControls } from "@/components/policy/save-controls";
 import { Switch } from "@/components/ui/switch";
 
 /** The action's reply shape this control reads (the settings route's `set-review-required` branch). */
@@ -9,11 +9,11 @@ interface ReviewFetcherData {
 }
 
 /**
- * The review-gate toggle, now a STEP-UP ceremony. Flipping the switch stages a pending value; the
- * password confirm appears, and only Save (with the right password) writes. `checked` is the
- * directory's real review-required value; the switch shows the staged value while an edit is open,
- * then settles back onto `checked` after the loader revalidates — so a denied or wrong-password
- * write snaps back to the real state, and a landed one matches it (the confirm closes because the
+ * The review-gate toggle. Flipping the switch stages a pending value; the dirty-reveal Save/Cancel
+ * appears, and only Save writes (the owner guard is the whole ceremony — no re-authentication).
+ * `checked` is the directory's real review-required value; the switch shows the staged value while
+ * an edit is open, then settles back onto `checked` after the loader revalidates — so a denied
+ * write snaps back to the real state, and a landed one matches it (the controls close because the
  * staged value now equals `checked`). Posts `intent=set-review-required` to the settings route's
  * action (the workspace comes from the route's own params).
  */
@@ -40,8 +40,7 @@ export function ReviewGateSwitch({ checked }: { checked: boolean }) {
         </label>
       </div>
       {dirty && (
-        <StepUpConfirm
-          idPrefix="review-gate"
+        <SaveControls
           saveLabel={staged ? "Require review" : "Stop requiring review"}
           pending={pending}
           error={error}
