@@ -289,24 +289,37 @@ export async function deliveryFor(actor: DeviceActor): Promise<DeliveryBody> {
  * NEVER delete (a row whose bundle left the install set is the frozen "last known" record the
  * fleet derives blind spots from). A report is CLIENT-ASSERTED data, so every named bundle is
  * re-checked against the server's own entitlement predicate: only truly-delivered bundles are
- * recorded.
+ * recorded. The write FENCES on the live ACTIVE link (FOR UPDATE): an in-flight report that
+ * lost a race with an unlink/sever must not resurrect reported state the sever just deleted —
+ * the lock serializes with the severing helper's link delete, and a gone link refuses into the
+ * caller's uniform 404 (a relinked device re-reports fresh).
  */
 export async function reportApplied(
   actor: DeviceActor,
   applied: { skillId: string; versionId: string }[],
-): Promise<"ok"> {
+): Promise<"ok" | "unlinked"> {
   const ws = actor.workspaceId;
   const skillIds = pgTextArray(applied.map((a) => a.skillId));
   const versionIds = pgTextArray(applied.map((a) => a.versionId));
-  await getDb().execute(sql`
-    INSERT INTO web.device_bundle_state (device_id, bundle_id, applied_version_id, reported_at)
-    SELECT ${actor.deviceId}, r.skill_id, r.version_id, now()
-    FROM UNNEST(${skillIds}::text[], ${versionIds}::text[]) AS r(skill_id, version_id)
-    JOIN (${entitledBundlesSql(actor.userId, ws)}) e ON e.bundle_id = r.skill_id
-    ON CONFLICT (device_id, bundle_id) DO UPDATE
-      SET applied_version_id = excluded.applied_version_id, reported_at = excluded.reported_at
-  `);
-  return "ok";
+  return await getDb().transaction(async (tx) => {
+    const link = await tx.execute(
+      sql`SELECT id FROM web.device_link
+          WHERE device_id = ${actor.deviceId} AND workspace_id = ${ws} AND status = 'active'
+          FOR UPDATE`,
+    );
+    if (link.rows.length === 0) {
+      return "unlinked";
+    }
+    await tx.execute(sql`
+      INSERT INTO web.device_bundle_state (device_id, bundle_id, applied_version_id, reported_at)
+      SELECT ${actor.deviceId}, r.skill_id, r.version_id, now()
+      FROM UNNEST(${skillIds}::text[], ${versionIds}::text[]) AS r(skill_id, version_id)
+      JOIN (${entitledBundlesSql(actor.userId, ws)}) e ON e.bundle_id = r.skill_id
+      ON CONFLICT (device_id, bundle_id) DO UPDATE
+        SET applied_version_id = excluded.applied_version_id, reported_at = excluded.reported_at
+    `);
+    return "ok";
+  });
 }
 
 // ── The describe reads (me / channels / reach) ──────────────────────────────────────────────

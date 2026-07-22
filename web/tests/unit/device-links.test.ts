@@ -424,3 +424,92 @@ describe("devicePerson carries the resolved device id", () => {
     expect(person?.userId).toBe("u_mem");
   });
 });
+
+describe("the report fence + the accept's seat lock (review round-2 findings)", () => {
+  async function lane() {
+    return import("@/lib/db/queries.lane.server");
+  }
+
+  it("reportApplied refuses once the link is severed — no resurrected state", async () => {
+    const id = await identity();
+    const q = await lane();
+    const mem = await mintDevice("u_mem", "Member", "report-fence-box");
+    const actor = {
+      userId: "u_mem",
+      display: "Member",
+      workspaceId: wsId,
+      deviceId: mem.deviceId,
+      role: "member",
+    };
+    // The race window, replayed deterministically: the guard passed (link live), then the owner
+    // removed the link BEFORE the report's write ran.
+    expect(
+      await id.ownerRemoveDeviceLink({ userId: "u_owner", display: "O" }, wsId, mem.deviceId),
+    ).toBe("removed");
+    expect(await q.reportApplied(actor as never, [])).toBe("unlinked");
+    expect(
+      await db.q(`SELECT 1 FROM web.device_bundle_state WHERE device_id = $1`, [mem.deviceId]),
+    ).toHaveLength(0);
+  });
+
+  it("reportApplied refuses over a PENDING link — delivery-grade standing only", async () => {
+    const q = await lane();
+    await setKnob("on");
+    try {
+      const mem = await mintDevice("u_mem", "Member", "report-pending-box");
+      const actor = {
+        userId: "u_mem",
+        display: "Member",
+        workspaceId: wsId,
+        deviceId: mem.deviceId,
+        role: "member",
+      };
+      expect(await q.reportApplied(actor as never, [])).toBe("unlinked");
+    } finally {
+      await setKnob("off");
+    }
+  });
+
+  it("invitation accept serializes with removeSeat: a link NEVER exists without a seat", async () => {
+    const id = await identity();
+    // The two ceremonies race repeatedly. Either commit order is legitimate (a live invitation
+    // may legitimately RE-seat a concurrently-removed member), but the invariant must hold in
+    // every interleaving: a surviving link implies a surviving seat — never a link on an
+    // unseated member.
+    for (let i = 0; i < 6; i++) {
+      const userId = `u_arace_${i}`;
+      const email = `arace-${i}@example.com`;
+      const deviceId = `dk_arace_${i}`;
+      await seedUser(db, userId, `ARacer ${i}`, email);
+      await db.q(`UPDATE web."user" SET email_verified = true WHERE id = $1`, [userId]);
+      await seatUser(db, wsId, userId, "member", "u_owner");
+      await db.q(
+        `INSERT INTO web.device (id, user_id, display_name, credential_sha256)
+         VALUES ($1, $2, $1, sha256(convert_to($1, 'UTF8')))`,
+        [deviceId, userId],
+      );
+      const token = `arace-token-${i}`;
+      await db.q(
+        `INSERT INTO web.invitation (id, workspace_id, email, role, status, token_sha256, expires_at)
+         VALUES ($1, $2, $3, 'member', 'pending', sha256(convert_to($4, 'UTF8')),
+                 now() + interval '7 days')`,
+        [`inv_arace_${i}`, wsId, email, token],
+      );
+      const [removed, accepted] = await Promise.all([
+        id.removeSeat({ userId: "u_owner", display: "Owner" }, wsId, userId, "membership_removed"),
+        id.acceptInvitationByToken(
+          token,
+          { userId, display: userId },
+          { mailboxProven: true, deviceId },
+        ),
+      ]);
+      expect(removed).toBe("ok");
+      expect(["accepted", "gone"]).toContain(accepted.outcome);
+      const seatRows = await db.q(`SELECT 1 FROM web.seat WHERE user_id = $1`, [userId]);
+      const linkRows = await db.q(`SELECT 1 FROM web.device_link WHERE device_id = $1`, [deviceId]);
+      if (linkRows.length > 0) {
+        expect(seatRows.length).toBeGreaterThan(0);
+      }
+    }
+  });
+});

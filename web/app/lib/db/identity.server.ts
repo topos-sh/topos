@@ -1541,12 +1541,20 @@ async function acceptInvitationTx(
   // invitation-woven links get no exception, so a member's link under an 'on' knob is pending.
   let linkStatus: DeviceLinkStatus | undefined;
   if (opts.deviceId !== undefined) {
+    // LOCKED and REQUIRED: an already-member accept holds no lock on its existing seat row (the
+    // earlier insert no-ops on conflict), so a concurrent seat removal could delete the seat and
+    // sever links BETWEEN a bare read and this link creation — leaving a fresh link that survives
+    // the removal. FOR UPDATE serializes with removeSeat's own seat lock; a vanished seat aborts
+    // the WHOLE accept (token unconsumed) into the uniform miss.
     const seatRow = await tx.execute(
       sql`SELECT role FROM ${seat}
-          WHERE workspace_id = ${inv.workspaceId} AND user_id = ${account.userId}`,
+          WHERE workspace_id = ${inv.workspaceId} AND user_id = ${account.userId}
+          FOR UPDATE`,
     );
-    const role =
-      (seatRow.rows[0] as { role: "owner" | "reviewer" | "member" } | undefined)?.role ?? "member";
+    const role = (seatRow.rows[0] as { role: "owner" | "reviewer" | "member" } | undefined)?.role;
+    if (role === undefined) {
+      throw ACCEPT_SEAT_GONE;
+    }
     const link = await createDeviceLinkTx(tx, {
       deviceId: opts.deviceId,
       workspaceId: inv.workspaceId,
@@ -1580,6 +1588,7 @@ async function acceptInvitationTx(
 /** The device-lane accept's in-transaction abort: the presented device turned out revoked and
  * the whole accept must ROLL BACK (a bare return commits) — caught at the boundary → "gone". */
 const ACCEPT_DEVICE_REVOKED = Symbol("invite-accept-device-revoked");
+const ACCEPT_SEAT_GONE = Symbol("invite-accept-seat-gone");
 
 /** The invitation page's accept: lock the live row by token, run the fence. The device lane
  * passes its resolved `deviceId` so the accepting device's link lands in the same fence. */
@@ -1597,9 +1606,10 @@ export async function acceptInvitationByToken(
       return acceptInvitationTx(tx, inv, await sessionAccountTx(tx, actor), opts);
     });
   } catch (error) {
-    // The revoked-device rollback surfaces as the uniform "gone" (the invitation is untouched
-    // and stays redeemable); any other error is a real fault and propagates.
-    if (error === ACCEPT_DEVICE_REVOKED) {
+    // The revoked-device and vanished-seat rollbacks surface as the uniform "gone" (the
+    // invitation is untouched and stays redeemable); any other error is a real fault and
+    // propagates.
+    if (error === ACCEPT_DEVICE_REVOKED || error === ACCEPT_SEAT_GONE) {
       return { outcome: "gone" };
     }
     throw error;

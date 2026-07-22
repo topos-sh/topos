@@ -53,7 +53,12 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
     applied.push({ skillId: row.skill_id, versionId: row.version_id });
   }
   const actor = await requireDeviceActor(request, params.ws ?? "");
-  await reportApplied(actor, applied);
+  const outcome = await reportApplied(actor, applied);
+  if (outcome === "unlinked") {
+    // The link vanished between the guard and the write (an unlink/sever won the race) — the
+    // same uniform miss the guard itself would have answered a moment later.
+    return uniformNotFound();
+  }
   return new Response(null, { status: 204 });
 }
 
