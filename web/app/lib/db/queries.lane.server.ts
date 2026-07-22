@@ -442,9 +442,13 @@ export async function laneReach(
       AND EXISTS (SELECT 1 FROM (${entitledBundlesSql(sql`s.user_id`, ws)}) e
                   WHERE e.bundle_id = ${bundleId})
   `);
+  // A device counts toward reach only through its live ACTIVE link HERE — an unlinked or
+  // pending device cannot receive delivery in this workspace, whatever its owner's seat says.
   const devices = await db.execute(sql`
     SELECT COUNT(*) AS n FROM web.device d
     JOIN web.seat s ON s.workspace_id = ${ws} AND s.user_id = d.user_id
+    JOIN web.device_link dl ON dl.device_id = d.id AND dl.workspace_id = ${ws}
+                           AND dl.status = 'active'
     WHERE d.revoked_at IS NULL
       AND EXISTS (SELECT 1 FROM (${entitledBundlesSql(sql`d.user_id`, ws)}) e
                   WHERE e.bundle_id = ${bundleId})

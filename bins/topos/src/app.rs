@@ -2737,8 +2737,11 @@ fn load_enrollment(fs: &dyn FsOps, layout: &Layout) -> Result<Option<Enrollment>
         follows: Vec::new(),
     });
     let credential = enroll::read_credentials(fs, layout)?.map(|c| c.credential);
+    // The SAME ended-link filter the reconcile connector applies: a severed link's membership is
+    // marked ended locally, and no transport — the bare `update` included — keeps dialing it
+    // (its delivery answers the uniform 404; `follow <address>` relinks).
     let workspaces: Vec<String> = enroll::read_user(fs, layout)?
-        .map(|u| u.workspaces.into_iter().map(|m| m.workspace_id).collect())
+        .map(|u| u.fanout_workspace_ids())
         .unwrap_or_default();
     let plane = UreqPlane::new(
         instance.base_url,
