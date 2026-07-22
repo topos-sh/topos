@@ -1,3 +1,7 @@
+-- Deliberately NO backfill: a link is only ever born through a ceremony (the /verify approval,
+-- the invitation accept, the credentialed link op), so a deployment holding device rows that
+-- predate this table re-links through those same ceremonies — pre-release, with no deployment
+-- carrying such rows, that set is empty by construction.
 CREATE TABLE "web"."device_link" (
 	"id" text PRIMARY KEY NOT NULL,
 	"device_id" text NOT NULL,

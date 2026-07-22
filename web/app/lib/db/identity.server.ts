@@ -296,6 +296,14 @@ async function deviceApprovalKnobTx(tx: Tx, workspaceId: string): Promise<"off" 
  * Create ONE device↔workspace link inside the caller's transaction, idempotently: an existing
  * row (whatever its status) is left untouched and its CURRENT status returned — no duplicate,
  * no error. A created link lands its `device_linked` audit row in the same transaction.
+ *
+ * The DEVICE ROW IS LOCKED FIRST and a revoked (or vanished) device refuses — the person
+ * guard runs outside the transaction, so without this check a link apply racing the global
+ * revoke (which flips `revoked_at` under the same row lock, THEN severs) could insert after
+ * the sever and leave a link attached to a dead device. The lock serializes the two: the
+ * apply either commits first (its link is then severed by the revoke's fresh-snapshot
+ * DELETE) or blocks on the device row and sees `revoked_at` set. The device-mint fence
+ * (approval) inserts the device in this same transaction, so its lock is trivially clean.
  */
 async function createDeviceLinkTx(
   tx: Tx,
@@ -305,7 +313,14 @@ async function createDeviceLinkTx(
     born: DeviceLinkStatus;
     actor: AuditActor;
   },
-): Promise<{ status: DeviceLinkStatus; created: boolean }> {
+): Promise<{ status: DeviceLinkStatus; created: boolean } | "device_revoked"> {
+  const deviceRows = await tx.execute(
+    sql`SELECT revoked_at FROM web.device WHERE id = ${args.deviceId} FOR UPDATE`,
+  );
+  const deviceRow = deviceRows.rows[0] as { revoked_at: string | null } | undefined;
+  if (deviceRow === undefined || deviceRow.revoked_at !== null) {
+    return "device_revoked";
+  }
   const inserted = await tx.execute(
     sql`INSERT INTO web.device_link (id, device_id, workspace_id, status)
         VALUES (${mintDeviceLinkId()}, ${args.deviceId}, ${args.workspaceId}, ${args.born})
@@ -493,7 +508,10 @@ export type DeviceLinkOp =
       born: DeviceLinkStatus;
     }
   /** Seatless caller OR unknown workspace name — byte-identical, no existence oracle. */
-  | { outcome: "not_a_member" };
+  | { outcome: "not_a_member" }
+  /** The presented device was revoked between the guard and the transaction — the route folds
+   * this into the uniform 404 (the same answer the dead credential gets everywhere else). */
+  | { outcome: "device_revoked" };
 
 /** The link DESCRIBE (`GET /v1/device/link`): the caller's standing + what apply would do.
  * Nothing mutates. */
@@ -552,6 +570,9 @@ export async function applyDeviceLink(
       born,
       actor: { userId: person.userId, display: person.display },
     });
+    if (link === "device_revoked") {
+      return { outcome: "device_revoked" as const };
+    }
     return {
       outcome: "ok" as const,
       workspaceId: ws.id,
@@ -857,12 +878,17 @@ export async function approveDeviceAuth(
       // workspaces each take their own explicit link from the device. Born per the ONE rule
       // (the approver's role vs the workspace's device-approval knob; invitation-woven flows
       // get no exception).
-      await createDeviceLinkTx(tx, {
+      const firstLink = await createDeviceLinkTx(tx, {
         deviceId,
         workspaceId: resolved.workspaceId,
         born: linkBornStatus(resolved.role, await deviceApprovalKnobTx(tx, resolved.workspaceId)),
         actor: { userId: approver.userId, display: approver.display },
       });
+      if (firstLink === "device_revoked") {
+        // Unreachable — the device row was inserted in THIS transaction — but a refused link
+        // must never commit a linkless grant: roll the whole approval back.
+        throw APPROVE_ABORT;
+      }
       await tx.execute(
         sql`UPDATE ${deviceAuthSession}
             SET status = 'approved', approved_by = ${approver.userId}, device_id = ${deviceId},
@@ -1527,6 +1553,13 @@ async function acceptInvitationTx(
       born: linkBornStatus(role, await deviceApprovalKnobTx(tx, inv.workspaceId)),
       actor: { userId: account.userId, display: account.display },
     });
+    if (link === "device_revoked") {
+      // The presented device was revoked between the guard and this fence. Roll the WHOLE
+      // accept back (a bare return would COMMIT the consumed token + seat) — the caller
+      // answers the uniform miss, exactly what the dead credential would have received had it
+      // arrived a moment later; the invitation stays live for a live device or the browser.
+      throw ACCEPT_DEVICE_REVOKED;
+    }
     linkStatus = link.status;
   }
   const ws = await tx.execute(
@@ -1544,6 +1577,10 @@ async function acceptInvitationTx(
   };
 }
 
+/** The device-lane accept's in-transaction abort: the presented device turned out revoked and
+ * the whole accept must ROLL BACK (a bare return commits) — caught at the boundary → "gone". */
+const ACCEPT_DEVICE_REVOKED = Symbol("invite-accept-device-revoked");
+
 /** The invitation page's accept: lock the live row by token, run the fence. The device lane
  * passes its resolved `deviceId` so the accepting device's link lands in the same fence. */
 export async function acceptInvitationByToken(
@@ -1551,13 +1588,22 @@ export async function acceptInvitationByToken(
   actor: { userId: string; display: string },
   opts: { mailboxProven: boolean; deviceId?: string },
 ): Promise<InviteAcceptOutcome> {
-  return await getDb().transaction(async (tx) => {
-    const inv = await lockPendingInvitationTx(tx, sql`i.token_sha256 = ${sha256OfText(token)}`);
-    if (inv === null) {
+  try {
+    return await getDb().transaction(async (tx) => {
+      const inv = await lockPendingInvitationTx(tx, sql`i.token_sha256 = ${sha256OfText(token)}`);
+      if (inv === null) {
+        return { outcome: "gone" };
+      }
+      return acceptInvitationTx(tx, inv, await sessionAccountTx(tx, actor), opts);
+    });
+  } catch (error) {
+    // The revoked-device rollback surfaces as the uniform "gone" (the invitation is untouched
+    // and stays redeemable); any other error is a real fault and propagates.
+    if (error === ACCEPT_DEVICE_REVOKED) {
       return { outcome: "gone" };
     }
-    return acceptInvitationTx(tx, inv, await sessionAccountTx(tx, actor), opts);
-  });
+    throw error;
+  }
 }
 
 /**
@@ -1781,6 +1827,22 @@ export async function removeSeat(
         details: { reason: "last_owner" },
       });
       return "last_owner";
+    }
+    // THE SERIALIZATION POINT with the link ceremonies: lock the TARGET's seat row BEFORE any
+    // severing. `applyDeviceLink` locks this same row (FOR UPDATE) before inserting its link,
+    // so a concurrent apply either committed first — its link is visible to the sever below
+    // (each statement reads a fresh snapshot) — or blocks here and finds no seat after this
+    // commit (NOT_A_MEMBER). Severing before taking this lock would let an in-flight apply
+    // commit an ACTIVE link that survives the removal on an unseated member, silently resuming
+    // delivery on a later re-seat. The detach inserts must still PRECEDE the seat delete (the
+    // delete cascades the memberships/subscriptions the entitlement predicate reads).
+    const targetSeat = await tx.execute(
+      sql`SELECT 1 FROM ${seat}
+          WHERE workspace_id = ${workspaceId} AND user_id = ${targetUserId}
+          FOR UPDATE`,
+    );
+    if (targetSeat.rows.length === 0) {
+      return "missing";
     }
     await tx.execute(
       sql`INSERT INTO ${bundleDetachment} (user_id, workspace_id, bundle_id, cause)

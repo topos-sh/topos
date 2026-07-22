@@ -322,6 +322,99 @@ describe("revocation severs everything", () => {
   });
 });
 
+describe("the transaction-ordering fences (review findings)", () => {
+  it("applyDeviceLink refuses a device revoked between the guard and the transaction", async () => {
+    const id = await identity();
+    const mem = await mintDevice("u_mem", "Member", "race-revoked-box");
+    // The race window, replayed deterministically: the guard resolved this person/device, then
+    // the global revoke landed (severing the link) BEFORE the apply's transaction ran.
+    expect(await id.revokeOwnDevice({ userId: "u_mem", display: "M" }, mem.deviceId)).toBe(true);
+    const person = { userId: "u_mem", display: "Member", deviceId: mem.deviceId };
+    expect(await id.applyDeviceLink(person as never, "")).toEqual({ outcome: "device_revoked" });
+    // Nothing attached to the dead device — the revoke's sever stays the last word.
+    expect(
+      await db.q(`SELECT 1 FROM web.device_link WHERE device_id = $1`, [mem.deviceId]),
+    ).toHaveLength(0);
+  });
+
+  it("the invitation accept ROLLS BACK whole when the accepting device is revoked", async () => {
+    const id = await identity();
+    await seedUser(db, "u_invitee", "Invitee", "invitee-dlr@example.com");
+    await db.q(`UPDATE web."user" SET email_verified = true WHERE id = 'u_invitee'`);
+    // A registered (seatless) device for the invitee, then the revoke lands mid-flight.
+    await db.q(
+      `INSERT INTO web.device (id, user_id, display_name, credential_sha256)
+       VALUES ('dk_invitee', 'u_invitee', 'invitee-box', sha256(convert_to('dk_invitee', 'UTF8')))`,
+    );
+    await db.q(`UPDATE web.device SET revoked_at = now() WHERE id = 'dk_invitee'`);
+    const token = "invite-token-device-revoked-race";
+    await db.q(
+      `INSERT INTO web.invitation (id, workspace_id, email, role, status, token_sha256, expires_at)
+       VALUES ('inv_dlr_1', $1, 'invitee-dlr@example.com', 'member', 'pending',
+               sha256(convert_to($2, 'UTF8')), now() + interval '7 days')`,
+      [wsId, token],
+    );
+
+    const outcome = await id.acceptInvitationByToken(
+      token,
+      { userId: "u_invitee", display: "Invitee" },
+      { mailboxProven: false, deviceId: "dk_invitee" },
+    );
+    // The whole fence rolled back: the uniform "gone" answer, the invitation still live (a
+    // live device or the browser can redeem it), no seat written, no link attached.
+    expect(outcome).toEqual({ outcome: "gone" });
+    const inv = await db.q<{ status: string }>(
+      `SELECT status FROM web.invitation WHERE id = 'inv_dlr_1'`,
+    );
+    expect(inv[0]?.status).toBe("pending");
+    expect(await db.q(`SELECT 1 FROM web.seat WHERE user_id = 'u_invitee'`)).toHaveLength(0);
+    expect(await db.q(`SELECT 1 FROM web.device_link WHERE device_id = 'dk_invitee'`)).toHaveLength(
+      0,
+    );
+  });
+
+  it("removeSeat serializes with applyDeviceLink: no link ever survives an unseated member", async () => {
+    const id = await identity();
+    // The two ceremonies race repeatedly; whichever interleaving lands, the invariant must
+    // hold: once the seat is gone, the member's device holds NO link here — either the apply
+    // lost the seat lock (not_a_member) or its committed link was severed by the removal.
+    for (let i = 0; i < 6; i++) {
+      const userId = `u_race_${i}`;
+      const deviceId = `dk_race_${i}`;
+      await seedUser(db, userId, `Racer ${i}`, `racer-${i}@example.com`);
+      await seatUser(db, wsId, userId, "member", "u_owner");
+      await db.q(
+        `INSERT INTO web.device (id, user_id, display_name, credential_sha256)
+         VALUES ($1, $2, $1, sha256(convert_to($1, 'UTF8')))`,
+        [deviceId, userId],
+      );
+      const person = { userId, display: userId, deviceId };
+      const [removed, applied] = await Promise.all([
+        id.removeSeat({ userId: "u_owner", display: "Owner" }, wsId, userId, "membership_removed"),
+        id.applyDeviceLink(person as never, ""),
+      ]);
+      expect(removed).toBe("ok");
+      expect(["ok", "not_a_member"]).toContain(applied.outcome);
+      // The invariant, every iteration: seat gone ⇒ link gone.
+      expect(await db.q(`SELECT 1 FROM web.seat WHERE user_id = $1`, [userId])).toHaveLength(0);
+      expect(
+        await db.q(`SELECT 1 FROM web.device_link WHERE device_id = $1`, [deviceId]),
+      ).toHaveLength(0);
+    }
+  });
+
+  it("removeSeat on an unseated target answers missing WITHOUT severing anything", async () => {
+    const id = await identity();
+    const mem = await mintDevice("u_mem", "Member", "untouched-box");
+    // The early miss (the seat lock finds no row) must sever nothing — 'u_out' holds no seat,
+    // and u_mem's freshly-linked device is not the target.
+    expect(
+      await id.removeSeat({ userId: "u_owner", display: "O" }, wsId, "u_out", "membership_removed"),
+    ).toBe("missing");
+    expect(await id.deviceLinkStatus(mem.deviceId, wsId)).toBe("active");
+  });
+});
+
 describe("devicePerson carries the resolved device id", () => {
   it("the link ceremonies act on THIS device, never a client-asserted one", async () => {
     const id = await identity();

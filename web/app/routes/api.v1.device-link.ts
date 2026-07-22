@@ -29,8 +29,12 @@ const MAX_WORKSPACE = 512;
 const NOT_A_MEMBER_MESSAGE =
   "not a member of that workspace — ask a workspace owner to invite you; an invitation link redeems on this device";
 
-/** Serialize one link-op outcome onto the wire (the all-outcome 200 envelope). */
+/** Serialize one link-op outcome onto the wire (the all-outcome 200 envelope; a device revoked
+ * mid-flight folds into the uniform 404 — the same answer its dead credential gets everywhere). */
 function linkOpResponse(request: Request, op: DeviceLinkOp, describe: boolean): Response {
+  if (op.outcome === "device_revoked") {
+    return uniformNotFound();
+  }
   if (op.outcome === "not_a_member") {
     return deniedCodeEnvelope("link", "NOT_A_MEMBER", NOT_A_MEMBER_MESSAGE);
   }
