@@ -15,6 +15,11 @@
         }
       ]
     },
+    "link_status": {
+      "description": "The ACCEPTING device's link to the joined workspace — `\"active\"` or `\"pending\"` (the accept\nalso links the device, born per the workspace's device-approval knob; no exception for\ninvitations). Serde-defaulted to `\"active\"` for a producer predating device links.",
+      "type": "string",
+      "default": "active"
+    },
     "workspace": {
       "description": "The workspace the accept seated the person in.",
       "$ref": "#/$defs/DeviceAuthWorkspace"

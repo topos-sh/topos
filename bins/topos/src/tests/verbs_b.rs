@@ -158,6 +158,7 @@ impl Rig {
                 name: "acme".to_owned(),
                 display_name: "Acme Inc".to_owned(),
                 enrolled_at: 1,
+                link_status: enroll::LINK_ACTIVE.to_owned(),
             },
         );
         enroll::write_user(&self.fs, &self.layout(), &user).unwrap();
@@ -289,6 +290,7 @@ impl DirectorySource for FakeDir {
             principal: "alice@acme.com".into(),
             role: self.role.clone(),
             invited_by: None,
+            link_status: "active".into(),
         })
     }
     fn channels_index(&self, _ws: &str) -> Result<WireChannelIndex, ClientError> {
@@ -1276,6 +1278,7 @@ fn delivery_with(skill_id: &str, review_required: bool) -> DeliverySnapshot {
         proposals_awaiting: 0,
         notices: Vec::new(),
         staleness_window_ms: 604_800_000,
+        link_status: crate::plane::LinkStatus::Active,
     }
 }
 

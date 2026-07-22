@@ -164,7 +164,7 @@ const REGISTRY: Record<string, CrumbBuilder> = {
   // Workspace nav.
   "routes/workspace-members": () => [{ label: "Members" }],
   "routes/workspace-settings": () => [{ label: "Settings" }],
-  "routes/fleet": () => [{ label: "Settings", sub: "settings" }, { label: "Devices" }],
+  "routes/fleet": () => [{ label: "Settings", sub: "settings" }, { label: "Linked devices" }],
   "routes/workspace-archive": () => [{ label: "Settings", sub: "settings" }, { label: "Archive" }],
 
   // Account-scoped (top-level in both tenancies) — mirrors the page's own title.

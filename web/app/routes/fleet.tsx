@@ -1,12 +1,18 @@
-import type { LoaderFunctionArgs } from "react-router";
-import { Link, useLoaderData } from "react-router";
+import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
+import { Form, Link, useActionData, useLoaderData, useNavigation } from "react-router";
+import { ConfirmButton } from "@/components/confirm";
 import { relativeTime, shortDevice } from "@/components/format";
 import { SettingsTabs } from "@/components/settings-tabs";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading, ShortId } from "@/components/ui";
-import { requireMemberInScope } from "@/lib/auth/guards.server";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { requireMemberInScope, requireWorkspaceOwner } from "@/lib/auth/guards.server";
+import { recordAdminEvent } from "@/lib/db/audit.server";
 import {
-  type DetachedCopyRow,
-  detachedCopiesOf,
+  approveDeviceLink,
+  ownerRemoveDeviceLink,
+  rejectDeviceLink,
+} from "@/lib/db/identity.server";
+import {
   type Fleet,
   type FleetDevice,
   type FleetFreshness,
@@ -17,57 +23,150 @@ import {
 import { useWsPath } from "@/lib/ws-path";
 
 export function meta({ params }: { params: { ws?: string } }) {
-  return [{ title: `Devices · ${params.ws ?? "Workspace"}` }];
+  return [{ title: `Linked devices · ${params.ws ?? "Workspace"}` }];
 }
 
 /**
- * The workspace Devices page (the Settings section's Devices tab) is a visibility surface,
- * read-only by design: it enumerates every device that touches the WORKSPACE and the version each
- * one last reported, and it NAMES its blind spots (stale devices, detached copies, per-device
- * exclusions, removed members' devices) instead of omitting them. It is the workspace-wide view —
- * distinct from your own "Your devices" list, where a device is signed out. It carries NO revoke
- * arm here: a device is a possession, revocation is self-only.
+ * The workspace Devices page (the Settings section's Devices tab) — DEVICE-LINK-driven: it
+ * enumerates the workspace's linked devices (a device is registered once, linked per
+ * workspace) and the version each one last reported, and — when the device-approval knob
+ * holds them — the PENDING links awaiting an owner. Owner arms: approve/reject a pending
+ * link, remove any link. Removing a link ends delivery to that device here; bytes already on
+ * the machine stay there. Signing a device out whole stays SELF-only on the account page.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const { actor } = await requireMemberInScope(request, params);
-  const [fleet, detached] = await Promise.all([fleetOf(actor), detachedCopiesOf(actor)]);
-  return { fleet, detached };
+  return { fleet: await fleetOf(actor), isOwner: actor.role === "owner" };
+}
+
+/**
+ * ONE action, dispatched on the hidden `intent` — all three link arms are OWNER-only
+ * guard-gated acts (a loader gate never extends to an action). The data layer lands the
+ * audit row of every landed act in its own transaction (`link_approved` / `link_rejected` /
+ * `device_unlinked`); the route records the attempts it never sees — mangled forms, faults.
+ */
+export async function action({ request, params }: ActionFunctionArgs) {
+  // The membership FLOOR, hoisted above the intent dispatch: the unmatched-intent 400 must
+  // never answer a non-member (in multi tenancy `:ws` is a guessable public name slug).
+  const { workspace } = await requireMemberInScope(request, params);
+  const owner = await requireWorkspaceOwner(request, workspace.id);
+  const formData = await request.formData();
+  const intent = String(formData.get("intent") ?? "");
+  const deviceId = String(formData.get("device_id") ?? "").trim();
+  const run =
+    intent === "approve-link"
+      ? approveDeviceLink
+      : intent === "reject-link"
+        ? rejectDeviceLink
+        : intent === "remove-link"
+          ? ownerRemoveDeviceLink
+          : null;
+  if (run === null || deviceId.length === 0) {
+    return { status: "error" as const };
+  }
+  let outcome: "approved" | "rejected" | "removed" | "unknown_link";
+  try {
+    outcome = await run(owner, workspace.id, deviceId);
+  } catch {
+    await recordAdminEvent(owner, {
+      kind: intent.replace("-", "_"),
+      subject: deviceId,
+      outcome: "error",
+    });
+    return { status: "error" as const };
+  }
+  // unknown_link — the row vanished between render and submit (a concurrent act): the
+  // revalidated page shows the truth; nothing to confirm or refuse.
+  return { status: outcome };
 }
 
 export default function FleetPage() {
-  const { fleet, detached } = useLoaderData<typeof loader>();
+  const { fleet, isOwner } = useLoaderData<typeof loader>();
+  const actionData = useActionData<typeof action>();
   const wsPath = useWsPath();
+  const active = fleet.devices.filter((d) => d.linkStatus === "active");
+  const pending = fleet.devices.filter((d) => d.linkStatus === "pending");
   return (
-    <div className="space-y-8">
-      <PageHeader
-        title="Devices"
-        meta={<FleetMeta fleet={fleet} />}
-        actions={
-          <>
-            <Link to="/account/devices" className={buttonClasses("quiet")}>
-              Your devices
-            </Link>
-            <Link to={wsPath("")} className={buttonClasses("quiet")}>
-              Back to workspace
-            </Link>
-          </>
-        }
-      />
-      <SettingsTabs active="devices" />
-      <IntroCopy wholeFleet={fleet.wholeFleet} />
-      <FleetBody fleet={fleet} />
-      {detached.length > 0 && <DetachedCopies rows={detached} />}
-      <BlindSpots />
-    </div>
+    <TooltipProvider>
+      <div className="space-y-8">
+        <PageHeader
+          title="Linked devices"
+          meta={<FleetMeta fleet={fleet} />}
+          actions={
+            <>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Link to="/account/devices" className={buttonClasses("quiet")}>
+                    Your devices
+                  </Link>
+                </TooltipTrigger>
+                <TooltipContent>
+                  Devices are self-service — each person manages their own from their account page.
+                </TooltipContent>
+              </Tooltip>
+              <Link to={wsPath("")} className={buttonClasses("quiet")}>
+                Back to workspace
+              </Link>
+            </>
+          }
+        />
+        <SettingsTabs active="devices" />
+        {actionData !== undefined && <ActionReceipt status={actionData.status} />}
+        <IntroCopy wholeFleet={fleet.wholeFleet} />
+        {(pending.length > 0 || fleet.deviceApproval === "on") && (
+          <PendingLinks devices={pending} isOwner={isOwner} />
+        )}
+        <LinkedDevices
+          devices={active}
+          wholeFleet={fleet.wholeFleet}
+          isOwner={isOwner}
+          stalenessWindowMs={fleet.stalenessWindowMs}
+        />
+      </div>
+    </TooltipProvider>
+  );
+}
+
+/**
+ * The post-action receipt — a calm one-liner after an owner arm lands (the page also revalidates,
+ * so the truth is already on screen; this names what happened). The Remove line says plainly that
+ * severing a link ends delivery and reporting but leaves the copies already on the device in place.
+ */
+function ActionReceipt({ status }: { status: string }) {
+  const line: Record<string, string> = {
+    approved: "Link approved — the device receives on its next sync.",
+    rejected: "Link rejected. The device isn't linked here; it can ask again later.",
+    removed:
+      "Link removed. Future delivery and reporting stop — the copies already on that device stay put.",
+    unknown_link: "That link was already gone — the page is up to date.",
+    error: "That didn't go through. Try again.",
+  };
+  const text = line[status];
+  if (text === undefined) {
+    return null;
+  }
+  return (
+    <p role="status" className={status === "error" ? "text-red-700 text-sm" : "text-dim text-sm"}>
+      {text}
+    </p>
   );
 }
 
 function FleetMeta({ fleet }: { fleet: Fleet }) {
-  const count = fleet.devices.length;
-  const stale = fleet.devices.filter((d) => d.freshness === "stale").length;
+  const count = fleet.devices.filter((d) => d.linkStatus === "active").length;
+  const pending = fleet.devices.length - count;
+  const stale = fleet.devices.filter(
+    (d) => d.linkStatus === "active" && d.freshness === "stale",
+  ).length;
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-      <span>{count === 1 ? "1 device" : `${count} devices`}</span>
+      <span>{count === 1 ? "1 linked device" : `${count} linked devices`}</span>
+      {pending > 0 && (
+        <>
+          <span aria-hidden="true">·</span>
+          <span>{pending === 1 ? "1 pending" : `${pending} pending`}</span>
+        </>
+      )}
       {stale > 0 && (
         <>
           <span aria-hidden="true">·</span>
@@ -83,29 +182,94 @@ function IntroCopy({ wholeFleet }: { wholeFleet: boolean }) {
     <p className="text-dim text-sm leading-relaxed">
       {wholeFleet ? (
         <>
-          Every enrolled device that touches this workspace and the version each one last reported.
-          Use it to confirm a change has reached the fleet — after a fix lands, watch until every
-          non-stale device reads <em className="text-ink not-italic">current</em>.
+          Every device linked to this workspace and the version each one last reported. Use it to
+          confirm a change has reached the fleet — after a fix lands, watch until every non-stale
+          device reads <em className="text-ink not-italic">current</em>.
         </>
       ) : (
         <>
-          These are your own devices in this workspace and the version each one last reported.
-          Reviewers and owners see the whole fleet.
+          These are your own devices linked to this workspace and the version each one last
+          reported. Reviewers and owners see the whole fleet.
         </>
       )}
     </p>
   );
 }
 
-function FleetBody({ fleet }: { fleet: Fleet }) {
-  if (fleet.devices.length === 0) {
+/**
+ * The pending section: links awaiting an owner (the device-approval knob holds a non-owner's
+ * new link here). Approve activates delivery; reject deletes the link — the device can ask
+ * again later. Owner-only arms; everyone seated sees the queue exists.
+ */
+function PendingLinks({ devices, isOwner }: { devices: FleetDevice[]; isOwner: boolean }) {
+  return (
+    <section aria-labelledby="pending-links-heading" className="space-y-3">
+      <SectionHeading>
+        <span id="pending-links-heading">Pending links</span>
+      </SectionHeading>
+      <p className="text-dim text-sm leading-relaxed">
+        Device approval is required here: a link asked for by a non-owner waits until an owner
+        approves it. Nothing is delivered over a pending link.
+      </p>
+      {devices.length === 0 ? (
+        <p className="text-faint text-sm">No links awaiting approval.</p>
+      ) : (
+        <Card className="overflow-hidden">
+          <ul>
+            {devices.map((device) => (
+              <li
+                key={device.deviceId}
+                data-testid={`fleet-pending-${device.deviceId}`}
+                className="flex flex-wrap items-center gap-x-3 gap-y-2 border-line-soft border-b px-4 py-3 last:border-b-0"
+              >
+                <span className="text-ink text-sm">{device.displayName}</span>
+                <span className="font-mono text-faint text-xs">{shortDevice(device.deviceId)}</span>
+                <span className="text-dim text-sm">
+                  {device.ownerDisplay}{" "}
+                  <span className="text-faint text-xs">{device.ownerEmail}</span>
+                </span>
+                <span className="text-faint text-xs">
+                  asked {relativeTime(new Date(device.linkedAtMs))}
+                </span>
+                {isOwner && (
+                  <span className="ml-auto flex flex-wrap items-center gap-2">
+                    <LinkArm intent="approve-link" deviceId={device.deviceId} label="Approve" />
+                    <LinkArm
+                      intent="reject-link"
+                      deviceId={device.deviceId}
+                      label="Reject"
+                      tone="danger"
+                    />
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+    </section>
+  );
+}
+
+function LinkedDevices({
+  devices,
+  wholeFleet,
+  isOwner,
+  stalenessWindowMs,
+}: {
+  devices: FleetDevice[];
+  wholeFleet: boolean;
+  isOwner: boolean;
+  stalenessWindowMs: number;
+}) {
+  if (devices.length === 0) {
     return (
       <div className="rounded-lg border border-line-soft border-dashed bg-panel px-6 py-12 text-center">
         <h2 className="font-display font-semibold text-base text-ink tracking-[-0.02em]">
-          No devices enrolled yet
+          No devices linked yet
         </h2>
         <p className="mx-auto mt-2 max-w-md text-dim text-sm leading-relaxed">
-          A device appears here the first time it enrolls and reports what it is running — run{" "}
+          A device appears here when it links to this workspace and reports what it is running — run{" "}
           <code className="rounded bg-panel2 px-1.5 py-0.5 font-mono text-[13px]">
             topos follow
           </code>{" "}
@@ -115,35 +279,6 @@ function FleetBody({ fleet }: { fleet: Fleet }) {
     );
   }
 
-  const present = fleet.devices.filter((d) => !d.removedUpstream);
-  const removed = fleet.devices.filter((d) => d.removedUpstream);
-
-  return (
-    <div className="space-y-8">
-      <PresentDevices
-        devices={present}
-        wholeFleet={fleet.wholeFleet}
-        stalenessWindowMs={fleet.stalenessWindowMs}
-      />
-      {removed.length > 0 && (
-        <RemovedUpstream devices={removed} stalenessWindowMs={fleet.stalenessWindowMs} />
-      )}
-    </div>
-  );
-}
-
-function PresentDevices({
-  devices,
-  wholeFleet,
-  stalenessWindowMs,
-}: {
-  devices: FleetDevice[];
-  wholeFleet: boolean;
-  stalenessWindowMs: number;
-}) {
-  if (devices.length === 0) {
-    return null;
-  }
   // Reviewer/owner: group by person. Member: a single flat "Your devices" list.
   if (!wholeFleet) {
     return (
@@ -157,6 +292,7 @@ function PresentDevices({
               key={device.deviceId}
               device={device}
               showOwner={false}
+              isOwner={false}
               stalenessWindowMs={stalenessWindowMs}
             />
           ))}
@@ -168,9 +304,22 @@ function PresentDevices({
   const groups = groupByOwner(devices);
   return (
     <section aria-labelledby="fleet-heading" className="space-y-6">
-      <SectionHeading>
-        <span id="fleet-heading">Enrolled devices</span>
-      </SectionHeading>
+      <div className="space-y-2">
+        <SectionHeading>
+          <span id="fleet-heading">Linked devices</span>
+        </SectionHeading>
+        {isOwner && (
+          <p className="text-faint text-sm leading-relaxed">
+            Removing a device&apos;s link ends delivery and reporting here — the copies already on
+            the machine stay put and must be chased by hand where it matters. Signing a device out
+            whole is self-service, from{" "}
+            <Link to="/account/devices" className="text-ink underline decoration-hairline">
+              your devices
+            </Link>
+            .
+          </p>
+        )}
+      </div>
       {groups.map(([ownerUserId, group]) => (
         <div key={ownerUserId} className="space-y-3">
           <h3 className="font-medium text-ink text-sm">
@@ -183,6 +332,7 @@ function PresentDevices({
                 key={device.deviceId}
                 device={device}
                 showOwner={false}
+                isOwner={isOwner}
                 stalenessWindowMs={stalenessWindowMs}
               />
             ))}
@@ -193,48 +343,41 @@ function PresentDevices({
   );
 }
 
-/**
- * The removed-upstream blind spot, named and enumerated: devices whose owner no longer holds a
- * seat. Removal deleted the seat, never the device — the copies are still out there, and only
- * the person themselves can sign the device out.
- */
-function RemovedUpstream({
-  devices,
-  stalenessWindowMs,
+/** One link arm — a two-step in-place confirm (people-affecting grade, never type-the-name). */
+function LinkArm({
+  intent,
+  deviceId,
+  label,
+  tone = "primary",
 }: {
-  devices: FleetDevice[];
-  stalenessWindowMs: number;
+  intent: "approve-link" | "reject-link" | "remove-link";
+  deviceId: string;
+  label: string;
+  tone?: "primary" | "quiet" | "danger";
 }) {
+  const navigation = useNavigation();
+  const pending =
+    navigation.state !== "idle" &&
+    navigation.formData?.get("intent") === intent &&
+    navigation.formData?.get("device_id") === deviceId;
   return (
-    <section aria-labelledby="removed-upstream-heading" className="space-y-3">
-      <SectionHeading>
-        <span id="removed-upstream-heading">Removed upstream</span>
-      </SectionHeading>
-      <p className="text-dim text-sm leading-relaxed">
-        The seat is gone, but these copies remain on their devices — this page can no longer move
-        them, and the bytes already on disk must be chased by hand.
-      </p>
-      <div className="space-y-3">
-        {devices.map((device) => (
-          <DeviceCard
-            key={device.deviceId}
-            device={device}
-            showOwner={true}
-            stalenessWindowMs={stalenessWindowMs}
-          />
-        ))}
-      </div>
-    </section>
+    <Form method="post">
+      <input type="hidden" name="intent" value={intent} />
+      <input type="hidden" name="device_id" value={deviceId} />
+      <ConfirmButton label={label} tone={tone} pending={pending} />
+    </Form>
   );
 }
 
 function DeviceCard({
   device,
   showOwner,
+  isOwner,
   stalenessWindowMs,
 }: {
   device: FleetDevice;
   showOwner: boolean;
+  isOwner: boolean;
   stalenessWindowMs: number;
 }) {
   return (
@@ -250,13 +393,19 @@ function DeviceCard({
           )}
           <span className="ml-auto flex flex-wrap items-center gap-1.5">
             <FreshnessChip freshness={device.freshness} />
-            {device.removedUpstream && <RemovedChip />}
-            {device.revoked && <RevokedChip />}
+            {isOwner && (
+              <LinkArm
+                intent="remove-link"
+                deviceId={device.deviceId}
+                label="Remove"
+                tone="danger"
+              />
+            )}
           </span>
         </div>
         <div className="text-faint text-xs">
           {device.lastSeenAtMs === null ? (
-            <>Has never reported — no session has run on it since it enrolled.</>
+            <>Has never reported — no session has run on it since it linked.</>
           ) : (
             <>
               last seen {relativeTime(new Date(device.lastSeenAtMs))}
@@ -267,13 +416,6 @@ function DeviceCard({
           )}
         </div>
         <SkillStates skills={device.skills} />
-        {device.revoked && (
-          <p className="text-faint text-xs">
-            Credential revoked — the device is signed out. Re-enrolling (
-            <code className="rounded bg-panel2 px-1 py-0.5 font-mono">topos auth login</code>) is
-            the recovery.
-          </p>
-        )}
       </div>
     </Card>
   );
@@ -327,127 +469,95 @@ function detachCauseLabel(cause: string): string {
 }
 
 /**
- * The standing detach records, person-joined — the chase list that survives even when the
- * device rows themselves are revoked or quiet: whose copies froze, of what, and why.
+ * A status chip that carries its own explainer as a tooltip — the reading legend rides the chips
+ * themselves instead of a separate section. The trigger is a REAL focusable control (a button, so
+ * it is keyboard-reachable) marked `cursor-help`; the tooltip opens on hover OR focus and never on
+ * click, so the chip stays a passive, readable label.
  */
-function DetachedCopies({ rows }: { rows: DetachedCopyRow[] }) {
+function StatusChip({
+  tone,
+  text,
+  tip,
+}: {
+  tone: "neutral" | "verified" | "pending";
+  text: string;
+  tip: string;
+}) {
   return (
-    <section aria-labelledby="detached-copies-heading" className="space-y-3">
-      <SectionHeading>
-        <span id="detached-copies-heading">Detached copies</span>
-      </SectionHeading>
-      <p className="text-dim text-sm leading-relaxed">
-        Copies delivery no longer reaches — frozen where their devices last applied them. Sync
-        cannot move or recall them; chase them by hand where it matters.
-      </p>
-      <Card className="overflow-hidden">
-        <ul>
-          {rows.map((row) => (
-            <li
-              key={`${row.userId}:${row.bundleId}`}
-              className="flex flex-wrap items-center gap-x-3 gap-y-1 border-line-soft border-b px-4 py-3 last:border-b-0"
-            >
-              <span className="text-ink text-sm">{row.display}</span>
-              <span className="font-mono text-dim text-xs">{row.bundleName ?? row.bundleId}</span>
-              <span className="text-faint text-xs">
-                {detachCauseLabel(row.cause)} · {relativeTime(new Date(row.createdAt))}
-              </span>
-            </li>
-          ))}
-        </ul>
-      </Card>
-    </section>
+    <Tooltip>
+      <TooltipTrigger
+        type="button"
+        className="cursor-help rounded-full focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+      >
+        <Chip tone={tone}>{text}</Chip>
+      </TooltipTrigger>
+      <TooltipContent>{tip}</TooltipContent>
+    </Tooltip>
   );
 }
 
 function FreshnessChip({ freshness }: { freshness: FleetFreshness }) {
   if (freshness === "fresh") {
-    return <Chip tone="verified">fresh</Chip>;
+    return (
+      <StatusChip
+        tone="verified"
+        text="fresh"
+        tip="Reported within the staleness window — a recent session confirmed this."
+      />
+    );
   }
   if (freshness === "stale") {
-    return <Chip tone="pending">stale</Chip>;
+    return (
+      <StatusChip
+        tone="pending"
+        text="stale"
+        tip="No report within the staleness window. Devices report at the start of a session, so an idle machine reads stale until its next run — unconfirmed, not wrong."
+      />
+    );
   }
-  return <Chip tone="neutral">never reported</Chip>;
+  return (
+    <StatusChip
+      tone="neutral"
+      text="never reported"
+      tip="This device has linked but no session has run on it yet, so it has never reported."
+    />
+  );
 }
 
 function SkillStatusChip({ status }: { status: FleetSkillStatus }) {
   if (status === "current") {
-    return <Chip tone="verified">current</Chip>;
+    return (
+      <StatusChip
+        tone="verified"
+        text="current"
+        tip="This device's copy matches the workspace's current version."
+      />
+    );
   }
   if (status === "behind") {
-    return <Chip tone="pending">behind</Chip>;
+    return (
+      <StatusChip
+        tone="pending"
+        text="behind"
+        tip="This device is on an older version — its next update brings it current."
+      />
+    );
   }
   if (status === "excluded") {
-    return <Chip tone="neutral">excluded</Chip>;
+    return (
+      <StatusChip
+        tone="neutral"
+        text="excluded"
+        tip="Opted out on this one device — it won't receive this skill. The copies already on the machine stay."
+      />
+    );
   }
-  if (status === "removed_upstream") {
-    return <Chip tone="neutral">removed upstream</Chip>;
-  }
-  return <Chip tone="neutral">detached</Chip>;
-}
-
-function RevokedChip() {
   return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-red-50 px-2 py-0.5 font-medium text-red-800 text-xs">
-      revoked
-    </span>
-  );
-}
-
-function RemovedChip() {
-  return (
-    <span className="inline-flex items-center gap-1 rounded-full border border-red-200 px-2 py-0.5 font-medium text-red-800 text-xs">
-      removed upstream
-    </span>
-  );
-}
-
-/**
- * The legend + the load-bearing footnote: devices report at SESSION START, so a healthy but idle
- * machine reads stale. Naming each state here keeps the blind spots explicit — the page
- * enumerates them, it never hides them.
- */
-function BlindSpots() {
-  return (
-    <section aria-labelledby="reading-heading" className="space-y-3">
-      <SectionHeading>
-        <span id="reading-heading">Reading this page</span>
-      </SectionHeading>
-      <Card className="space-y-2 px-4 py-3 text-dim text-sm leading-relaxed">
-        <p>
-          Devices report at the <strong className="font-medium text-ink">start of a session</strong>
-          , so a healthy but idle machine reads <em className="text-ink not-italic">stale</em> until
-          its next run — stale means unconfirmed, not wrong.
-        </p>
-        <p>
-          <em className="text-ink not-italic">Detached</em> copies are a device&apos;s last known
-          state, frozen when delivery stopped reaching the person; the bytes stay on their machine
-          and this page can no longer move them.
-        </p>
-        <p>
-          <em className="text-ink not-italic">Excluded</em> copies were opted out on that one device
-          — the person still follows the skill elsewhere; this device holds what it held.
-        </p>
-        <p>
-          <em className="text-ink not-italic">Removed upstream</em> devices belong to a person whose
-          seat is gone; the copies remain on their devices and must be chased by hand.
-        </p>
-        <p>
-          Signing a device out is SELF-service — a device is a possession, and its owner does it
-          from{" "}
-          <Link to="/account/devices" className="text-ink underline decoration-hairline">
-            your devices
-          </Link>
-          . This page watches; it doesn&apos;t reach into pockets.
-        </p>
-        <p>
-          After publishing a scrubbed version, watch until every non-stale device reads{" "}
-          <em className="text-ink not-italic">current</em>, then enumerate the stale, detached,
-          excluded, and removed-upstream copies and chase them directly — none of them are silently
-          omitted here.
-        </p>
-      </Card>
-    </section>
+    <StatusChip
+      tone="neutral"
+      text="detached"
+      tip="A last-known state, frozen when delivery stopped reaching this person. The copies already on the machine stay."
+    />
   );
 }
 

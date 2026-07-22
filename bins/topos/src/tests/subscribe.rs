@@ -166,6 +166,7 @@ impl Rig {
                 name: "acme".to_owned(),
                 display_name: "Acme Inc".to_owned(),
                 enrolled_at: 1,
+                link_status: enroll::LINK_ACTIVE.to_owned(),
             },
         );
         enroll::write_user(&self.fs, &self.layout(), &user).unwrap();
@@ -201,6 +202,7 @@ impl FakeDirectory {
                 principal: "alice@acme.com".into(),
                 role: "member".into(),
                 invited_by: Some("robert@acme.com".into()),
+                link_status: "active".into(),
             },
             channels: vec![
                 channel_entry("everyone", true, true, &[]),
@@ -386,6 +388,7 @@ impl FakeTransport {
                 proposals_awaiting: 0,
                 notices: Vec::new(),
                 staleness_window_ms: 604_800_000,
+                link_status: crate::plane::LinkStatus::Active,
             },
             versions: HashMap::new(),
             log,
@@ -479,6 +482,7 @@ impl EnrollSource for FakeAddressEnroll {
         self.log.lock().unwrap().push("poll".to_owned());
         Ok(DeviceAuthPoll::Granted(EnrolledGrant {
             hint: None,
+            link_status: crate::plane::LinkStatus::Active,
             credential: "devc_secret".into(),
             device_id: "dev_1".into(),
             workspace: EnrolledWorkspace {
@@ -1358,6 +1362,114 @@ fn notices_are_returned_and_acked_interactively_but_fetched_without_ack_by_the_h
         log.lock().unwrap().iter().all(|e| !e.starts_with("ack")),
         "the hook never acks: {:?}",
         log.lock().unwrap()
+    );
+}
+
+#[test]
+fn a_pending_link_delivery_is_skipped_quietly_and_marks_the_wait() {
+    // No data flows over a PENDING device↔workspace link: the sweep skips the workspace QUIETLY —
+    // no rows, no warnings, no report PUT, no freshness stamp. A `status`-visible fact, not an
+    // error; the local membership records the wait.
+    let rig = Rig::new("pending-link");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let mut transport = FakeTransport::empty(log.clone());
+    transport.snapshot.link_status = crate::plane::LinkStatus::Pending;
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+    let out = ops::pull_reconcile_with(&ctx, &transport, &ops::ReconcileOpts::default()).unwrap();
+    assert!(out.data.skills.is_empty());
+    assert!(out.warnings.is_empty(), "quiet: {:?}", out.warnings);
+    assert!(out.access_gone.is_empty() && out.unreachable.is_empty());
+    assert!(
+        !log.lock().unwrap().iter().any(|e| e.starts_with("report")),
+        "no report PUT rides a pending link: {:?}",
+        log.lock().unwrap()
+    );
+    assert!(
+        sync_status::read(&rig.fs, &rig.layout())
+            .unwrap()
+            .workspaces
+            .is_empty(),
+        "no freshness stamp for a pending workspace"
+    );
+    let user = enroll::read_user(&rig.fs, &rig.layout()).unwrap().unwrap();
+    assert_eq!(
+        user.membership(WS).unwrap().link_status,
+        enroll::LINK_PENDING
+    );
+
+    // Approval lands: the next delivering sweep SELF-HEALS the local record back to active.
+    transport.snapshot.link_status = crate::plane::LinkStatus::Active;
+    let out = ops::pull_reconcile_with(&ctx, &transport, &ops::ReconcileOpts::default()).unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    let user = enroll::read_user(&rig.fs, &rig.layout()).unwrap().unwrap();
+    assert_eq!(
+        user.membership(WS).unwrap().link_status,
+        enroll::LINK_ACTIVE
+    );
+}
+
+#[test]
+fn a_pending_workspace_that_404s_types_once_and_ends_the_membership() {
+    // The link request wasn't approved (or the workspace is gone): ONE typed line — never the
+    // freeze (nothing was ever delivered) — and the membership is marked ENDED so it prints once.
+    // An ACTIVE workspace that 404s keeps the freeze, with the generic-causes copy.
+    let rig = Rig::new("pending-404");
+    rig.seed_enrolled();
+    enroll::set_membership_link_status(&rig.fs, &rig.layout(), WS, enroll::LINK_PENDING).unwrap();
+    struct GoneDelivery;
+    impl DeliverySource for GoneDelivery {
+        fn workspaces(&self) -> Vec<String> {
+            vec![WS.to_owned()]
+        }
+        fn fetch_delivery(&self, _ws: &str) -> Result<DeliverySnapshot, PlaneError> {
+            Err(PlaneError::NotFound)
+        }
+        fn report_applied(&self, _ws: &str, _a: &[(String, [u8; 32])]) -> Result<(), PlaneError> {
+            unreachable!("a 404'd workspace never reports")
+        }
+    }
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+    let out =
+        ops::pull_reconcile_with(&ctx, &GoneDelivery, &ops::ReconcileOpts::default()).unwrap();
+    assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
+    assert!(
+        out.warnings[0].starts_with("LINK_ENDED w_acme"),
+        "{:?}",
+        out.warnings
+    );
+    assert!(
+        out.warnings[0].contains("topos follow acme"),
+        "the relink hint names the ADDRESS: {:?}",
+        out.warnings
+    );
+    assert!(
+        out.access_gone.is_empty(),
+        "nothing was delivered, so nothing freezes"
+    );
+    let user = enroll::read_user(&rig.fs, &rig.layout()).unwrap().unwrap();
+    assert_eq!(user.membership(WS).unwrap().link_status, enroll::LINK_ENDED);
+
+    // The second sweep stays SILENT — the line printed once (and the production fan-out drops an
+    // ended membership entirely).
+    let out =
+        ops::pull_reconcile_with(&ctx, &GoneDelivery, &ops::ReconcileOpts::default()).unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert!(out.access_gone.is_empty());
+
+    // An ACTIVE link that 404s keeps the FREEZE (unlinked, removed, or gone — indistinguishable).
+    enroll::set_membership_link_status(&rig.fs, &rig.layout(), WS, enroll::LINK_ACTIVE).unwrap();
+    let out =
+        ops::pull_reconcile_with(&ctx, &GoneDelivery, &ops::ReconcileOpts::default()).unwrap();
+    assert_eq!(out.access_gone, vec![WS.to_owned()]);
+    assert!(
+        out.warnings[0].contains("unlinked, removed, or gone"),
+        "{:?}",
+        out.warnings
     );
 }
 

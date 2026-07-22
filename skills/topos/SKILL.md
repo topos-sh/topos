@@ -93,7 +93,8 @@ provenance line ("Distilled by <agent> while <what was solved>").
 
 ```
 topos follow <skill>              # follow a catalog skill on this machine
-topos follow <server>/<workspace> # enroll this machine into a workspace (browser approval)
+topos follow <server>/<workspace> # join a workspace (first time: browser approval; further
+                                  # workspaces on the same server link with no browser step)
 topos follow <skill> --agent <a>  # place only for specific agents ('*' clears)
 topos remove <skill>              # off THIS machine (the team copy is untouched)
 topos unfollow <skill>            # stop following on every machine of yours

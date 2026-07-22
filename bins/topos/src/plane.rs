@@ -12,12 +12,35 @@
 
 use topos_core::digest::FileMode;
 use topos_types::requests::{
-    ProposeRequest, PublishRequest, RevertRequest, ReviewRequest, WireChannelIndex, WireMe,
-    WireNotice, WireProposalIndex, WireProtocolCard, WireReach, WireSkillIndex, WireSkillLog,
+    DeviceLinkData, DeviceLinkDescribe, ProposeRequest, PublishRequest, RevertRequest,
+    ReviewRequest, WireChannelIndex, WireMe, WireNotice, WireProposalIndex, WireProtocolCard,
+    WireReach, WireSkillIndex, WireSkillLog,
 };
 use topos_types::{Receipt, TerminalOutcome, WireCurrentRecord, WireError};
 
 use crate::error::ClientError;
+
+/// A device↔workspace LINK's status, as the wire spells it — the client branches only on the
+/// pending/active split (an unrecognized value reads as the stricter PENDING: no data flows).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LinkStatus {
+    /// The link is live — data flows.
+    Active,
+    /// The link awaits an owner's approval — no data flows; the sweep stays quiet.
+    Pending,
+}
+
+impl LinkStatus {
+    /// Parse a wire `link_status` field. Absent (an older producer) reads as ACTIVE — such a
+    /// producer serves only active-equivalent access; any present-but-unrecognized value reads as
+    /// the stricter PENDING.
+    pub(crate) fn from_wire(raw: Option<&str>) -> Self {
+        match raw {
+            None | Some("active") => LinkStatus::Active,
+            _ => LinkStatus::Pending,
+        }
+    }
+}
 
 /// The response to a conditional `get_current`: either the pointer is unchanged (a 304), or the served
 /// unsigned `current` record (the engine scope-checks it, then drives toward it).
@@ -209,6 +232,9 @@ pub(crate) struct DeliverySnapshot {
     /// The workspace's staleness window (ms) — the ONE clock the fleet page and the client's hook
     /// warning both read: a device whose last delivery is older than this is stale.
     pub staleness_window_ms: u64,
+    /// THIS device's link to the workspace. PENDING carries empty sets and a zero gauge (no data
+    /// flows over a pending link) — the reconcile skips the workspace quietly.
+    pub link_status: LinkStatus,
 }
 
 /// The delivery + fleet transport, per enrolled workspace. The production impl rides the workspace
@@ -291,6 +317,36 @@ pub(crate) trait DirectorySource {
         let _ = token;
         Err(ClientError::Plane(
             "this transport serves no invitation accept".into(),
+        ))
+    }
+
+    /// `GET /v1/device/link?workspace=<address-slug>` — the browser-free link DESCRIBE (nothing
+    /// mutates): where THIS device stands with the named workspace and what a link would be born
+    /// as. PERSON-scoped — the seat is checked server-side, no link is required, so an enrolled
+    /// device reaches a workspace it has never linked. An empty slug names the origin's own
+    /// workspace. Defaulted so read-only fakes need no arm.
+    ///
+    /// # Errors
+    /// [`ClientError::PlaneTerminal`] with code `NOT_A_MEMBER` for a seatless caller OR an unknown
+    /// workspace name (byte-identical — no existence oracle); [`ClientError::TargetNotFound`] on
+    /// the uniform 404 (a dead credential); transport/parse faults otherwise.
+    fn describe_link(&self, workspace_slug: &str) -> Result<DeviceLinkDescribe, ClientError> {
+        let _ = workspace_slug;
+        Err(ClientError::Plane(
+            "this transport serves no device link".into(),
+        ))
+    }
+
+    /// `POST /v1/device/link` — link THIS device to a workspace the person's seats reach (born
+    /// `active`, or `pending` under the workspace's device-approval knob). Idempotent: an existing
+    /// link answers ok with its current status. Defaulted so read-only fakes need no arm.
+    ///
+    /// # Errors
+    /// As [`describe_link`](Self::describe_link).
+    fn create_link(&self, workspace_slug: &str) -> Result<DeviceLinkData, ClientError> {
+        let _ = workspace_slug;
+        Err(ClientError::Plane(
+            "this transport serves no device link".into(),
         ))
     }
 
@@ -486,11 +542,13 @@ pub(crate) struct GrantHint {
 
 /// The direct-accept answer (`POST /v1/invitations/accept`): the joined workspace + the optional
 /// first-destination hint. The already-held device credential now reaches the workspace — no new
-/// secret arrives.
+/// secret arrives. The accept also LINKED the accepting device (born per the workspace's
+/// device-approval knob); a PENDING link answers the typed waiting receipt instead of a subscribe.
 #[derive(Debug, Clone)]
 pub(crate) struct InviteAccepted {
     pub workspace: EnrolledWorkspace,
     pub hint: Option<GrantHint>,
+    pub link_status: LinkStatus,
 }
 
 /// A GRANTED device-authorization poll: the device's ONE bearer credential (the promoted device code),
@@ -506,6 +564,10 @@ pub(crate) struct EnrolledGrant {
     /// The invitation's first-destination hint — present when the flow carried an invite token
     /// whose (now accepted) invitation named one.
     pub hint: Option<GrantHint>,
+    /// The FIRST device↔workspace link's born status (approval mints registration + link
+    /// together server-side). PENDING ⇒ persist the enrollment, then the waiting receipt — no
+    /// subscribe attempt.
+    pub link_status: LinkStatus,
 }
 
 impl std::fmt::Debug for EnrolledGrant {
@@ -515,6 +577,7 @@ impl std::fmt::Debug for EnrolledGrant {
             .field("device_id", &self.device_id)
             .field("workspace", &self.workspace)
             .field("hint", &self.hint)
+            .field("link_status", &self.link_status)
             .finish()
     }
 }
@@ -602,21 +665,16 @@ pub(crate) trait GovernanceSource {
         body: topos_types::requests::InvitationRequest,
     ) -> Result<topos_types::requests::InvitationData, ClientError>;
 
-    /// `DELETE /v1/workspaces/{ws}/devices` — revoke a registered device (an owner, or the device's
-    /// own principal — `auth logout`'s best-effort self-revoke). The target rides the body by its
-    /// non-secret key id; the actor is the credential's registry row. Default: an erroring body, so
-    /// fakes that never exercise governance need no impl.
+    /// `DELETE /v1/device` — the GLOBAL self-revoke (`auth logout`'s one call, no body): revokes
+    /// THIS credential's device server-side — the links and per-workspace reported state are
+    /// deleted there. After revocation a retry answers the uniform 404 (the caller treats that as
+    /// already-signed-out). Default: an erroring body, so fakes that never exercise governance
+    /// need no impl.
     ///
     /// # Errors
     /// [`ClientError::PlaneTerminal`] on an `ok: false` refusal; [`ClientError::TargetNotFound`] on
-    /// the uniform 404; [`ClientError::Plane`] on a transport fault.
-    fn revoke_device(
-        &self,
-        workspace_id: &str,
-        target_device_key_id: &str,
-        op_id: &str,
-    ) -> Result<(), ClientError> {
-        let _ = (workspace_id, target_device_key_id, op_id);
+    /// the uniform 404 (already revoked); [`ClientError::Plane`] on a transport fault.
+    fn revoke_device(&self) -> Result<(), ClientError> {
         Err(ClientError::Plane(
             "this transport serves no device revoke".into(),
         ))

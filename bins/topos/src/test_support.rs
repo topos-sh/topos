@@ -851,6 +851,90 @@ impl FollowHarness {
         }
     }
 
+    /// `follow <address>` on an ENROLLED install toward a same-plane workspace — the browser-free
+    /// device-link DESCRIBE, as its `--json` value (nothing mutates: no link row, no membership).
+    ///
+    /// # Errors
+    /// As [`resume_describe`](Self::resume_describe); a non-link outcome is reported as one.
+    pub fn link_describe(&self, target: &str) -> Result<serde_json::Value, String> {
+        match self
+            .run_follow_outcome(
+                &InertPlane,
+                &InertFollow,
+                Some(target.to_owned()),
+                follow_opts(false),
+            )
+            .map_err(|e| e.to_string())?
+        {
+            ops::FollowOutcome::LinkDescribed { describe, .. } => {
+                serde_json::to_value(&*describe).map_err(|e| e.to_string())
+            }
+            other => Err(format!(
+                "test_support: expected a link describe, got {other:?}"
+            )),
+        }
+    }
+
+    /// `follow <address> --yes` through the link lane on an ENROLLED install: create the link
+    /// (idempotent), then either CONTINUE into the ordinary subscribe apply THIS invocation (an
+    /// ACTIVE link) or answer the typed PENDING receipt (link created, nothing subscribed, no
+    /// bytes — delivery starts after an owner approves).
+    ///
+    /// # Errors
+    /// As [`resume_describe`](Self::resume_describe); a non-link outcome is reported as one.
+    pub fn link_apply(&self, target: &str) -> Result<LinkApplyOutcome, String> {
+        match self
+            .run_follow_outcome(
+                &InertPlane,
+                &InertFollow,
+                Some(target.to_owned()),
+                follow_opts(true),
+            )
+            .map_err(|e| e.to_string())?
+        {
+            ops::FollowOutcome::Applied(applied) => {
+                Ok(LinkApplyOutcome::Applied(applied_view(&applied)))
+            }
+            ops::FollowOutcome::LinkPending(pending) => Ok(LinkApplyOutcome::Pending(*pending)),
+            other => Err(format!(
+                "test_support: expected a link apply, got {other:?}"
+            )),
+        }
+    }
+
+    /// Resume a pending enrollment whose granted FIRST link is PENDING (the workspace's
+    /// device-approval knob): the typed receipt — enrolled, nothing subscribed, no bytes.
+    ///
+    /// # Errors
+    /// As [`resume_describe`](Self::resume_describe); a non-pending outcome is reported as one.
+    pub fn resume_link_pending(&self) -> Result<topos_types::results::LinkPendingData, String> {
+        match self
+            .run_follow_outcome(&InertPlane, &InertFollow, None, follow_opts(false))
+            .map_err(|e| e.to_string())?
+        {
+            ops::FollowOutcome::LinkPending(pending) => Ok(*pending),
+            other => Err(format!(
+                "test_support: expected the pending-link receipt, got {other:?}"
+            )),
+        }
+    }
+
+    /// The local per-workspace link record (`user.json`) as `(workspace_id, link_status)` rows —
+    /// the pending wait, the active default, and the once-typed ended mark the sweeps write.
+    #[must_use]
+    pub fn membership_link_statuses(&self) -> Vec<(String, String)> {
+        enroll::read_user(&self.fs, &self.layout())
+            .ok()
+            .flatten()
+            .map(|u| {
+                u.workspaces
+                    .into_iter()
+                    .map(|m| (m.workspace_id, m.link_status))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Call 1: `topos follow <workspace-address>` — fetch the bootstrap, guard one-plane, device-authorize, write the pending WAL.
     ///
     /// # Errors
@@ -1129,6 +1213,17 @@ impl FollowHarness {
             .ok()
             .flatten()
             .map(|c| c.device_id)
+    }
+
+    /// This rig's ONE bearer credential (the enrollment-minted secret; `None` before a grant) — for
+    /// RAW device-lane probes an e2e drives beside the verbs (the uniform-404 byte discipline must
+    /// probe under the SAME credential the CLI holds).
+    #[must_use]
+    pub fn credential(&self) -> Option<String> {
+        enroll::read_credentials(&self.fs, &self.layout())
+            .ok()
+            .flatten()
+            .map(|c| c.credential)
     }
 
     /// The enrolled plane base (`instance.json` — present after a completed enroll/login).
@@ -2242,6 +2337,17 @@ impl FollowHarness {
     }
 }
 
+/// The result of a [`FollowHarness::link_apply`]: the ACTIVE link's continued ordinary apply, or
+/// the typed PENDING receipt (the workspace's device-approval knob — link created, nothing
+/// subscribed, no bytes).
+#[derive(Debug)]
+pub enum LinkApplyOutcome {
+    /// The link was created (or already active) and the ordinary subscribe ran this invocation.
+    Applied(FollowAppliedView),
+    /// The link is PENDING an owner's approval — the typed receipt, nothing else changed.
+    Pending(topos_types::results::LinkPendingData),
+}
+
 /// The result of a [`ContributeHarness::publish`] / [`FollowHarness::publish`]: `current` moved (a direct
 /// publish), or a proposal opened (`--propose`, or the protection gate's downgrade). The public face of
 /// the client's internal `PublishOutcome`.
@@ -2370,6 +2476,7 @@ impl ContributeHarness {
                     name: "test".to_owned(),
                     display_name: "Test".to_owned(),
                     enrolled_at: 1,
+                    link_status: enroll::LINK_ACTIVE.to_owned(),
                 }],
             },
         )
@@ -2815,6 +2922,7 @@ impl ReconcileHarness {
                     name: "test".to_owned(),
                     display_name: "Test".to_owned(),
                     enrolled_at: 1,
+                    link_status: enroll::LINK_ACTIVE.to_owned(),
                 }],
             },
         )

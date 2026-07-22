@@ -1264,6 +1264,7 @@ fn list_discloses_enrollment_follow_state_and_hook() {
                 name: "acme".to_owned(),
                 display_name: "Acme".to_owned(),
                 enrolled_at: 1,
+                link_status: crate::enroll::LINK_ACTIVE.to_owned(),
             }],
         },
     )

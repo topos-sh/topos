@@ -18,7 +18,10 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
   if (belted !== null) {
     return belted;
   }
-  const actor = await requireDeviceActor(request, params.ws ?? "");
+  // One of the exactly TWO pending-tolerant routes: a live pending link proves standing (the
+  // person IS seated), so the normal body answers with `link_status` "pending" instead of the
+  // uniform 404 an unlinked device gets.
+  const actor = await requireDeviceActor(request, params.ws ?? "", { allowPending: true });
   const row = await laneMe(actor);
   if (row === null) {
     return uniformNotFound();
@@ -30,6 +33,7 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
     address: workspaceAddress(request, row.name),
     principal: actor.display,
     role: row.role,
+    link_status: actor.linkStatus,
     ...(row.invitedBy !== null ? { invited_by: row.invitedBy } : {}),
   };
   return Response.json(body, { headers: NO_STORE });

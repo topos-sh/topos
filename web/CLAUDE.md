@@ -9,10 +9,26 @@ app is its one caller.
 **The device lane terminates here.** Every `/api/v1/…` path is answered in this tier — there is no splat
 forwarder to the vault anymore. The row ops (delivery · the fleet report · me/channels/reach ·
 subscriptions/follows · curation · exclusions · protection · notices ack · invitations · the
-person-scoped invitation accept) are Drizzle
+person-scoped invitation accept · the device-link describe/apply · the global self-revoke) are Drizzle
 queries against this app's OWN `web` schema, behind the device-credential guard (`requireDeviceActor` —
-the presented `Authorization: Bearer` resolved credential → device → person → seat, the hash computed IN
-Postgres, so this tier still holds zero crypto). The **byte/pointer** ops of a publish-family verb
+the presented `Authorization: Bearer` resolved credential → un-revoked device → person's seat → **live
+device link**, the hash computed IN Postgres, so this tier still holds zero crypto). A device is
+**registered once (device ↔ server, user-owned) and LINKED per workspace** — `web.device_link` is a
+first-class row, severable by both sides, DELETED never tombstoned; a seat is to a person what a link
+is to a device. The default guard requires an ACTIVE link; exactly TWO routes answer typed for a
+PENDING one (`GET …/me` and `GET …/delivery`, each carrying `link_status` — delivery's pending body is
+shape-complete and EMPTY), and everything else folds pending/unlinked/unknown into the one uniform 404.
+The link's own ops are person-scoped (`requireDevicePerson`, seat-less: credential → device → user,
+now carrying the resolved device id): `GET/POST /api/v1/device/link` (describe/apply — resolution by
+workspace NAME in both tenancies, the empty string the single-tenant origin form; a seatless caller and
+an unknown name answer ONE byte-identical typed `NOT_A_MEMBER` refusal pointing at the invitation
+path; apply is idempotent and born per the ONE rule) and `DELETE /api/v1/device` (the CLI's simplified
+`auth logout`: revoke + sever every link + reported state in one transaction; a retry answers the
+uniform 404 — already signed out). The old per-workspace `DELETE …/workspaces/{ws}/devices` route is
+RETIRED (clean wire break; the catch-all covers the path). The **born-status rule** is written ONCE
+(`linkBornStatus` in identity.server.ts): an owner's act is its own approval → born `active`; otherwise
+the workspace's `device_approval` knob decides (`off` → active, `on` → pending) — invitation-woven
+links get no exception. The **byte/pointer** ops of a publish-family verb
 (ingest, the `current` CAS, revert, purge, the verified object/version/log reads) are the only things
 that leave this tier: they go through the ONE custody transport, `app/lib/plane/client.server.ts`
 (`vaultFetch` + a runtime route allowlist), to the vault's internal `/internal/v1` custody lane —
@@ -28,7 +44,8 @@ magic-link sign-up is born with `name = ''`, and a blank never surfaces as a lab
 selects (member lists, attribution, the device-lane actor). Every seat, device,
 subscription, notice, and audit row references a `user.id`. The whole directory lives in schema `web`:
 the Better Auth tables (`user`/`session`/`account`/`verification`), **seats** (workspace membership +
-role), devices + the device-auth flow rows, invitations, the bundle catalog (each row carrying a `kind`
+role), devices + their per-workspace **device_link** rows + the device-auth flow rows, invitations, the
+bundle catalog (each row carrying a `kind`
 tag — `'skill'` today — displayed, never branched on), channels (incl. the implicit default `everyone`
 channel with per-person `channel_optout`), subscriptions (ONE `bundle_subscription` stance row per
 person per bundle), detachment records, notices with read-state, proposals + comments, op receipts, and
@@ -71,7 +88,12 @@ transaction, FOR UPDATE-fenced or single-statement-atomic, audit row inside):
   never a workspace-existence oracle — the workspace may be created mid-flow), and approval resolves
   it under the tenancy grammar and requires the approver's SEAT in the resolved workspace, inside
   the same FOR-UPDATE fence — a missing workspace or a seatless approver gets the same uniform
-  refusal an expired code does. On a multi-tenant deployment a signed-in approver with zero seats
+  refusal an expired code does. Approval mints REGISTRATION + the FIRST device link together in
+  that fence (born per the one rule; the granted poll and the device-lane invitation accept both
+  report `link_status`; the /verify card shows THE ONE workspace being linked and says further
+  workspaces each take their own explicit link — and, knob-on with a non-owner approver, that the
+  link awaits an owner). The device-lane invitation accept links the accepting device in the accept
+  fence too. On a multi-tenant deployment a signed-in approver with zero seats
   anywhere is first woven through workspace creation (`/verify` redirects to `/new` carrying itself
   as `next` + the flow's slug as a `name` prefill) — unless the flow carries an invitation, whose
   accept will seat them right there. The LOOPBACK arrival (the CLI auto-opened the page): the URL
@@ -160,8 +182,13 @@ what a ceremony adds is CONFIRMATION of intent, proportional to its reach — th
 Every attempt lands an `admin_event` audit row, refused typed names included. The grade of a ceremony
 and the reach of its act stay matched IN THE DATABASE: the account page's device sign-out is SELF-ONLY
 (a device is a possession; no owner arm reaches into someone else's pocket), fenced in
-`revokeOwnDevice`. The `/verify` device-approve is a plain signed-in accept — a live session plus the
-explicit approve click is the whole ceremony there. Revoking a pending invitation is the same grade as
+`revokeOwnDevice` — which also severs every device link + per-workspace reported state in the same
+transaction (`device_unlinked` audit rows, cause-tagged), as does seat removal for the removed
+person's devices in that workspace. The LINK ceremonies split by side: SELF unlink (account page,
+per-link) and the owner arms on the fleet page — approve/reject a pending link, remove any link
+(`link_approved` / `link_rejected` / `device_unlinked`; removing ends delivery, never recalls bytes) —
+all wearing the in-place `<ConfirmButton>` two-step. The `/verify` device-approve is a plain signed-in
+accept — a live session plus the explicit approve click is the whole ceremony there. Revoking a pending invitation is the same grade as
 the invite it undoes (the row flips to revoked; re-inviting mints a fresh link), so the owner gate +
 the audited act is the whole ceremony on the members page.
 
@@ -227,15 +254,20 @@ member of an open channel, reviewer+ of a curated one — adds/removes the chann
 through the same core the device lane runs) · **Members** · **History** · **Settings** (the owner
 rename/delete ceremonies) under one shared tab header (`app/components/channel/channel-tabs.tsx`) —
 the **Settings** page — TABBED into **General** (the workspace policy: review
-default · staleness window · the `registration` knob · an OWNER-ONLY whole-catalog
+default · staleness window · the `device_approval` knob (links born pending until an owner approves,
+on the fleet page) · the `registration` knob · an OWNER-ONLY whole-catalog
 **export** — a `settings/export` resource route streaming a zip of every skill at its current version
 plus a `manifest.json`, one object at a time through the custody transport's verified reads) and
-**Devices** (the workspace fleet
-view: staleness + the named blind spots — detached copies, removed-upstream rows, stale devices) and
+**Devices** (the workspace fleet view, DEVICE-LINK-driven: the linked devices with staleness +
+per-copy labels — detached/excluded/current/behind — plus the PENDING-link queue and the owner arms;
+severed devices simply no longer appear, so the old removed-upstream and detached-copies ghost
+enumerations are gone) and
 **Archive** (the archived-skills list with the unarchive/delete ceremonies), all under
 one shared tab header (`app/components/settings-tabs.tsx`) at `settings` / `settings/devices` /
 `settings/archive`), the "your
-devices" self-service list, and the first-run claim. It renders state read from its own `web` schema and,
+devices" self-service list (each device carrying its linked-workspace list with per-link SELF unlink
+arms beside the global sign-out; "linked/unlink" is the device↔workspace word, "enrolled" stays
+device↔server), and the first-run claim. It renders state read from its own `web` schema and,
 read-only, from the vault's `plane` schema; it holds no signing key, computes no digest, and initiates no
 device-signed write — publishing stays on the enrolled device.
 

@@ -1,7 +1,7 @@
 import type { ActionFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
-import { pollDeviceAuth, workspaceRowById } from "@/lib/db/identity.server";
+import { deviceLinkStatus, pollDeviceAuth, workspaceRowById } from "@/lib/db/identity.server";
 
 /**
  * `POST /api/v1/device/token` — poll the device flow (`DeviceAuthPollRequest` →
@@ -47,6 +47,14 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   }
   const ws =
     result.approvedWorkspaceId === null ? null : await workspaceRowById(result.approvedWorkspaceId);
+  // `link_status` is the FIRST link's status — the approval minted registration + one link
+  // together, and the client's first sweep needs to know whether delivery flows yet or the
+  // link awaits an owner. Read live (an owner may have approved between grant and poll); a
+  // link already severed inside the TTL reads as the conservative "pending".
+  const linkStatus =
+    result.approvedWorkspaceId === null
+      ? "pending"
+      : ((await deviceLinkStatus(result.deviceId, result.approvedWorkspaceId)) ?? "pending");
   // `hint` decorates a grant whose flow carried an invitation naming a first destination — the
   // CLI's post-enrollment subscribe targets it (else the workspace set), through the ordinary
   // two-phase describe.
@@ -54,6 +62,7 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     status: "granted",
     credential: deviceCode,
     device_id: result.deviceId,
+    link_status: linkStatus,
     ...(ws === null
       ? {}
       : {

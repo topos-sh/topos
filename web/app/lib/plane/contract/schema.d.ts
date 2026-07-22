@@ -3,6 +3,22 @@
  * Regenerate with: bun run gen:plane
  */
 export interface paths {
+    "/v1/device": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["revoke_device"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/device/authorize": {
         parameters: {
             query?: never;
@@ -13,6 +29,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["device_auth_start"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/device/link": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_device_link"];
+        put?: never;
+        post: operations["create_device_link"];
         delete?: never;
         options?: never;
         head?: never;
@@ -174,22 +206,6 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/workspaces/{ws}/devices": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        delete: operations["revoke_device"];
         options?: never;
         head?: never;
         patch?: never;
@@ -516,6 +532,13 @@ export interface components {
             /** @description The registered device's id — present ONLY when `status` is `granted`. */
             device_id?: string | null;
             hint?: null | components["schemas"]["DeviceAuthHint"];
+            /**
+             * @description The FIRST device↔workspace link's born status — present ONLY when `status` is `granted`:
+             *     `"active"`, or `"pending"` when the workspace's device-approval knob gated it (approval
+             *     mints the registration and the first link together server-side). Absent on an older
+             *     producer ⇒ treat as `"active"`.
+             */
+            link_status?: string | null;
             /** @description The poll status. */
             status: components["schemas"]["DeviceAuthPollStatus"];
             workspace?: null | components["schemas"]["DeviceAuthWorkspace"];
@@ -591,20 +614,58 @@ export interface components {
             workspace_id: string;
         };
         /**
-         * @description `DELETE /v1/workspaces/{ws}/devices` body — revoke a registered device key (owner, or the device's own
-         *     principal). The revoke is INSTANT (flip `revoked` in one transaction — the row's credential stops
-         *     authorizing fresh work the moment it commits).
+         * @description `POST /v1/device/link` success `data` — the created (or re-affirmed) link: the joined workspace
+         *     and the link's status (`"active"`, or `"pending"` awaiting an owner's approval — no data flows
+         *     until it turns active). A seatless caller / unknown name answers `NOT_A_MEMBER`, exactly as the
+         *     describe does.
          */
-        DeviceRevokeRequest: {
-            /** @description The client-minted UUIDv4 idempotency key. */
-            op_id: string;
-            /**
-             * @description The id of the device key to revoke (the TARGET, named by its non-secret id; the actor rides the
-             *     Bearer credential).
-             */
-            target_device_key_id: string;
-            /** @description The target workspace id (scopes the op to one workspace). */
+        DeviceLinkData: {
+            /** @description The workspace's full address (server-built). */
+            address: string;
+            /** @description The workspace's display name. */
+            display_name: string;
+            /** @description The link's status — `"active"` or `"pending"`. */
+            link_status: string;
+            /** @description The workspace's ADDRESS slug. */
+            name: string;
+            /** @description The workspace id. */
             workspace_id: string;
+        };
+        /**
+         * @description `GET /v1/device/link?workspace=<address-slug>` success `data` — the link DESCRIBE (nothing
+         *     mutates): where THIS device stands with the named workspace, and what a link would be born as.
+         *     An EMPTY `workspace` value names the origin's own workspace (the same convention as
+         *     [`DeviceAuthStartRequest::workspace`]). A seatless caller — or an unknown workspace name,
+         *     byte-identically (no existence oracle) — answers the all-outcome envelope's `NOT_A_MEMBER`
+         *     refusal pointing at the invitation path.
+         */
+        DeviceLinkDescribe: {
+            /** @description The workspace's full address (the share link — server-built). */
+            address: string;
+            /**
+             * @description What a link created NOW would be born as — `"active"`, or `"pending"` when the workspace's
+             *     device-approval knob gates it (owner-created links are always born active).
+             */
+            born: string;
+            /** @description The workspace's display name. */
+            display_name: string;
+            /** @description THIS device's current link — `"none"` (no link yet), `"pending"`, or `"active"`. */
+            link_status: string;
+            /** @description The workspace's ADDRESS slug. */
+            name: string;
+            /** @description The caller's role on the roster (`owner` / `reviewer` / `member`). */
+            role: string;
+            /** @description The workspace id (the `{ws}` path segment a linked device's requests scope by). */
+            workspace_id: string;
+        };
+        /**
+         * @description `POST /v1/device/link` body — link THIS device (the Bearer credential's) to a workspace the
+         *     person's seats reach, by address slug (empty = the origin's own workspace). Idempotent: an
+         *     existing link answers ok with its current status.
+         */
+        DeviceLinkRequest: {
+            /** @description The workspace ADDRESS slug (empty = the origin's own workspace). */
+            workspace: string;
         };
         /**
          * @description `POST /v1/workspaces/{ws}/invitations` success `data` — what the inviter pastes onward: the
@@ -648,6 +709,12 @@ export interface components {
          */
         InviteAcceptData: {
             hint?: null | components["schemas"]["DeviceAuthHint"];
+            /**
+             * @description The ACCEPTING device's link to the joined workspace — `"active"` or `"pending"` (the accept
+             *     also links the device, born per the workspace's device-approval knob; no exception for
+             *     invitations). Serde-defaulted to `"active"` for a producer predating device links.
+             */
+            link_status?: string;
             /** @description The workspace the accept seated the person in. */
             workspace: components["schemas"]["DeviceAuthWorkspace"];
         };
@@ -1098,6 +1165,13 @@ export interface components {
              *     (the web, a second tool) for an upstream withdrawal.
              */
             excluded?: string[];
+            /**
+             * @description THIS device's link to the workspace — `"active"` or `"pending"`. REQUIRED: the delivery
+             *     answer is meaningless without it (a `"pending"` delivery carries empty `skills` /
+             *     `detached` / `excluded` / `notices` and `proposals_awaiting: 0` — no data flows over a
+             *     pending link; the client skips the workspace quietly and `topos status` shows the wait).
+             */
+            link_status: string;
             /** @description The unacked, person-scoped notices (verdicts, proposal closures, …). */
             notices: components["schemas"]["WireNotice"][];
             /**
@@ -1259,6 +1333,12 @@ export interface components {
             display_name: string;
             /** @description Who invited this principal (absent for a genesis owner). */
             invited_by?: string | null;
+            /**
+             * @description THIS device's link to the workspace — `"active"` or `"pending"` (a pending link awaits an
+             *     owner's approval; no skill data flows over it). Serde-defaulted to `"active"` for schema
+             *     stability: a producer predating device links serves only active-equivalent access.
+             */
+            link_status?: string;
             /** @description The workspace's ADDRESS name. */
             name: string;
             /** @description The caller's principal (canonical form). */
@@ -1532,6 +1612,56 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    revoke_device: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <device credential>`. */
+                Authorization: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The global self-revoke landed (no body sent): THIS credential's device is revoked server-side — its links and per-workspace reported state are deleted with it. A retry answers the uniform 404 (already signed out). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential or an already-revoked device (indistinguishable) — the caller treats this as already-signed-out. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
     device_auth_start: {
         parameters: {
             query?: never;
@@ -1573,6 +1703,122 @@ export interface operations {
                 };
             };
             /** @description Internal fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    get_device_link: {
+        parameters: {
+            query: {
+                /** @description The workspace ADDRESS slug (an EMPTY value names the origin's own workspace — the same convention as the device-auth start). */
+                workspace: string;
+            };
+            header: {
+                /** @description `Bearer <device credential>` — PERSON-scoped: the seat is checked, no link is required. */
+                Authorization: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The all-outcome envelope. OK carries the DeviceLinkDescribe (this device's current link — none/pending/active — and what a link would be born as: active, or pending under the workspace's device-approval knob); a seatless caller OR an unknown workspace name answers a byte-identical 200 DENIED NOT_A_MEMBER pointing at the invitation path (no existence oracle). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential or a revoked device (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    create_device_link: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <device credential>` — PERSON-scoped: the seat is checked, no link is required. */
+                Authorization: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeviceLinkRequest"];
+            };
+        };
+        responses: {
+            /** @description The all-outcome envelope. OK carries the DeviceLinkData (the joined workspace + the link's status: born active, or pending under the workspace's device-approval knob — owner-created links are always active). IDEMPOTENT: an existing link answers ok with its current status. A seatless caller OR an unknown workspace name answers the byte-identical 200 DENIED NOT_A_MEMBER. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Malformed body. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential or a revoked device (indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Integrity / internal store fault. */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -2253,72 +2499,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WireDelivery"];
-                };
-            };
-            /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Rate limited (Retry-After header). */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Integrity / internal store fault. */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-        };
-    };
-    revoke_device: {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description `Bearer <device credential>`. */
-                Authorization: string;
-            };
-            path: {
-                /** @description Workspace id. */
-                ws: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["DeviceRevokeRequest"];
-            };
-        };
-        responses: {
-            /** @description The revoke receipt (instant: the target credential stops authorizing fresh work the moment it commits). */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
-                };
-            };
-            /** @description Malformed body. */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JsonEnvelope"];
                 };
             };
             /** @description Missing/blank credential, unknown/revoked one, or non-member (indistinguishable). */

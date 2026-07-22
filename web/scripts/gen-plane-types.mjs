@@ -28,7 +28,10 @@ const TYPES_OUT = join(WEB_ROOT, "app", "lib", "plane", "contract", "schema.d.ts
  * that this list misses fails the gate loudly, forcing the reconcile).
  */
 const PUBLIC_ROUTES = [
+  { method: "delete", path: "/v1/device" },
   { method: "post", path: "/v1/device/authorize" },
+  { method: "get", path: "/v1/device/link" },
+  { method: "post", path: "/v1/device/link" },
   { method: "post", path: "/v1/device/token" },
   { method: "post", path: "/v1/proposals" },
   { method: "post", path: "/v1/publish" },
@@ -41,7 +44,6 @@ const PUBLIC_ROUTES = [
   { method: "delete", path: "/v1/workspaces/{ws}/channels/{ch}/skills/{skill}" },
   { method: "put", path: "/v1/workspaces/{ws}/channels/{ch}/skills/{skill}" },
   { method: "get", path: "/v1/workspaces/{ws}/delivery" },
-  { method: "delete", path: "/v1/workspaces/{ws}/devices" },
   { method: "put", path: "/v1/workspaces/{ws}/exclusions/{skill}" },
   { method: "delete", path: "/v1/workspaces/{ws}/follows/{skill}" },
   { method: "put", path: "/v1/workspaces/{ws}/follows/{skill}" },

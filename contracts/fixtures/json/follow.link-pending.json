@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "command": "follow",
+  "ok": true,
+  "data": {
+    "enrolled_now": false,
+    "link_status": "pending",
+    "workspace_display_name": "Beta Corp",
+    "workspace_id": "w_beta",
+    "workspace_name": "beta"
+  },
+  "warnings": [],
+  "next_actions": [
+    {
+      "code": "CHECK_STATUS",
+      "argv": [
+        "topos",
+        "status",
+        "--json"
+      ]
+    }
+  ]
+}

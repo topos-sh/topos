@@ -33,10 +33,18 @@ pub(crate) fn status_snapshot(ctx: &Ctx<'_>) -> Result<StatusData, ClientError> 
         .map(|u| {
             u.workspaces
                 .into_iter()
-                .map(|m| StatusWorkspace {
-                    workspace_id: m.workspace_id,
-                    name: m.name,
-                    display_name: m.display_name,
+                .map(|m| {
+                    // A non-active link is a status fact (pending = awaiting owner approval;
+                    // ended = relink with `follow <address>`); active omits, keeping the pinned
+                    // shape byte-identical for the common case.
+                    let link_status =
+                        (m.link_status != enroll::LINK_ACTIVE).then(|| m.link_status.clone());
+                    StatusWorkspace {
+                        workspace_id: m.workspace_id,
+                        name: m.name,
+                        display_name: m.display_name,
+                        link_status,
+                    }
                 })
                 .collect()
         })
@@ -254,6 +262,7 @@ mod tests {
                 name: "acme".to_owned(),
                 display_name: "Acme".to_owned(),
                 enrolled_at: 0,
+                link_status: enroll::LINK_ACTIVE.to_owned(),
             },
         );
         enroll::write_user(&fs, &layout, &user).unwrap();

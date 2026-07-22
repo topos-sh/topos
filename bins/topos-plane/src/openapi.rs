@@ -10,14 +10,14 @@ use utoipa::OpenApi;
 
 use topos_types::requests::{
     DeviceAuthHint, DeviceAuthPollRequest, DeviceAuthPollResponse, DeviceAuthPollStatus,
-    DeviceAuthStartRequest, DeviceAuthStartResponse, DeviceAuthWorkspace, DeviceRevokeRequest,
-    InvitationData, InvitationRequest, InviteAcceptData, InviteAcceptRequest, NoticeAckRequest,
-    ProposeRequest, ProtectionSetRequest, PublishRequest, RevertRequest, ReviewRequest,
-    WireAppliedReport, WireAppliedSkill, WireCandidate, WireChannelEntry, WireChannelIndex,
-    WireChannelSkill, WireDelivery, WireDeliverySkill, WireFile, WireFileMode, WireLogProposal,
-    WireLogVersion, WireMe, WireNotice, WireOpenProposal, WireProposalEntry, WireProposalIndex,
-    WireProposalList, WireProtocolCard, WireReach, WireSkillIndex, WireSkillIndexEntry,
-    WireSkillLog, WireVersionFile, WireVersionMeta, WireVia,
+    DeviceAuthStartRequest, DeviceAuthStartResponse, DeviceAuthWorkspace, DeviceLinkData,
+    DeviceLinkDescribe, DeviceLinkRequest, InvitationData, InvitationRequest, InviteAcceptData,
+    InviteAcceptRequest, NoticeAckRequest, ProposeRequest, ProtectionSetRequest, PublishRequest,
+    RevertRequest, ReviewRequest, WireAppliedReport, WireAppliedSkill, WireCandidate,
+    WireChannelEntry, WireChannelIndex, WireChannelSkill, WireDelivery, WireDeliverySkill,
+    WireFile, WireFileMode, WireLogProposal, WireLogVersion, WireMe, WireNotice, WireOpenProposal,
+    WireProposalEntry, WireProposalIndex, WireProposalList, WireProtocolCard, WireReach,
+    WireSkillIndex, WireSkillIndexEntry, WireSkillLog, WireVersionFile, WireVersionMeta, WireVia,
 };
 use topos_types::results::{ProposeData, PublishData, RevertData, ReviewData, ReviewDecision};
 use topos_types::{
@@ -29,7 +29,7 @@ use topos_types::{
 #[openapi(
     info(
         title = "Topos product API (device lane)",
-        description = "The device lane the product app serves: the gh-style device-auth enrollment (start/poll — approval promotes the device code to the device's ONE bearer credential), the publish/propose/revert/review writes, the current/version/object/catalog/proposals reads, the delivery + applied-state report, the describe reads, the row ops, and the device revoke. Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
+        description = "The device lane the product app serves: the gh-style device-auth enrollment (start/poll — approval promotes the device code to the device's ONE bearer credential), the publish/propose/revert/review writes, the current/version/object/catalog/proposals reads, the delivery + applied-state report, the describe reads, the row ops, the browser-free device-link lane (describe/create — an enrolled device joins a further workspace without a second ceremony), and the global device self-revoke. Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
         version = "0.0.0",
         license(name = "Apache-2.0"),
     ),
@@ -64,11 +64,13 @@ use topos_types::{
         crate::routes::door::set_channel_protection,
         crate::routes::door::ack_notices,
         crate::routes::door::invite,
-        // Enrollment: the device-auth flow + the enrolled device's invitation accept.
+        // Enrollment: the device-auth flow, the enrolled device's invitation accept, the
+        // browser-free device-link lane, and the global self-revoke (the CLI logout wire).
         crate::routes::door::device_auth_start,
         crate::routes::door::device_auth_poll,
         crate::routes::door::invite_accept,
-        // Governance: the device revoke (the CLI logout wire).
+        crate::routes::door::get_device_link,
+        crate::routes::door::create_device_link,
         crate::routes::door::revoke_device,
     ),
     components(schemas(
@@ -142,14 +144,16 @@ use topos_types::{
         DeviceAuthHint,
         InviteAcceptRequest,
         InviteAcceptData,
-        // Governance request DTOs.
-        DeviceRevokeRequest,
+        // The device-link lane.
+        DeviceLinkRequest,
+        DeviceLinkDescribe,
+        DeviceLinkData,
     )),
     tags(
         (name = "writes", description = "Device-credential writes (publish / propose / revert / review) and the member-lane row ops (follows / channels / exclusions / protection / notices)."),
         (name = "reads", description = "Device-credential reads (current / bundles / versions / proposals / catalog / delivery / me / channels / log / reach) plus the body-light applied-state report."),
-        (name = "enrollment", description = "The gh-style device-auth flow (start / poll; approval promotes the device code to the ONE bearer credential)."),
-        (name = "governance", description = "The device revoke and the member-lane invitation (a roster write)."),
+        (name = "enrollment", description = "The gh-style device-auth flow (start / poll; approval promotes the device code to the ONE bearer credential and mints the FIRST device↔workspace link), the browser-free device-link lane, and the global device self-revoke."),
+        (name = "governance", description = "The member-lane invitation (a roster write)."),
     ),
 )]
 struct ApiDoc;

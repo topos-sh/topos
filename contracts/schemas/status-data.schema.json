@@ -94,6 +94,13 @@
         "display_name": {
           "type": "string"
         },
+        "link_status": {
+          "description": "This device's link to the workspace, when it is NOT plainly active: `\"pending\"` (awaiting an\nowner's approval — delivery starts automatically once approved) or `\"ended\"` (the link was\nsevered or never approved — `topos follow <address>` relinks). Absent = active. **Additive.**",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "description": "The ADDRESS name (what you joined by).",
           "type": "string"

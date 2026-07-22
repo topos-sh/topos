@@ -3,6 +3,7 @@ import {
   asUser,
   bootWorkspace,
   createScratchDb,
+  linkDevice,
   type ScratchDb,
   seatUser,
   seedDevice,
@@ -32,8 +33,11 @@ beforeAll(async () => {
   await seatUser(db, wsId, "u_ana", "member");
   await seatUser(db, wsId, "u_bo", "member");
   await seedDevice(db, "dk_ana_1", "u_ana", "laptop");
+  await linkDevice(db, "dk_ana_1", wsId);
   await seedDevice(db, "dk_ana_2", "u_ana", "desktop");
+  await linkDevice(db, "dk_ana_2", wsId, "pending");
   await seedDevice(db, "dk_bo_1", "u_bo", "bo-laptop");
+  await linkDevice(db, "dk_bo_1", wsId);
   // Only the laptop has ever phoned home.
   await db.q(`UPDATE web.device SET last_seen_at = now() WHERE id = 'dk_ana_1'`);
 }, 60000);
@@ -55,10 +59,41 @@ describe("devicesFor (the your-devices read)", () => {
     expect(typeof rows[0]?.createdAtMs).toBe("number");
   });
 
+  it("each device carries its linked-workspace list, status included", async () => {
+    const queries = await q();
+    const rows = await queries.devicesFor(asUser("u_ana"));
+    expect(rows[0]?.links.map((l) => [l.workspaceId, l.status])).toEqual([[wsId, "active"]]);
+    expect(rows[1]?.links.map((l) => [l.workspaceId, l.status])).toEqual([[wsId, "pending"]]);
+    expect(typeof rows[0]?.links[0]?.workspaceDisplayName).toBe("string");
+  });
+
   it("returns [] for a user with no devices — never another person's rows", async () => {
     const queries = await q();
     await seedUser(db, "u_empty", "Empty", "empty@example.com");
     expect(await queries.devicesFor(asUser("u_empty"))).toEqual([]);
+  });
+});
+
+describe("unlinkOwnDevice (the per-link self arm)", () => {
+  it("severs the actor's own link; a foreign device id answers unknown_link (no oracle)", async () => {
+    const queries = await q();
+    expect(await queries.unlinkOwnDevice(asUser("u_ana", "Ana"), "dk_bo_1", wsId)).toBe(
+      "unknown_link",
+    );
+    expect(await queries.unlinkOwnDevice(asUser("u_ana", "Ana"), "dk_ana_2", wsId)).toBe(
+      "unlinked",
+    );
+    const rows = await queries.devicesFor(asUser("u_ana"));
+    expect(rows[1]?.links).toEqual([]);
+    // A repeat answers unknown_link — the row is gone, not tombstoned.
+    expect(await queries.unlinkOwnDevice(asUser("u_ana", "Ana"), "dk_ana_2", wsId)).toBe(
+      "unknown_link",
+    );
+    const audit = await db.q(
+      `SELECT details ->> 'cause' AS cause FROM web.audit_event
+       WHERE kind = 'device_unlinked' AND subject = 'dk_ana_2'`,
+    );
+    expect(audit).toEqual([{ cause: "self" }]);
   });
 });
 

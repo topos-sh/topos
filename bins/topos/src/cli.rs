@@ -415,9 +415,9 @@ pub(crate) enum AuthCmd {
         #[arg(long, value_name = "SECONDS", num_args = 0..=1)]
         wait: Option<Option<u64>>,
     },
-    /// Sign out of this install: revoke this device in each workspace (best-effort), delete the
-    /// stored credential — skills, follows, and drafts stay. Two-phase (bare describes; `--yes`
-    /// applies).
+    /// Sign out of this install: ONE server-side revoke signs this device out everywhere (every
+    /// linked workspace at once), then the stored credential is deleted — skills, follows, and
+    /// drafts stay. Two-phase (bare describes; `--yes` applies).
     Logout {
         /// Apply the described sign-out.
         #[arg(long)]

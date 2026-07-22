@@ -104,6 +104,11 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
     // both tenancy modes. Static segments outrank the splat, which answers the uniform wire 404.
     route("api/v1/device/authorize", file("api.v1.device-authorize.ts")),
     route("api/v1/device/token", file("api.v1.device-token.ts")),
+    // The device↔workspace link ops (describe + apply) and the global self-revoke — both
+    // person-scoped (credential → device → user; the link ops must answer the seatless
+    // refusal, the revoke targets the credential's own device).
+    route("api/v1/device/link", file("api.v1.device-link.ts")),
+    route("api/v1/device", file("api.v1.device.ts")),
     // The already-enrolled device's invite-URL accept — person-scoped (seat-less by design).
     route("api/v1/invitations/accept", file("api.v1.invitation-accept.ts")),
     route("api/v1/publish", file("api.v1.publish.ts")),
@@ -117,7 +122,6 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
       route("report", file("api.v1.report.ts")),
       route("notices/ack", file("api.v1.notices-ack.ts")),
       route("invitations", file("api.v1.invitations.ts")),
-      route("devices", file("api.v1.devices.ts")),
       route("proposals", file("api.v1.ws-proposals.ts")),
       route("skills", file("api.v1.skills-index.ts")),
       route("follows/:skill", file("api.v1.follows.ts")),

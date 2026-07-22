@@ -5,17 +5,18 @@ import {
   ensureAccount,
   ensureBundle,
   ensureSeatedUser,
+  mintDevice,
   seedCustody,
   theWorkspace,
 } from "./seed";
 import { gotoSettled } from "./sign-in";
 
 /**
- * The fleet page — a read-only visibility surface that enumerates every device touching the
- * workspace, the version each one last reported, and NAMES its blind spots (stale devices,
- * detached copies, per-device exclusions, removed members' still-live copies) instead of
- * omitting them. It carries NO revoke arm — a device is a possession, revocation is self-only
- * on /settings/devices.
+ * The fleet page — DEVICE-LINK-driven: it enumerates the workspace's linked devices (active
+ * AND pending), the version each one last reported, and carries the OWNER arms (approve /
+ * reject a pending link, remove any link). A device without a link to this workspace does not
+ * appear at all — seat removal severs links in the same fence, so there are no ghost rows to
+ * enumerate. Signing a device out whole stays self-only on /account/devices.
  *
  * Staleness joins `device.last_seen_at` against the workspace window (set to ONE HOUR here,
  * restored after); per-copy status joins `device_bundle_state` against the custody pointer
@@ -32,7 +33,8 @@ const SKILL_B = { id: "s_e2e_fleet_b", name: "handbook" };
 const DEV_FRESH = "dk_e2e_fleet_fresh"; // owner: current + behind, fresh
 const DEV_EXCL = "dk_e2e_fleet_excl"; // owner: excluded copy, stale
 const DEV_MATE = "dk_e2e_fleet_mate"; // seated mate: detached copy, stale
-const DEV_GONE = "dk_e2e_fleet_gone"; // departed (no seat): removed upstream
+const DEV_PEND = "dk_e2e_fleet_pend"; // seated mate: a PENDING link awaiting the owner
+const DEV_GONE = "dk_e2e_fleet_gone"; // departed: registration with NO link — never listed
 
 const WINDOW_1H = 3_600_000;
 
@@ -77,15 +79,22 @@ test.beforeAll(async () => {
 
   // A clean slate for THIS file's devices + records (idempotent on a reused database).
   await adminQuery(`delete from web.device where id = any($1::text[])`, [
-    [DEV_FRESH, DEV_EXCL, DEV_MATE, DEV_GONE],
+    [DEV_FRESH, DEV_EXCL, DEV_MATE, DEV_PEND, DEV_GONE],
   ]);
   await adminQuery(`delete from web.bundle_detachment where user_id = $1`, [mate.userId]);
 
-  const device = async (id: string, userId: string, name: string, lastSeenAgoMs: number) => {
+  const device = async (
+    id: string,
+    userId: string,
+    name: string,
+    lastSeenAgoMs: number,
+    linkStatus: "active" | "pending" | null = "active",
+  ) => {
+    await mintDevice(userId, id, name, `cred-${id}`, linkStatus);
     await adminQuery(
-      `insert into web.device (id, user_id, display_name, credential_sha256, last_seen_at)
-       values ($1, $2, $3, sha256(convert_to($4, 'UTF8')), now() - ($5 || ' milliseconds')::interval)`,
-      [id, userId, name, `cred-${id}`, String(lastSeenAgoMs)],
+      `update web.device set last_seen_at = now() - ($2 || ' milliseconds')::interval
+       where id = $1`,
+      [id, String(lastSeenAgoMs)],
     );
   };
   const state = async (deviceId: string, bundleId: string, applied: string) => {
@@ -119,8 +128,12 @@ test.beforeAll(async () => {
     [mate.userId, ws.id, SKILL_A.id],
   );
 
-  // A REMOVED member's device — no seat, still reporting: the removed-upstream blind spot.
-  await device(DEV_GONE, departed.userId, "departed-device", 1_800_000);
+  // The mate's second device: its link is PENDING — the owner's approval queue.
+  await device(DEV_PEND, mate.userId, "mates-new-box", 60_000, "pending");
+
+  // The departed person's device: a registration with NO link here — the severed state seat
+  // removal leaves behind. It must not appear on this page at all.
+  await device(DEV_GONE, departed.userId, "departed-device", 1_800_000, null);
   await state(DEV_GONE, SKILL_A.id, oldA as string);
 });
 
@@ -128,12 +141,12 @@ test.afterAll(async () => {
   await adminQuery(`update web.workspace set staleness_window_ms = 604800000`);
 });
 
-test("renders every device with the right freshness and per-copy status chips", async ({
+test("renders every LINKED device with the right freshness and per-copy status chips", async ({
   page,
 }) => {
   await theWorkspace();
   await gotoSettled(page, `/settings/devices`);
-  await expect(page.getByRole("heading", { name: "Devices", level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Linked devices", level: 1 })).toBeVisible();
 
   // It is the Devices tab of the Settings section: the shared tab header names both tabs and
   // marks Devices current.
@@ -157,40 +170,80 @@ test("renders every device with the right freshness and per-copy status chips", 
   await expect(mate.getByText("detached", { exact: true })).toBeVisible();
   await expect(mate.getByText("last known state")).toBeVisible();
   await expect(mate.getByText("they left the channel")).toBeVisible();
+
+  // A device with NO link to this workspace does not appear — severed means gone from here.
+  await expect(page.getByTestId(`fleet-device-${DEV_GONE}`)).toHaveCount(0);
+  await expect(page.getByText("departed-device")).toHaveCount(0);
 });
 
-test("names its blind spots: removed-upstream devices and the standing detach records", async ({
+test("the pending queue: an owner approves a waiting link in place (two-step confirm)", async ({
   page,
 }) => {
   await theWorkspace();
   await gotoSettled(page, `/settings/devices`);
 
-  // The removed-upstream section names the departed person and their still-present copy.
-  await expect(page.getByRole("heading", { name: "Removed upstream" })).toBeVisible();
-  const gone = page.getByTestId(`fleet-device-${DEV_GONE}`);
-  await expect(gone.getByText("removed upstream", { exact: true }).first()).toBeVisible();
-  await expect(gone.getByText(DEPARTED_EMAIL).first()).toBeVisible();
+  const pending = page.getByTestId(`fleet-pending-${DEV_PEND}`);
+  await expect(pending).toBeVisible();
+  await expect(pending.getByText("mates-new-box")).toBeVisible();
 
-  // The chase list: whose copies froze, of what, and why — surviving quiet devices.
-  const detached = page.getByRole("region", { name: "Detached copies" });
-  await expect(detached).toBeVisible();
-  await expect(detached.getByText(SKILL_A.name)).toBeVisible();
-  await expect(detached.getByText("they left the channel")).toBeVisible();
+  // The in-place two-step: the first activation ARMS (performing nothing), the armed submit
+  // posts. After approval the device moves into the linked list.
+  await pending.getByRole("button", { name: "Approve", exact: true }).click();
+  await pending.getByRole("button", { name: "Approve — confirm?" }).click();
+  await expect(page.getByTestId(`fleet-device-${DEV_PEND}`)).toBeVisible();
 
-  // The reading guide names the reporting cadence + every blind-spot vocabulary word.
-  const guide = page.getByRole("region", { name: "Reading this page" });
-  await expect(guide.getByText(/start of a session/)).toBeVisible();
-  await expect(guide.getByText(/Detached/)).toBeVisible();
-  await expect(guide.getByText(/Removed upstream/)).toBeVisible();
+  const rows = await adminQuery<{ status: string }>(
+    `select status from web.device_link where device_id = $1`,
+    [DEV_PEND],
+  );
+  expect(rows[0]?.status).toBe("active");
 });
 
-test("read-only by design: no revoke arm anywhere — your-devices is the sign-out surface", async ({
+test("owner Remove severs a link; the whole-device sign-out stays on your-devices", async ({
   page,
 }) => {
   await theWorkspace();
   await gotoSettled(page, `/settings/devices`);
-  await expect(page.getByRole("button", { name: /revoke/i })).toHaveCount(0);
+
+  // No sign-out arm anywhere — a device is a possession; this page severs LINKS only.
   await expect(page.getByRole("button", { name: "Sign out" })).toHaveCount(0);
-  // The header action (the reading guide carries a second, lowercase link to the same place).
   await expect(page.getByRole("link", { name: "Your devices", exact: true })).toBeVisible();
+
+  // Remove the mate's linked device: two-step confirm, then the card is gone and so is the
+  // link row + its reported state (bytes on the machine stay — the page copy says so).
+  const mate = page.getByTestId(`fleet-device-${DEV_MATE}`);
+  await mate.getByRole("button", { name: "Remove", exact: true }).click();
+  await mate.getByRole("button", { name: "Remove — confirm?" }).click();
+  await expect(page.getByTestId(`fleet-device-${DEV_MATE}`)).toHaveCount(0);
+
+  const links = await adminQuery<{ n: string }>(
+    `select count(*)::text as n from web.device_link where device_id = $1`,
+    [DEV_MATE],
+  );
+  expect(links[0]?.n).toBe("0");
+  const state = await adminQuery<{ n: string }>(
+    `select count(*)::text as n from web.device_bundle_state where device_id = $1`,
+    [DEV_MATE],
+  );
+  expect(state[0]?.n).toBe("0");
+});
+
+test("the status chips carry a focusable, hover/focus-only tooltip explainer", async ({ page }) => {
+  await theWorkspace();
+  await gotoSettled(page, `/settings/devices`);
+
+  // The freshness chip's tooltip trigger is a REAL control (keyboard-reachable), marked cursor-help
+  // — the reading legend rides the chips themselves, not a separate explainer section.
+  const fresh = page.getByTestId(`fleet-device-${DEV_FRESH}`);
+  const trigger = fresh.getByRole("button", { name: "fresh", exact: true });
+  await expect(trigger).toBeVisible();
+  await expect(trigger).toHaveClass(/cursor-help/);
+
+  // Nothing is shown until the trigger is engaged (hover/focus only — never click-to-open).
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+
+  // Keyboard focus alone reveals the explainer.
+  await trigger.focus();
+  await expect(trigger).toBeFocused();
+  await expect(page.getByRole("tooltip").first()).toBeVisible();
 });

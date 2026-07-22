@@ -4,6 +4,7 @@ import {
   asOwner,
   bootWorkspace,
   createScratchDb,
+  linkDevice,
   placeInDefault,
   type ScratchDb,
   seatUser,
@@ -14,11 +15,13 @@ import {
 } from "./helpers/scratch-db";
 
 /**
- * The FLEET DAL (queries.fleet.server.ts) against a REAL scratch Postgres. The fleet page is a
- * VISIBILITY surface: the reconcile only upserts state rows, and this layer derives every
- * blind-spot label from the person's detach records, the device's exclusions, and the seat's
- * absence — detached / excluded / removed_upstream are ENUMERATED for a human to chase, never
- * silently omitted. Role scoping lives here too: a member sees only their own devices.
+ * The FLEET DAL (queries.fleet.server.ts) against a REAL scratch Postgres — DEVICE-LINK-driven:
+ * the fleet enumerates the workspace's link rows (active AND pending), the version each linked
+ * device last reported, and derives the per-copy labels (detached / excluded / current /
+ * behind) from the person's detach records, the device's exclusions, and the custody pointer.
+ * Seat removal SEVERS links + reported state in the same fence, so a departed member's device
+ * simply no longer appears — no ghost rows to enumerate. Role scoping lives here too: a member
+ * sees only their own devices.
  */
 
 let db: ScratchDb;
@@ -53,12 +56,18 @@ beforeAll(async () => {
   await seedBundle(db, wsId, "s_det", "detached-skill");
   await seedBundle(db, wsId, "s_exc", "excluded-skill");
 
-  // Devices: the member's (fresh), the owner's (stale), the leaver's (never seen).
+  // Devices + links: the member's (fresh, active), the owner's (stale, active), a second
+  // member device with a PENDING link, and the leaver's (severed below).
   await seedDevice(db, "dk_mem", "u_mem", "mem-laptop");
+  await linkDevice(db, "dk_mem", wsId);
   await db.q(`UPDATE web.device SET last_seen_at = now() WHERE id = 'dk_mem'`);
   await seedDevice(db, "dk_own", "u_own", "own-laptop");
+  await linkDevice(db, "dk_own", wsId);
   await db.q(`UPDATE web.device SET last_seen_at = now() - interval '8 days' WHERE id = 'dk_own'`);
+  await seedDevice(db, "dk_mem_pend", "u_mem", "mem-second-box");
+  await linkDevice(db, "dk_mem_pend", wsId, "pending");
   await seedDevice(db, "dk_gone", "u_gone", "gone-laptop");
+  await linkDevice(db, "dk_gone", wsId);
 
   // Applied state: current / behind / detached / excluded on the member's device.
   await report("dk_mem", "s_cur", versionIdFor("s_cur"));
@@ -75,8 +84,8 @@ beforeAll(async () => {
   // The owner's device is merely behind on the current-channel skill.
   await report("dk_own", "s_cur", "f".repeat(64));
 
-  // The leaver reported a CURRENT copy — then their seat was removed through the REAL ceremony,
-  // which writes the membership_removed detach records for what they were being delivered.
+  // The leaver reported a CURRENT copy — then their seat was removed through the REAL
+  // ceremony, which now also SEVERS their links + reported state in the same fence.
   await report("dk_gone", "s_cur", versionIdFor("s_cur"));
   const identity = await import("@/lib/db/identity.server");
   const removed = await identity.removeSeat(
@@ -94,25 +103,37 @@ afterAll(async () => {
   await db.drop();
 });
 
-/**
- * (These cases once pinned a join-order bug — the detachment join's ON clause correlated on
- * the device table before it was joined; fixed by joining device first.)
- */
-describe("fleetOf — role scoping", () => {
-  it("a plain member sees only their OWN devices", async () => {
+describe("fleetOf — role scoping over the link rows", () => {
+  it("a plain member sees only their OWN devices (pending links included)", async () => {
     const queries = await q();
     const fleet = await queries.fleetOf(asMember(wsId, "u_mem"));
     expect(fleet.wholeFleet).toBe(false);
-    expect(fleet.devices.map((d) => d.deviceId)).toEqual(["dk_mem"]);
+    expect(fleet.devices.map((d) => [d.deviceId, d.linkStatus])).toEqual([
+      ["dk_mem", "active"],
+      ["dk_mem_pend", "pending"],
+    ]);
   });
 
-  it("an owner (or reviewer) sees the WHOLE fleet — the removed member's device included", async () => {
+  it("an owner sees the WHOLE fleet — and the severed leaver's device is GONE, not a ghost", async () => {
     const queries = await q();
     const fleet = await queries.fleetOf(asOwner(wsId, "u_own"));
     expect(fleet.wholeFleet).toBe(true);
-    // Owner-email order: gone@ < mem@ < own@.
-    expect(fleet.devices.map((d) => d.deviceId)).toEqual(["dk_gone", "dk_mem", "dk_own"]);
+    // Owner-email order: mem@ < own@; the removed member's link (and device) no longer lists.
+    expect(fleet.devices.map((d) => d.deviceId)).toEqual(["dk_mem", "dk_mem_pend", "dk_own"]);
     expect(fleet.stalenessWindowMs).toBe(604800000);
+    expect(fleet.deviceApproval).toBe("off");
+  });
+
+  it("seat removal severed the leaver's reported state with the link", async () => {
+    const rows = await db.q(`SELECT 1 FROM web.device_bundle_state WHERE device_id = 'dk_gone'`);
+    expect(rows).toHaveLength(0);
+    const links = await db.q(`SELECT 1 FROM web.device_link WHERE device_id = 'dk_gone'`);
+    expect(links).toHaveLength(0);
+    const audits = await db.q(
+      `SELECT details ->> 'cause' AS cause FROM web.audit_event
+       WHERE kind = 'device_unlinked' AND subject = 'dk_gone'`,
+    );
+    expect(audits).toEqual([{ cause: "seat_removed" }]);
   });
 });
 
@@ -123,7 +144,7 @@ describe("fleetOf — freshness against the ONE staleness clock", () => {
     const byId = new Map(fleet.devices.map((d) => [d.deviceId, d]));
     expect(byId.get("dk_mem")?.freshness).toBe("fresh");
     expect(byId.get("dk_own")?.freshness).toBe("stale");
-    expect(byId.get("dk_gone")?.freshness).toBe("never");
+    expect(byId.get("dk_mem_pend")?.freshness).toBe("never");
   });
 
   it("the workspace window is live: shrinking it flips fresh to stale", async () => {
@@ -140,7 +161,7 @@ describe("fleetOf — freshness against the ONE staleness clock", () => {
   });
 });
 
-describe("fleetOf — the per-copy statuses and the NAMED blind spots", () => {
+describe("fleetOf — the per-copy statuses", () => {
   it("current vs behind vs detached (cause-tagged) vs excluded, catalog-name order", async () => {
     const queries = await q();
     const fleet = await queries.fleetOf(asMember(wsId, "u_mem"));
@@ -155,26 +176,22 @@ describe("fleetOf — the per-copy statuses and the NAMED blind spots", () => {
     expect(skills.find((s) => s.skillId === "s_beh")?.appliedVersionId).toBe("e".repeat(64));
   });
 
-  it("a seatless owner's device rides as removed_upstream — every copy it holds so labelled", async () => {
+  it("the device-approval knob rides the fleet read", async () => {
     const queries = await q();
-    const fleet = await queries.fleetOf(asOwner(wsId, "u_own"));
-    const gone = fleet.devices.find((d) => d.deviceId === "dk_gone");
-    expect(gone?.removedUpstream).toBe(true);
-    expect(gone?.ownerEmail).toBe("gone@example.com");
-    // removed_upstream OUTRANKS current: the copy matches the pointer, but nobody administers it.
-    expect(gone?.skills.map((s) => [s.skillId, s.status])).toEqual([["s_cur", "removed_upstream"]]);
-    // Seated owners' devices are never so labelled.
-    expect(fleet.devices.find((d) => d.deviceId === "dk_own")?.removedUpstream).toBe(false);
+    await db.q(`UPDATE web.workspace SET device_approval = 'on' WHERE id = $1`, [wsId]);
+    try {
+      const fleet = await queries.fleetOf(asOwner(wsId, "u_own"));
+      expect(fleet.deviceApproval).toBe("on");
+    } finally {
+      await db.q(`UPDATE web.workspace SET device_approval = 'off' WHERE id = $1`, [wsId]);
+    }
   });
 });
 
-describe("detachedCopiesOf (the chase list)", () => {
-  it("lists every standing detach record person-joined — the removal ceremony's included", async () => {
+describe("workspaceDeviceCount (the onboarding probe)", () => {
+  it("counts live devices with an ACTIVE link — pending and revoked never count", async () => {
     const queries = await q();
-    const rows = await queries.detachedCopiesOf(asOwner(wsId, "u_own"));
-    expect(rows.map((r) => [r.userId, r.display, r.bundleId, r.bundleName, r.cause])).toEqual([
-      ["u_mem", "Member", "s_det", "detached-skill", "unfollow"],
-      ["u_gone", "Gone", "s_cur", "current-skill", "membership_removed"],
-    ]);
+    // Active links: dk_mem, dk_own (dk_mem_pend is pending; dk_gone was severed).
+    expect(await queries.workspaceDeviceCount(asOwner(wsId, "u_own"))).toBe(2);
   });
 });

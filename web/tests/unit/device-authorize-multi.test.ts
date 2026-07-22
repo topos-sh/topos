@@ -199,6 +199,7 @@ describe("the granted poll's workspace decoration", () => {
       status: "granted",
       credential: flow.deviceCode,
       device_id: approved?.deviceId,
+      link_status: "active",
       workspace: { workspace_id: "w_beta", name: "beta-team", display_name: "beta-team" },
     });
   });

@@ -41,8 +41,8 @@ export function StalenessWindowPanel({
       </SectionHeading>
       <Card className="space-y-3 px-4 py-3">
         <p className="text-sm text-dim">
-          A device is called stale on the fleet page once it goes this long without reporting.
-          Default is 7 days.
+          A device is called stale on the Linked devices page once it goes this long without
+          reporting. Default is 7 days.
         </p>
         {isOwner ? (
           <StalenessWindowControl initialDays={days} />

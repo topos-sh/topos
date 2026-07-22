@@ -19,6 +19,11 @@
         "null"
       ]
     },
+    "link_status": {
+      "description": "THIS device's link to the workspace — `\"active\"` or `\"pending\"` (a pending link awaits an\nowner's approval; no skill data flows over it). Serde-defaulted to `\"active\"` for schema\nstability: a producer predating device links serves only active-equivalent access.",
+      "type": "string",
+      "default": "active"
+    },
     "name": {
       "description": "The workspace's ADDRESS name.",
       "type": "string"

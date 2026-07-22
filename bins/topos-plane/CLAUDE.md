@@ -46,7 +46,10 @@ publicly reachable: no published port, no public router.
   annotations for the PUBLIC device lane the product app serves: device-auth start/poll (the
   gh-style flow — on approval the device code is promoted to the device's ONE bearer credential),
   publish/propose/revert/review, the reads (current/catalog/version/object/proposals/delivery/
-  me/channels/inbox/log/reach), the row ops, notices-ack, invitations, and the device revoke.
+  me/channels/inbox/log/reach), the row ops, notices-ack, invitations, the browser-free
+  device-link lane (`GET`/`POST /v1/device/link` — person-scoped; an enrolled device joins a
+  further workspace with no second ceremony), and the global device self-revoke
+  (`DELETE /v1/device`).
   `openapi()` (emitted to `contracts/openapi/` by `xtask`) is generated from these stubs; the
   internal custody lane stays OUT of the committed contract.
 - **The storage-maintenance scheduler** (`maintenance.rs`): `spawn_maintenance(state, every)` /

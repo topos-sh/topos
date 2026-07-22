@@ -93,11 +93,15 @@ test("approve is a plain signed-in accept: the click mints the credential the po
   await lookUp(page, flow.user_code);
   // The resolved request names what is asking, honestly (the name also rides the approve button's
   // label, so pin the disclosure span exactly), shows the CODE for the terminal glance-check, and
-  // lists everywhere the credential will reach.
+  // names THE ONE workspace being linked — the grant IS one link, and the card says further
+  // workspaces each take their own.
   await expect(page.getByText("“e2e-laptop”", { exact: true })).toBeVisible();
   await expect(page.getByText("wants to act as you", { exact: false })).toBeVisible();
   await expect(page.getByText(flow.user_code, { exact: false }).first()).toBeVisible();
-  await expect(page.getByText("acts with your seat in:", { exact: false })).toBeVisible();
+  await expect(page.getByText("Approving links it to", { exact: false })).toBeVisible();
+  await expect(
+    page.getByText("further workspace takes its own explicit link", { exact: false }),
+  ).toBeVisible();
 
   // A plain signed-in accept — the click alone mints the credential; approval needs no extra
   // confirmation.

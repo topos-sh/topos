@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LinkPendingData",
+  "description": "The typed receipt a PENDING device↔workspace link answers — a `follow` whose link (born at the\ndevice link lane, the enrollment grant, or an invitation accept) awaits an OWNER's approval.\nNothing is subscribed and no bytes land while it is pending; delivery starts automatically\nafter approval (the quiet sweep stays silent meanwhile), and `topos status` shows the waiting\nlink. **INFERRED** (additive-only).",
+  "type": "object",
+  "properties": {
+    "enrolled_now": {
+      "description": "Whether THIS invocation also enrolled the device (the first browser ceremony).",
+      "type": "boolean"
+    },
+    "link_status": {
+      "description": "Always `\"pending\"` — the machine-branchable link fact.",
+      "type": "string"
+    },
+    "workspace_display_name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "workspace_id": {
+      "type": "string"
+    },
+    "workspace_name": {
+      "description": "The workspace's ADDRESS name.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "workspace_id",
+    "workspace_name",
+    "link_status",
+    "enrolled_now"
+  ]
+}

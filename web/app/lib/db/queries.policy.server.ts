@@ -18,6 +18,8 @@ export interface WorkspacePolicy {
   /** The protection DEFAULT an unpinned bundle inherits (`reviewed` = review-required). */
   protectionDefault: "open" | "reviewed";
   registration: "invite_only" | "open";
+  /** The device-approval knob: 'on' → a non-owner's new device link is born pending. */
+  deviceApproval: "off" | "on";
 }
 
 /** The workspace's policy knobs, one read. */
@@ -27,6 +29,7 @@ export async function workspacePolicyOf(actor: MemberActor): Promise<WorkspacePo
       stalenessWindowMs: workspace.stalenessWindowMs,
       protectionDefault: workspace.protectionDefault,
       registration: workspace.registration,
+      deviceApproval: workspace.deviceApproval,
     })
     .from(workspace)
     .where(eq(workspace.id, actor.workspaceId))
@@ -39,6 +42,7 @@ export async function workspacePolicyOf(actor: MemberActor): Promise<WorkspacePo
     stalenessWindowMs: row.stalenessWindowMs,
     protectionDefault: row.protectionDefault as WorkspacePolicy["protectionDefault"],
     registration: row.registration as WorkspacePolicy["registration"],
+    deviceApproval: row.deviceApproval as WorkspacePolicy["deviceApproval"],
   };
 }
 
@@ -97,5 +101,23 @@ export async function setRegistration(
     return "bad_value";
   }
   await setKnob(actor, { registration: value }, "policy_registration", value);
+  return "set";
+}
+
+export type DeviceApprovalOutcome = "set" | "bad_value";
+
+/**
+ * The device-approval knob — `off` (the default: a member's new device link is born active)
+ * or `on` (born pending until an owner approves it on the fleet page). An owner's own act is
+ * always its own approval, whatever this says. Owner-only.
+ */
+export async function setDeviceApproval(
+  actor: OwnerActor,
+  value: string,
+): Promise<DeviceApprovalOutcome> {
+  if (value !== "off" && value !== "on") {
+    return "bad_value";
+  }
+  await setKnob(actor, { deviceApproval: value }, "policy_device_approval", value);
   return "set";
 }

@@ -89,12 +89,37 @@ export interface DeliveryNotice {
 export interface DeliveryBody {
   schema_version: 1;
   workspace_id: string;
+  /** The device↔workspace link's status; "pending" delivers NOTHING (the empty body below). */
+  link_status: "active" | "pending";
   skills: DeliverySkill[];
   detached: string[];
   excluded?: string[];
   notices: DeliveryNotice[];
   proposals_awaiting: number;
   staleness_window_ms: number;
+}
+
+/**
+ * The PENDING link's delivery: shape-complete and EMPTY — no data flows over a pending link
+ * (skills/detached/excluded/notices empty, zero proposals), but the staleness clock still
+ * serves so the client's freshness bookkeeping stays honest while it waits for approval.
+ */
+export async function emptyDeliveryFor(actor: DeviceActor): Promise<DeliveryBody> {
+  const wsRows = await getDb()
+    .select({ stalenessWindowMs: workspace.stalenessWindowMs })
+    .from(workspace)
+    .where(eq(workspace.id, actor.workspaceId))
+    .limit(1);
+  return {
+    schema_version: 1,
+    workspace_id: actor.workspaceId,
+    link_status: "pending",
+    skills: [],
+    detached: [],
+    notices: [],
+    proposals_awaiting: 0,
+    staleness_window_ms: wsRows[0]?.stalenessWindowMs ?? 604800000,
+  };
 }
 
 /** RFC-3339 seconds + Z (the wire's timestamp spelling). */
@@ -243,6 +268,7 @@ export async function deliveryFor(actor: DeviceActor): Promise<DeliveryBody> {
       const body: DeliveryBody = {
         schema_version: 1,
         workspace_id: ws,
+        link_status: "active",
         skills,
         detached,
         ...(excluded.length > 0 ? { excluded } : {}),

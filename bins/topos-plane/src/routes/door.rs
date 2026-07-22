@@ -6,16 +6,18 @@
 //! them.
 //!
 //! The lane: the gh-style device-auth start/poll (enrollment — on approval the device code is
-//! promoted to the device's ONE bearer credential), the publish/propose/revert/review writes, the
+//! promoted to the device's ONE bearer credential and the FIRST device↔workspace link is minted
+//! with it), the browser-free device-link lane (describe + create; person-scoped) and the global
+//! device self-revoke, the publish/propose/revert/review writes, the
 //! current/version/object/catalog/proposals reads, the delivery + applied-state report, the
-//! describe reads (me / channels / reach / review inbox / log), the row ops (follows / exclusions /
-//! channel membership + curation / protection / notices-ack / invitations), and the device revoke.
+//! describe reads (me / channels / reach / review inbox / log), and the row ops (follows /
+//! exclusions / channel membership + curation / protection / notices-ack / invitations).
 
 #![allow(dead_code)] // contract-only: referenced by the OpenAPI derive, routed by the web app.
 
 use topos_types::requests::{
     DeviceAuthPollRequest, DeviceAuthPollResponse, DeviceAuthStartRequest, DeviceAuthStartResponse,
-    DeviceRevokeRequest, InvitationRequest, InviteAcceptRequest, NoticeAckRequest, ProposeRequest,
+    DeviceLinkRequest, InvitationRequest, InviteAcceptRequest, NoticeAckRequest, ProposeRequest,
     ProtectionSetRequest, PublishRequest, RevertRequest, ReviewRequest, WireAppliedReport,
     WireChannelIndex, WireDelivery, WireMe, WireProposalIndex, WireProposalList, WireReach,
     WireSkillIndex, WireSkillLog, WireVersionMeta,
@@ -556,21 +558,53 @@ pub(crate) fn get_proposals() {}
 )]
 pub(crate) fn get_log() {}
 
-// ── the device revoke (the CLI logout wire) ──────────────────────────────────────────────────────
+// ── the device-link lane + the global self-revoke ────────────────────────────────────────────────
+// A device is REGISTERED once (device ↔ server, one browser ceremony ever) and LINKED per
+// workspace (device ↔ workspace, a first-class row, severable by both sides). The link ops are
+// PERSON-scoped: the seat is checked server-side, no link is required — an enrolled device joins a
+// further workspace browser-free, and a second device flow is never run against the same server.
+
+#[utoipa::path(
+    get,
+    path = "/v1/device/link",
+    tag = "enrollment",
+    params(
+        ("workspace" = String, Query, description = "The workspace ADDRESS slug (an EMPTY value names the origin's own workspace — the same convention as the device-auth start)."),
+        ("Authorization" = String, Header, description = "`Bearer <device credential>` — PERSON-scoped: the seat is checked, no link is required."),
+    ),
+    responses(
+        (status = 200, description = "The all-outcome envelope. OK carries the DeviceLinkDescribe (this device's current link — none/pending/active — and what a link would be born as: active, or pending under the workspace's device-approval knob); a seatless caller OR an unknown workspace name answers a byte-identical 200 DENIED NOT_A_MEMBER pointing at the invitation path (no existence oracle).", body = JsonEnvelope),
+        (status = 404, description = "Missing/blank credential or a revoked device (indistinguishable).", body = JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
+        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
+    ),
+)]
+pub(crate) fn get_device_link() {}
+
+#[utoipa::path(
+    post,
+    path = "/v1/device/link",
+    tag = "enrollment",
+    request_body = DeviceLinkRequest,
+    params(("Authorization" = String, Header, description = "`Bearer <device credential>` — PERSON-scoped: the seat is checked, no link is required.")),
+    responses(
+        (status = 200, description = "The all-outcome envelope. OK carries the DeviceLinkData (the joined workspace + the link's status: born active, or pending under the workspace's device-approval knob — owner-created links are always active). IDEMPOTENT: an existing link answers ok with its current status. A seatless caller OR an unknown workspace name answers the byte-identical 200 DENIED NOT_A_MEMBER.", body = JsonEnvelope),
+        (status = 400, description = "Malformed body.", body = JsonEnvelope),
+        (status = 404, description = "Missing/blank credential or a revoked device (indistinguishable).", body = JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
+        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
+    ),
+)]
+pub(crate) fn create_device_link() {}
 
 #[utoipa::path(
     delete,
-    path = "/v1/workspaces/{ws}/devices",
-    tag = "governance",
-    request_body = DeviceRevokeRequest,
-    params(
-        ("ws" = String, Path, description = "Workspace id."),
-        ("Authorization" = String, Header, description = "`Bearer <device credential>`."),
-    ),
+    path = "/v1/device",
+    tag = "enrollment",
+    params(("Authorization" = String, Header, description = "`Bearer <device credential>`.")),
     responses(
-        (status = 200, description = "The revoke receipt (instant: the target credential stops authorizing fresh work the moment it commits).", body = JsonEnvelope),
-        (status = 400, description = "Malformed body.", body = JsonEnvelope),
-        (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 200, description = "The global self-revoke landed (no body sent): THIS credential's device is revoked server-side — its links and per-workspace reported state are deleted with it. A retry answers the uniform 404 (already signed out).", body = JsonEnvelope),
+        (status = 404, description = "Missing/blank credential or an already-revoked device (indistinguishable) — the caller treats this as already-signed-out.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),

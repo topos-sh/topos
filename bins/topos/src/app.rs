@@ -280,10 +280,12 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
                 follows: Vec::new(),
             });
+        // The fan-out excludes locally-ENDED links (their deliveries answer the uniform 404 —
+        // the once-typed line already printed; `follow <address>` relinks).
         let workspaces: Vec<String> = enroll::read_user(ctx.fs, &ctx.layout)
             .ok()
             .flatten()
-            .map(|u| u.workspaces.into_iter().map(|m| m.workspace_id).collect())
+            .map(|u| u.fanout_workspace_ids())
             .unwrap_or_default();
         Box::new(
             UreqPlane::new(
@@ -1571,6 +1573,28 @@ fn finish_follow(
                 println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::reattach_applied_tty(&reattach));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::FollowOutcome::LinkDescribed { describe, yes_argv }) => {
+            if json {
+                let value = serde_json::json!({ "link": describe });
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::describe_next_actions(vec![yes_argv]);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::link_describe_tty(&describe, &yes_argv));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::FollowOutcome::LinkPending(pending)) => {
+            if json {
+                let value = serde_json::to_value(&*pending).unwrap_or_default();
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::link_pending_next_actions();
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::link_pending_tty(&pending));
             }
             ExitCode::SUCCESS
         }

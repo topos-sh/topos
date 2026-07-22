@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DeviceLinkRequest",
+  "description": "`POST /v1/device/link` body — link THIS device (the Bearer credential's) to a workspace the\nperson's seats reach, by address slug (empty = the origin's own workspace). Idempotent: an\nexisting link answers ok with its current status.",
+  "type": "object",
+  "properties": {
+    "workspace": {
+      "description": "The workspace ADDRESS slug (empty = the origin's own workspace).",
+      "type": "string"
+    }
+  },
+  "required": [
+    "workspace"
+  ]
+}

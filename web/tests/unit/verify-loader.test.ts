@@ -32,21 +32,35 @@ interface PendingView {
   requestedName: string;
   requestedWorkspace: string;
   userCode: string;
-  inviteWorkspace: { name: string; displayName: string } | null;
+  inviteWorkspace: { name: string; displayName: string; role: string } | null;
+}
+
+interface WorkspaceRow {
+  id: string;
+  name: string;
+  displayName: string;
+  deviceApproval: "off" | "on";
 }
 
 const pendingDeviceAuthByChallenge = vi.fn<(hex: string) => Promise<PendingView | null>>();
+const theWorkspace = vi.fn<() => Promise<WorkspaceRow | null>>();
+const workspaceByName = vi.fn<(name: string) => Promise<WorkspaceRow | null>>();
+const seatOf = vi.fn<() => Promise<{ role: string } | undefined>>();
 vi.mock("@/lib/db/identity.server", () => ({
   pendingDeviceAuth: vi.fn(),
   pendingDeviceAuthByChallenge: (hex: string) => pendingDeviceAuthByChallenge(hex),
   approveDeviceAuth: vi.fn(),
   denyDeviceAuth: vi.fn(),
+  // The REAL born-status rule, restated (a pure function — mocking it away would unpin the
+  // awaits-approval copy from the rule the ceremonies run).
+  linkBornStatus: (role: string, knob: string) =>
+    role === "owner" ? "active" : knob === "on" ? "pending" : "active",
   // guards.server's imports (unused by the loader under test, present so the mock resolves).
   deviceActor: vi.fn(),
   devicePerson: vi.fn(),
-  seatOf: vi.fn(),
-  theWorkspace: vi.fn(),
-  workspaceByName: vi.fn(),
+  seatOf: () => seatOf(),
+  theWorkspace: () => theWorkspace(),
+  workspaceByName: (name: string) => workspaceByName(name),
 }));
 
 const membershipsFor = vi.fn<() => Promise<unknown[]>>();
@@ -74,6 +88,9 @@ beforeEach(() => {
   session = { user: { id: "u_1", name: "Person", email: "person@example.com" } };
   pendingDeviceAuthByChallenge.mockReset().mockResolvedValue(null);
   membershipsFor.mockReset().mockResolvedValue([]);
+  theWorkspace.mockReset().mockResolvedValue(null);
+  workspaceByName.mockReset().mockResolvedValue(null);
+  seatOf.mockReset().mockResolvedValue(undefined);
 });
 
 /** Drive the loader; a thrown redirect Response comes back as the result. */
@@ -115,30 +132,74 @@ describe("the signed-out bounce", () => {
 });
 
 describe("the challenge resolution (zero typing)", () => {
-  it("a valid device challenge resolves the card, reach included", async () => {
-    membershipsFor.mockResolvedValue([{ displayName: "Acme", address: "acme" }]);
+  it("a valid device challenge resolves the card with THE ONE workspace being linked", async () => {
+    theWorkspace.mockResolvedValue({
+      id: "w_1",
+      name: "acme",
+      displayName: "Acme",
+      deviceApproval: "off",
+    });
+    seatOf.mockResolvedValue({ role: "member" });
     pendingDeviceAuthByChallenge.mockResolvedValue(FLOW);
     const result = (await call(`http://x/verify?device=${CHALLENGE}`)) as {
-      resolved: { userCode: string; reach: { label: string; joining: boolean }[] } | null;
+      resolved: {
+        userCode: string;
+        linked: { displayName: string; joining: boolean; awaitsApproval: boolean };
+      } | null;
     };
     expect(pendingDeviceAuthByChallenge).toHaveBeenCalledWith(CHALLENGE);
     expect(result.resolved?.userCode).toBe("AB12-CD34");
-    expect(result.resolved?.reach).toEqual([{ label: "Acme", joining: false }]);
+    expect(result.resolved?.linked).toEqual({
+      name: "acme",
+      displayName: "Acme",
+      joining: false,
+      awaitsApproval: false,
+    });
   });
 
-  it("an invite-carrying flow adds the joining workspace to the reach", async () => {
+  it("the device-approval knob + a non-owner approver forewarn the pending link", async () => {
+    theWorkspace.mockResolvedValue({
+      id: "w_1",
+      name: "acme",
+      displayName: "Acme",
+      deviceApproval: "on",
+    });
+    seatOf.mockResolvedValue({ role: "member" });
+    pendingDeviceAuthByChallenge.mockResolvedValue(FLOW);
+    const result = (await call(`http://x/verify?device=${CHALLENGE}`)) as {
+      resolved: { linked: { awaitsApproval: boolean } } | null;
+    };
+    expect(result.resolved?.linked.awaitsApproval).toBe(true);
+    // An OWNER approver's link never waits — the actor is the approval.
+    seatOf.mockResolvedValue({ role: "owner" });
+    const asOwner = (await call(`http://x/verify?device=${CHALLENGE}`)) as {
+      resolved: { linked: { awaitsApproval: boolean } } | null;
+    };
+    expect(asOwner.resolved?.linked.awaitsApproval).toBe(false);
+  });
+
+  it("an invite-carrying flow links the INVITATION's workspace, joining on approve", async () => {
     membershipsFor.mockResolvedValue([{ displayName: "Home", address: "home" }]);
+    workspaceByName.mockResolvedValue({
+      id: "w_acme",
+      name: "acme",
+      displayName: "Acme Platform",
+      deviceApproval: "off",
+    });
     pendingDeviceAuthByChallenge.mockResolvedValue({
       ...FLOW,
-      inviteWorkspace: { name: "acme", displayName: "Acme Platform" },
+      inviteWorkspace: { name: "acme", displayName: "Acme Platform", role: "member" },
     });
     const result = (await call(`http://x/verify?device=${CHALLENGE}`)) as {
-      resolved: { reach: { label: string; joining: boolean }[] } | null;
+      resolved: { linked: { displayName: string; joining: boolean } } | null;
     };
-    expect(result.resolved?.reach).toEqual([
-      { label: "Home", joining: false },
-      { label: "Acme Platform", joining: true },
-    ]);
+    expect(workspaceByName).toHaveBeenCalledWith("acme");
+    expect(result.resolved?.linked).toEqual({
+      name: "acme",
+      displayName: "Acme Platform",
+      joining: true,
+      awaitsApproval: false,
+    });
   });
 });
 
@@ -176,7 +237,7 @@ describe("multi tenancy: the workspace-creation weave", () => {
   it("zero seats + an INVITE-carrying flow stays here — the accept will seat them", async () => {
     pendingDeviceAuthByChallenge.mockResolvedValue({
       ...FLOW,
-      inviteWorkspace: { name: "acme", displayName: "Acme" },
+      inviteWorkspace: { name: "acme", displayName: "Acme", role: "member" },
     });
     const result = await call(`http://x/verify?device=${CHALLENGE}`);
     expect(result).toMatchObject({ multi: true });

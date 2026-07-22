@@ -33,13 +33,15 @@ use topos_gitstore::Store;
 use topos_types::PERSISTED_SCHEMA_VERSION;
 use topos_types::persisted::{Lock, PlacementMap, SwapCapability, SyncState};
 use topos_types::requests::{WireChannelIndex, WireMe, WireSkillIndex};
-use topos_types::results::{EnrollmentPending, FollowData, FollowOffer, Offer, PullAction};
+use topos_types::results::{
+    EnrollmentPending, FollowData, FollowOffer, LinkPendingData, Offer, PullAction,
+};
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::plane::{
     DeliverySnapshot, DeliverySource, DeviceAuthPoll, DirectorySource, EnrollSource, EnrolledGrant,
-    FollowContext, PlaneError, PlaneSource, ReconcileTransport,
+    FollowContext, LinkStatus, PlaneError, PlaneSource, ReconcileTransport,
 };
 use crate::plane_http::FileFollow;
 use crate::resolve::{self, ParsedTarget, Resolution, ResourceKind};
@@ -151,6 +153,37 @@ pub(crate) enum FollowOutcome {
     /// The `--agent` scope UPDATE on already-followed skills (two-phase, offline — the shared
     /// placement-policy surface).
     Scope(super::agent_scope::AgentScopeOutcome),
+    /// The browser-free device-link DESCRIBE — an ENROLLED install targeting a same-plane
+    /// workspace it is not yet linked to (nothing mutated; `yes_argv` carries the paste-ready
+    /// apply).
+    LinkDescribed {
+        describe: Box<LinkDescribe>,
+        yes_argv: Vec<String>,
+    },
+    /// A PENDING device↔workspace link's typed receipt — from the link lane's `--yes`, an
+    /// enrollment grant, or an invitation accept whose link awaits an owner's approval. Nothing
+    /// subscribed, no bytes; delivery starts automatically after approval.
+    LinkPending(Box<LinkPendingData>),
+}
+
+/// The browser-free link DESCRIBE: link this device to a same-plane workspace the person's seats
+/// reach — one row op, no device flow, no browser (the device is already registered with the
+/// server; a workspace link is the per-workspace half). Nothing mutates before `--yes`.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct LinkDescribe {
+    pub workspace: DescribedWorkspace,
+    /// The caller's role on the roster.
+    pub role: String,
+    /// THIS device's current link — `none` / `pending` / `active` (idempotent: an existing link's
+    /// `--yes` re-answers its status).
+    pub link_status: String,
+    /// What the link would be born as — `active`, or `pending` under the workspace's
+    /// device-approval knob (an owner then approves it in the web app).
+    pub born: String,
+    /// Following is person-scoped: every linked device of this person receives the same set.
+    pub all_devices_note: String,
+    /// This device reports its applied versions to the workspace's fleet view after each update.
+    pub reporting_note: String,
 }
 
 impl FollowOutcome {
@@ -559,6 +592,18 @@ fn resume(
         // describes the invited-to thing first.
         DeviceAuthPoll::Granted(grant) => {
             persist_enrollment(ctx, &wal.base_url, &grant)?;
+            // A PENDING first link: the enrollment persisted (registration + trigger armed), but
+            // no data flows until an owner approves — the typed receipt, no subscribe attempt
+            // (the sweep stays quiet; delivery starts automatically after approval).
+            if grant.link_status == LinkStatus::Pending {
+                return Ok(FollowOutcome::LinkPending(Box::new(LinkPendingData {
+                    workspace_id: grant.workspace.workspace_id.clone(),
+                    workspace_name: grant.workspace.name.clone(),
+                    workspace_display_name: Some(grant.workspace.display_name.clone()),
+                    link_status: "pending".to_owned(),
+                    enrolled_now: true,
+                })));
+            }
             let target = grant
                 .hint
                 .as_ref()
@@ -621,6 +666,12 @@ pub(super) fn persist_enrollment(
             name: grant.workspace.name.clone(),
             display_name: grant.workspace.display_name.clone(),
             enrolled_at: now_millis(ctx),
+            // The FIRST link's born status rides the grant (approval mints registration + link
+            // together server-side) — recorded so the sweep and `status` know a pending wait.
+            link_status: match grant.link_status {
+                LinkStatus::Active => enroll::LINK_ACTIVE.to_owned(),
+                LinkStatus::Pending => enroll::LINK_PENDING.to_owned(),
+            },
         },
     );
     enroll::write_user(ctx.fs, &ctx.layout, &user)?;
@@ -660,6 +711,9 @@ struct EnrollIntent {
     host: Option<String>,
     workspace_name: String,
     target: enroll::FollowTargetDoc,
+    /// The ORIGINAL argv token, verbatim — the link-lane describe's `--yes` argv re-spells this
+    /// invocation, so the apply resolves exactly what the human typed.
+    token: String,
     /// True when the target was a BARE word (no slash, no scheme) — the shape the unenrolled
     /// consent guard gates before any device flow starts.
     bareword: bool,
@@ -724,7 +778,7 @@ fn split_origin(raw: &str) -> Option<(String, String)> {
 /// stays the uniform not-found. An ORIGIN address (empty `workspace`) enrolls toward "the workspace
 /// this origin itself addresses" (single-tenant installs) — the empty slug rides the wire body, and
 /// the granted poll carries the authoritative workspace back.
-fn enroll_intent(parsed: &ParsedTarget) -> Option<EnrollIntent> {
+fn enroll_intent(parsed: &ParsedTarget, token: &str) -> Option<EnrollIntent> {
     match parsed {
         ParsedTarget::Address {
             host,
@@ -758,6 +812,7 @@ fn enroll_intent(parsed: &ParsedTarget) -> Option<EnrollIntent> {
                 host: host.clone(),
                 workspace_name: workspace.clone(),
                 target,
+                token: token.to_owned(),
                 bareword: false,
                 invite: None,
             })
@@ -769,6 +824,7 @@ fn enroll_intent(parsed: &ParsedTarget) -> Option<EnrollIntent> {
                 kind: enroll::FollowKindDoc::Workspace,
                 name: name.clone(),
             },
+            token: token.to_owned(),
             bareword: true,
             invite: None,
         }),
@@ -805,6 +861,14 @@ fn begin_address(
     let card = (connectors.enroll)(&origin).fetch_card(&card_url)?;
     let base_url = resolve_api_base(&origin, &card.api_base_url)?;
     guard_one_plane(ctx, &base_url)?;
+
+    // An ENROLLED install NEVER starts a second device flow against its own plane (one device row
+    // per install per server, ever — the guard above already refused a DIFFERENT server). The
+    // target names a same-plane workspace this install has no live link to: the browser-free LINK
+    // lane joins it — one row op, no ceremony, two-phase like every subscribe.
+    if enroll::read_instance(ctx.fs, &ctx.layout)?.is_some() {
+        return link_workspace(ctx, connectors, &base_url, &intent, opts);
+    }
 
     let start = (connectors.enroll)(&base_url).device_auth_start(
         &intent.workspace_name,
@@ -857,6 +921,128 @@ pub(crate) fn device_challenge(device_code: &str) -> String {
     to_hex(&topos_core::digest::sha256(device_code.as_bytes()))
 }
 
+// =================================================================================================
+// The browser-free LINK lane — an ENROLLED install joining a further same-plane workspace. The
+// device is registered ONCE (device ↔ server, one browser ceremony ever); each workspace is a
+// LINK (device ↔ workspace, a first-class row). Joining a second workspace is therefore one
+// person-scoped row op — never a second device flow, never a re-minted device row.
+// =================================================================================================
+
+/// The two-phase link: bare = the DESCRIBE (a GET, nothing mutates) — lead with "link this device
+/// to <workspace>", the standing disclosures, and whether the link is born active or pending;
+/// `--yes` = POST the link, record the membership, and on an ACTIVE link CONTINUE into the
+/// ordinary subscribe describe/apply THIS invocation (the enroll fold-in shape — `--yes` is
+/// already the subscribe consent). A PENDING link answers the typed waiting receipt instead: no
+/// subscribe, no bytes; delivery starts automatically after an owner approves.
+fn link_workspace(
+    ctx: &Ctx<'_>,
+    connectors: &FollowConnectors<'_>,
+    base_url: &str,
+    intent: &EnrollIntent,
+    opts: &FollowOpts,
+) -> Result<FollowOutcome, ClientError> {
+    // The refusal's display name: an ORIGIN target (empty slug) reads as the plane base.
+    let shown_name = if intent.workspace_name.is_empty() {
+        base_url
+    } else {
+        intent.workspace_name.as_str()
+    };
+    let directory = (connectors.directory)(base_url);
+    if !opts.yes {
+        let d = directory
+            .describe_link(&intent.workspace_name)
+            .map_err(|e| map_link_refusal(e, shown_name))?;
+        let mut yes_argv = vec![
+            "topos".to_owned(),
+            "follow".to_owned(),
+            intent.token.clone(),
+        ];
+        if opts.manual {
+            yes_argv.push("--manual".to_owned());
+        }
+        yes_argv.push("--yes".to_owned());
+        let describe = LinkDescribe {
+            workspace: DescribedWorkspace {
+                workspace_id: d.workspace_id,
+                name: d.name,
+                display_name: d.display_name,
+                address: d.address,
+            },
+            role: d.role,
+            link_status: d.link_status,
+            born: d.born,
+            all_devices_note: "following is person-scoped: every linked device of this person \
+                               receives the same set"
+                .to_owned(),
+            reporting_note: "this device reports its applied versions to the workspace's fleet \
+                             view after each update"
+                .to_owned(),
+        };
+        return Ok(FollowOutcome::LinkDescribed {
+            describe: Box::new(describe),
+            yes_argv,
+        });
+    }
+
+    // ---- APPLY (`--yes`) ---- ONE row op; idempotent (an existing link re-answers its status).
+    let data = directory
+        .create_link(&intent.workspace_name)
+        .map_err(|e| map_link_refusal(e, shown_name))?;
+    // The wire boundary: the workspace id becomes a `user.json` key + a URL segment downstream.
+    crate::id::validate_workspace_id(&data.workspace_id).map_err(crate::id::wire_flavor)?;
+    let pending = LinkStatus::from_wire(Some(&data.link_status)) == LinkStatus::Pending;
+    let mut user = enroll::read_user(ctx.fs, &ctx.layout)?.unwrap_or_default();
+    user.schema_version = PERSISTED_SCHEMA_VERSION;
+    enroll::upsert_membership(
+        &mut user,
+        enroll::Membership {
+            workspace_id: data.workspace_id.clone(),
+            name: data.name.clone(),
+            display_name: data.display_name.clone(),
+            enrolled_at: now_millis(ctx),
+            link_status: if pending {
+                enroll::LINK_PENDING
+            } else {
+                enroll::LINK_ACTIVE
+            }
+            .to_owned(),
+        },
+    );
+    enroll::write_user(ctx.fs, &ctx.layout, &user)?;
+    if pending {
+        return Ok(FollowOutcome::LinkPending(Box::new(LinkPendingData {
+            workspace_id: data.workspace_id,
+            workspace_name: data.name,
+            workspace_display_name: Some(data.display_name),
+            link_status: "pending".to_owned(),
+            enrolled_now: false,
+        })));
+    }
+    // ACTIVE: continue into the recorded target's ordinary subscribe THIS invocation (the enroll
+    // fold-in shape) — `--yes` is already set, so the row ops + reconcile apply now.
+    continue_into_target(
+        ctx,
+        connectors,
+        base_url,
+        &data.workspace_id,
+        &intent.target,
+        opts,
+    )
+}
+
+/// Turn the wire's `NOT_A_MEMBER` envelope refusal into the typed invitation-path guidance
+/// ([`ClientError::NotAMember`]); every other fault passes through untouched.
+fn map_link_refusal(e: ClientError, workspace: &str) -> ClientError {
+    match e {
+        ClientError::PlaneTerminal { ref code, .. } if code == "NOT_A_MEMBER" => {
+            ClientError::NotAMember {
+                workspace: workspace.to_owned(),
+            }
+        }
+        other => other,
+    }
+}
+
 /// The follow target an invitation's first-destination hint names (`channel` → a channel join;
 /// anything else — the catalog's `kind` tag — a direct skill follow).
 fn hint_target(hint: &crate::plane::GrantHint) -> enroll::FollowTargetDoc {
@@ -893,6 +1079,7 @@ fn follow_invite_url(
         // as its person, and the fresh seat extends its reach the moment the accept commits.
         let directory = (connectors.directory)(&base_url);
         let accepted = directory.accept_invitation(&link.token)?;
+        let pending = accepted.link_status == LinkStatus::Pending;
         let mut user = enroll::read_user(ctx.fs, &ctx.layout)?.unwrap_or_default();
         user.schema_version = PERSISTED_SCHEMA_VERSION;
         enroll::upsert_membership(
@@ -902,9 +1089,29 @@ fn follow_invite_url(
                 name: accepted.workspace.name.clone(),
                 display_name: accepted.workspace.display_name.clone(),
                 enrolled_at: now_millis(ctx),
+                // The accept also LINKED this device, born per the workspace's device-approval
+                // knob — no exception for invitations.
+                link_status: if pending {
+                    enroll::LINK_PENDING
+                } else {
+                    enroll::LINK_ACTIVE
+                }
+                .to_owned(),
             },
         );
         enroll::write_user(ctx.fs, &ctx.layout, &user)?;
+        // A PENDING link: the seat is accepted, but no data flows until an owner approves — the
+        // typed receipt instead of the hint's describe (the invitation's contents arrive
+        // automatically once approved).
+        if pending {
+            return Ok(FollowOutcome::LinkPending(Box::new(LinkPendingData {
+                workspace_id: accepted.workspace.workspace_id.clone(),
+                workspace_name: accepted.workspace.name.clone(),
+                workspace_display_name: Some(accepted.workspace.display_name.clone()),
+                link_status: "pending".to_owned(),
+                enrolled_now: false,
+            })));
+        }
         let target = match &accepted.hint {
             Some(hint) => hint_target(hint),
             None => enroll::FollowTargetDoc {
@@ -934,6 +1141,7 @@ fn follow_invite_url(
                 kind: enroll::FollowKindDoc::Workspace,
                 name: workspace_slug.to_owned(),
             },
+            token: link.url.clone(),
             bareword: false,
             invite: Some(link),
         },
@@ -1032,7 +1240,7 @@ fn subscribe_dispatch(
                 // resource is the uniform not-found), and a batch resolves all-or-none.
                 if specs.len() == 1
                     && spec.forced.is_none()
-                    && let Some(intent) = enroll_intent(&parsed)
+                    && let Some(intent) = enroll_intent(&parsed, &spec.token)
                 {
                     if universe.iter().any(|w| w.name == intent.workspace_name) {
                         return Err(resolve::not_found(&spec.token));
@@ -1138,8 +1346,11 @@ pub(super) fn build_universe_via(
     let Some(instance) = enroll::read_instance(ctx.fs, &ctx.layout)? else {
         return Ok((None, Vec::new()));
     };
+    // The fan-out excludes locally-ENDED links (their reads answer the uniform 404 anyway);
+    // PENDING links stay in — their member-scoped reads answer (with `link_status` marked), so a
+    // pending workspace's names still resolve while its delivery stays empty.
     let memberships: Vec<String> = enroll::read_user(ctx.fs, &ctx.layout)?
-        .map(|u| u.workspaces.into_iter().map(|m| m.workspace_id).collect())
+        .map(|u| u.fanout_workspace_ids())
         .unwrap_or_default();
     // No memberships ⇒ nothing to read (and no transport to build — an enrolled-but-memberless
     // install must stay on the offline-graceful paths).

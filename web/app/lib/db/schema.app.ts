@@ -139,6 +139,36 @@ export const deviceAuthSession = webSchema.table(
   ],
 );
 
+/**
+ * The device↔workspace LINK — a first-class row, severable by both sides. A device is
+ * REGISTERED once (device ↔ server, user-owned: the `device` table above) and LINKED per
+ * workspace: authorization on the device lane runs credential → un-revoked device → owner's
+ * seat → LIVE LINK. Links are DELETED, never tombstoned (no ghost rows — history lives in
+ * audit_event alone); `pending` is the device-approval knob's holding state (an owner approves
+ * on the fleet page, or the link was created by an owner and is born active).
+ */
+export const deviceLink = webSchema.table(
+  "device_link",
+  {
+    /** 'dl_…', server-minted. */
+    id: text("id").primaryKey(),
+    deviceId: text("device_id")
+      .notNull()
+      .references(() => device.id, { onDelete: "cascade" }),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    status: text("status").default("pending").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    unique("device_link_device_id_workspace_id_unique").on(table.deviceId, table.workspaceId),
+    index("device_link_workspace_idx").on(table.workspaceId),
+    index("device_link_device_idx").on(table.deviceId),
+    check("device_link_status_check", sql`${table.status} in ('pending', 'active')`),
+  ],
+);
+
 // ── Workspace + membership ───────────────────────────────────────────────────────────────────
 
 export const workspace = webSchema.table(
@@ -160,6 +190,12 @@ export const workspace = webSchema.table(
       .default(604800000)
       .notNull(),
     registration: text("registration").default("invite_only").notNull(),
+    /**
+     * The device-approval knob: 'on' makes a non-owner's new device link born 'pending' until
+     * an owner approves it on the fleet page. Off by default; an owner's own act is always its
+     * own approval.
+     */
+    deviceApproval: text("device_approval").default("off").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .defaultNow()
@@ -180,6 +216,7 @@ export const workspace = webSchema.table(
       sql`${table.protectionDefault} in ('open', 'reviewed')`,
     ),
     check("workspace_registration_check", sql`${table.registration} in ('invite_only', 'open')`),
+    check("workspace_device_approval_check", sql`${table.deviceApproval} in ('off', 'on')`),
     check(
       "workspace_claim_state_check",
       sql`(${table.claimedAt} is null) <> (${table.claimCodeSha256} is null)`,

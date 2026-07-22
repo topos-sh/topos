@@ -94,13 +94,17 @@ export async function ensureSeatedUser(
 
 /**
  * Mint a DEVICE row for a user with a KNOWN plaintext credential (the hash is computed in
- * Postgres, like the product's own mint). The credential then drives `/api/v1` as that user.
+ * Postgres, like the product's own mint), LINKED to the install's one workspace (active by
+ * default — the born state the real ceremony mints under an off knob; pass "pending" for the
+ * approval-queue seeds, or null for an unlinked registration). The credential then drives
+ * `/api/v1` as that user.
  */
 export async function mintDevice(
   userId: string,
   deviceId: string,
   displayName: string,
   credential: string,
+  linkStatus: "active" | "pending" | null = "active",
 ): Promise<void> {
   await adminQuery(
     `insert into web.device (id, user_id, display_name, credential_sha256)
@@ -108,6 +112,15 @@ export async function mintDevice(
      on conflict (id) do nothing`,
     [deviceId, userId, displayName, credential],
   );
+  if (linkStatus !== null) {
+    const ws = await theWorkspace();
+    await adminQuery(
+      `insert into web.device_link (id, device_id, workspace_id, status)
+       values ('dl_e2e_' || $1, $1, $2, $3)
+       on conflict (device_id, workspace_id) do update set status = excluded.status`,
+      [deviceId, ws.id, linkStatus],
+    );
+  }
 }
 
 // ── Web catalog rows ─────────────────────────────────────────────────────────────────────────

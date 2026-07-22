@@ -1,6 +1,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Link, useLoaderData } from "react-router";
 import { AddressBlock } from "@/components/members/address-block";
+import { DeviceApprovalPanel } from "@/components/policy/device-approval-panel";
 import type { LastSetLine } from "@/components/policy/last-set-line";
 import { RegistrationPanel } from "@/components/policy/registration-panel";
 import { ReviewRequiredPanel } from "@/components/policy/review-required-panel";
@@ -11,6 +12,7 @@ import { composition } from "@/composition.server";
 import { requireMemberInScope, requireWorkspaceOwner } from "@/lib/auth/guards.server";
 import { type AuditEventRow, lastAuditEventOfKind, recordAdminEvent } from "@/lib/db/audit.server";
 import {
+  setDeviceApproval,
   setRegistration,
   setStalenessWindow,
   workspacePolicyOf,
@@ -42,14 +44,16 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   // The knobs are plain columns on the ONE workspace row; the column DEFAULTs are the canonical
   // fallbacks, so a fresh install shows the true defaults, never a blank. The "last set by"
   // lines read the audit ledger — the same rows the setters land in their own transactions.
-  const [policy, lastReview, lastStaleness, lastRegistration] = await Promise.all([
-    workspacePolicyOf(actor),
-    lastAuditEventOfKind(actor, "policy_review_default"),
-    lastAuditEventOfKind(actor, "policy_staleness"),
-    registrationGoverns
-      ? lastAuditEventOfKind(actor, "policy_registration")
-      : Promise.resolve(undefined),
-  ]);
+  const [policy, lastReview, lastStaleness, lastRegistration, lastDeviceApproval] =
+    await Promise.all([
+      workspacePolicyOf(actor),
+      lastAuditEventOfKind(actor, "policy_review_default"),
+      lastAuditEventOfKind(actor, "policy_staleness"),
+      registrationGoverns
+        ? lastAuditEventOfKind(actor, "policy_registration")
+        : Promise.resolve(undefined),
+      lastAuditEventOfKind(actor, "policy_device_approval"),
+    ]);
   return {
     isOwner,
     registrationGoverns,
@@ -58,10 +62,12 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     reviewRequired: policy.protectionDefault === "reviewed",
     stalenessWindowMs: policy.stalenessWindowMs,
     registration: policy.registration,
+    deviceApproval: policy.deviceApproval,
     lastSet: {
       review: lastSetOf(lastReview),
       staleness: lastSetOf(lastStaleness),
       registration: lastSetOf(lastRegistration),
+      deviceApproval: lastSetOf(lastDeviceApproval),
     },
   };
 }
@@ -94,6 +100,9 @@ export async function action({ request, params }: ActionFunctionArgs) {
   // not exist there: it answers exactly what any unknown intent answers.
   if (intent === "set-registration" && composition.tenancy === "single") {
     return registrationIntent(request, ws, formData);
+  }
+  if (intent === "set-device-approval") {
+    return deviceApprovalIntent(request, ws, formData);
   }
   return data({ intent: "unknown" as const, status: "error" as const }, { status: 400 });
 }
@@ -182,6 +191,18 @@ async function registrationIntent(request: Request, ws: string, formData: FormDa
   return { intent: "set-registration" as const, ...result };
 }
 
+/** The device-approval knob — `on` bears non-owner device links pending; default off. */
+async function deviceApprovalIntent(request: Request, ws: string, formData: FormData) {
+  const value = String(formData.get("device_approval") ?? "");
+  const result = await knobIntent(request, ws, {
+    auditKind: "policy_device_approval",
+    detail: value,
+    run: (owner) => setDeviceApproval(owner, value),
+    deniedError: () => "Choose off or required.",
+  });
+  return { intent: "set-device-approval" as const, ...result };
+}
+
 export default function WorkspaceSettings() {
   const {
     isOwner,
@@ -191,6 +212,7 @@ export default function WorkspaceSettings() {
     reviewRequired,
     stalenessWindowMs,
     registration,
+    deviceApproval,
     lastSet,
   } = useLoaderData<typeof loader>();
   const wsPath = useWsPath();
@@ -218,6 +240,11 @@ export default function WorkspaceSettings() {
         isOwner={isOwner}
         stalenessWindowMs={stalenessWindowMs}
         lastSet={lastSet.staleness}
+      />
+      <DeviceApprovalPanel
+        isOwner={isOwner}
+        deviceApproval={deviceApproval}
+        lastSet={lastSet.deviceApproval}
       />
       {registrationGoverns && (
         <RegistrationPanel

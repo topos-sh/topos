@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { action as reviewsAction } from "@/routes/api.v1.reviews";
 import {
   createScratchDb,
+  linkDevice,
   type ScratchDb,
   seatUser,
   seedBundle,
@@ -35,6 +36,7 @@ beforeAll(async () => {
   await seedUser(db, "u_rev", "Reviewer", "rev@example.com");
   await seatUser(db, wsId, "u_rev", "reviewer");
   await seedDevice(db, "dk_rev", "u_rev", "rev-laptop"); // Bearer plaintext = "dk_rev"
+  await linkDevice(db, "dk_rev", wsId);
 
   // A `reviewed` bundle + an OPEN proposal the reviewer themselves authored: the self-approve.
   await seedBundle(db, wsId, "s_fe", "four-eyes", {

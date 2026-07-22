@@ -694,7 +694,10 @@ impl Stack {
     }
 
     /// Mint a PROBE device grant for the harness itself over the real device flow — for wire-level
-    /// lane calls the CLI has no verb for (curation, membership, the uniform-404 probes).
+    /// lane calls the CLI has no verb for (curation, membership, the uniform-404 probes). The
+    /// `/verify` approval mints registration + the FIRST device↔workspace link in one fence, so
+    /// the grant arrives already linked to the boot workspace — born per the one rule (an owner
+    /// approver's link is active; a member's is pending when the `device_approval` knob is on).
     pub(crate) fn mint_device(&self, approver: &Session, requested_name: &str) -> DeviceGrant {
         let start = self.device_post_json(
             None,
@@ -833,6 +836,13 @@ impl Stack {
     /// rung performs in a mail-armed deployment (the Playwright mail-sink spec drives that rung for
     /// real; these suites run SMTP-unset by design). Also marks the address verified.
     pub(crate) fn seat(&self, email: &str, role: &str) {
+        let workspace_id = self.workspace_id.clone();
+        self.seat_in(&workspace_id, email, role);
+    }
+
+    /// [`seat`](Self::seat) into a NAMED workspace — for the second-workspace arrangements the
+    /// device-link suites drive (the OSS single-tenant product has no second-workspace surface).
+    pub(crate) fn seat_in(&self, workspace_id: &str, email: &str, role: &str) {
         self.rt
             .block_on(async {
                 sqlx::query("UPDATE web.\"user\" SET email_verified = true WHERE email = $1")
@@ -844,7 +854,7 @@ impl Stack {
                      SELECT $1, id, $2 FROM web.\"user\" WHERE email = $3
                      ON CONFLICT (workspace_id, user_id) DO UPDATE SET role = EXCLUDED.role",
                 )
-                .bind(&self.workspace_id)
+                .bind(workspace_id)
                 .bind(role)
                 .bind(email)
                 .execute(&self.pool)
@@ -853,12 +863,51 @@ impl Stack {
                     "INSERT INTO web.audit_event (workspace_id, actor_display, kind, subject, outcome)
                      VALUES ($1, 'e2e-harness', 'seat_arranged', $2, 'ok')",
                 )
-                .bind(&self.workspace_id)
+                .bind(workspace_id)
                 .bind(email)
                 .execute(&self.pool)
                 .await
             })
             .expect("seat the account");
+    }
+
+    /// Insert a SECOND workspace directly — claimed (CHECK-valid), with its implicit default
+    /// `everyone` channel — and return its row id. The OSS single-tenant product deliberately has
+    /// no second-workspace surface; the device-link lane still resolves any workspace by NAME, so
+    /// this is the named mail-less arrangement for the cross-workspace and second-link suites.
+    pub(crate) fn add_workspace(&self, name: &str, display_name: &str) -> String {
+        let id = format!("w_e2e{name:0<28}").replace(' ', "0");
+        let channel_id = format!("c_e2e{name:0<28}").replace(' ', "0");
+        self.rt
+            .block_on(async {
+                sqlx::query(
+                    "INSERT INTO web.workspace (id, name, display_name, claimed_at)
+                     VALUES ($1, $2, $3, now())",
+                )
+                .bind(&id)
+                .bind(name)
+                .bind(display_name)
+                .execute(&self.pool)
+                .await?;
+                sqlx::query(
+                    "INSERT INTO web.channel (id, workspace_id, name, is_default)
+                     VALUES ($1, $2, 'everyone', true)",
+                )
+                .bind(&channel_id)
+                .bind(&id)
+                .execute(&self.pool)
+                .await?;
+                sqlx::query(
+                    "INSERT INTO web.audit_event (workspace_id, actor_display, kind, subject, outcome)
+                     VALUES ($1, 'e2e-harness', 'workspace_arranged', $2, 'ok')",
+                )
+                .bind(&id)
+                .bind(name)
+                .execute(&self.pool)
+                .await
+            })
+            .expect("insert the second workspace");
+        id
     }
 
     /// Sign a fresh member up AND seat them: the one-call arrangement most suites want.

@@ -608,6 +608,25 @@ pub struct FollowOffer {
     pub offer: Offer,
 }
 
+/// The typed receipt a PENDING device↔workspace link answers — a `follow` whose link (born at the
+/// device link lane, the enrollment grant, or an invitation accept) awaits an OWNER's approval.
+/// Nothing is subscribed and no bytes land while it is pending; delivery starts automatically
+/// after approval (the quiet sweep stays silent meanwhile), and `topos status` shows the waiting
+/// link. **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct LinkPendingData {
+    pub workspace_id: String,
+    /// The workspace's ADDRESS name.
+    pub workspace_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_display_name: Option<String>,
+    /// Always `"pending"` — the machine-branchable link fact.
+    pub link_status: String,
+    /// Whether THIS invocation also enrolled the device (the first browser ceremony).
+    pub enrolled_now: bool,
+}
+
 /// `unfollow` (local — stop following `current`, keep the bytes as a frozen copy). **INFERRED.**
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
@@ -1133,6 +1152,11 @@ pub struct StatusWorkspace {
     /// The ADDRESS name (what you joined by).
     pub name: String,
     pub display_name: String,
+    /// This device's link to the workspace, when it is NOT plainly active: `"pending"` (awaiting an
+    /// owner's approval — delivery starts automatically once approved) or `"ended"` (the link was
+    /// severed or never approved — `topos follow <address>` relinks). Absent = active. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_status: Option<String>,
 }
 
 /// One detected agent's auto-update trigger presence in a [`StatusData`] — a read-only probe of

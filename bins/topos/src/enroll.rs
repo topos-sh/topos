@@ -47,6 +47,16 @@ pub(crate) struct Instance {
     pub base_url: String,
 }
 
+/// This device's LINK to a membership's workspace, as `user.json` records it (the local mirror of
+/// the server's device↔workspace link row): live, awaiting an owner's approval, or ended.
+pub(crate) const LINK_ACTIVE: &str = "active";
+/// The link awaits an owner's approval — no data flows; the sweep skips the workspace quietly.
+pub(crate) const LINK_PENDING: &str = "pending";
+/// LOCAL-only: the link was severed or never approved (the delivery answered the uniform 404) —
+/// recorded so the one typed line prints once and the fan-outs stop dialing; `follow <address>`
+/// relinks.
+pub(crate) const LINK_ENDED: &str = "ended";
+
 /// One workspace this install has joined on the pinned plane — the per-workspace half of an enrollment.
 /// A single `user.json` carries a `Vec<Membership>`, so following skills from a second workspace ADDS a
 /// membership rather than overwriting the first. Non-secret metadata only (the device credential lives
@@ -61,6 +71,25 @@ pub(crate) struct Membership {
     pub display_name: String,
     /// When this membership's enrollment completed, epoch-millis.
     pub enrolled_at: i64,
+    /// This device's link to the workspace — [`LINK_ACTIVE`] / [`LINK_PENDING`] / [`LINK_ENDED`].
+    /// ADDITIVE with a serde default (the existing defaulted-field idiom — no `schema_version`
+    /// bump: a pre-field document reads as all-active, exactly what it was) and skipped while
+    /// active, so an all-active document keeps its prior bytes.
+    #[serde(
+        default = "default_link_status",
+        skip_serializing_if = "link_is_active"
+    )]
+    pub link_status: String,
+}
+
+/// serde default for [`Membership::link_status`] — a pre-field document's links were all live.
+fn default_link_status() -> String {
+    LINK_ACTIVE.to_owned()
+}
+
+/// serde skip helper — the active status is the common case and stays out of the on-disk bytes.
+fn link_is_active(s: &str) -> bool {
+    s == LINK_ACTIVE
 }
 
 /// `follows.json` — the durable follow-state: the skills this client follows, each with its workspace,
@@ -389,6 +418,18 @@ impl UserDoc {
             .find(|m| m.workspace_id == workspace_id)
     }
 
+    /// The workspace ids the network fan-outs dial (the delivery reconcile, the resolver
+    /// universe): every membership whose link is not locally ENDED. An ended link's reads answer
+    /// the uniform 404 — re-dialing it every sweep would re-print the one typed line and burn a
+    /// call; `follow <address>` relinks and the membership rejoins the fan-out.
+    pub(crate) fn fanout_workspace_ids(&self) -> Vec<String> {
+        self.workspaces
+            .iter()
+            .filter(|m| m.link_status != LINK_ENDED)
+            .map(|m| m.workspace_id.clone())
+            .collect()
+    }
+
     /// The single workspace an ambient write op (a genesis publish, an invite) acts in.
     ///
     /// - `explicit = Some(ws)` → that membership — matched by the opaque id OR the address NAME
@@ -474,6 +515,34 @@ pub(crate) fn canonicalize_workspace_flag(
         Some(m) => Some(m.workspace_id.clone()),
         None => Some(given),
     }
+}
+
+/// Flip one membership's `link_status` IN PLACE (the sweep's pending→active self-heal, the
+/// once-typed pending→ended mark), with the whole read-modify-write under the `"identity"` lock —
+/// the same lost-update discipline as [`set_following`]. A missing file or membership is a clean
+/// no-op; an already-equal status writes nothing.
+pub(crate) fn set_membership_link_status(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    workspace_id: &str,
+    status: &str,
+) -> Result<(), ClientError> {
+    let _guard = fs.lock_exclusive(&layout.identity_lock_file())?;
+    let Some(mut user) = read_user(fs, layout)? else {
+        return Ok(());
+    };
+    let Some(m) = user
+        .workspaces
+        .iter_mut()
+        .find(|m| m.workspace_id == workspace_id)
+    else {
+        return Ok(());
+    };
+    if m.link_status == status {
+        return Ok(());
+    }
+    m.link_status = status.to_owned();
+    write_user(fs, layout, &user)
 }
 
 /// Insert `m` into `user.workspaces`, REPLACING an existing membership with the same `workspace_id` (a
@@ -859,6 +928,7 @@ mod tests {
             name: format!("{workspace_id}-name"),
             display_name: display_name.to_owned(),
             enrolled_at: 1,
+            link_status: LINK_ACTIVE.to_owned(),
         }
     }
 
@@ -1309,6 +1379,40 @@ mod tests {
             read_follows(&fs, &layout).unwrap().unwrap().follows.len(),
             2
         );
+    }
+
+    #[test]
+    fn membership_link_status_defaults_active_persists_and_filters_the_fanout() {
+        let fs = crate::fs_seam::RealFs;
+        let layout = Layout::new(&scratch("link-status"));
+        write_user(
+            &fs,
+            &layout,
+            &user_with(vec![
+                sample_membership("w_a", "A"),
+                sample_membership("w_b", "B"),
+            ]),
+        )
+        .unwrap();
+        // An ACTIVE link stays OUT of the on-disk bytes (skip_serializing_if) and reads back as
+        // the default — a pre-field document is indistinguishable from an all-active one.
+        let raw = std::fs::read_to_string(layout.user_path()).unwrap();
+        assert!(!raw.contains("link_status"), "{raw}");
+        let user = read_user(&fs, &layout).unwrap().unwrap();
+        assert!(user.workspaces.iter().all(|m| m.link_status == LINK_ACTIVE));
+        assert_eq!(user.fanout_workspace_ids(), vec!["w_a", "w_b"]);
+        // A flip persists; an ENDED link leaves the fan-out (the once-typed line already printed).
+        set_membership_link_status(&fs, &layout, "w_b", LINK_PENDING).unwrap();
+        let user = read_user(&fs, &layout).unwrap().unwrap();
+        assert_eq!(user.membership("w_b").unwrap().link_status, LINK_PENDING);
+        assert_eq!(user.fanout_workspace_ids(), vec!["w_a", "w_b"]);
+        set_membership_link_status(&fs, &layout, "w_b", LINK_ENDED).unwrap();
+        let user = read_user(&fs, &layout).unwrap().unwrap();
+        assert_eq!(user.fanout_workspace_ids(), vec!["w_a"]);
+        // A missing membership / file is a clean no-op.
+        set_membership_link_status(&fs, &layout, "w_missing", LINK_ENDED).unwrap();
+        set_membership_link_status(&fs, &Layout::new(&scratch("ls-none")), "w_a", LINK_ENDED)
+            .unwrap();
     }
 
     #[test]

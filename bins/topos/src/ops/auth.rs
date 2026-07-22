@@ -8,14 +8,17 @@
 //! REPLACE this install's ONE device credential wholesale (a device holds exactly one; the identity
 //! is whoever approved in the browser).
 //!
-//! **`logout`** is two-phase: describe, then `--yes` best-effort revokes THIS device in every
-//! enrolled workspace (`DELETE /v1/workspaces/{ws}/devices` naming the stored device id) and
-//! deletes `identity/credentials.json`. Skills, follows, and drafts stay; `user.json` keeps the
-//! memberships for the re-login UX — no credential IS the signed-out state.
+//! **`logout`** is two-phase: describe (signing out revokes THIS device on the server — every
+//! linked workspace at once), then `--yes` runs ONE global self-revoke (`DELETE /v1/device` — the
+//! server deletes the device's links + reported state with it) and deletes
+//! `identity/credentials.json`. A uniform-404 answer means the device is already revoked — the
+//! local delete proceeds. Skills, follows, and drafts stay; `user.json` keeps the memberships for
+//! the re-login UX — no credential IS the signed-out state.
 //!
 //! **`status`** is side-effect-free: whoami, per-workspace access health (a member-scoped `me`
-//! probe — the uniform 404 reads "no access — revoked or removed"), hook health, reporting posture
-//! (`state/sync_status.json`), and the server base.
+//! probe — a pending link reads "awaiting owner approval"; the uniform 404 reads "no access —
+//! unlinked, removed, or gone"), hook health, reporting posture (`state/sync_status.json`), and
+//! the server base.
 
 use serde::Serialize;
 
@@ -216,12 +219,14 @@ fn resume_login(
 // logout
 // =================================================================================================
 
-/// The logout describe — what `--yes` would do (nothing has changed).
+/// The logout describe — what `--yes` would do (nothing has changed). Signing out is ONE act:
+/// revoke this device on the server (every linked workspace at once) + delete the local credential.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct AuthLogoutDescribe {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub principal: Option<String>,
-    /// The workspaces this device would be revoked in (best-effort) before the credential deletes.
+    /// The linked workspaces the ONE server-side revoke signs this device out of (disclosure —
+    /// the revoke is global, not per-workspace).
     pub workspaces: Vec<String>,
     /// What stays: skills, follows, drafts — signing out never touches a byte.
     pub keeps_note: String,
@@ -230,11 +235,9 @@ pub(crate) struct AuthLogoutDescribe {
 /// The applied logout's `--json` data.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct AuthLogoutData {
-    /// Workspaces where the self-revoke landed.
-    pub revoked: Vec<String>,
-    /// Workspaces where it did not (best-effort — the credential is deleted regardless).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub revoke_failed: Vec<String>,
+    /// Whether the ONE global self-revoke landed server-side (`false` = best-effort miss — the
+    /// credential is deleted locally regardless; an already-revoked device counts as `true`).
+    pub revoked: bool,
     /// Whether `credentials.json` was deleted (false = there was nothing to delete).
     pub credentials_deleted: bool,
     /// What stayed.
@@ -254,12 +257,14 @@ pub(crate) enum AuthLogoutOutcome {
 const LOGOUT_KEEPS: &str =
     "skills, follows, and drafts stay on this machine; `topos auth login` signs back in";
 
-/// `auth logout` — describe, then `--yes`: best-effort self device-revoke per enrolled workspace,
-/// then delete the stored credential. Idempotent: signed-out already is a clean success.
+/// `auth logout` — describe (signing out revokes THIS device server-side, across every linked
+/// workspace at once), then `--yes`: ONE global self-revoke (`DELETE /v1/device`) + delete the
+/// stored credential. A uniform-404 answer means the device is already revoked — the local delete
+/// proceeds. Idempotent: signed-out already is a clean success.
 ///
 /// # Errors
-/// An io/doc failure reading or deleting the credential doc (the revokes themselves are
-/// best-effort and never fail the logout).
+/// An io/doc failure reading or deleting the credential doc (the revoke itself is best-effort and
+/// never fails the logout).
 pub(crate) fn logout(
     ctx: &Ctx<'_>,
     connectors: &AuthConnectors<'_>,
@@ -298,22 +303,22 @@ pub(crate) fn logout(
         });
     }
 
-    // Best-effort self-revoke per enrolled workspace, BEFORE the credential is deleted (the revoke
-    // authenticates with it and names the stored device id as its target). A failure never blocks
-    // the local sign-out.
-    let mut revoked = Vec::new();
-    let mut revoke_failed = Vec::new();
-    if let (Some(creds), Some(instance)) = (&creds, enroll::read_instance(ctx.fs, &ctx.layout)?) {
+    // The ONE global self-revoke, BEFORE the credential is deleted (the revoke authenticates with
+    // it; the server deletes the device's links + reported state with the device). Best-effort: a
+    // transport failure never blocks the local sign-out, and the uniform 404 means the device is
+    // ALREADY revoked server-side — signed out is signed out.
+    let mut revoked = false;
+    if creds.is_some()
+        && let Some(instance) = enroll::read_instance(ctx.fs, &ctx.layout)?
+    {
         let governance: Box<dyn GovernanceSource> = (connectors.governance)(&instance.base_url);
-        for ws in &workspaces {
-            let op_id = uuid::Uuid::from_bytes(ctx.ids.new_op_id())
-                .hyphenated()
-                .to_string();
-            match governance.revoke_device(ws, &creds.device_id, &op_id) {
-                Ok(()) => revoked.push(ws.clone()),
-                Err(_) => revoke_failed.push(ws.clone()),
-            }
-        }
+        revoked = match governance.revoke_device() {
+            Ok(()) => true,
+            // Already revoked (or the credential is dead) — the server-side state is what a
+            // revoke would have produced; proceed with the local delete.
+            Err(ClientError::TargetNotFound { .. }) => true,
+            Err(_) => false,
+        };
     }
 
     // Delete the credential — the signed-out state IS its absence. `user.json` keeps the memberships
@@ -329,7 +334,6 @@ pub(crate) fn logout(
 
     Ok(AuthLogoutOutcome::Applied(AuthLogoutData {
         revoked,
-        revoke_failed,
         credentials_deleted,
         keeps_note: LOGOUT_KEEPS.to_owned(),
     }))
@@ -413,11 +417,21 @@ pub(crate) fn status(
                     Ok(me) => {
                         // The healthy probe is also the freshest identity disclosure.
                         probed_principal.get_or_insert(me.principal);
-                        ("healthy".to_owned(), Some(me.role))
+                        // A PENDING device↔workspace link answers the member-scoped read but
+                        // delivers nothing yet — the wait is the status, not a fault.
+                        if me.link_status == "pending" {
+                            (
+                                "pending — awaiting owner approval".to_owned(),
+                                Some(me.role),
+                            )
+                        } else {
+                            ("healthy".to_owned(), Some(me.role))
+                        }
                     }
-                    // The uniform 404: this device (or the person) lost the workspace.
+                    // The uniform 404: this device's link, the seat, or the workspace is gone —
+                    // indistinguishable by design; `topos follow <address>` relinks.
                     Err(ClientError::TargetNotFound { .. }) => {
-                        ("no access — revoked or removed".to_owned(), None)
+                        ("no access — unlinked, removed, or gone".to_owned(), None)
                     }
                     Err(_) => ("unreachable".to_owned(), None),
                 }

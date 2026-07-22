@@ -1,16 +1,25 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { UserActor } from "@/lib/auth/guards.server";
-import { revokeOwnDevice } from "@/lib/db/identity.server";
+import { revokeOwnDevice, selfUnlinkDevice } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
-import { device } from "@/lib/db/schema.app";
+import { device, deviceLink, workspace } from "@/lib/db/schema.app";
 
 /**
- * The ACCOUNT-level device DAL — the "your devices" page's reads and its self sign-out write.
- * A device is a POSSESSION of ONE user now (workspace-less), so this module is scoped by a
- * bare UserActor and discloses ONLY the person's own device rows. Revocation is SELF-ONLY by
+ * The ACCOUNT-level device DAL — the "your devices" page's reads, its self sign-out write, and
+ * the per-link SELF unlink. A device is REGISTERED to ONE user (device ↔ server) and LINKED
+ * per workspace, so this module is scoped by a bare UserActor and discloses ONLY the person's
+ * own device rows — each carrying its linked-workspace list. Revocation is SELF-ONLY by
  * design — no owner arm reaches into someone else's pocket — and FINAL (the database trigger
  * refuses any un-revoke); re-enrolling through the device flow is the recovery.
  */
+
+/** One device↔workspace link as the account page renders it. */
+export interface AccountDeviceLink {
+  workspaceId: string;
+  workspaceName: string;
+  workspaceDisplayName: string;
+  status: "active" | "pending";
+}
 
 /** One device row as the account page renders it. */
 export interface AccountDevice {
@@ -20,11 +29,14 @@ export interface AccountDevice {
   /** Epoch-milliseconds, or null when the device has never phoned home. */
   lastSeenAtMs: number | null;
   createdAtMs: number;
+  /** The workspaces this device is linked to (a revoked device holds none — severed). */
+  links: AccountDeviceLink[];
 }
 
-/** The person's OWN devices, oldest first. */
+/** The person's OWN devices, oldest first, each with its linked-workspace list. */
 export async function devicesFor(actor: UserActor): Promise<AccountDevice[]> {
-  const rows = await getDb()
+  const db = getDb();
+  const rows = await db
     .select({
       deviceId: device.id,
       displayName: device.displayName,
@@ -35,13 +47,61 @@ export async function devicesFor(actor: UserActor): Promise<AccountDevice[]> {
     .from(device)
     .where(eq(device.userId, actor.userId))
     .orderBy(asc(device.createdAt), asc(device.id));
+  const linkRows = await db
+    .select({
+      deviceId: deviceLink.deviceId,
+      workspaceId: deviceLink.workspaceId,
+      workspaceName: workspace.name,
+      workspaceDisplayName: workspace.displayName,
+      status: deviceLink.status,
+    })
+    .from(deviceLink)
+    .innerJoin(device, eq(device.id, deviceLink.deviceId))
+    .innerJoin(workspace, eq(workspace.id, deviceLink.workspaceId))
+    .where(eq(device.userId, actor.userId))
+    .orderBy(asc(workspace.name), asc(deviceLink.workspaceId));
+  const linksByDevice = new Map<string, AccountDeviceLink[]>();
+  for (const link of linkRows) {
+    const entry: AccountDeviceLink = {
+      workspaceId: link.workspaceId,
+      workspaceName: link.workspaceName,
+      workspaceDisplayName: link.workspaceDisplayName,
+      status: link.status as AccountDeviceLink["status"],
+    };
+    const list = linksByDevice.get(link.deviceId);
+    if (list === undefined) {
+      linksByDevice.set(link.deviceId, [entry]);
+    } else {
+      list.push(entry);
+    }
+  }
   return rows.map((r) => ({
     deviceId: r.deviceId,
     displayName: r.displayName,
     revoked: r.revokedAt !== null,
     lastSeenAtMs: r.lastSeenAtMs === null ? null : Number(r.lastSeenAtMs),
     createdAtMs: Number(r.createdAtMs),
+    links: linksByDevice.get(r.deviceId) ?? [],
   }));
+}
+
+export type UnlinkOutcome = "unlinked" | "unknown_link";
+
+/**
+ * SELF unlink — sever ONE of the actor's own device links (the page's per-link arm). Self-only
+ * by the ceremony's WHERE clause (a foreign device id matches nothing — the same answer an
+ * unknown one gets); the `device_unlinked` audit row (cause: self) rides the same transaction.
+ */
+export async function unlinkOwnDevice(
+  actor: UserActor,
+  deviceId: string,
+  workspaceId: string,
+): Promise<UnlinkOutcome> {
+  return await selfUnlinkDevice(
+    { userId: actor.userId, display: actor.display },
+    deviceId,
+    workspaceId,
+  );
 }
 
 export type SignOutOutcome = "revoked" | "unknown_device";

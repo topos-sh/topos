@@ -1204,6 +1204,69 @@ pub(crate) fn reattach_applied_tty(r: &crate::ops::Reattach) -> String {
     s
 }
 
+/// The browser-free link DESCRIBE's TTY: lead with "link this device to <workspace>", the standing
+/// disclosures, whether the link is born active or pending, and the paste-ready `--yes`.
+pub(crate) fn link_describe_tty(d: &crate::ops::LinkDescribe, yes_argv: &[String]) -> String {
+    let mut s = format!(
+        "Link this device to {} ({}) — {}",
+        d.workspace.display_name, d.workspace.name, d.workspace.address
+    );
+    s.push_str(
+        "\nThis device is already enrolled with this server; joining the workspace is one \
+                link — no browser step.",
+    );
+    s.push_str(&format!("\nYour role: {}", d.role));
+    match d.link_status.as_str() {
+        "active" => s.push_str("\nAlready linked (active) — `--yes` re-affirms it."),
+        "pending" => s.push_str(
+            "\nA link request is already waiting for an owner's approval — `--yes` re-affirms it.",
+        ),
+        _ => match d.born.as_str() {
+            "pending" => s.push_str(
+                "\nThe link is born PENDING — this workspace approves new devices: an owner \
+                 confirms it in the web app, then delivery starts automatically.",
+            ),
+            _ => s.push_str("\nThe link is born active — delivery starts on `--yes`."),
+        },
+    }
+    s.push_str(&format!("\n{}", d.all_devices_note));
+    s.push_str(&format!("\n{}", d.reporting_note));
+    s.push_str(&format!(
+        "\nNothing has changed yet — apply with:\n  {}",
+        argv_line(yes_argv)
+    ));
+    s
+}
+
+/// The PENDING-link receipt's TTY — the link awaits an owner's approval; nothing subscribed, no
+/// bytes; delivery starts automatically after approval.
+pub(crate) fn link_pending_tty(p: &topos_types::results::LinkPendingData) -> String {
+    let label = p
+        .workspace_display_name
+        .as_deref()
+        .unwrap_or(&p.workspace_name);
+    let mut s = String::new();
+    if p.enrolled_now {
+        s.push_str("Enrolled this device (identity only — nothing is installed yet).\n");
+    }
+    s.push_str(&format!(
+        "Linked to {label} ({}) — awaiting owner approval.\nNo skills land until an owner \
+         approves this device in the web app; delivery then starts automatically.\n`topos status` \
+         shows the waiting link.",
+        p.workspace_name
+    ));
+    s
+}
+
+/// The pending-link receipt's next actions: check the wait with `topos status` (delivery resumes
+/// by itself — there is nothing to re-run).
+pub(crate) fn link_pending_next_actions() -> Vec<NextAction> {
+    vec![crate::actions::next_action(
+        ActionCode::from("CHECK_STATUS".to_owned()),
+        vec!["topos".into(), "status".into(), "--json".into()],
+    )]
+}
+
 /// The unfollow DESCRIBE's TTY: what stops where, what never changes, and the `--yes` argv.
 pub(crate) fn unfollow_describe_tty(
     d: &crate::ops::UnfollowDescribe,
@@ -1345,10 +1408,11 @@ pub(crate) fn logout_describe_tty(
         None => "Signing out.".to_owned(),
     };
     if d.workspaces.is_empty() {
-        s.push_str("\nNo stored workspace credentials — already signed out.");
+        s.push_str("\nNo stored credential — already signed out.");
     } else {
         s.push_str(&format!(
-            "\nWould revoke this device (best-effort) and delete its credential in: {}",
+            "\nWould sign this device out of the server everywhere — one revoke covers every \
+             linked workspace ({}) — and delete the stored credential.",
             d.workspaces.join(", ")
         ));
     }
@@ -1456,22 +1520,17 @@ pub(crate) fn uninstall_applied_tty(d: &crate::ops::UninstallApplied) -> String 
 /// The applied logout's TTY.
 pub(crate) fn logout_applied_tty(d: &crate::ops::AuthLogoutData) -> String {
     let mut s = if d.credentials_deleted {
-        "Signed out — the stored credentials are deleted.".to_owned()
+        "Signed out — the stored credential is deleted.".to_owned()
     } else {
-        "Already signed out — no credentials were stored.".to_owned()
+        "Already signed out — no credential was stored.".to_owned()
     };
-    if !d.revoked.is_empty() {
-        s.push_str(&format!(
-            "\nRevoked this device in: {}",
-            d.revoked.join(", ")
-        ));
-    }
-    if !d.revoke_failed.is_empty() {
-        s.push_str(&format!(
-            "\nCould not reach the server to revoke in: {} (the credential is deleted locally \
-             either way; an owner can revoke the device on the web)",
-            d.revoke_failed.join(", ")
-        ));
+    if d.revoked {
+        s.push_str("\nRevoked this device on the server — every linked workspace at once.");
+    } else if d.credentials_deleted {
+        s.push_str(
+            "\nCould not reach the server to revoke the device (the credential is deleted \
+             locally either way; an owner can unlink the device on the web).",
+        );
     }
     s.push_str(&format!("\n{}", d.keeps_note));
     s
@@ -1494,6 +1553,14 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
             ));
             for ws in &d.workspaces {
                 s.push_str(&format!("\n  {} ({})", ws.display_name, ws.name));
+                match ws.link_status.as_deref() {
+                    Some("pending") => s.push_str(" — awaiting owner approval"),
+                    Some("ended") => s.push_str(&format!(
+                        " — no access; relink with `topos follow {}`",
+                        ws.name
+                    )),
+                    _ => {}
+                }
             }
         }
         None => s.push_str(
@@ -2990,6 +3057,7 @@ mod tests {
                 workspace_id: "w_demo".to_owned(),
                 name: "demo".to_owned(),
                 display_name: "Demo".to_owned(),
+                link_status: None,
             }],
             followed_skills: 2,
             pending_offers: Some(1),

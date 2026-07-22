@@ -476,6 +476,11 @@ pub struct WireDelivery {
     /// body must never fail to parse over one new field).
     #[serde(default = "default_staleness_window_ms")]
     pub staleness_window_ms: u64,
+    /// THIS device's link to the workspace — `"active"` or `"pending"`. REQUIRED: the delivery
+    /// answer is meaningless without it (a `"pending"` delivery carries empty `skills` /
+    /// `detached` / `excluded` / `notices` and `proposals_awaiting: 0` — no data flows over a
+    /// pending link; the client skips the workspace quietly and `topos status` shows the wait).
+    pub link_status: String,
 }
 
 /// The default bundle kind — the fallback when a producer predating the catalog `kind` omits it
@@ -487,6 +492,13 @@ fn default_bundle_kind() -> String {
 /// The default staleness window (one week, ms) — the fallback when a producer omits the field.
 fn default_staleness_window_ms() -> u64 {
     604_800_000
+}
+
+/// The default device↔workspace link status — the fallback where a field is serde-defaulted
+/// ([`WireMe::link_status`]): a producer predating device links serves only active-equivalent
+/// access.
+fn default_link_status() -> String {
+    "active".to_owned()
 }
 
 /// One applied-state row a device reports: the skill and the version it currently holds after its
@@ -664,6 +676,12 @@ pub struct DeviceAuthPollResponse {
     /// carried an invite token naming one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<DeviceAuthHint>,
+    /// The FIRST device↔workspace link's born status — present ONLY when `status` is `granted`:
+    /// `"active"`, or `"pending"` when the workspace's device-approval knob gated it (approval
+    /// mints the registration and the first link together server-side). Absent on an older
+    /// producer ⇒ treat as `"active"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_status: Option<String>,
 }
 
 // =================================================================================================
@@ -741,25 +759,83 @@ pub struct InviteAcceptData {
     /// The invitation's first-destination hint, when it named one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<DeviceAuthHint>,
+    /// The ACCEPTING device's link to the joined workspace — `"active"` or `"pending"` (the accept
+    /// also links the device, born per the workspace's device-approval knob; no exception for
+    /// invitations). Serde-defaulted to `"active"` for a producer predating device links.
+    #[serde(default = "default_link_status")]
+    pub link_status: String,
 }
 
-/// `DELETE /v1/workspaces/{ws}/devices` body — revoke a registered device key (owner, or the device's own
-/// principal). The revoke is INSTANT (flip `revoked` in one transaction — the row's credential stops
-/// authorizing fresh work the moment it commits).
+// =================================================================================================
+// The device-link lane — a device is REGISTERED once (device ↔ server, one browser ceremony ever)
+// and LINKED per workspace (device ↔ workspace, a first-class row, severable by both sides). The
+// browser-free lane below joins an ENROLLED device to a further workspace the person's seats reach:
+// person-scoped (seat checked server-side, no link required), so a second workspace never re-runs
+// the device flow. `DELETE /v1/device` is the global self-revoke (`auth logout`'s one call).
+// =================================================================================================
+
+/// `GET /v1/device/link?workspace=<address-slug>` success `data` — the link DESCRIBE (nothing
+/// mutates): where THIS device stands with the named workspace, and what a link would be born as.
+/// An EMPTY `workspace` value names the origin's own workspace (the same convention as
+/// [`DeviceAuthStartRequest::workspace`]). A seatless caller — or an unknown workspace name,
+/// byte-identically (no existence oracle) — answers the all-outcome envelope's `NOT_A_MEMBER`
+/// refusal pointing at the invitation path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
-pub struct DeviceRevokeRequest {
-    /// The target workspace id (scopes the op to one workspace).
+pub struct DeviceLinkDescribe {
+    /// The workspace id (the `{ws}` path segment a linked device's requests scope by).
     pub workspace_id: String,
-    /// The client-minted UUIDv4 idempotency key.
-    #[cfg_attr(feature = "contract-derives", schemars(extend("format" = "uuid")))]
-    pub op_id: String,
-    /// The id of the device key to revoke (the TARGET, named by its non-secret id; the actor rides the
-    /// Bearer credential).
-    pub target_device_key_id: String,
+    /// The workspace's ADDRESS slug.
+    pub name: String,
+    /// The workspace's display name.
+    pub display_name: String,
+    /// The workspace's full address (the share link — server-built).
+    pub address: String,
+    /// The caller's role on the roster (`owner` / `reviewer` / `member`).
+    pub role: String,
+    /// THIS device's current link — `"none"` (no link yet), `"pending"`, or `"active"`.
+    pub link_status: String,
+    /// What a link created NOW would be born as — `"active"`, or `"pending"` when the workspace's
+    /// device-approval knob gates it (owner-created links are always born active).
+    pub born: String,
+}
+
+/// `POST /v1/device/link` body — link THIS device (the Bearer credential's) to a workspace the
+/// person's seats reach, by address slug (empty = the origin's own workspace). Idempotent: an
+/// existing link answers ok with its current status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct DeviceLinkRequest {
+    /// The workspace ADDRESS slug (empty = the origin's own workspace).
+    pub workspace: String,
+}
+
+/// `POST /v1/device/link` success `data` — the created (or re-affirmed) link: the joined workspace
+/// and the link's status (`"active"`, or `"pending"` awaiting an owner's approval — no data flows
+/// until it turns active). A seatless caller / unknown name answers `NOT_A_MEMBER`, exactly as the
+/// describe does.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct DeviceLinkData {
+    /// The workspace id.
+    pub workspace_id: String,
+    /// The workspace's ADDRESS slug.
+    pub name: String,
+    /// The workspace's display name.
+    pub display_name: String,
+    /// The workspace's full address (server-built).
+    pub address: String,
+    /// The link's status — `"active"` or `"pending"`.
+    pub link_status: String,
 }
 
 // =================================================================================================
@@ -834,6 +910,11 @@ pub struct WireMe {
     /// Who invited this principal (absent for a genesis owner).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invited_by: Option<String>,
+    /// THIS device's link to the workspace — `"active"` or `"pending"` (a pending link awaits an
+    /// owner's approval; no skill data flows over it). Serde-defaulted to `"active"` for schema
+    /// stability: a producer predating device links serves only active-equivalent access.
+    #[serde(default = "default_link_status")]
+    pub link_status: String,
 }
 
 /// One skill reference inside a channel entry.
@@ -1146,10 +1227,12 @@ mod tests {
             device_id: None,
             workspace: None,
             hint: None,
+            link_status: None,
         };
         let v = serde_json::to_value(&pending).unwrap();
         assert_eq!(v["status"], "pending");
         assert!(v.get("credential").is_none() && v.get("workspace").is_none());
+        assert!(v.get("link_status").is_none(), "absent pre-grant");
         // A granted poll carries the ONE credential (the promoted device code), the device id, and
         // the joined workspace — everything the CLI stores, from one field each.
         let granted = DeviceAuthPollResponse {
@@ -1165,12 +1248,15 @@ mod tests {
                 kind: "skill".to_owned(),
                 name: "deploy".to_owned(),
             }),
+            link_status: Some("pending".to_owned()),
         };
         let v = serde_json::to_value(&granted).unwrap();
         assert_eq!(v["status"], "granted");
         assert_eq!(v["credential"], "dc_secret");
         assert_eq!(v["device_id"], "dev_1");
         assert_eq!(v["workspace"]["name"], "acme");
+        // The FIRST link's born status rides the grant (approval mints registration + link together).
+        assert_eq!(v["link_status"], "pending");
         // The start pair round-trips; the poll target is the same secret the start returned.
         let start = DeviceAuthStartResponse {
             device_code: "dc_secret".to_owned(),
@@ -1254,6 +1340,7 @@ mod tests {
             }],
             proposals_awaiting: 2,
             staleness_window_ms: 604_800_000,
+            link_status: "active".to_owned(),
         };
         let v = serde_json::to_value(&delivery).unwrap();
         assert_eq!(v["schema_version"], 1);
@@ -1271,12 +1358,15 @@ mod tests {
         assert!(v["notices"][0].get("message").is_none());
         // The ONE staleness clock rides every delivery.
         assert_eq!(v["staleness_window_ms"], 604_800_000_u64);
+        // The device↔workspace link status is REQUIRED on every delivery.
+        assert_eq!(v["link_status"], "active");
         let back: WireDelivery = serde_json::from_value(v).unwrap();
         assert_eq!(back.skills.len(), 1);
         assert_eq!(back.skills[0].via.channels, vec!["everyone".to_owned()]);
         assert_eq!(back.proposals_awaiting, 2);
-        // An empty delivery (nothing entitled, nothing detached) still round-trips.
-        let empty: WireDelivery = serde_json::from_value(serde_json::json!({
+        // A PENDING delivery (no data flows over a pending link) still round-trips — empty sets,
+        // a zero gauge, and the pending status the client's sweep skips on.
+        let pending: WireDelivery = serde_json::from_value(serde_json::json!({
             "schema_version": 1,
             "workspace_id": "w_demo",
             "skills": [],
@@ -1284,9 +1374,24 @@ mod tests {
             "notices": [],
             "proposals_awaiting": 0,
             "staleness_window_ms": 604800000,
+            "link_status": "pending",
         }))
         .unwrap();
-        assert!(empty.skills.is_empty() && empty.notices.is_empty());
+        assert!(pending.skills.is_empty() && pending.notices.is_empty());
+        assert_eq!(pending.link_status, "pending");
+        // A delivery WITHOUT the required link_status fails to parse (a clean wire break).
+        assert!(
+            serde_json::from_value::<WireDelivery>(serde_json::json!({
+                "schema_version": 1,
+                "workspace_id": "w_demo",
+                "skills": [],
+                "detached": [],
+                "notices": [],
+                "proposals_awaiting": 0,
+                "staleness_window_ms": 604800000,
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -1343,5 +1448,64 @@ mod tests {
         let v = serde_json::to_value(&data).unwrap();
         assert_eq!(v["address"], "https://topos.example/acme");
         assert_eq!(v["mailed"], false);
+    }
+
+    #[test]
+    fn link_lane_bodies_round_trip_and_link_status_defaults_ride_the_legacy_shapes() {
+        // The link DESCRIBE: current status + what a link would be born as.
+        let describe = DeviceLinkDescribe {
+            workspace_id: "w_acme".to_owned(),
+            name: "acme".to_owned(),
+            display_name: "Acme".to_owned(),
+            address: "https://topos.example/acme".to_owned(),
+            role: "member".to_owned(),
+            link_status: "none".to_owned(),
+            born: "pending".to_owned(),
+        };
+        let v = serde_json::to_value(&describe).unwrap();
+        assert_eq!(v["link_status"], "none");
+        assert_eq!(v["born"], "pending");
+        let back: DeviceLinkDescribe = serde_json::from_value(v).unwrap();
+        assert_eq!(back.name, "acme");
+        // The link REQUEST: the address slug alone (empty = the origin's own workspace).
+        let req: DeviceLinkRequest =
+            serde_json::from_value(serde_json::json!({ "workspace": "" })).unwrap();
+        assert_eq!(req.workspace, "");
+        // The link DATA: the joined workspace + the born status.
+        let data = DeviceLinkData {
+            workspace_id: "w_acme".to_owned(),
+            name: "acme".to_owned(),
+            display_name: "Acme".to_owned(),
+            address: "https://topos.example/acme".to_owned(),
+            link_status: "pending".to_owned(),
+        };
+        let v = serde_json::to_value(&data).unwrap();
+        assert_eq!(v["link_status"], "pending");
+        // `WireMe` / `InviteAcceptData` DEFAULT the link status to "active" (schema stability —
+        // a producer predating device links serves only active-equivalent access).
+        let me: WireMe = serde_json::from_value(serde_json::json!({
+            "workspace_id": "w_acme",
+            "name": "acme",
+            "display_name": "Acme",
+            "address": "https://topos.example/acme",
+            "principal": "alice@acme.com",
+            "role": "member",
+        }))
+        .unwrap();
+        assert_eq!(me.link_status, "active");
+        let accept: InviteAcceptData = serde_json::from_value(serde_json::json!({
+            "workspace": { "workspace_id": "w_acme", "name": "acme", "display_name": "Acme" },
+        }))
+        .unwrap();
+        assert_eq!(accept.link_status, "active");
+        // The granted poll's absent link_status stays absent (an older producer ⇒ treat as active).
+        let poll: DeviceAuthPollResponse = serde_json::from_value(serde_json::json!({
+            "status": "granted",
+            "credential": "dc",
+            "device_id": "dev_1",
+            "workspace": { "workspace_id": "w_acme", "name": "acme", "display_name": "Acme" },
+        }))
+        .unwrap();
+        assert!(poll.link_status.is_none());
     }
 }

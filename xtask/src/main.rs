@@ -123,6 +123,24 @@ fn schemas() -> Vec<(&'static str, String)> {
                 topos_types::requests::DeviceAuthPollResponse
             )),
         ),
+        // The browser-free device-link lane (describe + create) — an enrolled device joins a
+        // further workspace without a second device flow.
+        (
+            "device-link-request",
+            emit(schemars::schema_for!(
+                topos_types::requests::DeviceLinkRequest
+            )),
+        ),
+        (
+            "device-link-describe",
+            emit(schemars::schema_for!(
+                topos_types::requests::DeviceLinkDescribe
+            )),
+        ),
+        (
+            "device-link-data",
+            emit(schemars::schema_for!(topos_types::requests::DeviceLinkData)),
+        ),
         (
             "notice-ack-request",
             emit(schemars::schema_for!(
@@ -253,6 +271,10 @@ fn schemas() -> Vec<(&'static str, String)> {
         (
             "status-data",
             emit(schemars::schema_for!(topos_types::results::StatusData)),
+        ),
+        (
+            "link-pending-data",
+            emit(schemars::schema_for!(topos_types::results::LinkPendingData)),
         ),
         // On-disk persisted client documents.
         (
@@ -415,10 +437,11 @@ fn fixtures() -> Vec<(&'static str, String)> {
     use topos_types::results::{
         AddData, ChannelAction, ChannelData, ChannelItem, ChannelItemOutcome, Conflict,
         ConflictPathReport, DiffData, DiffPatchInfo, DiffSource, EnrollmentPending, FollowData,
-        FollowOffer, InviteReadData, ListData, LogData, MergePreview, MergePreviewVerdict,
-        MergeReport, Offer, ProtectData, PublishData, PublishDescribeData, PublishGate, PullAction,
-        PullData, PullSkill, RemoveData, RemoveItem, RemoveKind, ReviewIndexData, ReviewIndexEntry,
-        SkillEntry, StatusData, StatusTrigger, StatusWorkspace, UnfollowData, WorkspaceSyncReport,
+        FollowOffer, InviteReadData, LinkPendingData, ListData, LogData, MergePreview,
+        MergePreviewVerdict, MergeReport, Offer, ProtectData, PublishData, PublishDescribeData,
+        PublishGate, PullAction, PullData, PullSkill, RemoveData, RemoveItem, RemoveKind,
+        ReviewIndexData, ReviewIndexEntry, SkillEntry, StatusData, StatusTrigger, StatusWorkspace,
+        UnfollowData, WorkspaceSyncReport,
     };
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
 
@@ -830,6 +853,22 @@ fn fixtures() -> Vec<(&'static str, String)> {
         }],
         staleness_window_ms: 604_800_000,
         proposals_awaiting: 1,
+        link_status: "active".to_owned(),
+    };
+
+    // The PENDING-link delivery: no data flows over a pending link — the server answers empty
+    // sets and a zero gauge with `link_status: "pending"`; the client's sweep skips the workspace
+    // quietly (a `status`-visible fact, not an error).
+    let delivery_pending = WireDelivery {
+        schema_version: 1,
+        workspace_id: "w_demo".to_owned(),
+        skills: vec![],
+        detached: vec![],
+        excluded: vec![],
+        notices: vec![],
+        staleness_window_ms: 604_800_000,
+        proposals_awaiting: 0,
+        link_status: "pending".to_owned(),
     };
 
     // =============================================================================================
@@ -1290,6 +1329,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 workspace_id: "w_demo".to_owned(),
                 name: "demo".to_owned(),
                 display_name: "Demo".to_owned(),
+                // An active link omits (the pinned shape stays byte-identical); a pending link
+                // would read "pending" — awaiting owner approval.
+                link_status: None,
             }],
             followed_skills: 2,
             pending_offers: Some(1),
@@ -1338,6 +1380,53 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
+    // A PENDING device↔workspace link's typed receipt — `follow acme/skills/deploy --yes` on an
+    // enrolled install where the workspace's device-approval knob gates new devices: the link row
+    // landed, nothing subscribed, no bytes; delivery starts automatically after an owner approves.
+    let follow_link_pending = JsonEnvelope {
+        schema_version: 1,
+        command: "follow".to_owned(),
+        ok: true,
+        data: serde_json::to_value(LinkPendingData {
+            workspace_id: "w_beta".to_owned(),
+            workspace_name: "beta".to_owned(),
+            workspace_display_name: Some("Beta Corp".to_owned()),
+            link_status: "pending".to_owned(),
+            enrolled_now: false,
+        })
+        .expect("LinkPendingData serializes"),
+        warnings: vec![],
+        next_actions: vec![topos::actions::next_action(
+            ActionCode::from("CHECK_STATUS".to_owned()),
+            argv(&["topos", "status", "--json"]),
+        )],
+        receipt: None,
+        error: None,
+    };
+
+    // The link lane's typed refusal: the signed-in person holds NO seat in the named workspace —
+    // or no workspace of that name exists (byte-identical; no existence oracle). The way in is an
+    // invitation; the mailed invitation link redeems on this device.
+    let follow_not_a_member = JsonEnvelope {
+        schema_version: 1,
+        command: "follow".to_owned(),
+        ok: false,
+        data: serde_json::json!({}),
+        warnings: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: Some(WireError {
+            code: "NOT_A_MEMBER".to_owned(),
+            outcome: TerminalOutcome::Denied,
+            retryable: false,
+            affected: Affected::default(),
+            expected_generation: None,
+            current_generation: None,
+            context: serde_json::json!({}),
+            next_actions: vec![],
+        }),
+    };
+
     vec![
         ("json/status.ok", emit_json(&status_ok)),
         ("json/update.not-enrolled", emit_json(&update_not_enrolled)),
@@ -1353,7 +1442,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ("json/publish.conflict", emit_json(&publish_conflict)),
         ("json/follow.pending", emit_json(&follow_pending)),
         ("json/follow.describe", emit_json(&follow_describe)),
+        ("json/follow.link-pending", emit_json(&follow_link_pending)),
+        ("json/follow.not-a-member", emit_json(&follow_not_a_member)),
         ("json/delivery.ok", emit_json(&delivery_ok)),
+        ("json/delivery.pending", emit_json(&delivery_pending)),
         ("json/remove.describe", emit_json(&remove_describe)),
         ("json/remove.ok", emit_json(&remove_ok)),
         ("json/channel.ok", emit_json(&channel_ok)),

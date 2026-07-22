@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loader as wsProposalsLoader } from "@/routes/api.v1.ws-proposals";
 import {
   createScratchDb,
+  linkDevice,
   type ScratchDb,
   seatUser,
   seedBundle,
@@ -36,7 +37,9 @@ beforeAll(async () => {
   await seatUser(db, wsId, "u_ana", "reviewer");
   await seatUser(db, wsId, "u_bo", "member");
   await seedDevice(db, "dk_ana", "u_ana", "ana-laptop"); // Bearer plaintext = "dk_ana"
+  await linkDevice(db, "dk_ana", wsId);
   await seedDevice(db, "dk_bo", "u_bo", "bo-laptop");
+  await linkDevice(db, "dk_bo", wsId);
 
   await seedBundle(db, wsId, "s_p", "planner");
   // ONE open proposal, authored by Ana.

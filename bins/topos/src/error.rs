@@ -236,6 +236,16 @@ pub(crate) enum ClientError {
          `topos invite <your-email>`, then re-run `topos follow`"
     )]
     EnrollDenied,
+    /// The device-link lane refused: the signed-in person holds NO seat in the named workspace — or
+    /// no workspace of that name exists (byte-identical server-side; no existence oracle). The way
+    /// in is an invitation: an owner invites the person's email, and the mailed invitation link
+    /// redeems on this device (`topos follow <invite-url>`).
+    #[error(
+        "you're not a member of '{workspace}' (or it doesn't exist) — ask a workspace owner to run \
+         `topos invite <your-email>`; the mailed invitation link redeems on this device: \
+         `topos follow <invite-url>`"
+    )]
+    NotAMember { workspace: String },
     /// A `publish` is blocked because an unresolved author-merge conflict (`conflict.json`) is present —
     /// the draft must be resolved first. Refused before any build / WAL / send (the publish guard).
     #[error("publish is blocked: resolve the merge conflict in this skill first")]
@@ -419,6 +429,9 @@ impl ClientError {
             ClientError::Denied(_) => "DENIED",
             // The same closed DENIED code — only the guidance message differs (enrollment ask-an-owner).
             ClientError::EnrollDenied => "DENIED",
+            // The device-link refusal mirrors the WIRE code 1:1 (the server's seatless/unknown
+            // non-answer), so an agent branches on the same fact on either surface.
+            ClientError::NotAMember { .. } => "NOT_A_MEMBER",
             // A review verdict on a no-longer-open proposal — an open code, its own domain refusal.
             ClientError::ReviewNotOpen(_) => "REVIEW_NOT_OPEN",
             ClientError::PublishBlocked { .. } => "PUBLISH_BLOCKED",
@@ -483,7 +496,9 @@ impl ClientError {
             // The contribute typed outcomes carry their own terminal classification (the plane's verdict,
             // surfaced 1:1 so the agent branches on the same outcome it would on the wire).
             ClientError::Conflict { .. } => TerminalOutcome::Conflict,
-            ClientError::Denied(_) | ClientError::EnrollDenied => TerminalOutcome::Denied,
+            ClientError::Denied(_) | ClientError::EnrollDenied | ClientError::NotAMember { .. } => {
+                TerminalOutcome::Denied
+            }
             ClientError::PublishBlocked { .. } => TerminalOutcome::Diverged,
             // Divergent per-placement edits are the same class as a diverged draft: local
             // reconciliation (or the disclosed reset) resolves it, never a blind retry.

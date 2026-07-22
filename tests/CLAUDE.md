@@ -35,13 +35,18 @@ in their crates; this directory is for what only a cross-crate composed run can 
   - **HTTP ceremonies** (`Session` — a manual-cookie-jar `ureq` browser stand-in): `claim_owner`
     (GET+POST `/claim` with the preset code → the signed-in first owner), `sign_in`/`sign_up`
     (better-auth's own REST rungs, Origin header included), `approve_device`/`deny_device` (the
-    `/verify` action — a plain signed-in accept, no re-authentication field), `enroll_begin_and_approve` (the CLI's
-    `follow` call 1 + the human approval — the caller resumes), and `mint_device` (a probe
-    credential over the real device flow, for wire-level lane calls the CLI has no verb for);
+    `/verify` action — a plain signed-in accept, no re-authentication field; the approval mints
+    registration + the FIRST device↔workspace link in one fence), `enroll_begin_and_approve` (the
+    CLI's `follow` call 1 + the human approval — the caller resumes), and `mint_device` (a probe
+    credential over the real device flow, for wire-level lane calls the CLI has no verb for — it
+    arrives already LINKED to the boot workspace, born per the one rule: active for an owner
+    approver, pending for a member's under the `device_approval` knob);
   - **the raw device lane** (`device_get`/`device_put`/`device_delete`/`device_post_json` —
     Bearer requests against `<origin>/api`) and **row-level witnesses** (the superuser pool:
     `count` / `text_witness` / `user_id`);
-  - **the named mail-less arrangement helpers** (`open_registration`, `seat`, `add_member`) —
+  - **the named mail-less arrangement helpers** (`open_registration`, `seat` / `seat_in`,
+    `add_member`, `add_workspace` — a second workspace row + its implicit `everyone` channel, for
+    the second-link and cross-workspace probes the single-tenant product has no surface for) —
     direct rows + an audit note for exactly the steps whose OSS surface is the invitation mailbox
     rung (the SMTP-unset suites run without it; the web Playwright mail-sink spec drives that rung
     for real). Everything else goes through the product surfaces.
@@ -96,17 +101,40 @@ in their crates; this directory is for what only a cross-crate composed run can 
   the withheld placement disclosed on the receipt) until a curator's real `channel add` places it
   and a second device lands it byte-exact; a member's explicit `--to everyone` answers exactly what
   a named curated channel answers.
-- **`tests/revocation_e2e.rs`** — revocation: a self-revoke ends the lane IMMEDIATELY (the very
-  next request under the dead credential 404s), is FINAL (the un-revoke UPDATE is refused by the
-  DB trigger), and re-enrolling recovers; the CLI's `auth logout` best-effort-revokes its device
-  and deletes the credential doc while every byte stays; a seat removal through the app's members
-  ceremony writes the detach records and ends delivery IN THE SAME REQUEST — the removed
-  member's sweep fails CLOSED into a freeze (placements intact, the quiet hook exit-0 with its
-  one-liner) and resumes when re-seated.
+- **`tests/revocation_e2e.rs`** — revocation on the device-link model: the account page's
+  self-only device sign-out ends the lane IMMEDIATELY (the very next request under the dead
+  credential 404s) and severs EVERY link in the same transaction (`device_unlinked` audit rows,
+  cause `device_revoked`); revocation is FINAL (the un-revoke UPDATE is refused by the DB
+  trigger) and re-enrolling recovers; the CLI's `auth logout` is ONE global `DELETE /v1/device`
+  (device revoked, links + reported state severed server-side, credential doc deleted, every
+  byte stays); a seat removal through the app's members ceremony writes the detach records AND
+  deletes the removed person's device-link rows IN THE SAME REQUEST — the removed member's sweep
+  fails CLOSED into a freeze (placements intact, the quiet hook exit-0 with its one-liner), and
+  because links are DELETED never tombstoned, re-seating alone does NOT resume delivery: the
+  probe relinks over the lane's own `POST /v1/device/link` (the empty-workspace single-tenant
+  form) and the CLI relinks through `follow <address> --yes`.
 - **`tests/cross_workspace_e2e.rs`** — the cross-workspace refusal probe: with a second workspace
   row inserted directly, a credential seated in workspace A gets the uniform wire 404 on EVERY
-  workspace-B route (reads and row-op writes), byte-identical to a workspace that never existed
-  and to a wrong path — no oracle in any direction; the A lane is untouched.
+  workspace-B route (reads and row-op writes, incl. the RETIRED per-workspace device-revoke path
+  the catch-all now covers), byte-identical to a workspace that never existed and to a wrong path
+  — no oracle in any direction; the A lane is untouched. Then the LINK gate alone: a seat in B
+  WITHOUT a device link still answers the same byte-identical 404, and the lane's own
+  `POST /v1/device/link` flips exactly that gate open.
+- **`tests/device_links_e2e.rs`** — the device-link model end to end: an ENROLLED install joining
+  a SECOND same-plane workspace rides the browser-free link lane (`follow <address>` two-phase —
+  the bare describe mutates nothing; `--yes` creates the link and lands that workspace's bytes
+  THIS invocation) and NEVER re-mints the device (one `web.device` row across both joins — the
+  re-mint regression); SELF unlink (the account page) and OWNER remove (the fleet page's
+  in-place-confirm arm) each delete the row (cause-tagged `device_unlinked`), freeze the device's
+  next sweep with placements intact, and turn that workspace's lane byte-identical to a
+  never-linked one — the seat still standing, relink is open; the `device_approval` knob (flipped
+  through the REAL settings ceremony) births a member's link PENDING — the typed
+  `link_status: "pending"` receipt, delivery's shape-complete EMPTY body, the QUIET sweep skip,
+  the uniform 404 on every non-pending-tolerant lane op — until the owner APPROVES on the fleet
+  page (the next sweep offers I-TOFU and the accept lands byte-exact), while an OWNER's own new
+  link is born ACTIVE regardless; the REJECT arm deletes the row, the CLI's next contact prints
+  ONE typed `LINK_ENDED` line toward relink (the second sweep is silent), and the relink
+  succeeds with a fresh pending row.
 - **`tests/invite_redemption_e2e.rs`** — the terminal-first invited person, mail-armed: a lane
   invite with a first-destination SKILL hint mails the tokened link; `topos follow <invite-url>`
   starts the device flow CARRYING the token (the browser destination is the invitation page + the

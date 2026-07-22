@@ -187,9 +187,17 @@ fn e2e_the_terminal_first_invited_person_weaves_one_visit_and_installs_after_con
         verify.body.contains(&pending.user_code),
         "the resolved card shows the code for the glance-check"
     );
+    // The device-link card: the approval mints registration + THE ONE workspace link (no
+    // whole-reach list — every further workspace takes its own explicit link from the device).
     assert!(
-        verify.body.contains("acts with your seat in"),
-        "the card disclosed the credential's workspace reach"
+        verify.body.contains("Approving links it to"),
+        "the card names the one workspace being linked: {}",
+        verify.body
+    );
+    assert!(
+        verify.body.contains("explicit link"),
+        "the card says further workspaces each take their own link: {}",
+        verify.body
     );
     let approved = browser.post_form(
         "/verify",

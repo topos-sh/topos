@@ -102,17 +102,30 @@ renderer over the SAME typed outcomes (one value, two presentations).
     **protocol card** at the address — the bare ORIGIN when no slug was given (the card is constant
     on every path, so no existence signal), re-roots onto its declared `api_base_url` (same URL gate,
     https-never-downgrades), guards one-plane-per-install (the wrong-server refusal NAMES the
-    `TOPOS_HOME` second-install hatch), starts the gh-style device flow
+    `TOPOS_HOME` second-install hatch). An ENROLLED install then NEVER starts a second device flow
+    against its own plane — the DEVICE-LINK model: registered once (device ↔ server, ONE browser
+    ceremony ever), LINKED per workspace (a first-class row, severable by both sides). A same-plane
+    workspace outside the local memberships takes the browser-free LINK lane instead: bare = the
+    link DESCRIBE (`GET /v1/device/link?workspace=<slug>` — person-scoped, seat checked
+    server-side; lead line "link this device to <workspace>", the born-active/pending fact, the
+    standing disclosures, the paste-ready `--yes`); `--yes` = `POST /v1/device/link` (idempotent),
+    the `user.json` membership record, and on an ACTIVE link the CONTINUED ordinary subscribe THIS
+    invocation — a PENDING link (the workspace's device-approval knob) answers the typed
+    `LinkPendingData` receipt instead: nothing subscribed, no bytes, delivery starts automatically
+    after an owner approves. A seatless caller / unknown name is the typed `NOT_A_MEMBER` refusal
+    pointing at the invitation path. An UNENROLLED install starts the gh-style device flow
     (`POST /v1/device/authorize {requested_name: "topos CLI (<hostname>)", workspace:
     <address-name-or-empty>}` — an empty workspace names the origin's own workspace), and persists a
     ONE-phase `0600` WAL
     carrying the FOLLOW INTENT + the secret device code. A re-invoked `follow` polls
     `POST /v1/device/token` once: pending re-emits the server-built approval URL verbatim; denied /
     expired sweep the WAL typed; GRANTED carries the device's ONE bearer credential (the promoted
-    device code), the registered device id, and the AUTHORITATIVE workspace context — the persist
-    writes `instance.json` → `credentials.json` (whole) → the `user.json` membership → deletes the
-    WAL → arms the auto-update trigger, and the flow CONTINUES into the intent's describe/apply in the
-    same invocation. There is no post-grant fence phase: an approved flow re-answers the same
+    device code), the registered device id, the AUTHORITATIVE workspace context, and the FIRST
+    link's born `link_status` (approval mints registration + link together server-side) — the
+    persist writes `instance.json` → `credentials.json` (whole) → the `user.json` membership (link
+    status recorded) → deletes the WAL → arms the auto-update trigger, and the flow CONTINUES into
+    the intent's describe/apply in the same invocation (a PENDING first link prints the typed
+    receipt instead — no subscribe attempt). There is no post-grant fence phase: an approved flow re-answers the same
     granted poll, so a crash mid-persist recovers by re-polling;
   - **the INVITE-URL flow** (`follow <invite-url>` — `<origin>[/<ws>]/invite/<token>`, the
     invitation mail's terminal line verbatim): an UNENROLLED install starts the ordinary device
@@ -124,7 +137,9 @@ renderer over the SAME typed outcomes (one value, two presentations).
     post-enrollment subscribe at the invited-to skill/channel through the ordinary two-phase
     describe. An ENROLLED install accepts DIRECTLY over the device lane
     (`DirectorySource::accept_invitation`, person-scoped — no browser, no second flow) and
-    continues into the same describe; a different plane keeps the wrong-server refusal. The
+    continues into the same describe — the accept also LINKS the accepting device (born per the
+    knob, no exception for invitations; a pending link answers the typed receipt instead of the
+    hint describe); a different plane keeps the wrong-server refusal. The
     pending disclosure everywhere is TWO LINES — the bare URL, then the code (`Open:` / `Code:`);
     and when a wait is interactive with a local browser plausible (`ops/loopback` — a pure,
     table-tested chooser: never SSH/headless; `TOPOS_NO_BROWSER` opts out) the wait binds an
@@ -213,8 +228,14 @@ renderer over the SAME typed outcomes (one value, two presentations).
   known skills sync against the delivery's already-resolved target (`sync_one_with` — no second pointer
   GET); the undelivered remainder splits by WHO ACTED (the served `detached` set = the person's
   unfollow/lapse → freeze in place, `PullAction::Detached`; otherwise upstream withdrew it → snapshot
-  any draft, CLEAN the agent dirs, keep every sidecar byte, `PullAction::Withdrawn`); a whole-workspace
-  404 (removed / revoked) freezes everything with a warning, never a clean. Each workspace then gets the
+  any draft, CLEAN the agent dirs, keep every sidecar byte, `PullAction::Withdrawn`); a delivery whose
+  `link_status` is PENDING (no data flows over a pending device↔workspace link) skips the
+  workspace QUIETLY — no report, no freeze, no freshness stamp (a `status`-visible fact; a later
+  delivering sweep self-heals the local record to active); a whole-workspace 404 splits by the
+  LOCAL link record — a PENDING link that misses was never approved (or the workspace is gone):
+  ONE typed `LINK_ENDED` line + the membership marked ended so it prints once and leaves the
+  fan-out (`follow <address>` relinks), while an ACTIVE link keeps the freeze ("no access —
+  unlinked, removed, or gone" + the relink hint), never a clean. Each workspace then gets the
   device's post-reconcile applied snapshot (`PUT /v1/workspaces/{ws}/report`) — best-effort fleet
   visibility, never a sync blocker. Targeted pulls and the un-enrolled state keep the classic per-skill
   engine; the ancestor backfill SHALLOW-STOPS at a version the plane no longer serves (a purged
@@ -254,7 +275,9 @@ renderer over the SAME typed outcomes (one value, two presentations).
   the device-authorization flow: on approval the flow's device code is promoted server-side to the
   credential and the granted poll carries it back — one secret, one field, no keypair, no per-workspace
   mint. It authenticates EVERY request (reads AND writes AND governance) in every workspace the
-  approving person's seats reach; the server resolves credential → device → user → seat per request.
+  approving person's seats reach; the server resolves credential → un-revoked device → seat →
+  LIVE LINK per request (the device↔workspace link is the per-workspace half — registered once,
+  linked per workspace).
   `host.json` keeps only the LOCAL commit-author id (`d_<hex>`) — a label, never an auth artifact.
 - **The private-file FsOps primitives** (`fs_seam`, `atomic`, `doc`) — secrets need `0600`. The seam gains
   `write_private` (mode 0600 **from creation** — no world-readable window, no chmod-after-write race) +
@@ -340,15 +363,20 @@ are asserted byte-equal in tests.
   `follow <address>`) → the shared WAL/poll/resume idiom (a login-owned WAL; the BIN blocks
   interactively / under `--wait`) → on the granted poll the device's ONE credential REPLACES the
   stored one wholesale (the identity is whoever approved in the browser). **`logout`** is two-phase:
-  describe, then best-effort self device-revoke per enrolled workspace (the governance
-  `DELETE …/devices` naming the STORED device id) and delete `identity/credentials.json` — skills,
-  follows, drafts, and the memberships stay (no credential IS signed-out). **`status`** is
+  describe (signing out revokes THIS device server-side — every linked workspace at once), then
+  `--yes`: ONE global self-revoke (`DELETE /v1/device`, no body — the server deletes the device's
+  links + reported state with it; the uniform 404 = already revoked, the local delete proceeds)
+  and delete `identity/credentials.json` — skills, follows, drafts, and the memberships stay (no
+  credential IS signed-out; the per-workspace revoke loop is retired). **`status`** is
   side-effect-free: whoami (the principal from the freshest `me` probe), per-workspace access health
-  via a `GET /me` probe (healthy / "no access — revoked or removed" on the uniform 404 / unreachable
-  / no credential), hook health (the adapter's config-entry probe), and the reporting posture from
+  via a `GET /me` probe (healthy / "pending — awaiting owner approval" on a pending link / "no
+  access — unlinked, removed, or gone" on the uniform 404 / unreachable / no credential), hook
+  health (the adapter's config-entry probe), and the reporting posture from
   `state/sync_status.json`.
 - **The `status` verb + the bare `topos` orientation** (`ops/status`, `ops/arm::probe_detected`) —
-  the ONE offline orientation read: enrollment (server + joined workspaces), sign-in, followed-skill
+  the ONE offline orientation read: enrollment (server + joined workspaces, each with its
+  non-active link status — "awaiting owner approval" on pending, the relink hint on ended),
+  sign-in, followed-skill
   and pending-first-receive-offer counts (from `follows.json` + the per-skill sync docs' all-zero
   baseline; any unreadable doc makes the offer count honestly absent), per-agent auto-update trigger
   state probed READ-ONLY over the detected agents (the same adapters the arming sweep drives, minus
@@ -551,7 +579,7 @@ are asserted byte-equal in tests.
 
 The **unified-identity credential model is now in place**: the device-authorization flow mints ONE
 Bearer **device credential** that authenticates EVERY plane request — reads AND writes AND governance
-— and authorization server-side is the credential's device → user → seat resolution. No key material
+— and authorization server-side is the credential's device → seat → live-link resolution. No key material
 exists client-side (nothing signs). `follows.json` is pure subscription state;
 `identity/credentials.json` (a `0600` secret) holds the one credential + the registered device id.
 Still to come:

@@ -2,9 +2,9 @@ import { data, redirect } from "react-router";
 import { composition } from "@/composition.server";
 import { bearerToken, uniformNotFound } from "@/lib/api/wire.server";
 import {
+  type DevicePersonRow,
   deviceActor,
   devicePerson,
-  type SessionAccount,
   seatOf,
   theWorkspace,
   workspaceByName,
@@ -270,25 +270,30 @@ export async function requireReviewer(
 /**
  * Proof of an authenticated DEVICE — the `/api/v1` lane's actor: the presented bearer
  * resolved (hash computed in Postgres — this tier computes no digest) credential → device →
- * user → seat, fail-closed. Person and device ids come from the trusted rows, NEVER a
- * client-asserted field.
+ * user → seat → LIVE LINK, fail-closed. Person and device ids come from the trusted rows,
+ * NEVER a client-asserted field. `linkStatus` is 'active' under the default guard; only the
+ * two pending-tolerant routes ever see 'pending'.
  */
 export type DeviceActor = UserActor & {
   readonly workspaceId: string;
   readonly deviceId: string;
   readonly role: "owner" | "reviewer" | "member";
+  readonly linkStatus: "active" | "pending";
 };
 
 /**
  * The device lane's front door. Every miss — no/blank/foreign-scheme Authorization, unknown
- * credential, revoked device, unknown workspace, unseated user — throws the ONE uniform wire
- * 404 (an ENVELOPE body, not the HTML miss: the caller is a device). Since the identity
- * unification this guard authenticates EVERY device-lane op; the custody forwarder runs
- * behind it, app-authorized.
+ * credential, revoked device, unknown workspace, unseated user, UNLINKED device — throws the
+ * ONE uniform wire 404 (an ENVELOPE body, not the HTML miss: the caller is a device). The
+ * default requires an ACTIVE link; exactly two routes (`/me`, `/delivery`) pass
+ * `allowPending` — a live pending row proves standing, so they answer typed with
+ * `link_status` instead of pretending the workspace does not exist. Everything else folds a
+ * pending link into the same uniform 404 an unlinked device gets.
  */
 export async function requireDeviceActor(
   request: Request,
   workspaceId: string,
+  opts: { allowPending?: boolean } = {},
 ): Promise<DeviceActor> {
   const credential = bearerToken(request);
   if (credential === null) {
@@ -298,23 +303,28 @@ export async function requireDeviceActor(
   if (row === null) {
     throw uniformNotFound();
   }
+  if (row.linkStatus !== "active" && opts.allowPending !== true) {
+    throw uniformNotFound();
+  }
   return {
     userId: row.userId,
     display: row.userDisplay,
     workspaceId,
     deviceId: row.deviceId,
     role: row.role,
+    linkStatus: row.linkStatus,
   } as DeviceActor;
 }
 
 /**
- * The PERSON-scoped device guard: credential → device → user, NO seat requirement — for the
- * one lane op whose caller by definition has no seat yet (accepting an invitation from an
- * already-enrolled device). The email facts ride along because the invitation ceremony fences
- * on them, resolved from the trusted user row — never a client field. Every miss is the same
- * uniform wire 404 the seated guard answers.
+ * The PERSON-scoped device guard: credential → device → user, NO seat or link requirement —
+ * for the lane ops whose caller has (or may have) no standing in the target workspace yet:
+ * the invitation accept, the link describe/apply, the global self-revoke. The email facts
+ * ride along because the invitation ceremony fences on them, and the resolved DEVICE id rides
+ * because the link ceremonies act on this device — all from the trusted rows, never a client
+ * field. Every miss is the same uniform wire 404 the seated guard answers.
  */
-export async function requireDevicePerson(request: Request): Promise<SessionAccount> {
+export async function requireDevicePerson(request: Request): Promise<DevicePersonRow> {
   const credential = bearerToken(request);
   if (credential === null) {
     throw uniformNotFound();

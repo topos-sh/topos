@@ -52,6 +52,7 @@ describe("workspacePolicyOf (the reads)", () => {
       stalenessWindowMs: DEFAULT_WINDOW_MS,
       protectionDefault: "open",
       registration: "invite_only",
+      deviceApproval: "off",
     });
     expect(await queries.stalenessWindowOf(asMember(wsId, "u_owner"))).toBe(DEFAULT_WINDOW_MS);
   });
@@ -95,6 +96,23 @@ describe("setRegistration (the open-sign-up knob)", () => {
     expect(await auditRows("policy_registration")).toEqual([
       { subject: "open", outcome: "ok" },
       { subject: "invite_only", outcome: "ok" },
+    ]);
+  });
+});
+
+describe("setDeviceApproval (the device-approval knob)", () => {
+  it("sets 'on' and back to 'off', audited; refuses any other value", async () => {
+    const queries = await q();
+    const owner = asOwner(wsId, "u_owner", "Owner");
+    expect(await queries.setDeviceApproval(owner, "on")).toBe("set");
+    expect((await queries.workspacePolicyOf(asMember(wsId, "u_owner"))).deviceApproval).toBe("on");
+    expect(await queries.setDeviceApproval(owner, "off")).toBe("set");
+    expect((await queries.workspacePolicyOf(asMember(wsId, "u_owner"))).deviceApproval).toBe("off");
+
+    expect(await queries.setDeviceApproval(owner, "maybe")).toBe("bad_value");
+    expect(await auditRows("policy_device_approval")).toEqual([
+      { subject: "on", outcome: "ok" },
+      { subject: "off", outcome: "ok" },
     ]);
   });
 });

@@ -343,6 +343,7 @@ describe("describe reads", () => {
       address: "http://x",
       principal: "Owner",
       role: "owner",
+      link_status: "active",
     });
   });
 
@@ -359,6 +360,7 @@ describe("describe reads", () => {
       address: "http://x",
       principal: "Member",
       role: "member",
+      link_status: "active",
       invited_by: "owner@example.com",
     });
   });
@@ -865,6 +867,7 @@ describe("delivery", () => {
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.schema_version).toBe(1);
     expect(body.workspace_id).toBe(wsId);
+    expect(body.link_status).toBe("active");
     expect(body.staleness_window_ms).toBe(604800000);
     expect(body.detached).toEqual([]);
     expect(body.proposals_awaiting).toBe(0);
@@ -1241,6 +1244,7 @@ describe("device authorize + token", () => {
       status: "granted",
       credential: flow.device_code,
       device_id: approved?.deviceId,
+      link_status: "active",
       workspace: { workspace_id: wsId, name: "team", display_name: "team" },
     });
 
@@ -1255,6 +1259,7 @@ describe("device authorize + token", () => {
       status: "granted",
       credential: flow.device_code,
       device_id: approved?.deviceId,
+      link_status: "active",
       workspace: { workspace_id: wsId, name: "team", display_name: "team" },
     });
     const me = await drive(

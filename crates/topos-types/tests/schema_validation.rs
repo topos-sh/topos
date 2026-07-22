@@ -98,6 +98,7 @@ fn good_delivery() -> WireDelivery {
         }],
         proposals_awaiting: 1,
         staleness_window_ms: 604_800_000,
+        link_status: "active".into(),
     }
 }
 
@@ -124,6 +125,14 @@ fn delivery_accepts_valid_and_rejects_bad_version_and_schema_version() {
     assert!(
         !v.is_valid(&bad),
         "schema_version != 1 must be rejected (const)"
+    );
+
+    // The device↔workspace link status is REQUIRED on every delivery (a clean wire break).
+    let mut bad = good.clone();
+    bad.as_object_mut().unwrap().remove("link_status");
+    assert!(
+        !v.is_valid(&bad),
+        "a delivery without link_status must be rejected (required)"
     );
 
     // An unknown extra field is ACCEPTED — schemars sets no `additionalProperties: false`, so the wire

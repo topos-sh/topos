@@ -42,6 +42,9 @@ export function mintChannelId(): string {
 export function mintDeviceId(): string {
   return `dk_${randomBytes(16).toString("hex")}`;
 }
+export function mintDeviceLinkId(): string {
+  return `dl_${randomBytes(16).toString("hex")}`;
+}
 export function mintInvitationId(): string {
   return `inv_${randomBytes(16).toString("hex")}`;
 }
@@ -260,6 +263,307 @@ export async function consumeClaim(
   });
 }
 
+// ── Device links (device ↔ workspace — the per-workspace half of enrollment) ────────────────
+
+export type DeviceLinkStatus = "active" | "pending";
+
+/**
+ * THE born-status rule, written once: a link created by an act of a seated member is born
+ * 'active' when the actor is an OWNER (the actor is the approval, regardless of the knob);
+ * otherwise the workspace's device-approval knob decides — 'off' → 'active', 'on' → 'pending'.
+ * Invitation-woven links get NO exception. Applies identically at /verify approval, at
+ * invitation accept, and at the link lane op.
+ */
+export function linkBornStatus(
+  role: "owner" | "reviewer" | "member",
+  knob: "off" | "on",
+): DeviceLinkStatus {
+  if (role === "owner") {
+    return "active";
+  }
+  return knob === "on" ? "pending" : "active";
+}
+
+/** The workspace's device-approval knob, read inside the caller's transaction. */
+async function deviceApprovalKnobTx(tx: Tx, workspaceId: string): Promise<"off" | "on"> {
+  const rows = await tx.execute(
+    sql`SELECT device_approval FROM ${workspace} WHERE id = ${workspaceId}`,
+  );
+  return (rows.rows[0] as { device_approval: "off" | "on" } | undefined)?.device_approval ?? "off";
+}
+
+/**
+ * Create ONE device↔workspace link inside the caller's transaction, idempotently: an existing
+ * row (whatever its status) is left untouched and its CURRENT status returned — no duplicate,
+ * no error. A created link lands its `device_linked` audit row in the same transaction.
+ */
+async function createDeviceLinkTx(
+  tx: Tx,
+  args: {
+    deviceId: string;
+    workspaceId: string;
+    born: DeviceLinkStatus;
+    actor: AuditActor;
+  },
+): Promise<{ status: DeviceLinkStatus; created: boolean }> {
+  const inserted = await tx.execute(
+    sql`INSERT INTO web.device_link (id, device_id, workspace_id, status)
+        VALUES (${mintDeviceLinkId()}, ${args.deviceId}, ${args.workspaceId}, ${args.born})
+        ON CONFLICT (device_id, workspace_id) DO NOTHING
+        RETURNING status`,
+  );
+  if (inserted.rows.length > 0) {
+    await auditInTx(tx, {
+      workspaceId: args.workspaceId,
+      actor: args.actor,
+      kind: "device_linked",
+      subject: args.deviceId,
+      outcome: "ok",
+      details: { status: args.born },
+    });
+    return { status: args.born, created: true };
+  }
+  const existing = await tx.execute(
+    sql`SELECT status FROM web.device_link
+        WHERE device_id = ${args.deviceId} AND workspace_id = ${args.workspaceId}`,
+  );
+  const status =
+    (existing.rows[0] as { status: DeviceLinkStatus } | undefined)?.status ?? args.born;
+  return { status, created: false };
+}
+
+/**
+ * Delete a set of link rows + the linked devices' per-workspace reported per-skill state,
+ * inside the caller's transaction — the ONE severing helper every unlink ceremony runs
+ * (self unlink, owner remove, seat removal, device revocation). One `device_unlinked` audit
+ * row per deleted link, cause-tagged; bytes already on the machine stay there. Reported state
+ * dies with the link so a relinked device re-reports fresh.
+ */
+async function severDeviceLinksTx(
+  tx: Tx,
+  args: {
+    /** The link rows to sever: every (device × workspace) pair this predicate matches. */
+    where: ReturnType<typeof sql>;
+    actor: AuditActor;
+    cause: "self" | "owner_removed" | "seat_removed" | "device_revoked";
+  },
+): Promise<{ deviceId: string; workspaceId: string }[]> {
+  const deleted = await tx.execute(
+    sql`DELETE FROM web.device_link WHERE ${args.where}
+        RETURNING device_id, workspace_id`,
+  );
+  const links = (deleted.rows as { device_id: string; workspace_id: string }[]).map((r) => ({
+    deviceId: r.device_id,
+    workspaceId: r.workspace_id,
+  }));
+  for (const link of links) {
+    await tx.execute(
+      sql`DELETE FROM web.device_bundle_state st
+          USING web.bundle b
+          WHERE st.device_id = ${link.deviceId} AND b.id = st.bundle_id
+            AND b.workspace_id = ${link.workspaceId}`,
+    );
+    await auditInTx(tx, {
+      workspaceId: link.workspaceId,
+      actor: args.actor,
+      kind: "device_unlinked",
+      subject: link.deviceId,
+      outcome: "ok",
+      details: { cause: args.cause },
+    });
+  }
+  return links;
+}
+
+/**
+ * OWNER remove — a workspace owner severs any link in THEIR workspace (fleet page; the route's
+ * owner guard is the gate): the link row + that device's reported state there, `device_unlinked`
+ * (cause: removed by owner). Bytes already on the machine stay there — the page copy says so.
+ */
+export async function ownerRemoveDeviceLink(
+  actor: { userId: string; display: string },
+  workspaceId: string,
+  deviceId: string,
+): Promise<"removed" | "unknown_link"> {
+  return await getDb().transaction(async (tx) => {
+    const severed = await severDeviceLinksTx(tx, {
+      where: sql`device_id = ${deviceId} AND workspace_id = ${workspaceId}`,
+      actor: { userId: actor.userId, display: actor.display },
+      cause: "owner_removed",
+    });
+    return severed.length > 0 ? "removed" : "unknown_link";
+  });
+}
+
+/** APPROVE — an owner flips a PENDING link active (fleet page); `link_approved` audited. */
+export async function approveDeviceLink(
+  actor: { userId: string; display: string },
+  workspaceId: string,
+  deviceId: string,
+): Promise<"approved" | "unknown_link"> {
+  return await getDb().transaction(async (tx) => {
+    const updated = await tx.execute(
+      sql`UPDATE web.device_link SET status = 'active'
+          WHERE device_id = ${deviceId} AND workspace_id = ${workspaceId}
+            AND status = 'pending'
+          RETURNING id`,
+    );
+    if (updated.rows.length === 0) {
+      return "unknown_link";
+    }
+    await auditInTx(tx, {
+      workspaceId,
+      actor: { userId: actor.userId, display: actor.display },
+      kind: "link_approved",
+      subject: deviceId,
+      outcome: "ok",
+    });
+    return "approved";
+  });
+}
+
+/**
+ * REJECT — an owner DELETES a pending link (fleet page); `link_rejected` audited. Relinking
+ * later is allowed (the row is gone, not tombstoned).
+ */
+export async function rejectDeviceLink(
+  actor: { userId: string; display: string },
+  workspaceId: string,
+  deviceId: string,
+): Promise<"rejected" | "unknown_link"> {
+  return await getDb().transaction(async (tx) => {
+    const deleted = await tx.execute(
+      sql`DELETE FROM web.device_link
+          WHERE device_id = ${deviceId} AND workspace_id = ${workspaceId}
+            AND status = 'pending'
+          RETURNING id`,
+    );
+    if (deleted.rows.length === 0) {
+      return "unknown_link";
+    }
+    await auditInTx(tx, {
+      workspaceId,
+      actor: { userId: actor.userId, display: actor.display },
+      kind: "link_rejected",
+      subject: deviceId,
+      outcome: "ok",
+    });
+    return "rejected";
+  });
+}
+
+/** The link a (device, workspace) pair holds right now — the granted poll's decoration read. */
+export async function deviceLinkStatus(
+  deviceId: string,
+  workspaceId: string,
+): Promise<DeviceLinkStatus | null> {
+  const rows = await getDb().execute(
+    sql`SELECT status FROM web.device_link
+        WHERE device_id = ${deviceId} AND workspace_id = ${workspaceId}`,
+  );
+  return (rows.rows[0] as { status: DeviceLinkStatus } | undefined)?.status ?? null;
+}
+
+/**
+ * The link lane ops' workspace resolution — one grammar for describe AND apply: a non-empty
+ * `workspace` is looked up by NAME in BOTH tenancies; the empty string is the single-tenant
+ * origin-addressed form (the install's one workspace) and a refusal in multi (there is no
+ * "the" workspace to name). A miss resolves null; the caller folds it into the SAME refusal a
+ * seatless member gets — no existence oracle.
+ */
+async function resolveLinkWorkspace(
+  workspaceName: string,
+): Promise<typeof workspace.$inferSelect | null> {
+  if (workspaceName.length === 0) {
+    return composition.tenancy === "multi" ? null : await theWorkspace();
+  }
+  return await workspaceByName(workspaceName);
+}
+
+export type DeviceLinkOp =
+  | {
+      outcome: "ok";
+      workspaceId: string;
+      name: string;
+      displayName: string;
+      role: "owner" | "reviewer" | "member";
+      /** The link this device holds NOW ('none' on the describe when no row exists). */
+      linkStatus: DeviceLinkStatus | "none";
+      /** What a link created now would be born as — the describe's forward look. */
+      born: DeviceLinkStatus;
+    }
+  /** Seatless caller OR unknown workspace name — byte-identical, no existence oracle. */
+  | { outcome: "not_a_member" };
+
+/** The link DESCRIBE (`GET /v1/device/link`): the caller's standing + what apply would do.
+ * Nothing mutates. */
+export async function describeDeviceLink(
+  person: DevicePersonRow,
+  workspaceName: string,
+): Promise<DeviceLinkOp> {
+  const ws = await resolveLinkWorkspace(workspaceName);
+  if (ws === null) {
+    return { outcome: "not_a_member" };
+  }
+  const seated = await seatOf(person.userId, ws.id);
+  if (seated === undefined) {
+    return { outcome: "not_a_member" };
+  }
+  const status = await deviceLinkStatus(person.deviceId, ws.id);
+  return {
+    outcome: "ok",
+    workspaceId: ws.id,
+    name: ws.name,
+    displayName: ws.displayName,
+    role: seated.role,
+    linkStatus: status ?? "none",
+    born: linkBornStatus(seated.role, ws.deviceApproval as "off" | "on"),
+  };
+}
+
+/**
+ * The link APPLY (`POST /v1/device/link`): create THIS device's link to the named workspace —
+ * born per the ONE rule, `device_linked` audited in the same transaction, IDEMPOTENT (an
+ * existing row answers ok with its current status). The seat is locked FOR UPDATE so a
+ * concurrent seat removal serializes with the link instead of racing it.
+ */
+export async function applyDeviceLink(
+  person: DevicePersonRow,
+  workspaceName: string,
+): Promise<DeviceLinkOp> {
+  const ws = await resolveLinkWorkspace(workspaceName);
+  if (ws === null) {
+    return { outcome: "not_a_member" };
+  }
+  return await getDb().transaction(async (tx) => {
+    const seats = await tx.execute(
+      sql`SELECT role FROM ${seat}
+          WHERE workspace_id = ${ws.id} AND user_id = ${person.userId}
+          FOR UPDATE`,
+    );
+    const seatRow = seats.rows[0] as { role: "owner" | "reviewer" | "member" } | undefined;
+    if (seatRow === undefined) {
+      return { outcome: "not_a_member" as const };
+    }
+    const born = linkBornStatus(seatRow.role, await deviceApprovalKnobTx(tx, ws.id));
+    const link = await createDeviceLinkTx(tx, {
+      deviceId: person.deviceId,
+      workspaceId: ws.id,
+      born,
+      actor: { userId: person.userId, display: person.display },
+    });
+    return {
+      outcome: "ok" as const,
+      workspaceId: ws.id,
+      name: ws.name,
+      displayName: ws.displayName,
+      role: seatRow.role,
+      linkStatus: link.status,
+      born,
+    };
+  });
+}
+
 // ── The gh-style device flow ─────────────────────────────────────────────────────────────────
 
 const DEVICE_AUTH_TTL_MS = 15 * 60 * 1000;
@@ -441,7 +745,7 @@ async function seatedFlowWorkspaceTx(
   tx: Tx,
   requestedWorkspace: string,
   actorUserId: string,
-): Promise<{ workspaceId: string } | null> {
+): Promise<{ workspaceId: string; role: "owner" | "reviewer" | "member" } | null> {
   const rows =
     composition.tenancy === "multi"
       ? await tx.execute(
@@ -456,13 +760,14 @@ async function seatedFlowWorkspaceTx(
   // serializes with this ceremony instead of racing it (no approve/deny commits on a seat
   // whose delete already committed).
   const seats = await tx.execute(
-    sql`SELECT 1 FROM ${seat} WHERE workspace_id = ${ws.id} AND user_id = ${actorUserId}
+    sql`SELECT role FROM ${seat} WHERE workspace_id = ${ws.id} AND user_id = ${actorUserId}
         FOR UPDATE`,
   );
-  if (seats.rows.length === 0) {
+  const seatRow = seats.rows[0] as { role: "owner" | "reviewer" | "member" } | undefined;
+  if (seatRow === undefined) {
     return null;
   }
-  return { workspaceId: ws.id };
+  return { workspaceId: ws.id, role: seatRow.role };
 }
 
 /**
@@ -548,6 +853,16 @@ export async function approveDeviceAuth(
         displayName: row.requested_name,
         credentialSha256: row.device_code_sha256,
       });
+      // Registration + the FIRST link, one fence: the grant now IS one link — further
+      // workspaces each take their own explicit link from the device. Born per the ONE rule
+      // (the approver's role vs the workspace's device-approval knob; invitation-woven flows
+      // get no exception).
+      await createDeviceLinkTx(tx, {
+        deviceId,
+        workspaceId: resolved.workspaceId,
+        born: linkBornStatus(resolved.role, await deviceApprovalKnobTx(tx, resolved.workspaceId)),
+        actor: { userId: approver.userId, display: approver.display },
+      });
       await tx.execute(
         sql`UPDATE ${deviceAuthSession}
             SET status = 'approved', approved_by = ${approver.userId}, device_id = ${deviceId},
@@ -613,12 +928,14 @@ export async function denyDeviceAuth(
 
 /** The verify page's resolved request: what is asking, the code for the glance-check, and —
  * when the flow carries an invite token that still resolves — the workspace the invitation
- * would join (disclosed to the code-holder, who is the token-holder's own terminal). */
+ * would join (disclosed to the code-holder, who is the token-holder's own terminal). The
+ * invitation's role rides along so the approval copy can say honestly whether the link will
+ * await an owner. */
 export interface PendingDeviceAuthView {
   requestedName: string;
   requestedWorkspace: string;
   userCode: string;
-  inviteWorkspace: { name: string; displayName: string } | null;
+  inviteWorkspace: { name: string; displayName: string; role: string } | null;
 }
 
 /** The verify page's lookup: the pending request a typed user_code names (display only). */
@@ -646,7 +963,8 @@ async function pendingDeviceAuthWhere(
 ): Promise<PendingDeviceAuthView | null> {
   const rows = await getDb().execute(
     sql`SELECT s.requested_name, s.requested_workspace, s.user_code,
-               w.name AS invite_ws_name, w.display_name AS invite_ws_display
+               w.name AS invite_ws_name, w.display_name AS invite_ws_display,
+               i.role AS invite_role
         FROM ${deviceAuthSession} s
         LEFT JOIN web.invitation i ON i.token_sha256 = s.invite_token_sha256
           AND i.status = 'pending' AND (i.expires_at IS NULL OR i.expires_at > now())
@@ -660,6 +978,7 @@ async function pendingDeviceAuthWhere(
         user_code: string;
         invite_ws_name: string | null;
         invite_ws_display: string | null;
+        invite_role: string | null;
       }
     | undefined;
   if (!row) {
@@ -672,7 +991,11 @@ async function pendingDeviceAuthWhere(
     inviteWorkspace:
       row.invite_ws_name === null
         ? null
-        : { name: row.invite_ws_name, displayName: row.invite_ws_display ?? row.invite_ws_name },
+        : {
+            name: row.invite_ws_name,
+            displayName: row.invite_ws_display ?? row.invite_ws_name,
+            role: row.invite_role ?? "member",
+          },
   };
 }
 
@@ -683,12 +1006,17 @@ export interface DeviceActorRow {
   userId: string;
   userDisplay: string;
   role: "owner" | "reviewer" | "member";
+  /** The device↔workspace link's status — a LIVE row is standing; 'active' is authorization. */
+  linkStatus: DeviceLinkStatus;
 }
 
 /**
- * credential-hash → device → user → seat, one query, fail-closed: a revoked device or a
- * seatless owner resolves to nothing (the route answers the uniform wire 404). The hash is
- * computed in Postgres; last_seen_at rides along.
+ * credential-hash → device → user → seat → LIVE LINK, one query, fail-closed: a revoked
+ * device, a seatless owner, or an unlinked device all resolve to nothing (the route answers
+ * the uniform wire 404 — NO row is byte-indistinguishable from a workspace that never
+ * existed). A PENDING link resolves WITH its status: exactly two routes answer typed for it
+ * (the guard folds everything else to the 404). The hash is computed in Postgres;
+ * last_seen_at rides along.
  */
 export async function deviceActor(
   workspaceId: string,
@@ -696,17 +1024,25 @@ export async function deviceActor(
 ): Promise<DeviceActorRow | null> {
   const rows = await getDb().execute(
     sql`UPDATE ${device} d SET last_seen_at = now()
-        FROM ${seat} s, web."user" u
+        FROM ${seat} s, web."user" u, web.device_link dl
         WHERE d.credential_sha256 = ${sha256OfText(credential)}
           AND d.revoked_at IS NULL
           AND u.id = d.user_id
           AND s.user_id = d.user_id AND s.workspace_id = ${workspaceId}
+          AND dl.device_id = d.id AND dl.workspace_id = ${workspaceId}
         RETURNING d.id AS device_id, d.user_id,
           -- The display rule (app/lib/person-display.ts): a blank name falls back to the email.
-          COALESCE(NULLIF(btrim(u.name), ''), u.email) AS user_display, s.role`,
+          COALESCE(NULLIF(btrim(u.name), ''), u.email) AS user_display, s.role,
+          dl.status AS link_status`,
   );
   const row = rows.rows[0] as
-    | { device_id: string; user_id: string; user_display: string; role: DeviceActorRow["role"] }
+    | {
+        device_id: string;
+        user_id: string;
+        user_display: string;
+        role: DeviceActorRow["role"];
+        link_status: DeviceLinkStatus;
+      }
     | undefined;
   if (!row) {
     return null;
@@ -716,19 +1052,21 @@ export async function deviceActor(
     userId: row.user_id,
     userDisplay: row.user_display,
     role: row.role,
+    linkStatus: row.link_status,
   };
 }
 
 /**
  * Self-service revocation — SELF-ONLY by design (a device is a possession; no owner arm
  * reaches into someone else's pocket), effective immediately and FINAL (the trigger refuses
- * any un-revoke).
+ * any un-revoke). In the SAME transaction every one of the device's links is severed and its
+ * per-workspace reported state deleted — one `device_unlinked` audit row per link (cause:
+ * device revoked/signed out); bytes already on the machine stay there.
  *
- * A device is workspace-LESS — a possession of ONE user, whose credential reaches every
- * workspace that user holds a seat in. So the honest audit scope of a revocation is every one
- * of the owner's seat workspaces (revocation is an event in each), NOT some single boot
- * workspace the actor may hold no seat in. Zero seats ⇒ zero audit rows — no workspace's trail
- * is touched. All in the SAME transaction as the row flip.
+ * A registration is workspace-LESS — a possession of ONE user. The honest audit scope of the
+ * revocation event itself stays every one of the owner's seat workspaces (revocation is an
+ * event in each), NOT some single boot workspace the actor may hold no seat in. Zero seats ⇒
+ * zero device_revoked rows — no workspace's trail is touched.
  */
 export async function revokeOwnDevice(
   actor: { userId: string; display: string },
@@ -743,6 +1081,11 @@ export async function revokeOwnDevice(
     if (rows.rows.length === 0) {
       return false;
     }
+    await severDeviceLinksTx(tx, {
+      where: sql`device_id = ${deviceId}`,
+      actor: { userId: actor.userId, display: actor.display },
+      cause: "device_revoked",
+    });
     const seats = await tx.execute(
       sql`SELECT workspace_id FROM ${seat} WHERE user_id = ${actor.userId}`,
     );
@@ -756,6 +1099,29 @@ export async function revokeOwnDevice(
       });
     }
     return true;
+  });
+}
+
+/**
+ * SELF unlink — the device's owner severs ONE link (from the account page): the link row and
+ * that workspace's reported state for that device go together; `device_unlinked` (cause:
+ * self). Self-only by the WHERE clause itself — a foreign device id matches nothing, the same
+ * answer an unknown one gets. Bytes already on the machine stay there; relinking later is
+ * allowed and re-reports fresh.
+ */
+export async function selfUnlinkDevice(
+  actor: { userId: string; display: string },
+  deviceId: string,
+  workspaceId: string,
+): Promise<"unlinked" | "unknown_link"> {
+  return await getDb().transaction(async (tx) => {
+    const severed = await severDeviceLinksTx(tx, {
+      where: sql`device_id = ${deviceId} AND workspace_id = ${workspaceId}
+        AND device_id IN (SELECT id FROM web.device WHERE user_id = ${actor.userId})`,
+      actor: { userId: actor.userId, display: actor.display },
+      cause: "self",
+    });
+    return severed.length > 0 ? "unlinked" : "unknown_link";
   });
 }
 
@@ -1052,6 +1418,9 @@ export type InviteAcceptOutcome =
       workspaceDisplayName: string;
       hint: DeviceGrantHint | null;
       alreadyMember: boolean;
+      /** Set on the DEVICE-lane accept only: the accepting device's link, created (or found)
+       * in the same fence — born per the ONE rule, no invitation exception. */
+      linkStatus?: DeviceLinkStatus;
     }
   /** No live invitation under this token — the one constant page. */
   | { outcome: "gone" }
@@ -1075,7 +1444,7 @@ async function acceptInvitationTx(
   tx: Tx,
   inv: LockedInvitation,
   account: SessionAccount,
-  opts: { mailboxProven: boolean },
+  opts: { mailboxProven: boolean; deviceId?: string },
 ): Promise<InviteAcceptOutcome> {
   if (account.email.trim().toLowerCase() !== inv.email) {
     return { outcome: "wrong_account" };
@@ -1141,6 +1510,25 @@ async function acceptInvitationTx(
     outcome: "ok",
     details: { role: inv.role, ...(hint === null ? {} : { hint }) },
   });
+  // The DEVICE-lane accept also links the accepting device in the same fence — born per the
+  // ONE rule against the person's ACTUAL seat role (an already-member keeps their real role);
+  // invitation-woven links get no exception, so a member's link under an 'on' knob is pending.
+  let linkStatus: DeviceLinkStatus | undefined;
+  if (opts.deviceId !== undefined) {
+    const seatRow = await tx.execute(
+      sql`SELECT role FROM ${seat}
+          WHERE workspace_id = ${inv.workspaceId} AND user_id = ${account.userId}`,
+    );
+    const role =
+      (seatRow.rows[0] as { role: "owner" | "reviewer" | "member" } | undefined)?.role ?? "member";
+    const link = await createDeviceLinkTx(tx, {
+      deviceId: opts.deviceId,
+      workspaceId: inv.workspaceId,
+      born: linkBornStatus(role, await deviceApprovalKnobTx(tx, inv.workspaceId)),
+      actor: { userId: account.userId, display: account.display },
+    });
+    linkStatus = link.status;
+  }
   const ws = await tx.execute(
     sql`SELECT name, display_name FROM ${workspace} WHERE id = ${inv.workspaceId}`,
   );
@@ -1152,14 +1540,16 @@ async function acceptInvitationTx(
     workspaceDisplayName: wsRow?.display_name ?? wsRow?.name ?? "",
     hint,
     alreadyMember,
+    ...(linkStatus === undefined ? {} : { linkStatus }),
   };
 }
 
-/** The invitation page's accept: lock the live row by token, run the fence. */
+/** The invitation page's accept: lock the live row by token, run the fence. The device lane
+ * passes its resolved `deviceId` so the accepting device's link lands in the same fence. */
 export async function acceptInvitationByToken(
   token: string,
   actor: { userId: string; display: string },
-  opts: { mailboxProven: boolean },
+  opts: { mailboxProven: boolean; deviceId?: string },
 ): Promise<InviteAcceptOutcome> {
   return await getDb().transaction(async (tx) => {
     const inv = await lockPendingInvitationTx(tx, sql`i.token_sha256 = ${sha256OfText(token)}`);
@@ -1193,29 +1583,41 @@ export async function declineInvitationByToken(token: string): Promise<"declined
   });
 }
 
+/** A person-scoped resolve's answer: the account facts plus WHICH device presented them. */
+export type DevicePersonRow = SessionAccount & { deviceId: string };
+
 /**
- * The PERSON-scoped device resolve: credential → device → user, NO seat requirement — the
- * guard of the device lane's invitation accept, where the caller by definition has no seat yet
- * in the invitation's workspace. Fail-closed on a revoked device; last_seen_at rides along.
+ * The PERSON-scoped device resolve: credential → device → user, NO seat or link requirement —
+ * the guard of the lane ops whose caller has (or may have) no standing in the target workspace
+ * yet: the invitation accept, the link describe/apply, and the global self-revoke. Fail-closed
+ * on a revoked device; last_seen_at rides along; the resolved device id rides too (the link
+ * ceremonies act on THIS device, never a client-asserted one).
  */
-export async function devicePerson(credential: string): Promise<SessionAccount | null> {
+export async function devicePerson(credential: string): Promise<DevicePersonRow | null> {
   const rows = await getDb().execute(
     sql`UPDATE ${device} d SET last_seen_at = now()
         FROM web."user" u
         WHERE d.credential_sha256 = ${sha256OfText(credential)}
           AND d.revoked_at IS NULL
           AND u.id = d.user_id
-        RETURNING d.user_id,
+        RETURNING d.id AS device_id, d.user_id,
           COALESCE(NULLIF(btrim(u.name), ''), u.email) AS user_display,
           u.email, u.email_verified`,
   );
   const row = rows.rows[0] as
-    | { user_id: string; user_display: string; email: string; email_verified: boolean }
+    | {
+        device_id: string;
+        user_id: string;
+        user_display: string;
+        email: string;
+        email_verified: boolean;
+      }
     | undefined;
   if (!row) {
     return null;
   }
   return {
+    deviceId: row.device_id,
     userId: row.user_id,
     display: row.user_display,
     email: row.email,
@@ -1390,6 +1792,15 @@ export async function removeSeat(
           )
           ON CONFLICT (user_id, bundle_id) DO NOTHING`,
     );
+    // The removed person's devices are unlinked from THIS workspace in the same fence — their
+    // links and per-workspace reported state go with the seat (a re-invited + relinked device
+    // re-reports fresh); one device_unlinked audit row per link, cause-tagged.
+    await severDeviceLinksTx(tx, {
+      where: sql`workspace_id = ${workspaceId}
+        AND device_id IN (SELECT id FROM web.device WHERE user_id = ${targetUserId})`,
+      actor: { userId: actor.userId, display: actor.display },
+      cause: "seat_removed",
+    });
     const deleted = await tx.execute(
       sql`DELETE FROM ${seat}
           WHERE workspace_id = ${workspaceId} AND user_id = ${targetUserId}

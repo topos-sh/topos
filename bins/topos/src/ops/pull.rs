@@ -32,7 +32,7 @@ use crate::error::ClientError;
 use crate::id::SkillId;
 use crate::plane::{
     DeliverySkill, DeliverySource, FetchedVersion, FollowContext, FollowMode, FollowSource,
-    KnownCurrent, PlaneError, PlaneSource, PointerFetch,
+    KnownCurrent, LinkStatus, PlaneError, PlaneSource, PointerFetch,
 };
 use crate::sync_status::{self, DeliveredSkill, WorkspaceSync};
 use crate::{doc, sidecar};
@@ -388,12 +388,47 @@ pub(crate) fn pull_reconcile_with(
         let snapshot = match delivery.fetch_delivery(&ws) {
             Ok(s) => s,
             Err(PlaneError::NotFound) => {
-                // The whole workspace is gone for THIS device (removed from the roster, revoked,
-                // or the workspace itself is no more). The who-acts principle: an upstream person
-                // acted on YOU — every copy stays, frozen; nothing is cleaned.
+                // The whole workspace answered the uniform 404 for THIS device. The LOCAL link
+                // record splits the story: a PENDING link that now misses was never approved (or
+                // the workspace is gone) — nothing was ever delivered, so there is nothing to
+                // freeze: ONE typed line, and the membership is marked ended so it prints once
+                // (the fan-out drops an ended link). An ACTIVE link keeps the freeze — unlinked,
+                // removed, or gone (indistinguishable by design); every copy stays, nothing is
+                // cleaned, and relinking re-enables.
+                let membership = enroll::read_user(ctx.fs, &ctx.layout)
+                    .ok()
+                    .flatten()
+                    .and_then(|u| u.membership(&ws).cloned());
+                let address = membership
+                    .as_ref()
+                    .map(|m| m.name.clone())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| ws.clone());
+                match membership.as_ref().map(|m| m.link_status.as_str()) {
+                    Some(enroll::LINK_PENDING) => {
+                        warnings.push(format!(
+                            "LINK_ENDED {ws}: the link request wasn't approved, or the workspace \
+                             is gone — relink with `topos follow {address}`"
+                        ));
+                        if let Err(e) = enroll::set_membership_link_status(
+                            ctx.fs,
+                            &ctx.layout,
+                            &ws,
+                            enroll::LINK_ENDED,
+                        ) {
+                            warnings.push(format!("LINK_STATE_WRITE_FAILED {ws}: {}", e.detail()));
+                        }
+                        continue;
+                    }
+                    // Already marked ended: the one typed line printed when it flipped — stay
+                    // silent (the production fan-out drops an ended membership; this arm keeps
+                    // "prints once" true even for a caller that still dials it).
+                    Some(enroll::LINK_ENDED) => continue,
+                    _ => {}
+                }
                 warnings.push(format!(
-                    "ACCESS_GONE {ws}: this device no longer has access; its skills stay frozen in \
-                     place (re-adding the member re-enables them)"
+                    "ACCESS_GONE {ws}: this device no longer has access (unlinked, removed, or \
+                     gone); its skills stay frozen in place — relink with `topos follow {address}`"
                 ));
                 access_gone.push(ws.clone());
                 continue;
@@ -409,6 +444,17 @@ pub(crate) fn pull_reconcile_with(
                 continue;
             }
         };
+        // A PENDING link delivers nothing (the server sends empty sets and a zero gauge) — skip
+        // the workspace QUIETLY: no report PUT, no freeze warning, no freshness stamp. It is a
+        // `status`-visible fact, not an error; delivery starts automatically after approval.
+        if snapshot.link_status == LinkStatus::Pending {
+            let _ =
+                enroll::set_membership_link_status(ctx.fs, &ctx.layout, &ws, enroll::LINK_PENDING);
+            continue;
+        }
+        // A delivering (active) link SELF-HEALS a locally-recorded pending wait — the owner
+        // approved since the last sweep. A no-op when the record already reads active.
+        let _ = enroll::set_membership_link_status(ctx.fs, &ctx.layout, &ws, enroll::LINK_ACTIVE);
         proposals_awaiting = proposals_awaiting
             .saturating_add(u32::try_from(snapshot.proposals_awaiting).unwrap_or(u32::MAX));
 
@@ -734,8 +780,8 @@ fn pull_channel_filtered(
             Ok(s) => s,
             Err(PlaneError::NotFound) => {
                 warnings.push(format!(
-                    "ACCESS_GONE {ws}: this device no longer has access; its skills stay frozen in \
-                     place (re-adding the member re-enables them)"
+                    "ACCESS_GONE {ws}: this device no longer has access (unlinked, removed, or \
+                     gone); its skills stay frozen in place — relink with `topos follow <address>`"
                 ));
                 access_gone.push(ws.clone());
                 continue;
@@ -750,6 +796,10 @@ fn pull_channel_filtered(
                 continue;
             }
         };
+        // A PENDING link delivers nothing — the targeted channel sync skips it quietly too.
+        if snapshot.link_status == LinkStatus::Pending {
+            continue;
+        }
         proposals_awaiting = proposals_awaiting
             .saturating_add(u32::try_from(snapshot.proposals_awaiting).unwrap_or(u32::MAX));
         for ds in &snapshot.skills {
@@ -1227,7 +1277,8 @@ pub(crate) fn quiet_hook_lines(
     let mut lines = Vec::new();
     for ws in &out.access_gone {
         lines.push(format!(
-            "topos: {ws} — this device no longer has access; its skills are frozen in place"
+            "topos: {ws} — this device no longer has access (unlinked, removed, or gone); its \
+             skills are frozen in place"
         ));
     }
     if out.unreachable.is_empty() {

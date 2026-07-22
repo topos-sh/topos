@@ -140,6 +140,21 @@ export async function seedDevice(
   );
 }
 
+/** A device↔workspace link row without the ceremony (default active — the knob-off born state). */
+export async function linkDevice(
+  db: ScratchDb,
+  deviceId: string,
+  ws: string,
+  status: "active" | "pending" = "active",
+): Promise<void> {
+  await db.q(
+    `INSERT INTO web.device_link (id, device_id, workspace_id, status)
+     VALUES ('dl_seed_' || $1 || '_' || substr(md5($2), 1, 8), $1, $2, $3)
+     ON CONFLICT (device_id, workspace_id) DO UPDATE SET status = excluded.status`,
+    [deviceId, ws, status],
+  );
+}
+
 /** A deterministic 64-hex version id derived from the bundle id (a seed, not a real digest). */
 export function versionIdFor(bundleId: string): string {
   return `${bundleId.replaceAll("_", "")}0`.padEnd(64, "a").slice(0, 64);

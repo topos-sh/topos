@@ -29,6 +29,13 @@
         }
       ]
     },
+    "link_status": {
+      "description": "The FIRST device↔workspace link's born status — present ONLY when `status` is `granted`:\n`\"active\"`, or `\"pending\"` when the workspace's device-approval knob gated it (approval\nmints the registration and the first link together server-side). Absent on an older\nproducer ⇒ treat as `\"active\"`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "status": {
       "description": "The poll status.",
       "$ref": "#/$defs/DeviceAuthPollStatus"

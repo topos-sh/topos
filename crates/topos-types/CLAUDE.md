@@ -26,7 +26,14 @@ The [`requests`] module carries the PUBLIC device lane the product app serves:
   `WireProposalList`, `WireSkillIndex`, `WireDelivery` + `WireAppliedReport`, the describe reads
   `WireMe`/`WireChannelIndex`/`WireProposalIndex`/`WireSkillLog`/`WireReach`), the row-op bodies
   (`ProtectionSetRequest`, `NoticeAckRequest`, `InvitationRequest`/`InvitationData`), the constant
-  `WireProtocolCard`, and `DeviceRevokeRequest` (the CLI logout wire).
+  `WireProtocolCard`, and the DEVICE-LINK lane (`DeviceLinkRequest` / `DeviceLinkDescribe` /
+  `DeviceLinkData` — a device is registered once per server and LINKED per workspace; the
+  browser-free lane joins an enrolled device to a further workspace, and `DELETE /v1/device` is
+  the global self-revoke the CLI logout runs — no request body). `link_status`
+  ("active"/"pending") rides `WireMe` (defaulted), `WireDelivery` (REQUIRED — a pending link
+  delivers empty sets), `InviteAcceptData` (defaulted), and the granted poll (optional; the first
+  link's born status). The old per-workspace `DeviceRevokeRequest` is RETIRED (a clean wire
+  break, no shim).
 
 The old enrollment surface (device/token/passcode/redeem/claim/login/roster DTOs and the bootstrap
 module) is DELETED — enrollment and every identity ceremony live in the product app now; the vault

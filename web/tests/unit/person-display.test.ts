@@ -4,6 +4,7 @@ import {
   asMember,
   bootWorkspace,
   createScratchDb,
+  linkDevice,
   type ScratchDb,
   seatUser,
   seedDevice,
@@ -43,6 +44,7 @@ describe("the SQL twin (scratch DB)", () => {
     await seatUser(db, ws, "u_blank", "member");
     await seatUser(db, ws, "u_named", "member");
     await seedDevice(db, "dev_blank", "u_blank");
+    await linkDevice(db, "dev_blank", ws);
   }, 60_000);
 
   afterAll(async () => {

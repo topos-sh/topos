@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "command": "follow",
+  "ok": false,
+  "data": {},
+  "warnings": [],
+  "next_actions": [],
+  "error": {
+    "code": "NOT_A_MEMBER",
+    "outcome": "DENIED",
+    "retryable": false,
+    "affected": {},
+    "context": {},
+    "next_actions": []
+  }
+}

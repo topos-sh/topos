@@ -51,10 +51,11 @@ export function okStatusEnvelope(command: string, status: string): Response {
 /**
  * A DENIED envelope carrying a SPECIFIC code (the `*_ROLE_REQUIRED` / `CHANNEL_BUILTIN` /
  * `SKILL_NOT_ACTIVE` / `BAD_NAME` / `UNKNOWN_CHANNEL` family). HTTP 200 — the flat error rides the
- * access-recovery next actions like every DENIED; `affected`/`context` are `{}`, the generation
- * fields omitted.
+ * access-recovery next actions like every DENIED; `affected` is `{}`, the generation fields
+ * omitted. An optional recovery `message` rides `error.context` (the transport faults'
+ * spelling) — the refusal names the way back, never a fact about what exists.
  */
-export function deniedCodeEnvelope(command: string, code: string): Response {
+export function deniedCodeEnvelope(command: string, code: string, message?: string): Response {
   return new Response(
     JSON.stringify({
       schema_version: WIRE_SCHEMA_VERSION,
@@ -68,7 +69,7 @@ export function deniedCodeEnvelope(command: string, code: string): Response {
         outcome: "DENIED",
         retryable: false,
         affected: {},
-        context: {},
+        context: message === undefined ? {} : { message },
         next_actions: DENIED_NEXT_ACTIONS,
       },
     }),

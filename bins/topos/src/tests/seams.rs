@@ -176,6 +176,7 @@ impl Rig {
                 name: "acme".to_owned(),
                 display_name: "Acme".to_owned(),
                 enrolled_at: 1,
+                link_status: enroll::LINK_ACTIVE.to_owned(),
             },
         );
         enroll::write_user(&self.fs, &self.layout(), &user).unwrap();
@@ -386,6 +387,7 @@ impl DirectorySource for FakeDir {
             principal: "alice@acme.com".into(),
             role: "member".into(),
             invited_by: None,
+            link_status: "active".into(),
         })
     }
     fn channels_index(&self, _ws: &str) -> Result<WireChannelIndex, ClientError> {
@@ -535,6 +537,7 @@ fn update_channel_filters_delivered_skills_by_via() {
         proposals_awaiting: 0,
         notices: Vec::new(),
         staleness_window_ms: 604_800_000,
+        link_status: crate::plane::LinkStatus::Active,
     };
     let delivery = FakeDelivery { snapshot };
     let plane = InertPlane;

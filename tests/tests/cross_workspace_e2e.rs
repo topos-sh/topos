@@ -91,6 +91,8 @@ fn e2e_a_seated_credential_gets_the_uniform_404_on_every_foreign_workspace_route
     );
     assert_eq!(put_exclusion.status, 404);
     assert_eq!(put_exclusion.body, reference.body);
+    // The RETIRED per-workspace device-revoke route (the global `DELETE /v1/device` replaced it):
+    // the catch-all keeps the byte discipline — the dead path answers the same envelope as a miss.
     let del_device = stack.device_delete(
         &probe.credential,
         &format!("/v1/workspaces/{b}/devices"),
@@ -113,4 +115,32 @@ fn e2e_a_seated_credential_gets_the_uniform_404_on_every_foreign_workspace_route
         &format!("/v1/workspaces/{}/delivery", stack.workspace_id),
     );
     assert_eq!(a_again.status, 200, "A is unaffected: {}", a_again.body);
+
+    // A SEAT without a LINK is still the uniform 404 — the device↔workspace link is a second,
+    // independent gate on the lane, byte-indistinguishable from no seat at all.
+    stack.seat_in(b, OWNER_EMAIL, "owner");
+    let seated_unlinked = stack.device_get(&probe.credential, &format!("/v1/workspaces/{b}/me"));
+    assert_eq!(
+        seated_unlinked.status, 404,
+        "seated but unlinked: {}",
+        seated_unlinked.body
+    );
+    assert_eq!(
+        seated_unlinked.body, reference.body,
+        "the seat-without-link miss is byte-identical to the never-existed miss"
+    );
+
+    // Creating the link over the lane's own op flips exactly that gate: the same read now answers.
+    let linked = stack.device_post_json(
+        Some(&probe.credential),
+        "/v1/device/link",
+        &serde_json::json!({ "workspace": "othr" }),
+    );
+    assert_eq!(linked.status, 200, "the link applies: {}", linked.body);
+    let b_me = stack.device_get(&probe.credential, &format!("/v1/workspaces/{b}/me"));
+    assert_eq!(
+        b_me.status, 200,
+        "seat + link opens the lane: {}",
+        b_me.body
+    );
 }

@@ -57,5 +57,6 @@
     }
   ],
   "proposals_awaiting": 1,
-  "staleness_window_ms": 604800000
+  "staleness_window_ms": 604800000,
+  "link_status": "active"
 }

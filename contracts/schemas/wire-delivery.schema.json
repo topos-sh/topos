@@ -18,6 +18,10 @@
         "type": "string"
       }
     },
+    "link_status": {
+      "description": "THIS device's link to the workspace — `\"active\"` or `\"pending\"`. REQUIRED: the delivery\nanswer is meaningless without it (a `\"pending\"` delivery carries empty `skills` /\n`detached` / `excluded` / `notices` and `proposals_awaiting: 0` — no data flows over a\npending link; the client skips the workspace quietly and `topos status` shows the wait).",
+      "type": "string"
+    },
     "notices": {
       "description": "The unacked, person-scoped notices (verdicts, proposal closures, …).",
       "type": "array",
@@ -63,7 +67,8 @@
     "skills",
     "detached",
     "notices",
-    "proposals_awaiting"
+    "proposals_awaiting",
+    "link_status"
   ],
   "$defs": {
     "WireDeliverySkill": {

@@ -51,10 +51,13 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   }
 
   const person = await requireDevicePerson(request);
+  // The accept transaction ALSO links the accepting device in the same fence (born per the
+  // ONE rule — the accepter is typically a member, so a device-approval 'on' knob bears a
+  // pending link, invitation or not); `link_status` reports what the device now holds.
   const result = await acceptInvitationByToken(
     token,
     { userId: person.userId, display: person.display },
-    { mailboxProven: false },
+    { mailboxProven: false, deviceId: person.deviceId },
   );
   switch (result.outcome) {
     case "accepted":
@@ -64,6 +67,7 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
           name: result.workspaceName,
           display_name: result.workspaceDisplayName,
         },
+        link_status: result.linkStatus ?? "pending",
         ...(result.hint === null ? {} : { hint: result.hint }),
       });
     case "wrong_account":

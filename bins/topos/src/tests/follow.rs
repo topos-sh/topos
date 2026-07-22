@@ -161,6 +161,7 @@ impl FakeEnroll {
     fn granted() -> DeviceAuthPoll {
         DeviceAuthPoll::Granted(EnrolledGrant {
             hint: None,
+            link_status: crate::plane::LinkStatus::Active,
             credential: "devc_secret".into(),
             device_id: "dev_1".into(),
             workspace: EnrolledWorkspace {
@@ -229,6 +230,141 @@ impl DirectorySource for FakeDirectory {
             principal: "alice@acme.com".into(),
             role: "member".into(),
             invited_by: None,
+            link_status: "active".into(),
+        })
+    }
+    fn channels_index(&self, _ws: &str) -> Result<WireChannelIndex, ClientError> {
+        Ok(WireChannelIndex {
+            channels: Vec::new(),
+        })
+    }
+    fn skills_index(&self, _ws: &str) -> Result<WireSkillIndex, ClientError> {
+        Ok(WireSkillIndex { skills: Vec::new() })
+    }
+    fn proposals_index(&self, _ws: &str) -> Result<WireProposalIndex, ClientError> {
+        unreachable!()
+    }
+    fn skill_log(&self, _ws: &str, _s: &str) -> Result<WireSkillLog, ClientError> {
+        unreachable!()
+    }
+    fn reach(&self, _ws: &str, _s: &str) -> Result<WireReach, ClientError> {
+        unreachable!()
+    }
+    fn follow_skill(&self, _ws: &str, _s: &str) -> Result<(), ClientError> {
+        unreachable!()
+    }
+    fn unfollow_skill(&self, _ws: &str, _s: &str) -> Result<(), ClientError> {
+        unreachable!()
+    }
+    fn channel_join(&self, _ws: &str, _c: &str) -> Result<(), ClientError> {
+        unreachable!()
+    }
+    fn channel_leave(&self, _ws: &str, _c: &str) -> Result<(), ClientError> {
+        unreachable!()
+    }
+    fn channel_place(&self, _ws: &str, _c: &str, _s: &str) -> Result<(), ClientError> {
+        unreachable!()
+    }
+    fn channel_unplace(&self, _ws: &str, _c: &str, _s: &str) -> Result<(), ClientError> {
+        unreachable!()
+    }
+    fn exclude_device(&self, _ws: &str, _s: &str) -> Result<(), ClientError> {
+        unreachable!()
+    }
+    fn protect_skill(&self, _ws: &str, _s: &str, _l: &str) -> Result<(), ClientError> {
+        unreachable!()
+    }
+    fn protect_channel(&self, _ws: &str, _c: &str, _l: &str) -> Result<(), ClientError> {
+        unreachable!()
+    }
+    fn ack_notices(&self, _ws: &str, _ids: &[String]) -> Result<(), ClientError> {
+        unreachable!()
+    }
+}
+
+/// The browser-free LINK lane's directory fake: scripted describe/create answers for the SECOND
+/// workspace (`beta`), plus the member-scoped reads the post-link continued subscribe runs. The
+/// row ops stay unreachable (a workspace-target subscribe writes no row).
+#[derive(Clone)]
+struct LinkDirectory {
+    log: CallLog,
+    /// What the describe reports as THIS device's current link (`none`/`pending`/`active`).
+    link_status: String,
+    /// What a created link is born as (`active`/`pending`) — also the describe's `born`.
+    born: String,
+    /// Answer the wire's NOT_A_MEMBER refusal on both lane ops (seatless / unknown name).
+    not_a_member: bool,
+}
+impl LinkDirectory {
+    fn beta(log: CallLog) -> Self {
+        Self {
+            log,
+            link_status: "none".to_owned(),
+            born: "active".to_owned(),
+            not_a_member: false,
+        }
+    }
+    fn refusal() -> ClientError {
+        ClientError::PlaneTerminal {
+            outcome: topos_types::TerminalOutcome::Denied,
+            code: "NOT_A_MEMBER".to_owned(),
+            retryable: false,
+        }
+    }
+}
+impl DirectorySource for LinkDirectory {
+    fn me(&self, ws: &str) -> Result<WireMe, ClientError> {
+        // Per-workspace facts: the ENROLLED membership (`w_acme`) answers its own name — so the
+        // universe never resolves "beta" as already-joined — and `w_beta` answers beta's.
+        if ws == WS {
+            return FakeDirectory.me(ws);
+        }
+        Ok(WireMe {
+            workspace_id: ws.to_owned(),
+            name: "beta".into(),
+            display_name: "Beta".into(),
+            address: "https://topos.sh/beta".into(),
+            principal: "alice@acme.com".into(),
+            role: "member".into(),
+            invited_by: None,
+            link_status: "active".into(),
+        })
+    }
+    fn describe_link(
+        &self,
+        slug: &str,
+    ) -> Result<topos_types::requests::DeviceLinkDescribe, ClientError> {
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("describe-link {slug}"));
+        if self.not_a_member {
+            return Err(Self::refusal());
+        }
+        Ok(topos_types::requests::DeviceLinkDescribe {
+            workspace_id: "w_beta".into(),
+            name: "beta".into(),
+            display_name: "Beta".into(),
+            address: "https://topos.sh/beta".into(),
+            role: "member".into(),
+            link_status: self.link_status.clone(),
+            born: self.born.clone(),
+        })
+    }
+    fn create_link(
+        &self,
+        slug: &str,
+    ) -> Result<topos_types::requests::DeviceLinkData, ClientError> {
+        self.log.lock().unwrap().push(format!("create-link {slug}"));
+        if self.not_a_member {
+            return Err(Self::refusal());
+        }
+        Ok(topos_types::requests::DeviceLinkData {
+            workspace_id: "w_beta".into(),
+            name: "beta".into(),
+            display_name: "Beta".into(),
+            address: "https://topos.sh/beta".into(),
+            link_status: self.born.clone(),
         })
     }
     fn channels_index(&self, _ws: &str) -> Result<WireChannelIndex, ClientError> {
@@ -303,6 +439,7 @@ impl DeliverySource for EmptyTransport {
             proposals_awaiting: 0,
             notices: Vec::new(),
             staleness_window_ms: 604_800_000,
+            link_status: crate::plane::LinkStatus::Active,
         })
     }
     fn report_applied(&self, _ws: &str, _a: &[(String, [u8; 32])]) -> Result<(), PlaneError> {
@@ -557,44 +694,186 @@ fn resume_granted_persists_the_one_credential_and_continues_into_the_describe() 
 }
 
 #[test]
-fn a_second_workspace_grant_replaces_the_credential_and_adds_a_membership() {
+fn a_second_workspace_links_browser_free_and_never_reenrolls() {
+    // The root fix for the re-mint bug: an ENROLLED install targeting a same-plane workspace it
+    // has no link to NEVER starts a second device flow (one device row per install per server,
+    // ever). Bare = the link DESCRIBE (a GET, nothing mutates); `--yes` = the link row op, the
+    // membership record, and the continued subscribe — the credential is untouched.
     let rig = Rig::new("second-ws");
     let log: CallLog = Arc::default();
     let enroll_fake = FakeEnroll::new(log.clone(), vec![FakeEnroll::granted()]);
-    // First enrollment (granted immediately on the resume poll).
+    // First enrollment (granted immediately on the resume poll) — the ONE browser ceremony.
     run_follow(&rig, &enroll_fake, vec!["acme".to_owned()], opts(false)).unwrap();
     run_follow(&rig, &enroll_fake, Vec::new(), opts(false)).unwrap();
 
-    // A second workspace on the SAME plane: a fresh flow whose grant carries a NEW credential.
-    let second = FakeEnroll {
-        polls: Arc::new(Mutex::new(
-            vec![DeviceAuthPoll::Granted(EnrolledGrant {
-                hint: None,
-                credential: "devc_two".into(),
-                device_id: "dev_2".into(),
-                workspace: EnrolledWorkspace {
-                    workspace_id: "w_beta".into(),
-                    name: "beta".into(),
-                    display_name: "Beta".into(),
-                },
-            })]
-            .into(),
-        )),
-        ..FakeEnroll::new(log, Vec::new())
+    // A second workspace on the SAME plane: bare = the link DESCRIBE.
+    let directory = LinkDirectory::beta(log.clone());
+    let out = run_follow_link(
+        &rig,
+        &enroll_fake,
+        &directory,
+        vec!["beta".to_owned()],
+        opts(false),
+    )
+    .unwrap();
+    let ops::FollowOutcome::LinkDescribed { describe, yes_argv } = out else {
+        panic!("an enrolled same-plane target describes the LINK, never a device flow");
     };
-    run_follow(&rig, &second, vec!["beta".to_owned()], opts(false)).unwrap();
-    run_follow(&rig, &second, Vec::new(), opts(false)).unwrap();
+    assert_eq!(describe.workspace.name, "beta");
+    assert_eq!(describe.link_status, "none");
+    assert_eq!(describe.born, "active");
+    assert_eq!(
+        yes_argv,
+        vec!["topos", "follow", "beta", "--yes"],
+        "the apply re-spells THIS invocation"
+    );
+    // Nothing mutated on the describe.
+    assert!(
+        enroll::read_user(&rig.fs, &rig.layout())
+            .unwrap()
+            .unwrap()
+            .membership("w_beta")
+            .is_none()
+    );
 
-    // The device holds exactly ONE credential (replaced wholesale)…
+    // `--yes`: ONE link row op; the membership records; the subscribe continues THIS invocation.
+    let out = run_follow_link(
+        &rig,
+        &enroll_fake,
+        &directory,
+        vec!["beta".to_owned()],
+        opts(true),
+    )
+    .unwrap();
+    assert!(
+        matches!(out, ops::FollowOutcome::Applied(_)),
+        "an active link continues into the ordinary subscribe apply (the enroll fold-in shape)"
+    );
+    {
+        let l = log.lock().unwrap();
+        assert!(l.iter().any(|e| e == "describe-link beta"), "{l:?}");
+        assert!(l.iter().any(|e| e == "create-link beta"), "{l:?}");
+        assert!(
+            !l.iter().any(|e| e.starts_with("authorize beta")),
+            "NEVER a second device flow against the same plane: {l:?}"
+        );
+    }
+    // The credential is UNTOUCHED (the registration is the device↔server half; the link is the
+    // per-workspace half — no re-mint, no zombie device row)…
     let creds = enroll::read_credentials(&rig.fs, &rig.layout())
         .unwrap()
         .unwrap();
-    assert_eq!(creds.credential, "devc_two");
-    assert_eq!(creds.device_id, "dev_2");
+    assert_eq!(creds.credential, "devc_secret");
+    assert_eq!(creds.device_id, "dev_1");
     // …while the memberships ACCUMULATE (a second follow never drops the first).
     let user = enroll::read_user(&rig.fs, &rig.layout()).unwrap().unwrap();
     assert!(user.membership(WS).is_some());
-    assert!(user.membership("w_beta").is_some());
+    let beta = user.membership("w_beta").expect("the link recorded");
+    assert_eq!(beta.link_status, enroll::LINK_ACTIVE);
+}
+
+#[test]
+fn a_pending_born_link_answers_the_typed_receipt() {
+    // The workspace's device-approval knob gates new devices: the link lands PENDING — the typed
+    // receipt, no subscribe attempt, and the membership records the wait for `status`/the sweep.
+    let rig = Rig::new("link-pending");
+    let log: CallLog = Arc::default();
+    let enroll_fake = FakeEnroll::new(log.clone(), vec![FakeEnroll::granted()]);
+    run_follow(&rig, &enroll_fake, vec!["acme".to_owned()], opts(false)).unwrap();
+    run_follow(&rig, &enroll_fake, Vec::new(), opts(false)).unwrap();
+
+    let directory = LinkDirectory {
+        born: "pending".to_owned(),
+        ..LinkDirectory::beta(log.clone())
+    };
+    let out = run_follow_link(
+        &rig,
+        &enroll_fake,
+        &directory,
+        vec!["beta".to_owned()],
+        opts(true),
+    )
+    .unwrap();
+    let ops::FollowOutcome::LinkPending(pending) = out else {
+        panic!("a pending-born link answers the typed receipt, never a subscribe");
+    };
+    assert_eq!(pending.workspace_name, "beta");
+    assert_eq!(pending.link_status, "pending");
+    assert!(!pending.enrolled_now);
+    let user = enroll::read_user(&rig.fs, &rig.layout()).unwrap().unwrap();
+    assert_eq!(
+        user.membership("w_beta").unwrap().link_status,
+        enroll::LINK_PENDING
+    );
+}
+
+#[test]
+fn a_seatless_link_target_refuses_toward_the_invitation_path() {
+    // NOT_A_MEMBER (a seatless caller, or an unknown name — byte-identical server-side) is the
+    // typed refusal pointing at the invitation path.
+    let rig = Rig::new("link-not-member");
+    let log: CallLog = Arc::default();
+    let enroll_fake = FakeEnroll::new(log.clone(), vec![FakeEnroll::granted()]);
+    run_follow(&rig, &enroll_fake, vec!["acme".to_owned()], opts(false)).unwrap();
+    run_follow(&rig, &enroll_fake, Vec::new(), opts(false)).unwrap();
+
+    let directory = LinkDirectory {
+        not_a_member: true,
+        ..LinkDirectory::beta(log.clone())
+    };
+    let err = run_follow_link(
+        &rig,
+        &enroll_fake,
+        &directory,
+        vec!["beta".to_owned()],
+        opts(false),
+    )
+    .unwrap_err();
+    assert!(matches!(err, ClientError::NotAMember { .. }), "{err:?}");
+    assert_eq!(err.code(), "NOT_A_MEMBER");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("invite"),
+        "points at the invitation path: {msg}"
+    );
+}
+
+#[test]
+fn a_granted_flow_with_a_pending_first_link_prints_the_receipt_and_skips_the_subscribe() {
+    // The enrollment ceremony under the device-approval knob: the grant persists (registration +
+    // credential + trigger), but the FIRST link is born pending — the typed receipt, no describe.
+    let rig = Rig::new("grant-pending-link");
+    let log: CallLog = Arc::default();
+    let granted_pending = DeviceAuthPoll::Granted(EnrolledGrant {
+        hint: None,
+        link_status: crate::plane::LinkStatus::Pending,
+        credential: "devc_secret".into(),
+        device_id: "dev_1".into(),
+        workspace: EnrolledWorkspace {
+            workspace_id: WS.into(),
+            name: "acme".into(),
+            display_name: "Acme Inc".into(),
+        },
+    });
+    let enroll_fake = FakeEnroll::new(log.clone(), vec![granted_pending]);
+    run_follow(&rig, &enroll_fake, vec!["acme".to_owned()], opts(false)).unwrap();
+    let out = run_follow(&rig, &enroll_fake, Vec::new(), opts(false)).unwrap();
+    let ops::FollowOutcome::LinkPending(pending) = out else {
+        panic!("a pending first link answers the receipt, never the subscribe describe");
+    };
+    assert!(pending.enrolled_now, "the enrollment itself DID happen");
+    // The enrollment persisted in full — credential + membership (marked pending) + no WAL.
+    assert!(
+        enroll::read_credentials(&rig.fs, &rig.layout())
+            .unwrap()
+            .is_some()
+    );
+    let user = enroll::read_user(&rig.fs, &rig.layout()).unwrap().unwrap();
+    assert_eq!(
+        user.membership(WS).unwrap().link_status,
+        enroll::LINK_PENDING
+    );
+    assert!(enroll::read_wal(&rig.fs, &rig.layout()).unwrap().is_none());
 }
 
 #[test]
@@ -679,6 +958,32 @@ fn the_recovery_sweep_reaps_an_expired_wal_so_follow_starts_fresh() {
 // =================================================================================================
 
 /// [`run_follow`] with an injected consent answer (the guard's own seam).
+/// Drive `follow` with the LINK-lane directory fake (the browser-free second-workspace suite).
+fn run_follow_link(
+    rig: &Rig,
+    enroll_fake: &FakeEnroll,
+    directory: &LinkDirectory,
+    targets: Vec<String>,
+    opts: ops::FollowOpts,
+) -> Result<ops::FollowOutcome, ClientError> {
+    crate::identity::load_or_create_device_id(&rig.fs, &rig.layout()).unwrap();
+    sidecar::recover(&rig.fs, &rig.layout(), FIXED_MILLIS as i64).unwrap();
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+    let enroll_connect = |_b: &str| -> Box<dyn EnrollSource> { Box::new(enroll_fake.clone()) };
+    let dir_connect = |_b: &str| -> Box<dyn DirectorySource> { Box::new(directory.clone()) };
+    let del_connect = |_b: &str| -> Box<dyn ReconcileTransport> { Box::new(EmptyTransport) };
+    let connectors = ops::FollowConnectors {
+        enroll: &enroll_connect,
+        directory: &dir_connect,
+        delivery: &del_connect,
+        web_origin: "https://topos.sh".to_owned(),
+        confirm_bareword: &|_, _| ops::BarewordDecision::Proceed,
+    };
+    ops::follow(&ctx, &connectors, targets, opts)
+}
+
 fn run_follow_confirm(
     rig: &Rig,
     enroll_fake: &FakeEnroll,
@@ -801,10 +1106,11 @@ fn yes_is_the_headless_consent_and_a_full_address_never_prompts() {
 }
 
 #[test]
-fn an_enrolled_install_keeps_its_prior_bareword_behavior() {
-    // Enrolled (instance.json pinned): a bareword that matches nothing locally still begins the
-    // device flow against the PINNED plane — the guard is for the fresh-machine default-server
-    // surprise only.
+fn an_enrolled_install_bareword_dials_the_link_lane_never_a_flow_and_never_prompts() {
+    // Enrolled (instance.json pinned): a bareword that matches nothing locally is a same-plane
+    // workspace target — the browser-free LINK lane describes it (the pinned plane is the bare
+    // word's context). No prompt (the bareword guard is the fresh-machine default-server
+    // surprise), and NEVER a second device flow.
     let rig = Rig::new("bareword-enrolled");
     enroll::write_instance(
         &rig.fs,
@@ -815,24 +1121,37 @@ fn an_enrolled_install_keeps_its_prior_bareword_behavior() {
         },
     )
     .unwrap();
+    crate::identity::load_or_create_device_id(&rig.fs, &rig.layout()).unwrap();
+    sidecar::recover(&rig.fs, &rig.layout(), FIXED_MILLIS as i64).unwrap();
     let log: CallLog = Arc::default();
     let enroll_fake = FakeEnroll::new(log.clone(), vec![DeviceAuthPoll::Pending]);
-    let out = run_follow_confirm(
-        &rig,
-        &enroll_fake,
-        vec!["ghost".to_owned()],
-        opts(false),
-        &|_, _| panic!("an enrolled install must never prompt"),
-    )
-    .unwrap();
-    let ops::FollowOutcome::Data { data, .. } = out else {
-        panic!("the enrolled bareword begins the flow toward the pinned plane");
+    let directory = LinkDirectory::beta(log.clone());
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+    let enroll_connect = |_b: &str| -> Box<dyn EnrollSource> { Box::new(enroll_fake.clone()) };
+    let dir_connect = |_b: &str| -> Box<dyn DirectorySource> { Box::new(directory.clone()) };
+    let del_connect = |_b: &str| -> Box<dyn ReconcileTransport> { Box::new(EmptyTransport) };
+    let connectors = ops::FollowConnectors {
+        enroll: &enroll_connect,
+        directory: &dir_connect,
+        delivery: &del_connect,
+        web_origin: "https://topos.sh".to_owned(),
+        confirm_bareword: &|_, _| panic!("an enrolled install must never prompt"),
     };
-    assert!(data.pending.is_some());
+    let out = ops::follow(&ctx, &connectors, vec!["ghost".to_owned()], opts(false)).unwrap();
+    assert!(
+        matches!(out, ops::FollowOutcome::LinkDescribed { .. }),
+        "the enrolled bareword describes the LINK toward the pinned plane"
+    );
     let l = log.lock().unwrap();
     assert!(
-        l.iter().any(|e| e.starts_with("authorize ghost")),
-        "the flow ran against the pinned plane: {l:?}"
+        l.iter().any(|e| e == "describe-link ghost"),
+        "the link lane was dialed: {l:?}"
+    );
+    assert!(
+        !l.iter().any(|e| e.starts_with("authorize")),
+        "never a device flow: {l:?}"
     );
 }
 
@@ -849,6 +1168,8 @@ fn an_enrolled_install_keeps_its_prior_bareword_behavior() {
 struct InviteDirectory {
     log: CallLog,
     hint: Option<crate::plane::GrantHint>,
+    /// What the accept's link is born as (per the workspace's device-approval knob).
+    link: crate::plane::LinkStatus,
 }
 impl DirectorySource for InviteDirectory {
     fn me(&self, ws: &str) -> Result<WireMe, ClientError> {
@@ -863,6 +1184,7 @@ impl DirectorySource for InviteDirectory {
                 display_name: "Acme Inc".into(),
             },
             hint: self.hint.clone(),
+            link_status: self.link,
         })
     }
     fn channels_index(&self, ws: &str) -> Result<WireChannelIndex, ClientError> {
@@ -959,6 +1281,7 @@ fn an_invite_url_starts_the_flow_carrying_the_token_and_weaves_the_browser_desti
     let directory = InviteDirectory {
         log: log.clone(),
         hint: None,
+        link: crate::plane::LinkStatus::Active,
     };
     let out = run_follow_invite(
         &rig,
@@ -1006,6 +1329,7 @@ fn a_multi_tenant_invite_url_names_its_workspace_slug() {
     let directory = InviteDirectory {
         log: log.clone(),
         hint: None,
+        link: crate::plane::LinkStatus::Active,
     };
     run_follow_invite(
         &rig,
@@ -1033,6 +1357,7 @@ fn a_granted_invite_flow_continues_into_the_hinted_skill() {
             kind: "skill".into(),
             name: "deploy".into(),
         }),
+        link_status: crate::plane::LinkStatus::Active,
         credential: "devc_secret".into(),
         device_id: "dev_1".into(),
         workspace: EnrolledWorkspace {
@@ -1045,6 +1370,7 @@ fn a_granted_invite_flow_continues_into_the_hinted_skill() {
     let directory = InviteDirectory {
         log: log.clone(),
         hint: None,
+        link: crate::plane::LinkStatus::Active,
     };
     // Call 1: begin (pending WAL). The fake's scripted poll then grants on the resume.
     let pending_fake = FakeEnroll::new(log.clone(), vec![DeviceAuthPoll::Pending]);
@@ -1074,6 +1400,7 @@ fn an_enrolled_install_accepts_directly_and_continues_into_the_hint() {
     let log: CallLog = Arc::default();
     let directory = InviteDirectory {
         log: log.clone(),
+        link: crate::plane::LinkStatus::Active,
         hint: Some(crate::plane::GrantHint {
             kind: "skill".into(),
             name: "deploy".into(),
@@ -1129,6 +1456,7 @@ fn an_invite_url_for_a_different_plane_refuses_toward_the_second_install_hatch()
     let directory = InviteDirectory {
         log: log.clone(),
         hint: None,
+        link: crate::plane::LinkStatus::Active,
     };
     crate::identity::load_or_create_device_id(&rig.fs, &rig.layout()).unwrap();
     enroll::write_instance(

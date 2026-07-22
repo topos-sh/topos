@@ -12,15 +12,24 @@ import {
 } from "react-router";
 import { buttonClasses } from "@/components/ui";
 import { composition } from "@/composition.server";
-import { actorFromSession, notFound, requireSession } from "@/lib/auth/guards.server";
+import {
+  actorFromSession,
+  notFound,
+  requireSession,
+  type UserActor,
+} from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
 import { announceCeremony } from "@/lib/ceremony-event";
 import {
   approveDeviceAuth,
   denyDeviceAuth,
+  linkBornStatus,
   type PendingDeviceAuthView,
   pendingDeviceAuth,
   pendingDeviceAuthByChallenge,
+  seatOf,
+  theWorkspace,
+  workspaceByName,
 } from "@/lib/db/identity.server";
 import { membershipsFor } from "@/lib/db/queries.server";
 
@@ -85,29 +94,57 @@ function selfPath(device: string | null, loopback: Loopback | null): string {
   return `/verify${search === "" ? "" : `?${search}`}`;
 }
 
+/** The ONE workspace this approval would link the device to — the resolved card's subject. */
+interface LinkTarget {
+  name: string;
+  displayName: string;
+  /** The approver holds no seat there yet (an invitation accept — or `/new` — will seat them). */
+  joining: boolean;
+  /** The link will be born pending: the device-approval knob is on and the approver (or the
+   * invitation's role) is not an owner. */
+  awaitsApproval: boolean;
+}
+
 /**
- * The resolved card's workspace-reach list: EVERY workspace the minted credential will act in —
- * the approver's existing seats, plus the flow's requested workspace and any invitation join
- * when those aren't seats yet. Full disclosure: the credential is device-wide, not
- * workspace-scoped.
+ * Resolve the flow's ONE workspace for the card — display only, outside the approve fence
+ * (the ceremony re-resolves under its own lock): an invitation names its workspace; otherwise
+ * the tenancy grammar decides (single → the install's one workspace, multi → the recorded
+ * slug, which may not exist yet — a CLI-first person creates it mid-flow and returns owning
+ * it). The approval mints registration + THIS one link; further workspaces each take their own
+ * explicit link from the device.
  */
-function reachOf(
-  memberships: { displayName: string; address: string }[],
+async function linkTargetOf(
+  actor: UserActor,
   pending: PendingDeviceAuthView,
   multi: boolean,
-): { label: string; joining: boolean }[] {
-  const rows = memberships.map((m) => ({ label: m.displayName, joining: false }));
-  const seatAddresses = new Set(memberships.map((m) => m.address));
-  if (pending.inviteWorkspace !== null && !seatAddresses.has(pending.inviteWorkspace.name)) {
-    rows.push({ label: pending.inviteWorkspace.displayName, joining: true });
-  } else if (
-    multi &&
-    pending.requestedWorkspace !== "" &&
-    !seatAddresses.has(pending.requestedWorkspace)
-  ) {
-    rows.push({ label: pending.requestedWorkspace, joining: true });
+): Promise<LinkTarget> {
+  const ws =
+    pending.inviteWorkspace !== null
+      ? await workspaceByName(pending.inviteWorkspace.name)
+      : multi
+        ? await workspaceByName(pending.requestedWorkspace)
+        : await theWorkspace();
+  if (ws == null) {
+    // Multi tenancy, a workspace not created yet: the approver will create it through the
+    // `/new` weave and own it — a link created by its owner is born active.
+    return {
+      name: pending.requestedWorkspace,
+      displayName: pending.requestedWorkspace,
+      joining: true,
+      awaitsApproval: false,
+    };
   }
-  return rows;
+  const seat = await seatOf(actor.userId, ws.id);
+  const role = (seat?.role ?? pending.inviteWorkspace?.role ?? "member") as Parameters<
+    typeof linkBornStatus
+  >[0];
+  const knob = ((ws as { deviceApproval?: string }).deviceApproval ?? "off") as "off" | "on";
+  return {
+    name: ws.name,
+    displayName: ws.displayName,
+    joining: seat === undefined,
+    awaitsApproval: linkBornStatus(role, knob) === "pending",
+  };
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -140,8 +177,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
     device,
     loopback,
     resolved:
-      resolved === null ? null : { ...resolved, reach: reachOf(memberships, resolved, multi) },
-    memberships: memberships.map((m) => ({ displayName: m.displayName, address: m.address })),
+      resolved === null
+        ? null
+        : { ...resolved, linked: await linkTargetOf(actor, resolved, multi) },
   };
 }
 
@@ -172,16 +210,11 @@ export async function action({ request }: ActionFunctionArgs) {
     if (pending === null) {
       return { kind: "miss" as const };
     }
-    const memberships = await membershipsFor(actor);
     return {
       kind: "resolved" as const,
       pending: {
         ...pending,
-        reach: reachOf(
-          memberships.map((m) => ({ displayName: m.displayName, address: m.address })),
-          pending,
-          composition.tenancy === "multi",
-        ),
+        linked: await linkTargetOf(actor, pending, composition.tenancy === "multi"),
       },
     };
   }
@@ -339,14 +372,15 @@ function CodeLookup() {
 
 /** One resolved-card row shape shared by loader (challenge) and action (lookup) arrivals. */
 interface ResolvedCard extends PendingDeviceAuthView {
-  reach: { label: string; joining: boolean }[];
+  linked: LinkTarget;
 }
 
 /**
  * State two: the resolved request. What is asking, the CODE for the glance-check against the
- * terminal, EVERY workspace the credential will reach, and the two arms. The approve form
- * posts the RESOLVED code as a hidden field — the approval applies to exactly the request
- * shown, never to whatever a lookup input held.
+ * terminal, THE ONE workspace being linked (the grant IS one link — further workspaces each
+ * take their own explicit link from the device), and the two arms. The approve form posts the
+ * RESOLVED code as a hidden field — the approval applies to exactly the request shown, never
+ * to whatever a lookup input held.
  */
 function PendingRequest({ card, loopback }: { card: ResolvedCard; loopback: Loopback | null }) {
   const navigation = useNavigation();
@@ -371,15 +405,11 @@ function PendingRequest({ card, loopback }: { card: ResolvedCard; loopback: Loop
         your terminal before approving.
       </p>
       <div className="text-dim text-sm">
-        <p className="mb-1">Approving gives it a credential that acts with your seat in:</p>
-        <ul className="list-inside list-disc">
-          {card.reach.map((row) => (
-            <li key={`${row.label}-${row.joining}`}>
-              <span className="text-ink">{row.label}</span>
-              {row.joining && <span className="text-faint"> — joins on approve</span>}
-            </li>
-          ))}
-        </ul>
+        <p>
+          Approving links it to{" "}
+          <span className="font-medium text-ink">{card.linked.displayName}</span>
+          {card.linked.joining && <span className="text-faint"> — which you join on approve</span>}.
+        </p>
         {card.inviteWorkspace !== null && (
           <p className="mt-2">
             This enrollment carries an invitation to{" "}
@@ -387,8 +417,15 @@ function PendingRequest({ card, loopback }: { card: ResolvedCard; loopback: Loop
             approving accepts it.
           </p>
         )}
+        {card.linked.awaitsApproval && (
+          <p className="mt-2">
+            Device approval is on there: the link waits until a workspace owner approves it —
+            nothing is delivered before that.
+          </p>
+        )}
         <p className="mt-2">
-          It publishes, follows, and reads there until you sign it out from your devices.
+          It publishes, follows, and reads there until you sign it out from your devices. Any
+          further workspace takes its own explicit link from the device.
         </p>
       </div>
       <Form method="post" className="flex flex-col gap-3">

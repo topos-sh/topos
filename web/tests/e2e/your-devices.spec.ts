@@ -74,6 +74,28 @@ test("lists exactly the person's own devices; another user's device never render
   await expect(page.getByRole("link", { name: "everyone" })).toBeVisible();
 });
 
+test("each device lists its workspace links; a SELF unlink severs one in place", async ({
+  page,
+}) => {
+  await signIn(page, OWNER_EMAIL);
+  await page.goto("/account/devices");
+
+  // Both devices carry their linked-workspace row (this install's one workspace, active).
+  const rowA = page.getByRole("listitem").filter({ hasText: "alpha-macbook" }).first();
+  await expect(rowA.getByText("linked", { exact: true })).toBeVisible();
+
+  // The per-link unlink arm is a two-step in-place confirm; after it, the device reads
+  // link-less (the honest empty line) and the row is gone from the database.
+  await rowA.getByRole("button", { name: "Unlink", exact: true }).click();
+  await rowA.getByRole("button", { name: "Unlink — confirm?" }).click();
+  await expect(rowA.getByText("Linked to no workspace", { exact: false })).toBeVisible();
+  const links = await adminQuery<{ n: string }>(
+    `select count(*)::text as n from web.device_link where device_id = $1`,
+    [DEVICE_A],
+  );
+  expect(links[0]?.n).toBe("0");
+});
+
 test("self sign-out flips one device to the revoked treatment, persisting across a reload", async ({
   page,
 }) => {

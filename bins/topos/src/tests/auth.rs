@@ -146,6 +146,7 @@ impl Rig {
                 name: "acme".to_owned(),
                 display_name: "Acme Inc".to_owned(),
                 enrolled_at: 1,
+                link_status: enroll::LINK_ACTIVE.to_owned(),
             },
         );
         enroll::write_user(&self.fs, &self.layout(), &user).unwrap();
@@ -171,6 +172,7 @@ impl FakeEnroll {
     fn granted() -> DeviceAuthPoll {
         DeviceAuthPoll::Granted(EnrolledGrant {
             hint: None,
+            link_status: crate::plane::LinkStatus::Active,
             credential: "devc_new".into(),
             device_id: "dev_new".into(),
             workspace: EnrolledWorkspace {
@@ -248,6 +250,7 @@ impl DirectorySource for FakeDirectory {
             principal: "alice@acme.com".into(),
             role: "owner".into(),
             invited_by: None,
+            link_status: "active".into(),
         })
     }
     fn channels_index(&self, _ws: &str) -> Result<WireChannelIndex, ClientError> {
@@ -297,29 +300,26 @@ impl DirectorySource for FakeDirectory {
     }
 }
 
-/// A governance fake recording the self-revokes (`revoke <ws> <device_id>`); `fail` makes every
-/// revoke a transport fault (logout stays best-effort).
+/// A governance fake recording the ONE global self-revoke; `fail` makes it a transport fault
+/// (logout stays best-effort); `already_revoked` answers the uniform 404 (= already signed out).
 #[derive(Clone)]
 struct FakeGovernance {
     log: CallLog,
     fail: bool,
+    already_revoked: bool,
 }
 impl GovernanceSource for FakeGovernance {
     fn invite(&self, _ws: &str, _body: InvitationRequest) -> Result<InvitationData, ClientError> {
         unreachable!("auth never invites")
     }
-    fn revoke_device(
-        &self,
-        workspace_id: &str,
-        target_device_key_id: &str,
-        _op_id: &str,
-    ) -> Result<(), ClientError> {
-        self.log
-            .lock()
-            .unwrap()
-            .push(format!("revoke {workspace_id} {target_device_key_id}"));
+    fn revoke_device(&self) -> Result<(), ClientError> {
+        self.log.lock().unwrap().push("revoke device".to_owned());
         if self.fail {
             Err(ClientError::Plane("connect refused".into()))
+        } else if self.already_revoked {
+            Err(ClientError::TargetNotFound {
+                target: "device".to_owned(),
+            })
         } else {
             Ok(())
         }
@@ -363,6 +363,7 @@ fn fakes(log: &CallLog, polls: Vec<DeviceAuthPoll>) -> AuthFakes {
         governance: FakeGovernance {
             log: log.clone(),
             fail: false,
+            already_revoked: false,
         },
     }
 }
@@ -486,7 +487,7 @@ fn a_follow_owned_wal_refuses_toward_follow() {
 // =================================================================================================
 
 #[test]
-fn logout_is_two_phase_and_revokes_with_the_stored_device_id() {
+fn logout_is_two_phase_and_runs_the_one_global_revoke() {
     let rig = Rig::new("logout");
     rig.seed_enrolled();
     let log: CallLog = Arc::default();
@@ -507,19 +508,21 @@ fn logout_is_two_phase_and_revokes_with_the_stored_device_id() {
         "nothing changed on the describe"
     );
 
-    // `--yes` = the best-effort self-revoke (naming the STORED device id) + the credential delete.
+    // `--yes` = ONE global self-revoke (`DELETE /v1/device`) + the credential delete.
     let out = with_connectors(&rig, &fk, |ctx, c| ops::logout(ctx, c, true)).unwrap();
     let ops::AuthLogoutOutcome::Applied(applied) = out else {
         panic!("--yes applies");
     };
     assert!(applied.credentials_deleted);
-    assert_eq!(applied.revoked, vec![WS.to_owned()]);
-    assert!(
+    assert!(applied.revoked, "the one global revoke landed");
+    assert_eq!(
         log.lock()
             .unwrap()
             .iter()
-            .any(|e| e == "revoke w_acme dev_old"),
-        "the revoke targets the STORED device id: {:?}",
+            .filter(|e| e.as_str() == "revoke device")
+            .count(),
+        1,
+        "exactly ONE global revoke — the per-workspace loop is gone: {:?}",
         log.lock().unwrap()
     );
     // Signed out = no credential; the memberships stay for the re-login UX.
@@ -542,7 +545,24 @@ fn logout_is_two_phase_and_revokes_with_the_stored_device_id() {
         panic!("--yes applies");
     };
     assert!(!applied.credentials_deleted);
-    assert!(applied.revoked.is_empty());
+    assert!(!applied.revoked, "no credential ⇒ nothing dialed");
+}
+
+#[test]
+fn logout_treats_the_uniform_404_as_already_revoked() {
+    // The design fact: after a server-side revoke, a retry answers the uniform 404 — logout treats
+    // that as already-signed-out and still proceeds with the local delete, reporting revoked.
+    let rig = Rig::new("logout-already-revoked");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let mut fk = fakes(&log, vec![DeviceAuthPoll::Pending]);
+    fk.governance.already_revoked = true;
+    let out = with_connectors(&rig, &fk, |ctx, c| ops::logout(ctx, c, true)).unwrap();
+    let ops::AuthLogoutOutcome::Applied(applied) = out else {
+        panic!("--yes applies");
+    };
+    assert!(applied.revoked, "the uniform 404 = already revoked");
+    assert!(applied.credentials_deleted);
 }
 
 #[test]
@@ -560,7 +580,7 @@ fn logout_deletes_the_credential_even_when_the_revoke_fails() {
         applied.credentials_deleted,
         "the local sign-out never blocks on the network"
     );
-    assert_eq!(applied.revoke_failed, vec![WS.to_owned()]);
+    assert!(!applied.revoked, "the transport fault is reported honestly");
     assert!(
         enroll::read_credentials(&rig.fs, &rig.layout())
             .unwrap()
@@ -592,7 +612,10 @@ fn status_probes_me_and_reports_the_access_causes() {
     let mut fk_gone = fakes(&log, vec![DeviceAuthPoll::Pending]);
     fk_gone.directory.gone = true;
     let s = with_connectors(&rig, &fk_gone, ops::status).unwrap();
-    assert_eq!(s.workspaces[0].health, "no access — revoked or removed");
+    assert_eq!(
+        s.workspaces[0].health,
+        "no access — unlinked, removed, or gone"
+    );
 
     // A transport fault: unreachable, never a false "revoked".
     let mut fk_down = fakes(&log, vec![DeviceAuthPoll::Pending]);
