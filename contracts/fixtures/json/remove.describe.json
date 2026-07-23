@@ -12,6 +12,7 @@
         "bytes_kept": true,
         "kind": "followed-exclusion",
         "name": "deploy",
+        "note": "you have local edits ahead of the followed version — removing takes the draft out of every agent dir on this device (a snapshot is kept in the sidecar). Share it first with `topos publish deploy`, inspect it with `topos diff deploy`, or apply with --yes",
         "workspace_id": "w_acme"
       }
     ]

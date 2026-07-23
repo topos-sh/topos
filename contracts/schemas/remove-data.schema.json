@@ -5,13 +5,20 @@
   "type": "object",
   "properties": {
     "applied": {
-      "description": "`true` on the `--yes` apply, `false` on the describe (nothing changed yet).",
+      "description": "`true` on an apply (immediate for a followed clean skill, or `--yes`), `false` on the\ndescribe (nothing changed yet).",
       "type": "boolean"
     },
     "items": {
       "type": "array",
       "items": {
         "$ref": "#/$defs/RemoveItem"
+      }
+    },
+    "undo": {
+      "description": "APPLY receipts: the literal inverse command (paste-ready argv) — `topos follow <skill>`\nre-attaches the followed skills this removal excluded. Empty when nothing is undoable (a\npermanent delete) or on a describe. **INFERRED** (additive).",
+      "type": "array",
+      "items": {
+        "type": "string"
       }
     }
   },

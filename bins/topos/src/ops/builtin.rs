@@ -523,8 +523,9 @@ fn create_builtin(ctx: &Ctx<'_>, sid: &SkillId, bundle: &ScannedBundle) -> Resul
 // `follow topos` — re-place after a remove / repair in place (rides the agent-scope payload).
 // ---------------------------------------------------------------------------------------------
 
-/// `follow topos [--agent <slug>…]` — two-phase. On a PRESENT built-in with `--agent` it is the
-/// ordinary scope update (the shared implementation). Everywhere else it is the RESTORE: an
+/// `follow topos [--agent <slug>…]`. On a PRESENT built-in with `--agent` it is the ordinary
+/// scope update (the shared implementation — applies immediately, placement policy only).
+/// Everywhere else it is the two-phase RESTORE: an
 /// opted-out or never-placed built-in comes back (`--yes` lifts the opt-out), and any `--agent`
 /// slugs are recorded as the include-list in the same act — so a scoped follow works as the FIRST
 /// placement and straight after a `remove`, never a refusal pointing at a second command. The
@@ -540,7 +541,8 @@ pub(crate) fn follow_builtin(
     let state = read_state(ctx)?;
     let sid = builtin_sid()?;
     if !state.removed && ctx.fs.exists(&ctx.layout.skill_dir(&sid)) && !agents.is_empty() {
-        return super::agent_scope::set_scope(ctx, &[BUILTIN_NAME.to_owned()], agents, None, yes);
+        // The scope UPDATE applies immediately (placement policy; `--yes` is a no-op on it).
+        return super::agent_scope::set_scope(ctx, &[BUILTIN_NAME.to_owned()], agents, None);
     }
     // The restore path. `--agent '*'` clears; named slugs replace the include-list and re-include
     // previously excluded ones (the same fold the scope update applies).
@@ -630,6 +632,16 @@ pub(crate) fn follow_builtin(
                             plane is never told"
             .to_owned(),
         applied: yes,
+        // The restore's inverse — the durable device opt-out.
+        undo: if yes {
+            vec![
+                "topos".to_owned(),
+                "remove".to_owned(),
+                BUILTIN_NAME.to_owned(),
+            ]
+        } else {
+            Vec::new()
+        },
     };
     if !yes {
         let mut yes_argv = vec![

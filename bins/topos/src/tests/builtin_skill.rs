@@ -620,9 +620,9 @@ fn per_agent_exclusion_flips_to_native_only_and_cleans_that_agent() {
     // cline) is cleaned, and the remaining agent (cursor) gets its own native copy.
     let targets = vec!["topos".to_owned()];
     let agents = vec!["cline".to_owned()];
-    match ops::exclude_agents(&ctx, "remove", &targets, &agents, None, true).unwrap() {
+    match ops::exclude_agents(&ctx, "remove", &targets, &agents, None).unwrap() {
         ops::AgentScopeOutcome::Applied(data) => assert!(data.applied),
-        _ => panic!("--yes applies"),
+        _ => panic!("the per-agent exclusion applies immediately"),
     }
     assert!(!shared.exists(), "narrowing cleans the shared copy");
     assert!(

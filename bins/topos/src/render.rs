@@ -1033,6 +1033,27 @@ pub(crate) fn describe_next_actions(argvs: Vec<Vec<String>>) -> Vec<NextAction> 
         .collect()
 }
 
+/// The next-actions for an UNDO-led apply receipt: the literal inverse command, when one exists
+/// (an immediate self-scoped apply always discloses its way back).
+pub(crate) fn undo_next_actions(undo: &[String]) -> Vec<NextAction> {
+    if undo.is_empty() {
+        return Vec::new();
+    }
+    vec![crate::actions::next_action(
+        ActionCode::from("UNDO".to_owned()),
+        undo.to_vec(),
+    )]
+}
+
+/// The TTY spelling of an undo-led receipt's tail — the paste-ready inverse command. Empty when
+/// there is nothing to undo.
+fn undo_line(undo: &[String]) -> String {
+    if undo.is_empty() {
+        return String::new();
+    }
+    format!("\nUndo: {}", argv_line(undo))
+}
+
 /// One argv as a paste-ready shell line (the TTY's spelling of a next action) — each token
 /// [`shell_quote`]d so a value carrying whitespace or a shell metacharacter (e.g. a multi-word `-m
 /// <message>`) copy-pastes back as ONE argument instead of mis-parsing. The `--json` envelope carries the
@@ -1195,32 +1216,26 @@ pub(crate) fn follow_applied_tty(a: &crate::ops::FollowApplied) -> String {
     for w in &a.warnings {
         s.push_str(&format!("\nwarning: {w}"));
     }
+    s.push_str(&undo_line(&a.undo));
     s
 }
 
-/// The re-attach DESCRIBE's TTY: this device excluded the skill (via `remove`); `follow` lifts the
-/// exclusion and reinstalls the current bytes. Nothing has changed yet.
-pub(crate) fn reattach_describe_tty(r: &crate::ops::Reattach, yes_argv: &[String]) -> String {
-    let digest = r.bundle_digest.as_deref().map(short).unwrap_or("?");
-    format!(
-        "{} was removed on THIS device (excluded here); the exclusion still stands, and the person \
-         keeps receiving it on every other device.\n`topos follow {}` re-attaches this device: it \
-         lifts the exclusion and reinstalls the current bytes ({} @{digest}).\nNothing has changed \
-         yet — apply with:\n  {}",
-        r.name,
-        r.name,
-        r.name,
-        argv_line(yes_argv)
-    )
-}
-
-/// The re-attach APPLY's TTY: the exclusion is lifted, the marker cleared, the current bytes back.
+/// The re-attach APPLY's TTY — undo-led: the stance is cleared, the bytes are back, the way back
+/// is the literal inverse. Worded by the cause (`excluded-here` vs `unfollowed`).
 pub(crate) fn reattach_applied_tty(r: &crate::ops::Reattach) -> String {
-    let mut s = format!(
-        "Re-attached {} on this device in {} ({}) — the exclusion is lifted; the person keeps \
-         following it.",
-        r.name, r.workspace_name, r.workspace_id
-    );
+    let mut s = if r.cause == "unfollowed" {
+        format!(
+            "Following {} again in {} ({}) — the unfollow is cleared; delivery resumes on every \
+             device of yours.",
+            r.name, r.workspace_name, r.workspace_id
+        )
+    } else {
+        format!(
+            "Re-attached {} on this device in {} ({}) — the exclusion is lifted; the person keeps \
+             following it.",
+            r.name, r.workspace_name, r.workspace_id
+        )
+    };
     if r.installed {
         let digest = r.bundle_digest.as_deref().map(short).unwrap_or("?");
         s.push_str(&format!("\nReinstalled: {}  @{digest}", r.name));
@@ -1230,6 +1245,7 @@ pub(crate) fn reattach_applied_tty(r: &crate::ops::Reattach) -> String {
     for w in &r.warnings {
         s.push_str(&format!("\nwarning: {w}"));
     }
+    s.push_str(&undo_line(&r.undo));
     s
 }
 
@@ -1367,21 +1383,24 @@ pub(crate) fn agent_scope_tty(
             "\nNothing has changed yet — apply with:\n  {}",
             argv_line(argv)
         ));
+    } else {
+        s.push_str(&undo_line(&d.undo));
     }
     s
 }
 
-/// The unfollow APPLY's TTY.
+/// The unfollow APPLY's TTY — undo-led: what stopped, what never changes, the way back.
 pub(crate) fn unfollow_applied_tty(a: &crate::ops::UnfollowApplied) -> String {
     let mut s = String::new();
     for item in &a.items {
         s.push_str(&format!(
-            "Stopped following {} {} — delivery ends on every device; the local copy stays as a \
-             frozen copy.\n",
+            "Stopped following {} {} — delivery ends on every device of yours; the local copy \
+             stays as a frozen copy.\n",
             item.kind, item.name
         ));
     }
     s.push_str("`topos follow` re-attaches.");
+    s.push_str(&undo_line(&a.undo));
     s
 }
 
@@ -1778,14 +1797,16 @@ pub(crate) fn remove_describe_tty(data: &RemoveData, yes_argv: &[String]) -> Str
     s
 }
 
-/// The `remove` APPLY's TTY.
+/// The `remove` APPLY's TTY — undo-led on the reversible shape (the followed exclusion).
 pub(crate) fn remove_applied_tty(data: &RemoveData) -> String {
     let mut s = String::new();
     for item in &data.items {
         s.push_str(&remove_item_line(item, true));
         s.push('\n');
     }
-    s.trim_end().to_owned()
+    let mut s = s.trim_end().to_owned();
+    s.push_str(&undo_line(&data.undo));
+    s
 }
 
 /// The `channel add|remove` DESCRIBE's TTY — the placements/removals, the mode gate, the create note.

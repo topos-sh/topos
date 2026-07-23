@@ -909,8 +909,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
-    // `remove <skill>` (bare) — the DESCRIBE: a followed skill becomes a per-device exclusion (bytes
-    // kept, the agent dirs would be cleaned). `applied: false` — nothing has changed.
+    // `remove <skill>` (bare, LOSS-GUARDED) — the DESCRIBE a draft holds: the followed skill has
+    // local edits ahead, so the exclusion waits for `--yes` (a followed CLEAN skill applies
+    // immediately instead — see `remove.ok`). `applied: false` — nothing has changed.
     let remove_describe = JsonEnvelope {
         schema_version: 1,
         command: "remove".to_owned(),
@@ -922,9 +923,16 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 workspace_id: Some("w_acme".to_owned()),
                 agent_dirs: vec!["~/.claude/skills/deploy".to_owned()],
                 bytes_kept: true,
-                note: None,
+                note: Some(
+                    "you have local edits ahead of the followed version — removing takes the \
+                     draft out of every agent dir on this device (a snapshot is kept in the \
+                     sidecar). Share it first with `topos publish deploy`, inspect it with \
+                     `topos diff deploy`, or apply with --yes"
+                        .to_owned(),
+                ),
             }],
             applied: false,
+            undo: Vec::new(),
         })
         .expect("RemoveData serializes"),
         warnings: vec![],
@@ -936,8 +944,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
-    // `remove <skill> --yes` — the APPLY of the same exclusion (`applied: true`; the agent dirs are
-    // cleaned, every sidecar byte kept).
+    // `remove <skill>` on a followed CLEAN skill — the IMMEDIATE apply (`applied: true`; the agent
+    // dirs are cleaned, every sidecar byte kept) with the undo-led receipt.
     let remove_ok = JsonEnvelope {
         schema_version: 1,
         command: "remove".to_owned(),
@@ -952,10 +960,14 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 note: None,
             }],
             applied: true,
+            undo: argv(&["topos", "follow", "deploy"]),
         })
         .expect("RemoveData serializes"),
         warnings: vec![],
-        next_actions: vec![],
+        next_actions: vec![topos::actions::next_action(
+            ActionCode::from("UNDO".to_owned()),
+            argv(&["topos", "follow", "deploy"]),
+        )],
         receipt: None,
         error: None,
     };

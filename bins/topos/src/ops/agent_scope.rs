@@ -1,5 +1,7 @@
-//! The `--agent` scope verbs — DEVICE-LOCAL placement policy for a followed skill, two-phase
-//! (describe → `--yes`), fully offline (the plane is never told; the subscription never moves):
+//! The `--agent` scope verbs — DEVICE-LOCAL placement policy for a followed skill, applied
+//! immediately with an undo-led receipt (self-scoped, reversible by the inverse scope command, and
+//! fully named by its arguments — `--yes` is accepted as a no-op), fully offline (the plane is
+//! never told; the subscription never moves):
 //!
 //! - **`follow <skill> --agent <slug>…`** ([`set_scope`]) — record the include-list (placement lands
 //!   in exactly those agents' native dirs; `'*'` clears it back to unscoped), then reconcile the
@@ -64,9 +66,15 @@ pub(crate) struct AgentScopeData {
     /// The standing constant: the subscription is untouched — this device's placement only.
     pub subscription_note: String,
     pub applied: bool,
+    /// APPLY receipts: the literal inverse command (paste-ready argv) that undoes this scope
+    /// change. Empty when there is nothing to undo (or on a describe).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub undo: Vec<String>,
 }
 
-/// The two-phase outcome.
+/// The verbs' outcome. The scope verbs themselves apply immediately ([`Applied`] with an undo-led
+/// receipt); [`Described`] remains for the one arm that still describes over this payload — the
+/// built-in restore's consented takeover (`super::builtin::follow_builtin`).
 #[derive(Debug)]
 pub(crate) enum AgentScopeOutcome {
     Described {
@@ -78,7 +86,8 @@ pub(crate) enum AgentScopeOutcome {
 
 /// `unfollow <skill> --agent <slug>…` == `remove <skill> --agent <slug>…` on a followed skill — the
 /// ONE shared implementation: record the per-agent exclusions and clean exactly those agents'
-/// placements (snapshot-first). `verb` names the calling spelling for the paste-ready `--yes` argv.
+/// placements (snapshot-first). Applies immediately (device-local, reversible — `topos follow
+/// <skill> --agent <slug>` re-includes) and answers an undo-led receipt.
 ///
 /// # Errors
 /// [`ClientError::InvalidArgument`] on an unknown slug (naming the valid ones), a `'*'` (the
@@ -90,7 +99,6 @@ pub(crate) fn exclude_agents(
     targets: &[String],
     agents: &[String],
     workspace: Option<&str>,
-    yes: bool,
 ) -> Result<AgentScopeOutcome, ClientError> {
     if agents.iter().any(|a| a == "*") {
         return Err(ClientError::InvalidArgument(
@@ -140,23 +148,18 @@ pub(crate) fn exclude_agents(
         items.push(item);
     }
 
-    if !yes {
-        let mut yes_argv = vec!["topos".to_owned(), verb.to_owned()];
-        yes_argv.extend(targets.iter().cloned());
-        for a in agents {
-            yes_argv.push("--agent".to_owned());
-            yes_argv.push(a.clone());
-        }
-        yes_argv.push("--yes".to_owned());
-        return Ok(AgentScopeOutcome::Described {
-            data: data(agents, items, "exclude", false),
-            yes_argv,
-        });
+    // The literal inverse: naming the same slugs on `follow --agent` re-includes them.
+    let mut undo = vec!["topos".to_owned(), "follow".to_owned()];
+    undo.extend(targets.iter().cloned());
+    for a in agents {
+        undo.push("--agent".to_owned());
+        undo.push(a.clone());
     }
 
-    // ---- APPLY (`--yes`) ---- record the exclusions, then reconcile the placements. The scope is
-    // re-derived per skill from the CURRENT follow-state folded with this verb's slugs (the seam on
-    // `ctx` predates the write we just made, so the fold is explicit).
+    // ---- APPLY (immediately — the explicit command is the consent) ---- record the exclusions,
+    // then reconcile the placements. The scope is re-derived per skill from the CURRENT
+    // follow-state folded with this verb's slugs (the seam on `ctx` predates the write we just
+    // made, so the fold is explicit).
     for (sid, lock, _) in &resolved {
         if super::builtin::is_builtin(sid.as_str()) {
             super::builtin::add_excluded(ctx, agents)?;
@@ -187,13 +190,14 @@ pub(crate) fn exclude_agents(
         )?;
     }
     Ok(AgentScopeOutcome::Applied(data(
-        agents, items, "exclude", true,
+        agents, items, "exclude", true, undo,
     )))
 }
 
 /// `follow <skill> --agent <slug>…` on an ALREADY-followed skill — the scope UPDATE: replace the
 /// include-list (`'*'` clears it back to unscoped; naming a slug also re-includes a previously
-/// excluded one), then reconcile the placements two-phase.
+/// excluded one), then reconcile the placements. Applies immediately with an undo-led receipt
+/// (`--agent '*'` restores the unscoped default; a clear's undo re-applies the prior list).
 ///
 /// # Errors
 /// As [`exclude_agents`], minus the `'*'` refusal (here it is the documented clear).
@@ -202,7 +206,6 @@ pub(crate) fn set_scope(
     targets: &[String],
     agents: &[String],
     workspace: Option<&str>,
-    yes: bool,
 ) -> Result<AgentScopeOutcome, ClientError> {
     let clear = agents.iter().any(|a| a == "*");
     if clear && agents.len() > 1 {
@@ -217,9 +220,14 @@ pub(crate) fn set_scope(
     let resolved = resolve_followed(ctx, targets, workspace, "follow")?;
 
     let mut items = Vec::with_capacity(resolved.len());
+    // The prior include-lists, captured BEFORE the durable write — a clear's literal undo
+    // re-applies them (offered only when every target shared one prior list, so the undo can
+    // never misstate a target's restore).
+    let mut priors: Vec<Vec<String>> = Vec::with_capacity(resolved.len());
     for (sid, lock, ws) in &resolved {
         let map = sync_engine::read_map_required(ctx, &ctx.layout.published(sid))?;
-        let (_, cur_excluded) = scope_state(ctx, sid.as_str())?;
+        let (cur_agents, cur_excluded) = scope_state(ctx, sid.as_str())?;
+        priors.push(cur_agents);
         // Naming an agent re-includes it (the durable write folds the same way).
         let next_excluded: Vec<String> = cur_excluded
             .iter()
@@ -246,19 +254,28 @@ pub(crate) fn set_scope(
         items.push(item);
     }
 
-    if !yes {
-        let mut yes_argv = vec!["topos".to_owned(), "follow".to_owned()];
-        yes_argv.extend(targets.iter().cloned());
-        for a in agents {
-            yes_argv.push("--agent".to_owned());
-            yes_argv.push(a.clone());
+    // The literal inverse: a set's undo clears back to unscoped; a clear's undo re-applies the
+    // prior include-list (skipped when the targets held differing lists, or none — nothing to
+    // restore).
+    let undo_agents: Vec<String> = if clear {
+        match priors.first() {
+            Some(first) if !first.is_empty() && priors.iter().all(|p| p == first) => first.clone(),
+            _ => Vec::new(),
         }
-        yes_argv.push("--yes".to_owned());
-        return Ok(AgentScopeOutcome::Described {
-            data: data(&next_agents, items, "scope", false),
-            yes_argv,
-        });
-    }
+    } else {
+        vec!["*".to_owned()]
+    };
+    let undo: Vec<String> = if undo_agents.is_empty() {
+        Vec::new()
+    } else {
+        let mut argv = vec!["topos".to_owned(), "follow".to_owned()];
+        argv.extend(targets.iter().cloned());
+        for a in &undo_agents {
+            argv.push("--agent".to_owned());
+            argv.push(a.clone());
+        }
+        argv
+    };
 
     for (sid, lock, _) in &resolved {
         if super::builtin::is_builtin(sid.as_str()) {
@@ -287,6 +304,7 @@ pub(crate) fn set_scope(
         items,
         "scope",
         true,
+        undo,
     )))
 }
 
@@ -295,6 +313,7 @@ fn data(
     items: Vec<AgentScopeItem>,
     action: &str,
     applied: bool,
+    undo: Vec<String>,
 ) -> AgentScopeData {
     AgentScopeData {
         action: action.to_owned(),
@@ -305,6 +324,7 @@ fn data(
                             bytes"
             .to_owned(),
         applied,
+        undo,
     }
 }
 

@@ -830,8 +830,14 @@ pub enum ReviewDecision {
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct RemoveData {
     pub items: Vec<RemoveItem>,
-    /// `true` on the `--yes` apply, `false` on the describe (nothing changed yet).
+    /// `true` on an apply (immediate for a followed clean skill, or `--yes`), `false` on the
+    /// describe (nothing changed yet).
     pub applied: bool,
+    /// APPLY receipts: the literal inverse command (paste-ready argv) — `topos follow <skill>`
+    /// re-attaches the followed skills this removal excluded. Empty when nothing is undoable (a
+    /// permanent delete) or on a describe. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undo: Vec<String>,
 }
 
 /// One skill in a [`RemoveData`]. **INFERRED.**

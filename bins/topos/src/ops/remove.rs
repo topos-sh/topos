@@ -1,11 +1,14 @@
-//! `remove [SKILL]... [-a <agent>]...` — take skills off THIS machine, two-phase (describe → `--yes`).
+//! `remove [SKILL]... [-a <agent>]...` — take skills off THIS machine.
 //!
 //! Three shapes, all byte-honest about what survives:
 //! - a FOLLOWED skill → a per-device **exclusion** (`PUT exclusions/{skill}`): delivery stops on THIS
 //!   device, the person keeps following it (every other device still receives it), and the local copy is
 //!   kept as a frozen copy — the agent dirs are cleaned (any draft snapshotted first), never the sidecar
 //!   bytes. Nothing returns at the next sync; `topos follow <name>` re-attaches. This is NOT unfollow —
-//!   stopping a skill everywhere is `topos unfollow`.
+//!   stopping a skill everywhere is `topos unfollow`. On a CLEAN followed skill the exclusion applies
+//!   immediately with an undo-led receipt (`--yes` an accepted no-op); with a DRAFT ahead (local
+//!   edits) the loss-guard holds the two-phase describe — the draft leaves every agent dir on apply,
+//!   so the disclosure comes first (a scan that cannot classify fails TOWARD the gate).
 //! - a TRACKED, never-published LOCAL skill → a **permanent** delete: no other copy exists, so the agent
 //!   dirs AND the sidecar entry go.
 //! - an UNTRACKED local copy sitting in an agent dir (`<name>@<agent>`, or `-a <agent>` scoped) → a
@@ -101,8 +104,9 @@ pub(crate) fn remove(
                     }))
         })
     {
+        // Applies immediately (device-local placement policy; `--yes` is an accepted no-op).
         return Ok(RemoveOutcome::AgentScope(
-            super::agent_scope::exclude_agents(ctx, "remove", targets, agents, None, yes)?,
+            super::agent_scope::exclude_agents(ctx, "remove", targets, agents, None)?,
         ));
     }
     // A single `-a` value scopes untracked locals; more than one is accepted (a copy in several agents).
@@ -122,9 +126,46 @@ pub(crate) fn remove(
         removals.push(classify(ctx, &universe, roots, agent_filter, token)?);
     }
 
-    let items: Vec<RemoveItem> = removals.iter().map(describe_item).collect();
+    let mut items: Vec<RemoveItem> = removals.iter().map(describe_item).collect();
 
-    if !yes {
+    // The gate: a followed CLEAN skill is a reversible per-device act — it applies immediately
+    // (`--yes` an accepted no-op). Everything else keeps the two-phase describe: a permanent
+    // delete (local-only / untracked / the built-in opt-out) destroys the only copy, and the
+    // LOSS-GUARD holds a followed skill with a draft ahead — the apply cleans the draft out of
+    // every agent dir (snapshot-first into the sidecar, but out of the working copies), so the
+    // disclosure comes first. A scan that cannot classify FAILS TOWARD THE GATE — a stale or
+    // unreadable copy must never lose a draft to an optimistic apply. One gated target gates the
+    // whole batch (all-or-none, like the resolution).
+    let mut gated = false;
+    for (removal, item) in removals.iter().zip(items.iter_mut()) {
+        match removal {
+            Removal::Followed { skill_id, name, .. } => match draft_state(ctx, skill_id) {
+                DraftState::Clean => {}
+                DraftState::Draft => {
+                    gated = true;
+                    item.note = Some(format!(
+                        "you have local edits ahead of the followed version — removing takes the \
+                         draft out of every agent dir on this device (a snapshot is kept in the \
+                         sidecar). Share it first with `topos publish {name}`, inspect it with \
+                         `topos diff {name}`, or apply with --yes"
+                    ));
+                }
+                DraftState::Indeterminate => {
+                    gated = true;
+                    item.note = Some(
+                        "this skill's local copy cannot be scanned, so a draft cannot be ruled \
+                         out — inspect the directory, or apply with --yes"
+                            .to_owned(),
+                    );
+                }
+            },
+            Removal::TrackedLocal { .. } | Removal::Untracked { .. } | Removal::Builtin { .. } => {
+                gated = true;
+            }
+        }
+    }
+
+    if gated && !yes {
         let mut yes_argv = vec!["topos".to_owned(), "remove".to_owned()];
         yes_argv.extend(targets.iter().cloned());
         for a in agents {
@@ -136,12 +177,13 @@ pub(crate) fn remove(
             data: RemoveData {
                 items,
                 applied: false,
+                undo: Vec::new(),
             },
             yes_argv,
         });
     }
 
-    // ---- APPLY (`--yes`) ----
+    // ---- APPLY (immediate for followed clean skills; `--yes` for the gated shapes) ----
     let needs_server = removals
         .iter()
         .any(|r| matches!(r, Removal::Followed { .. }));
@@ -195,10 +237,67 @@ pub(crate) fn remove(
             }
         }
     }
+    // The literal inverse for what is undoable: `follow` re-attaches the excluded followed
+    // skills (a permanent delete has no inverse — its describe said so).
+    let followed: Vec<&str> = removals
+        .iter()
+        .filter_map(|r| match r {
+            Removal::Followed { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let undo: Vec<String> = if followed.is_empty() {
+        Vec::new()
+    } else {
+        let mut argv = vec!["topos".to_owned(), "follow".to_owned()];
+        argv.extend(followed.iter().map(|n| (*n).to_owned()));
+        argv
+    };
     Ok(RemoveOutcome::Applied(RemoveData {
         items,
         applied: true,
+        undo,
     }))
+}
+
+/// The loss-guard's draft classification for one FOLLOWED skill, from the same placement scan the
+/// sync engine trusts: any `Modified` placement = a DRAFT ahead; every placement `Clean` / `Absent`
+/// / `Foreign` = clean. `Unscannable` — or any failure to read the map or run the scan — is
+/// INDETERMINATE and fails toward the gate: a stale stat-cache or an unreadable dir must never
+/// cost a draft.
+enum DraftState {
+    Clean,
+    Draft,
+    Indeterminate,
+}
+
+fn draft_state(ctx: &Ctx<'_>, skill_id: &str) -> DraftState {
+    let Ok(sid) = SkillId::parse(skill_id) else {
+        return DraftState::Indeterminate;
+    };
+    let sp = ctx.layout.published(&sid);
+    let map = match doc::read_map(ctx.fs, &sp.map) {
+        Ok(Some(map)) => map,
+        // No placement record: nothing materialized on this device — nothing to lose.
+        Ok(None) => return DraftState::Clean,
+        Err(_) => return DraftState::Indeterminate,
+    };
+    match crate::placement::scan_placements(ctx, &map) {
+        Ok(scans) => {
+            let mut state = DraftState::Clean;
+            for scan in &scans {
+                match scan.status {
+                    crate::placement::ScanStatus::Modified { .. } => return DraftState::Draft,
+                    crate::placement::ScanStatus::Unscannable => {
+                        state = DraftState::Indeterminate;
+                    }
+                    _ => {}
+                }
+            }
+            state
+        }
+        Err(_) => DraftState::Indeterminate,
+    }
 }
 
 /// Classify ONE target: a followed catalog skill (exclusion), a tracked-local (permanent), or an

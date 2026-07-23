@@ -436,14 +436,7 @@ fn a_scope_replan_adopts_a_byte_identical_native_occupant() {
     let follow = rig.follow_seam();
     let inert_p = InertPlane;
     let ctx = rig.ctx(&follow, &inert_p);
-    let out = ops::set_scope(
-        &ctx,
-        &["deploy".to_owned()],
-        &["cursor".to_owned()],
-        None,
-        true,
-    )
-    .unwrap();
+    let out = ops::set_scope(&ctx, &["deploy".to_owned()], &["cursor".to_owned()], None).unwrap();
     assert!(matches!(out, ops::AgentScopeOutcome::Applied(_)));
 
     let map = rig.read_map(&sid);
@@ -716,7 +709,6 @@ fn unknown_agent_slugs_refuse_naming_the_valid_ones() {
         &["deploy".to_owned()],
         &["not-a-real-agent".to_owned()],
         None,
-        false,
     )
     .unwrap_err();
     assert_eq!(err.code(), "INVALID_ARGUMENT");
@@ -728,7 +720,7 @@ fn unknown_agent_slugs_refuse_naming_the_valid_ones() {
 }
 
 #[test]
-fn exclude_agents_cleans_exactly_that_agents_dir_and_records_the_exclusion() {
+fn exclude_agents_applies_immediately_cleans_that_agents_dir_and_records_the_exclusion() {
     let rig = Rig::new("exclude");
     let sid = rig.adopt_followed("deploy");
     let (adopted, cursor) = fan_out(&rig, &sid);
@@ -743,35 +735,30 @@ fn exclude_agents_cleans_exactly_that_agents_dir_and_records_the_exclusion() {
     let inert_p = InertPlane;
     let ctx = rig.ctx(&follow, &inert_p);
 
-    // DESCRIBE first: nothing mutates.
+    // ONE bare invocation APPLIES (no describe phase): the cursor dir is cleaned snapshot-first;
+    // the adopted dir stays; the exclusion is durable; the receipt carries the cleaned disclosure
+    // and the literal undo.
     let out = ops::exclude_agents(
         &ctx,
         "unfollow",
         &["deploy".to_owned()],
         &["cursor".to_owned()],
         None,
-        false,
     )
     .unwrap();
-    let ops::AgentScopeOutcome::Described { data, yes_argv } = out else {
-        panic!("expected a describe");
+    let ops::AgentScopeOutcome::Applied(data) = out else {
+        panic!("the per-agent exclusion applies immediately");
     };
-    assert!(!data.applied);
+    assert!(data.applied);
     assert_eq!(data.items[0].cleaned, vec![cursor.display().to_string()]);
-    assert!(yes_argv.contains(&"--agent".to_owned()) && yes_argv.contains(&"--yes".to_owned()));
-    assert!(cursor.exists(), "the describe cleans nothing");
-
-    // APPLY: the cursor dir is cleaned; the adopted dir stays; the exclusion is durable.
-    let out = ops::exclude_agents(
-        &ctx,
-        "unfollow",
-        &["deploy".to_owned()],
-        &["cursor".to_owned()],
-        None,
-        true,
-    )
-    .unwrap();
-    assert!(matches!(out, ops::AgentScopeOutcome::Applied(_)));
+    assert_eq!(
+        data.undo,
+        vec!["topos", "follow", "deploy", "--agent", "cursor"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+        "the receipt leads with the literal inverse"
+    );
     assert!(!cursor.exists(), "the excluded agent's dir is cleaned");
     assert!(adopted.exists(), "the adopted working copy stays");
     let follows = enroll::read_follows(&rig.fs, &rig.layout())
@@ -846,15 +833,19 @@ fn follow_agent_scope_update_narrows_then_star_clears_back_to_unscoped() {
         let follow = rig.follow_seam();
         let inert_p = InertPlane;
         let ctx = rig.ctx(&follow, &inert_p);
-        let out = ops::set_scope(
-            &ctx,
-            &["deploy".to_owned()],
-            &["cursor".to_owned()],
-            None,
-            true,
-        )
-        .unwrap();
-        assert!(matches!(out, ops::AgentScopeOutcome::Applied(_)));
+        let out =
+            ops::set_scope(&ctx, &["deploy".to_owned()], &["cursor".to_owned()], None).unwrap();
+        // The undo of a narrowing set is the documented clear back to unscoped.
+        match out {
+            ops::AgentScopeOutcome::Applied(data) => assert_eq!(
+                data.undo,
+                vec!["topos", "follow", "deploy", "--agent", "*"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            ),
+            _ => panic!("the scope update applies immediately"),
+        }
     }
     let follows = enroll::read_follows(&rig.fs, &rig.layout())
         .unwrap()
@@ -867,9 +858,18 @@ fn follow_agent_scope_update_narrows_then_star_clears_back_to_unscoped() {
         let follow = rig.follow_seam();
         let inert_p = InertPlane;
         let ctx = rig.ctx(&follow, &inert_p);
-        let out =
-            ops::set_scope(&ctx, &["deploy".to_owned()], &["*".to_owned()], None, true).unwrap();
-        assert!(matches!(out, ops::AgentScopeOutcome::Applied(_)));
+        let out = ops::set_scope(&ctx, &["deploy".to_owned()], &["*".to_owned()], None).unwrap();
+        // The clear's undo re-applies the prior include-list.
+        match out {
+            ops::AgentScopeOutcome::Applied(data) => assert_eq!(
+                data.undo,
+                vec!["topos", "follow", "deploy", "--agent", "cursor"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            ),
+            _ => panic!("the scope clear applies immediately"),
+        }
     }
     let follows = enroll::read_follows(&rig.fs, &rig.layout())
         .unwrap()

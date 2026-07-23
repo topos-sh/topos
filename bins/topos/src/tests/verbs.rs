@@ -1362,7 +1362,7 @@ fn list_discloses_enrollment_follow_state_and_hook() {
 
 #[test]
 fn follow_approve_resumes_an_unfollowed_skill() {
-    use crate::enroll::{self, FollowEntry, FollowModeDoc, Instance};
+    use crate::enroll::{self, FollowEntry, FollowModeDoc};
     use crate::plane::EnrollSource;
 
     let src = editable_source();
@@ -1371,17 +1371,10 @@ fn follow_approve_resumes_an_unfollowed_skill() {
     let ctx = h.ctx();
     let a = ops::add(&ctx, &root).unwrap();
 
-    // Seed what a real `follow` promote writes (instance + follow entry), then pause it — the exact
-    // state `unfollow` leaves behind.
-    enroll::write_instance(
-        ctx.fs,
-        &ctx.layout,
-        &Instance {
-            schema_version: 1,
-            base_url: "https://topos.example".to_owned(),
-        },
-    )
-    .unwrap();
+    // Seed a follow entry, then pause it — the exact state `unfollow` leaves behind. NO
+    // `instance.json`: this is the UN-ENROLLED graceful path (an enrolled install's paused
+    // resume clears the server stance through the re-attach arm instead — covered in the
+    // subscribe suite).
     enroll::write_follows_merged(
         ctx.fs,
         &ctx.layout,
@@ -1400,9 +1393,10 @@ fn follow_approve_resumes_an_unfollowed_skill() {
     let u = unfollow_local_yes(&ctx, "pr-describe");
     assert!(u.bytes_kept);
 
-    // `follow <skill>` resumes the paused entry. The skill has already been received (its
-    // base is the adopted genesis — no pending first-receive offer), so no transport is touched: the
-    // connectors panic if reached, and the inert ctx plane would error on any fetch.
+    // `follow <skill>` resumes the paused entry LOCALLY (un-enrolled — there is no server stance
+    // to clear). The skill has already been received (its base is the adopted genesis — no
+    // pending first-receive offer), so no transport is touched: the connectors panic if reached,
+    // and the inert ctx plane would error on any fetch.
     let enroll_connect =
         |_b: &str| -> Box<dyn EnrollSource> { unreachable!("the skill path never enrolls") };
     let dir_connect2 = |_b: &str| -> Box<dyn crate::plane::DirectorySource> {
@@ -1460,17 +1454,9 @@ fn follow_approve_resumes_an_unfollowed_skill() {
     assert!(e.following, "the retained entry resumed");
     assert_eq!(e.workspace_id, "w_acme");
 
-    // `list` shows (following, mode) again…
-    let listed = ops::list(&ctx, None, false, None, None).unwrap();
-    let en = listed.enrollment.as_ref();
-    assert!(
-        en.is_some_and(
-            |en| matches!(en.notes.as_slice(), [Some(n)] if n.following && n.mode == "auto")
-        ),
-        "list discloses the resumed follow state"
-    );
-
-    // …and a subsequent bare sweep includes the skill again (an up-to-date row, not a skip).
+    // A subsequent bare sweep includes the skill again (an up-to-date row, not a skip). (The
+    // `list` enrollment disclosure needs `instance.json` — the ENROLLED paused-resume path, which
+    // clears the server stance through the re-attach arm, is covered in the subscribe suite.)
     let file_follow = crate::plane_http::FileFollow::new(enroll::follow_contexts(&follows));
     let sweep_ctx = Ctx {
         follow: &file_follow,

@@ -138,14 +138,10 @@ pub(crate) enum FollowOutcome {
     },
     /// The `--yes` apply report.
     Applied(Box<FollowApplied>),
-    /// A per-device exclusion LIFT ("re-attach this device") DESCRIBE — bare `follow <skill>` on a
-    /// skill this person follows but THIS device excluded. Nothing mutated; `yes_argv` carries the
-    /// ready-to-exec apply command.
-    ReattachDescribed {
-        reattach: Box<Reattach>,
-        yes_argv: Vec<String>,
-    },
-    /// The `--yes` re-attach report (exclusion lifted, marker cleared, current bytes reinstalled).
+    /// The re-attach report — `follow <skill>` on a skill previously on THIS device's trust
+    /// surface (excluded here via `remove`, or unfollowed) applies IMMEDIATELY: the standing
+    /// stance clears (exclusion lifted / unfollow cleared), the marker converges, the current
+    /// bytes reinstall, and the receipt leads with its undo. `--yes` is an accepted no-op.
     ReattachApplied(Box<Reattach>),
     /// The `--agent` scope UPDATE on already-followed skills (two-phase, offline — the shared
     /// placement-policy surface).
@@ -314,37 +310,58 @@ pub(crate) struct FollowApplied {
     pub subscribed: Vec<DescribedTarget>,
     /// The installs the reconcile landed (batch-accepted first receives + refreshed knowns).
     pub installed: Vec<DescribedInstall>,
+    /// The literal inverse command (paste-ready argv), set when this apply was the widened
+    /// re-attach of previously-followed skills — `topos unfollow <skill>…` restores the stance.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub undo: Vec<String>,
     /// The reconcile's isolated warnings (ride the envelope's `warnings` too).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
 
-/// A per-device exclusion LIFT — "re-attach this device". The target is a skill this person still
-/// FOLLOWS but THIS device excluded via `remove` (a `follows.json` `excluded_here` marker + the
-/// server exclusion row). `follow <skill>` here lifts it: the server exclusion clears (via
-/// [`DirectorySource::follow_skill`], the same row op the web "re-attach" uses — it re-affirms the
-/// direct follow AND deletes the CALLING device's exclusion row), the local marker clears, and the
-/// reconcile reinstalls the current bytes into the agent dirs. This is a DISTINCT surface from the
-/// offer/subscribe paths — a re-attach never re-enrolls and never lands a "first-receive" offer,
-/// so the enroll/offer arm can never re-materialize bytes while an exclusion stands.
+/// A standing-stance LIFT — "re-attach". The target is a skill previously on THIS device's trust
+/// surface, in one of two stances: EXCLUDED here via `remove` (a `follows.json` `excluded_here`
+/// marker + the server exclusion row), or UNFOLLOWED (the person's standing detach — a paused
+/// local entry, or the delivery snapshot's `detached` list). `follow <skill>` clears it
+/// immediately: the server row converges (via [`DirectorySource::follow_skill`], the same row op
+/// the web "re-attach" uses — it re-affirms the direct follow AND deletes the CALLING device's
+/// exclusion row), the local markers converge, and the reconcile reinstalls the current bytes
+/// into the agent dirs. This is a DISTINCT surface from the offer/subscribe paths — a re-attach
+/// never re-enrolls and never lands a "first-receive" offer; a FIRST-EVER follow (first-trust)
+/// stays on the two-phase subscribe describe instead.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Reattach {
     pub workspace_id: String,
-    /// The workspace's human label (from `user.json`, offline), for the describe.
+    /// The workspace's human label (from `user.json`, offline).
     pub workspace_name: String,
     pub skill_id: String,
     /// The skill's catalog/local name (its dirname).
     pub name: String,
+    /// The stance this re-attach cleared: `excluded-here` (this device's `remove`) or
+    /// `unfollowed` (the person's detach).
+    pub cause: String,
     /// The current bytes this device re-installs — the last-known current from the local lock.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bundle_digest: Option<String>,
-    /// APPLY only: whether the reconcile actually placed the bytes back on this device.
+    /// Whether the reconcile actually placed the bytes back on this device.
     pub installed: bool,
-    /// APPLY: the reconcile's isolated warnings (ride the envelope's `warnings` too).
+    /// The literal inverse command (paste-ready argv) — back to the stance this cleared.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub undo: Vec<String>,
+    /// The reconcile's isolated warnings (ride the envelope's `warnings` too).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+}
+
+/// The stance a re-attach clears — routes the receipt wording and the literal undo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReattachCause {
+    /// This device excluded the skill via `remove` — the undo is `topos remove <skill>`.
+    ExcludedHere,
+    /// The person unfollowed the skill — the undo is `topos unfollow <skill>`.
+    Unfollowed,
 }
 
 /// Dispatch the `follow` verb over its positional targets + selectors, in this precedence order:
@@ -411,8 +428,16 @@ pub(crate) fn follow(
                     .into(),
             ));
         }
-        // Refuse unknown slugs up front (both dispatch arms share the same validation).
-        let _ = crate::placement::validate_agent_slugs(ctx, &opts.agents)?;
+        // Refuse unknown slugs up front (both dispatch arms share the same validation). `'*'` is
+        // the documented clear sentinel, not a slug — stripped here exactly as `set_scope` strips
+        // it before its own validation.
+        let named: Vec<String> = opts
+            .agents
+            .iter()
+            .filter(|a| a.as_str() != "*")
+            .cloned()
+            .collect();
+        let _ = crate::placement::validate_agent_slugs(ctx, &named)?;
         // Every target already followed (bare/`@digest` names) ⇒ the offline SCOPE-UPDATE path —
         // "a follow of an already-followed skill with --agent just updates the scope, two-phase".
         // Anything else falls through to the ordinary subscribe, which records the include-list at
@@ -426,12 +451,12 @@ pub(crate) fn follow(
                     && matches!(known_followed_entry(ctx, strip_digest(t), ws), Ok(Some(_)))
             });
         if all_followed {
+            // Applies immediately (device-local placement policy; `--yes` is an accepted no-op).
             return Ok(FollowOutcome::Scope(super::agent_scope::set_scope(
                 ctx,
                 &tokens,
                 &opts.agents,
                 ws,
-                opts.yes,
             )?));
         }
     }
@@ -467,14 +492,31 @@ pub(crate) fn follow(
             // the address grammar. If THIS device EXCLUDED it (`remove`), `follow` RE-ATTACHES the
             // device (lift the exclusion + reinstall the current bytes) rather than replaying a
             // first-receive offer that would leave the exclusion standing and re-materialize an
-            // inconsistent split; otherwise it is the classic accept / paused-resume.
+            // inconsistent split. A PAUSED entry (the person unfollowed) re-attaches the same way
+            // on an enrolled install — clearing the person's unfollowed stance server-side, not
+            // just the local flag (the un-enrolled graceful local resume stays in `approve`).
+            // An actively-following entry is the classic accept.
             let name = strip_digest(single);
-            if let Some((sid, ws_id, excluded)) = known_followed_entry(ctx, name, ws)? {
-                if excluded {
-                    // The bare positional path carries no address name to qualify with (the re-attach
-                    // describe is offline) — the apply argv preserves the caller's `--workspace` filter
-                    // instead (see `reattach`).
-                    return reattach(ctx, connectors, &ws_id, sid.as_str(), name, None, &opts);
+            if let Some(entry) = known_followed_entry(ctx, name, ws)? {
+                if entry.excluded_here {
+                    return reattach(
+                        ctx,
+                        connectors,
+                        &entry.workspace_id,
+                        entry.sid.as_str(),
+                        name,
+                        ReattachCause::ExcludedHere,
+                    );
+                }
+                if !entry.following && enroll::read_instance(ctx.fs, &ctx.layout)?.is_some() {
+                    return reattach(
+                        ctx,
+                        connectors,
+                        &entry.workspace_id,
+                        entry.sid.as_str(),
+                        name,
+                        ReattachCause::Unfollowed,
+                    );
                 }
                 return approve(ctx, std::slice::from_ref(single), ws);
             }
@@ -492,18 +534,25 @@ pub(crate) fn follow(
     subscribe_dispatch(ctx, connectors, &targets, &opts)
 }
 
-/// The `(skill_id, workspace_id, excluded_here)` of `name` when it resolves to a tracked skill with a
-/// follow entry (following OR `unfollow`-paused OR `remove`-excluded), else `None` — the "known followed
-/// skill" test the positional dispatch uses, extended to carry the per-device exclusion marker so the
-/// dispatch can route an excluded skill to the re-attach arm. Reads `follows.json` directly (mirroring
+/// The follow-entry facts of `name` when it resolves to a tracked skill with a follow entry
+/// (following OR `unfollow`-paused OR `remove`-excluded), else `None` — the "known followed skill"
+/// test the positional dispatch uses, carrying the stance markers so the dispatch can route an
+/// excluded or paused skill to the re-attach arm. Reads `follows.json` directly (mirroring
 /// [`approve`]), so it is correct even when the caller's `ctx.follow` seam is inert. A name that resolves
 /// to no tracked skill is not known (→ treat the positional as a link/token); an AMBIGUOUS name propagates
 /// its typed error (a genuine collision the user resolves with `--workspace`), never a silent token.
+struct KnownFollowEntry {
+    sid: crate::id::SkillId,
+    workspace_id: String,
+    excluded_here: bool,
+    following: bool,
+}
+
 fn known_followed_entry(
     ctx: &Ctx<'_>,
     name: &str,
     workspace: Option<&str>,
-) -> Result<Option<(crate::id::SkillId, String, bool)>, ClientError> {
+) -> Result<Option<KnownFollowEntry>, ClientError> {
     let Some(follows) = enroll::read_follows(ctx.fs, &ctx.layout)? else {
         return Ok(None);
     };
@@ -512,23 +561,39 @@ fn known_followed_entry(
             .follows
             .iter()
             .find(|e| e.skill_id == id.as_str())
-            .map(|e| (id.clone(), e.workspace_id.clone(), e.excluded_here))),
+            .map(|e| KnownFollowEntry {
+                sid: id.clone(),
+                workspace_id: e.workspace_id.clone(),
+                excluded_here: e.excluded_here,
+                following: e.following,
+            })),
         Err(ClientError::NoSuchSkill { .. }) => Ok(None),
         Err(e) => Err(e),
     }
 }
 
-/// Whether `skill_id` carries a `follows.json` `excluded_here` marker — this device's per-device
-/// exclusion, written by `remove`. The routing signal for the qualified `<ws>/skills/<name>` path
-/// (the local marker; the server exclusion row the lift clears is the authority).
-fn is_excluded_here(ctx: &Ctx<'_>, skill_id: &str) -> Result<bool, ClientError> {
+/// The standing LOCAL stance of `skill_id`, from its `follows.json` entry: `excluded-here` (this
+/// device's per-device exclusion, written by `remove` — it wins over a pause) or `unfollowed` (a
+/// paused entry — the person's detach), else `None`. The routing signal for the qualified
+/// `<ws>/skills/<name>` path (the local markers; the server rows the lift converges are the
+/// authority).
+fn local_stance(ctx: &Ctx<'_>, skill_id: &str) -> Result<Option<ReattachCause>, ClientError> {
     let Some(follows) = enroll::read_follows(ctx.fs, &ctx.layout)? else {
-        return Ok(false);
+        return Ok(None);
     };
     Ok(follows
         .follows
         .iter()
-        .any(|e| e.skill_id == skill_id && e.excluded_here))
+        .find(|e| e.skill_id == skill_id)
+        .and_then(|e| {
+            if e.excluded_here {
+                Some(ReattachCause::ExcludedHere)
+            } else if !e.following {
+                Some(ReattachCause::Unfollowed)
+            } else {
+                None
+            }
+        }))
 }
 
 /// The one-plane-per-install guard, shared by every enrollment door (`follow <address>`,
@@ -1292,35 +1357,28 @@ fn subscribe_dispatch(
         }
     }
 
-    // A SINGLE followed-but-EXCLUDED skill target RE-ATTACHES this device (lift the exclusion +
-    // reinstall the current bytes) instead of replaying a person-scope subscribe that would leave the
-    // device exclusion standing. This is how the qualified `<ws>/skills/<name>` path reaches the same
-    // arm the bare positional does — but ONLY for a single target: a MULTI-target subscribe (even one
-    // whose targets include an excluded skill) falls through to the classic apply below, which clears
-    // each re-affirmed skill's stale marker itself. A fresh (never-followed) or non-excluded skill also
-    // stays on the ordinary subscribe describe/apply below. The resolved `workspace_name` (the address
-    // slug) qualifies the apply argv so a re-run resolves to this workspace even for a shared name.
+    // A SINGLE skill target with a standing LOCAL stance RE-ATTACHES this device (clear the
+    // stance + reinstall the current bytes) instead of replaying a person-scope subscribe: an
+    // EXCLUDED skill (this device's `remove`) would otherwise leave the device exclusion
+    // standing, and a PAUSED one (the person's unfollow) was previously on this device's trust
+    // surface — both apply immediately. This is how the qualified `<ws>/skills/<name>` path
+    // reaches the same arm the bare positional does — but ONLY for a single target: a
+    // MULTI-target subscribe (even one whose targets include an excluded skill) falls through to
+    // the classic path below, which clears each re-affirmed skill's stale marker itself. A fresh
+    // (never-followed) skill stays on the ordinary subscribe describe/apply below (first-trust —
+    // the snapshot's `detached` list widens it inside `subscribe`).
     if let [
         Resolution::Resource {
             kind: ResourceKind::Skill,
             skill_id: Some(sid),
             name,
             workspace_id,
-            workspace_name,
             ..
         },
     ] = resolutions.as_slice()
-        && is_excluded_here(ctx, sid)?
+        && let Some(cause) = local_stance(ctx, sid)?
     {
-        return reattach(
-            ctx,
-            connectors,
-            workspace_id,
-            sid,
-            name,
-            Some(workspace_name),
-            opts,
-        );
+        return reattach(ctx, connectors, workspace_id, sid, name, cause);
     }
 
     // One workspace per invocation: the describe is one workspace's story, and the apply's
@@ -1447,10 +1505,13 @@ fn continue_into_target(
     )
 }
 
-/// The two-phase subscribe over ONE workspace's resolved targets: assemble the describe from the
+/// The subscribe over ONE workspace's resolved targets: assemble the describe from the
 /// member-scoped reads; bare = return it (nothing mutated); `--yes` = the row ops, the reconcile
 /// (batch-accepted first receives; colliding dirnames auto-namespace, identical occupants adopt in
-/// place), and the report.
+/// place), and the report. ONE widening: when EVERY target is a skill previously on this person's
+/// trust surface (the delivery snapshot's `detached` list, or a paused/excluded local entry), the
+/// bare run applies immediately — re-following what was followed is not first-trust; the receipt
+/// leads with its undo.
 fn subscribe(
     ctx: &Ctx<'_>,
     connectors: &FollowConnectors<'_>,
@@ -1483,7 +1544,25 @@ fn subscribe(
         describe.agent_notes = agent_plan_notes(ctx, opts, &describe.installs, &me.name);
     }
 
-    if !opts.yes {
+    // The widened re-attach: when EVERY target is a skill the person previously followed — the
+    // delivery snapshot lists it DETACHED (an unfollow from the web or another device leaves no
+    // local marker), or a local entry holds a paused/excluded stance — the bare run APPLIES
+    // immediately: re-following what was on the trust surface is not first-trust, and the apply
+    // is reversible by its inverse (`topos unfollow <skill>`). One first-ever skill (or a
+    // channel/workspace target) keeps the whole invocation on the describe.
+    let all_previously_trusted = resolutions.iter().all(|r| match r {
+        Resolution::Resource {
+            kind: ResourceKind::Skill,
+            skill_id: Some(id),
+            ..
+        } => {
+            snapshot.detached.iter().any(|d| d == id)
+                || matches!(local_stance(ctx, id), Ok(Some(_)))
+        }
+        _ => false,
+    });
+
+    if !opts.yes && !all_previously_trusted {
         // Would `--yes` write any NEW subscription row? A workspace target writes none (membership
         // itself entitles `everyone`); a channel join is new only when the caller is not yet a
         // member (a missing index entry counts as new — the safe side); a direct follow only when
@@ -1568,11 +1647,15 @@ fn subscribe(
                         ClientError::WireInvalid("a resolved skill carried no id".into())
                     })?;
                     directory.follow_skill(ws_id, id)?;
-                    // The `follow_skill` PUT lifted any SERVER exclusion of this skill; clear the local
-                    // per-device marker to match (the single-excluded-target case re-attaches instead, so
-                    // this only fires for a MULTI-target subscribe that swept an excluded skill in). A
-                    // no-op when nothing was excluded; the reconcile below reinstalls the bytes.
+                    // The `follow_skill` PUT lifted any SERVER exclusion of this skill AND
+                    // re-affirmed the person's direct follow; converge the local markers to match
+                    // (the single-stanced-target case re-attaches instead, so this fires for a
+                    // MULTI-target subscribe that swept a stanced skill in, and for the
+                    // detached-in-snapshot widening). No-ops when nothing was excluded/paused;
+                    // without the follow re-affirm the reconcile's `!following` guard would skip
+                    // a paused entry and the install below would silently not land.
                     enroll::set_excluded(ctx.fs, &ctx.layout, id, false)?;
+                    enroll::set_following(ctx.fs, &ctx.layout, id, true)?;
                 }
             }
             subscribed.push(DescribedTarget {
@@ -1671,12 +1754,25 @@ fn subscribe(
             }
         }
     }
+    // The undo-led receipt for the widened re-attach: the literal inverse restores the stance.
+    let undo: Vec<String> = if all_previously_trusted {
+        let mut argv = vec!["topos".to_owned(), "unfollow".to_owned()];
+        for r in resolutions {
+            if let Resolution::Resource { name, .. } = r {
+                argv.push(name.clone());
+            }
+        }
+        argv
+    } else {
+        Vec::new()
+    };
     Ok(FollowOutcome::Applied(Box::new(FollowApplied {
         workspace_id: ws_id.to_owned(),
         workspace_name: me.name,
         enrolled_now,
         subscribed,
         installed,
+        undo,
         warnings: out.warnings,
     })))
 }
@@ -2302,58 +2398,36 @@ fn approve(
 // The per-device exclusion LIFT — "re-attach this device".
 // =================================================================================================
 
-/// Re-attach a skill this person follows but THIS device excluded via `remove`. Reached from BOTH the
-/// bare positional path (`address_name = None` — the describe is offline, so it has no address slug to
-/// qualify with) and the qualified `<ws>/skills/<name>` subscribe path (`address_name = Some(slug)`).
-/// Two-phase:
-/// - bare = DESCRIBE the re-attach (nothing mutated) — the truthful "lift the exclusion, reinstall the
-///   current bytes" surface, NOT a "first-receive offer" (which would tell the user to re-run the very
-///   command they just ran, and re-materialize bytes while the exclusion still stood);
-/// - `--yes` = APPLY: (a) lift the SERVER exclusion via [`DirectorySource::follow_skill`] — the row op
-///   re-affirms the direct follow AND, because it carries THIS device's credential, deletes this
-///   device's exclusion row (the same op the web "re-attach" speaks; no new wire shape); (b) clear the
-///   local `excluded_here` marker AND re-affirm the local follow (a prior `unfollow` may have paused it,
-///   and the PUT above re-affirmed the person's direct follow — so the local entry must converge too, or
-///   the reconcile's `!following` guard skips it and "lands on next update" is a lie); (c) reconcile ONLY
-///   this skill's current bytes back into the agent dirs (the never-received baseline `remove` laid makes
-///   the accepted first receive PLACE) — every OTHER pending first-receive stays an undisclosed offer;
-///   (d) report honestly.
+/// Re-attach a skill previously on THIS device's trust surface — the standing stance (`cause`)
+/// clears IMMEDIATELY (the explicit `follow <skill>` is the consent; `--yes` is an accepted
+/// no-op, and the receipt leads with its literal undo). Reached from the bare positional path,
+/// the qualified `<ws>/skills/<name>` subscribe path, and the detached-in-snapshot subscribe arm.
+/// The apply: (a) converge the SERVER rows via [`DirectorySource::follow_skill`] — the row op
+/// re-affirms the direct follow (clearing a person-scoped unfollow) AND, because it carries THIS
+/// device's credential, deletes this device's exclusion row (the same op the web "re-attach"
+/// speaks; no new wire shape); (b) clear the local `excluded_here` marker AND re-affirm the local
+/// follow (a prior `unfollow` paused it, and the PUT above re-affirmed the person's direct follow
+/// — so the local entry must converge too, or the reconcile's `!following` guard skips it and
+/// "lands on next update" is a lie); (c) reconcile ONLY this skill's current bytes back into the
+/// agent dirs (the never-received baseline `remove` laid makes the accepted first receive PLACE)
+/// — every OTHER pending first-receive stays an undisclosed offer; (d) report honestly.
 fn reattach(
     ctx: &Ctx<'_>,
     connectors: &FollowConnectors<'_>,
     workspace_id: &str,
     skill_id: &str,
     name: &str,
-    address_name: Option<&str>,
-    opts: &FollowOpts,
+    cause: ReattachCause,
 ) -> Result<FollowOutcome, ClientError> {
-    // The current bytes to reinstall — from the local lock, kept through the exclusion (`remove`
-    // cleans the agent dirs, never the sidecar). Offline; the describe needs no network.
+    // The current bytes to reinstall — from the local lock, kept through the stance (`remove`
+    // cleans the agent dirs, never the sidecar; an unfollow freezes in place).
     let sid = crate::id::SkillId::parse(skill_id)?;
     let lock: Option<Lock> = doc::read_doc(ctx.fs, &ctx.layout.published(&sid).lock)?;
     let version_id = lock.as_ref().map(|l| l.base_commit.clone());
     let bundle_digest = lock.as_ref().map(|l| l.bundle_digest.clone());
     let workspace_name = workspace_label(ctx, workspace_id);
 
-    if !opts.yes {
-        let reattach = Reattach {
-            workspace_id: workspace_id.to_owned(),
-            workspace_name,
-            skill_id: skill_id.to_owned(),
-            name: name.to_owned(),
-            version_id,
-            bundle_digest,
-            installed: false,
-            warnings: Vec::new(),
-        };
-        let yes_argv = reattach_yes_argv(name, address_name, opts.workspace.as_deref());
-        return Ok(FollowOutcome::ReattachDescribed {
-            reattach: Box::new(reattach),
-            yes_argv,
-        });
-    }
-
-    // ---- APPLY (`--yes`) ----
+    // ---- APPLY (immediately — the skill was on this device's trust surface) ----
     let base_url = enroll::read_instance(ctx.fs, &ctx.layout)?
         .map(|i| i.base_url)
         .ok_or_else(|| ClientError::Enrollment("not enrolled; nothing to re-attach".into()))?;
@@ -2400,11 +2474,16 @@ fn reattach(
     });
     // Re-read the lock so the report discloses what is now current locally.
     let updated: Option<Lock> = doc::read_doc(ctx.fs, &ctx.layout.published(&sid).lock)?;
+    let (cause_str, undo_verb) = match cause {
+        ReattachCause::ExcludedHere => ("excluded-here", "remove"),
+        ReattachCause::Unfollowed => ("unfollowed", "unfollow"),
+    };
     Ok(FollowOutcome::ReattachApplied(Box::new(Reattach {
         workspace_id: workspace_id.to_owned(),
         workspace_name,
         skill_id: skill_id.to_owned(),
         name: name.to_owned(),
+        cause: cause_str.to_owned(),
         version_id: updated
             .as_ref()
             .map(|l| l.base_commit.clone())
@@ -2414,35 +2493,9 @@ fn reattach(
             .map(|l| l.bundle_digest.clone())
             .or(bundle_digest),
         installed,
+        undo: vec!["topos".to_owned(), undo_verb.to_owned(), name.to_owned()],
         warnings: out.warnings,
     })))
-}
-
-/// The paste-ready `--yes` apply argv for a re-attach DESCRIBE. A name followed in two workspaces would
-/// make a bare `follow <name> --yes` ambiguous, so the argv carries the disambiguator this invocation
-/// used: the qualified `<address-slug>/skills/<name>` spelling the classic describe uses (when the
-/// qualified path supplied the address slug), else the caller's `--workspace <filter>` (the bare path
-/// carries no address slug offline), else nothing (an already-unique name).
-fn reattach_yes_argv(
-    name: &str,
-    address_name: Option<&str>,
-    workspace: Option<&str>,
-) -> Vec<String> {
-    let target = match address_name {
-        Some(slug) => format!("{slug}/{}/{name}", ResourceKind::Skill.segment()),
-        None => name.to_owned(),
-    };
-    let mut argv = vec!["topos".to_owned(), "follow".to_owned(), target];
-    // Only the bare path (no qualified target) needs the `--workspace` filter preserved — the qualified
-    // spelling already pins the workspace.
-    if address_name.is_none()
-        && let Some(w) = workspace
-    {
-        argv.push("--workspace".to_owned());
-        argv.push(w.to_owned());
-    }
-    argv.push("--yes".to_owned());
-    argv
 }
 
 /// The workspace's human label (its display name from `user.json`, offline), falling back to the id —

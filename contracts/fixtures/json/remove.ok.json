@@ -14,8 +14,22 @@
         "name": "deploy",
         "workspace_id": "w_acme"
       }
+    ],
+    "undo": [
+      "topos",
+      "follow",
+      "deploy"
     ]
   },
   "warnings": [],
-  "next_actions": []
+  "next_actions": [
+    {
+      "code": "UNDO",
+      "argv": [
+        "topos",
+        "follow",
+        "deploy"
+      ]
+    }
+  ]
 }

@@ -1,4 +1,10 @@
-//! `unfollow` — stop following a channel or skill, two-phase (describe → `--yes`).
+//! `unfollow` — stop following a channel or skill.
+//!
+//! A SKILL unfollow applies immediately and prints an undo-led receipt (`topos follow <skill>`
+//! re-attaches; local copies stay frozen — the act is self-scoped-reversible, and `--yes` is an
+//! accepted no-op). A CHANNEL unfollow stays two-phase (describe → `--yes`): which skills stop
+//! is computed breadth (the union math over channels and direct follows), so the disclosure comes
+//! first. A mixed invocation describes — the gated arm sets the bar for the whole batch.
 //!
 //! The detach is PERSON-scoped and server-recorded: a skill unfollow writes the standing
 //! `skill_unfollows` row (delivery ends on EVERY device; the entitlement predicate subtracts it even
@@ -61,12 +67,15 @@ pub(crate) struct UnfollowDescribe {
     pub record_note: String,
 }
 
-/// The `--yes` apply report.
+/// The apply report (a skill unfollow's immediate apply, or a channel unfollow's `--yes`).
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct UnfollowApplied {
     pub items: Vec<UnfollowItem>,
     /// Always true — an unfollow never touches a byte.
     pub bytes_kept: bool,
+    /// The literal inverse command (paste-ready argv) — re-follow what this stopped.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub undo: Vec<String>,
 }
 
 /// The verb's outcome — the two-phase pair.
@@ -98,7 +107,8 @@ enum Detach {
 }
 
 /// Dispatch the `unfollow` verb: resolve every target dual-kind (all-or-none), refuse workspace /
-/// `everyone` targets typed, describe (bare) or apply (`--yes`).
+/// `everyone` targets typed; a skill-only invocation applies immediately (undo-led receipt;
+/// `--yes` an accepted no-op), a channel target keeps the two-phase describe → `--yes`.
 ///
 /// # Errors
 /// [`ClientError::InvalidArgument`] for a workspace / `everyone` / local-domain target;
@@ -216,7 +226,11 @@ pub(crate) fn unfollow(
     // The describe facts: per workspace, what stops vs what keeps arriving.
     let items = describe_items(connectors, base_url.as_deref(), &detaches)?;
 
-    if !yes {
+    // A CHANNEL detach stays two-phase: which skills stop is computed breadth (union math), so
+    // the disclosure gates the apply. A skill-only invocation applies immediately (`--yes` is an
+    // accepted no-op) — the explicit command is the consent, and the receipt leads with its undo.
+    let gated = detaches.iter().any(|d| matches!(d, Detach::Channel { .. }));
+    if gated && !yes {
         let mut yes_argv = vec!["topos".to_owned(), "unfollow".to_owned()];
         for item in &items {
             yes_argv.push(format!("--{}", item.kind));
@@ -239,7 +253,7 @@ pub(crate) fn unfollow(
         });
     }
 
-    // ---- APPLY (`--yes`) ----
+    // ---- APPLY ----
     // The transport is built only when a SERVER row moves — a purely local pause (the graceful
     // offline path) never dials.
     let needs_server = detaches
@@ -278,9 +292,22 @@ pub(crate) fn unfollow(
             }
         }
     }
+    // The literal inverse: re-follow everything this invocation stopped (`follow` re-attaches a
+    // paused skill and re-joins a channel).
+    let mut undo = vec!["topos".to_owned(), "follow".to_owned()];
+    for item in &items {
+        match item.kind.as_str() {
+            "channel" => {
+                undo.push("--channel".to_owned());
+                undo.push(item.name.clone());
+            }
+            _ => undo.push(item.name.clone()),
+        }
+    }
     Ok(UnfollowOutcome::Applied(UnfollowApplied {
         items,
         bytes_kept: true,
+        undo,
     }))
 }
 

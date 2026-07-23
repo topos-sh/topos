@@ -1944,31 +1944,17 @@ fn unfollow_skill_writes_the_detach_row_and_flips_the_local_pause() {
     )
     .unwrap();
 
-    // Bare = describe; nothing changes.
+    // A bare SKILL unfollow APPLIES immediately: the server row + the local pause flip; bytes
+    // stay (nothing else on disk moves); the receipt leads with its undo.
     let out = run_unfollow(&rig, &directory, &transport, &["docs".to_owned()], false).unwrap();
-    let ops::UnfollowOutcome::Described { describe, yes_argv } = out else {
-        panic!("bare = describe");
-    };
-    assert_eq!(describe.items.len(), 1);
-    assert_eq!(describe.items[0].kind, "skill");
-    assert_eq!(describe.items[0].stops, vec!["docs".to_owned()]);
-    assert!(describe.all_devices_note.contains("every device"));
-    assert!(describe.record_note.contains("records the detach"));
-    assert!(yes_argv.contains(&"--yes".to_owned()));
-    assert!(
-        log.lock()
-            .unwrap()
-            .iter()
-            .all(|e| !e.starts_with("unfollow")),
-        "the describe wrote nothing"
-    );
-
-    // --yes: the server row + the local pause flip; bytes stay (nothing else on disk moves).
-    let out = run_unfollow(&rig, &directory, &transport, &["docs".to_owned()], true).unwrap();
     let ops::UnfollowOutcome::Applied(applied) = out else {
-        panic!("--yes = apply");
+        panic!("a skill unfollow applies immediately");
     };
     assert!(applied.bytes_kept);
+    assert_eq!(applied.items.len(), 1);
+    assert_eq!(applied.items[0].kind, "skill");
+    assert_eq!(applied.items[0].stops, vec!["docs".to_owned()]);
+    assert_eq!(applied.undo, vec!["topos", "follow", "docs"]);
     assert!(
         log.lock().unwrap().iter().any(|e| e == "unfollow s_docs"),
         "the person-scoped detach row was written"
@@ -2382,9 +2368,140 @@ fn follow_entry(rig: &Rig, skill_id: &str) -> enroll::FollowEntry {
         .unwrap_or_else(|| panic!("no follow entry for {skill_id}"))
 }
 
+/// The first half of [`seed_excluded_deploy`]: install `deploy` fresh through a consented channel
+/// follow, leaving it followed + materialized (no exclusion).
+fn seed_installed_deploy(rig: &Rig, directory: &FakeDirectory, transport: &FakeTransport) {
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: Arc::default(),
+    };
+    let out = run_follow(
+        rig,
+        &enroll_fake,
+        directory,
+        transport,
+        vec!["acme/channels/eng".to_owned()],
+        opts(true),
+    )
+    .unwrap();
+    assert!(
+        matches!(&out, ops::FollowOutcome::Applied(a) if a.installed.iter().any(|i| i.name == "deploy")),
+        "the seed install landed deploy",
+    );
+}
+
 #[test]
-fn a_bare_follow_of_an_excluded_skill_describes_the_reattach_and_mutates_nothing() {
-    let rig = Rig::new("reattach-desc");
+fn a_bare_follow_of_an_unfollowed_skill_clears_the_stance_and_applies() {
+    // Arm: previously-followed-then-unfollowed. The bare `follow <skill>` on an ENROLLED install
+    // clears the person's unfollowed stance SERVER-side (the same `follow_skill` row op), resumes
+    // the local entry, reinstalls, and answers the undo-led receipt — no describe phase.
+    let rig = Rig::new("reattach-unfollowed");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let directory = FakeDirectory::acme(log.clone());
+    let transport = deploy_transport(log.clone());
+    seed_installed_deploy(&rig, &directory, &transport);
+
+    // Unfollow it (a bare skill unfollow applies immediately now) — the paused stance.
+    let out = run_unfollow(&rig, &directory, &transport, &["deploy".to_owned()], false).unwrap();
+    assert!(matches!(out, ops::UnfollowOutcome::Applied(_)));
+    assert!(!follow_entry(&rig, "s_deploy").following, "paused");
+    log.lock().unwrap().clear();
+
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: log.clone(),
+    };
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["deploy".to_owned()],
+        opts(false),
+    )
+    .unwrap();
+    let ops::FollowOutcome::ReattachApplied(reattach) = out else {
+        panic!("a previously-unfollowed skill re-attaches immediately");
+    };
+    assert_eq!(reattach.cause, "unfollowed");
+    assert_eq!(reattach.undo, vec!["topos", "unfollow", "deploy"]);
+    // The stance cleared SERVER-side (not just the local flag) via the follow_skill row op.
+    assert!(
+        log.lock().unwrap().iter().any(|e| e == "follow s_deploy"),
+        "clearing the unfollowed stance rides `follow_skill`: {:?}",
+        log.lock().unwrap()
+    );
+    assert!(
+        follow_entry(&rig, "s_deploy").following,
+        "the local entry resumed"
+    );
+    // The TTY receipt words the resume and leads with its undo.
+    let text = crate::render::reattach_applied_tty(&reattach);
+    assert!(text.contains("Following deploy again"), "{text}");
+    assert!(text.contains("Undo: topos unfollow deploy"), "{text}");
+}
+
+#[test]
+fn remove_with_a_draft_holds_the_loss_guard_then_yes_applies() {
+    // The loss-guard: a followed skill WITH local edits ahead keeps the two-phase describe (the
+    // draft would leave every agent dir), with loss-led copy; `--yes` then applies snapshot-first.
+    let rig = Rig::new("rm-loss-guard");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let directory = FakeDirectory::acme(log.clone());
+    let transport = deploy_transport(log.clone());
+    seed_installed_deploy(&rig, &directory, &transport);
+    log.lock().unwrap().clear();
+
+    // Edit the placed copy — a draft ahead of the followed version.
+    let placed = rig.work.0.join("skills").join("deploy").join("SKILL.md");
+    std::fs::write(&placed, "# deploy\nmy local edit\n").unwrap();
+
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+    let dir_connect = |_b: &str| -> Box<dyn DirectorySource> { Box::new(directory.clone()) };
+    let connectors = ops::RemoveConnectors {
+        directory: &dir_connect,
+    };
+
+    // Bare = the loss-guard DESCRIBE: loss-led copy, nothing mutated.
+    let out = ops::remove(&ctx, &connectors, &["deploy".to_owned()], &[], None, false).unwrap();
+    let ops::RemoveOutcome::Described { data, yes_argv } = out else {
+        panic!("a draft holds the gate");
+    };
+    assert!(!data.applied);
+    let note = data.items[0].note.as_deref().unwrap_or_default();
+    assert!(
+        note.contains("local edits ahead"),
+        "the describe leads with the loss: {note}"
+    );
+    assert!(yes_argv.contains(&"--yes".to_owned()));
+    assert!(
+        log.lock()
+            .unwrap()
+            .iter()
+            .all(|e| !e.starts_with("exclude")),
+        "the describe wrote no row: {:?}",
+        log.lock().unwrap()
+    );
+    assert!(placed.exists(), "the describe cleaned nothing");
+
+    // `--yes` applies: the exclusion row lands, the dir is cleaned (draft snapshotted first).
+    let out = ops::remove(&ctx, &connectors, &["deploy".to_owned()], &[], None, true).unwrap();
+    assert!(matches!(out, ops::RemoveOutcome::Applied(d) if d.applied));
+    assert!(
+        log.lock().unwrap().iter().any(|e| e == "exclude s_deploy"),
+        "the exclusion row was written"
+    );
+    assert!(!placed.exists(), "the dirs are cleaned on apply");
+    assert!(follow_entry(&rig, "s_deploy").excluded_here);
+}
+
+#[test]
+fn a_bare_follow_of_an_excluded_skill_applies_the_reattach_immediately() {
+    let rig = Rig::new("reattach-bare");
     rig.seed_enrolled();
     let log: CallLog = Arc::default();
     let directory = FakeDirectory::acme(log.clone());
@@ -2396,7 +2513,8 @@ fn a_bare_follow_of_an_excluded_skill_describes_the_reattach_and_mutates_nothing
         api_base: API.to_owned(),
         log: log.clone(),
     };
-    // Bare `follow deploy` (no `--yes`): the re-attach DESCRIBE — nothing mutated, ever.
+    // Bare `follow deploy` (no `--yes`): the skill was on this device's trust surface, so the
+    // re-attach APPLIES immediately — the receipt leads with its undo.
     let out = run_follow(
         &rig,
         &enroll_fake,
@@ -2406,28 +2524,29 @@ fn a_bare_follow_of_an_excluded_skill_describes_the_reattach_and_mutates_nothing
         opts(false),
     )
     .unwrap();
-    let ops::FollowOutcome::ReattachDescribed { reattach, yes_argv } = out else {
-        panic!("an excluded skill describes the re-attach, never a first-receive offer");
+    let ops::FollowOutcome::ReattachApplied(reattach) = out else {
+        panic!("an excluded skill re-attaches immediately, never a first-receive offer");
     };
     assert_eq!(reattach.name, "deploy");
     assert_eq!(reattach.skill_id, "s_deploy");
-    assert!(!reattach.installed);
-    assert_eq!(yes_argv, vec!["topos", "follow", "deploy", "--yes"]);
-    // Nothing mutated: no wire row, the marker still stands, the agent dir stays clean.
+    assert_eq!(reattach.cause, "excluded-here");
+    assert!(reattach.installed, "the current bytes landed back");
+    assert_eq!(reattach.undo, vec!["topos", "remove", "deploy"]);
+    // The mutation is real: the server row op fired, the marker cleared, the bytes are back.
     assert!(
-        log.lock().unwrap().is_empty(),
-        "a describe writes no row: {:?}",
+        log.lock().unwrap().iter().any(|e| e == "follow s_deploy"),
+        "the lift rides `follow_skill`: {:?}",
         log.lock().unwrap()
     );
     assert!(
-        follow_entry(&rig, "s_deploy").excluded_here,
-        "still excluded"
+        !follow_entry(&rig, "s_deploy").excluded_here,
+        "marker cleared"
     );
-    assert!(!rig.work.0.join("skills").join("deploy").exists());
-    // The TTY names the re-attach and the apply argv.
-    let text = crate::render::reattach_describe_tty(&reattach, &yes_argv);
-    assert!(text.contains("re-attaches this device"), "{text}");
-    assert!(text.contains("topos follow deploy --yes"), "{text}");
+    assert!(rig.work.0.join("skills").join("deploy").exists());
+    // The TTY receipt is undo-led.
+    let text = crate::render::reattach_applied_tty(&reattach);
+    assert!(text.contains("Re-attached deploy"), "{text}");
+    assert!(text.contains("Undo: topos remove deploy"), "{text}");
 }
 
 #[test]
@@ -2558,11 +2677,10 @@ fn a_bare_follow_of_a_never_followed_name_still_takes_the_offer_path() {
 }
 
 #[test]
-fn a_qualified_bare_follow_of_an_excluded_skill_qualifies_the_apply_argv() {
-    // The re-attach DESCRIBE reached via the qualified `<ws>/skills/<name>` path must print the CANONICAL
-    // qualified apply argv (`<slug>/skills/<name> --yes`), not a bare name that would resolve AMBIGUOUS if
-    // the same name were excluded in a second workspace.
-    let rig = Rig::new("reattach-qual-desc");
+fn a_qualified_bare_follow_of_an_excluded_skill_applies_immediately_too() {
+    // The qualified `<ws>/skills/<name>` path reaches the SAME immediate re-attach arm as the bare
+    // positional — one gate policy per stance, not per spelling.
+    let rig = Rig::new("reattach-qual-bare");
     rig.seed_enrolled();
     let log: CallLog = Arc::default();
     let directory = FakeDirectory::acme(log.clone());
@@ -2583,16 +2701,14 @@ fn a_qualified_bare_follow_of_an_excluded_skill_qualifies_the_apply_argv() {
         opts(false),
     )
     .unwrap();
-    let ops::FollowOutcome::ReattachDescribed { yes_argv, .. } = out else {
-        panic!("the qualified excluded target describes the re-attach");
+    let ops::FollowOutcome::ReattachApplied(reattach) = out else {
+        panic!("the qualified excluded target re-attaches immediately");
     };
-    assert_eq!(
-        yes_argv,
-        vec!["topos", "follow", "acme/skills/deploy", "--yes"]
-    );
+    assert_eq!(reattach.cause, "excluded-here");
+    assert!(reattach.installed);
     assert!(
-        log.lock().unwrap().is_empty(),
-        "a describe writes no row: {:?}",
+        log.lock().unwrap().iter().any(|e| e == "follow s_deploy"),
+        "the lift rides the same row op: {:?}",
         log.lock().unwrap()
     );
 }

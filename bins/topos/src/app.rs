@@ -528,13 +528,13 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 }
                 let mut all_targets = targets.clone();
                 all_targets.extend(skill.iter().cloned());
+                // Applies immediately (placement policy; `--yes` is an accepted no-op).
                 let result = ops::exclude_agents(
                     &ctx,
                     "unfollow",
                     &all_targets,
                     &agent,
                     workspace.as_deref(),
-                    yes,
                 );
                 return finish_agent_scope(json, cmd_name, result, &diag);
             }
@@ -1539,9 +1539,11 @@ fn finish_follow(
         Ok(ops::FollowOutcome::Applied(applied)) => {
             if json {
                 let warnings = applied.warnings.clone();
+                let undo = render::undo_next_actions(&applied.undo);
                 let value = serde_json::to_value(&applied).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
                 envelope.warnings = warnings;
+                envelope.next_actions = undo;
                 println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::follow_applied_tty(&applied));
@@ -1551,23 +1553,14 @@ fn finish_follow(
         Ok(ops::FollowOutcome::Scope(outcome)) => {
             finish_agent_scope(json, command, Ok(outcome), diag)
         }
-        Ok(ops::FollowOutcome::ReattachDescribed { reattach, yes_argv }) => {
-            if json {
-                let value = serde_json::json!({ "reattach": reattach });
-                let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions = render::describe_next_actions(vec![yes_argv]);
-                println!("{}", render::to_json(&envelope));
-            } else {
-                println!("{}", render::reattach_describe_tty(&reattach, &yes_argv));
-            }
-            ExitCode::SUCCESS
-        }
         Ok(ops::FollowOutcome::ReattachApplied(reattach)) => {
             if json {
                 let warnings = reattach.warnings.clone();
+                let undo = render::undo_next_actions(&reattach.undo);
                 let value = serde_json::json!({ "reattach": reattach });
                 let mut envelope = render::ok_envelope(command, value);
                 envelope.warnings = warnings;
+                envelope.next_actions = undo;
                 println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::reattach_applied_tty(&reattach));
@@ -1625,7 +1618,9 @@ fn finish_agent_scope(
         Ok(ops::AgentScopeOutcome::Applied(data)) => {
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::undo_next_actions(&data.undo);
+                println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::agent_scope_tty(&data, None));
             }
@@ -1656,7 +1651,9 @@ fn finish_unfollow(
         Ok(ops::UnfollowOutcome::Applied(applied)) => {
             if json {
                 let value = serde_json::to_value(&applied).unwrap_or_default();
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::undo_next_actions(&applied.undo);
+                println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::unfollow_applied_tty(&applied));
             }
@@ -1854,7 +1851,9 @@ fn finish_remove(
         Ok(ops::RemoveOutcome::Applied(data)) => {
             if json {
                 let value = serde_json::to_value(&data).unwrap_or_default();
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::undo_next_actions(&data.undo);
+                println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::remove_applied_tty(&data));
             }

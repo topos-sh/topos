@@ -424,7 +424,7 @@ fn dir_connect(fake: &FakeDir) -> impl Fn(&str) -> Box<dyn DirectorySource> + '_
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-fn remove_followed_skill_describe_then_exclude() {
+fn remove_followed_clean_skill_applies_the_exclusion_immediately() {
     let rig = Rig::new("rm-followed");
     rig.seed_enrolled("alice@acme.com");
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
@@ -437,30 +437,22 @@ fn remove_followed_skill_describe_then_exclude() {
     let inert_f = InertFollow;
     let ctx = rig.ctx(&inert_p, &inert_f);
 
-    // Bare = describe (nothing mutated): the boundary is the followed exclusion.
+    // A followed CLEAN skill: the bare run APPLIES the exclusion immediately — the server row is
+    // written, the receipt is undo-led, `--yes` stays an accepted no-op.
     let out = ops::remove(&ctx, &connectors, &["deploy".into()], &[], None, false).unwrap();
     match out {
-        ops::RemoveOutcome::Described { data, yes_argv } => {
-            assert!(!data.applied);
+        ops::RemoveOutcome::Applied(data) => {
+            assert!(data.applied);
             assert_eq!(data.items.len(), 1);
             assert!(matches!(
                 data.items[0].kind,
                 topos_types::results::RemoveKind::FollowedExclusion
             ));
             assert!(data.items[0].bytes_kept);
-            assert!(yes_argv.contains(&"--yes".to_owned()));
+            assert_eq!(data.undo, vec!["topos", "follow", "deploy"]);
         }
-        _ => panic!("bare remove should describe"),
+        _ => panic!("a followed clean skill applies immediately"),
     }
-    assert!(
-        log.lock().unwrap().is_empty(),
-        "a describe mutates nothing: {:?}",
-        log.lock().unwrap()
-    );
-
-    // --yes applies: the server exclusion row is written.
-    let out = ops::remove(&ctx, &connectors, &["deploy".into()], &[], None, true).unwrap();
-    assert!(matches!(out, ops::RemoveOutcome::Applied(d) if d.applied));
     assert_eq!(*log.lock().unwrap(), vec!["exclude s_deploy".to_owned()]);
 }
 
