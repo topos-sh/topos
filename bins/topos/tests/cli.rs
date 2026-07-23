@@ -112,6 +112,57 @@ fn end_to_end_add_then_list_over_json() {
 }
 
 #[test]
+fn json_envelope_apply_receipt_on_ungated_arms_describe_on_gated() {
+    // The reduced consent gate's `--json` compat flip, on the REAL binary: a bare run of an
+    // UNGATED arm answers the APPLY receipt (with the undo-led next action), while a still-gated
+    // arm keeps the describe envelope (with the `--yes` apply next action).
+    let home = scratch("yes-scope");
+    let src = scratch("yes-scope-src");
+    let skill = src.join("pr-describe");
+    copy_tree(&fixture(), &skill);
+    let (ok, _) = run(&home, &["--json", "add", skill.to_str().unwrap()]);
+    assert!(ok, "add should exit 0");
+
+    // UNGATED (the local-pause fallback of a skill unfollow): the bare run APPLIES — the receipt
+    // document (not a `describe` wrapper), `bytes_kept`, the literal undo, the UNDO next action.
+    let (ok, v) = run(&home, &["--json", "unfollow", "pr-describe"]);
+    assert!(ok, "the bare skill unfollow applies: {v}");
+    assert_eq!(v["command"], "unfollow");
+    assert!(v["data"].get("describe").is_none(), "an apply receipt: {v}");
+    assert_eq!(v["data"]["bytes_kept"], true);
+    assert_eq!(
+        v["data"]["undo"],
+        serde_json::json!(["topos", "follow", "pr-describe"])
+    );
+    assert_eq!(v["next_actions"][0]["code"], "UNDO");
+    assert_eq!(
+        v["next_actions"][0]["argv"],
+        serde_json::json!(["topos", "follow", "pr-describe"])
+    );
+
+    // GATED (a local-only `remove` — the permanent delete of the only copy): the bare run answers
+    // the DESCRIBE envelope, `applied: false`, the `--yes` apply next action; nothing is deleted.
+    let (ok, v) = run(&home, &["--json", "remove", "pr-describe"]);
+    assert!(ok, "the gated describe exits 0: {v}");
+    assert_eq!(v["command"], "remove");
+    assert_eq!(v["data"]["describe"]["applied"], false);
+    assert_eq!(
+        v["data"]["describe"]["items"][0]["kind"],
+        "tracked-local-permanent"
+    );
+    assert_eq!(v["next_actions"][0]["code"], "APPLY_DESCRIBED");
+    let argv = v["next_actions"][0]["argv"].as_array().expect("argv");
+    assert_eq!(argv.last().and_then(|t| t.as_str()), Some("--yes"));
+    // The describe deleted nothing: the skill still lists as tracked.
+    let (ok, v) = run(&home, &["--json", "list", "--tracked"]);
+    assert!(ok);
+    assert_eq!(v["data"]["tracked"][0]["skill"], "pr-describe");
+
+    let _ = std::fs::remove_dir_all(&src);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
 fn end_to_end_claude_code_adopt_arms_currency_and_pull_is_silent() {
     let home = scratch("cc-home");
     let claude = scratch("cc-claude");

@@ -157,6 +157,60 @@ pub struct FollowAppliedView {
     pub warnings: Vec<String>,
 }
 
+/// A bare/`--yes` probe outcome of `unfollow` — which face answered, plus the receipt facts the
+/// acceptance suite asserts.
+#[derive(Debug)]
+pub enum UnfollowProbe {
+    /// The two-phase describe (a channel target's computed-breadth gate).
+    Described {
+        yes_argv: Vec<String>,
+        /// Every skill the describe says stops.
+        stops: Vec<String>,
+    },
+    /// The apply (immediate for a skill-only invocation; `--yes` for a channel's).
+    Applied {
+        /// The literal inverse argv on the receipt.
+        undo: Vec<String>,
+        bytes_kept: bool,
+    },
+}
+
+/// A bare/`--yes` probe outcome of `remove` — which face answered (`AgentScope` for the `-a` arm
+/// on a followed skill).
+#[derive(Debug)]
+pub enum RemoveProbe {
+    /// The two-phase describe (the loss-guard, or a permanent local delete).
+    Described {
+        data: topos_types::results::RemoveData,
+        yes_argv: Vec<String>,
+    },
+    /// The apply (immediate for a followed clean skill; `--yes` for the described shapes).
+    Applied(topos_types::results::RemoveData),
+    /// The per-agent exclusion receipt (`AgentScopeData` as JSON; `described` is `false` on the
+    /// immediate apply).
+    AgentScope {
+        data: serde_json::Value,
+        described: bool,
+    },
+}
+
+/// A bare/`--yes` probe outcome of a positional `follow` — which surface answered.
+#[derive(Debug)]
+pub enum FollowProbe {
+    /// The two-phase subscribe describe (first-trust).
+    Described { next_argvs: Vec<Vec<String>> },
+    /// The subscribe apply (consented, or the widened previously-followed immediate apply — the
+    /// latter carries the undo).
+    Applied {
+        installed: Vec<String>,
+        undo: Vec<String>,
+    },
+    /// The immediate re-attach receipt (`Reattach` as JSON — cause / undo / installed).
+    Reattached(serde_json::Value),
+    /// The `--agent` scope receipt (`AgentScopeData` as JSON).
+    Scope(serde_json::Value),
+}
+
 /// One followed skill's enrollment, as the harness holds it. The device credential is a secret
 /// (redacted in `Debug`).
 #[derive(Clone)]
@@ -1142,6 +1196,13 @@ impl FollowHarness {
         write_tree(&self.placement_dir(skill_id), files);
     }
 
+    /// The on-disk path this rig's adapter places `skill_id` at — for e2e probes that manipulate
+    /// the directory itself (permissions, existence) rather than its file contents.
+    #[must_use]
+    pub fn placement_path(&self, skill_id: &str) -> PathBuf {
+        self.placement_dir(skill_id)
+    }
+
     /// The adapter's auto-update [`TriggerReport`] — a fresh, IDEMPOTENT re-probe of the same trigger
     /// install the enroll `promote` armed (the adapter's `install_currency_trigger` is idempotent: it
     /// detects the already-installed hook and re-reports it, writing no duplicate). The two-phase ADDRESS
@@ -1491,6 +1552,148 @@ impl FollowHarness {
             }
         })
         .map_err(|e| e.to_string())
+    }
+
+    /// Probe `unfollow` on either face: `yes = false` is the BARE run (a skill-only invocation
+    /// applies immediately with the undo-led receipt; a channel target describes), `yes = true`
+    /// the consented apply. The acceptance suite asserts both faces plus the receipt facts.
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string.
+    pub fn unfollow_probe(
+        &self,
+        targets: &[&str],
+        channels: &[&str],
+        yes: bool,
+    ) -> Result<UnfollowProbe, String> {
+        let directory = self.dir_connect();
+        let fs = &self.fs;
+        let layout = self.layout();
+        let delivery = move |b: &str| -> Box<dyn crate::plane::ReconcileTransport> {
+            let follows = enroll::read_follows(fs, &layout)
+                .ok()
+                .flatten()
+                .unwrap_or(Follows {
+                    schema_version: 1,
+                    follows: Vec::new(),
+                });
+            Box::new(
+                UreqPlane::new(
+                    b.to_owned(),
+                    device_credential(fs, &layout),
+                    enroll::skill_workspaces(&follows),
+                )
+                .with_workspaces(enrolled_workspaces(fs, &layout)),
+            )
+        };
+        let connectors = ops::UnfollowConnectors {
+            directory: &directory,
+            delivery: &delivery,
+        };
+        let t: Vec<String> = targets.iter().map(|s| (*s).to_owned()).collect();
+        let c: Vec<String> = channels.iter().map(|s| (*s).to_owned()).collect();
+        self.with_inert_ctx(
+            |ctx| match ops::unfollow(ctx, &connectors, &t, &c, &[], yes)? {
+                ops::UnfollowOutcome::Applied(a) => Ok(UnfollowProbe::Applied {
+                    undo: a.undo.clone(),
+                    bytes_kept: a.bytes_kept,
+                }),
+                ops::UnfollowOutcome::Described { describe, yes_argv } => {
+                    Ok(UnfollowProbe::Described {
+                        yes_argv,
+                        stops: describe
+                            .items
+                            .iter()
+                            .flat_map(|i| i.stops.iter().cloned())
+                            .collect(),
+                    })
+                }
+            },
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// Probe `remove` on either face (`agents` engages the per-agent exclusion arm): the bare run
+    /// applies immediately for a followed CLEAN skill, describes under the loss-guard / for a
+    /// permanent delete; `--yes` applies the described shapes.
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string.
+    pub fn remove_probe(
+        &self,
+        targets: &[&str],
+        agents: &[&str],
+        yes: bool,
+    ) -> Result<RemoveProbe, String> {
+        let directory = self.dir_connect();
+        let connectors = ops::RemoveConnectors {
+            directory: &directory,
+        };
+        let t: Vec<String> = targets.iter().map(|s| (*s).to_owned()).collect();
+        let a: Vec<String> = agents.iter().map(|s| (*s).to_owned()).collect();
+        // The enrolled ctx (real on-disk follow seam), as the production composition root wires it
+        // — the `-a` arm resolves the followed workspace through `ctx.follow`.
+        self.with_enrolled_ctx(
+            |ctx| match ops::remove(ctx, &connectors, &t, &a, None, yes)? {
+                ops::RemoveOutcome::Applied(d) => Ok(RemoveProbe::Applied(d)),
+                ops::RemoveOutcome::Described { data, yes_argv } => {
+                    Ok(RemoveProbe::Described { data, yes_argv })
+                }
+                ops::RemoveOutcome::AgentScope(s) => {
+                    let (data, described) = match s {
+                        ops::AgentScopeOutcome::Applied(d) => (d, false),
+                        ops::AgentScopeOutcome::Described { data, .. } => (data, true),
+                    };
+                    Ok(RemoveProbe::AgentScope {
+                        data: serde_json::to_value(&data).expect("serialize AgentScopeData"),
+                        described,
+                    })
+                }
+            },
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// Probe a positional `follow` on either face and project which surface answered: the
+    /// two-phase describe (first-trust), the subscribe apply, the immediate re-attach, or the
+    /// `--agent` scope receipt.
+    ///
+    /// # Errors
+    /// The verb's typed error rendered to a string.
+    pub fn follow_probe(
+        &self,
+        target: &str,
+        agents: &[&str],
+        yes: bool,
+    ) -> Result<FollowProbe, String> {
+        let mut opts = follow_opts(yes);
+        opts.agents = agents.iter().map(|s| (*s).to_owned()).collect();
+        // The enrolled seams (real transport + the on-disk follow seam), as the production
+        // composition root wires them — the `--agent` scope arm resolves the followed workspace
+        // through `ctx.follow`.
+        let (plane, follow) = self.reconcile_transport();
+        match self
+            .run_follow_outcome(&plane, &follow, Some(target.to_owned()), opts)
+            .map_err(|e| e.to_string())?
+        {
+            ops::FollowOutcome::Described { next_argvs, .. } => {
+                Ok(FollowProbe::Described { next_argvs })
+            }
+            ops::FollowOutcome::Applied(a) => Ok(FollowProbe::Applied {
+                installed: a.installed.iter().map(|i| i.name.clone()).collect(),
+                undo: a.undo.clone(),
+            }),
+            ops::FollowOutcome::ReattachApplied(r) => Ok(FollowProbe::Reattached(
+                serde_json::to_value(&*r).expect("serialize Reattach"),
+            )),
+            ops::FollowOutcome::Scope(
+                ops::AgentScopeOutcome::Applied(data)
+                | ops::AgentScopeOutcome::Described { data, .. },
+            ) => Ok(FollowProbe::Scope(
+                serde_json::to_value(&data).expect("serialize AgentScopeData"),
+            )),
+            other => Err(format!("test_support: unexpected follow outcome {other:?}")),
+        }
     }
 
     /// Drive `follow --skill <s>... --yes` (the kind-forced selector batch — resolve ALL-OR-NONE, then
