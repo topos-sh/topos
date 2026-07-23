@@ -61,7 +61,9 @@ session-start trigger runs \`topos update --quiet\` on this machine.
 ## Driving topos afterwards
 
 - Add \`--json\` to any verb for exactly one machine-readable envelope — never a prompt.
-- Mutating verbs are two-phase: bare DESCRIBES (nothing written); \`--yes\` applies.
+- topos asks first when an act reaches the team, loses local work, or trusts something new —
+  those verbs are two-phase: bare DESCRIBES (nothing written); \`--yes\` applies. Everything
+  else applies immediately and prints its undo.
 - On exit 1, the envelope's \`error\` carries \`next_actions\` naming the fix — run it, then
   retry once.
 - The \`topos\` skill that lands with enrollment teaches the full verb surface, including how

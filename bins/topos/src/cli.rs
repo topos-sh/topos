@@ -1,12 +1,17 @@
 //! The `clap` surface. Thin: it only parses argv; every verb's logic lives in the lib over the seams.
 //!
 //! The behavior verbs are grouped by SCOPE — self-scoped (affect only your machine), team-scoped (change
-//! shared state), and maintenance. The reshaped verbs run the FULL resolution grammar + the two-phase
-//! describe/`--yes` flow (`crate::resolve`): `follow`/`unfollow`/`auth`, plus `remove`, `channel
-//! add/remove`, `protect`, the review inbox/describe, `invite`'s bare read/describe, `update --reset`,
-//! `publish`'s describe, and the log/list plane columns. A few tails still parse here and refuse with a
-//! marked seam at dispatch (see `ops::not_yet`): the `update`/`list` `--channel`/`--skill` selectors +
-//! multi-target, `add`'s `'*'` (all-skills/all-agents) selector, and the keep-as-yours re-adopt.
+//! shared state), and maintenance. The reshaped verbs run the FULL resolution grammar
+//! (`crate::resolve`); the two-phase describe/`--yes` flow gates only acts with REACH (touch other
+//! people), LOSS (destroy unrecoverable local work), or FIRST-TRUST (bytes/credentials land
+//! somewhere new) — a first-ever `follow`, a channel `unfollow`, a permanent/draft-guarded
+//! `remove`, `channel add/remove`, `protect`, the review describe, `invite`, `update --reset`,
+//! `publish`'s describe, `auth logout`, `uninstall`. Self-scoped reversible arms (the `--agent`
+//! scope verbs, a skill `unfollow`, a followed clean `remove`, a re-follow of a previously-followed
+//! skill) apply immediately and print an undo-led receipt; `--yes` stays an accepted no-op there.
+//! A few tails still parse here and refuse with a marked seam at dispatch (see `ops::not_yet`): the
+//! `update`/`list` `--channel`/`--skill` selectors + multi-target, `add`'s `'*'`
+//! (all-skills/all-agents) selector, and the keep-as-yours re-adopt.
 
 use clap::{Parser, Subcommand};
 
@@ -49,11 +54,13 @@ pub(crate) enum Command {
     /// Entirely offline (nothing is dialed) and read-only (nothing is armed or repaired).
     /// A bare `topos` on a TTY renders the same snapshot.
     Status,
-    /// Follow a workspace, channel, or skill — enroll if needed, then subscribe two-phase (a bare
-    /// invocation DESCRIBES what would land; `--yes` INSTALLS exactly what its own describe
-    /// disclosed for the NAMED targets — a workspace target lands the whole delivered set, a
-    /// channel/skill target only its own; other waiting arrivals stay individually consentable,
-    /// while already-followed skills still update as on any sweep).
+    /// Follow a workspace, channel, or skill — enroll if needed, then subscribe. A FIRST-EVER
+    /// follow is two-phase (a bare invocation DESCRIBES what would land — new bytes are
+    /// first-trust; `--yes` INSTALLS exactly what its own describe disclosed for the NAMED
+    /// targets — a workspace target lands the whole delivered set, a channel/skill target only
+    /// its own; other waiting arrivals stay individually consentable, while already-followed
+    /// skills still update as on any sweep). Re-following a skill that was ALREADY on your trust
+    /// surface — removed on this device, or unfollowed — applies immediately and prints its undo.
     /// Targets: a workspace address
     /// (`https://topos.sh/acme`, or a bare workspace name), a bare SERVER address with no workspace
     /// slug (`https://topos.example.com`, or the schemeless `topos.example.com`) — "the workspace
@@ -78,11 +85,12 @@ pub(crate) enum Command {
         skill: Vec<String>,
         /// Scope a followed skill's placement to these agents on THIS device (registry slugs;
         /// repeatable; `'*'` clears the list back to unscoped). Placement policy only — the
-        /// subscription is untouched and the server is never told. Two-phase: bare describes the
-        /// placement plan; `--yes` applies.
+        /// subscription is untouched and the server is never told. Applies immediately; the
+        /// receipt shows what landed/cleaned/stayed and the undo.
         #[arg(long, value_name = "SLUG")]
         agent: Vec<String>,
-        /// Apply the described subscription (the one-shot consent). Bare = describe only.
+        /// Apply a described subscription (the one-shot consent for a first-ever follow /
+        /// enrollment). Accepted as a no-op on the arms that apply immediately.
         #[arg(long)]
         yes: bool,
         /// Adopt followed skills in confirm-each mode (a one-tap accept per new version) instead of auto.
@@ -95,10 +103,12 @@ pub(crate) enum Command {
         #[arg(long, value_name = "SECONDS", num_args = 0..=1)]
         wait: Option<Option<u64>>,
     },
-    /// Stop following a skill or channel — two-phase (bare describes what stops; `--yes` applies).
-    /// Delivery ends on EVERY device of yours; local copies are KEPT as frozen copies (nothing is
-    /// deleted) and `follow` re-attaches. A workspace cannot be left here (that is a web action),
-    /// and the structural `everyone` cannot be left at all.
+    /// Stop following a skill or channel. A SKILL unfollow applies immediately and prints its
+    /// undo (`topos follow <skill>` re-attaches); a CHANNEL unfollow is two-phase (bare describes
+    /// which skills stop — the union math decides; `--yes` applies). Delivery ends on EVERY
+    /// device of yours; local copies are KEPT as frozen copies (nothing is deleted). A workspace
+    /// cannot be left here (that is a web action), and the structural `everyone` cannot be left
+    /// at all.
     Unfollow {
         /// The channel/skill name(s) (or qualified paths) to stop following.
         targets: Vec<String>,
@@ -110,11 +120,12 @@ pub(crate) enum Command {
         skill: Vec<String>,
         /// Stop placing a followed skill into these agents on THIS device (registry slugs;
         /// repeatable). The subscription is untouched (no server call) — the agent's dir is cleaned
-        /// (any edit snapshotted first) and a per-agent exclusion is recorded. Same behavior as
-        /// `remove <skill> --agent <slug>`.
+        /// (any edit snapshotted first) and a per-agent exclusion is recorded, immediately (the
+        /// receipt carries the undo). Same behavior as `remove <skill> --agent <slug>`.
         #[arg(long, value_name = "SLUG")]
         agent: Vec<String>,
-        /// Apply the described detach (the one-shot consent). Bare = describe only.
+        /// Apply a described channel detach (the one-shot consent). Accepted as a no-op on a
+        /// skill unfollow (which applies immediately).
         #[arg(long)]
         yes: bool,
     },
@@ -180,14 +191,19 @@ pub(crate) enum Command {
         yes: bool,
     },
     /// Remove skills from this machine (or from specific agents). A followed skill becomes a per-device
-    /// exclusion (your other devices keep receiving it); an untracked local copy is cleaned.
+    /// exclusion (your other devices keep receiving it) — applied immediately when the local copy
+    /// is CLEAN (the receipt prints the undo: `topos follow <skill>` re-attaches, bytes are kept);
+    /// with local edits ahead, or for a local-only copy whose delete is permanent, a bare run
+    /// describes first and `--yes` applies.
     Remove {
         /// The skill name(s) to remove.
         skill: Vec<String>,
-        /// Remove only from these agents (harness slugs; repeatable; `'*'` = all).
+        /// Remove only from these agents (harness slugs; repeatable; `'*'` = all). On a followed
+        /// skill this is the per-agent exclusion — applied immediately, undo on the receipt.
         #[arg(long, short = 'a', value_name = "SLUG")]
         agent: Vec<String>,
-        /// Apply without the describe step. Parses today; the two-phase describe lands later.
+        /// Apply a described removal (a draft's loss-guard, or a permanent local delete).
+        /// Accepted as a no-op on a followed clean skill (which applies immediately).
         #[arg(long)]
         yes: bool,
     },

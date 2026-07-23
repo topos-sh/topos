@@ -19,10 +19,13 @@ verb reference is `reference.md` next to this file; `topos <verb> --help` matche
 ## Driving the CLI
 
 - Add `--json` to any verb for exactly one machine-readable envelope — never a prompt.
-- Mutating verbs are two-phase: bare DESCRIBES (nothing written) and returns the paste-ready
-  `--yes` argv; `--yes` applies. Run verbs autonomously; describe first when the effect is
-  unclear; tell the person what changed afterward.
-- Describe once, then act: when the describe matches what the user already asked for, apply
+- topos asks first only when an act REACHES your team, LOSES local work, or TRUSTS something
+  new — those verbs are two-phase: bare DESCRIBES (nothing written) and returns the paste-ready
+  `--yes` argv; `--yes` applies. Everything self-scoped and reversible (a skill `unfollow`, a
+  `remove` of a clean followed skill, re-following a skill this machine already trusted, the
+  `--agent` placement scoping) applies immediately and prints its undo — read the receipt's
+  `undo`/next action to reverse it. Tell the person what changed afterward.
+- Describe once, then act: when a describe matches what the user already asked for, apply
   `--yes` immediately — repeating a describe or survey is never progress. Acting decisively
   never overrides the consent bar: anything org-bound (`publish`, with or without `--propose`)
   still needs the user's explicit yes from THIS session — "improve our team skill" asks for the

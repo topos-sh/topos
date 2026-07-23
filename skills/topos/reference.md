@@ -34,15 +34,15 @@ Show where this install stands — enrollment, sign-in, followed skills, pending
 topos follow [OPTIONS] [TARGETS]...
 ```
 
-Follow a workspace, channel, or skill — enroll if needed, then subscribe two-phase (a bare invocation DESCRIBES what would land; `--yes` INSTALLS exactly what its own describe disclosed for the NAMED targets — a workspace target lands the whole delivered set, a channel/skill target only its own; other waiting arrivals stay individually consentable, while already-followed skills still update as on any sweep). Targets: a workspace address (`https://topos.sh/acme`, or a bare workspace name), a bare SERVER address with no workspace slug (`https://topos.example.com`, or the schemeless `topos.example.com`) — "the workspace that origin addresses", the single-tenant install form, a qualified path (`acme/channels/eng`, `acme/skills/deploy`), or a bare channel/skill name. A first follow enrolls this device: open the printed approval URL in a browser, check the code matches, and approve — the device then holds ONE credential for everything your seats reach. `follow <skill>` on a KNOWN followed skill places its disclosed first-receive offer (or resumes a skill `unfollow` paused). While an enrollment is pending, re-invoking `follow` RESUMES it. On a machine not yet enrolled, a bare NAME (no slash) reads as a workspace on the default server and asks for confirmation before any enrollment starts — a TTY prompts; headless runs pass `--yes` or spell the full `<server>/<workspace>` address
+Follow a workspace, channel, or skill — enroll if needed, then subscribe. A FIRST-EVER follow is two-phase (a bare invocation DESCRIBES what would land — new bytes are first-trust; `--yes` INSTALLS exactly what its own describe disclosed for the NAMED targets — a workspace target lands the whole delivered set, a channel/skill target only its own; other waiting arrivals stay individually consentable, while already-followed skills still update as on any sweep). Re-following a skill that was ALREADY on your trust surface — removed on this device, or unfollowed — applies immediately and prints its undo. Targets: a workspace address (`https://topos.sh/acme`, or a bare workspace name), a bare SERVER address with no workspace slug (`https://topos.example.com`, or the schemeless `topos.example.com`) — "the workspace that origin addresses", the single-tenant install form, a qualified path (`acme/channels/eng`, `acme/skills/deploy`), or a bare channel/skill name. A first follow enrolls this device: open the printed approval URL in a browser, check the code matches, and approve — the device then holds ONE credential for everything your seats reach. `follow <skill>` on a KNOWN followed skill places its disclosed first-receive offer (or resumes a skill `unfollow` paused). While an enrollment is pending, re-invoking `follow` RESUMES it. On a machine not yet enrolled, a bare NAME (no slash) reads as a workspace on the default server and asks for confirmation before any enrollment starts — a TTY prompts; headless runs pass `--yes` or spell the full `<server>/<workspace>` address
 
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
 | `[TARGETS]...` |  |  | The follow targets (addresses, qualified paths, or names). Omitted, it resumes a pending enrollment |
 | `--channel` | `<NAME>` |  | Follow a channel by name (repeatable; kind-forced) |
 | `--skill` | `<NAME>` |  | Follow a specific skill by name (repeatable; kind-forced) |
-| `--agent` | `<SLUG>` |  | Scope a followed skill's placement to these agents on THIS device (registry slugs; repeatable; `'*'` clears the list back to unscoped). Placement policy only — the subscription is untouched and the server is never told. Two-phase: bare describes the placement plan; `--yes` applies |
-| `--yes` |  |  | Apply the described subscription (the one-shot consent). Bare = describe only |
+| `--agent` | `<SLUG>` |  | Scope a followed skill's placement to these agents on THIS device (registry slugs; repeatable; `'*'` clears the list back to unscoped). Placement policy only — the subscription is untouched and the server is never told. Applies immediately; the receipt shows what landed/cleaned/stayed and the undo |
+| `--yes` |  |  | Apply a described subscription (the one-shot consent for a first-ever follow / enrollment). Accepted as a no-op on the arms that apply immediately |
 | `--manual` |  |  | Adopt followed skills in confirm-each mode (a one-tap accept per new version) instead of auto |
 | `--wait` | `<SECONDS>` |  | Block until the browser approval settles, finishing enrollment in ONE command. Bare `--wait` waits until the code expires; `--wait <seconds>` caps the wait. Put `--wait` AFTER any positional. A TTY blocks by default; a PIPED run without `--wait` prints the approval URL and returns immediately — re-invoke `follow` to poll, or pass `--wait` to block |
 
@@ -53,15 +53,15 @@ Follow a workspace, channel, or skill — enroll if needed, then subscribe two-p
 topos unfollow [OPTIONS] [TARGETS]...
 ```
 
-Stop following a skill or channel — two-phase (bare describes what stops; `--yes` applies). Delivery ends on EVERY device of yours; local copies are KEPT as frozen copies (nothing is deleted) and `follow` re-attaches. A workspace cannot be left here (that is a web action), and the structural `everyone` cannot be left at all
+Stop following a skill or channel. A SKILL unfollow applies immediately and prints its undo (`topos follow <skill>` re-attaches); a CHANNEL unfollow is two-phase (bare describes which skills stop — the union math decides; `--yes` applies). Delivery ends on EVERY device of yours; local copies are KEPT as frozen copies (nothing is deleted). A workspace cannot be left here (that is a web action), and the structural `everyone` cannot be left at all
 
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
 | `[TARGETS]...` |  |  | The channel/skill name(s) (or qualified paths) to stop following |
 | `--channel` | `<NAME>` |  | Unfollow a channel by name (repeatable; kind-forced) |
 | `--skill` | `<NAME>` |  | Unfollow a specific skill by name (repeatable; kind-forced) |
-| `--agent` | `<SLUG>` |  | Stop placing a followed skill into these agents on THIS device (registry slugs; repeatable). The subscription is untouched (no server call) — the agent's dir is cleaned (any edit snapshotted first) and a per-agent exclusion is recorded. Same behavior as `remove <skill> --agent <slug>` |
-| `--yes` |  |  | Apply the described detach (the one-shot consent). Bare = describe only |
+| `--agent` | `<SLUG>` |  | Stop placing a followed skill into these agents on THIS device (registry slugs; repeatable). The subscription is untouched (no server call) — the agent's dir is cleaned (any edit snapshotted first) and a per-agent exclusion is recorded, immediately (the receipt carries the undo). Same behavior as `remove <skill> --agent <slug>` |
+| `--yes` |  |  | Apply a described channel detach (the one-shot consent). Accepted as a no-op on a skill unfollow (which applies immediately) |
 
 
 ### `topos update`
@@ -107,13 +107,13 @@ Adopt a skill into topos. The source is polymorphic: • a skill NAME (`deploy`,
 topos remove [OPTIONS] [SKILL]...
 ```
 
-Remove skills from this machine (or from specific agents). A followed skill becomes a per-device exclusion (your other devices keep receiving it); an untracked local copy is cleaned
+Remove skills from this machine (or from specific agents). A followed skill becomes a per-device exclusion (your other devices keep receiving it) — applied immediately when the local copy is CLEAN (the receipt prints the undo: `topos follow <skill>` re-attaches, bytes are kept); with local edits ahead, or for a local-only copy whose delete is permanent, a bare run describes first and `--yes` applies
 
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
 | `[SKILL]...` |  |  | The skill name(s) to remove |
-| `-a, --agent` | `<SLUG>` |  | Remove only from these agents (harness slugs; repeatable; `'*'` = all) |
-| `--yes` |  |  | Apply without the describe step. Parses today; the two-phase describe lands later |
+| `-a, --agent` | `<SLUG>` |  | Remove only from these agents (harness slugs; repeatable; `'*'` = all). On a followed skill this is the per-agent exclusion — applied immediately, undo on the receipt |
+| `--yes` |  |  | Apply a described removal (a draft's loss-guard, or a permanent local delete). Accepted as a no-op on a followed clean skill (which applies immediately) |
 
 
 ### `topos list`
