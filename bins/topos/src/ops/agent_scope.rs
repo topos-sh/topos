@@ -368,10 +368,12 @@ pub(crate) fn set_scope(
 }
 
 /// Whether any placement this scope change would CLEAN (`cleaned` — the plan's leaving dirs,
-/// verbatim map entries) holds local edits — or cannot be scanned, which must count the same way:
-/// an unreadable dir cannot prove clean. The clean itself stays snapshot-first (and fails closed
-/// on an unscannable dir at apply); this scan only decides whether the receipt may promise an
-/// undo, because the inverse rematerializes canonical bytes, never the draft.
+/// verbatim map entries) blocks the undo: local edits (the inverse rematerializes canonical
+/// bytes, never the draft), an unscannable dir (cannot prove clean; the apply fails closed on it
+/// anyway), or a FOREIGN record (the apply drops the reservation while leaving the occupied dir —
+/// the inverse would re-plan around it as a namespaced sibling, not restore the prior record).
+/// The clean itself stays snapshot-first; this scan only decides whether the receipt may promise
+/// an undo.
 fn leaving_draft(
     ctx: &Ctx<'_>,
     map: &PlacementMap,
@@ -383,10 +385,7 @@ fn leaving_draft(
     let scans = placement::scan_placements(ctx, map)?;
     Ok(map.placements.iter().zip(&scans).any(|(dir, scan)| {
         cleaned.iter().any(|c| c == dir)
-            && !matches!(
-                scan.status,
-                ScanStatus::Clean { .. } | ScanStatus::Absent | ScanStatus::Foreign
-            )
+            && !matches!(scan.status, ScanStatus::Clean { .. } | ScanStatus::Absent)
     }))
 }
 

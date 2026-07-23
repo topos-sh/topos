@@ -258,13 +258,15 @@ pub(crate) fn remove(
     // "undo" would change pre-existing state, and a remove of an UNFOLLOWED skill's frozen copy
     // must not offer a `follow` that would clear the person's unfollow stance too. A followed
     // skill with NO local entry (resolved through the universe — followed on the web, never
-    // received here) carries no stance evidence and stays eligible.
-    let prior_stanced: std::collections::HashSet<String> =
+    // received here) is likewise ineligible: after this exclusion the delivery reports it
+    // excluded, not detached, so the advertised `follow` would answer a first-trust DESCRIBE
+    // instead of the immediate re-attach only a local marker routes to.
+    let prior_active: std::collections::HashSet<String> =
         enroll::read_follows(ctx.fs, &ctx.layout)?
             .map(|f| {
                 f.follows
                     .iter()
-                    .filter(|e| !e.following || e.excluded_here)
+                    .filter(|e| e.following && !e.excluded_here)
                     .map(|e| e.skill_id.clone())
                     .collect()
             })
@@ -317,8 +319,10 @@ pub(crate) fn remove(
     }
     // The literal inverse, offered ONLY when it restores the whole prior state: every removal a
     // followed exclusion (a permanent delete has no inverse — the batch omits the undo rather
-    // than misstating a partial one), every exclusion NEW (a repeat remove of an already-excluded
-    // skill is a no-op the "undo" would not restore), every pre-apply copy CLEAN (a consented
+    // than misstating a partial one), every exclusion flipped from a locally ACTIVE follow (a
+    // repeat remove, a stanced entry, or a web-followed skill with no local entry — whose
+    // `follow` would describe first-trust, not re-attach — all withhold), every pre-apply copy
+    // CLEAN (a consented
     // draft removal cleans working edits the inverse would not reinstall — the snapshot keeps
     // them recoverable, but recovery is not this one command), and one workspace (`follow` takes
     // one per invocation). Targets ride QUALIFIED (`<ws>/skills/<name>`) when the address slug is
@@ -336,9 +340,7 @@ pub(crate) fn remove(
         })
         .collect();
     let all_followed = followed.len() == removals.len();
-    let all_new = followed
-        .iter()
-        .all(|(_, id, _)| !prior_stanced.contains(*id));
+    let all_new = followed.iter().all(|(_, id, _)| prior_active.contains(*id));
     let all_clean = followed.iter().all(|(_, id, _)| !drafted.contains(*id));
     let one_workspace = followed
         .first()

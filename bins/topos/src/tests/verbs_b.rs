@@ -427,6 +427,25 @@ fn dir_connect(fake: &FakeDir) -> impl Fn(&str) -> Box<dyn DirectorySource> + '_
 fn remove_followed_clean_skill_applies_the_exclusion_immediately() {
     let rig = Rig::new("rm-followed");
     rig.seed_enrolled("alice@acme.com");
+    // The representative shape: the skill was RECEIVED on this device, so `follows.json` carries
+    // its locally ACTIVE entry — the undo eligibility's evidence that a bare `follow` would route
+    // to the immediate re-attach (a web-followed skill with no local entry offers no undo; see
+    // the variant below).
+    enroll::write_follows_merged(
+        &rig.fs,
+        &rig.layout(),
+        &[enroll::FollowEntry {
+            skill_id: "s_deploy".to_owned(),
+            workspace_id: "w_acme".to_owned(),
+            mode: enroll::FollowModeDoc::Auto,
+            review_required: false,
+            following: true,
+            excluded_here: false,
+            agents: Vec::new(),
+            excluded_agents: Vec::new(),
+        }],
+    )
+    .unwrap();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let fake = FakeDir::new(log.clone());
     let connect = dir_connect(&fake);
@@ -2057,4 +2076,38 @@ fn a_qualified_agent_remove_refuses_instead_of_widening_to_the_device() {
         "no server row moved: {:?}",
         log.lock().unwrap()
     );
+}
+
+#[test]
+fn remove_of_a_web_followed_skill_with_no_local_entry_offers_no_undo() {
+    // The skill is followed (the universe resolves it) but was never received HERE — no
+    // `follows.json` entry. The exclusion still applies immediately (clean, reversible via the
+    // web), but the receipt offers NO undo: after this exclusion the delivery reports the skill
+    // excluded, not detached, so the advertised `follow` would answer a first-trust DESCRIBE
+    // instead of the immediate re-attach only a local marker routes to.
+    let rig = Rig::new("rm-web-followed");
+    rig.seed_enrolled("alice@acme.com");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let fake = FakeDir::new(log.clone());
+    let connect = dir_connect(&fake);
+    let connectors = ops::RemoveConnectors {
+        directory: &connect,
+    };
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+
+    let out = ops::remove(&ctx, &connectors, &["deploy".into()], &[], None, false).unwrap();
+    match out {
+        ops::RemoveOutcome::Applied(data) => {
+            assert!(data.applied);
+            assert!(
+                data.undo.is_empty(),
+                "no local entry, no undo: {:?}",
+                data.undo
+            );
+        }
+        _ => panic!("a followed clean skill applies immediately"),
+    }
+    assert_eq!(*log.lock().unwrap(), vec!["exclude s_deploy".to_owned()]);
 }

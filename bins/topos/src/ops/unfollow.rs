@@ -314,11 +314,15 @@ pub(crate) fn unfollow(
     // Targets ride QUALIFIED (`<ws>/skills/<name>`) when the address slug is known offline — a
     // name known in a second workspace would make the bare spelling an ambiguous refusal instead
     // of the promised undo; a purely local pause keeps the bare spelling.
+    // A LOCAL detach on an ENROLLED device is a skill the directory could not resolve (a removed
+    // workspace or catalog entry) — its re-follow would dial the dead workspace and fail before
+    // restoring anything, so no undo; un-enrolled, the graceful local resume completes entirely
+    // locally and the undo holds.
+    let enrolled = enroll::read_instance(ctx.fs, &ctx.layout)?.is_some();
     let all_flipped_skills = detaches.iter().all(|d| match d {
         Detach::Channel { .. } => false,
-        Detach::Skill { skill_id, .. } | Detach::LocalSkill { skill_id, .. } => {
-            prior_active.contains(skill_id)
-        }
+        Detach::Skill { skill_id, .. } => prior_active.contains(skill_id),
+        Detach::LocalSkill { skill_id, .. } => !enrolled && prior_active.contains(skill_id),
     });
     let server_workspaces: Vec<&str> = items
         .iter()
