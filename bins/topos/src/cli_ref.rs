@@ -174,9 +174,12 @@ pub fn cli_ref_md() -> String {
          gate.\n\n",
     );
     out.push_str(
-        "`topos` is the client an agent drives non-interactively. Every mutating verb is TWO-PHASE: a \
+        "`topos` is the client an agent drives non-interactively. topos asks first when an act \
+         REACHES your team, LOSES local work, or TRUSTS something new — those verbs are TWO-PHASE: a \
          bare invocation DESCRIBES what would change (nothing is written), and `--yes` applies it in \
-         one shot (`revert` is the exception — `--yes` there also acknowledges a no-op). `--json` works \
+         one shot (`revert` is the exception — `--yes` there also acknowledges a no-op). Everything \
+         else — self-scoped acts reversible by their inverse command — applies immediately and prints \
+         an undo-led receipt (`--yes` is an accepted no-op there). `--json` works \
          on every verb and prints exactly one envelope on stdout (never a prompt). The exit status is \
          one of three classes: `0` on success, `1` on a domain refusal or a failed operation (the \
          envelope's `ok` + `error.outcome` distinguish a refusal from a transport fault), and `2` on a \
