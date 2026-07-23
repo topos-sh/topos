@@ -156,14 +156,20 @@ pub(crate) fn remove(
     // unreadable copy must never lose a draft to an optimistic apply. One gated target gates the
     // whole batch (all-or-none, like the resolution).
     let mut gated = false;
-    // The followed removals whose PRE-apply copy was not provably clean: their consented
-    // (`--yes`) apply cleans a draft out of the working dirs (snapshot-first), and the `follow`
-    // inverse would reinstall only the canonical bytes — so their receipts offer no undo.
+    // The followed removals whose PRE-apply state the `follow` inverse could not restore: a
+    // draft the apply cleans out of the working dirs (the inverse reinstalls only canonical
+    // bytes), an unscannable copy, or a FOREIGN recorded placement (the clean drops the
+    // reservation but leaves the occupied dir — the inverse re-plans around it, never restoring
+    // the prior record) — their receipts offer no undo.
     let mut drafted: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for (removal, item) in removals.iter().zip(items.iter_mut()) {
         match removal {
             Removal::Followed { skill_id, name, .. } => match draft_state(ctx, skill_id) {
-                DraftState::Clean => {}
+                DraftState::Clean { foreign_left } => {
+                    if foreign_left {
+                        drafted.insert(skill_id.as_str());
+                    }
+                }
                 DraftState::Draft => {
                     gated = true;
                     drafted.insert(skill_id.as_str());
@@ -220,7 +226,7 @@ pub(crate) fn remove(
     if !yes {
         for (removal, item) in removals.iter().zip(items.iter_mut()) {
             if let Removal::Followed { skill_id, name, .. } = removal
-                && !matches!(draft_state(ctx, skill_id), DraftState::Clean)
+                && !matches!(draft_state(ctx, skill_id), DraftState::Clean { .. })
             {
                 item.note = Some(format!(
                     "local edits appeared while removing — removing takes the draft out of every \
@@ -370,7 +376,13 @@ pub(crate) fn remove(
 /// INDETERMINATE and fails toward the gate: a stale stat-cache or an unreadable dir must never
 /// cost a draft.
 enum DraftState {
-    Clean,
+    /// No draft ahead — the removal applies immediately. `foreign_left` marks a FOREIGN recorded
+    /// placement: it holds no draft of ours (the gate stays open), but the clean drops the
+    /// reservation while leaving the occupied dir, so a re-follow would re-plan around it as a
+    /// namespaced sibling instead of restoring the prior record — the receipt's undo is withheld.
+    Clean {
+        foreign_left: bool,
+    },
     Draft,
     Indeterminate,
 }
@@ -383,22 +395,34 @@ fn draft_state(ctx: &Ctx<'_>, skill_id: &str) -> DraftState {
     let map = match doc::read_map(ctx.fs, &sp.map) {
         Ok(Some(map)) => map,
         // No placement record: nothing materialized on this device — nothing to lose.
-        Ok(None) => return DraftState::Clean,
+        Ok(None) => {
+            return DraftState::Clean {
+                foreign_left: false,
+            };
+        }
         Err(_) => return DraftState::Indeterminate,
     };
     match crate::placement::scan_placements(ctx, &map) {
         Ok(scans) => {
-            let mut state = DraftState::Clean;
+            let mut indeterminate = false;
+            let mut foreign_left = false;
             for scan in &scans {
                 match scan.status {
                     crate::placement::ScanStatus::Modified { .. } => return DraftState::Draft,
                     crate::placement::ScanStatus::Unscannable => {
-                        state = DraftState::Indeterminate;
+                        indeterminate = true;
+                    }
+                    crate::placement::ScanStatus::Foreign => {
+                        foreign_left = true;
                     }
                     _ => {}
                 }
             }
-            state
+            if indeterminate {
+                DraftState::Indeterminate
+            } else {
+                DraftState::Clean { foreign_left }
+            }
         }
         Err(_) => DraftState::Indeterminate,
     }
