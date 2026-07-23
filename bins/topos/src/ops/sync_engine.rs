@@ -251,6 +251,42 @@ pub(crate) fn sync_one_with(
     // story) — corruption evidence, never a transient skip.
     let bundle = store.render_verified(target_commit, target_digest)?;
     let target_digest_hex = to_hex(&target_digest);
+    // A first-receive ADOPTION recorded for an EARLIER served version LAPSES here — the plan runs
+    // before the fetch, so only now can the reservation's digest be checked against the resolved
+    // target. The offer's consent was "adopt the byte-identical occupant"; a target that resolved
+    // to DIFFERENT bytes no longer describes it, and proceeding would wedge the apply on the
+    // materializer's never-clobber refusal. Clear the stale record and re-plan: the re-choose
+    // suffixes past the occupied dir, the reservation swap puts the record right, and the apply
+    // proceeds with the fresh state (the correction only touches never-materialized reservations,
+    // which scan Foreign/Absent either way — the base classification above is unchanged).
+    let (map, managed, work) = if first_receive
+        && managed.iter().any(|&i| {
+            map.placement_state[i].materialized_sha.is_none()
+                && map.placement_state[i]
+                    .pre_existing_sha
+                    .as_deref()
+                    .is_some_and(|sha| sha != target_digest_hex)
+        }) {
+        let mut corrected = map.clone();
+        for &i in &managed {
+            let st = &mut corrected.placement_state[i];
+            if st.materialized_sha.is_none()
+                && st
+                    .pre_existing_sha
+                    .as_deref()
+                    .is_some_and(|sha| sha != target_digest_hex)
+            {
+                st.pre_existing_sha = None;
+            }
+        }
+        let plan = placement::plan_for_skill(ctx, skill_id, &lock, &corrected);
+        let map = placement::reconcile_map(&corrected, &plan);
+        let managed = placement::managed_indices(&map, &plan);
+        let work = compute_work(ctx, &map, &lock, &name)?;
+        (map, managed, work)
+    } else {
+        (map, managed, work)
+    };
     // "At target" is now an EVERYWHERE fact: every managed placement must already hold the target's
     // bytes for the no-swap heal — a partial landing (a crash mid-loop, a newly added dir) stays a
     // CleanForward, whose apply loop skips the landed dirs and swaps only the rest.
@@ -437,6 +473,7 @@ pub(crate) fn go_back(
             snapshot: Some(&|scanned: &ScannedBundle| {
                 snapshot_draft(ctx, &sp, &lock, scanned).map(|_| ())
             }),
+            takeover: None,
         },
     )?;
     log_apply(ctx, skill_id, "pull-goback", target, &report);
@@ -517,6 +554,7 @@ pub(crate) fn reset_to_base(
             snapshot: Some(&|scanned: &ScannedBundle| {
                 snapshot_draft(ctx, &sp, &lock, scanned).map(|_| ())
             }),
+            takeover: None,
         },
     )?;
     // A recorded merge conflict describes the divergence this reset just DISCARDED — clear the
@@ -626,6 +664,7 @@ fn apply_forward(
             snapshot: Some(&|scanned: &ScannedBundle| {
                 snapshot_draft(ctx, sp, lock, scanned).map(|_| ())
             }),
+            takeover: None,
         },
     )?;
     log_apply(ctx, skill_id, "pull", t.commit, &report);
@@ -693,6 +732,7 @@ fn converge_placements(
             snapshot: Some(&|scanned: &ScannedBundle| {
                 snapshot_draft(ctx, sp, lock, scanned).map(|_| ())
             }),
+            takeover: None,
         },
     )?;
     log_apply(ctx, skill_id, "converge", base, &report);

@@ -1428,7 +1428,6 @@ fn follow_approve_resumes_an_unfollowed_skill() {
             manual: false,
             workspace: None,
             yes: false,
-            prefix_dirname: false,
             channels: Vec::new(),
             skills: Vec::new(),
             agents: Vec::new(),

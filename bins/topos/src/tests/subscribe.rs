@@ -1,9 +1,10 @@
 //! The two-phase SUBSCRIBE surface over fakes (no HTTP): the `follow <address>` enroll flow
 //! (card → authorize(workspace) → redeem → the describe gate), the wrong-server `TOPOS_HOME`
-//! refusal, the describe fields (installs + collision choice + direct-follow note), the `--yes`
-//! apply (row ops + the batch-accepted reconcile), the dual-kind `unfollow` (workspace/`everyone`
-//! refusals; the skill detach row + the local pause), and the hook posture (the staleness warning
-//! line; notices fetched-without-ack vs narrated-then-acked).
+//! refusal, the describe fields (installs + the dirname outcomes — in-place adoptions and
+//! auto-namespaced collisions — + direct-follow note), the `--yes` apply (row ops + the
+//! batch-accepted reconcile), the dual-kind `unfollow` (workspace/`everyone` refusals; the skill
+//! detach row + the local pause), and the hook posture (the staleness warning line; notices
+//! fetched-without-ack vs narrated-then-acked).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -73,11 +74,17 @@ impl HarnessAdapter for TmpHarness {
         naming: topos_harness::PlacementNaming<'_>,
         _d: Option<&DiscoveredPlacement>,
     ) -> PlacementTarget {
-        // Mirror the real adapters: the DIRNAME is the (sanitized) display name — the collision
-        // machinery's whole subject — falling back to the id.
-        let dir = naming.name.unwrap_or(skill_id);
+        // Mirror the real adapters: the ONE naming discipline — the (sanitized) display name,
+        // workspace-suffixed on a collision, the id as the last resort. The collision machinery
+        // is this suite's whole subject.
         PlacementTarget {
-            dir: self.skills_root.join(dir),
+            dir: topos_harness::choose_skill_dir(
+                &self.skills_root,
+                skill_id,
+                naming,
+                &topos_harness::dir_taken,
+                &|_| false,
+            ),
         }
     }
     fn currency_kind(&self) -> CurrencyKind {
@@ -528,7 +535,6 @@ fn opts(yes: bool) -> ops::FollowOpts {
         manual: false,
         workspace: None,
         yes,
-        prefix_dirname: false,
         channels: Vec::new(),
         skills: Vec::new(),
         agents: Vec::new(),
@@ -599,17 +605,15 @@ fn an_address_follow_enrolls_then_lands_on_the_describe_never_the_apply() {
     assert!(describe.enrolled_now, "this invocation enrolled");
     assert_eq!(describe.workspace.name, "acme");
     assert_eq!(describe.role, "member");
+    assert_eq!(describe.principal, "alice@acme.com");
     assert_eq!(describe.invited_by.as_deref(), Some("robert@acme.com"));
     // The inviter's pre-placement is disclosed; the structural everyone is not.
     assert_eq!(describe.preplaced_channels, vec!["design".to_owned()]);
-    // The paste-ready apply argv ends in --yes.
-    assert_eq!(
-        next_argvs[0],
-        vec!["topos", "follow", "acme", "--yes"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
-    );
+    // Nothing is delivered and a workspace target writes no row — the honest standing receipt: no
+    // `--yes` to offer, the standing note carries the fact instead.
+    assert!(next_argvs.is_empty(), "{next_argvs:?}");
+    let note = describe.standing_note.as_deref().expect("standing note");
+    assert!(note.starts_with("nothing new to install"), "{note}");
     // The grant was polled for (the credential rides the granted poll — no redeem round-trip).
     assert!(log.lock().unwrap().iter().any(|e| e == "poll"));
     // The enrollment itself promoted (identity, reversible): the credential + membership are on
@@ -663,7 +667,7 @@ fn the_wrong_server_refusal_names_the_topos_home_hatch() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-fn the_channel_describe_lists_installs_with_digests_and_the_collision_choice() {
+fn the_channel_describe_lists_installs_with_digests_and_the_auto_namespaced_collision() {
     let rig = Rig::new("describe");
     rig.seed_enrolled();
     let log: CallLog = Arc::default();
@@ -674,9 +678,9 @@ fn the_channel_describe_lists_installs_with_digests_and_the_collision_choice() {
     let directory = FakeDirectory::acme(log.clone());
     let transport = FakeTransport::empty(log.clone());
 
-    // A LOCAL tracked skill already holds the name "deploy" (a different identity) — the incoming
-    // channel skill collides on the dirname.
-    let local = rig.work.0.join("local-deploy");
+    // A LOCAL tracked skill (a different identity, DIFFERENT bytes) already occupies the by-name
+    // dir under the harness skills root — the incoming channel skill collides on the dirname.
+    let local = rig.work.0.join("skills").join("deploy");
     std::fs::create_dir_all(&local).unwrap();
     std::fs::write(local.join("SKILL.md"), b"# local deploy\n").unwrap();
     {
@@ -715,12 +719,22 @@ fn the_channel_describe_lists_installs_with_digests_and_the_collision_choice() {
     );
     assert_eq!(install.via_channels, vec!["eng".to_owned()]);
     assert!(!install.via_direct);
-    // The collision is listed with the prefixed-dir choice, and the alternative argv is offered.
+    // The collision is disclosed with the auto-namespaced dirname (skill first, workspace suffix);
+    // there is exactly ONE apply argv — no opt-in flag exists any more.
     assert_eq!(describe.collisions.len(), 1);
     assert_eq!(describe.collisions[0].name, "deploy");
-    assert_eq!(describe.collisions[0].prefixed_dirname, "acme.deploy");
-    assert_eq!(next_argvs.len(), 2, "the --prefix-dirname argv is offered");
-    assert!(next_argvs[1].contains(&"--prefix-dirname".to_owned()));
+    assert_eq!(describe.collisions[0].installs_as, "deploy-acme");
+    assert!(
+        describe.collisions[0].existing.ends_with("skills/deploy"),
+        "{}",
+        describe.collisions[0].existing
+    );
+    assert!(describe.adoptions.is_empty(), "different bytes never adopt");
+    assert_eq!(next_argvs.len(), 1, "one apply argv, no collision variant");
+    assert!(
+        next_argvs[0].iter().all(|a| a != "--prefix-dirname"),
+        "{next_argvs:?}"
+    );
     // Nothing was mutated by the describe.
     assert!(log.lock().unwrap().iter().all(|e| !e.starts_with("join")));
 }
@@ -764,6 +778,553 @@ fn a_direct_skill_follow_on_a_channel_delivered_skill_explains_why_it_is_not_red
     let note = describe.direct_follow_note.expect("the note is present");
     assert!(note.contains("already arrives via #eng"), "{note}");
     assert!(note.contains("keeps it"), "{note}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The dirname outcomes: a byte-identical occupant is ADOPTED in place; a genuine conflict
+// auto-namespaces `<skill>-<workspace>` (the ADDRESS slug, never the `w_…` id); an unknown slug
+// falls back to the validated skill id.
+// ---------------------------------------------------------------------------------------------
+
+/// A transport whose delivery carries `s_deploy` at a REAL version (the engine re-verifies bytes).
+fn transport_with_deploy(log: CallLog) -> (FakeTransport, Version) {
+    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n")]);
+    let mut transport = FakeTransport::empty(log);
+    transport.snapshot.skills.push(DeliverySkill {
+        skill_id: "s_deploy".into(),
+        name: "deploy".into(),
+        review_required: false,
+        version_id: v.id,
+        generation: 1,
+        bundle_digest: v.digest,
+        via_channels: vec!["eng".into()],
+        via_direct: false,
+    });
+    transport
+        .versions
+        .insert("s_deploy".into(), v.fetched.clone());
+    (transport, v)
+}
+
+#[test]
+fn a_byte_identical_occupant_is_adopted_in_place_never_duplicated() {
+    let rig = Rig::new("adopt");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: log.clone(),
+    };
+    let directory = FakeDirectory::acme(log.clone());
+    let (transport, v) = transport_with_deploy(log.clone());
+
+    // An UNTRACKED byte-identical copy already sits at the by-name dir (e.g. hand-installed from
+    // the same source) — the untracked-occupant policy is identical to a tracked one's.
+    let occupant = rig.work.0.join("skills").join("deploy");
+    std::fs::create_dir_all(&occupant).unwrap();
+    std::fs::write(occupant.join("SKILL.md"), b"# deploy\n").unwrap();
+
+    // The workspace describe discloses the ADOPTION — no collision, no namespaced sibling.
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["acme".to_owned()],
+        opts(false),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Described { describe, .. } = out else {
+        panic!("bare = describe");
+    };
+    assert_eq!(describe.adoptions.len(), 1, "{:?}", describe.adoptions);
+    assert_eq!(describe.adoptions[0].name, "deploy");
+    assert!(
+        describe.adoptions[0].path.ends_with("skills/deploy"),
+        "{}",
+        describe.adoptions[0].path
+    );
+    assert!(
+        describe.collisions.is_empty(),
+        "identical bytes are an adoption, never a collision: {:?}",
+        describe.collisions
+    );
+
+    // `--yes` manages THAT dir: no `deploy-acme` sibling, the recorded placement IS the adopted
+    // dir, and the sync landed applied over the occupant's (identical) bytes.
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["acme".to_owned()],
+        opts(true),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Applied(applied) = out else {
+        panic!("--yes = apply");
+    };
+    assert_eq!(
+        applied
+            .installed
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["deploy"]
+    );
+    assert!(
+        !rig.work.0.join("skills").join("deploy-acme").exists(),
+        "never a second copy beside an identical occupant"
+    );
+    assert_eq!(
+        std::fs::read(occupant.join("SKILL.md")).unwrap(),
+        b"# deploy\n"
+    );
+    let sid = crate::id::SkillId::parse("s_deploy").unwrap();
+    let map = crate::doc::read_map(&rig.fs, &rig.layout().published(&sid).map)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        map.placements,
+        vec![occupant.to_string_lossy().into_owned()],
+        "the adopted dir IS the placement"
+    );
+    assert_eq!(
+        map.placement_state[0].materialized_sha.as_deref(),
+        Some(topos_core::digest::to_hex(&v.digest).as_str()),
+        "the apply advanced over the adopted dir"
+    );
+}
+
+#[test]
+fn a_conflicting_occupant_auto_namespaces_by_the_address_slug_and_stays_untouched() {
+    let rig = Rig::new("conflict");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: log.clone(),
+    };
+    let directory = FakeDirectory::acme(log.clone());
+    let (transport, v) = transport_with_deploy(log.clone());
+
+    // An UNTRACKED occupant with DIFFERENT bytes holds the by-name dir.
+    let occupant = rig.work.0.join("skills").join("deploy");
+    std::fs::create_dir_all(&occupant).unwrap();
+    std::fs::write(occupant.join("SKILL.md"), b"# mine\n").unwrap();
+
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["acme".to_owned()],
+        opts(false),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Described { describe, .. } = out else {
+        panic!("bare = describe");
+    };
+    assert_eq!(describe.collisions.len(), 1, "{:?}", describe.collisions);
+    assert_eq!(describe.collisions[0].installs_as, "deploy-acme");
+    assert!(describe.adoptions.is_empty(), "{:?}", describe.adoptions);
+
+    // `--yes`: the namespaced dir lands the incoming bytes; the occupant is byte-untouched; the
+    // suffix is the workspace's ADDRESS slug — a `w_…` id never reaches a dir name.
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["acme".to_owned()],
+        opts(true),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Applied(applied) = out else {
+        panic!("--yes = apply");
+    };
+    assert_eq!(
+        applied
+            .installed
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["deploy"]
+    );
+    let namespaced = rig.work.0.join("skills").join("deploy-acme");
+    assert_eq!(
+        std::fs::read(namespaced.join("SKILL.md")).unwrap(),
+        b"# deploy\n"
+    );
+    assert_eq!(
+        std::fs::read(occupant.join("SKILL.md")).unwrap(),
+        b"# mine\n",
+        "the occupant is never written"
+    );
+    for entry in std::fs::read_dir(rig.work.0.join("skills")).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        assert!(
+            !name.starts_with("w_"),
+            "a workspace ID must never reach a dir name: {name}"
+        );
+    }
+    let sid = crate::id::SkillId::parse("s_deploy").unwrap();
+    let map = crate::doc::read_map(&rig.fs, &rig.layout().published(&sid).map)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        map.placements,
+        vec![namespaced.to_string_lossy().into_owned()]
+    );
+    let _ = v;
+}
+
+#[test]
+fn an_unknown_membership_slug_falls_back_to_the_skill_id_never_the_workspace_id() {
+    // Enrolled shape WITHOUT a membership record (instance + credential only): the delivered
+    // workspace's ADDRESS slug is unknowable, so a colliding dirname skips the namespace attempt
+    // and lands under the validated skill id.
+    let rig = Rig::new("slug-fallback");
+    enroll::write_instance(
+        &rig.fs,
+        &rig.layout(),
+        &enroll::Instance {
+            schema_version: 1,
+            base_url: API.to_owned(),
+        },
+    )
+    .unwrap();
+    enroll::write_credentials(&rig.fs, &rig.layout(), "wsc_secret", "dev_1").unwrap();
+    crate::identity::load_or_create_device_id(&rig.fs, &rig.layout()).unwrap();
+    let log: CallLog = Arc::default();
+    let (transport, _v) = transport_with_deploy(log.clone());
+    let occupant = rig.work.0.join("skills").join("deploy");
+    std::fs::create_dir_all(&occupant).unwrap();
+    std::fs::write(occupant.join("SKILL.md"), b"# mine\n").unwrap();
+
+    let inert_f = InertFollow;
+    // The transport doubles as ctx.plane so the accepted first receive can fetch its bytes.
+    let ctx = rig.ctx(&transport, &inert_f);
+    let out = ops::pull_reconcile_with(
+        &ctx,
+        &transport,
+        &ops::ReconcileOpts {
+            accept_first_receive: true,
+            ..ops::ReconcileOpts::default()
+        },
+    )
+    .unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    let id_dir = rig.work.0.join("skills").join("s_deploy");
+    assert_eq!(
+        std::fs::read(id_dir.join("SKILL.md")).unwrap(),
+        b"# deploy\n",
+        "the fallback dirname is the validated skill id"
+    );
+    assert!(
+        !rig.work.0.join("skills").join("deploy-acme").exists()
+            && !rig.work.0.join("skills").join("w_acme-deploy").exists()
+            && !rig.work.0.join("skills").join("deploy-w_acme").exists(),
+        "no namespace attempt without a membership slug"
+    );
+    assert_eq!(
+        std::fs::read(occupant.join("SKILL.md")).unwrap(),
+        b"# mine\n"
+    );
+}
+
+#[test]
+fn a_moved_target_lapses_the_adoption_and_the_accept_lands_namespaced() {
+    // The adoption reservation was laid for version A (the sweep's offer); the served current
+    // moves to B before the accept. The A-recorded adoption must not be reused for B — the engine
+    // clears the lapsed record, re-plans, and lands B under the suffixed dir in the SAME
+    // invocation: the occupant stays byte-untouched and nothing wedges.
+    let rig = Rig::new("adopt-lapse");
+    rig.seed_enrolled();
+    crate::identity::load_or_create_device_id(&rig.fs, &rig.layout()).unwrap();
+    let log: CallLog = Arc::default();
+    let v_a = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy v1\n")]);
+    let v_b = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy v2\n")]);
+    let mut transport = FakeTransport::empty(log.clone());
+    transport.snapshot.skills.push(DeliverySkill {
+        skill_id: "s_deploy".into(),
+        name: "deploy".into(),
+        review_required: false,
+        version_id: v_a.id,
+        generation: 1,
+        bundle_digest: v_a.digest,
+        via_channels: vec!["eng".into()],
+        via_direct: false,
+    });
+    transport
+        .versions
+        .insert("s_deploy".into(), v_a.fetched.clone());
+
+    // An UNTRACKED occupant byte-identical to VERSION A sits at the by-name dir.
+    let occupant = rig.work.0.join("skills").join("deploy");
+    std::fs::create_dir_all(&occupant).unwrap();
+    std::fs::write(occupant.join("SKILL.md"), b"# deploy v1\n").unwrap();
+
+    // The bare sweep lays the baseline + the A-adoption and OFFERS (no bytes move).
+    let inert_f = InertFollow;
+    {
+        let ctx = rig.ctx(&transport, &inert_f);
+        ops::pull_reconcile_with(&ctx, &transport, &ops::ReconcileOpts::default()).unwrap();
+    }
+    let sid = crate::id::SkillId::parse("s_deploy").unwrap();
+    let map = crate::doc::read_map(&rig.fs, &rig.layout().published(&sid).map)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        map.placement_state[0].pre_existing_sha.as_deref(),
+        Some(topos_core::digest::to_hex(&v_a.digest).as_str()),
+        "the sweep recorded the A-adoption"
+    );
+
+    // The served current MOVES to B before any accept.
+    let mut transport_b = transport.clone();
+    transport_b.snapshot.skills[0].version_id = v_b.id;
+    transport_b.snapshot.skills[0].bundle_digest = v_b.digest;
+    transport_b.snapshot.skills[0].generation = 2;
+    transport_b
+        .versions
+        .insert("s_deploy".into(), v_b.fetched.clone());
+
+    // ONE accept: B lands under the suffixed dir; the occupant untouched; no wedge, no retry.
+    let follows = enroll::read_follows(&rig.fs, &rig.layout())
+        .unwrap()
+        .unwrap();
+    let seam = crate::plane_http::FileFollow::new(enroll::follow_contexts(&follows));
+    let ctx = rig.ctx(&transport_b, &seam);
+    let out = ops::pull_reconcile_with(
+        &ctx,
+        &transport_b,
+        &ops::ReconcileOpts {
+            accept_first_receive: true,
+            ..ops::ReconcileOpts::default()
+        },
+    )
+    .unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert!(
+        matches!(out.data.skills[0].action, PullAction::FastForwarded),
+        "{:?}",
+        out.data.skills[0].action
+    );
+    assert_eq!(
+        std::fs::read(occupant.join("SKILL.md")).unwrap(),
+        b"# deploy v1\n",
+        "the raced occupant is never written"
+    );
+    let namespaced = rig.work.0.join("skills").join("deploy-acme");
+    assert_eq!(
+        std::fs::read(namespaced.join("SKILL.md")).unwrap(),
+        b"# deploy v2\n"
+    );
+    let map = crate::doc::read_map(&rig.fs, &rig.layout().published(&sid).map)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        map.placements,
+        vec![namespaced.to_string_lossy().into_owned()],
+        "the lapsed reservation was swapped for the suffixed dir"
+    );
+}
+
+#[test]
+fn a_dir_recorded_by_another_skill_is_never_adopted_even_when_identical() {
+    // The strongest confusion case: ANOTHER tracked skill already owns the by-name dir with bytes
+    // IDENTICAL to the incoming version. Adoption must refuse (two records must never own one
+    // dir) — the plan suffixes instead, and each record keeps exactly its own dir.
+    let rig = Rig::new("adopt-owned");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: log.clone(),
+    };
+    let directory = FakeDirectory::acme(log.clone());
+    let (transport, _v) = transport_with_deploy(log.clone());
+
+    let owned = rig.work.0.join("skills").join("deploy");
+    std::fs::create_dir_all(&owned).unwrap();
+    std::fs::write(owned.join("SKILL.md"), b"# deploy\n").unwrap(); // identical to the incoming
+    let other_id = {
+        let inert_p = InertPlane;
+        let inert_f = InertFollow;
+        let ctx = rig.ctx(&inert_p, &inert_f);
+        ops::add_with_name(&ctx, &owned, Some("deploy"))
+            .unwrap()
+            .skill_id
+    };
+
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["acme".to_owned()],
+        opts(false),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Described { describe, .. } = out else {
+        panic!("bare = describe");
+    };
+    assert!(
+        describe.adoptions.is_empty(),
+        "another record's dir is never adopted: {:?}",
+        describe.adoptions
+    );
+    assert_eq!(describe.collisions.len(), 1);
+    assert_eq!(describe.collisions[0].installs_as, "deploy-acme");
+
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["acme".to_owned()],
+        opts(true),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Applied(applied) = out else {
+        panic!("--yes = apply");
+    };
+    assert_eq!(
+        applied
+            .installed
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["deploy"]
+    );
+    let namespaced = rig.work.0.join("skills").join("deploy-acme");
+    assert_eq!(
+        std::fs::read(namespaced.join("SKILL.md")).unwrap(),
+        b"# deploy\n"
+    );
+    // Each record owns exactly its own dir.
+    let sid = crate::id::SkillId::parse("s_deploy").unwrap();
+    let map = crate::doc::read_map(&rig.fs, &rig.layout().published(&sid).map)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        map.placements,
+        vec![namespaced.to_string_lossy().into_owned()]
+    );
+    let other_sid = crate::id::SkillId::parse(&other_id).unwrap();
+    let other_map = crate::doc::read_map(&rig.fs, &rig.layout().published(&other_sid).map)
+        .unwrap()
+        .unwrap();
+    // The record stores the CANONICALIZED adopt source (macOS temp roots are symlinked).
+    assert_eq!(
+        other_map.placements,
+        vec![owned.canonicalize().unwrap().to_string_lossy().into_owned()],
+        "the other skill's record is untouched"
+    );
+}
+
+#[test]
+fn a_deleted_dir_recorded_by_another_skill_stays_reserved() {
+    // Skill A's record owns the by-name dir but the dir was manually DELETED: the free-LOOKING
+    // path must stay A's — a same-named arrival lands suffixed (never claims it), and A's later
+    // converge re-lands A's bytes there without touching the arrival's dir.
+    let rig = Rig::new("recorded-free");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: log.clone(),
+    };
+    let directory = FakeDirectory::acme(log.clone());
+    let (transport, _v) = transport_with_deploy(log.clone());
+
+    // Skill A: tracked at the by-name dir; then its dir is deleted on disk.
+    let owned = rig.work.0.join("skills").join("deploy");
+    std::fs::create_dir_all(&owned).unwrap();
+    std::fs::write(owned.join("SKILL.md"), b"# A's deploy\n").unwrap();
+    let a_id = {
+        let inert_p = InertPlane;
+        let inert_f = InertFollow;
+        let ctx = rig.ctx(&inert_p, &inert_f);
+        ops::add_with_name(&ctx, &owned, Some("deploy"))
+            .unwrap()
+            .skill_id
+    };
+    std::fs::remove_dir_all(&owned).unwrap();
+
+    // The arrival's `--yes` lands under the suffix — the deleted dir is still A's.
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["acme".to_owned()],
+        opts(true),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Applied(applied) = out else {
+        panic!("--yes = apply");
+    };
+    assert_eq!(
+        applied
+            .installed
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["deploy"]
+    );
+    let namespaced = rig.work.0.join("skills").join("deploy-acme");
+    assert_eq!(
+        std::fs::read(namespaced.join("SKILL.md")).unwrap(),
+        b"# deploy\n"
+    );
+    assert!(!owned.exists(), "the reserved path is never claimed");
+    let sid = crate::id::SkillId::parse("s_deploy").unwrap();
+    let map = crate::doc::read_map(&rig.fs, &rig.layout().published(&sid).map)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        map.placements,
+        vec![namespaced.to_string_lossy().into_owned()]
+    );
+
+    // A's record is untouched; its converge re-lands A's bytes at the reserved path without
+    // touching the arrival's dir.
+    let a_sid = crate::id::SkillId::parse(&a_id).unwrap();
+    let a_lock: topos_types::persisted::Lock =
+        crate::doc::read_doc(&rig.fs, &rig.layout().published(&a_sid).lock)
+            .unwrap()
+            .unwrap();
+    {
+        let inert_p = InertPlane;
+        let inert_f = InertFollow;
+        let ctx = rig.ctx(&inert_p, &inert_f);
+        ops::apply_scope_change(
+            &ctx,
+            &a_sid,
+            &a_lock,
+            crate::placement::AgentScope::default(),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        std::fs::read(owned.join("SKILL.md")).unwrap(),
+        b"# A's deploy\n",
+        "A's bytes re-land at A's recorded dir"
+    );
+    assert_eq!(
+        std::fs::read(namespaced.join("SKILL.md")).unwrap(),
+        b"# deploy\n",
+        "the arrival's dir is untouched"
+    );
+    let a_map = crate::doc::read_map(&rig.fs, &rig.layout().published(&a_sid).map)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        a_map.placements,
+        vec![owned.canonicalize().unwrap().to_string_lossy().into_owned()]
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1115,6 +1676,203 @@ fn a_workspace_yes_still_lands_the_whole_delivered_set() {
     );
     assert!(rig.work.0.join("skills").join("deploy").exists());
     assert!(rig.work.0.join("skills").join("extra").exists());
+}
+
+// ---------------------------------------------------------------------------------------------
+// The standing no-op receipt + the enrolled receipt: a describe that would change nothing offers
+// no apply argv (the standing note carries the fact); an enrolling describe names the principal
+// and never claims "nothing has changed".
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn a_standing_follow_with_nothing_new_offers_no_apply_argv() {
+    let rig = Rig::new("standing");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: log.clone(),
+    };
+    // An extra channel with NO skills: `design` is already a member (no new row), `ops` is not
+    // (a join row would be new even with nothing to install).
+    let mut directory = FakeDirectory::acme(log.clone());
+    directory
+        .channels
+        .push(channel_entry("ops", false, false, &[]));
+    let transport = FakeTransport::empty(log.clone());
+
+    // The workspace target: no installs, no new rows → the standing note, no `--yes` offered.
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["acme".to_owned()],
+        opts(false),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Described {
+        describe,
+        next_argvs,
+    } = out
+    else {
+        panic!("bare = describe");
+    };
+    assert!(next_argvs.is_empty(), "{next_argvs:?}");
+    let note = describe.standing_note.as_deref().expect("standing note");
+    assert!(note.starts_with("nothing new to install"), "{note}");
+    assert!(
+        note.contains("every device you've linked to this workspace"),
+        "{note}"
+    );
+    // The TTY carries the standing fact and neither the classic no-change line nor an argv.
+    let text = crate::render::follow_describe_tty(&describe, &next_argvs);
+    assert!(text.contains("nothing new to install"), "{text}");
+    assert!(!text.contains("Nothing has changed yet"), "{text}");
+    assert!(!text.contains("--yes"), "{text}");
+    assert!(
+        crate::render::describe_next_actions(Vec::new()).is_empty(),
+        "an empty argv list yields no next actions"
+    );
+
+    // An ALREADY-MEMBER channel target with nothing to install: same suppression.
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["acme/channels/design".to_owned()],
+        opts(false),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Described {
+        describe,
+        next_argvs,
+    } = out
+    else {
+        panic!("bare = describe");
+    };
+    assert!(next_argvs.is_empty(), "{next_argvs:?}");
+    assert!(describe.standing_note.is_some());
+
+    // A NOT-YET-JOINED channel writes a row even with nothing to install → the argv is offered.
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["acme/channels/ops".to_owned()],
+        opts(false),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Described {
+        describe,
+        next_argvs,
+    } = out
+    else {
+        panic!("bare = describe");
+    };
+    assert_eq!(next_argvs.len(), 1, "{next_argvs:?}");
+    assert!(describe.standing_note.is_none());
+}
+
+#[test]
+fn the_enrolled_receipt_names_the_principal_and_never_claims_nothing_changed() {
+    // The two-call enroll against an EMPTY delivery: the receipt leads with WHO this device now
+    // acts as, and folds the standing fact into the Following line.
+    let rig = Rig::new("enroll-receipt");
+    let log: CallLog = Arc::default();
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: log.clone(),
+    };
+    let directory = FakeDirectory::acme(log.clone());
+    let transport = FakeTransport::empty(log.clone());
+    run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["acme".to_owned()],
+        opts(false),
+    )
+    .unwrap();
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        Vec::new(),
+        opts(false),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Described {
+        describe,
+        next_argvs,
+    } = out
+    else {
+        panic!("resume lands on the describe");
+    };
+    assert!(describe.enrolled_now);
+    let text = crate::render::follow_describe_tty(&describe, &next_argvs);
+    assert!(
+        text.contains(
+            "Enrolled this device as alice@acme.com — role: member — invited by robert@acme.com."
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "Following: workspace acme — nothing new to install; new team skills arrive \
+             automatically on every device you've linked to this workspace."
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("Your role:"), "{text}");
+    assert!(
+        !text.contains("Nothing has changed yet"),
+        "the enrollment persisted a credential and armed the trigger: {text}"
+    );
+
+    // With an install waiting, the enrolled describe offers the apply under the honest heading.
+    let rig = Rig::new("enroll-receipt-installs");
+    let log: CallLog = Arc::default();
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: log.clone(),
+    };
+    let directory = FakeDirectory::acme(log.clone());
+    let (transport, _v) = transport_with_deploy(log.clone());
+    run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["acme".to_owned()],
+        opts(false),
+    )
+    .unwrap();
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        Vec::new(),
+        opts(false),
+    )
+    .unwrap();
+    let ops::FollowOutcome::Described {
+        describe,
+        next_argvs,
+    } = out
+    else {
+        panic!("resume lands on the describe");
+    };
+    assert!(describe.enrolled_now && describe.standing_note.is_none());
+    assert_eq!(next_argvs.len(), 1);
+    let text = crate::render::follow_describe_tty(&describe, &next_argvs);
+    assert!(text.contains("Apply the follow with:"), "{text}");
+    assert!(!text.contains("Nothing has changed yet"), "{text}");
 }
 
 // ---------------------------------------------------------------------------------------------

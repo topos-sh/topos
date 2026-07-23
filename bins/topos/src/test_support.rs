@@ -118,6 +118,8 @@ pub struct FollowDescribeView {
     pub address: String,
     /// The caller's role on the roster.
     pub role: String,
+    /// The signed-in principal the describe acts as (the enrolled-receipt disclosure).
+    pub principal: String,
     /// Who invited the caller (present for an invited member).
     pub invited_by: Option<String>,
     /// Whether THIS invocation enrolled the device.
@@ -128,10 +130,15 @@ pub struct FollowDescribeView {
     pub installs: Vec<InstallView>,
     /// Channels the person is already placed into (an inviter's pre-placement; `everyone` excluded).
     pub preplaced_channels: Vec<String>,
-    /// Following is person-scoped: every enrolled device receives the same set.
+    /// The in-place adoptions the describe disclosed (`(skill name, adopted path)`).
+    pub adoptions: Vec<(String, String)>,
+    /// The auto-namespaced dirname collisions (`(skill name, the dirname it installs as)`).
+    pub collisions: Vec<(String, String)>,
+    /// Following is person-scoped: skills arrive on every device linked to the workspace.
     pub all_devices_note: String,
-    /// This device reports its applied versions to the workspace's fleet view.
-    pub reporting_note: String,
+    /// Present when the follow is already standing and `--yes` would change nothing (no apply
+    /// argv offered).
+    pub standing_note: Option<String>,
 }
 
 /// The `--yes` APPLY report — the public face of `FollowApplied`: the subscription rows written and the
@@ -958,7 +965,6 @@ impl FollowHarness {
             manual,
             workspace: None,
             yes: false,
-            prefix_dirname: false,
             channels: Vec::new(),
             skills: Vec::new(),
             agents: Vec::new(),
@@ -979,7 +985,6 @@ impl FollowHarness {
             manual: false,
             workspace: None,
             yes: false,
-            prefix_dirname: false,
             channels: Vec::new(),
             skills: Vec::new(),
             agents: Vec::new(),
@@ -1002,7 +1007,6 @@ impl FollowHarness {
             manual: false,
             workspace: None,
             yes: false,
-            prefix_dirname: false,
             channels: Vec::new(),
             skills: Vec::new(),
             agents: Vec::new(),
@@ -1054,7 +1058,6 @@ impl FollowHarness {
             manual: false,
             workspace: None,
             yes: false,
-            prefix_dirname: false,
             channels: Vec::new(),
             skills: Vec::new(),
             agents: Vec::new(),
@@ -1500,7 +1503,6 @@ impl FollowHarness {
             manual: false,
             workspace: None,
             yes: true,
-            prefix_dirname: false,
             channels: Vec::new(),
             skills: skills.iter().map(|s| (*s).to_owned()).collect(),
             agents: Vec::new(),
@@ -3108,14 +3110,13 @@ impl ReconcileHarness {
     }
 }
 
-/// `follow`'s flags for the address-flow methods: the classic auto adoption, no workspace filter, no
-/// prefixing, no kind-forced selectors — just the `--yes` toggle the describe/apply split turns on.
+/// `follow`'s flags for the address-flow methods: the classic auto adoption, no workspace filter,
+/// no kind-forced selectors — just the `--yes` toggle the describe/apply split turns on.
 fn follow_opts(yes: bool) -> ops::FollowOpts {
     ops::FollowOpts {
         manual: false,
         workspace: None,
         yes,
-        prefix_dirname: false,
         channels: Vec::new(),
         skills: Vec::new(),
         agents: Vec::new(),
@@ -3129,6 +3130,7 @@ fn describe_view(d: &crate::ops::FollowDescribe) -> FollowDescribeView {
         workspace_name: d.workspace.name.clone(),
         address: d.workspace.address.clone(),
         role: d.role.clone(),
+        principal: d.principal.clone(),
         invited_by: d.invited_by.clone(),
         enrolled_now: d.enrolled_now,
         targets: d
@@ -3149,8 +3151,18 @@ fn describe_view(d: &crate::ops::FollowDescribe) -> FollowDescribeView {
             })
             .collect(),
         preplaced_channels: d.preplaced_channels.clone(),
+        adoptions: d
+            .adoptions
+            .iter()
+            .map(|a| (a.name.clone(), a.path.clone()))
+            .collect(),
+        collisions: d
+            .collisions
+            .iter()
+            .map(|c| (c.name.clone(), c.installs_as.clone()))
+            .collect(),
         all_devices_note: d.all_devices_note.clone(),
-        reporting_note: d.reporting_note.clone(),
+        standing_note: d.standing_note.clone(),
     }
 }
 

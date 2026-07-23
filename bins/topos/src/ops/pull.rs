@@ -18,7 +18,7 @@
 //! hang the harness.
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use topos_core::digest::to_hex;
@@ -104,8 +104,8 @@ impl PullOutcome {
 }
 
 /// How a delivery-driven reconcile behaves — the `follow --yes` apply and the hook differ only here.
-/// The default (the bare enrolled sweep) accepts nothing silently, declines nothing, renames nothing,
-/// reconciles every enrolled workspace, and fetches notices WITHOUT acking.
+/// The default (the bare enrolled sweep) accepts nothing silently, reconciles every enrolled
+/// workspace, and fetches notices WITHOUT acking.
 #[derive(Default)]
 pub(crate) struct ReconcileOpts {
     /// Accept first-receive offers THIS invocation (the `follow --yes` batch consent: the describe
@@ -113,12 +113,6 @@ pub(crate) struct ReconcileOpts {
     /// Already-received skills keep their normal consent path — this never releases a hold or
     /// auto-applies a confirm-each update.
     pub accept_first_receive: bool,
-    /// Skill ids NOT to install (declined dirname collisions): a declined NEW arrival is skipped
-    /// wholesale — no follow entry, no baseline, no bytes.
-    pub decline: HashSet<String>,
-    /// skill_id → the dirname to install a NEW arrival under (the `--prefix-dirname` `<ws>.<name>`
-    /// choice for a colliding name). Only a fresh install consults it.
-    pub rename: HashMap<String, String>,
     /// Reconcile only this workspace (a `follow --yes` targets one); `None` = every enrolled one.
     pub only_workspace: Option<String>,
     /// When `Some`, RESTRICT first-receive acceptance AND new-arrival installation to these skill ids —
@@ -348,8 +342,8 @@ pub(crate) enum ResetOutcome {
 }
 
 /// The reconcile with explicit [`ReconcileOpts`] — the `follow --yes` apply (one workspace,
-/// batch-accepted first receives, declined/renamed collisions) and the interactive `update` (acked
-/// notices) drive the non-default forms; `&ReconcileOpts::default()` is the bare sweep.
+/// batch-accepted first receives) and the interactive `update` (acked notices) drive the
+/// non-default forms; `&ReconcileOpts::default()` is the bare sweep.
 pub(crate) fn pull_reconcile_with(
     ctx: &Ctx<'_>,
     delivery: &dyn DeliverySource,
@@ -464,13 +458,6 @@ pub(crate) fn pull_reconcile_with(
         let mut delivered_cache: BTreeMap<String, DeliveredSkill> = BTreeMap::new();
         let mut delivered_ids: HashSet<&str> = HashSet::with_capacity(snapshot.skills.len());
         for ds in &snapshot.skills {
-            // A DECLINED new arrival (a dirname collision the follow describe listed and `--yes`
-            // did not opt into) is skipped WHOLESALE — no follow entry, no baseline, no bytes, and
-            // no delivered-id mark (the undelivered classifier below must not treat it as detached:
-            // it is not followed, so the filter never selects it anyway).
-            if opts.decline.contains(&ds.skill_id) {
-                continue;
-            }
             delivered_ids.insert(ds.skill_id.as_str());
             delivered_cache.insert(
                 ds.skill_id.clone(),
@@ -497,8 +484,7 @@ pub(crate) fn pull_reconcile_with(
                 Some((_, f)) => sync_delivered(ctx, &ws, ds, f, accept_for(ctx, ds, opts)),
                 // A brand-new arrival OUTSIDE a targeted install (a re-attach / a targeted
                 // `follow --yes`) stays undisclosed — no follow entry, no baseline, no bytes.
-                // Skipped wholesale (like a declined collision) so the next full describe is the
-                // first to disclose it.
+                // Skipped wholesale so the next full describe is the first to disclose it.
                 None if opts
                     .install_only
                     .as_ref()
@@ -933,10 +919,11 @@ fn sync_delivered(
 
 /// A brand-new delivered skill this device has never held: record the follow entry (person-scoped
 /// truth lives on the plane; the local entry is install-state), lay the first-receive baseline
-/// under the skill's CATALOG name (or the caller's `--prefix-dirname` rename), and run the engine —
-/// whose kernel consent OFFERS the first bytes (I-TOFU) on a bare sweep, and PLACES them under the
-/// `follow --yes` batch consent ([`ReconcileOpts::accept_first_receive`], where the describe already
-/// disclosed the install set).
+/// under the skill's CATALOG name (a colliding dirname auto-namespaces by the workspace's ADDRESS
+/// slug; a byte-identical occupant is adopted in place), and run the engine — whose kernel consent
+/// OFFERS the first bytes (I-TOFU) on a bare sweep, and PLACES them under the `follow --yes` batch
+/// consent ([`ReconcileOpts::accept_first_receive`], where the describe already disclosed the
+/// install set).
 fn install_new_arrival(
     ctx: &Ctx<'_>,
     ws: &str,
@@ -944,17 +931,22 @@ fn install_new_arrival(
     opts: &ReconcileOpts,
 ) -> Result<PullSkill, ClientError> {
     let sid = SkillId::parse(&ds.skill_id)?;
-    let dirname = opts
-        .rename
-        .get(&ds.skill_id)
-        .cloned()
-        .unwrap_or_else(|| ds.name.clone());
+    // The collision namespace is the workspace's ADDRESS slug from the enrolled membership — a raw
+    // `w_…` id must never reach a dir name; with no membership record the naming discipline skips
+    // the namespace attempt and falls back to the validated skill id.
+    let slug = crate::placement::workspace_slug(ctx, Some(ws));
     // The BASELINE FIRST, the follow entry second — the same ordering `follow`'s promote uses. A
     // crash between them leaves a baseline with no entry, which the NEXT reconcile treats as a
     // fresh arrival again (the baseline layer is idempotent: it returns early if the skill dir
     // exists). The reverse order would leave an entry whose sidecar docs do not exist, and every
     // later sweep would fail that skill on a missing-doc read — a permanent wedge.
-    super::follow::lay_first_receive_baseline(ctx, &sid, dirname, ws)?;
+    super::follow::lay_first_receive_baseline(
+        ctx,
+        &sid,
+        ds.name.clone(),
+        slug.as_deref(),
+        Some(&ds.bundle_digest),
+    )?;
     enroll::write_follows_merged(
         ctx.fs,
         &ctx.layout,

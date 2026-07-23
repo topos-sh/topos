@@ -59,7 +59,13 @@ impl HarnessAdapter for StubClaude {
         _d: Option<&DiscoveredPlacement>,
     ) -> PlacementTarget {
         PlacementTarget {
-            dir: topos_harness::choose_skill_dir(&self.skills, skill_id, naming, &|_| false),
+            dir: topos_harness::choose_skill_dir(
+                &self.skills,
+                skill_id,
+                naming,
+                &topos_harness::dir_taken,
+                &|_| false,
+            ),
         }
     }
     fn currency_kind(&self) -> CurrencyKind {
@@ -657,11 +663,12 @@ fn the_name_is_reserved_end_to_end_client_side() {
             name: Some("topos"),
             workspace_slug: Some("acme"),
         },
+        &topos_harness::dir_taken,
         &|_| false,
     );
     assert_eq!(
         chosen,
-        root.join("acme-topos"),
+        root.join("topos-acme"),
         "a foreign skill named `topos` disambiguates like a collision"
     );
     // The built-in itself (skill id == the reserved name) keeps the plain dir.
@@ -672,6 +679,7 @@ fn the_name_is_reserved_end_to_end_client_side() {
             name: Some("topos"),
             workspace_slug: None,
         },
+        &topos_harness::dir_taken,
         &|_| false,
     );
     assert_eq!(own, root.join("topos"));

@@ -73,8 +73,8 @@ in their crates; this directory is for what only a cross-crate composed run can 
   agent hand-off) and byte-identical across the address / the origin root / an unmatched path; call
   1 pends (user code + the `0600` WAL) → the signed-in member approves at `/verify` → the resumed
   follow persists the ONE `0600` bearer credential and continues into the two-phase DESCRIBE
-  (role, installs with consent digests, the `via everyone` attribution, the all-devices +
-  fleet-reporting disclosures) → `--yes` lands `everyone`'s genesis byte-exact. The TARGET-SCOPED
+  (role, installs with consent digests, the `via everyone` attribution, the all-devices
+  disclosure) → `--yes` lands `everyone`'s genesis byte-exact. The TARGET-SCOPED
   consent regression: with a waiting `everyone` arrival never received on the member's device, the
   targeted channel/skill describes list ONLY their named target's set and the targeted `--yes`
   lands exactly that (no subscription state, no bytes for the un-named arrival — no member

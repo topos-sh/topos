@@ -783,6 +783,7 @@ fn place_draft_on_current(
             next_sync: &next_sync,
             sp,
             snapshot: Some(&|s: &ScannedBundle| snapshot_draft(ctx, sp, lock, s).map(|_| ())),
+            takeover: None,
         },
     )?;
     Ok(())

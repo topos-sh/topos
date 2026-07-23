@@ -396,7 +396,6 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             skill,
             agent,
             yes,
-            prefix_dirname,
             manual,
             wait,
         } => {
@@ -438,7 +437,6 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 // workspaces this install follows on one plane (the enrollment motions ignore it).
                 workspace: workspace.clone(),
                 yes,
-                prefix_dirname,
                 channels: channel.clone(),
                 skills: skill.clone(),
                 agents: agent.clone(),

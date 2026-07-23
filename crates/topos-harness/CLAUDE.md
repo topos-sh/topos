@@ -12,7 +12,7 @@ scheduler probe — health is never claimed on faith, and the footprint stays a 
 **Implemented:** the **Claude Code** reference adapter (`claude_code`) — `discover` (probe
 `~/.claude/skills/*/SKILL.md`, confirm by existence, never parse frontmatter), `placement_for` (a pure
 follower's first receive names the folder by the skill's **sanitized display name** — Claude Code invokes a
-skill by its folder name — namespacing by workspace on a name collision and falling back to the validated
+skill by its folder name — namespacing by the workspace slug on a name collision (`<skill>-<workspace>`) and falling back to the validated
 id; the display name + workspace slug are UNTRUSTED and routed through `sanitize_skill_dir` to one safe path
 component, so they can never redirect the placement), `currency_kind` = `SessionStart`, and the idempotent,
 content-blind `install_currency_trigger` /
@@ -88,7 +88,7 @@ github-copilot / goose / opencode `Docs(true)` from vendor docs) over the automa
 registry row whose USER dir is the literal home `.agents/skills` ⇒ `Docs(true)`, staying in sync
 with registry re-syncs). The registry additionally exposes `detected_harnesses(home, cwd)` (the rows
 whose detect dirs exist) and the crate exports `choose_skill_dir` — the ONE placement-naming
-discipline (sanitized display name → workspace-prefixed on collision → the validated id; only a FREE
+discipline (sanitized display name → workspace-suffixed on collision (`<skill>-<workspace>`) → the validated id; only a FREE
 dir or one the caller's own record owns), factored out of the Claude Code adapter so registry-target
 dirs name identically. The dir name `topos` (`RESERVED_SKILL_DIR`) is reserved for the CLI's
 BUILT-IN skill (the one skill whose id equals it): any other skill folding to that name

@@ -24,10 +24,13 @@
 //! ## Naming + never-clobber
 //!
 //! Every new target dir is named by the ONE discipline the reference adapter uses
-//! ([`topos_harness::choose_skill_dir`]): the sanitized display name, workspace-prefixed on a
-//! collision, the validated id as the last resort — and only a FREE dir or one this skill's own
-//! placement record already owns is ever chosen. An already-recorded (kind, agent) target keeps its
-//! dir verbatim (stability comes from the record, not from re-derivation).
+//! ([`topos_harness::choose_skill_dir`]): the sanitized display name, workspace-suffixed on a
+//! collision (`<name>-<ws>`), the validated id as the last resort — and only a FREE dir or one this
+//! skill's own placement record already owns is ever chosen. An already-recorded (kind, agent)
+//! target keeps its dir verbatim (stability comes from the record, not from re-derivation). One
+//! CLI-side refinement on top: an occupant that is a byte-identical copy of the incoming version —
+//! and that no OTHER tracked skill's record owns — is ADOPTED in place (the caller arms the choice
+//! with the incoming bundle digest), never duplicated under a namespaced sibling.
 
 use std::path::{Path, PathBuf};
 
@@ -94,22 +97,26 @@ pub(crate) fn scope_of(ctx: &Ctx<'_>, skill_id: &str) -> (Vec<String>, Vec<Strin
 
 /// Compute the placement plan for one skill. `naming` carries the untrusted display name + workspace
 /// slug (the collision namespace); `prior` is the durable record whose dirs are kept verbatim for
-/// already-recorded targets. With no roots (no `$HOME`, or a test that does not exercise detection)
-/// or no detected harness, the plan is the CLASSIC single placement — the prior record as-is, else
-/// the active adapter's placement.
+/// already-recorded targets; `adopt` is the INCOMING version's bundle digest, arming adopt-in-place
+/// (a first receive passes it so a byte-identical occupant becomes the placement instead of a
+/// namespaced sibling — and a recorded adoption reservation is reusable only for THAT digest).
+/// With no roots (no `$HOME`, or a test that does not exercise detection) or no detected harness,
+/// the plan is the CLASSIC single placement — the prior record as-is, else the active adapter's
+/// placement.
 pub(crate) fn plan_targets(
     ctx: &Ctx<'_>,
     skill_id: &str,
     naming: PlacementNaming<'_>,
     scope: AgentScope<'_>,
     prior: Option<&PlacementMap>,
+    adopt: Option<[u8; 32]>,
 ) -> PlacementPlan {
     let detected: Vec<&'static registry::KnownHarness> = match &ctx.roots {
         Some(roots) => registry::detected_harnesses(&roots.home, roots.cwd.as_deref()),
         None => Vec::new(),
     };
     if detected.is_empty() {
-        return classic_plan(ctx, skill_id, naming, prior);
+        return classic_plan(ctx, skill_id, naming, prior, adopt);
     }
     let home = &ctx
         .roots
@@ -128,6 +135,12 @@ pub(crate) fn plan_targets(
         .collect();
 
     let owned = owned_predicate(prior);
+    // The CLI's taken-probe: a path is unavailable when a filesystem entry holds it (lstat, so a
+    // dangling symlink counts) OR when ANOTHER tracked skill's record names it — an absent-on-disk
+    // recorded path stays reserved for its owner, so the ladder suffixes past it exactly like an
+    // occupied dir.
+    let taken =
+        |p: &Path| topos_harness::dir_taken(p) || recorded_by_another_skill(ctx, skill_id, p);
     let mut plan = PlacementPlan::default();
 
     // Shared-dir-first — but ONLY for an unscoped skill: a shared dir cannot express narrowing, so
@@ -148,12 +161,19 @@ pub(crate) fn plan_targets(
             }
         }
         if !plan.shared_covers.is_empty() {
-            let dir = prior_dir(prior, PlacementKind::Shared, None).unwrap_or_else(|| {
-                topos_harness::choose_skill_dir(
-                    &coverage::shared_skills_dir(home),
+            let dir = prior_dir(prior, PlacementKind::Shared, None, adopt).unwrap_or_else(|| {
+                adopt_override(
+                    ctx,
+                    topos_harness::choose_skill_dir(
+                        &coverage::shared_skills_dir(home),
+                        skill_id,
+                        naming,
+                        &taken,
+                        &owned,
+                    ),
                     skill_id,
                     naming,
-                    &owned,
+                    adopt,
                 )
             });
             plan.targets.push(PlannedTarget {
@@ -166,20 +186,28 @@ pub(crate) fn plan_targets(
 
     let active_slug = ctx.harness.id().slug();
     for h in native {
-        let dir = match prior_dir(prior, PlacementKind::Native, Some(h.slug)) {
+        let dir = match prior_dir(prior, PlacementKind::Native, Some(h.slug), adopt) {
             Some(dir) => dir,
             // The active adapter keeps its own richer `placement_for` for its native dir; every
             // other detected harness resolves through the registry's canonical user skills root
             // (v0's composition root constructs one adapter — the registry root is the same dir the
             // sibling adapters' no-discovery default names) with the shared naming discipline.
-            None if h.slug == active_slug => ctx.harness.placement_for(skill_id, naming, None).dir,
+            None if h.slug == active_slug => {
+                adapter_choice(ctx, skill_id, naming, &taken, &owned, adopt)
+            }
             None => {
                 let Some(root) =
                     registry::skills_root(h.slug, registry::SkillScope::User, home, cwd)
                 else {
                     continue; // a cwd-only harness has no user-scope dir — nothing to place
                 };
-                topos_harness::choose_skill_dir(&root, skill_id, naming, &owned)
+                adopt_override(
+                    ctx,
+                    topos_harness::choose_skill_dir(&root, skill_id, naming, &taken, &owned),
+                    skill_id,
+                    naming,
+                    adopt,
+                )
             }
         };
         // A native dir may coincide with an already-planned target (a harness whose native user dir
@@ -218,40 +246,63 @@ pub(crate) fn plan_targets(
         // fallback deliberately does NOT engage here: an explicit scope that excludes everything
         // must not resurrect the active adapter's copy.
         if !scope.narrows() {
-            return classic_plan(ctx, skill_id, naming, prior);
+            return classic_plan(ctx, skill_id, naming, prior, adopt);
         }
     }
     plan
 }
 
-/// The classic single-placement plan (no detection): the prior record's targets as-is, else the
-/// active adapter's placement — today's behavior, byte-identical.
+/// The classic single-placement plan (no detection): the prior record's targets as-is — except a
+/// STALE adoption reservation (never materialized, dir occupied, the occupant no longer matching
+/// its recorded digest), which is re-chosen fresh so [`reconcile_map`] can replace it (mirroring
+/// [`prior_dir`]'s validation on the detection path; returned verbatim it would wedge every apply
+/// on the never-clobber refusal) — else the active adapter's placement.
 fn classic_plan(
     ctx: &Ctx<'_>,
     skill_id: &str,
     naming: PlacementNaming<'_>,
     prior: Option<&PlacementMap>,
+    adopt: Option<[u8; 32]>,
 ) -> PlacementPlan {
+    let owned = owned_predicate(prior);
+    let taken =
+        |p: &Path| topos_harness::dir_taken(p) || recorded_by_another_skill(ctx, skill_id, p);
     if let Some(map) = prior
         && !map.placements.is_empty()
     {
-        return PlacementPlan {
-            targets: map
-                .placements
-                .iter()
-                .zip(&map.placement_state)
-                .map(|(dir, st)| PlannedTarget {
+        let mut targets: Vec<PlannedTarget> = Vec::new();
+        let mut invalid: Vec<(PlacementKind, Option<String>)> = Vec::new();
+        for (dir, st) in map.placements.iter().zip(&map.placement_state) {
+            let reusable = st.materialized_sha.is_some()
+                || !topos_harness::dir_taken(Path::new(dir))
+                || adoption_reservation_holds(dir, st, adopt);
+            if reusable {
+                targets.push(PlannedTarget {
                     dir: PathBuf::from(dir),
                     kind: st.kind,
                     agent: st.agent.clone(),
-                })
-                .collect(),
+                });
+            } else {
+                invalid.push((st.kind, st.agent.clone()));
+            }
+        }
+        // Each invalidated key re-chooses through the active adapter (+ the caller's adopt digest);
+        // an equal dir already planned collapses to one target.
+        for (kind, agent) in invalid {
+            let dir = adapter_choice(ctx, skill_id, naming, &taken, &owned, adopt);
+            if targets.iter().any(|t| t.dir == dir) {
+                continue;
+            }
+            targets.push(PlannedTarget { dir, kind, agent });
+        }
+        return PlacementPlan {
+            targets,
             shared_covers: Vec::new(),
         };
     }
     PlacementPlan {
         targets: vec![PlannedTarget {
-            dir: ctx.harness.placement_for(skill_id, naming, None).dir,
+            dir: adapter_choice(ctx, skill_id, naming, &taken, &owned, adopt),
             kind: PlacementKind::Native,
             agent: Some(ctx.harness.id().slug().to_owned()),
         }],
@@ -259,14 +310,79 @@ fn classic_plan(
     }
 }
 
+/// The active adapter's placement, hardened against paths ANOTHER tracked skill's record owns: the
+/// adapter's own ladder probes only the filesystem (it is content-blind and cannot see the sidecar),
+/// so when its answer lands on a recorded-elsewhere path — occupied or deleted — the ONE ladder
+/// re-runs directly over the same root with the CLI's full taken-probe (no duplicate naming logic;
+/// the adapter told us the root). The adopt override then applies as usual.
+fn adapter_choice(
+    ctx: &Ctx<'_>,
+    skill_id: &str,
+    naming: PlacementNaming<'_>,
+    taken: &dyn Fn(&Path) -> bool,
+    owned: &dyn Fn(&Path) -> bool,
+    adopt: Option<[u8; 32]>,
+) -> PathBuf {
+    let mut dir = ctx.harness.placement_for(skill_id, naming, None).dir;
+    if recorded_by_another_skill(ctx, skill_id, &dir)
+        && let Some(root) = dir.parent().map(Path::to_path_buf)
+    {
+        dir = topos_harness::choose_skill_dir(&root, skill_id, naming, taken, owned);
+    }
+    adopt_override(ctx, dir, skill_id, naming, adopt)
+}
+
+/// Adopt-in-place override on a chosen placement dir: when the by-name candidate under the same
+/// root is OCCUPIED by a byte-identical copy of the incoming version — and no OTHER tracked
+/// skill's record already owns that dir — that dir IS the placement, never a second namespaced/id
+/// copy. The reserved built-in dir name is never overridden. When the naming discipline already
+/// chose the by-name dir (free, or owned), the candidate equals the choice and nothing changes.
+fn adopt_override(
+    ctx: &Ctx<'_>,
+    dir: PathBuf,
+    skill_id: &str,
+    naming: PlacementNaming<'_>,
+    adopt: Option<[u8; 32]>,
+) -> PathBuf {
+    let Some(digest) = adopt else {
+        return dir;
+    };
+    let Some(name) = naming.name.and_then(topos_harness::sanitize_skill_dir) else {
+        return dir;
+    };
+    if name == topos_harness::RESERVED_SKILL_DIR && skill_id != topos_harness::RESERVED_SKILL_DIR {
+        return dir;
+    }
+    let Some(parent) = dir.parent() else {
+        return dir;
+    };
+    let candidate = parent.join(&name);
+    if candidate != dir
+        && topos_harness::dir_taken(&candidate)
+        && !recorded_by_another_skill(ctx, skill_id, &candidate)
+        && digest_probe(digest)(&candidate)
+    {
+        candidate
+    } else {
+        dir
+    }
+}
+
 /// The dir the prior record holds for a (kind, agent) key — target stability comes from the record.
 /// A record that was NEVER materialized and whose dir has since been occupied by someone else is not
 /// reusable (never clobber a foreign dir): the key re-chooses, and [`reconcile_map`] replaces the
-/// stale reservation.
+/// stale reservation. ONE occupied-but-reusable exception: an ADOPTION RESERVATION — a
+/// never-materialized placement whose `pre_existing_sha` records the occupant's digest, laid at
+/// first-receive baseline time for a byte-identical occupant — stays reusable while the occupant is
+/// unchanged (a fresh scan reproduces the recorded sha) AND, when the caller supplied the incoming
+/// version's digest, that version is still the recorded one (an adoption recorded for version A is
+/// never reused for an apply of version B). A failed scan or any mismatch means the reservation
+/// lapsed: NOT reusable, and it is replaced like any other stale reservation.
 fn prior_dir(
     prior: Option<&PlacementMap>,
     kind: PlacementKind,
     agent: Option<&str>,
+    adopt: Option<[u8; 32]>,
 ) -> Option<PathBuf> {
     let map = prior?;
     map.placements
@@ -275,9 +391,117 @@ fn prior_dir(
         .find(|(dir, st)| {
             st.kind == kind
                 && st.agent.as_deref() == agent
-                && (st.materialized_sha.is_some() || !Path::new(dir).exists())
+                && (st.materialized_sha.is_some()
+                    || !topos_harness::dir_taken(Path::new(dir))
+                    || adoption_reservation_holds(dir, st, adopt))
         })
         .map(|(dir, _)| PathBuf::from(dir))
+}
+
+/// Whether a never-materialized-but-occupied placement is a still-valid ADOPTION reservation: its
+/// recorded `pre_existing_sha` (the adopted occupant's digest) still matches a fresh scan of the
+/// dir, and — when the caller supplied the incoming version's digest — that digest too. Fails
+/// closed — an unscannable or changed occupant, or a version the adoption was not recorded for, is
+/// not ours to reuse.
+fn adoption_reservation_holds(dir: &str, st: &PlacementState, adopt: Option<[u8; 32]>) -> bool {
+    st.pre_existing_sha.as_deref().is_some_and(|sha| {
+        adopt.is_none_or(|d| topos_core::digest::to_hex(&d) == sha)
+            && scan::scan(Path::new(dir))
+                .is_ok_and(|s| topos_core::digest::to_hex(&s.bundle_digest) == sha)
+    })
+}
+
+/// The standard adopt-in-place content probe over an incoming/current bundle digest: an occupant
+/// whose scanned bytes digest-equal it is adoptable.
+fn digest_probe(digest: [u8; 32]) -> impl Fn(&Path) -> bool {
+    move |p: &Path| scan::scan(p).is_ok_and(|s| s.bundle_digest == digest)
+}
+
+/// A path's canonical form for record comparison, resolvable even when the LEAF is absent: a
+/// deleted placement dir still compares by canonicalizing its (real) parent and re-joining the
+/// leaf — records store canonicalized paths, and a deleted dir must stay comparable or its
+/// reservation would silently stop matching.
+fn canonical_or_parent(p: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(p).ok().or_else(|| {
+        let parent = p.parent()?;
+        let leaf = p.file_name()?;
+        std::fs::canonicalize(parent).ok().map(|c| c.join(leaf))
+    })
+}
+
+/// Whether ANOTHER tracked skill's placement map records `dir` (materialized or reserved,
+/// PRESENT on disk or deleted — an absent recorded path stays reserved for its owner) — a
+/// candidate some other skill's record names must never be claimed or adopted, or two records
+/// would own one path. Best-effort over the sidecar walk (naming-choice moments are rare, so the
+/// cost is fine): an absent sidecar records nothing; an unreadable entry is skipped — the
+/// materializer's never-clobber backstop stays the hard rail behind this planning-time hygiene.
+fn recorded_by_another_skill(ctx: &Ctx<'_>, skill_id: &str, dir: &Path) -> bool {
+    if !ctx.fs.exists(&ctx.layout.skills_dir()) {
+        return false;
+    }
+    let Ok(entries) = ctx.fs.read_dir(&ctx.layout.skills_dir()) else {
+        return false;
+    };
+    // Records store CANONICALIZED paths (adopt-in-place canonicalizes its source); the candidate
+    // may arrive through a symlinked root — and either side may be absent on disk. Raw equality
+    // first, then the parent-resolved canonical forms.
+    let canonical = canonical_or_parent(dir);
+    for entry in entries {
+        let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if id.starts_with('.') || !entry.is_dir() || id == skill_id {
+            continue;
+        }
+        let Ok(sid) = crate::id::SkillId::parse(id) else {
+            continue;
+        };
+        let Ok(Some(map)) = crate::doc::read_map(ctx.fs, &ctx.layout.published(&sid).map) else {
+            continue;
+        };
+        if map.placements.iter().any(|p| {
+            let recorded = Path::new(p);
+            recorded == dir
+                || canonical
+                    .as_deref()
+                    .is_some_and(|c| canonical_or_parent(recorded).is_some_and(|r| r == c))
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Record ADOPTION RESERVATIONS on a freshly reconciled map: every never-materialized placement
+/// whose dir already exists under the sanitized display `name` with content digest-equal to
+/// `digest` — and which no OTHER tracked skill's record owns (the same guard the plan's adopt
+/// choice applies) — gets that digest into `pre_existing_sha` — the durable adoption record
+/// ([`prior_dir`] and [`classic_plan`] reuse it across plans; the sticky prior-bytes semantics
+/// ride it). No bytes move here; `materialized_sha` stays untouched.
+pub(crate) fn record_adoptions(
+    ctx: &Ctx<'_>,
+    map: &mut PlacementMap,
+    skill_id: &str,
+    name: &str,
+    digest: &[u8; 32],
+) {
+    let Some(sanitized) = topos_harness::sanitize_skill_dir(name) else {
+        return;
+    };
+    let probe = digest_probe(*digest);
+    for (dir, st) in map.placements.iter().zip(map.placement_state.iter_mut()) {
+        if st.materialized_sha.is_some() {
+            continue;
+        }
+        let p = Path::new(dir);
+        if p.file_name().and_then(|l| l.to_str()) == Some(sanitized.as_str())
+            && topos_harness::dir_taken(p)
+            && !recorded_by_another_skill(ctx, skill_id, p)
+            && probe(p)
+        {
+            st.pre_existing_sha = Some(topos_core::digest::to_hex(digest));
+        }
+    }
 }
 
 /// The never-clobber ownership predicate: a dir counts as this skill's own iff the record names it
@@ -306,7 +530,9 @@ pub(crate) fn reconcile_map(prior: &PlacementMap, plan: &PlacementPlan) -> Place
         }
         // A stale RESERVATION for the same (kind, agent) key — recorded, never materialized, and
         // re-chosen because its dir got occupied — is REPLACED in place (a reservation holds no
-        // bytes, so nothing freezes); everything else appends.
+        // bytes, so nothing freezes); everything else appends. The slot's state resets with the
+        // dir: the old reservation's `pre_existing_sha` described the OLD dir's occupant and must
+        // never migrate to the new one.
         if let Some(i) = next
             .placements
             .iter()
@@ -318,6 +544,13 @@ pub(crate) fn reconcile_map(prior: &PlacementMap, plan: &PlacementPlan) -> Place
             })
         {
             next.placements[i] = dir;
+            next.placement_state[i] = PlacementState {
+                kind: t.kind,
+                agent: t.agent.clone(),
+                materialized_sha: None,
+                pre_existing_sha: None,
+                swap_capability: SwapCapability::Unsupported,
+            };
             continue;
         }
         next.placements.push(dir);
@@ -569,7 +802,7 @@ pub(crate) fn placements_diverged(skill_name: &str, scans: &[PlacementScan]) -> 
 }
 
 /// The workspace ADDRESS slug for `workspace_id` (the collision namespace `choose_skill_dir`
-/// prefixes with), from the enrolled memberships — best-effort (`None` offline / unenrolled).
+/// suffixes with), from the enrolled memberships — best-effort (`None` offline / unenrolled).
 pub(crate) fn workspace_slug(ctx: &Ctx<'_>, workspace_id: Option<&str>) -> Option<String> {
     let ws = workspace_id?;
     crate::enroll::read_user(ctx.fs, &ctx.layout)
@@ -599,10 +832,13 @@ pub(crate) fn plan_for_skill(
                 workspace_slug: None,
             },
             Some(prior),
+            None,
         );
     }
     let (agents, excluded) = scope_of(ctx, skill_id);
     let slug = workspace_slug(ctx, ws.as_deref());
+    // No adopt probe here: a tracked skill's adoption continuity rides the record — the baseline's
+    // adoption reservation (`pre_existing_sha`) keeps [`prior_dir`] answering the adopted dir.
     plan_targets(
         ctx,
         skill_id,
@@ -615,6 +851,7 @@ pub(crate) fn plan_for_skill(
             excluded: &excluded,
         },
         Some(prior),
+        None,
     )
 }
 
@@ -649,4 +886,76 @@ pub(crate) fn validate_agent_slugs(
         .filter(|s| !detected.contains(&s.as_str()))
         .cloned()
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A one-entry never-materialized map (a reservation) whose slot carries a recorded adoption.
+    fn reservation_map(dir: &str, pre_existing: Option<&str>) -> PlacementMap {
+        PlacementMap {
+            schema_version: topos_types::PLACEMENT_MAP_SCHEMA_VERSION,
+            placements: vec![dir.to_owned()],
+            applied_commit: "0".repeat(64),
+            materialized_sha: "0".repeat(64),
+            pre_existing_sha: None,
+            swap_capability: SwapCapability::Unsupported,
+            placement_state: vec![PlacementState {
+                kind: PlacementKind::Native,
+                agent: Some("claude-code".to_owned()),
+                materialized_sha: None,
+                pre_existing_sha: pre_existing.map(str::to_owned),
+                swap_capability: SwapCapability::AtomicExchange,
+            }],
+            harness: None,
+            harness_layer: None,
+            harness_slug: None,
+        }
+    }
+
+    /// Replacing a stale reservation's dir RESETS the slot's state (kind/agent kept): the old
+    /// adoption's `pre_existing_sha` described the OLD occupant and must never migrate to the new
+    /// dir, and the cached swap capability was probed against the old parent.
+    #[test]
+    fn a_replaced_stale_reservation_resets_the_slot_state() {
+        let prior = reservation_map("/skills/deploy", Some(&"a".repeat(64)));
+        let plan = PlacementPlan {
+            targets: vec![PlannedTarget {
+                dir: PathBuf::from("/skills/deploy-acme"),
+                kind: PlacementKind::Native,
+                agent: Some("claude-code".to_owned()),
+            }],
+            shared_covers: Vec::new(),
+        };
+        let next = reconcile_map(&prior, &plan);
+        assert_eq!(next.placements, vec!["/skills/deploy-acme".to_owned()]);
+        let st = &next.placement_state[0];
+        assert_eq!(st.kind, PlacementKind::Native);
+        assert_eq!(st.agent.as_deref(), Some("claude-code"));
+        assert!(st.materialized_sha.is_none());
+        assert!(st.pre_existing_sha.is_none(), "no adoption record migrates");
+        assert_eq!(st.swap_capability, SwapCapability::Unsupported);
+    }
+
+    /// The same-dir plan (a still-valid reservation) keeps the slot verbatim — the reset fires
+    /// only on an actual replacement.
+    #[test]
+    fn an_unchanged_reservation_keeps_its_recorded_state() {
+        let prior = reservation_map("/skills/deploy", Some(&"a".repeat(64)));
+        let plan = PlacementPlan {
+            targets: vec![PlannedTarget {
+                dir: PathBuf::from("/skills/deploy"),
+                kind: PlacementKind::Native,
+                agent: Some("claude-code".to_owned()),
+            }],
+            shared_covers: Vec::new(),
+        };
+        let next = reconcile_map(&prior, &plan);
+        assert_eq!(next.placements, vec!["/skills/deploy".to_owned()]);
+        assert_eq!(
+            next.placement_state[0].pre_existing_sha.as_deref(),
+            Some("a".repeat(64).as_str())
+        );
+    }
 }

@@ -107,7 +107,13 @@ impl<'a> ClaudeCode<'a> {
     /// [`crate::choose_skill_dir`] (this adapter is the reference; other placement targets name
     /// identically); with no placement record to consult here, only a FREE dir counts as available.
     fn follower_placement_dir(&self, skill_id: &str, naming: PlacementNaming<'_>) -> PathBuf {
-        crate::choose_skill_dir(&self.skills_dir(), skill_id, naming, &|_| false)
+        crate::choose_skill_dir(
+            &self.skills_dir(),
+            skill_id,
+            naming,
+            &crate::dir_taken,
+            &|_| false,
+        )
     }
 
     fn settings_path(&self) -> PathBuf {
@@ -1102,7 +1108,8 @@ mod tests {
         let cfg = MemConfig::default();
         let a = adapter(&home.0, &cfg);
 
-        // Collision on the plain name → namespaced by the (sanitized) workspace slug, never clobbering.
+        // Collision on the plain name → suffixed by the (sanitized) workspace slug — skill first, so
+        // the folder stays recognizable — never clobbering.
         let naming = PlacementNaming {
             name: Some("deploy-helper"),
             workspace_slug: Some("robert's workspace"),
@@ -1111,15 +1118,65 @@ mod tests {
             a.placement_for("topos_abc", naming, None).dir,
             home.0
                 .join("skills")
-                .join("robert-s-workspace-deploy-helper"),
+                .join("deploy-helper-robert-s-workspace"),
         );
 
         // Now the namespaced form is taken too → the globally-unique id is the ultimate safe fallback.
-        home.skill("robert-s-workspace-deploy-helper");
+        home.skill("deploy-helper-robert-s-workspace");
         assert_eq!(
             a.placement_for("topos_abc", naming, None).dir,
             home.0.join("skills").join("topos_abc"),
             "when every named candidate is taken, the unique id never collides",
+        );
+    }
+
+    #[test]
+    fn an_occupied_id_dir_namespaces_by_workspace_before_the_bare_id_residual() {
+        let home = TempHome::new();
+        home.skill("deploy-helper"); // the plain name is taken…
+        home.skill("deploy-helper-acme"); // …and its workspace form…
+        home.skill("topos_abc"); // …and even the id dir.
+        let cfg = MemConfig::default();
+        let a = adapter(&home.0, &cfg);
+        let naming = PlacementNaming {
+            name: Some("deploy-helper"),
+            workspace_slug: Some("acme"),
+        };
+        assert_eq!(
+            a.placement_for("topos_abc", naming, None).dir,
+            home.0.join("skills").join("topos_abc-acme"),
+            "an occupied id dir disambiguates by the workspace before giving up"
+        );
+
+        // Every rung occupied → the bare id is returned; the CLI's materializer refuses to
+        // overwrite an occupied dir it never placed, so this names but never clobbers.
+        home.skill("topos_abc-acme");
+        assert_eq!(
+            a.placement_for("topos_abc", naming, None).dir,
+            home.0.join("skills").join("topos_abc"),
+        );
+    }
+
+    #[test]
+    fn a_dangling_symlink_counts_as_occupied_and_the_ladder_moves_on() {
+        // `Path::exists()` traverses symlinks, so a DANGLING link would read as "free" and the
+        // materializer would then refuse the unresolvable entry — occupancy is lstat-based, and
+        // the ladder namespaces past it instead.
+        let home = TempHome::new();
+        let skills = home.0.join("skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        std::os::unix::fs::symlink(skills.join("gone-target"), skills.join("deploy-helper"))
+            .unwrap();
+        let cfg = MemConfig::default();
+        let a = adapter(&home.0, &cfg);
+        let naming = PlacementNaming {
+            name: Some("deploy-helper"),
+            workspace_slug: Some("acme"),
+        };
+        assert_eq!(
+            a.placement_for("topos_abc", naming, None).dir,
+            home.0.join("skills").join("deploy-helper-acme"),
+            "a dangling link at the by-name rung is occupied — the ladder suffixes past it"
         );
     }
 

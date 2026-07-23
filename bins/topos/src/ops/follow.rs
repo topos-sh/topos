@@ -65,9 +65,6 @@ pub(crate) struct FollowOpts {
     pub workspace: Option<String>,
     /// `--yes` — apply the described subscription (the one-shot consent). Bare = describe only.
     pub yes: bool,
-    /// `--prefix-dirname` — install a dirname-colliding skill under `<workspace>.<name>` instead of
-    /// declining it (the collision choice the describe offers).
-    pub prefix_dirname: bool,
     /// `--channel` selectors — kind-forced channel targets (join).
     pub channels: Vec<String>,
     /// `--skill` selectors — kind-forced skill targets (direct follow).
@@ -133,8 +130,8 @@ pub(crate) enum FollowOutcome {
         resumed: Vec<String>,
     },
     /// The two-phase DESCRIBE (a bare subscribe) — nothing mutated beyond the enrollment itself;
-    /// `next_argvs` carry the ready-to-exec apply commands (`--yes`, and the `--prefix-dirname`
-    /// variant when collisions exist).
+    /// `next_argvs` carry the ready-to-exec apply command (`--yes`; empty when the follow is
+    /// already standing and nothing would change — the describe's `standing_note` says so).
     Described {
         describe: Box<FollowDescribe>,
         next_argvs: Vec<Vec<String>>,
@@ -180,10 +177,8 @@ pub(crate) struct LinkDescribe {
     /// What the link would be born as — `active`, or `pending` under the workspace's
     /// device-approval knob (an owner then approves it in the web app).
     pub born: String,
-    /// Following is person-scoped: every linked device of this person receives the same set.
+    /// Following is person-scoped: skills arrive on every device linked to the workspace.
     pub all_devices_note: String,
-    /// This device reports its applied versions to the workspace's fleet view after each update.
-    pub reporting_note: String,
 }
 
 impl FollowOutcome {
@@ -229,16 +224,31 @@ pub(crate) struct DescribedInstall {
     pub via_direct: bool,
 }
 
-/// One dirname collision: an incoming install whose name a DIFFERENT local skill already holds. The
-/// default `--yes` DECLINES it; `--prefix-dirname` installs it under the prefixed dirname instead.
+/// One dirname collision: an incoming install whose by-name dir a DIFFERENT occupant already holds
+/// (different bytes — an identical occupant is an adoption instead). `--yes` installs it under the
+/// auto-namespaced dirname, disclosed here before consent; the occupant is never touched. One entry
+/// per distinct planned outcome — a multi-root plan may collide in several roots.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct DescribedCollision {
     pub skill_id: String,
     pub name: String,
-    /// Where the existing same-named copy lives (its placement dir, or its tracked identity).
+    /// Where the occupying same-named copy lives (the by-name dir under the planned root).
     pub existing: String,
-    /// The `--prefix-dirname` alternative (`<workspace>.<name>`).
-    pub prefixed_dirname: String,
+    /// The auto-namespaced dirname `<skill>-<workspace>` the install lands under (last resort the
+    /// validated skill id), disclosed before `--yes`.
+    pub installs_as: String,
+}
+
+/// One in-place ADOPTION: the planned by-name dir is already occupied by a byte-identical copy of
+/// the incoming version, so `--yes` adopts THAT dir as the placement — never a second copy. The
+/// describe discloses it before consent; one entry per adopted dir (a multi-root plan may adopt
+/// in several roots).
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DescribedAdoption {
+    pub skill_id: String,
+    pub name: String,
+    /// The adopted dir (display path).
+    pub path: String,
 }
 
 /// The two-phase DESCRIBE a bare subscribe answers — everything `--yes` would change, and nothing
@@ -249,6 +259,8 @@ pub(crate) struct FollowDescribe {
     pub workspace: DescribedWorkspace,
     /// The caller's role on the roster.
     pub role: String,
+    /// The signed-in principal this describe acts as (the enrolled-receipt disclosure).
+    pub principal: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub invited_by: Option<String>,
     /// Whether THIS invocation enrolled the device (the identity step already happened; the
@@ -262,9 +274,14 @@ pub(crate) struct FollowDescribe {
     pub installs: Vec<DescribedInstall>,
     /// Channels the person is already placed into (an inviter's pre-placement; `everyone` excluded).
     pub preplaced_channels: Vec<String>,
-    /// Dirname collisions — declined by default; `--prefix-dirname` opts into the prefixed paths.
+    /// Dirname collisions — auto-namespaced: `--yes` installs each under its disclosed
+    /// `installs_as` dirname, the occupant untouched.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub collisions: Vec<DescribedCollision>,
+    /// In-place adoptions — the planned by-name dir already holds a byte-identical copy, which
+    /// `--yes` adopts as the placement (never a second copy).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub adoptions: Vec<DescribedAdoption>,
     /// A colliding name in THIS workspace whose skill id changed — a freed name reassigned to a NEW
     /// skill (the old copy stays retained locally).
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -273,17 +290,19 @@ pub(crate) struct FollowDescribe {
     /// it even if the channel drops it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub direct_follow_note: Option<String>,
-    /// Following is person-scoped: every enrolled device of this person receives the same set.
+    /// Following is person-scoped: skills arrive on every device linked to the workspace.
     pub all_devices_note: String,
-    /// This device reports its applied versions to the workspace's fleet view after each update.
-    pub reporting_note: String,
+    /// Present when the follow is ALREADY standing and `--yes` would change nothing (no installs,
+    /// no new subscription rows) — the honest "nothing new" fact; no apply argv is offered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub standing_note: Option<String>,
     /// The `--agent` placement plan for the described installs (which dirs land where), when the
     /// invocation carried an include-list. Empty otherwise.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub agent_notes: Vec<String>,
 }
 
-/// The `--yes` apply report: the rows written, the installs landed, the collisions declined.
+/// The `--yes` apply report: the rows written and the installs landed.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct FollowApplied {
     pub workspace_id: String,
@@ -295,9 +314,6 @@ pub(crate) struct FollowApplied {
     pub subscribed: Vec<DescribedTarget>,
     /// The installs the reconcile landed (batch-accepted first receives + refreshed knowns).
     pub installed: Vec<DescribedInstall>,
-    /// The dirname collisions the apply DECLINED (absent under `--prefix-dirname`).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub declined: Vec<DescribedCollision>,
     /// The reconcile's isolated warnings (ride the envelope's `warnings` too).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
@@ -971,11 +987,8 @@ fn link_workspace(
             role: d.role,
             link_status: d.link_status,
             born: d.born,
-            all_devices_note: "following is person-scoped: every linked device of this person \
-                               receives the same set"
-                .to_owned(),
-            reporting_note: "this device reports its applied versions to the workspace's fleet \
-                             view after each update"
+            all_devices_note: "skills you follow arrive on every device you've linked to this \
+                               workspace"
                 .to_owned(),
         };
         return Ok(FollowOutcome::LinkDescribed {
@@ -1436,7 +1449,8 @@ fn continue_into_target(
 
 /// The two-phase subscribe over ONE workspace's resolved targets: assemble the describe from the
 /// member-scoped reads; bare = return it (nothing mutated); `--yes` = the row ops, the reconcile
-/// (batch-accepted first receives, collisions declined or prefixed), and the report.
+/// (batch-accepted first receives; colliding dirnames auto-namespace, identical occupants adopt in
+/// place), and the report.
 fn subscribe(
     ctx: &Ctx<'_>,
     connectors: &FollowConnectors<'_>,
@@ -1470,33 +1484,60 @@ fn subscribe(
     }
 
     if !opts.yes {
-        // The paste-ready apply argvs: the canonical qualified paths + `--yes` (and the
-        // `--prefix-dirname` variant when collisions exist).
-        let mut base_argv = vec!["topos".to_owned(), "follow".to_owned()];
-        for r in resolutions {
-            base_argv.push(match r {
-                Resolution::Workspace { workspace_name, .. } => workspace_name.clone(),
-                Resolution::Resource {
-                    workspace_name,
-                    kind,
-                    name,
-                    ..
-                } => format!("{workspace_name}/{}/{name}", kind.segment()),
-            });
-        }
-        // `--manual` must ride the apply argv: without it the suggested next action installs in the
-        // default AUTO mode, so later updates auto-land despite the confirm-each consent the user chose.
-        if opts.manual {
-            base_argv.push("--manual".to_owned());
-        }
-        let mut yes = base_argv.clone();
-        yes.push("--yes".to_owned());
-        let mut next_argvs = vec![yes];
-        if !describe.collisions.is_empty() {
-            let mut prefixed = base_argv;
-            prefixed.push("--prefix-dirname".to_owned());
-            prefixed.push("--yes".to_owned());
-            next_argvs.push(prefixed);
+        // Would `--yes` write any NEW subscription row? A workspace target writes none (membership
+        // itself entitles `everyone`); a channel join is new only when the caller is not yet a
+        // member (a missing index entry counts as new — the safe side); a direct follow only when
+        // the delivery does not already carry the skill direct.
+        let new_rows = resolutions.iter().any(|r| match r {
+            Resolution::Workspace { .. } => false,
+            Resolution::Resource {
+                kind,
+                name,
+                skill_id,
+                ..
+            } => match kind {
+                ResourceKind::Channel => channels
+                    .channels
+                    .iter()
+                    .find(|c| &c.name == name)
+                    .is_none_or(|c| !c.member),
+                ResourceKind::Skill => !snapshot
+                    .skills
+                    .iter()
+                    .any(|s| Some(s.skill_id.as_str()) == skill_id.as_deref() && s.via_direct),
+            },
+        });
+        let mut next_argvs = Vec::new();
+        if describe.installs.is_empty() && !new_rows {
+            // The follow is ALREADY standing and nothing would install — an honest no-op: no
+            // `--yes` to offer, just the standing fact.
+            describe.standing_note = Some(
+                "nothing new to install; new team skills arrive automatically on every device \
+                 you've linked to this workspace"
+                    .to_owned(),
+            );
+        } else {
+            // The paste-ready apply argv: the canonical qualified paths + `--yes`.
+            let mut base_argv = vec!["topos".to_owned(), "follow".to_owned()];
+            for r in resolutions {
+                base_argv.push(match r {
+                    Resolution::Workspace { workspace_name, .. } => workspace_name.clone(),
+                    Resolution::Resource {
+                        workspace_name,
+                        kind,
+                        name,
+                        ..
+                    } => format!("{workspace_name}/{}/{name}", kind.segment()),
+                });
+            }
+            // `--manual` must ride the apply argv: without it the suggested next action installs in
+            // the default AUTO mode, so later updates auto-land despite the confirm-each consent
+            // the user chose.
+            if opts.manual {
+                base_argv.push("--manual".to_owned());
+            }
+            base_argv.push("--yes".to_owned());
+            next_argvs.push(base_argv);
         }
         return Ok(FollowOutcome::Described {
             describe: Box::new(describe),
@@ -1541,15 +1582,16 @@ fn subscribe(
         }
     }
 
-    // 2) The reconcile lands the set THIS invocation — batch-accepting first receives, declining
-    //    or prefixing the collisions, one workspace only. INSTALLATION is RESTRICTED to exactly
-    //    the ids THIS invocation's describe disclosed (`install_only`): a `--yes` is consent for
-    //    its own describe, so a waiting arrival outside the named targets is never swept in — it
-    //    stays an offer for the sweep / its own describe. Already-followed, already-received
-    //    skills still UPDATE under their standing follow mode, exactly as on any sweep — that
-    //    consent was given at follow time, not here. The notices stay unacked (they belong
-    //    to `update`'s narration).
-    let mut rec_opts = ReconcileOpts {
+    // 2) The reconcile lands the set THIS invocation — batch-accepting first receives, one
+    //    workspace only. INSTALLATION is RESTRICTED to exactly the ids THIS invocation's describe
+    //    disclosed (`install_only`): a `--yes` is consent for its own describe, so a waiting
+    //    arrival outside the named targets is never swept in — it stays an offer for the sweep /
+    //    its own describe. Already-followed, already-received skills still UPDATE under their
+    //    standing follow mode, exactly as on any sweep — that consent was given at follow time,
+    //    not here. The notices stay unacked (they belong to `update`'s narration). Dirname
+    //    collisions need no steering here: the baseline's naming discipline auto-namespaces a
+    //    genuine conflict and adopts a byte-identical occupant, exactly as disclosed.
+    let rec_opts = ReconcileOpts {
         accept_first_receive: true,
         only_workspace: Some(ws_id.to_owned()),
         install_only: Some(
@@ -1562,17 +1604,7 @@ fn subscribe(
         ack_notices: false,
         // `--manual` threads through to the adopted entries: every later update is an offer.
         confirm_each: opts.manual,
-        ..ReconcileOpts::default()
     };
-    for c in &describe.collisions {
-        if opts.prefix_dirname {
-            rec_opts
-                .rename
-                .insert(c.skill_id.clone(), c.prefixed_dirname.clone());
-        } else {
-            rec_opts.decline.insert(c.skill_id.clone());
-        }
-    }
     // The reconcile's byte fetches ride the SAME transport as the delivery (the engine ctx's plane
     // is swapped onto it) — a mid-invocation enrollment's ctx still carries the inert startup
     // plane, and `bind_skill` must land on the object the fetches use.
@@ -1583,8 +1615,8 @@ fn subscribe(
 
     // 3) The apply report: which of the described installs actually landed (an isolated per-skill
     //    failure stays a warning — the reconcile's isolation semantics hold here too). The rows key
-    //    by the skill's local NAME (its dirname), so a `--prefix-dirname` install matches under the
-    //    prefixed spelling.
+    //    by the skill's CATALOG name (its lock name — an auto-namespaced install keeps it; only the
+    //    dirname carries the workspace suffix).
     let landed: HashMap<&str, PullAction> = out
         .data
         .skills
@@ -1595,22 +1627,13 @@ fn subscribe(
         .installs
         .iter()
         .filter(|i| {
-            let prefixed = format!("{}.{}", me.name, i.name);
-            let action = landed
-                .get(i.name.as_str())
-                .or_else(|| landed.get(prefixed.as_str()));
             matches!(
-                action,
+                landed.get(i.name.as_str()),
                 Some(PullAction::FastForwarded | PullAction::UpToDate | PullAction::Merged)
             )
         })
         .cloned()
         .collect();
-    let declined = if opts.prefix_dirname {
-        Vec::new()
-    } else {
-        describe.collisions.clone()
-    };
     // The `--agent` include-list rides the apply: record it on each directly-followed skill and
     // reconcile its placements (clean what the scope removes, land the native dirs from the local
     // store). Runs AFTER the reconcile so the first receive has already laid bytes to re-scope.
@@ -1633,8 +1656,8 @@ fn subscribe(
             let Ok(sid) = crate::id::SkillId::parse(id) else {
                 continue;
             };
-            // A declined collision (or a still-pending offer) laid no lock — nothing to re-scope yet;
-            // the recorded include-list engages when the bytes land.
+            // A still-pending offer laid no lock — nothing to re-scope yet; the recorded
+            // include-list engages when the bytes land.
             if let Some(lock) = doc::read_doc::<Lock>(ctx.fs, &ctx.layout.published(&sid).lock)? {
                 super::agent_scope::apply_scope_change(
                     ctx,
@@ -1654,7 +1677,6 @@ fn subscribe(
         enrolled_now,
         subscribed,
         installed,
-        declined,
         warnings: out.warnings,
     })))
 }
@@ -1665,7 +1687,7 @@ fn subscribe(
 /// channel/skill subscribe lists ONLY what its own targets entitle — any other waiting arrival
 /// stays an undisclosed offer for the sweep / a later describe of its own, never listed under (or
 /// landed by) an unrelated `--yes`. Plus: who you are here, the pre-placements, the dirname
-/// collisions with the prefixed choice, and the standing disclosures.
+/// outcomes (in-place adoptions; auto-namespaced collisions), and the standing disclosures.
 fn build_describe(
     ctx: &Ctx<'_>,
     me: &WireMe,
@@ -1809,32 +1831,92 @@ fn build_describe(
         }
     }
 
-    // Dirname collisions + the freed-name notes, over the would-land set.
+    // The dirname outcomes, over the ACTUAL placement plan per install: the by-name dir may be
+    // occupied by a byte-identical copy (ADOPTED in place) or by a different occupant (the plan
+    // auto-namespaces `<skill>-<workspace>`) — the describe scans exactly what the apply's
+    // baseline will choose. The freed-name notes stay a tracked-names read.
     let tracked = tracked_names(ctx)?;
-    let mut collisions = Vec::new();
+    let mut collisions: Vec<DescribedCollision> = Vec::new();
+    let mut adoptions: Vec<DescribedAdoption> = Vec::new();
     let mut freed_name_notes = Vec::new();
     for inst in &installs {
-        let Some(existing) = tracked
+        if let Some(existing) = tracked
             .iter()
             .find(|t| t.name == inst.name && t.skill_id != inst.skill_id)
-        else {
-            continue;
-        };
-        collisions.push(DescribedCollision {
-            skill_id: inst.skill_id.clone(),
-            name: inst.name.clone(),
-            existing: existing
-                .placement
-                .clone()
-                .unwrap_or_else(|| format!("tracked skill {}", existing.skill_id)),
-            prefixed_dirname: format!("{}.{}", me.name, inst.name),
-        });
-        if existing.workspace_id.as_deref() == Some(me.workspace_id.as_str()) {
+            && existing.workspace_id.as_deref() == Some(me.workspace_id.as_str())
+        {
             freed_name_notes.push(format!(
                 "'{}' is a NEW skill under a previously-used name in this workspace — your \
                  existing copy ({}) stays retained and is NOT this skill's history",
                 inst.name, existing.skill_id
             ));
+        }
+        let Ok(sid) = crate::id::SkillId::parse(&inst.skill_id) else {
+            continue;
+        };
+        // A sweep-laid baseline's record steers the plan exactly as the apply's will.
+        let prior = if ctx.fs.exists(&ctx.layout.skill_dir(&sid)) {
+            doc::read_map(ctx.fs, &ctx.layout.published(&sid).map)?
+        } else {
+            None
+        };
+        let digest = inst
+            .bundle_digest
+            .as_deref()
+            .and_then(|hex| super::parse_hex32(hex).ok());
+        let plan = crate::placement::plan_targets(
+            ctx,
+            &inst.skill_id,
+            topos_harness::PlacementNaming {
+                name: Some(&inst.name),
+                workspace_slug: Some(&me.name),
+            },
+            crate::placement::AgentScope::default(),
+            prior.as_ref(),
+            digest,
+        );
+        let Some(n) = topos_harness::sanitize_skill_dir(&inst.name) else {
+            continue;
+        };
+        // Per PLACEMENT, not per skill: a multi-root plan can adopt in one root and namespace in
+        // another — every distinct outcome gets its own entry (the dedupe keys carry the path).
+        for target in &plan.targets {
+            let Some(leaf) = target.dir.file_name().and_then(|l| l.to_str()) else {
+                continue;
+            };
+            if leaf == n {
+                // The by-name dir with an occupant is an adoption (the plan chooses an occupied
+                // by-name dir only when the probe answered, or a still-valid adoption reservation
+                // holds it); a free by-name dir is the plain uncontested install.
+                let path = target.dir.display().to_string();
+                if target.dir.exists()
+                    && !adoptions
+                        .iter()
+                        .any(|a| a.skill_id == inst.skill_id && a.path == path)
+                {
+                    adoptions.push(DescribedAdoption {
+                        skill_id: inst.skill_id.clone(),
+                        name: inst.name.clone(),
+                        path,
+                    });
+                }
+            } else {
+                let existing = target
+                    .dir
+                    .parent()
+                    .map(|p| p.join(&n).display().to_string())
+                    .unwrap_or_else(|| n.clone());
+                if !collisions.iter().any(|c| {
+                    c.skill_id == inst.skill_id && c.installs_as == leaf && c.existing == existing
+                }) {
+                    collisions.push(DescribedCollision {
+                        skill_id: inst.skill_id.clone(),
+                        name: inst.name.clone(),
+                        existing,
+                        installs_as: leaf.to_owned(),
+                    });
+                }
+            }
         }
     }
 
@@ -1866,21 +1948,20 @@ fn build_describe(
             address: me.address.clone(),
         },
         role: me.role.clone(),
+        principal: me.principal.clone(),
         invited_by: me.invited_by.clone(),
         enrolled_now,
         targets,
         installs,
         preplaced_channels,
         collisions,
+        adoptions,
         freed_name_notes,
         direct_follow_note,
-        all_devices_note: format!(
-            "following is person-scoped: every device enrolled as {} receives this set",
-            me.principal
-        ),
-        reporting_note: "this device reports its applied versions to the workspace's fleet view \
-                         after each update"
+        all_devices_note: "skills you follow arrive on every device you've linked to this \
+                           workspace"
             .to_owned(),
+        standing_note: None,
         agent_notes: Vec::new(),
     })
 }
@@ -1903,6 +1984,12 @@ fn agent_plan_notes(
     let undetected = crate::placement::validate_agent_slugs(ctx, &scope).unwrap_or_default();
     let mut notes = Vec::new();
     for inst in installs {
+        // The install's digest arms the same adopt-in-place choice the apply's plan makes, so the
+        // disclosed dirs never differ from what `--yes` lands.
+        let digest = inst
+            .bundle_digest
+            .as_deref()
+            .and_then(|hex| super::parse_hex32(hex).ok());
         let plan = crate::placement::plan_targets(
             ctx,
             &inst.skill_id,
@@ -1915,6 +2002,7 @@ fn agent_plan_notes(
                 excluded: &[],
             },
             None,
+            digest,
         );
         for target in &plan.targets {
             let where_ = match (&target.kind, &target.agent) {
@@ -1963,18 +2051,16 @@ fn locally_received(ctx: &Ctx<'_>, skill_id: &str) -> Result<bool, ClientError> 
         .is_some_and(|s| !sync_engine::is_never_received(s)))
 }
 
-/// One locally-tracked skill's naming facts — the collision detector's input.
+/// One locally-tracked skill's naming facts — the freed-name detector's input.
 struct TrackedName {
     name: String,
     skill_id: String,
-    /// Its first placement dir, when the map records one.
-    placement: Option<String>,
     /// The workspace its follow entry names, when followed.
     workspace_id: Option<String>,
 }
 
-/// Every tracked skill's `(name, id, placement, workspace)` — read from the sidecar walk + the
-/// follow-state (directly from `follows.json`, so it is correct even under an inert `ctx.follow`).
+/// Every tracked skill's `(name, id, workspace)` — read from the sidecar walk + the follow-state
+/// (directly from `follows.json`, so it is correct even under an inert `ctx.follow`).
 fn tracked_names(ctx: &Ctx<'_>) -> Result<Vec<TrackedName>, ClientError> {
     let followed: HashMap<String, String> = enroll::read_follows(ctx.fs, &ctx.layout)?
         .map(|f| {
@@ -2001,13 +2087,10 @@ fn tracked_names(ctx: &Ctx<'_>) -> Result<Vec<TrackedName>, ClientError> {
         let Some(lock) = doc::read_doc::<Lock>(ctx.fs, &ctx.layout.published(&sid).lock)? else {
             continue;
         };
-        let placement = doc::read_map(ctx.fs, &ctx.layout.published(&sid).map)?
-            .and_then(|m| m.placements.first().cloned());
         out.push(TrackedName {
             name: lock.name,
             workspace_id: followed.get(sid.as_str()).cloned(),
             skill_id: sid.into_string(),
-            placement,
         });
     }
     Ok(out)
@@ -2020,13 +2103,19 @@ fn tracked_names(ctx: &Ctx<'_>) -> Result<Vec<TrackedName>, ClientError> {
 /// Lay the NEVER-RECEIVED sidecar baseline for `skill_id` (mirrors `ops::add`'s staged-then-renamed,
 /// all-or-nothing publish). A fresh `sync` (`observed = applied = 0`, empty `recorded`), an empty
 /// `lock` (the name + zero base/digest, no files), and a `map` carrying the harness placement target (so
-/// the existing apply path can first-install there) but no applied content. Idempotent: a skill dir that
-/// already exists (already baselined, or received) is left untouched — `follow` never clobbers bytes.
+/// the existing apply path can first-install there) but no applied content. `workspace_slug` is the
+/// ADDRESS slug the naming discipline suffixes onto a colliding dirname (`None` = no namespace
+/// attempt — the fallback is the validated id); `incoming_digest` arms the adopt-in-place probe: a
+/// by-name occupant whose bytes digest-equal the incoming version becomes the placement, recorded
+/// as an ADOPTION RESERVATION (`pre_existing_sha`, no bytes moved here). Idempotent: a skill dir
+/// that already exists (already baselined, or received) is left untouched — `follow` never clobbers
+/// bytes.
 pub(crate) fn lay_first_receive_baseline(
     ctx: &Ctx<'_>,
     skill_id: &crate::id::SkillId,
     name: String,
-    workspace_slug: &str,
+    workspace_slug: Option<&str>,
+    incoming_digest: Option<&[u8; 32]>,
 ) -> Result<(), ClientError> {
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
     if ctx.fs.exists(&ctx.layout.skill_dir(skill_id)) {
@@ -2050,16 +2139,18 @@ pub(crate) fn lay_first_receive_baseline(
     // the adapter/registry "callers pass an already-validated id" contract; the display name +
     // workspace slug are UNTRUSTED advisory hints — the naming discipline sanitizes them and falls
     // back to the id, so they can never redirect a placement. A brand-new arrival is UNSCOPED (no
-    // follow entry exists yet; a later `--agent` scope narrows through the scope verbs).
+    // follow entry exists yet; a later `--agent` scope narrows through the scope verbs). The adopt
+    // digest lets a byte-identical by-name occupant BE the placement instead of a namespaced sibling.
     let plan = crate::placement::plan_targets(
         ctx,
         skill_id.as_str(),
         topos_harness::PlacementNaming {
             name: Some(&name),
-            workspace_slug: Some(workspace_slug),
+            workspace_slug,
         },
         crate::placement::AgentScope::default(),
         None,
+        incoming_digest.copied(),
     );
     doc::write_doc(
         ctx.fs,
@@ -2086,11 +2177,15 @@ pub(crate) fn lay_first_receive_baseline(
         harness_layer: None,
         harness_slug: Some(ctx.harness.id().slug().to_owned()),
     };
-    doc::write_map(
-        ctx.fs,
-        &sp.map,
-        &crate::placement::reconcile_map(&baseline, &plan),
-    )?;
+    let mut map = crate::placement::reconcile_map(&baseline, &plan);
+    // Record the ADOPTIONS durably: a planned dir that already exists under the display name with
+    // byte-identical content gets its digest into `pre_existing_sha` — the reservation later plans
+    // reuse (and the sticky prior-bytes record uninstall restores). `materialized_sha` stays None:
+    // no bytes move at baseline time; the consented accept heals the dir in place.
+    if let Some(digest) = incoming_digest {
+        crate::placement::record_adoptions(ctx, &mut map, skill_id.as_str(), &name, digest);
+    }
+    doc::write_map(ctx.fs, &sp.map, &map)?;
     // lock LAST — the commit marker (recovery keeps a dir only when lock.json is present).
     doc::write_doc(
         ctx.fs,

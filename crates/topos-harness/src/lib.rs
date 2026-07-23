@@ -85,46 +85,76 @@ pub fn sanitize_skill_dir(raw: &str) -> Option<String> {
 /// The dir name reserved for the CLI's BUILT-IN skill (whose skill id IS this name). No other
 /// skill may name its placement dir `topos` — even a free dir — so the built-in can never be
 /// shadowed or clobbered by a workspace skill; a colliding display name disambiguates exactly like
-/// an occupied-dir collision (workspace prefix, then the id).
+/// an occupied-dir collision (workspace suffix, then the id).
 pub const RESERVED_SKILL_DIR: &str = "topos";
+
+/// The DEFAULT taken-probe for [`choose_skill_dir`]: lstat-based occupancy. A DANGLING symlink is a
+/// real filesystem entry a placement cannot claim, but `Path::exists()` traverses it and reads
+/// "free" — the ladder must move past it. Callers with richer knowledge (the CLI knows which paths
+/// its sidecar records) compose this into their own probe.
+#[must_use]
+pub fn dir_taken(p: &Path) -> bool {
+    std::fs::symlink_metadata(p).is_ok()
+}
 
 /// Choose the directory a skill's bytes land in under `skills_root` — the ONE naming discipline every
 /// placement target follows (the reference adapter's, factored out so registry-resolved dirs name
 /// identically): prefer the skill's **sanitized display name** (agents invoke a skill by its folder
 /// name); on a collision with a dir that is neither FREE nor this skill's own recorded placement,
-/// disambiguate by the sanitized workspace slug (`<ws>-<name>`); fall back to the validated,
-/// globally-unique `skill_id`. A foreign dir is NEVER a valid target — only a free dir, or one
-/// `is_owned` answers `true` for (the caller's own placement record), is ever chosen, so a placement
-/// can never clobber another skill's (or the user's) directory. The name [`RESERVED_SKILL_DIR`] is
-/// additionally reserved for the built-in skill (the one skill whose ID equals it).
+/// disambiguate by suffixing the sanitized workspace slug (`<name>-<ws>` — the skill stays the
+/// leading, recognizable part); then the validated, globally-unique `skill_id`; then `<skill_id>-<ws>`
+/// when even the id dir is taken. What "taken" means is the CALLER'S probe (`is_taken` — the default
+/// is the lstat-based [`dir_taken`]; the CLI enriches it with its own record knowledge, so a path
+/// reserved elsewhere counts as taken even when absent on disk). A foreign dir is NEVER a valid
+/// target — only a non-taken dir, or one `is_owned` answers `true` for (the caller's own placement
+/// record), is ever chosen, so a placement can never clobber another skill's (or the user's)
+/// directory. The one residual: with EVERY rung taken (astronomically unlikely — four distinct
+/// foreign dirs shadowing one skill), the bare id is still returned; the CLI's materializer refuses
+/// to overwrite an occupied dir it never placed, so even that names but never clobbers. The name
+/// [`RESERVED_SKILL_DIR`] is additionally reserved for the built-in skill (the one skill whose ID
+/// equals it).
 ///
 /// `naming`'s strings are UNTRUSTED and are sanitized to a single safe path component before any join;
-/// `skill_id` must be an already-validated single component (the trait-wide id contract).
+/// `skill_id` must be an already-validated single component (the trait-wide id contract). The crate
+/// stays content-blind: it receives predicates, never bytes or sidecar state.
 #[must_use]
 pub fn choose_skill_dir(
     skills_root: &Path,
     skill_id: &str,
     naming: PlacementNaming<'_>,
+    is_taken: &dyn Fn(&Path) -> bool,
     is_owned: &dyn Fn(&Path) -> bool,
 ) -> PathBuf {
     if let Some(name) = naming.name.and_then(sanitize_skill_dir) {
         let reserved = name == RESERVED_SKILL_DIR && skill_id != RESERVED_SKILL_DIR;
         let by_name = skills_root.join(&name);
-        if !reserved && (!by_name.exists() || is_owned(&by_name)) {
+        if !reserved && (!is_taken(&by_name) || is_owned(&by_name)) {
             return by_name;
         }
         // Collision: a different skill (or the user's own dir) already holds this name. Namespace by
         // the workspace so the two coexist (both parts are already sanitized single components).
         if let Some(ws) = naming.workspace_slug.and_then(sanitize_skill_dir) {
-            let namespaced = skills_root.join(format!("{ws}-{name}"));
-            if !namespaced.exists() || is_owned(&namespaced) {
+            let namespaced = skills_root.join(format!("{name}-{ws}"));
+            if !is_taken(&namespaced) || is_owned(&namespaced) {
                 return namespaced;
             }
         }
     }
-    // Unnamed / unsafe name / every candidate taken → the unique id (a validated single component
-    // that can never collide with another skill).
-    skills_root.join(skill_id)
+    // Unnamed / unsafe name / every named candidate taken → the unique id (a validated single
+    // component that can never collide with another SKILL — but the dir itself may still be
+    // taken by something the record does not own, so it gets the same taken-or-owned check and
+    // one more workspace disambiguation before the bare-id residual above applies).
+    let by_id = skills_root.join(skill_id);
+    if !is_taken(&by_id) || is_owned(&by_id) {
+        return by_id;
+    }
+    if let Some(ws) = naming.workspace_slug.and_then(sanitize_skill_dir) {
+        let namespaced = skills_root.join(format!("{skill_id}-{ws}"));
+        if !is_taken(&namespaced) || is_owned(&namespaced) {
+            return namespaced;
+        }
+    }
+    by_id
 }
 
 /// The narrow filesystem port an adapter needs to read + atomically replace a harness **config** file

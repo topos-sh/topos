@@ -1022,7 +1022,8 @@ pub(crate) fn follow_tty(data: &FollowData, resumed: &[String]) -> String {
 }
 
 /// The generic next-actions for a two-phase DESCRIBE: each argv is the ready-to-exec apply command
-/// (`… --yes`, plus alternatives like the `--prefix-dirname` variant).
+/// (`… --yes`). An empty argv list yields an empty next-actions list (a standing follow's
+/// nothing-to-apply describe).
 pub(crate) fn describe_next_actions(argvs: Vec<Vec<String>>) -> Vec<NextAction> {
     argvs
         .into_iter()
@@ -1060,7 +1061,10 @@ fn shell_quote(arg: &str) -> String {
 }
 
 /// The follow DESCRIBE's TTY: the workspace story, the install list with digests + via, the
-/// collision choice, the standing disclosures, and the `--yes` argvs. Nothing has changed yet.
+/// dirname outcomes (adoptions; auto-namespaced collisions), the standing disclosures, and the
+/// `--yes` argv. Nothing has changed yet — except an enrollment, which is disclosed as a fact
+/// (the credential/link persisted and the trigger armed), never papered over with "nothing has
+/// changed".
 pub(crate) fn follow_describe_tty(
     d: &crate::ops::FollowDescribe,
     next_argvs: &[Vec<String>],
@@ -1070,11 +1074,19 @@ pub(crate) fn follow_describe_tty(
         d.workspace.display_name, d.workspace.name, d.workspace.address
     );
     if d.enrolled_now {
-        s.push_str("\nEnrolled this device (identity only — nothing is installed yet).");
-    }
-    s.push_str(&format!("\nYour role: {}", d.role));
-    if let Some(by) = &d.invited_by {
-        s.push_str(&format!(" — invited by {by}"));
+        s.push_str(&format!(
+            "\nEnrolled this device as {} — role: {}",
+            d.principal, d.role
+        ));
+        if let Some(by) = &d.invited_by {
+            s.push_str(&format!(" — invited by {by}"));
+        }
+        s.push('.');
+    } else {
+        s.push_str(&format!("\nYour role: {}", d.role));
+        if let Some(by) = &d.invited_by {
+            s.push_str(&format!(" — invited by {by}"));
+        }
     }
     if !d.preplaced_channels.is_empty() {
         s.push_str(&format!(
@@ -1087,6 +1099,15 @@ pub(crate) fn follow_describe_tty(
         .iter()
         .map(|t| format!("{} {}", t.kind, t.name))
         .collect();
+    if let Some(note) = &d.standing_note {
+        // The standing no-op: one honest line carrying the whole fact (the all-devices constant
+        // is folded into the note), no install lines, no apply block.
+        s.push_str(&format!(
+            "\nFollowing: {} — {note}.",
+            target_list.join(", ")
+        ));
+        return s;
+    }
     s.push_str(&format!("\nFollowing: {}", target_list.join(", ")));
     if d.installs.is_empty() {
         s.push_str("\nNothing new would install on this device.");
@@ -1116,26 +1137,41 @@ pub(crate) fn follow_describe_tty(
     for note in &d.freed_name_notes {
         s.push_str(&format!("\nnote: {note}"));
     }
+    if !d.adoptions.is_empty() {
+        s.push_str("\nAdopts in place:");
+        for a in &d.adoptions {
+            s.push_str(&format!(
+                "\n  {} — adopts your existing identical copy at {}",
+                a.name, a.path
+            ));
+        }
+    }
     if !d.collisions.is_empty() {
-        s.push_str("\nName collisions (declined by default):");
+        s.push_str("\nName collisions:");
         for c in &d.collisions {
             s.push_str(&format!(
-                "\n  {} — a different skill already lives at {}; `--prefix-dirname` installs it \
-                 as {}",
-                c.name, c.existing, c.prefixed_dirname
+                "\n  {} — a different skill already lives at {}; installs as {}",
+                c.name, c.existing, c.installs_as
             ));
         }
     }
     s.push_str(&format!("\n{}", d.all_devices_note));
-    s.push_str(&format!("\n{}", d.reporting_note));
-    s.push_str("\nNothing has changed yet — apply with:");
-    for argv in next_argvs {
-        s.push_str(&format!("\n  {}", argv_line(argv)));
+    if !next_argvs.is_empty() {
+        if d.enrolled_now {
+            // The enrollment DID persist (credential/link + the armed trigger) — never claim
+            // nothing has changed.
+            s.push_str("\nApply the follow with:");
+        } else {
+            s.push_str("\nNothing has changed yet — apply with:");
+        }
+        for argv in next_argvs {
+            s.push_str(&format!("\n  {}", argv_line(argv)));
+        }
     }
     s
 }
 
-/// The follow APPLY's TTY: what was subscribed, what landed, what was declined.
+/// The follow APPLY's TTY: what was subscribed and what landed.
 pub(crate) fn follow_applied_tty(a: &crate::ops::FollowApplied) -> String {
     let mut s = format!("Following in {} ({}).", a.workspace_name, a.workspace_id);
     if a.enrolled_now {
@@ -1155,13 +1191,6 @@ pub(crate) fn follow_applied_tty(a: &crate::ops::FollowApplied) -> String {
             let digest = i.bundle_digest.as_deref().map(short).unwrap_or("?");
             s.push_str(&format!("\n  {}  @{digest}", i.name));
         }
-    }
-    for c in &a.declined {
-        s.push_str(&format!(
-            "\nDeclined {} (name collision with {}); re-run with `--prefix-dirname` to install it \
-             as {}",
-            c.name, c.existing, c.prefixed_dirname
-        ));
     }
     for w in &a.warnings {
         s.push_str(&format!("\nwarning: {w}"));
@@ -1230,7 +1259,6 @@ pub(crate) fn link_describe_tty(d: &crate::ops::LinkDescribe, yes_argv: &[String
         },
     }
     s.push_str(&format!("\n{}", d.all_devices_note));
-    s.push_str(&format!("\n{}", d.reporting_note));
     s.push_str(&format!(
         "\nNothing has changed yet — apply with:\n  {}",
         argv_line(yes_argv)

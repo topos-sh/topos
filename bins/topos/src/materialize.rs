@@ -49,6 +49,9 @@ use crate::sidecar::SkillPaths;
 /// The pre-overwrite snapshot seam's shape (see [`MaterializeReq::snapshot`]).
 pub(crate) type SnapshotFn<'a> = &'a dyn Fn(&ScannedBundle) -> Result<(), ClientError>;
 
+/// The consented-takeover revalidation's shape (see [`MaterializeReq::takeover`]).
+pub(crate) type TakeoverFn<'a> = &'a dyn Fn(&Path) -> bool;
+
 /// Everything the materializer needs for one apply. The engine has already fetched + `render_verified`'d
 /// `bundle` (so the bytes are authenticated), reconciled `next_map`'s placement set, and computed the
 /// complete `next_lock` + `next_sync` target.
@@ -75,6 +78,15 @@ pub(crate) struct MaterializeReq<'a> {
     /// the never-a-lost-byte rail. `None` only where the caller has already snapshotted every copy
     /// (reset / go-back / the merge, whose snapshot-on-touch runs first).
     pub snapshot: Option<SnapshotFn<'a>>,
+    /// Consent to OVERWRITE an occupied target the record never materialized (snapshot-first) —
+    /// the one disclosed takeover path: the built-in's consented `follow topos --yes` adoption of a
+    /// marked downloaded copy. The predicate RE-PROVES the consent against the LIVE dir immediately
+    /// before the overwrite (the built-in re-checks the downloaded-copy marker), so a dir that
+    /// changed since the describe fails closed. Everywhere else `None`: a first install into an
+    /// occupied dir whose bytes differ from the target REFUSES (the never-clobber backstop) —
+    /// including an adopted dir whose occupant raced to change (the consent was for an IDENTICAL
+    /// copy).
+    pub takeover: Option<TakeoverFn<'a>>,
 }
 
 /// What the materializer actually did (so the engine can log / record the effective capability).
@@ -145,10 +157,12 @@ pub(crate) fn mirror_first_placement(map: &mut PlacementMap) {
 ///
 /// # Errors
 /// [`ClientError::PlacementUnsupported`] if a placement is a non-directory, an unresolvable symlink,
-/// an unscannable occupied dir, or on a filesystem with no safe swap; otherwise the underlying
-/// [`FsOps`] failure (which the crash gate injects). On any error `applied` has NOT advanced (the
-/// sync write is the last, all-or-nothing step); already-landed placements are recorded in the map,
-/// so a re-run converges without a second swap of those dirs.
+/// an unscannable occupied dir, an occupied FIRST-install target holding non-target bytes (the
+/// never-clobber backstop, unless [`MaterializeReq::takeover`] re-proves consent), or on a filesystem with
+/// no safe swap; otherwise the underlying [`FsOps`] failure (which the crash gate injects). On any
+/// error `applied` has NOT advanced (the sync write is the last, all-or-nothing step);
+/// already-landed placements are recorded in the map, so a re-run converges without a second swap
+/// of those dirs.
 pub(crate) fn materialize(
     fs: &dyn FsOps,
     req: &MaterializeReq<'_>,
@@ -184,7 +198,22 @@ pub(crate) fn materialize(
                         doc::write_map(fs, &sp_map(req), &map)?;
                         continue;
                     }
+                    // The never-clobber backstop: a target the record NEVER materialized is not
+                    // ours to replace — a first install must never overwrite an occupant (the
+                    // naming discipline avoids occupied dirs, and an adopted dir whose bytes raced
+                    // to change since the describe fails closed here: the consent was for an
+                    // IDENTICAL copy; the next describe re-probes and re-namespaces). The one
+                    // exception is the caller's disclosed takeover, re-proven against the LIVE dir.
                     let recorded = map.placement_state[i].materialized_sha.as_deref();
+                    if recorded.is_none() && !req.takeover.is_some_and(|t| t(&target.dir)) {
+                        return Err(ClientError::PlacementUnsupported {
+                            reason: format!(
+                                "the placement {} is occupied by content topos never placed; \
+                                 refusing to overwrite it",
+                                target.dir.display()
+                            ),
+                        });
+                    }
                     if recorded != Some(on_disk.as_str())
                         && let Some(snapshot) = req.snapshot
                     {
@@ -700,6 +729,7 @@ mod tests {
             next_sync,
             sp,
             snapshot: None,
+            takeover: None,
         }
     }
 
@@ -781,6 +811,98 @@ mod tests {
         );
         // No old-bytes staging litter left behind.
         assert!(!staging_path(&parent.0, "topos_upd").exists());
+    }
+
+    #[test]
+    fn a_first_install_into_an_occupied_dir_refuses_and_writes_nothing() {
+        let parent = Scratch::new("occ");
+        let home = Scratch::new("occ-home");
+        let placement = parent.0.join("demo");
+        install_old(&placement); // an occupant topos never placed
+        let bundle = rendered(NEW);
+        let lock = lock_of("topos_occ", NEW, &"1".repeat(64));
+        let sync = sync_at(1, 1, &"1".repeat(64), &digest_hex(NEW));
+        let mut prior = prior_map(&[&placement], &"0".repeat(64), SwapCapability::Unsupported);
+        prior.placement_state[0].materialized_sha = None; // this apply would be the FIRST install
+        let d = docs_under(&home.0, "topos_occ");
+
+        let err = materialize(
+            &RealFs,
+            &req("topos_occ", &[0], &bundle, &prior, &lock, &sync, &d.sp),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ClientError::PlacementUnsupported { .. }));
+        assert!(
+            err.to_string().contains(&placement.display().to_string()),
+            "the refusal names the dir: {err}"
+        );
+        // The occupant is byte-untouched and no doc advanced (`sync.json` was never written).
+        assert_eq!(dir_snapshot(&placement), Some(expected(OLD)));
+        assert!(!d.sp.sync.exists(), "nothing committed");
+    }
+
+    #[test]
+    fn a_takeover_predicate_that_answers_false_still_refuses() {
+        // The takeover is a per-target REVALIDATION against the live dir, not a blanket consent:
+        // a predicate that cannot re-prove the disclosed condition (e.g. the built-in's downloaded
+        // -copy marker vanished since the describe) fails closed exactly like no takeover at all.
+        let parent = Scratch::new("occ-tk");
+        let home = Scratch::new("occ-tk-home");
+        let placement = parent.0.join("demo");
+        install_old(&placement);
+        let bundle = rendered(NEW);
+        let lock = lock_of("topos_occt", NEW, &"1".repeat(64));
+        let sync = sync_at(1, 1, &"1".repeat(64), &digest_hex(NEW));
+        let mut prior = prior_map(&[&placement], &"0".repeat(64), SwapCapability::Unsupported);
+        prior.placement_state[0].materialized_sha = None;
+        let d = docs_under(&home.0, "topos_occt");
+
+        let deny: &dyn Fn(&Path) -> bool = &|_| false;
+        let req = MaterializeReq {
+            takeover: Some(deny),
+            ..req("topos_occt", &[0], &bundle, &prior, &lock, &sync, &d.sp)
+        };
+        let err = materialize(&RealFs, &req).unwrap_err();
+        assert!(matches!(err, ClientError::PlacementUnsupported { .. }));
+        assert_eq!(dir_snapshot(&placement), Some(expected(OLD)));
+    }
+
+    #[test]
+    fn a_first_install_over_target_equal_bytes_still_heals_in_place() {
+        let parent = Scratch::new("occ-heal");
+        let home = Scratch::new("occ-heal-home");
+        let placement = parent.0.join("demo");
+        // The occupant already IS the target (an adopted identical copy): heal, never refuse.
+        std::fs::create_dir_all(&placement).unwrap();
+        for (p, m, b) in NEW {
+            let dest = placement.join(p);
+            std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+            std::fs::write(&dest, b).unwrap();
+            if *m == FileMode::Executable {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let bundle = rendered(NEW);
+        let lock = lock_of("topos_occh", NEW, &"1".repeat(64));
+        let g = 1;
+        let sync = sync_at(g, g, &"1".repeat(64), &digest_hex(NEW));
+        let mut prior = prior_map(&[&placement], &"0".repeat(64), SwapCapability::Unsupported);
+        prior.placement_state[0].materialized_sha = None;
+        let d = docs_under(&home.0, "topos_occh");
+
+        materialize(
+            &RealFs,
+            &req("topos_occh", &[0], &bundle, &prior, &lock, &sync, &d.sp),
+        )
+        .unwrap();
+        assert_eq!(dir_snapshot(&placement), Some(expected(NEW)));
+        let m = crate::doc::read_map(&RealFs, &d.sp.map).unwrap().unwrap();
+        assert_eq!(
+            m.placement_state[0].materialized_sha.as_deref(),
+            Some(digest_hex(NEW).as_str()),
+            "the heal advanced the record with no swap"
+        );
     }
 
     #[test]

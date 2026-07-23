@@ -360,6 +360,7 @@ fn ensure_inner(
             excluded: &state.excluded_agents,
         },
         Some(&map),
+        None,
     );
     let next = placement::reconcile_map(&map, &plan);
     let managed = placement::managed_indices(&next, &plan);
@@ -425,6 +426,13 @@ fn ensure_inner(
             snapshot: Some(&|s: &crate::scan::ScannedBundle| {
                 sync_engine::snapshot_draft(ctx, &sp, lock_ref, s).map(|_| ())
             }),
+            // The consented `follow topos --yes` restore takes over the marked downloaded copy —
+            // an occupied, never-materialized dir the target filter admitted only under
+            // AdoptMarked. The predicate re-proves the marker against the LIVE dir immediately
+            // before the overwrite, so a copy that lost it since the describe fails closed. The
+            // silent sweep (Freeze) never targets such a dir and passes no takeover.
+            takeover: (posture == ForeignPosture::AdoptMarked)
+                .then_some(&is_downloaded_copy as &dyn Fn(&std::path::Path) -> bool),
         },
     )?;
     Ok(BuiltinSync { changed: true })
@@ -565,6 +573,7 @@ pub(crate) fn follow_builtin(
             excluded: &scope_excluded,
         },
         prior.as_ref(),
+        None,
     );
     // The planned dirs a consented `--yes` will ADOPT: occupied, never materialized by the
     // built-in (the record's Foreign posture), and carrying the downloaded copy's marker.

@@ -480,7 +480,6 @@ fn opts(yes: bool) -> ops::FollowOpts {
         manual: false,
         workspace: None,
         yes,
-        prefix_dirname: false,
         channels: Vec::new(),
         skills: Vec::new(),
         agents: Vec::new(),

@@ -168,13 +168,10 @@ fn e2e_real_follow_enrolls_describes_and_lands_the_first_skill() {
     );
     assert_eq!(install.via_channels, vec!["everyone".to_owned()]);
     assert!(!install.via_direct, "it arrives via the everyone channel");
-    assert!(
-        !describe.all_devices_note.is_empty(),
-        "the person-scoped disclosure"
-    );
-    assert!(
-        !describe.reporting_note.is_empty(),
-        "the fleet-reporting disclosure"
+    assert_eq!(
+        describe.all_devices_note,
+        "skills you follow arrive on every device you've linked to this workspace",
+        "the person-scoped disclosure is link-accurate (and the fleet-reporting line is gone)"
     );
 
     // Call 3 — `topos follow <address> --yes`: the reconcile lands `everyone`'s set this invocation.

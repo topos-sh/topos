@@ -85,9 +85,6 @@ pub(crate) enum Command {
         /// Apply the described subscription (the one-shot consent). Bare = describe only.
         #[arg(long)]
         yes: bool,
-        /// Install a dirname-colliding skill under `<workspace>.<name>` instead of declining it.
-        #[arg(long)]
-        prefix_dirname: bool,
         /// Adopt followed skills in confirm-each mode (a one-tap accept per new version) instead of auto.
         #[arg(long)]
         manual: bool,
@@ -608,23 +605,16 @@ mod tests {
     }
 
     #[test]
-    fn follow_takes_the_two_phase_and_collision_flags() {
-        let out = Cli::try_parse_from([
-            "topos",
-            "follow",
-            "acme/channels/eng",
-            "--prefix-dirname",
-            "--yes",
-        ])
-        .unwrap();
+    fn follow_takes_the_two_phase_flag_and_the_collision_flag_is_retired() {
+        let out = Cli::try_parse_from(["topos", "follow", "acme/channels/eng", "--yes"]).unwrap();
         assert!(matches!(
             out.command,
-            Some(Command::Follow {
-                yes: true,
-                prefix_dirname: true,
-                ..
-            })
+            Some(Command::Follow { yes: true, .. })
         ));
+        // Colliding dirnames auto-namespace now — the old opt-in flag is gone.
+        let removed = Cli::try_parse_from(["topos", "follow", "acme", "--prefix-dirname", "--yes"])
+            .unwrap_err();
+        assert_eq!(removed.kind(), ErrorKind::UnknownArgument);
     }
 
     #[test]

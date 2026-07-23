@@ -62,7 +62,13 @@ impl HarnessAdapter for StubClaude {
         _d: Option<&DiscoveredPlacement>,
     ) -> PlacementTarget {
         PlacementTarget {
-            dir: topos_harness::choose_skill_dir(&self.skills, skill_id, naming, &|_| false),
+            dir: topos_harness::choose_skill_dir(
+                &self.skills,
+                skill_id,
+                naming,
+                &topos_harness::dir_taken,
+                &|_| false,
+            ),
         }
     }
     fn currency_kind(&self) -> CurrencyKind {
@@ -215,6 +221,7 @@ fn unscoped_plan_is_shared_dir_first_plus_uncovered_natives() {
         },
         AgentScope::default(),
         None,
+        None,
     );
 
     // ONE shared copy (cline + openclaw are covered) + native copies for cursor and codex (probed
@@ -276,6 +283,7 @@ fn scoped_plan_is_native_only_never_the_shared_dir() {
         },
         scoped(&include, &[]),
         None,
+        None,
     );
     assert!(plan.targets.iter().all(|t| t.kind == PlacementKind::Native));
     assert_eq!(plan.targets.len(), 1);
@@ -301,6 +309,7 @@ fn scoped_plan_is_native_only_never_the_shared_dir() {
         },
         scoped(&[], &excluded),
         None,
+        None,
     );
     assert!(plan.targets.iter().all(|t| t.kind == PlacementKind::Native));
     assert_eq!(
@@ -324,8 +333,148 @@ fn scoped_plan_is_native_only_never_the_shared_dir() {
         },
         scoped(&include, &[]),
         None,
+        None,
     );
     assert!(plan.targets.is_empty(), "{:?}", plan.targets);
+}
+
+#[test]
+fn a_stale_classic_adoption_reservation_rechooses_a_fresh_dir() {
+    // The no-detection path validates adoption reservations exactly like the detection path: a
+    // recorded never-materialized placement whose occupant CHANGED since the adoption is dropped
+    // from the plan and its key re-chooses fresh — returned verbatim it would wedge every apply on
+    // the never-clobber refusal.
+    let rig = Rig::new("classic-stale");
+    let occupied = rig
+        .agent_home
+        .0
+        .join(".claude")
+        .join("skills")
+        .join("deploy");
+    std::fs::create_dir_all(&occupied).unwrap();
+    std::fs::write(occupied.join("SKILL.md"), "# someone else's deploy\n").unwrap();
+    let mk_prior = |pre_existing: &str| topos_types::persisted::PlacementMap {
+        schema_version: topos_types::PLACEMENT_MAP_SCHEMA_VERSION,
+        placements: vec![occupied.to_string_lossy().into_owned()],
+        applied_commit: "0".repeat(64),
+        materialized_sha: "0".repeat(64),
+        pre_existing_sha: None,
+        swap_capability: topos_types::persisted::SwapCapability::Unsupported,
+        placement_state: vec![topos_types::persisted::PlacementState {
+            kind: PlacementKind::Native,
+            agent: Some("claude-code".to_owned()),
+            materialized_sha: None,
+            pre_existing_sha: Some(pre_existing.to_owned()),
+            swap_capability: topos_types::persisted::SwapCapability::Unsupported,
+        }],
+        harness: None,
+        harness_layer: None,
+        harness_slug: None,
+    };
+    let inert_f = InertFollow;
+    let inert_p = InertPlane;
+    let ctx = rig.ctx_no_roots(&inert_f, &inert_p);
+    let naming = topos_harness::PlacementNaming {
+        name: Some("deploy"),
+        workspace_slug: Some("acme"),
+    };
+
+    // STALE: the recorded adoption digest no longer matches the occupant → re-choose (the by-name
+    // dir is occupied, so the fresh choice is the workspace-suffixed sibling).
+    let stale = mk_prior(&"a".repeat(64));
+    let plan = placement::plan_targets(
+        &ctx,
+        "topos_stale",
+        naming,
+        AgentScope::default(),
+        Some(&stale),
+        None,
+    );
+    assert_eq!(plan.targets.len(), 1);
+    assert_eq!(
+        plan.targets[0].dir,
+        rig.agent_home
+            .0
+            .join(".claude")
+            .join("skills")
+            .join("deploy-acme"),
+        "the stale reservation is not reused"
+    );
+
+    // VALID: a reservation whose occupant still matches its recorded digest is kept verbatim.
+    let digest = crate::scan::scan(&occupied).unwrap().bundle_digest;
+    let valid = mk_prior(&topos_core::digest::to_hex(&digest));
+    let plan = placement::plan_targets(
+        &ctx,
+        "topos_stale",
+        naming,
+        AgentScope::default(),
+        Some(&valid),
+        None,
+    );
+    assert_eq!(plan.targets.len(), 1);
+    assert_eq!(plan.targets[0].dir, occupied);
+}
+
+#[test]
+fn a_scope_replan_adopts_a_byte_identical_native_occupant() {
+    // FIX territory: scoping to an agent whose native dir ALREADY holds a byte-identical copy of
+    // the landed version adopts that dir — never a namespaced (or id-named) duplicate — and the
+    // adoption heals to a materialized placement so later updates ride the normal rail.
+    let rig = Rig::new("scope-adopt");
+    let sid = rig.adopt_followed("deploy");
+    rig.detect(".cursor");
+    let cursor = rig
+        .agent_home
+        .0
+        .join(".cursor")
+        .join("skills")
+        .join("deploy");
+    std::fs::create_dir_all(&cursor).unwrap();
+    std::fs::write(cursor.join("SKILL.md"), "# deploy\nbody\n").unwrap(); // byte-identical
+
+    let follow = rig.follow_seam();
+    let inert_p = InertPlane;
+    let ctx = rig.ctx(&follow, &inert_p);
+    let out = ops::set_scope(
+        &ctx,
+        &["deploy".to_owned()],
+        &["cursor".to_owned()],
+        None,
+        true,
+    )
+    .unwrap();
+    assert!(matches!(out, ops::AgentScopeOutcome::Applied(_)));
+
+    let map = rig.read_map(&sid);
+    let i = map
+        .placements
+        .iter()
+        .position(|p| Path::new(p) == cursor)
+        .expect("the identical occupant IS the placement");
+    let skills_root = rig.agent_home.0.join(".cursor").join("skills");
+    let entries: Vec<String> = std::fs::read_dir(&skills_root)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        entries,
+        vec!["deploy".to_owned()],
+        "no namespaced or id-named duplicate lands beside the adopted copy"
+    );
+    // Healed to materialized: the record advanced with no swap, the occupant byte-untouched.
+    let lock: topos_types::persisted::Lock =
+        doc::read_doc(&rig.fs, &rig.layout().published(&sid).lock)
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        map.placement_state[i].materialized_sha.as_deref(),
+        Some(lock.bundle_digest.as_str())
+    );
+    assert_eq!(
+        std::fs::read_to_string(cursor.join("SKILL.md")).unwrap(),
+        "# deploy\nbody\n"
+    );
 }
 
 #[test]
@@ -346,6 +495,7 @@ fn no_detection_keeps_the_classic_single_placement() {
                 workspace_slug: None,
             },
             AgentScope::default(),
+            None,
             None,
         );
         assert_eq!(plan.targets.len(), 1);

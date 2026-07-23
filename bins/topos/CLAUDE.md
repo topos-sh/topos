@@ -151,9 +151,11 @@ renderer over the SAME typed outcomes (one value, two presentations).
   The SUBSCRIBE is two-phase: bare = a DESCRIBE (`GET /me` + `/channels` + the catalog + `/delivery`
   → workspace/role/invited-by, the install list — SCOPED to the named targets: a WORKSPACE target
   lists the whole delivered set, a channel/skill target only what it entitles — with digests +
-  `via` attribution, the all-devices +
-  fleet-reporting disclosures, pre-placed channels, dirname collisions with the `--prefix-dirname`
-  `<ws>.<name>` choice, freed-name new-identity notes, the direct-follow explanation) + `next_actions`
+  `via` attribution, the all-devices disclosure (skills you follow arrive on every device you've
+  linked to this workspace), pre-placed channels, adopt-in-place notes (a byte-identical occupant of
+  the planned dir is adopted where it sits, never a second copy) and auto-namespaced dirname
+  collisions (a different skill already holds the name → installs as `<skill>-<workspace>`),
+  freed-name new-identity notes, the direct-follow explanation) + `next_actions`
   carrying the paste-ready `--yes` argv (NOTHING mutates before `--yes` except the enrollment itself
   — identity, reversible, disclosed as `enrolled_now`); `--yes` = the row ops (`channel_join` /
   `follow_skill`) then the delivery-driven reconcile landing the DESCRIBED set THIS invocation
@@ -161,8 +163,8 @@ renderer over the SAME typed outcomes (one value, two presentations).
   restricts INSTALLATION to exactly the ids the describe disclosed, so a waiting arrival outside
   the named targets is never swept in under an unrelated `--yes` — it stays an individually
   consentable offer, while already-followed skills still UPDATE under their standing follow mode,
-  as on any sweep; collisions decline
-  by default or install prefixed), then the fleet report. The transports are built per-base-URL
+  as on any sweep; a dirname collision auto-namespaces to `<skill>-<workspace>` and a byte-identical
+  occupant is adopted in place), then the fleet report. The transports are built per-base-URL
   behind injectable factories, so the whole flow is tested over fakes with no HTTP.
 - **The `invite` verb** (`ops/invite`, `plane_http::UreqDeviceClient`) — the two-phase roster write
   (`POST /v1/workspaces/{ws}/invitations` under the ONE device Bearer credential; the server resolves
@@ -180,8 +182,8 @@ renderer over the SAME typed outcomes (one value, two presentations).
   least one detected harness is covered by it (coverage carries provenance — live-probed vs
   vendor-docs vs unknown-treated-as-false), plus a native user-dir copy per detected-but-uncovered
   harness (the active adapter keeps its richer `placement_for`; the rest resolve through the
-  registry's user skills root with the ONE shared naming discipline — sanitize → workspace-prefix on
-  collision → the id; never a foreign dir). A SCOPED skill (`--agent` include-list and/or per-agent
+  registry's user skills root with the ONE shared naming discipline — sanitize → workspace-suffix on
+  collision (`<skill>-<workspace>`) → the id; never a foreign dir). A SCOPED skill (`--agent` include-list and/or per-agent
   exclusions) places into exactly the scoped-and-not-excluded detected harnesses' native dirs —
   never the shared dir. No detection at all (or no `$HOME`) keeps the classic active-adapter single
   placement; an adopted agent-less dir (the author's working copy) is ALWAYS managed. Targets are
@@ -407,7 +409,7 @@ are asserted byte-equal in tests.
   hook never fails a session start for a network blip; it still stamps, so a dead plane is not
   re-dialed every session event) while a genuinely local failure still exits nonzero. `follow
   --yes` reuses the same reconcile with explicit `ReconcileOpts` (batch-accepted first receives
-  restricted to the describe's disclosed ids, declined/renamed collisions, one workspace, no ack)
+  restricted to the describe's disclosed ids, one workspace, no ack)
   and no gate.
 
 - **The BUILT-IN `topos` skill** (`ops/builtin`, `cli_ref`, the repo-top-level `skills/topos/`

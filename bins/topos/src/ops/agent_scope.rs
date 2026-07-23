@@ -382,6 +382,7 @@ fn plan_item(
         },
         scope,
         Some(map),
+        adopt_digest_for(lock),
     );
     let (cleaned_idx, _) = partition_leaving(ctx, map, &plan, scope);
     let cleaned: Vec<String> = cleaned_idx
@@ -485,6 +486,9 @@ pub(crate) fn apply_scope_change(
     let map = sync_engine::read_map_required(ctx, &sp)?;
     let ws = super::followed_workspace(ctx, sid.as_str());
     let slug = placement::workspace_slug(ctx, ws.as_deref());
+    // A scoped re-plan runs AFTER the first receive landed, so a native dir already holding a
+    // byte-identical copy of the placed version is ADOPTED, never duplicated under a namespaced
+    // sibling.
     let plan = placement::plan_targets(
         ctx,
         sid.as_str(),
@@ -494,6 +498,7 @@ pub(crate) fn apply_scope_change(
         },
         scope,
         Some(&map),
+        adopt_digest_for(lock),
     );
     let (cleaned_idx, _) = partition_leaving(ctx, &map, &plan, scope);
 
@@ -530,8 +535,24 @@ pub(crate) fn apply_scope_change(
         }
     }
     let mut next = placement::reconcile_map(&next, &plan);
+    // The durable adoption record for any occupied-but-identical target the plan just chose: the
+    // digest lands in `pre_existing_sha` (later plans reuse the reservation; the sticky prior-bytes
+    // record rides it), and the materialize below HEALS the dir to a materialized placement.
+    if let Some(digest) = super::parse_hex32(&lock.bundle_digest)
+        .ok()
+        .filter(|d| *d != [0u8; 32])
+    {
+        placement::record_adoptions(ctx, &mut next, sid.as_str(), &lock.name, &digest);
+    }
     materialize_missing(ctx, &sp, lock, &mut next, &plan)?;
     Ok(())
+}
+
+/// The adopt-in-place digest for a skill's LANDED current (`None` on a never-received baseline —
+/// its all-zero digest names no bytes, so there is nothing an occupant could equal).
+fn adopt_digest_for(lock: &Lock) -> Option<[u8; 32]> {
+    let digest = super::parse_hex32(&lock.bundle_digest).ok()?;
+    (digest != [0u8; 32]).then_some(digest)
 }
 
 /// Land the placed version's bytes into every planned-but-empty target from the LOCAL store, and
@@ -553,7 +574,18 @@ fn materialize_missing(
     let scans = placement::scan_placements(ctx, next)?;
     let missing: Vec<usize> = managed
         .into_iter()
-        .filter(|&i| matches!(scans[i].status, ScanStatus::Absent))
+        .filter(|&i| match &scans[i].status {
+            ScanStatus::Absent => true,
+            // An ADOPTED occupied dir — recorded never-materialized with the placed version's
+            // digest as its adoption record — rides the same call: the materializer's pre-swap
+            // scan proves the bytes equal the target and HEALS it in place (no swap), advancing
+            // the record to materialized. A raced occupant fails closed there instead.
+            ScanStatus::Foreign => {
+                next.placement_state[i].pre_existing_sha.as_deref()
+                    == Some(lock.bundle_digest.as_str())
+            }
+            _ => false,
+        })
         .collect();
     if missing.is_empty() {
         return doc::write_map(ctx.fs, &sp.map, next);
@@ -582,6 +614,7 @@ fn materialize_missing(
             snapshot: Some(&|s: &crate::scan::ScannedBundle| {
                 sync_engine::snapshot_draft(ctx, sp, lock, s).map(|_| ())
             }),
+            takeover: None,
         },
     )?;
     Ok(())
