@@ -62,9 +62,10 @@ export const FUTURE_RESERVED_SEGMENTS: readonly string[] = [
   "status",
   "support",
   "terms",
-  // Also the CLI's built-in skill's reserved name — a workspace named `topos` would collide with
-  // the product name everywhere a bare `topos` token is resolved.
-  "topos",
+  // `topos` is deliberately NOT here: the built-in skill is never a workspace resource (it is
+  // binary-embedded and served under /.well-known/agent-skills/), the CLI resolves a bare
+  // `topos` token to the built-in BEFORE the address grammar, and the catalog + channel mints
+  // keep the name reserved where a real collision could occur — so the workspace slug is free.
   "webhooks",
   "www",
 ];
