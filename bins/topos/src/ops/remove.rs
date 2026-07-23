@@ -184,6 +184,39 @@ pub(crate) fn remove(
     }
 
     // ---- APPLY (immediate for followed clean skills; `--yes` for the gated shapes) ----
+    // The UNGATED path re-checks the loss-guard at the apply boundary: an edit landing between
+    // the classification above and this point must not slip through the gate it would have held.
+    // (Byte loss is impossible either way — `snapshot_and_clean` snapshots any draft under the
+    // skill lock before a dir goes — this recheck is for the CONSENT, not the bytes.)
+    if !yes {
+        for (removal, item) in removals.iter().zip(items.iter_mut()) {
+            if let Removal::Followed { skill_id, name, .. } = removal
+                && !matches!(draft_state(ctx, skill_id), DraftState::Clean)
+            {
+                item.note = Some(format!(
+                    "local edits appeared while removing — removing takes the draft out of every \
+                     agent dir on this device (a snapshot is kept in the sidecar). Share it first \
+                     with `topos publish {name}`, inspect it with `topos diff {name}`, or apply \
+                     with --yes"
+                ));
+                let mut yes_argv = vec!["topos".to_owned(), "remove".to_owned()];
+                yes_argv.extend(targets.iter().cloned());
+                for a in agents {
+                    yes_argv.push("-a".to_owned());
+                    yes_argv.push(a.clone());
+                }
+                yes_argv.push("--yes".to_owned());
+                return Ok(RemoveOutcome::Described {
+                    data: RemoveData {
+                        items,
+                        applied: false,
+                        undo: Vec::new(),
+                    },
+                    yes_argv,
+                });
+            }
+        }
+    }
     let needs_server = removals
         .iter()
         .any(|r| matches!(r, Removal::Followed { .. }));
@@ -238,19 +271,33 @@ pub(crate) fn remove(
         }
     }
     // The literal inverse for what is undoable: `follow` re-attaches the excluded followed
-    // skills (a permanent delete has no inverse — its describe said so).
-    let followed: Vec<&str> = removals
+    // skills (a permanent delete has no inverse — its describe said so). Targets ride QUALIFIED
+    // (`<ws>/skills/<name>`) when the address slug is known offline — a name followed in a second
+    // workspace would make the bare spelling an ambiguous refusal instead of the promised undo.
+    // A batch spanning workspaces offers NO undo: `follow` takes one workspace per invocation,
+    // and a command that cannot run is worse than none.
+    let followed: Vec<(&str, &str)> = removals
         .iter()
         .filter_map(|r| match r {
-            Removal::Followed { name, .. } => Some(name.as_str()),
+            Removal::Followed {
+                workspace_id, name, ..
+            } => Some((workspace_id.as_str(), name.as_str())),
             _ => None,
         })
         .collect();
-    let undo: Vec<String> = if followed.is_empty() {
+    let one_workspace = followed
+        .first()
+        .is_some_and(|(ws, _)| followed.iter().all(|(w, _)| w == ws));
+    let undo: Vec<String> = if !one_workspace {
         Vec::new()
     } else {
         let mut argv = vec!["topos".to_owned(), "follow".to_owned()];
-        argv.extend(followed.iter().map(|n| (*n).to_owned()));
+        for (ws, name) in &followed {
+            argv.push(match crate::placement::workspace_slug(ctx, Some(ws)) {
+                Some(slug) => format!("{slug}/skills/{name}"),
+                None => (*name).to_owned(),
+            });
+        }
         argv
     };
     Ok(RemoveOutcome::Applied(RemoveData {

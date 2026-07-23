@@ -751,9 +751,12 @@ fn exclude_agents_applies_immediately_cleans_that_agents_dir_and_records_the_exc
     };
     assert!(data.applied);
     assert_eq!(data.items[0].cleaned, vec![cursor.display().to_string()]);
+    // The skill was on the UNSCOPED default before the exclusion, so the literal inverse is the
+    // `'*'` reset (which drops the exclusion with the include-list) — naming the excluded slug
+    // would instead SET the include-list to just that slug, which is not where the skill was.
     assert_eq!(
         data.undo,
-        vec!["topos", "follow", "deploy", "--agent", "cursor"]
+        vec!["topos", "follow", "deploy", "--agent", "*"]
             .into_iter()
             .map(str::to_owned)
             .collect::<Vec<_>>(),

@@ -438,12 +438,35 @@ pub(crate) fn follow(
             .cloned()
             .collect();
         let _ = crate::placement::validate_agent_slugs(ctx, &named)?;
-        // Every target already followed (bare/`@digest` names) ⇒ the offline SCOPE-UPDATE path —
-        // "a follow of an already-followed skill with --agent just updates the scope, two-phase".
-        // Anything else falls through to the ordinary subscribe, which records the include-list at
-        // apply (after the reconcile installs the new follow).
+        // A STANDING STANCE refuses the scope verbs typed: a skill removed on this device (or
+        // unfollowed) is not receiving here, so scoping WHERE it lands would silently paper over
+        // the stance (and the re-attach arm cannot honor `--agent` in the same act). The refusal
+        // names the two-step way out; the stance itself never moves.
         let mut tokens: Vec<String> = targets.clone();
         tokens.extend(opts.skills.iter().cloned());
+        for t in &tokens {
+            if t.contains("://") || t.contains('/') || super::builtin::is_builtin(t) {
+                continue;
+            }
+            if let Some(entry) = known_followed_entry(ctx, strip_digest(t), ws)? {
+                let name = strip_digest(t);
+                if entry.excluded_here {
+                    return Err(ClientError::InvalidArgument(format!(
+                        "'{name}' was removed on this device — re-attach it first (`topos follow \
+                         {name}`), then scope with `--agent`"
+                    )));
+                }
+                if !entry.following {
+                    return Err(ClientError::InvalidArgument(format!(
+                        "'{name}' is unfollowed — follow it again first (`topos follow {name}`), \
+                         then scope with `--agent`"
+                    )));
+                }
+            }
+        }
+        // Every target already followed (bare/`@digest` names) ⇒ the offline SCOPE-UPDATE path.
+        // Anything else falls through to the ordinary subscribe, which records the include-list at
+        // apply (after the reconcile installs the new follow).
         let all_followed = !tokens.is_empty()
             && tokens.iter().all(|t| {
                 !t.contains("://")
@@ -1378,6 +1401,17 @@ fn subscribe_dispatch(
     ] = resolutions.as_slice()
         && let Some(cause) = local_stance(ctx, sid)?
     {
+        // The re-attach cannot honor `--agent` in the same act — refuse typed (the same two-step
+        // way out the bare-word dispatch names), never a silent drop of the scoping intent.
+        if !opts.agents.is_empty() {
+            let verb = match cause {
+                ReattachCause::ExcludedHere => "was removed on this device — re-attach it first",
+                ReattachCause::Unfollowed => "is unfollowed — follow it again first",
+            };
+            return Err(ClientError::InvalidArgument(format!(
+                "'{name}' {verb} (`topos follow {name}`), then scope with `--agent`"
+            )));
+        }
         return reattach(ctx, connectors, workspace_id, sid, name, cause);
     }
 
@@ -1544,12 +1578,16 @@ fn subscribe(
         describe.agent_notes = agent_plan_notes(ctx, opts, &describe.installs, &me.name);
     }
 
-    // The widened re-attach: when EVERY target is a skill the person previously followed — the
+    // The widened re-attach: when EVERY target is a skill the person previously UNFOLLOWED — the
     // delivery snapshot lists it DETACHED (an unfollow from the web or another device leaves no
-    // local marker), or a local entry holds a paused/excluded stance — the bare run APPLIES
-    // immediately: re-following what was on the trust surface is not first-trust, and the apply
-    // is reversible by its inverse (`topos unfollow <skill>`). One first-ever skill (or a
-    // channel/workspace target) keeps the whole invocation on the describe.
+    // local marker), or a local entry holds the paused stance — the bare run APPLIES immediately:
+    // re-following what was on the trust surface is not first-trust, and the whole apply is
+    // reversible by ONE literal inverse (`topos unfollow <skill>…`). The EXCLUDED-HERE stance is
+    // deliberately NOT widened here: its inverse is `remove`, not `unfollow`, so a batch mixing
+    // the two stances has no single undo — the single-target case re-attaches upstream in
+    // `subscribe_dispatch` (undo `remove <skill>`), and a batch sweeping an excluded skill keeps
+    // the two-phase describe. One first-ever skill (or a channel/workspace target) likewise keeps
+    // the whole invocation on the describe.
     let all_previously_trusted = resolutions.iter().all(|r| match r {
         Resolution::Resource {
             kind: ResourceKind::Skill,
@@ -1557,7 +1595,7 @@ fn subscribe(
             ..
         } => {
             snapshot.detached.iter().any(|d| d == id)
-                || matches!(local_stance(ctx, id), Ok(Some(_)))
+                || matches!(local_stance(ctx, id), Ok(Some(ReattachCause::Unfollowed)))
         }
         _ => false,
     });
@@ -1755,11 +1793,19 @@ fn subscribe(
         }
     }
     // The undo-led receipt for the widened re-attach: the literal inverse restores the stance.
+    // Targets ride as QUALIFIED `<ws>/skills/<name>` paths — a name followed in a second
+    // workspace would make the bare spelling an ambiguous refusal instead of the promised undo.
     let undo: Vec<String> = if all_previously_trusted {
         let mut argv = vec!["topos".to_owned(), "unfollow".to_owned()];
         for r in resolutions {
-            if let Resolution::Resource { name, .. } = r {
-                argv.push(name.clone());
+            if let Resolution::Resource {
+                name,
+                workspace_name,
+                kind,
+                ..
+            } = r
+            {
+                argv.push(format!("{workspace_name}/{}/{name}", kind.segment()));
             }
         }
         argv
@@ -2478,6 +2524,13 @@ fn reattach(
         ReattachCause::ExcludedHere => ("excluded-here", "remove"),
         ReattachCause::Unfollowed => ("unfollowed", "unfollow"),
     };
+    // The undo target rides QUALIFIED (`<ws>/skills/<name>`) when the address slug is known
+    // offline — a name followed in a second workspace would make the bare spelling an ambiguous
+    // refusal instead of the promised undo. No slug on record keeps the caller's bare name.
+    let undo_target = match crate::placement::workspace_slug(ctx, Some(workspace_id)) {
+        Some(slug) => format!("{slug}/{}/{name}", ResourceKind::Skill.segment()),
+        None => name.to_owned(),
+    };
     Ok(FollowOutcome::ReattachApplied(Box::new(Reattach {
         workspace_id: workspace_id.to_owned(),
         workspace_name,
@@ -2493,7 +2546,7 @@ fn reattach(
             .map(|l| l.bundle_digest.clone())
             .or(bundle_digest),
         installed,
-        undo: vec!["topos".to_owned(), undo_verb.to_owned(), name.to_owned()],
+        undo: vec!["topos".to_owned(), undo_verb.to_owned(), undo_target],
         warnings: out.warnings,
     })))
 }

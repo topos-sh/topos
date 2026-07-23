@@ -123,6 +123,10 @@ fn safety(code: &ActionCode, argv: &[String]) -> Safety {
         // The paste-ready `--yes` of a two-phase describe: applying ALWAYS mutates (that is its
         // point); whether it dials — and what deserves a caution — is the verb's.
         "APPLY_DESCRIBED" => apply_described(argv),
+        // The undo-led receipt's literal inverse: an executable mutation exactly like an apply
+        // argv (it IS a follow/unfollow/remove invocation) — the same per-verb refinement decides
+        // the network story and any caution.
+        "UNDO" => apply_described(argv),
         // The unenrolled dead-ends' join pointer (`topos follow <workspace-address>` — usually a
         // template whose `needs` names the address): following dials, and a fresh install's
         // follow ENROLLS this device (a credential is stored once the browser approval lands).

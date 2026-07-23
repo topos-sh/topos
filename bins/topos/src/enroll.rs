@@ -721,11 +721,13 @@ pub(crate) fn set_excluded(
 }
 
 /// Replace one skill's device-local agent SCOPE in place (`follow --agent`): the include-list becomes
-/// `agents` (empty = back to unscoped), and every slug it names is dropped from `excluded_agents` —
-/// naming an agent in a fresh include-list is the explicit consent that re-includes a previously
-/// excluded one (the same verb is the re-inclusion path; there is no separate "un-exclude" spelling).
-/// Same identity-locked read-modify-write discipline as [`set_following`]. A missing file or entry is
-/// a clean no-op.
+/// `agents`, and every slug it names is dropped from `excluded_agents` — naming an agent in a fresh
+/// include-list is the explicit consent that re-includes a previously excluded one (the same verb is
+/// the re-inclusion path; there is no separate "un-exclude" spelling). An EMPTY `agents` is the
+/// `'*'` clear — the reset to the unscoped DEFAULT placement — so it drops the per-agent exclusions
+/// too: that is what makes `follow <skill> --agent '*'` the literal inverse of a scope or exclusion
+/// change made from the default. Same identity-locked read-modify-write discipline as
+/// [`set_following`]. A missing file or entry is a clean no-op.
 pub(crate) fn set_agent_scope(
     fs: &dyn FsOps,
     layout: &Layout,
@@ -740,12 +742,16 @@ pub(crate) fn set_agent_scope(
         return Ok(());
     };
     let next: Vec<String> = agents.to_vec();
-    let next_excluded: Vec<String> = entry
-        .excluded_agents
-        .iter()
-        .filter(|s| !next.contains(s))
-        .cloned()
-        .collect();
+    let next_excluded: Vec<String> = if next.is_empty() {
+        Vec::new()
+    } else {
+        entry
+            .excluded_agents
+            .iter()
+            .filter(|s| !next.contains(s))
+            .cloned()
+            .collect()
+    };
     if entry.agents == next && entry.excluded_agents == next_excluded {
         return Ok(());
     }

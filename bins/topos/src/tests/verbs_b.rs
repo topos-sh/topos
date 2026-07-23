@@ -449,7 +449,9 @@ fn remove_followed_clean_skill_applies_the_exclusion_immediately() {
                 topos_types::results::RemoveKind::FollowedExclusion
             ));
             assert!(data.items[0].bytes_kept);
-            assert_eq!(data.undo, vec!["topos", "follow", "deploy"]);
+            // QUALIFIED — the promised inverse must resolve even beside a same-named skill in a
+            // second workspace.
+            assert_eq!(data.undo, vec!["topos", "follow", "acme/skills/deploy"]);
         }
         _ => panic!("a followed clean skill applies immediately"),
     }

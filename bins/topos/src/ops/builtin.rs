@@ -169,11 +169,16 @@ pub(crate) fn current_scope(ctx: &Ctx<'_>) -> Result<(Vec<String>, Vec<String>),
     Ok((st.agents, st.excluded_agents))
 }
 
-/// Persist a replaced include-list (the `follow --agent` fold — naming a slug also re-includes it).
+/// Persist a replaced include-list (the `follow --agent` fold — naming a slug also re-includes it;
+/// an EMPTY list is the `'*'` reset to the default placement, dropping the exclusions with it).
 pub(crate) fn set_agents(ctx: &Ctx<'_>, agents: &[String]) -> Result<(), ClientError> {
     let mut st = read_state(ctx)?;
     st.agents = agents.to_vec();
-    st.excluded_agents.retain(|e| !agents.contains(e));
+    if agents.is_empty() {
+        st.excluded_agents.clear();
+    } else {
+        st.excluded_agents.retain(|e| !agents.contains(e));
+    }
     write_state(ctx, &st)
 }
 

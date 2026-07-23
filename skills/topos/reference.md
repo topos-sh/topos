@@ -41,7 +41,7 @@ Follow a workspace, channel, or skill — enroll if needed, then subscribe. A FI
 | `[TARGETS]...` |  |  | The follow targets (addresses, qualified paths, or names). Omitted, it resumes a pending enrollment |
 | `--channel` | `<NAME>` |  | Follow a channel by name (repeatable; kind-forced) |
 | `--skill` | `<NAME>` |  | Follow a specific skill by name (repeatable; kind-forced) |
-| `--agent` | `<SLUG>` |  | Scope a followed skill's placement to these agents on THIS device (registry slugs; repeatable; `'*'` clears the list back to unscoped). Placement policy only — the subscription is untouched and the server is never told. Applies immediately; the receipt shows what landed/cleaned/stayed and the undo |
+| `--agent` | `<SLUG>` |  | Scope a followed skill's placement to these agents on THIS device (registry slugs; repeatable; `'*'` restores the default placement, clearing the include-list and any per-agent exclusions). Placement policy only — the subscription is untouched and the server is never told. Applies immediately; the receipt shows what landed/cleaned/stayed and the undo |
 | `--yes` |  |  | Apply a described subscription (the one-shot consent for a first-ever follow / enrollment). Accepted as a no-op on the arms that apply immediately |
 | `--manual` |  |  | Adopt followed skills in confirm-each mode (a one-tap accept per new version) instead of auto |
 | `--wait` | `<SECONDS>` |  | Block until the browser approval settles, finishing enrollment in ONE command. Bare `--wait` waits until the code expires; `--wait <seconds>` caps the wait. Put `--wait` AFTER any positional. A TTY blocks by default; a PIPED run without `--wait` prints the approval URL and returns immediately — re-invoke `follow` to poll, or pass `--wait` to block |

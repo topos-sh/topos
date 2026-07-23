@@ -84,7 +84,8 @@ pub(crate) enum Command {
         #[arg(long, value_name = "NAME")]
         skill: Vec<String>,
         /// Scope a followed skill's placement to these agents on THIS device (registry slugs;
-        /// repeatable; `'*'` clears the list back to unscoped). Placement policy only — the
+        /// repeatable; `'*'` restores the default placement, clearing the include-list and any
+        /// per-agent exclusions). Placement policy only — the
         /// subscription is untouched and the server is never told. Applies immediately; the
         /// receipt shows what landed/cleaned/stayed and the undo.
         #[arg(long, value_name = "SLUG")]

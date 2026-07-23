@@ -18,7 +18,7 @@
     "undo": [
       "topos",
       "follow",
-      "deploy"
+      "acme/skills/deploy"
     ]
   },
   "warnings": [],
@@ -28,8 +28,10 @@
       "argv": [
         "topos",
         "follow",
-        "deploy"
-      ]
+        "acme/skills/deploy"
+      ],
+      "mutates": true,
+      "needs_network": true
     }
   ]
 }

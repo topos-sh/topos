@@ -960,13 +960,13 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 note: None,
             }],
             applied: true,
-            undo: argv(&["topos", "follow", "deploy"]),
+            undo: argv(&["topos", "follow", "acme/skills/deploy"]),
         })
         .expect("RemoveData serializes"),
         warnings: vec![],
         next_actions: vec![topos::actions::next_action(
             ActionCode::from("UNDO".to_owned()),
-            argv(&["topos", "follow", "deploy"]),
+            argv(&["topos", "follow", "acme/skills/deploy"]),
         )],
         receipt: None,
         error: None,

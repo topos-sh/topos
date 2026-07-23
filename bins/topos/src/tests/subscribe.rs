@@ -1954,7 +1954,9 @@ fn unfollow_skill_writes_the_detach_row_and_flips_the_local_pause() {
     assert_eq!(applied.items.len(), 1);
     assert_eq!(applied.items[0].kind, "skill");
     assert_eq!(applied.items[0].stops, vec!["docs".to_owned()]);
-    assert_eq!(applied.undo, vec!["topos", "follow", "docs"]);
+    // The undo target rides QUALIFIED — a same-named skill in a second workspace must not turn
+    // the promised inverse into an ambiguity refusal.
+    assert_eq!(applied.undo, vec!["topos", "follow", "acme/skills/docs"]);
     assert!(
         log.lock().unwrap().iter().any(|e| e == "unfollow s_docs"),
         "the person-scoped detach row was written"
@@ -2425,7 +2427,10 @@ fn a_bare_follow_of_an_unfollowed_skill_clears_the_stance_and_applies() {
         panic!("a previously-unfollowed skill re-attaches immediately");
     };
     assert_eq!(reattach.cause, "unfollowed");
-    assert_eq!(reattach.undo, vec!["topos", "unfollow", "deploy"]);
+    assert_eq!(
+        reattach.undo,
+        vec!["topos", "unfollow", "acme/skills/deploy"]
+    );
     // The stance cleared SERVER-side (not just the local flag) via the follow_skill row op.
     assert!(
         log.lock().unwrap().iter().any(|e| e == "follow s_deploy"),
@@ -2436,10 +2441,13 @@ fn a_bare_follow_of_an_unfollowed_skill_clears_the_stance_and_applies() {
         follow_entry(&rig, "s_deploy").following,
         "the local entry resumed"
     );
-    // The TTY receipt words the resume and leads with its undo.
+    // The TTY receipt words the resume and leads with its undo (the qualified target).
     let text = crate::render::reattach_applied_tty(&reattach);
     assert!(text.contains("Following deploy again"), "{text}");
-    assert!(text.contains("Undo: topos unfollow deploy"), "{text}");
+    assert!(
+        text.contains("Undo: topos unfollow acme/skills/deploy"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -2531,7 +2539,7 @@ fn a_bare_follow_of_an_excluded_skill_applies_the_reattach_immediately() {
     assert_eq!(reattach.skill_id, "s_deploy");
     assert_eq!(reattach.cause, "excluded-here");
     assert!(reattach.installed, "the current bytes landed back");
-    assert_eq!(reattach.undo, vec!["topos", "remove", "deploy"]);
+    assert_eq!(reattach.undo, vec!["topos", "remove", "acme/skills/deploy"]);
     // The mutation is real: the server row op fired, the marker cleared, the bytes are back.
     assert!(
         log.lock().unwrap().iter().any(|e| e == "follow s_deploy"),
@@ -2543,10 +2551,13 @@ fn a_bare_follow_of_an_excluded_skill_applies_the_reattach_immediately() {
         "marker cleared"
     );
     assert!(rig.work.0.join("skills").join("deploy").exists());
-    // The TTY receipt is undo-led.
+    // The TTY receipt is undo-led (the qualified target).
     let text = crate::render::reattach_applied_tty(&reattach);
     assert!(text.contains("Re-attached deploy"), "{text}");
-    assert!(text.contains("Undo: topos remove deploy"), "{text}");
+    assert!(
+        text.contains("Undo: topos remove acme/skills/deploy"),
+        "{text}"
+    );
 }
 
 #[test]

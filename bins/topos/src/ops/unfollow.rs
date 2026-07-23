@@ -293,15 +293,38 @@ pub(crate) fn unfollow(
         }
     }
     // The literal inverse: re-follow everything this invocation stopped (`follow` re-attaches a
-    // paused skill and re-joins a channel).
+    // paused skill and re-joins a channel). Targets ride QUALIFIED (`<ws>/skills|channels/<name>`)
+    // when the workspace's address slug is known offline — a name known in a second workspace
+    // would make the bare spelling an ambiguous refusal instead of the promised undo; a purely
+    // local pause (no workspace on record) keeps the bare spelling. A batch spanning workspaces
+    // offers NO undo: `follow` takes one workspace per invocation.
     let mut undo = vec!["topos".to_owned(), "follow".to_owned()];
-    for item in &items {
-        match item.kind.as_str() {
-            "channel" => {
-                undo.push("--channel".to_owned());
-                undo.push(item.name.clone());
+    let server_workspaces: Vec<&str> = items
+        .iter()
+        .filter_map(|i| i.workspace_id.as_deref())
+        .collect();
+    let one_workspace = server_workspaces
+        .first()
+        .is_none_or(|ws| server_workspaces.iter().all(|w| w == ws));
+    if !one_workspace {
+        undo = Vec::new();
+    } else {
+        for item in &items {
+            let slug = item
+                .workspace_id
+                .as_deref()
+                .and_then(|ws| crate::placement::workspace_slug(ctx, Some(ws)));
+            match (item.kind.as_str(), slug) {
+                ("channel", Some(slug)) => {
+                    undo.push(format!("{slug}/channels/{}", item.name));
+                }
+                ("channel", None) => {
+                    undo.push("--channel".to_owned());
+                    undo.push(item.name.clone());
+                }
+                (_, Some(slug)) => undo.push(format!("{slug}/skills/{}", item.name)),
+                (_, None) => undo.push(item.name.clone()),
             }
-            _ => undo.push(item.name.clone()),
         }
     }
     Ok(UnfollowOutcome::Applied(UnfollowApplied {

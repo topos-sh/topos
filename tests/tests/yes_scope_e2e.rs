@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::{OWNER_EMAIL, SKILL, Stack, expected, genesis_files};
+use common::{OWNER_EMAIL, SKILL, Stack, WS_NAME, expected, genesis_files};
 use topos::test_support::{
     FollowHarness, FollowProbe, PublishResult, RemoveProbe, Scope, UnfollowProbe,
 };
@@ -138,7 +138,8 @@ fn e2e_bare_runs_apply_for_the_ungated_arms_with_undo_led_receipts() {
     assert!(data.applied);
     assert!(matches!(data.items[0].kind, RemoveKind::FollowedExclusion));
     assert!(data.items[0].bytes_kept);
-    assert_eq!(data.undo, vec!["topos", "follow", SKILL]);
+    let qualified = format!("{WS_NAME}/skills/{SKILL}");
+    assert_eq!(data.undo, vec!["topos", "follow", qualified.as_str()]);
     assert_eq!(exclusion_rows(&stack, &device_id), 1, "the row is real");
     assert!(
         !client.placement_path(SKILL).exists(),
@@ -156,8 +157,8 @@ fn e2e_bare_runs_apply_for_the_ungated_arms_with_undo_led_receipts() {
     assert_eq!(r["installed"], true);
     assert_eq!(
         r["undo"],
-        serde_json::json!(["topos", "remove", SKILL]),
-        "the receipt leads with the literal inverse"
+        serde_json::json!(["topos", "remove", qualified]),
+        "the receipt leads with the literal inverse (qualified — never an ambiguity refusal)"
     );
     assert_eq!(exclusion_rows(&stack, &device_id), 0, "the row is gone");
     assert_eq!(
@@ -174,7 +175,7 @@ fn e2e_bare_runs_apply_for_the_ungated_arms_with_undo_led_receipts() {
         panic!("a skill unfollow applies immediately: {unfollowed:?}");
     };
     assert!(bytes_kept);
-    assert_eq!(undo, vec!["topos", "follow", SKILL]);
+    assert_eq!(undo, vec!["topos", "follow", qualified.as_str()]);
     assert_eq!(
         unfollowed_rows(&stack, &member_id, SKILL),
         1,
@@ -194,7 +195,10 @@ fn e2e_bare_runs_apply_for_the_ungated_arms_with_undo_led_receipts() {
         panic!("a previously-unfollowed skill re-attaches immediately: {refollowed:?}");
     };
     assert_eq!(r["cause"], "unfollowed");
-    assert_eq!(r["undo"], serde_json::json!(["topos", "unfollow", SKILL]));
+    assert_eq!(
+        r["undo"],
+        serde_json::json!(["topos", "unfollow", qualified])
+    );
     assert_eq!(
         unfollowed_rows(&stack, &member_id, SKILL),
         0,
@@ -399,5 +403,79 @@ fn e2e_gates_hold_loss_guard_fails_closed_and_yes_still_applies() {
     assert!(
         !client.placement_path(FRESH).exists(),
         "the describe lands nothing"
+    );
+}
+
+// ── the widened re-attach on SNAPSHOT evidence alone (no local entry) ──────────────────────────────
+
+#[test]
+fn e2e_detached_refollow_with_no_local_entry_lands_on_a_second_device() {
+    // The person unfollows a skill on device A, then brings up a FRESH device B (enrolled after
+    // the unfollow): B holds no `follows.json` entry and no bytes — the delivery snapshot's
+    // `detached` list is the ONLY evidence the skill was ever on the person's trust surface. The
+    // bare `follow <skill>` on B is still a re-follow, not first-trust: it must apply immediately
+    // AND actually converge — the server stance cleared, the bytes landed on disk, the local
+    // entry created — never a receipt over nothing.
+    let (stack, _owner, member, client_a) = arranged("yss-detached");
+    let member_id = stack.user_id(MEMBER_EMAIL);
+
+    // Device A: the person's standing unfollow (applies immediately, server-recorded).
+    let unfollowed = client_a
+        .unfollow_probe(&[SKILL], &[], false)
+        .expect("the bare unfollow applies");
+    assert!(matches!(unfollowed, UnfollowProbe::Applied { .. }));
+    assert_eq!(unfollowed_rows(&stack, &member_id, SKILL), 1);
+
+    // Device B enrolls AFTER the unfollow — the delivery carries nothing for the skill.
+    let client_b = FollowHarness::new("yss-detached-b");
+    stack.enroll_begin_and_approve(&client_b, &member);
+    client_b.resume_apply().expect("the second device enrolls");
+    let (data, _) = client_b.reconcile(true);
+    assert!(
+        data.skills.iter().all(|s| s.skill != SKILL),
+        "an unfollowed skill is not delivered to a fresh device: {:?}",
+        data.skills
+    );
+    assert!(!client_b.placement_path(SKILL).exists(), "no bytes yet");
+
+    // The bare re-follow on B: previously trusted (the snapshot's `detached` evidence) — applies.
+    let refollowed = client_b
+        .follow_probe(SKILL, &[], false)
+        .expect("the bare re-follow applies");
+    let FollowProbe::Applied { installed, undo } = refollowed else {
+        panic!("a detached skill re-follows immediately: {refollowed:?}");
+    };
+    assert!(
+        installed.iter().any(|n| n == SKILL),
+        "the bytes actually land THIS invocation: {installed:?}"
+    );
+    assert_eq!(
+        undo,
+        vec![
+            "topos".to_owned(),
+            "unfollow".to_owned(),
+            format!("{WS_NAME}/skills/{SKILL}"),
+        ],
+        "the receipt leads with its literal (qualified) undo"
+    );
+    assert_eq!(
+        unfollowed_rows(&stack, &member_id, SKILL),
+        0,
+        "the stance cleared server-side"
+    );
+    assert_eq!(
+        client_b.placement_files(SKILL),
+        expected(&genesis_files()),
+        "the current bytes are on B's disk"
+    );
+    // The local entry converged: the next sweep syncs it as a known skill — never a re-offer.
+    let (data, warnings) = client_b.reconcile(true);
+    assert!(warnings.is_empty(), "a clean sweep: {warnings:?}");
+    assert!(
+        data.skills
+            .iter()
+            .any(|s| s.skill == SKILL && matches!(s.action, PullAction::UpToDate)),
+        "no first-receive re-offer after the re-follow: {:?}",
+        data.skills
     );
 }

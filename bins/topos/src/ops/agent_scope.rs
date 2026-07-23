@@ -4,9 +4,10 @@
 //! never told; the subscription never moves):
 //!
 //! - **`follow <skill> --agent <slug>…`** ([`set_scope`]) — record the include-list (placement lands
-//!   in exactly those agents' native dirs; `'*'` clears it back to unscoped), then reconcile the
-//!   placements: dirs leaving the set are cleaned snapshot-first, new native dirs land from the
-//!   local store.
+//!   in exactly those agents' native dirs; `'*'` restores the DEFAULT — it clears the include-list
+//!   AND the per-agent exclusions, which is what makes it the literal inverse of a scope change made
+//!   from the default), then reconcile the placements: dirs leaving the set are cleaned
+//!   snapshot-first, new native dirs land from the local store.
 //! - **`unfollow <skill> --agent <slug>…`** and **`remove <skill> --agent <slug>…`** on a followed
 //!   skill ([`exclude_agents`]) — the SAME implementation (one function, two spellings): record the
 //!   per-agent exclusion and clean exactly that agent's placement (snapshot-first). The subscription
@@ -84,6 +85,68 @@ pub(crate) enum AgentScopeOutcome {
     Applied(AgentScopeData),
 }
 
+/// One skill's device-local scope facts: the include-list + the per-agent exclusions.
+type ScopePair = (Vec<String>, Vec<String>);
+
+/// The state a `follow <skill> --agent <named>` fold leaves behind: `'*'` resets to the unscoped
+/// DEFAULT (no include-list, no exclusions — the durable setters share this reset); a named list
+/// replaces the include-list and re-includes exactly the named slugs.
+fn simulate_set(state: &ScopePair, named: &[String]) -> ScopePair {
+    if named.iter().any(|a| a == "*") {
+        (Vec::new(), Vec::new())
+    } else {
+        (
+            named.to_vec(),
+            state
+                .1
+                .iter()
+                .filter(|e| !named.contains(e))
+                .cloned()
+                .collect(),
+        )
+    }
+}
+
+/// The literal inverse of a scope change, VERIFIED before it is offered: pick the candidate
+/// `follow --agent` spelling (`'*'` when the prior state was the unscoped default, the prior
+/// include-list otherwise) and offer it only when replaying that fold over the post-change state
+/// provably restores the prior — an inexpressible restore (e.g. prior exclusions the fold cannot
+/// re-mint) offers NO undo rather than a wrong one. Multi-target invocations offer the undo only
+/// when every target shares one prior/post pair, so the command can never misstate a target's
+/// restore. The caller's own target spellings (plus its `--workspace` filter) ride the argv, so
+/// the undo resolves exactly as the invocation it reverses did.
+fn undo_argv(
+    targets: &[String],
+    workspace: Option<&str>,
+    pairs: &[(ScopePair, ScopePair)],
+) -> Vec<String> {
+    let Some((prior, post)) = pairs.first() else {
+        return Vec::new();
+    };
+    if !pairs.iter().all(|p| &p.0 == prior && &p.1 == post) {
+        return Vec::new();
+    }
+    let candidate: Vec<String> = if prior.0.is_empty() {
+        vec!["*".to_owned()]
+    } else {
+        prior.0.clone()
+    };
+    if &simulate_set(post, &candidate) != prior {
+        return Vec::new();
+    }
+    let mut argv = vec!["topos".to_owned(), "follow".to_owned()];
+    argv.extend(targets.iter().cloned());
+    for a in &candidate {
+        argv.push("--agent".to_owned());
+        argv.push(a.clone());
+    }
+    if let Some(w) = workspace {
+        argv.push("--workspace".to_owned());
+        argv.push(w.to_owned());
+    }
+    argv
+}
+
 /// `unfollow <skill> --agent <slug>…` == `remove <skill> --agent <slug>…` on a followed skill — the
 /// ONE shared implementation: record the per-agent exclusions and clean exactly those agents'
 /// placements (snapshot-first). Applies immediately (device-local, reversible — `topos follow
@@ -111,6 +174,8 @@ pub(crate) fn exclude_agents(
     let resolved = resolve_followed(ctx, targets, workspace, verb)?;
 
     let mut items = Vec::with_capacity(resolved.len());
+    // The per-target (prior, post) scope pairs — the verified undo derives from them.
+    let mut pairs: Vec<(ScopePair, ScopePair)> = Vec::with_capacity(resolved.len());
     for (sid, lock, ws) in &resolved {
         let map = sync_engine::read_map_required(ctx, &ctx.layout.published(sid))?;
         let (cur_agents, cur_excluded) = scope_state(ctx, sid.as_str())?;
@@ -146,15 +211,14 @@ pub(crate) fn exclude_agents(
             ));
         }
         items.push(item);
+        pairs.push((
+            (cur_agents, cur_excluded),
+            (next_agents.clone(), next_excluded.clone()),
+        ));
     }
 
-    // The literal inverse: naming the same slugs on `follow --agent` re-includes them.
-    let mut undo = vec!["topos".to_owned(), "follow".to_owned()];
-    undo.extend(targets.iter().cloned());
-    for a in agents {
-        undo.push("--agent".to_owned());
-        undo.push(a.clone());
-    }
+    // The literal inverse, verified against the prior state (no undo beats a wrong one).
+    let undo = undo_argv(targets, workspace, &pairs);
 
     // ---- APPLY (immediately — the explicit command is the consent) ---- record the exclusions,
     // then reconcile the placements. The scope is re-derived per skill from the CURRENT
@@ -220,20 +284,16 @@ pub(crate) fn set_scope(
     let resolved = resolve_followed(ctx, targets, workspace, "follow")?;
 
     let mut items = Vec::with_capacity(resolved.len());
-    // The prior include-lists, captured BEFORE the durable write — a clear's literal undo
-    // re-applies them (offered only when every target shared one prior list, so the undo can
-    // never misstate a target's restore).
-    let mut priors: Vec<Vec<String>> = Vec::with_capacity(resolved.len());
+    // The per-target (prior, post) scope pairs, captured BEFORE the durable write — the verified
+    // undo derives from them (a clear's undo re-applies the prior include-list; offered only when
+    // every target shared one pair, so the undo can never misstate a target's restore).
+    let mut pairs: Vec<(ScopePair, ScopePair)> = Vec::with_capacity(resolved.len());
     for (sid, lock, ws) in &resolved {
         let map = sync_engine::read_map_required(ctx, &ctx.layout.published(sid))?;
-        let (cur_agents, cur_excluded) = scope_state(ctx, sid.as_str())?;
-        priors.push(cur_agents);
-        // Naming an agent re-includes it (the durable write folds the same way).
-        let next_excluded: Vec<String> = cur_excluded
-            .iter()
-            .filter(|e| !next_agents.contains(e))
-            .cloned()
-            .collect();
+        let prior = scope_state(ctx, sid.as_str())?;
+        // The one fold: `'*'` resets to the unscoped default (exclusions included); naming an
+        // agent re-includes it (the durable write folds the same way).
+        let post = simulate_set(&prior, agents);
         let mut item = plan_item(
             ctx,
             sid,
@@ -241,8 +301,8 @@ pub(crate) fn set_scope(
             ws.clone(),
             &map,
             AgentScope {
-                agents: &next_agents,
-                excluded: &next_excluded,
+                agents: &post.0,
+                excluded: &post.1,
             },
         );
         for slug in &undetected {
@@ -252,30 +312,11 @@ pub(crate) fn set_scope(
             ));
         }
         items.push(item);
+        pairs.push((prior, post));
     }
 
-    // The literal inverse: a set's undo clears back to unscoped; a clear's undo re-applies the
-    // prior include-list (skipped when the targets held differing lists, or none — nothing to
-    // restore).
-    let undo_agents: Vec<String> = if clear {
-        match priors.first() {
-            Some(first) if !first.is_empty() && priors.iter().all(|p| p == first) => first.clone(),
-            _ => Vec::new(),
-        }
-    } else {
-        vec!["*".to_owned()]
-    };
-    let undo: Vec<String> = if undo_agents.is_empty() {
-        Vec::new()
-    } else {
-        let mut argv = vec!["topos".to_owned(), "follow".to_owned()];
-        argv.extend(targets.iter().cloned());
-        for a in &undo_agents {
-            argv.push("--agent".to_owned());
-            argv.push(a.clone());
-        }
-        argv
-    };
+    // The literal inverse, verified against the prior state (no undo beats a wrong one).
+    let undo = undo_argv(targets, workspace, &pairs);
 
     for (sid, lock, _) in &resolved {
         if super::builtin::is_builtin(sid.as_str()) {
@@ -283,19 +324,16 @@ pub(crate) fn set_scope(
         } else {
             enroll::set_agent_scope(ctx.fs, &ctx.layout, sid.as_str(), &next_agents)?;
         }
-        let (_, cur_excluded) = scope_state(ctx, sid.as_str())?;
-        let next_excluded: Vec<String> = cur_excluded
-            .iter()
-            .filter(|e| !next_agents.contains(e))
-            .cloned()
-            .collect();
+        // Re-fold from the seam's state (it predates the write above), through the same fold the
+        // setters just applied durably.
+        let post = simulate_set(&scope_state(ctx, sid.as_str())?, agents);
         apply_scope_change(
             ctx,
             sid,
             lock,
             AgentScope {
-                agents: &next_agents,
-                excluded: &next_excluded,
+                agents: &post.0,
+                excluded: &post.1,
             },
         )?;
     }
@@ -638,4 +676,107 @@ fn materialize_missing(
         },
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pair(a: &[&str], e: &[&str]) -> ScopePair {
+        (
+            a.iter().map(|s| (*s).to_owned()).collect(),
+            e.iter().map(|s| (*s).to_owned()).collect(),
+        )
+    }
+
+    fn one(prior: ScopePair, post: ScopePair) -> Vec<(ScopePair, ScopePair)> {
+        vec![(prior, post)]
+    }
+
+    fn deploy() -> Vec<String> {
+        vec!["deploy".to_owned()]
+    }
+
+    #[test]
+    fn exclusion_from_the_default_undoes_with_the_star_reset() {
+        // (unscoped, no exclusions) --exclude cursor--> the `'*'` reset restores the default
+        // exactly (the reset drops the exclusion with the include-list).
+        let undo = undo_argv(
+            &deploy(),
+            None,
+            &one(pair(&[], &[]), pair(&[], &["cursor"])),
+        );
+        assert_eq!(undo, vec!["topos", "follow", "deploy", "--agent", "*"]);
+    }
+
+    #[test]
+    fn exclusion_from_a_scoped_skill_undoes_with_the_prior_include_list() {
+        // ([claude,cursor], -) --exclude cursor--> re-applying the PRIOR list re-includes cursor
+        // and restores the scope; naming only the excluded slug would clobber claude out.
+        let undo = undo_argv(
+            &deploy(),
+            None,
+            &one(
+                pair(&["claude", "cursor"], &[]),
+                pair(&["claude"], &["cursor"]),
+            ),
+        );
+        assert_eq!(
+            undo,
+            vec![
+                "topos", "follow", "deploy", "--agent", "claude", "--agent", "cursor"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_inexpressible_restore_offers_no_undo() {
+        // A PRIOR exclusion the fold cannot re-mint: the star reset would drop it too.
+        let undo = undo_argv(
+            &deploy(),
+            None,
+            &one(pair(&[], &["hermes"]), pair(&[], &["cursor", "hermes"])),
+        );
+        assert!(undo.is_empty(), "no undo beats a wrong one: {undo:?}");
+        // A clear from scoped-with-exclusions: re-applying the prior list cannot re-mint the
+        // exclusion either.
+        let undo = undo_argv(
+            &deploy(),
+            None,
+            &one(pair(&["claude"], &["cursor"]), pair(&[], &[])),
+        );
+        assert!(undo.is_empty(), "no undo beats a wrong one: {undo:?}");
+    }
+
+    #[test]
+    fn a_clear_undoes_with_the_prior_list_and_keeps_the_workspace_filter() {
+        let undo = undo_argv(
+            &deploy(),
+            Some("acme"),
+            &one(pair(&["claude"], &[]), pair(&[], &[])),
+        );
+        assert_eq!(
+            undo,
+            vec![
+                "topos",
+                "follow",
+                "deploy",
+                "--agent",
+                "claude",
+                "--workspace",
+                "acme"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_batch_with_differing_priors_offers_no_undo() {
+        // One command cannot state two different restores.
+        let pairs = vec![
+            (pair(&[], &[]), pair(&[], &["cursor"])),
+            (pair(&["claude"], &[]), pair(&["claude"], &["cursor"])),
+        ];
+        let undo = undo_argv(&["a".to_owned(), "b".to_owned()], None, &pairs);
+        assert!(undo.is_empty());
+    }
 }

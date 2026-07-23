@@ -345,7 +345,8 @@ are asserted byte-equal in tests.
 - **The `--agent` scope verbs** (`ops/agent_scope`) — DEVICE-LOCAL placement policy for a followed
   skill, applied IMMEDIATELY with an undo-led receipt (self-scoped and reversible — `--yes` is an
   accepted no-op) and fully offline (the plane is NEVER told; the subscription never moves).
-  `follow <skill> --agent <slug>` (repeatable; `'*'` clears back to unscoped) records the
+  `follow <skill> --agent <slug>` (repeatable; `'*'` restores the DEFAULT placement — it clears the
+  include-list AND the per-agent exclusions, which is what makes it a literal inverse) records the
   include-list on an already-followed skill and reconciles the placements (out-of-scope dirs cleaned
   snapshot-first, new native dirs landed from the local store); on a not-yet-followed skill the
   ordinary subscribe runs and the include-list is recorded at apply. `unfollow <skill> --agent
@@ -354,8 +355,12 @@ are asserted byte-equal in tests.
   agent's placement. Unknown slugs refuse naming the registry's valid ones; a known-but-undetected
   slug is accepted with an honest note; the receipts name the placement plan (what landed/cleaned/
   stayed — shared vs native, with a vendor-docs-level parenthetical where coverage is docs-level)
-  and the literal undo (a set's undo is the `'*'` clear; a clear's undo re-applies the prior
-  include-list). `remove`'s classic `-a` semantics for untracked/local copies are unchanged.
+  and the literal undo, VERIFIED before it is offered: the candidate `follow --agent` spelling
+  (`'*'` from the unscoped default, else the prior include-list) is replayed over the post-change
+  state and offered only when it provably restores the prior — an inexpressible restore (or a
+  multi-target batch with differing priors) offers NO undo rather than a wrong one, and the
+  caller's `--workspace` filter rides the argv. `remove`'s classic `-a` semantics for
+  untracked/local copies are unchanged.
 - **The `unfollow` verb** (`ops/unfollow`) — the PERSON-scoped detach, byte-inert. Resolves
   dual-kind through the one grammar: a WORKSPACE target is recognized and refused toward
   the web (leaving is a roster change); the structural `everyone` refuses with the alternatives
