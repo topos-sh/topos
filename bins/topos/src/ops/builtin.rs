@@ -560,12 +560,19 @@ pub(crate) fn follow_builtin(
         agents.to_vec()
     };
     let undetected = placement::validate_agent_slugs(ctx, &scope_agents)?;
-    let scope_excluded: Vec<String> = state
-        .excluded_agents
-        .iter()
-        .filter(|e| !scope_agents.contains(e))
-        .cloned()
-        .collect();
+    // The same fold the scope update applies: `'*'` is the reset to the DEFAULT placement, so it
+    // drops the per-agent exclusions with the include-list; a named list re-includes exactly the
+    // slugs it names.
+    let scope_excluded: Vec<String> = if clear {
+        Vec::new()
+    } else {
+        state
+            .excluded_agents
+            .iter()
+            .filter(|e| !scope_agents.contains(e))
+            .cloned()
+            .collect()
+    };
     let sp = ctx.layout.published(&sid);
     let prior = doc::read_map(ctx.fs, &sp.map)?;
     let plan = placement::plan_targets(

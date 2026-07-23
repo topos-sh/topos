@@ -1586,17 +1586,21 @@ fn subscribe(
     // deliberately NOT widened here: its inverse is `remove`, not `unfollow`, so a batch mixing
     // the two stances has no single undo — the single-target case re-attaches upstream in
     // `subscribe_dispatch` (undo `remove <skill>`), and a batch sweeping an excluded skill keeps
-    // the two-phase describe. One first-ever skill (or a channel/workspace target) likewise keeps
-    // the whole invocation on the describe.
+    // the two-phase describe. The stance check runs FIRST: a skill both excluded here AND
+    // detached in the snapshot (a `remove` then an `unfollow`) is still the excluded-here case —
+    // the detached evidence alone must not widen past this device's opt-out. One first-ever skill
+    // (or a channel/workspace target) likewise keeps the whole invocation on the describe, and an
+    // unreadable local stance fails toward the gate.
     let all_previously_trusted = resolutions.iter().all(|r| match r {
         Resolution::Resource {
             kind: ResourceKind::Skill,
             skill_id: Some(id),
             ..
-        } => {
-            snapshot.detached.iter().any(|d| d == id)
-                || matches!(local_stance(ctx, id), Ok(Some(ReattachCause::Unfollowed)))
-        }
+        } => match local_stance(ctx, id) {
+            Ok(Some(ReattachCause::Unfollowed)) => true,
+            Ok(Some(ReattachCause::ExcludedHere)) | Err(_) => false,
+            Ok(None) => snapshot.detached.iter().any(|d| d == id),
+        },
         _ => false,
     });
 
