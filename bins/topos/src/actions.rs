@@ -477,6 +477,30 @@ mod tests {
     }
 
     #[test]
+    fn undo_actions_carry_the_same_per_verb_refinement_as_applies() {
+        // The undo-led receipts' UNDO action is an executable mutation exactly like an apply
+        // argv — the one rules module classifies it through the same per-verb refinement.
+        let undo = next_action(
+            ActionCode::from("UNDO".to_owned()),
+            argv(&["topos", "follow", "acme/skills/deploy"]),
+        );
+        assert_eq!((undo.mutates, undo.needs_network), (Some(true), Some(true)));
+        let undo_unfollow = next_action(
+            ActionCode::from("UNDO".to_owned()),
+            argv(&["topos", "unfollow", "acme/skills/deploy"]),
+        );
+        assert_eq!(undo_unfollow.mutates, Some(true));
+        assert!(
+            undo_unfollow
+                .risk_note
+                .as_deref()
+                .unwrap_or("")
+                .contains("every device"),
+            "{undo_unfollow:?}"
+        );
+    }
+
+    #[test]
     fn apply_described_refines_by_verb_inside_the_one_module() {
         // A publish apply is team-visible + networked.
         let publish = next_action(

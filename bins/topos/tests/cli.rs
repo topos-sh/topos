@@ -124,21 +124,20 @@ fn json_envelope_apply_receipt_on_ungated_arms_describe_on_gated() {
     assert!(ok, "add should exit 0");
 
     // UNGATED (the local-pause fallback of a skill unfollow): the bare run APPLIES — the receipt
-    // document (not a `describe` wrapper), `bytes_kept`, the literal undo, the UNDO next action.
+    // document (not a `describe` wrapper), `bytes_kept`. This skill was never actively followed,
+    // so the pause is a no-op and the receipt honestly offers NO undo (a bare `follow
+    // pr-describe` here would even read as a bareword enrollment) — the undo-led shape on a real
+    // flip is proven in the composed-stack suite.
     let (ok, v) = run(&home, &["--json", "unfollow", "pr-describe"]);
     assert!(ok, "the bare skill unfollow applies: {v}");
     assert_eq!(v["command"], "unfollow");
     assert!(v["data"].get("describe").is_none(), "an apply receipt: {v}");
     assert_eq!(v["data"]["bytes_kept"], true);
-    assert_eq!(
-        v["data"]["undo"],
-        serde_json::json!(["topos", "follow", "pr-describe"])
+    assert!(
+        v["data"].get("undo").is_none(),
+        "a no-op pause offers no undo: {v}"
     );
-    assert_eq!(v["next_actions"][0]["code"], "UNDO");
-    assert_eq!(
-        v["next_actions"][0]["argv"],
-        serde_json::json!(["topos", "follow", "pr-describe"])
-    );
+    assert_eq!(v["next_actions"], serde_json::json!([]));
 
     // GATED (a local-only `remove` — the permanent delete of the only copy): the bare run answers
     // the DESCRIBE envelope, `applied: false`, the `--yes` apply next action; nothing is deleted.

@@ -11,8 +11,9 @@ const AGENT_DOC = `# Topos setup — instructions for an AI agent
 You were asked to set up Topos. Topos distributes a team's agent skills — bundles of
 instructions, scripts, and reference docs — and keeps them current on every enrolled machine.
 Work non-interactively; every command below prints what to do next. Nothing lands silently:
-the first time a skill reaches a machine its contents are disclosed and consented to with an
-explicit \`--yes\`; skills the machine already trusts stay current automatically.
+the first time a skill enters your trust surface its contents are disclosed and consented to
+with an explicit \`--yes\`; skills you already follow stay current on every enrolled machine
+automatically.
 
 ## First: do you have a workspace address?
 

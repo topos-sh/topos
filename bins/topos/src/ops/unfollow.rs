@@ -254,6 +254,20 @@ pub(crate) fn unfollow(
     }
 
     // ---- APPLY ----
+    // The PRE-apply follow stances — the undo below is offered only over skills this invocation
+    // actually FLIPPED from an active, unexcluded follow (a repeat unfollow is a no-op whose
+    // "undo" would change pre-existing state; an excluded skill's re-follow would also lift the
+    // device exclusion — more than this act did).
+    let prior_active: std::collections::HashSet<String> =
+        enroll::read_follows(ctx.fs, &ctx.layout)?
+            .map(|f| {
+                f.follows
+                    .iter()
+                    .filter(|e| e.following && !e.excluded_here)
+                    .map(|e| e.skill_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
     // The transport is built only when a SERVER row moves — a purely local pause (the graceful
     // offline path) never dials.
     let needs_server = detaches
@@ -292,13 +306,20 @@ pub(crate) fn unfollow(
             }
         }
     }
-    // The literal inverse: re-follow everything this invocation stopped (`follow` re-attaches a
-    // paused skill and re-joins a channel). Targets ride QUALIFIED (`<ws>/skills|channels/<name>`)
-    // when the workspace's address slug is known offline — a name known in a second workspace
-    // would make the bare spelling an ambiguous refusal instead of the promised undo; a purely
-    // local pause (no workspace on record) keeps the bare spelling. A batch spanning workspaces
-    // offers NO undo: `follow` takes one workspace per invocation.
-    let mut undo = vec!["topos".to_owned(), "follow".to_owned()];
+    // The literal inverse, offered ONLY when it restores the whole prior state: every detach a
+    // SKILL this invocation flipped from an active, unexcluded follow (a channel rejoin is a
+    // gated two-phase act, not a one-command inverse; a no-op pause on a never-followed local
+    // skill has nothing to undo — and its bare `follow <name>` would even read as a BAREWORD
+    // enrollment on a fresh install), and one workspace (`follow` takes one per invocation).
+    // Targets ride QUALIFIED (`<ws>/skills/<name>`) when the address slug is known offline — a
+    // name known in a second workspace would make the bare spelling an ambiguous refusal instead
+    // of the promised undo; a purely local pause keeps the bare spelling.
+    let all_flipped_skills = detaches.iter().all(|d| match d {
+        Detach::Channel { .. } => false,
+        Detach::Skill { skill_id, .. } | Detach::LocalSkill { skill_id, .. } => {
+            prior_active.contains(skill_id)
+        }
+    });
     let server_workspaces: Vec<&str> = items
         .iter()
         .filter_map(|i| i.workspace_id.as_deref())
@@ -306,27 +327,22 @@ pub(crate) fn unfollow(
     let one_workspace = server_workspaces
         .first()
         .is_none_or(|ws| server_workspaces.iter().all(|w| w == ws));
-    if !one_workspace {
-        undo = Vec::new();
+    let undo: Vec<String> = if !(all_flipped_skills && one_workspace) {
+        Vec::new()
     } else {
+        let mut argv = vec!["topos".to_owned(), "follow".to_owned()];
         for item in &items {
             let slug = item
                 .workspace_id
                 .as_deref()
                 .and_then(|ws| crate::placement::workspace_slug(ctx, Some(ws)));
-            match (item.kind.as_str(), slug) {
-                ("channel", Some(slug)) => {
-                    undo.push(format!("{slug}/channels/{}", item.name));
-                }
-                ("channel", None) => {
-                    undo.push("--channel".to_owned());
-                    undo.push(item.name.clone());
-                }
-                (_, Some(slug)) => undo.push(format!("{slug}/skills/{}", item.name)),
-                (_, None) => undo.push(item.name.clone()),
+            match slug {
+                Some(slug) => argv.push(format!("{slug}/skills/{}", item.name)),
+                None => argv.push(item.name.clone()),
             }
         }
-    }
+        argv
+    };
     Ok(UnfollowOutcome::Applied(UnfollowApplied {
         items,
         bytes_kept: true,

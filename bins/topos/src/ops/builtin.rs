@@ -644,16 +644,10 @@ pub(crate) fn follow_builtin(
                             plane is never told"
             .to_owned(),
         applied: yes,
-        // The restore's inverse — the durable device opt-out.
-        undo: if yes {
-            vec![
-                "topos".to_owned(),
-                "remove".to_owned(),
-                BUILTIN_NAME.to_owned(),
-            ]
-        } else {
-            Vec::new()
-        },
+        // No undo on the restore: it is a GATED (`--yes`) act — the undo-led receipt belongs to
+        // the immediate arms — and `remove topos` is itself two-phase, so it would not be the
+        // one-command inverse the field promises (nor could it restore a pre-restore scope).
+        undo: Vec::new(),
     };
     if !yes {
         let mut yes_argv = vec![

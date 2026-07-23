@@ -186,8 +186,12 @@ pub(crate) fn remove(
     // ---- APPLY (immediate for followed clean skills; `--yes` for the gated shapes) ----
     // The UNGATED path re-checks the loss-guard at the apply boundary: an edit landing between
     // the classification above and this point must not slip through the gate it would have held.
-    // (Byte loss is impossible either way — `snapshot_and_clean` snapshots any draft under the
-    // skill lock before a dir goes — this recheck is for the CONSENT, not the bytes.)
+    // A residual window remains between this recheck and `snapshot_and_clean` acquiring the skill
+    // lock — an edit racing into those milliseconds is cleaned WITHOUT the describe, but never
+    // lost: the snapshot-first clean retains every distinct edited copy in the sidecar store
+    // under the lock before a byte leaves a dir. Closing the window whole would need the gate
+    // decision inside the shared lock (a `snapshot_and_clean` contract change shared with the
+    // withdrawal sweep) — deliberately not taken for a consent-courtesy race with no byte loss.
     if !yes {
         for (removal, item) in removals.iter().zip(items.iter_mut()) {
             if let Removal::Followed { skill_id, name, .. } = removal
@@ -224,6 +228,19 @@ pub(crate) fn remove(
         (Some(b), true) => Some((connectors.directory)(b)),
         _ => None,
     };
+    // The PRE-apply exclusion stances — the undo below is offered only over NEWLY excluded
+    // skills (a repeat remove of an already-excluded skill is a no-op whose "undo" would change
+    // pre-existing state, not restore it).
+    let prior_excluded: std::collections::HashSet<String> =
+        enroll::read_follows(ctx.fs, &ctx.layout)?
+            .map(|f| {
+                f.follows
+                    .iter()
+                    .filter(|e| e.excluded_here)
+                    .map(|e| e.skill_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
     for removal in &removals {
         match removal {
             Removal::Followed {
@@ -270,29 +287,36 @@ pub(crate) fn remove(
             }
         }
     }
-    // The literal inverse for what is undoable: `follow` re-attaches the excluded followed
-    // skills (a permanent delete has no inverse — its describe said so). Targets ride QUALIFIED
-    // (`<ws>/skills/<name>`) when the address slug is known offline — a name followed in a second
-    // workspace would make the bare spelling an ambiguous refusal instead of the promised undo.
-    // A batch spanning workspaces offers NO undo: `follow` takes one workspace per invocation,
-    // and a command that cannot run is worse than none.
-    let followed: Vec<(&str, &str)> = removals
+    // The literal inverse, offered ONLY when it restores the whole prior state: every removal a
+    // followed exclusion (a permanent delete has no inverse — the batch omits the undo rather
+    // than misstating a partial one), every exclusion NEW (a repeat remove of an already-excluded
+    // skill is a no-op the "undo" would not restore), and one workspace (`follow` takes one per
+    // invocation). Targets ride QUALIFIED (`<ws>/skills/<name>`) when the address slug is known
+    // offline — a name followed in a second workspace would make the bare spelling an ambiguous
+    // refusal instead of the promised undo.
+    let followed: Vec<(&str, &str, &str)> = removals
         .iter()
         .filter_map(|r| match r {
             Removal::Followed {
-                workspace_id, name, ..
-            } => Some((workspace_id.as_str(), name.as_str())),
+                workspace_id,
+                skill_id,
+                name,
+            } => Some((workspace_id.as_str(), skill_id.as_str(), name.as_str())),
             _ => None,
         })
         .collect();
+    let all_followed = followed.len() == removals.len();
+    let all_new = followed
+        .iter()
+        .all(|(_, id, _)| !prior_excluded.contains(*id));
     let one_workspace = followed
         .first()
-        .is_some_and(|(ws, _)| followed.iter().all(|(w, _)| w == ws));
-    let undo: Vec<String> = if !one_workspace {
+        .is_some_and(|(ws, _, _)| followed.iter().all(|(w, _, _)| w == ws));
+    let undo: Vec<String> = if !(all_followed && all_new && one_workspace) {
         Vec::new()
     } else {
         let mut argv = vec!["topos".to_owned(), "follow".to_owned()];
-        for (ws, name) in &followed {
+        for (ws, _, name) in &followed {
             argv.push(match crate::placement::workspace_slug(ctx, Some(ws)) {
                 Some(slug) => format!("{slug}/skills/{name}"),
                 None => (*name).to_owned(),

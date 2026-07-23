@@ -415,6 +415,26 @@ fn resolve_followed(
                  {token}@<agent>`"
             )));
         }
+        // A STANDING STANCE refuses typed — the ONE choke point every `--agent` spelling
+        // resolves through (`follow`'s dispatch guard mirrors these words for its own arms):
+        // scoping WHERE a skill lands presumes it is landing here, and papering a scope change
+        // over an exclusion or an unfollow would silently misstate both.
+        if let Some(follows) = enroll::read_follows(ctx.fs, &ctx.layout)?
+            && let Some(entry) = follows.follows.iter().find(|e| e.skill_id == sid.as_str())
+        {
+            if entry.excluded_here {
+                return Err(ClientError::InvalidArgument(format!(
+                    "'{token}' was removed on this device — re-attach it first (`topos follow \
+                     {token}`), then scope with `--agent`"
+                )));
+            }
+            if !entry.following {
+                return Err(ClientError::InvalidArgument(format!(
+                    "'{token}' is unfollowed — follow it again first (`topos follow {token}`), \
+                     then scope with `--agent`"
+                )));
+            }
+        }
         out.push((sid, lock, ws));
     }
     Ok(out)
