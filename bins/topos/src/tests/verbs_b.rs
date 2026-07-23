@@ -2020,3 +2020,41 @@ fn a_bare_republish_describe_claims_no_placement() {
         "an explicit --to on a republish still notes a curated target"
     );
 }
+
+#[test]
+fn a_qualified_agent_remove_refuses_instead_of_widening_to_the_device() {
+    // `remove acme/skills/deploy --agent cursor`: the qualified spelling misses the per-agent
+    // route (it takes bare names only), and falling through would perform the WHOLE-DEVICE
+    // exclusion — strictly more than the caller named. The verb refuses typed toward the
+    // supported spelling; nothing mutates.
+    let rig = Rig::new("rm-qual-agent");
+    rig.seed_enrolled("alice@acme.com");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let fake = FakeDir::new(log.clone());
+    let connect = dir_connect(&fake);
+    let connectors = ops::RemoveConnectors {
+        directory: &connect,
+    };
+    let inert_p = InertPlane;
+    let inert_f = InertFollow;
+    let ctx = rig.ctx(&inert_p, &inert_f);
+
+    let err = ops::remove(
+        &ctx,
+        &connectors,
+        &["acme/skills/deploy".into()],
+        &["cursor".into()],
+        None,
+        false,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, ClientError::InvalidArgument(m) if m.contains("--agent")),
+        "the fall-through refuses typed: {err:?}"
+    );
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "no server row moved: {:?}",
+        log.lock().unwrap()
+    );
+}

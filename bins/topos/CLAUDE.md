@@ -359,8 +359,10 @@ are asserted byte-equal in tests.
   (`'*'` from the unscoped default, else the prior include-list) is replayed over the post-change
   state and offered only when it provably restores the prior — an inexpressible restore (or a
   multi-target batch with differing priors) offers NO undo rather than a wrong one, and the
-  caller's `--workspace` filter rides the argv. `remove`'s classic `-a` semantics for
-  untracked/local copies are unchanged.
+  caller's `--workspace` filter rides the argv. The ONE resolver refuses a removed/unfollowed
+  target typed toward the re-attach (scope changes act on ACTIVE follows, every spelling), and a
+  batch mixing the built-in with ordinary skills refuses typed. `remove`'s classic `-a` semantics
+  for untracked/local copies are unchanged.
 - **The `unfollow` verb** (`ops/unfollow`) — the PERSON-scoped detach, byte-inert. Resolves
   dual-kind through the one grammar: a WORKSPACE target is recognized and refused toward
   the web (leaving is a roster change); the structural `everyone` refuses with the alternatives
@@ -371,8 +373,13 @@ are asserted byte-equal in tests.
   the skill from the WHOLE entitlement, channels included) AND the local `follows.json` pause flip
   in the same identity-locked write (so `list`'s cause column reads the frozen copy offline); the
   undo-led receipt keeps the three constants: every device of yours, bytes frozen in place, the
-  final detach record, plus `topos follow <skill>` as the way back. Un-enrolled (or a purely local
-  skill) the graceful local path ungates the same way — the pause flag flips, nothing dials.
+  final detach record, plus `topos follow <skill>` (qualified where the address slug is known) as
+  the way back — offered only when it restores the WHOLE prior state: every target flipped from
+  an active, unexcluded follow, one workspace (a stanced no-op, a cross-workspace batch, or a
+  CHANNEL detach — whose rejoin is a gated two-phase act, not a one-command inverse — offers no
+  undo rather than a wrong one). Un-enrolled
+  (or a purely local skill) the graceful local path ungates the same way — the pause flag flips,
+  nothing dials.
   Idempotent; never a skill file, never a `held` pin, never the auto-update
   hook; an explicit local `update <skill>@<hash>` remains available on an unfollowed copy.
 - **The `auth` group** (`ops/auth`) — `login` / `logout` / `status`. **`login [server]`** (default
