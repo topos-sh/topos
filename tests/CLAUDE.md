@@ -101,6 +101,13 @@ in their crates; this directory is for what only a cross-crate composed run can 
   the withheld placement disclosed on the receipt) until a curator's real `channel add` places it
   and a second device lands it byte-exact; a member's explicit `--to everyone` answers exactly what
   a named curated channel answers.
+- **`tests/yes_scope_e2e.rs`** — the reduced consent gate: every self-scoped-reversible arm (the
+  followed clean `remove`, both re-attach causes of `follow <skill>` — excluded-here and the
+  server-side unfollowed stance — a skill `unfollow`, the `--agent` scope pair) applies on a BARE
+  run with the mutation witnessed for real (device-exclusion / unfollowed-stance rows, dirs on
+  disk) and an undo-led receipt; the gates hold with nothing mutated (the draft loss-guard incl.
+  fail-closed on an unreadable placement, a permanent local delete, a channel unfollow's computed
+  breadth, a first-trust follow) while `--yes` still applies them.
 - **`tests/revocation_e2e.rs`** — revocation on the device-link model: the account page's
   self-only device sign-out ends the lane IMMEDIATELY (the very next request under the dead
   credential 404s) and severs EVERY link in the same transaction (`device_unlinked` audit rows,

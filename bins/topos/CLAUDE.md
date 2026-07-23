@@ -146,9 +146,11 @@ renderer over the SAME typed outcomes (one value, two presentations).
     ephemeral 127.0.0.1 listener (std `TcpListener` — no server crate), auto-opens the approval
     page with state-bound return coordinates, and the page's single-use redirect wakes the next
     poll — the poll stays the source of truth, so a failed open degrades to the typed wait;
-  - **the classic skill path** (`follow <skill>[@<hash>]`) — the I-TOFU accept / the paused-entry
-    resume, unchanged.
-  The SUBSCRIBE is two-phase: bare = a DESCRIBE (`GET /me` + `/channels` + the catalog + `/delivery`
+  - **the classic skill path** (`follow <skill>[@<hash>]`) — the I-TOFU accept; a PAUSED entry on
+    an ENROLLED install re-attaches through the immediate stance-clear below (the un-enrolled
+    graceful local resume is unchanged).
+  The SUBSCRIBE is two-phase for a FIRST-EVER follow (first-trust): bare = a DESCRIBE (`GET /me` +
+  `/channels` + the catalog + `/delivery`
   → workspace/role/invited-by, the install list — SCOPED to the named targets: a WORKSPACE target
   lists the whole delivered set, a channel/skill target only what it entitles — with digests +
   `via` attribution, the all-devices disclosure (skills you follow arrive on every device you've
@@ -166,6 +168,13 @@ renderer over the SAME typed outcomes (one value, two presentations).
   as on any sweep; a dirname collision auto-namespaces to `<skill>-<workspace>` and a byte-identical
   occupant is adopted in place), then the fleet report. The transports are built per-base-URL
   behind injectable factories, so the whole flow is tested over fakes with no HTTP.
+  **The RE-ATTACH widening:** a skill target previously on the person's trust surface — this
+  device's `excluded_here` marker, a paused local entry, or the delivery snapshot's `detached`
+  list — applies IMMEDIATELY on the bare run (re-following what was followed is not first-trust):
+  the `follow_skill` row op converges the SERVER stance (exclusion deleted / unfollow cleared),
+  the local markers converge, the reconcile reinstalls ONLY the named skill, and the receipt
+  leads with its literal undo (`remove <skill>` / `unfollow <skill>`). `--yes` is an accepted
+  no-op there.
 - **The `invite` verb** (`ops/invite`, `plane_http::UreqDeviceClient`) — the two-phase roster write
   (`POST /v1/workspaces/{ws}/invitations` under the ONE device Bearer credential; the server resolves
   credential → device → user → the owner gate — inviting is owner-only; the acting device is never a
@@ -334,7 +343,8 @@ are asserted byte-equal in tests.
   `ops/contribute`; the full loop is proven e2e over loopback HTTP in `tests/`.
 
 - **The `--agent` scope verbs** (`ops/agent_scope`) — DEVICE-LOCAL placement policy for a followed
-  skill, two-phase and fully offline (the plane is NEVER told; the subscription never moves).
+  skill, applied IMMEDIATELY with an undo-led receipt (self-scoped and reversible — `--yes` is an
+  accepted no-op) and fully offline (the plane is NEVER told; the subscription never moves).
   `follow <skill> --agent <slug>` (repeatable; `'*'` clears back to unscoped) records the
   include-list on an already-followed skill and reconciles the placements (out-of-scope dirs cleaned
   snapshot-first, new native dirs landed from the local store); on a not-yet-followed skill the
@@ -342,21 +352,23 @@ are asserted byte-equal in tests.
   <slug>` and `remove <skill> --agent <slug>` on a followed skill are ONE shared implementation
   (`exclude_agents` — the verbs alias it): record the per-agent exclusion + clean exactly that
   agent's placement. Unknown slugs refuse naming the registry's valid ones; a known-but-undetected
-  slug is accepted with an honest note; the describes name the placement plan (shared vs native,
-  with a vendor-docs-level parenthetical where coverage is docs-level). `remove`'s classic `-a`
-  semantics for untracked/local copies are unchanged, and bare `remove`/`unfollow` keep their exact
-  prior behavior.
-- **The `unfollow` verb** (`ops/unfollow`) — the PERSON-scoped detach, two-phase and byte-inert.
-  Resolves dual-kind through the one grammar: a WORKSPACE target is recognized and refused toward
+  slug is accepted with an honest note; the receipts name the placement plan (what landed/cleaned/
+  stayed — shared vs native, with a vendor-docs-level parenthetical where coverage is docs-level)
+  and the literal undo (a set's undo is the `'*'` clear; a clear's undo re-applies the prior
+  include-list). `remove`'s classic `-a` semantics for untracked/local copies are unchanged.
+- **The `unfollow` verb** (`ops/unfollow`) — the PERSON-scoped detach, byte-inert. Resolves
+  dual-kind through the one grammar: a WORKSPACE target is recognized and refused toward
   the web (leaving is a roster change); the structural `everyone` refuses with the alternatives
-  spelled; a channel target describes what STOPS (delivered via this channel alone) vs what KEEPS
-  arriving (another channel / a direct follow), then `--yes` DELETEs the membership; a skill target
-  describes the everywhere-stop (the unfollow row subtracts the skill from the WHOLE entitlement,
-  channels included), then `--yes` DELETEs `follows/{skill}` AND flips the local `follows.json`
-  pause in the same identity-locked write (so `list`'s cause column reads the frozen copy offline).
-  The describe names the three constants: every device of yours, bytes frozen in place, the final
-  detach record. Un-enrolled (or a purely local skill) keeps the graceful local path — the pause
-  flag flips, nothing dials. Idempotent; never a skill file, never a `held` pin, never the auto-update
+  spelled. A CHANNEL target stays two-phase (its breadth is computed): the describe names what
+  STOPS (delivered via this channel alone) vs what KEEPS arriving (another channel / a direct
+  follow), then `--yes` DELETEs the membership. A SKILL target applies IMMEDIATELY (`--yes` an
+  accepted no-op; a mixed batch gates whole): DELETE `follows/{skill}` (the unfollow row subtracts
+  the skill from the WHOLE entitlement, channels included) AND the local `follows.json` pause flip
+  in the same identity-locked write (so `list`'s cause column reads the frozen copy offline); the
+  undo-led receipt keeps the three constants: every device of yours, bytes frozen in place, the
+  final detach record, plus `topos follow <skill>` as the way back. Un-enrolled (or a purely local
+  skill) the graceful local path ungates the same way — the pause flag flips, nothing dials.
+  Idempotent; never a skill file, never a `held` pin, never the auto-update
   hook; an explicit local `update <skill>@<hash>` remains available on an unfollowed copy.
 - **The `auth` group** (`ops/auth`) — `login` / `logout` / `status`. **`login [server]`** (default
   `https://topos.sh`, `TOPOS_PLANE_URL` override, or the enrolled plane) re-runs the SAME device flow
@@ -488,13 +500,20 @@ are asserted byte-equal in tests.
   composition root (`app::run`), which runs the check ONCE after the dispatch, never per-verb.
 
 - **The reshaped team verbs** (`ops/{remove,channel,protect,invite,review,log,list,pull,publish}`) — each
-  runs the ONE resolution grammar + the two-phase describe/`--yes` gate over the built directory row ops:
-  - **`remove`** (`ops/remove`) — take skills off THIS machine, two-phase. A FOLLOWED skill becomes a
+  runs the ONE resolution grammar + the consent gate over the built directory row ops: two-phase
+  describe/`--yes` where an act has REACH, LOSS, or FIRST-TRUST; immediate with an undo-led
+  receipt where self-scoped and reversible (`--yes` an accepted no-op there):
+  - **`remove`** (`ops/remove`) — take skills off THIS machine. A FOLLOWED skill becomes a
     per-device **exclusion** (`PUT exclusions/{skill}`): delivery stops here, the person keeps following it
     (other devices still receive it), the agent dirs are cleaned (any draft snapshotted first) and every
     sidecar byte KEPT — via the shared `snapshot_and_clean` the upstream-withdrawal sweep also runs (factored
-    out of `withdraw_upstream`, never forked). A tracked never-published local (or an untracked agent-dir
-    copy `<name>@<agent>` / `-a`-scoped) is a **permanent** delete. Multi-skill, all-or-none; the local
+    out of `withdraw_upstream`, never forked). On a CLEAN followed skill the exclusion applies
+    IMMEDIATELY (undo-led receipt: bytes-stay honesty + `follow <skill>` as the way back); the
+    LOSS-GUARD holds the two-phase describe when local edits are ahead (the apply takes the draft
+    out of every agent dir), and a scan that cannot classify FAILS TOWARD THE GATE. A tracked
+    never-published local (or an untracked agent-dir
+    copy `<name>@<agent>` / `-a`-scoped) is a **permanent** delete — two-phase, always. Multi-skill,
+    all-or-none (one gated target gates the batch); the local
     exclusion cause is marked on `follows.json` (`excluded_here`) for `list`.
   - **`channel add|remove`** (`ops/channel`) — channel-first placement, two-phase. Resolves every skill
     ALL-OR-NONE through the grammar, reads the channel's mode for the describe (create-on-first-place says
