@@ -1591,18 +1591,38 @@ fn subscribe(
     // the detached evidence alone must not widen past this device's opt-out. One first-ever skill
     // (or a channel/workspace target) likewise keeps the whole invocation on the describe, and an
     // unreadable local stance fails toward the gate.
-    let all_previously_trusted = resolutions.iter().all(|r| match r {
-        Resolution::Resource {
-            kind: ResourceKind::Skill,
-            skill_id: Some(id),
-            ..
-        } => match local_stance(ctx, id) {
-            Ok(Some(ReattachCause::Unfollowed)) => true,
-            Ok(Some(ReattachCause::ExcludedHere)) | Err(_) => false,
-            Ok(None) => snapshot.detached.iter().any(|d| d == id),
-        },
-        _ => false,
-    });
+    let mut all_previously_trusted = true;
+    // The stricter fact the UNDO needs: every target flips a LOCAL paused entry — only then does
+    // `unfollow` restore the whole prior state (paused entry back, bytes already frozen there).
+    // A snapshot-only target (no local entry: a fresh device, or an entry still active while the
+    // server says detached) still WIDENS, but its apply mints local state and lands bytes an
+    // `unfollow` would not take back, so the receipt offers no undo.
+    let mut all_flip_local_pause = true;
+    for r in resolutions {
+        match r {
+            Resolution::Resource {
+                kind: ResourceKind::Skill,
+                skill_id: Some(id),
+                ..
+            } => match local_stance(ctx, id) {
+                Ok(Some(ReattachCause::Unfollowed)) => {}
+                Ok(Some(ReattachCause::ExcludedHere)) | Err(_) => {
+                    all_previously_trusted = false;
+                    all_flip_local_pause = false;
+                }
+                Ok(None) => {
+                    all_flip_local_pause = false;
+                    if !snapshot.detached.iter().any(|d| d == id) {
+                        all_previously_trusted = false;
+                    }
+                }
+            },
+            _ => {
+                all_previously_trusted = false;
+                all_flip_local_pause = false;
+            }
+        }
+    }
 
     // The widened arm cannot honor `--agent` in the same act either (the same rule the
     // local-stance dispatch holds): a bare re-follow that also recorded a scope would need an
@@ -1815,12 +1835,14 @@ fn subscribe(
             }
         }
     }
-    // The undo-led receipt for the widened re-attach: the literal inverse restores the stance.
-    // Targets ride as QUALIFIED `<ws>/skills/<name>` paths — a name followed in a second
-    // workspace would make the bare spelling an ambiguous refusal instead of the promised undo.
-    // A consented apply that ALSO recorded an `--agent` scope offers none: `unfollow` alone would
-    // not remove the recorded scope, so it is not the whole inverse.
-    let undo: Vec<String> = if all_previously_trusted && opts.agents.is_empty() {
+    // The undo-led receipt for the widened re-attach: the literal inverse restores the stance —
+    // offered ONLY when every target flipped a LOCAL paused entry (then `unfollow` puts the pause
+    // back exactly; a snapshot-only target's apply minted local state and landed bytes the
+    // inverse would not take back). Targets ride as QUALIFIED `<ws>/skills/<name>` paths — a name
+    // followed in a second workspace would make the bare spelling an ambiguous refusal instead of
+    // the promised undo. A consented apply that ALSO recorded an `--agent` scope offers none:
+    // `unfollow` alone would not remove the recorded scope, so it is not the whole inverse.
+    let undo: Vec<String> = if all_flip_local_pause && opts.agents.is_empty() {
         let mut argv = vec!["topos".to_owned(), "unfollow".to_owned()];
         for r in resolutions {
             if let Resolution::Resource {

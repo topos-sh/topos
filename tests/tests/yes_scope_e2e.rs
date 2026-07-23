@@ -290,11 +290,15 @@ fn e2e_gates_hold_loss_guard_fails_closed_and_yes_still_applies() {
     assert_eq!(exclusion_rows(&stack, &device_id), 0, "nothing mutated");
     assert!(client.placement_path(SKILL).exists(), "the draft stays");
 
-    // Acceptance 5 (gated side): `--yes` still applies the described removal.
+    // Acceptance 5 (gated side): `--yes` still applies the described removal — with NO undo on
+    // the receipt (a re-follow would land the canonical bytes, not the draft this apply cleaned).
     let applied = client
         .remove_probe(&[SKILL], &[], true)
         .expect("--yes applies the guarded remove");
-    assert!(matches!(applied, RemoveProbe::Applied(ref d) if d.applied));
+    assert!(
+        matches!(applied, RemoveProbe::Applied(ref d) if d.applied && d.undo.is_empty()),
+        "a consented draft removal applies with no undo: {applied:?}"
+    );
     assert_eq!(exclusion_rows(&stack, &device_id), 1, "the row landed");
     assert!(
         !client.placement_path(SKILL).exists(),
@@ -449,14 +453,13 @@ fn e2e_detached_refollow_with_no_local_entry_lands_on_a_second_device() {
         installed.iter().any(|n| n == SKILL),
         "the bytes actually land THIS invocation: {installed:?}"
     );
-    assert_eq!(
-        undo,
-        vec![
-            "topos".to_owned(),
-            "unfollow".to_owned(),
-            format!("{WS_NAME}/skills/{SKILL}"),
-        ],
-        "the receipt leads with its literal (qualified) undo"
+    // NO undo on the snapshot-only re-follow: the apply minted this device's local entry and
+    // landed bytes an `unfollow` would not take back (it pauses and keeps them), so the receipt
+    // offers no inverse rather than half of one. The undo-led shape belongs to the local-pause
+    // flip, proven above on device A's arms.
+    assert!(
+        undo.is_empty(),
+        "a snapshot-only re-follow offers no undo: {undo:?}"
     );
     assert_eq!(
         unfollowed_rows(&stack, &member_id, SKILL),

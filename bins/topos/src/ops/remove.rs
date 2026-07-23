@@ -156,12 +156,17 @@ pub(crate) fn remove(
     // unreadable copy must never lose a draft to an optimistic apply. One gated target gates the
     // whole batch (all-or-none, like the resolution).
     let mut gated = false;
+    // The followed removals whose PRE-apply copy was not provably clean: their consented
+    // (`--yes`) apply cleans a draft out of the working dirs (snapshot-first), and the `follow`
+    // inverse would reinstall only the canonical bytes — so their receipts offer no undo.
+    let mut drafted: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for (removal, item) in removals.iter().zip(items.iter_mut()) {
         match removal {
             Removal::Followed { skill_id, name, .. } => match draft_state(ctx, skill_id) {
                 DraftState::Clean => {}
                 DraftState::Draft => {
                     gated = true;
+                    drafted.insert(skill_id.as_str());
                     item.note = Some(format!(
                         "you have local edits ahead of the followed version — removing takes the \
                          draft out of every agent dir on this device (a snapshot is kept in the \
@@ -171,6 +176,7 @@ pub(crate) fn remove(
                 }
                 DraftState::Indeterminate => {
                     gated = true;
+                    drafted.insert(skill_id.as_str());
                     item.note = Some(
                         "this skill's local copy cannot be scanned, so a draft cannot be ruled \
                          out — inspect the directory, or apply with --yes"
@@ -312,10 +318,12 @@ pub(crate) fn remove(
     // The literal inverse, offered ONLY when it restores the whole prior state: every removal a
     // followed exclusion (a permanent delete has no inverse — the batch omits the undo rather
     // than misstating a partial one), every exclusion NEW (a repeat remove of an already-excluded
-    // skill is a no-op the "undo" would not restore), and one workspace (`follow` takes one per
-    // invocation). Targets ride QUALIFIED (`<ws>/skills/<name>`) when the address slug is known
-    // offline — a name followed in a second workspace would make the bare spelling an ambiguous
-    // refusal instead of the promised undo.
+    // skill is a no-op the "undo" would not restore), every pre-apply copy CLEAN (a consented
+    // draft removal cleans working edits the inverse would not reinstall — the snapshot keeps
+    // them recoverable, but recovery is not this one command), and one workspace (`follow` takes
+    // one per invocation). Targets ride QUALIFIED (`<ws>/skills/<name>`) when the address slug is
+    // known offline — a name followed in a second workspace would make the bare spelling an
+    // ambiguous refusal instead of the promised undo.
     let followed: Vec<(&str, &str, &str)> = removals
         .iter()
         .filter_map(|r| match r {
@@ -331,10 +339,11 @@ pub(crate) fn remove(
     let all_new = followed
         .iter()
         .all(|(_, id, _)| !prior_stanced.contains(*id));
+    let all_clean = followed.iter().all(|(_, id, _)| !drafted.contains(*id));
     let one_workspace = followed
         .first()
         .is_some_and(|(ws, _, _)| followed.iter().all(|(w, _, _)| w == ws));
-    let undo: Vec<String> = if !(all_followed && all_new && one_workspace) {
+    let undo: Vec<String> = if !(all_followed && all_new && all_clean && one_workspace) {
         Vec::new()
     } else {
         let mut argv = vec!["topos".to_owned(), "follow".to_owned()];

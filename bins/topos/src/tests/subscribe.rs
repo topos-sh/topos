@@ -2496,9 +2496,14 @@ fn remove_with_a_draft_holds_the_loss_guard_then_yes_applies() {
     );
     assert!(placed.exists(), "the describe cleaned nothing");
 
-    // `--yes` applies: the exclusion row lands, the dir is cleaned (draft snapshotted first).
+    // `--yes` applies: the exclusion row lands, the dir is cleaned (draft snapshotted first) —
+    // and the receipt offers NO undo: a re-follow would reinstall the canonical bytes, not the
+    // draft this consented apply cleaned, so it is not the whole inverse.
     let out = ops::remove(&ctx, &connectors, &["deploy".to_owned()], &[], None, true).unwrap();
-    assert!(matches!(out, ops::RemoveOutcome::Applied(d) if d.applied));
+    assert!(
+        matches!(&out, ops::RemoveOutcome::Applied(d) if d.applied && d.undo.is_empty()),
+        "a draft removal applies with no undo: {out:?}"
+    );
     assert!(
         log.lock().unwrap().iter().any(|e| e == "exclude s_deploy"),
         "the exclusion row was written"

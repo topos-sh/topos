@@ -176,6 +176,7 @@ pub(crate) fn exclude_agents(
     let mut items = Vec::with_capacity(resolved.len());
     // The per-target (prior, post) scope pairs — the verified undo derives from them.
     let mut pairs: Vec<(ScopePair, ScopePair)> = Vec::with_capacity(resolved.len());
+    let mut undoable = true;
     for (sid, lock, ws) in &resolved {
         let map = sync_engine::read_map_required(ctx, &ctx.layout.published(sid))?;
         let (cur_agents, cur_excluded) = scope_state(ctx, sid.as_str())?;
@@ -210,6 +211,9 @@ pub(crate) fn exclude_agents(
                  if it appears"
             ));
         }
+        if leaving_draft(ctx, &map, &item.cleaned)? {
+            undoable = false;
+        }
         items.push(item);
         pairs.push((
             (cur_agents, cur_excluded),
@@ -217,8 +221,15 @@ pub(crate) fn exclude_agents(
         ));
     }
 
-    // The literal inverse, verified against the prior state (no undo beats a wrong one).
-    let undo = undo_argv(targets, workspace, &pairs);
+    // The literal inverse, verified against the prior state (no undo beats a wrong one) — and
+    // withheld whole when a leaving dir holds a DRAFT: the clean is snapshot-first (the edits
+    // survive in the sidecar), but the inverse rematerializes only the canonical bytes, so it
+    // would not put the working copy back as it was.
+    let undo = if undoable {
+        undo_argv(targets, workspace, &pairs)
+    } else {
+        Vec::new()
+    };
 
     // ---- APPLY (immediately — the explicit command is the consent) ---- record the exclusions,
     // then reconcile the placements. The scope is re-derived per skill from the CURRENT
@@ -288,6 +299,7 @@ pub(crate) fn set_scope(
     // undo derives from them (a clear's undo re-applies the prior include-list; offered only when
     // every target shared one pair, so the undo can never misstate a target's restore).
     let mut pairs: Vec<(ScopePair, ScopePair)> = Vec::with_capacity(resolved.len());
+    let mut undoable = true;
     for (sid, lock, ws) in &resolved {
         let map = sync_engine::read_map_required(ctx, &ctx.layout.published(sid))?;
         let prior = scope_state(ctx, sid.as_str())?;
@@ -311,12 +323,21 @@ pub(crate) fn set_scope(
                  detected"
             ));
         }
+        if leaving_draft(ctx, &map, &item.cleaned)? {
+            undoable = false;
+        }
         items.push(item);
         pairs.push((prior, post));
     }
 
-    // The literal inverse, verified against the prior state (no undo beats a wrong one).
-    let undo = undo_argv(targets, workspace, &pairs);
+    // The literal inverse, verified against the prior state (no undo beats a wrong one) — and
+    // withheld whole when a leaving dir holds a DRAFT (see `exclude_agents`; the same
+    // snapshot-first clean, the same partial inverse).
+    let undo = if undoable {
+        undo_argv(targets, workspace, &pairs)
+    } else {
+        Vec::new()
+    };
 
     for (sid, lock, _) in &resolved {
         if super::builtin::is_builtin(sid.as_str()) {
@@ -344,6 +365,29 @@ pub(crate) fn set_scope(
         true,
         undo,
     )))
+}
+
+/// Whether any placement this scope change would CLEAN (`cleaned` — the plan's leaving dirs,
+/// verbatim map entries) holds local edits — or cannot be scanned, which must count the same way:
+/// an unreadable dir cannot prove clean. The clean itself stays snapshot-first (and fails closed
+/// on an unscannable dir at apply); this scan only decides whether the receipt may promise an
+/// undo, because the inverse rematerializes canonical bytes, never the draft.
+fn leaving_draft(
+    ctx: &Ctx<'_>,
+    map: &PlacementMap,
+    cleaned: &[String],
+) -> Result<bool, ClientError> {
+    if cleaned.is_empty() {
+        return Ok(false);
+    }
+    let scans = placement::scan_placements(ctx, map)?;
+    Ok(map.placements.iter().zip(&scans).any(|(dir, scan)| {
+        cleaned.iter().any(|c| c == dir)
+            && !matches!(
+                scan.status,
+                ScanStatus::Clean { .. } | ScanStatus::Absent | ScanStatus::Foreign
+            )
+    }))
 }
 
 fn data(

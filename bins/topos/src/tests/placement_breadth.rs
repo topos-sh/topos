@@ -751,16 +751,13 @@ fn exclude_agents_applies_immediately_cleans_that_agents_dir_and_records_the_exc
     };
     assert!(data.applied);
     assert_eq!(data.items[0].cleaned, vec![cursor.display().to_string()]);
-    // The skill was on the UNSCOPED default before the exclusion, so the literal inverse is the
-    // `'*'` reset (which drops the exclusion with the include-list) — naming the excluded slug
-    // would instead SET the include-list to just that slug, which is not where the skill was.
-    assert_eq!(
-        data.undo,
-        vec!["topos", "follow", "deploy", "--agent", "*"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>(),
-        "the receipt leads with the literal inverse"
+    // The leaving dir held a DRAFT: the clean snapshots it, but the `'*'` inverse would
+    // rematerialize only the canonical bytes — not the edit — so the receipt offers NO undo
+    // rather than half of one (the clean-copy variant below keeps the verified inverse).
+    assert!(
+        data.undo.is_empty(),
+        "a leaving draft withholds the undo: {:?}",
+        data.undo
     );
     assert!(!cursor.exists(), "the excluded agent's dir is cleaned");
     assert!(adopted.exists(), "the adopted working copy stays");
@@ -1067,4 +1064,42 @@ fn stat_cache_swap_invalidation_rebuilds_and_bumps_the_generation() {
         bucket_b.generation,
         gen_a
     );
+}
+
+#[test]
+fn a_clean_leaving_dir_keeps_the_verified_undo() {
+    // The clean-copy counterpart of the draft-withholding above: nothing edited in the leaving
+    // dir, so the exclusion's receipt DOES carry the verified inverse — the skill sat on the
+    // unscoped default, and the `'*'` reset provably restores it (dropping the exclusion with
+    // the include-list).
+    let rig = Rig::new("exclude-clean");
+    let sid = rig.adopt_followed("deploy");
+    let (adopted, cursor) = fan_out(&rig, &sid);
+
+    let follow = rig.follow_seam();
+    let inert_p = InertPlane;
+    let ctx = rig.ctx(&follow, &inert_p);
+
+    let out = ops::exclude_agents(
+        &ctx,
+        "remove",
+        &["deploy".to_owned()],
+        &["cursor".to_owned()],
+        None,
+    )
+    .unwrap();
+    let ops::AgentScopeOutcome::Applied(data) = out else {
+        panic!("the per-agent exclusion applies immediately");
+    };
+    assert!(data.applied);
+    assert_eq!(
+        data.undo,
+        vec!["topos", "follow", "deploy", "--agent", "*"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+        "a clean leaving dir keeps the literal inverse"
+    );
+    assert!(!cursor.exists(), "the excluded agent's dir is cleaned");
+    assert!(adopted.exists(), "the adopted working copy stays");
 }
