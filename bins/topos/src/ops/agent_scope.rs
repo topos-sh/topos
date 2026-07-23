@@ -391,6 +391,16 @@ fn resolve_followed(
             "`{verb} --agent` needs a followed skill name"
         )));
     }
+    // The built-in rides its OWN dispatch everywhere else (`follow topos` handles it as a single
+    // target) — a batch mixing it with ordinary skills would mint receipts whose undo cannot run
+    // as one command. Refuse typed toward separate invocations.
+    if targets.len() > 1 && targets.iter().any(|t| super::builtin::is_builtin(t)) {
+        return Err(ClientError::InvalidArgument(
+            "the built-in `topos` skill takes its own invocation — scope it separately from \
+             other skills"
+                .into(),
+        ));
+    }
     let mut out = Vec::with_capacity(targets.len());
     for token in targets {
         if super::builtin::is_builtin(token) {

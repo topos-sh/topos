@@ -684,3 +684,55 @@ fn the_name_is_reserved_end_to_end_client_side() {
     );
     assert_eq!(own, root.join("topos"));
 }
+
+#[test]
+fn a_star_restore_resets_the_per_agent_exclusions_to_the_default() {
+    // Exclude one agent, opt out whole-device, then restore with `--agent '*'`: the reset returns
+    // the DEFAULT placement — the include-list AND the per-agent exclusions clear (the same fold
+    // the ordinary scope update applies), so the previously excluded agent is served again. With
+    // the exclusion wrongly retained, the restore would stay narrowed native-only and cline's
+    // shared copy would never come back.
+    let rig = Rig::new("star-restore");
+    rig.detect(".cline");
+    let inert_f = InertFollow;
+    let inert_p = InertPlane;
+    let ctx = rig.ctx(&inert_f, &inert_p);
+    ops::ensure_builtin(&ctx).unwrap();
+    let shared = rig.shared_copy();
+    assert!(shared.exists());
+
+    // The per-agent exclusion (any scope narrows to native-only; cline was the shared copy's
+    // audience, so nothing serves it now).
+    let targets = vec!["topos".to_owned()];
+    match ops::exclude_agents(&ctx, "remove", &targets, &["cline".to_owned()], None).unwrap() {
+        ops::AgentScopeOutcome::Applied(data) => assert!(data.applied),
+        _ => panic!("the per-agent exclusion applies immediately"),
+    }
+    assert!(
+        !shared.exists(),
+        "the exclusion cleaned cline's serving copy"
+    );
+
+    // The whole-device opt-out, then the `'*'` restore.
+    let dir_connect = |_: &str| -> Box<dyn crate::plane::DirectorySource> {
+        unreachable!("the built-in removal is offline — no directory transport is ever built")
+    };
+    let connectors = ops::RemoveConnectors {
+        directory: &dir_connect,
+    };
+    match ops::remove(&ctx, &connectors, &targets, &[], None, true).unwrap() {
+        ops::RemoveOutcome::Applied(data) => assert!(data.applied),
+        _ => panic!("--yes applies the opt-out"),
+    }
+    match ops::builtin_follow(&ctx, &["*".to_owned()], true).unwrap() {
+        ops::AgentScopeOutcome::Applied(data) => assert!(data.applied),
+        _ => panic!("--yes applies the restore"),
+    }
+    assert!(
+        shared.join("SKILL.md").exists(),
+        "the default placement serves cline again — the reset dropped the exclusion"
+    );
+    // Durable: the next sweep keeps the default placement (no retained exclusion re-narrows it).
+    ops::ensure_builtin(&ctx).unwrap();
+    assert!(shared.join("SKILL.md").exists());
+}

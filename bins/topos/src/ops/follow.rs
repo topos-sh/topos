@@ -1604,6 +1604,25 @@ fn subscribe(
         _ => false,
     });
 
+    // The widened arm cannot honor `--agent` in the same act either (the same rule the
+    // local-stance dispatch holds): a bare re-follow that also recorded a scope would need an
+    // undo no single command expresses. Refuse typed toward the two-step way out; the consented
+    // `--yes` path (the ordinary describe/apply, which records the include-list at apply) stays.
+    if !opts.yes && all_previously_trusted && !opts.agents.is_empty() {
+        let names: Vec<&str> = resolutions
+            .iter()
+            .filter_map(|r| match r {
+                Resolution::Resource { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        let list = names.join("', '");
+        return Err(ClientError::InvalidArgument(format!(
+            "'{list}' is unfollowed — follow it again first (`topos follow {list}`), then scope \
+             with `--agent`"
+        )));
+    }
+
     if !opts.yes && !all_previously_trusted {
         // Would `--yes` write any NEW subscription row? A workspace target writes none (membership
         // itself entitles `everyone`); a channel join is new only when the caller is not yet a
@@ -1799,7 +1818,9 @@ fn subscribe(
     // The undo-led receipt for the widened re-attach: the literal inverse restores the stance.
     // Targets ride as QUALIFIED `<ws>/skills/<name>` paths — a name followed in a second
     // workspace would make the bare spelling an ambiguous refusal instead of the promised undo.
-    let undo: Vec<String> = if all_previously_trusted {
+    // A consented apply that ALSO recorded an `--agent` scope offers none: `unfollow` alone would
+    // not remove the recorded scope, so it is not the whole inverse.
+    let undo: Vec<String> = if all_previously_trusted && opts.agents.is_empty() {
         let mut argv = vec!["topos".to_owned(), "unfollow".to_owned()];
         for r in resolutions {
             if let Resolution::Resource {
@@ -2476,6 +2497,17 @@ fn reattach(
     let version_id = lock.as_ref().map(|l| l.base_commit.clone());
     let bundle_digest = lock.as_ref().map(|l| l.bundle_digest.clone());
     let workspace_name = workspace_label(ctx, workspace_id);
+    // The PRE-apply stance, captured before the mutations below: a skill BOTH excluded here AND
+    // unfollowed has no single-command inverse (this apply clears both), so its receipt offers no
+    // undo rather than one that restores only half the prior state.
+    let prior_both = enroll::read_follows(ctx.fs, &ctx.layout)?
+        .and_then(|f| {
+            f.follows
+                .iter()
+                .find(|e| e.skill_id == skill_id)
+                .map(|e| e.excluded_here && !e.following)
+        })
+        .unwrap_or(false);
 
     // ---- APPLY (immediately — the skill was on this device's trust surface) ----
     let base_url = enroll::read_instance(ctx.fs, &ctx.layout)?
@@ -2535,6 +2567,13 @@ fn reattach(
         Some(slug) => format!("{slug}/{}/{name}", ResourceKind::Skill.segment()),
         None => name.to_owned(),
     };
+    // A doubly-stanced prior (excluded here AND unfollowed) has no single-command inverse — the
+    // apply cleared both — so the receipt honestly offers no undo.
+    let undo = if prior_both {
+        Vec::new()
+    } else {
+        vec!["topos".to_owned(), undo_verb.to_owned(), undo_target]
+    };
     Ok(FollowOutcome::ReattachApplied(Box::new(Reattach {
         workspace_id: workspace_id.to_owned(),
         workspace_name,
@@ -2550,7 +2589,7 @@ fn reattach(
             .map(|l| l.bundle_digest.clone())
             .or(bundle_digest),
         installed,
-        undo: vec!["topos".to_owned(), undo_verb.to_owned(), undo_target],
+        undo,
         warnings: out.warnings,
     })))
 }

@@ -126,6 +126,25 @@ pub(crate) fn remove(
         removals.push(classify(ctx, &universe, roots, agent_filter, token)?);
     }
 
+    // A NAMED `--agent` that did not engage the per-agent route above (a qualified
+    // `<ws>/skills/<name>` or `<name>@<agent>` spelling, or a mixed batch) must never fall
+    // through to the WHOLE-DEVICE exclusion of a followed skill — the caller asked for less than
+    // that, so widening silently would be a consent bypass. Refuse typed toward the supported
+    // spelling; the classic `-a` discovery scoping of untracked copies is untouched.
+    if !agents.is_empty()
+        && !agents.iter().any(|a| a == "*")
+        && removals
+            .iter()
+            .any(|r| matches!(r, Removal::Followed { .. }))
+    {
+        return Err(ClientError::InvalidArgument(
+            "`--agent` scopes a FOLLOWED skill by its bare name — `topos remove <skill> --agent \
+             <slug>` (one invocation per skill; qualified paths and `<name>@<agent>` spellings \
+             do not take the per-agent arm)"
+                .into(),
+        ));
+    }
+
     let mut items: Vec<RemoveItem> = removals.iter().map(describe_item).collect();
 
     // The gate: a followed CLEAN skill is a reversible per-device act — it applies immediately
@@ -228,15 +247,18 @@ pub(crate) fn remove(
         (Some(b), true) => Some((connectors.directory)(b)),
         _ => None,
     };
-    // The PRE-apply exclusion stances — the undo below is offered only over NEWLY excluded
-    // skills (a repeat remove of an already-excluded skill is a no-op whose "undo" would change
-    // pre-existing state, not restore it).
-    let prior_excluded: std::collections::HashSet<String> =
+    // The PRE-apply stances — the undo below is withheld from any skill whose LOCAL entry shows
+    // a standing stance going in: a repeat remove of an already-excluded skill is a no-op whose
+    // "undo" would change pre-existing state, and a remove of an UNFOLLOWED skill's frozen copy
+    // must not offer a `follow` that would clear the person's unfollow stance too. A followed
+    // skill with NO local entry (resolved through the universe — followed on the web, never
+    // received here) carries no stance evidence and stays eligible.
+    let prior_stanced: std::collections::HashSet<String> =
         enroll::read_follows(ctx.fs, &ctx.layout)?
             .map(|f| {
                 f.follows
                     .iter()
-                    .filter(|e| e.excluded_here)
+                    .filter(|e| !e.following || e.excluded_here)
                     .map(|e| e.skill_id.clone())
                     .collect()
             })
@@ -308,7 +330,7 @@ pub(crate) fn remove(
     let all_followed = followed.len() == removals.len();
     let all_new = followed
         .iter()
-        .all(|(_, id, _)| !prior_excluded.contains(*id));
+        .all(|(_, id, _)| !prior_stanced.contains(*id));
     let one_workspace = followed
         .first()
         .is_some_and(|(ws, _, _)| followed.iter().all(|(w, _, _)| w == ws));

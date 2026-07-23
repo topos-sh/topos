@@ -246,7 +246,10 @@ fn apply_described(argv: &[String]) -> Safety {
         ),
         Some("review") => (Some(true), Some("settles the proposal for the whole team")),
         Some("protect") | Some("channel") | Some("invite") => (Some(true), None),
-        // Subscription rows + delivery.
+        // Subscription rows + delivery. With `--agent` the argv may be a device-local scope
+        // change (offline) OR a subscribe recording an include-list (networked) — unknowable
+        // from the argv alone, so the network story is honestly absent there.
+        Some("follow") if has_flag(argv, "--agent") => (None, None),
         Some("follow") => (Some(true), None),
         Some("unfollow") => (
             Some(true),

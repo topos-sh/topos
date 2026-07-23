@@ -2911,3 +2911,74 @@ fn a_multi_target_subscribe_clears_a_swept_in_excluded_skills_marker() {
         "deploy converged (bytes reinstalled)",
     );
 }
+
+#[test]
+fn a_batch_sweeping_an_excluded_skill_keeps_the_describe() {
+    // `remove deploy` (this device's exclusion) + `unfollow docs` (the person's pause): the bare
+    // TWO-target `follow deploy docs` must DESCRIBE — the excluded-here stance is never widened
+    // (its inverse is `remove`, and the batch's single `unfollow` undo could not restore the
+    // device opt-out), and the stance check runs BEFORE the snapshot's `detached` evidence, so a
+    // skill both excluded here and detached stays gated too. Docs alone would re-attach
+    // immediately; the excluded member gates the whole batch.
+    let rig = Rig::new("no-widen-excluded");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let directory = FakeDirectory::acme(log.clone());
+    let transport = deploy_transport(log.clone());
+    seed_excluded_deploy(&rig, &directory, &transport);
+    // docs: followed locally, then unfollowed — the paused stance beside the exclusion. The
+    // person's unfollow ALSO lists deploy detached server-side in the codex scenario; the local
+    // excluded-here marker must win regardless of the snapshot.
+    enroll::write_follows_merged(
+        &rig.fs,
+        &rig.layout(),
+        &[enroll::FollowEntry {
+            skill_id: "s_docs".to_owned(),
+            workspace_id: WS.to_owned(),
+            mode: enroll::FollowModeDoc::Auto,
+            review_required: false,
+            following: true,
+            excluded_here: false,
+            agents: Vec::new(),
+            excluded_agents: Vec::new(),
+        }],
+    )
+    .unwrap();
+    let out = run_unfollow(&rig, &directory, &transport, &["docs".to_owned()], false).unwrap();
+    assert!(matches!(out, ops::UnfollowOutcome::Applied(_)));
+    // Deploy carries BOTH stances now: excluded here AND unfollowed (paused) — the remove-then-
+    // unfollow shape whose batch re-follow must stay gated.
+    let out = run_unfollow(&rig, &directory, &transport, &["deploy".to_owned()], false).unwrap();
+    assert!(matches!(out, ops::UnfollowOutcome::Applied(_)));
+    log.lock().unwrap().clear();
+
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: log.clone(),
+    };
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["deploy".to_owned(), "docs".to_owned()],
+        opts(false),
+    )
+    .unwrap();
+    assert!(
+        matches!(out, ops::FollowOutcome::Described { .. }),
+        "an excluded-here member gates the whole batch: {out:?}"
+    );
+    // Nothing mutated: no follow_skill row op fired, both stances stand.
+    assert!(
+        log.lock()
+            .unwrap()
+            .iter()
+            .all(|e| e != "follow s_deploy" && e != "follow s_docs"),
+        "no row op on a describe: {:?}",
+        log.lock().unwrap()
+    );
+    let e = follow_entry(&rig, "s_deploy");
+    assert!(e.excluded_here, "the device exclusion stands");
+    assert!(!follow_entry(&rig, "s_docs").following, "the pause stands");
+}
