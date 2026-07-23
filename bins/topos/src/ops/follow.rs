@@ -438,40 +438,49 @@ pub(crate) fn follow(
             .cloned()
             .collect();
         let _ = crate::placement::validate_agent_slugs(ctx, &named)?;
-        // A STANDING STANCE refuses the scope verbs typed: a skill removed on this device (or
-        // unfollowed) is not receiving here, so scoping WHERE it lands would silently paper over
-        // the stance (and the re-attach arm cannot honor `--agent` in the same act). The refusal
-        // names the two-step way out; the stance itself never moves.
+        // A STANDING STANCE refuses the BARE scope verbs typed: a skill removed on this device
+        // (or unfollowed) is not receiving here, so scoping WHERE it lands would silently paper
+        // over the stance (and the re-attach arm cannot honor `--agent` in the same act). The
+        // refusal names the two-step way out; the stance itself never moves. The CONSENTED
+        // `--yes` form is the one-act spelling of that two-step: it falls through to the
+        // ordinary subscribe below, which re-affirms the follow and records the include-list at
+        // apply.
         let mut tokens: Vec<String> = targets.clone();
         tokens.extend(opts.skills.iter().cloned());
-        for t in &tokens {
-            if t.contains("://") || t.contains('/') || super::builtin::is_builtin(t) {
-                continue;
-            }
-            if let Some(entry) = known_followed_entry(ctx, strip_digest(t), ws)? {
-                let name = strip_digest(t);
-                if entry.excluded_here {
-                    return Err(ClientError::InvalidArgument(format!(
-                        "'{name}' was removed on this device — re-attach it first (`topos follow \
-                         {name}`), then scope with `--agent`"
-                    )));
+        if !opts.yes {
+            for t in &tokens {
+                if t.contains("://") || t.contains('/') || super::builtin::is_builtin(t) {
+                    continue;
                 }
-                if !entry.following {
-                    return Err(ClientError::InvalidArgument(format!(
-                        "'{name}' is unfollowed — follow it again first (`topos follow {name}`), \
-                         then scope with `--agent`"
-                    )));
+                if let Some(entry) = known_followed_entry(ctx, strip_digest(t), ws)? {
+                    let name = strip_digest(t);
+                    if entry.excluded_here {
+                        return Err(ClientError::InvalidArgument(format!(
+                            "'{name}' was removed on this device — re-attach it first (`topos \
+                             follow {name}`), then scope with `--agent`"
+                        )));
+                    }
+                    if !entry.following {
+                        return Err(ClientError::InvalidArgument(format!(
+                            "'{name}' is unfollowed — follow it again first (`topos follow \
+                             {name}`), then scope with `--agent`"
+                        )));
+                    }
                 }
             }
         }
-        // Every target already followed (bare/`@digest` names) ⇒ the offline SCOPE-UPDATE path.
-        // Anything else falls through to the ordinary subscribe, which records the include-list at
-        // apply (after the reconcile installs the new follow).
+        // Every target an ACTIVELY followed skill (bare/`@digest` names; a stanced entry is not
+        // active — its consented `--yes` re-follow rides the subscribe below instead) ⇒ the
+        // offline SCOPE-UPDATE path. Anything else falls through to the ordinary subscribe,
+        // which records the include-list at apply (after the reconcile installs the new follow).
         let all_followed = !tokens.is_empty()
             && tokens.iter().all(|t| {
                 !t.contains("://")
                     && !t.contains('/')
-                    && matches!(known_followed_entry(ctx, strip_digest(t), ws), Ok(Some(_)))
+                    && matches!(
+                        known_followed_entry(ctx, strip_digest(t), ws),
+                        Ok(Some(e)) if e.following && !e.excluded_here
+                    )
             });
         if all_followed {
             // Applies immediately (device-local placement policy; `--yes` is an accepted no-op).
@@ -521,7 +530,11 @@ pub(crate) fn follow(
             // An actively-following entry is the classic accept.
             let name = strip_digest(single);
             if let Some(entry) = known_followed_entry(ctx, name, ws)? {
-                if entry.excluded_here {
+                // The re-attach cannot honor `--agent` in the same act: an agents-carrying
+                // invocation is either already refused (bare — the dispatch guard above) or the
+                // CONSENTED `--yes` form, which falls through to the ordinary subscribe below to
+                // re-affirm the follow and record the include-list at apply.
+                if entry.excluded_here && opts.agents.is_empty() {
                     return reattach(
                         ctx,
                         connectors,
@@ -531,7 +544,10 @@ pub(crate) fn follow(
                         ReattachCause::ExcludedHere,
                     );
                 }
-                if !entry.following && enroll::read_instance(ctx.fs, &ctx.layout)?.is_some() {
+                if !entry.following
+                    && opts.agents.is_empty()
+                    && enroll::read_instance(ctx.fs, &ctx.layout)?.is_some()
+                {
                     return reattach(
                         ctx,
                         connectors,
@@ -541,7 +557,11 @@ pub(crate) fn follow(
                         ReattachCause::Unfollowed,
                     );
                 }
-                return approve(ctx, std::slice::from_ref(single), ws);
+                if opts.agents.is_empty() {
+                    // The classic accept — or the un-enrolled paused entry's graceful local
+                    // resume, which lives inside `approve`.
+                    return approve(ctx, std::slice::from_ref(single), ws);
+                }
             }
             // Not a known followed skill: a `@<digest>` suffix has nothing to pin (typed error); a
             // bare word falls through to the address / subscribe grammar.
@@ -1401,9 +1421,15 @@ fn subscribe_dispatch(
     ] = resolutions.as_slice()
         && let Some(cause) = local_stance(ctx, sid)?
     {
-        // The re-attach cannot honor `--agent` in the same act — refuse typed (the same two-step
-        // way out the bare-word dispatch names), never a silent drop of the scoping intent.
-        if !opts.agents.is_empty() {
+        if opts.agents.is_empty() {
+            return reattach(ctx, connectors, workspace_id, sid, name, cause);
+        }
+        // The re-attach cannot honor `--agent` in the same act — a BARE run refuses typed (the
+        // same two-step way out the bare-word dispatch names), never a silent drop of the
+        // scoping intent. The CONSENTED `--yes` form falls through to the ordinary subscribe
+        // below, which re-affirms the follow and records the include-list at apply (its receipt
+        // offers no undo — the scope-carrying apply withholds it).
+        if !opts.yes {
             let verb = match cause {
                 ReattachCause::ExcludedHere => "was removed on this device — re-attach it first",
                 ReattachCause::Unfollowed => "is unfollowed — follow it again first",
@@ -1412,7 +1438,6 @@ fn subscribe_dispatch(
                 "'{name}' {verb} (`topos follow {name}`), then scope with `--agent`"
             )));
         }
-        return reattach(ctx, connectors, workspace_id, sid, name, cause);
     }
 
     // One workspace per invocation: the describe is one workspace's story, and the apply's

@@ -2987,3 +2987,47 @@ fn a_batch_sweeping_an_excluded_skill_keeps_the_describe() {
     assert!(e.excluded_here, "the device exclusion stands");
     assert!(!follow_entry(&rig, "s_docs").following, "the pause stands");
 }
+
+#[test]
+fn a_consented_refollow_with_scope_applies_through_the_subscribe() {
+    // `follow deploy --agent cursor --yes` on an EXCLUDED skill: the bare forms refuse typed
+    // toward the two-step way out, but the CONSENTED `--yes` is that two-step in one act — it
+    // rides the ordinary subscribe, re-affirms the follow (lifting the exclusion), records the
+    // include-list at apply, and offers no undo (the scope-carrying apply withholds it).
+    let rig = Rig::new("consented-scoped-refollow");
+    rig.seed_enrolled();
+    let log: CallLog = Arc::default();
+    let directory = FakeDirectory::acme(log.clone());
+    let transport = deploy_transport(log.clone());
+    seed_excluded_deploy(&rig, &directory, &transport);
+    log.lock().unwrap().clear();
+
+    let enroll_fake = FakeAddressEnroll {
+        api_base: API.to_owned(),
+        log: log.clone(),
+    };
+    let mut o = opts(true);
+    o.agents = vec!["cursor".to_owned()];
+    let out = run_follow(
+        &rig,
+        &enroll_fake,
+        &directory,
+        &transport,
+        vec!["deploy".to_owned()],
+        o,
+    )
+    .unwrap();
+    let ops::FollowOutcome::Applied(applied) = out else {
+        panic!("the consented scoped re-follow applies through the subscribe: {out:?}");
+    };
+    assert!(applied.undo.is_empty(), "no undo on a scope-carrying apply");
+    // The row op fired, the stance cleared, the include-list is durable.
+    assert!(
+        log.lock().unwrap().iter().any(|e| e == "follow s_deploy"),
+        "the re-affirm rides `follow_skill`: {:?}",
+        log.lock().unwrap()
+    );
+    let e = follow_entry(&rig, "s_deploy");
+    assert!(e.following && !e.excluded_here, "the stance cleared");
+    assert_eq!(e.agents, vec!["cursor".to_owned()], "the scope recorded");
+}
