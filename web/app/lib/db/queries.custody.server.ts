@@ -220,11 +220,15 @@ export async function registerGenesisBundleInTx(
   // lands. The member never asked for a channel, so the default's refusal never fails the op.
   let placement: GenesisRegistration["placement"];
   if (toChannel === null) {
+    // FOR UPDATE — the same pin the named `--to` placement takes: a concurrent open→curated
+    // flip of the default channel must conflict here, never slip a member's placement past
+    // the curation gate mid-transaction.
     const everyone = await tx
       .select({ id: channel.id, mode: channel.mode })
       .from(channel)
       .where(and(eq(channel.workspaceId, ws), eq(channel.isDefault, true)))
-      .limit(1);
+      .limit(1)
+      .for("update");
     if (everyone[0] !== undefined) {
       if (everyone[0].mode === "curated" && actor.role === "member") {
         placement = "curated_role_required";

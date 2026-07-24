@@ -569,13 +569,16 @@ export async function unplaceBundleRefInTx(
 }
 
 /** The id-keyed channel resolve the web curation functions share — workspace-scoped, mode
- * included (the gate needs it). */
+ * included (the gate needs it), and FOR UPDATE: a concurrent mode flip (or delete) conflicts
+ * with the curation transaction instead of letting a member's edit slip past a gate that
+ * changed after this read. */
 async function channelCurationTargetInTx(tx: Tx, ws: string, channelId: string) {
   const rows = await tx
     .select({ id: channel.id, mode: channel.mode })
     .from(channel)
     .where(and(eq(channel.workspaceId, ws), eq(channel.id, channelId)))
-    .limit(1);
+    .limit(1)
+    .for("update");
   return rows[0];
 }
 
