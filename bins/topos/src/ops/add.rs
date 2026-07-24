@@ -268,6 +268,7 @@ pub(crate) fn add_with_name(
         manifest: None,
         reference: None,
         undo: Vec::new(),
+        governed_copy: None,
     })
 }
 
@@ -985,6 +986,58 @@ fn registry_attribution(source_abs: &Path) -> Option<topos_harness::registry::Ha
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
     let cwd = std::env::current_dir().ok();
     topos_harness::registry::attribute_path(source_abs, &home, cwd.as_deref())
+}
+
+/// Consult each ACTIVE session's catalog for a GOVERNED copy of `spec`'s source — the dedup
+/// suggestion a remote import's receipt carries ("acme already has this as `@acme/deploy`").
+/// Matching is by upstream host + `owner/repo` over the catalog's additive upstream fields; a
+/// path-exact match wins over a same-repo sibling. Best-effort by design: no sessions, a
+/// transport fault, or an upstream-less catalog all answer `None` — the suggestion is a
+/// courtesy, never a gate on the import (npm shape: warn beside the act, never block it).
+pub(crate) fn governed_copy_suggestion(
+    ctx: &Ctx<'_>,
+    connect: &super::reconcile::SessionConnect<'_>,
+    spec: &RemoteSpec,
+) -> Option<topos_types::results::GovernedCopy> {
+    let sessions = crate::sessions::read_sessions(ctx.fs, &ctx.layout).ok()?;
+    let want_host = spec.host.domain();
+    let want_repo = format!("{}/{}", spec.owner, spec.repo);
+    let want_path = spec.subdir.as_deref().unwrap_or("");
+    let mut sibling: Option<topos_types::results::GovernedCopy> = None;
+    for s in &sessions.sessions {
+        // Only an ACTIVE session's catalog is this person's universe (pending delivers nothing).
+        if s.status != crate::sessions::SESSION_ACTIVE {
+            continue;
+        }
+        let transports = connect(s);
+        let Ok(index) = transports.directory.skills_index(&s.workspace_id) else {
+            continue;
+        };
+        for e in index.skills {
+            if e.status != "active" {
+                continue;
+            }
+            let (Some(host), Some(repo)) = (e.upstream_host.as_deref(), e.upstream_repo.as_deref())
+            else {
+                continue;
+            };
+            if host != want_host || repo != want_repo {
+                continue;
+            }
+            let same_path = e.upstream_path.as_deref().unwrap_or("") == want_path;
+            let copy = topos_types::results::GovernedCopy {
+                workspace: s.workspace_name.clone(),
+                name: e.name.clone(),
+                reference: format!("@{}/{}", s.workspace_name, e.name),
+                same_path,
+            };
+            if same_path {
+                return Some(copy);
+            }
+            sibling.get_or_insert(copy);
+        }
+    }
+    sibling
 }
 
 /// Refuse a source path that is equal to, an ancestor of, or a descendant of `~/.topos/` (canonicalized,

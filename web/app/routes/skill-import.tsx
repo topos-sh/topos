@@ -1,10 +1,18 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { data, Form, Link, redirect, useActionData, useNavigation } from "react-router";
+import {
+  data,
+  Form,
+  Link,
+  redirect,
+  useActionData,
+  useLoaderData,
+  useNavigation,
+} from "react-router";
 import { buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
 import { requireMemberInScope } from "@/lib/auth/guards.server";
 import { mintBundleId } from "@/lib/db/identity.server";
 import { inFinalTx, registerGenesisBundleInTx } from "@/lib/db/queries.custody.server";
-import { fetchUpstreamTree, resolveTreeSource } from "@/lib/db/upstream.server";
+import { fetchUpstreamTree, governedCopiesOf, resolveTreeSource } from "@/lib/db/upstream.server";
 import { publishVersion } from "@/lib/plane/custody.server";
 import { useWsPath } from "@/lib/ws-path";
 import { wsPathServer } from "@/lib/ws-url.server";
@@ -76,6 +84,10 @@ interface PreviewData {
   suggestedName: string;
   files: { path: string; bytes: number }[];
   skillMdLead: string | null;
+  /** A copy of this source the workspace ALREADY governs (`bundle_upstream` matched) — the
+   * dedup notice ("already in this workspace as @ws/name"). `samePath` = the exact subdir;
+   * false = same repository, different path. Never blocks the publish. */
+  already: { name: string; samePath: boolean } | null;
   error?: string;
 }
 
@@ -102,6 +114,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
           suggestedName: "",
           files: [],
           skillMdLead: null,
+          already: null,
           error:
             "That doesn't read as a GitHub reference — `owner/repo`, a repository URL, or a subfolder URL.",
         },
@@ -128,6 +141,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
             suggestedName: "",
             files: [],
             skillMdLead: null,
+            already: null,
             error: "Nothing there — the path holds no files.",
           },
           { status: 400 },
@@ -141,6 +155,17 @@ export async function action({ request, params }: ActionFunctionArgs) {
         .replaceAll(/[^a-z0-9-]+/g, "-")
         .replaceAll(/^-+|-+$/g, "")
         .slice(0, 60);
+      // The DEDUP notice: this workspace may already govern the same source. Path-exact wins;
+      // a same-repo sibling still gets named (same repository, different folder). Visible on
+      // the preview, never blocking — publishing again mints a second, separate skill.
+      const copies = await governedCopiesOf(workspace.id, "github.com", source.repo);
+      const exact = copies.find((c) => c.path === subdir);
+      const already =
+        exact !== undefined
+          ? { name: exact.name, samePath: true }
+          : copies.length > 0 && copies[0] !== undefined
+            ? { name: copies[0].name, samePath: false }
+            : null;
       return data<PreviewData>({
         form: "preview",
         repo: source.repo,
@@ -152,6 +177,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
           .map((f) => ({ path: f.path, bytes: f.bytes.length }))
           .sort((a, b) => a.path.localeCompare(b.path)),
         skillMdLead: skillMd === undefined ? null : skillMd.bytes.toString("utf8").slice(0, 1200),
+        already,
       });
     } catch (error) {
       return data<PreviewData>(
@@ -164,6 +190,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
           suggestedName: "",
           files: [],
           skillMdLead: null,
+          already: null,
           error: `Fetch failed: ${error instanceof Error ? error.message : "unknown"}`,
         },
         { status: 400 },
@@ -301,6 +328,8 @@ export default function SkillImport() {
 
 function PreviewCard({ preview }: { preview: PreviewData }) {
   const navigation = useNavigation();
+  const { wsName } = useLoaderData<typeof loader>();
+  const wsPath = useWsPath();
   const busy = navigation.state !== "idle";
   return (
     <section aria-labelledby="import-preview-heading" className="max-w-2xl space-y-3">
@@ -308,6 +337,29 @@ function PreviewCard({ preview }: { preview: PreviewData }) {
         <span id="import-preview-heading">What would land</span>
       </SectionHeading>
       <Card className="space-y-3 px-4 py-3" data-testid="import-preview">
+        {preview.already !== null && (
+          <p
+            data-testid="import-already-governed"
+            className="rounded-md border border-line bg-panel2 px-3 py-2 text-dim text-sm"
+          >
+            {preview.already.samePath ? (
+              <>Already in this workspace as</>
+            ) : (
+              <>This repository is already in this workspace as</>
+            )}{" "}
+            <Link
+              to={wsPath(`skills/${preview.already.name}`)}
+              className="font-mono text-[13px] text-ink underline decoration-hairline"
+            >
+              @{wsName}/{preview.already.name}
+            </Link>
+            {" — "}
+            <code className="font-mono text-[13px]">
+              topos add @{wsName}/{preview.already.name}
+            </code>{" "}
+            delivers the governed copy. Publishing again creates a second, separate skill.
+          </p>
+        )}
         <p className="text-dim text-sm">
           <span className="font-mono text-[13px] text-ink">
             {preview.repo}

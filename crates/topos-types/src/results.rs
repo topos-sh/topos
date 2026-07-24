@@ -500,6 +500,28 @@ pub struct AddData {
     /// The paste-ready inverse (`topos remove <ref>`). Empty when nothing is undoable. **Additive.**
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub undo: Vec<String>,
+    /// A GOVERNED COPY of the same upstream source already living in a connected workspace — the
+    /// dedup suggestion on a remote import ("acme already has this as `@acme/deploy`"). Disclosed,
+    /// never blocking: the import proceeded as asked; the reference is the governed alternative.
+    /// **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governed_copy: Option<GovernedCopy>,
+}
+
+/// The dedup suggestion an [`AddData`] carries when a remote import's source is already governed
+/// in a connected workspace. **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct GovernedCopy {
+    /// The workspace's address name.
+    pub workspace: String,
+    /// The skill's catalog name there.
+    pub name: String,
+    /// The paste-ready reference (`@<workspace>/<name>`).
+    pub reference: String,
+    /// Whether the governed copy was imported from the exact same subdirectory (`false` = same
+    /// repository, different path).
+    pub same_path: bool,
 }
 
 /// `init` — create this folder's `topos.toml` (the project manifest `add`/`remove` edit and

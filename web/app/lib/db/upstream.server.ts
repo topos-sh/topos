@@ -481,6 +481,40 @@ export async function upstreamOf(
   };
 }
 
+/** One governed copy of an upstream source already in the workspace — the dedup lookup's row. */
+export interface GovernedCopy {
+  bundleId: string;
+  /** The bundle's catalog name (the `@ws/name` suggestion's second half). */
+  name: string;
+  /** The recorded subdirectory inside the repo (`""` = the repo root). */
+  path: string;
+}
+
+/**
+ * The workspace's governed copies of `host`/`repo` (any subdir), non-deleted bundles only — the
+ * import preview's dedup lookup ("already in this workspace as …"). Ordered path-first so a
+ * caller preferring the exact subdir can take the first match itself.
+ */
+export async function governedCopiesOf(
+  workspaceId: string,
+  host: string,
+  repo: string,
+): Promise<GovernedCopy[]> {
+  const rows = await getDb().execute(sql`
+    SELECT bu.bundle_id, b.name, bu.path
+    FROM web.bundle_upstream bu
+    JOIN web.bundle b ON b.id = bu.bundle_id AND b.workspace_id = bu.workspace_id
+    WHERE bu.workspace_id = ${workspaceId} AND bu.host = ${host} AND bu.repo = ${repo}
+      AND b.status <> 'deleted'
+    ORDER BY bu.path, b.name
+  `);
+  return (rows.rows as { bundle_id: string; name: string; path: string }[]).map((r) => ({
+    bundleId: r.bundle_id,
+    name: r.name,
+    path: r.path,
+  }));
+}
+
 // ── The poller ──────────────────────────────────────────────────────────────────────────────
 
 let checkerArmed = false;

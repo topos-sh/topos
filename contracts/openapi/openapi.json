@@ -4123,6 +4123,27 @@
             "format": "int64",
             "description": "When `current` last moved (epoch milliseconds)."
           },
+          "upstream_host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The recorded upstream origin's host (`github.com` today) — present when the bundle was\nimported from an external source (the fork-that-remembers-its-parent provenance). Lets a\nclient suggest the governed copy when the same source is added again. **Additive.**"
+          },
+          "upstream_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The subdirectory inside the upstream repo (`\"\"` = the repo root). Present exactly when\n`upstream_host` is. **Additive.**"
+          },
+          "upstream_repo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The upstream `owner/repo`. Present exactly when `upstream_host` is. **Additive.**"
+          },
           "version_id": {
             "type": "string",
             "description": "The `current` version's commit id (64-char lowercase hex)."

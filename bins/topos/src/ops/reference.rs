@@ -31,7 +31,9 @@ struct ResolvedRef {
 }
 
 enum ResolvedKind {
-    Skill(topos_types::requests::WireSkillIndexEntry),
+    // Boxed: the catalog entry grew its additive upstream fields, and the enum travels by value
+    // through the resolve ladder — keep the channel arm's footprint small.
+    Skill(Box<topos_types::requests::WireSkillIndexEntry>),
     Channel(String),
 }
 
@@ -106,7 +108,7 @@ fn resolve_ref(
                 canonical: format!("{}/{}/{name}", session.host, session.workspace_name),
                 session,
                 transports,
-                kind: ResolvedKind::Skill(entry),
+                kind: ResolvedKind::Skill(Box::new(entry)),
                 pin: pin.clone(),
             })
         }
@@ -177,7 +179,7 @@ fn resolve_ref(
                         canonical: format!("{}/{}/{name}", session.host, session.workspace_name),
                         session,
                         transports,
-                        kind: ResolvedKind::Skill(entry),
+                        kind: ResolvedKind::Skill(Box::new(entry)),
                         pin: pin.clone(),
                     })
                 }
@@ -380,6 +382,7 @@ pub(crate) fn add_reference(
         manifest: None,
         reference: None,
         undo: Vec::new(),
+        governed_copy: None,
     };
     if global {
         // The profile edit — the person's set, on every machine they log in.

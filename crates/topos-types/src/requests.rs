@@ -355,6 +355,18 @@ pub struct WireSkillIndexEntry {
     pub updated_at: i64,
     /// The count of OPEN, non-stale proposals on the skill.
     pub open_proposals: u64,
+    /// The recorded upstream origin's host (`github.com` today) — present when the bundle was
+    /// imported from an external source (the fork-that-remembers-its-parent provenance). Lets a
+    /// client suggest the governed copy when the same source is added again. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_host: Option<String>,
+    /// The upstream `owner/repo`. Present exactly when `upstream_host` is. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_repo: Option<String>,
+    /// The subdirectory inside the upstream repo (`""` = the repo root). Present exactly when
+    /// `upstream_host` is. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_path: Option<String>,
 }
 
 /// `GET /v1/workspaces/{ws}/skills` response body — the workspace catalog (every skill holding a `current`),
@@ -1261,13 +1273,17 @@ mod tests {
             display_name: None,
             updated_at: 1_700_000_000_000,
             open_proposals: 0,
+            upstream_host: None,
+            upstream_repo: None,
+            upstream_path: None,
         };
         let v = serde_json::to_value(&entry).unwrap();
         // The new fields ride under their snake_case spellings.
         assert_eq!(v["name"], "pr-describe");
         assert_eq!(v["status"], "active");
-        // An absent display_name omits (skip_serializing_if).
+        // An absent display_name omits (skip_serializing_if), as do the upstream fields.
         assert!(v.get("display_name").is_none());
+        assert!(v.get("upstream_host").is_none());
         let back: WireSkillIndexEntry = serde_json::from_value(v).unwrap();
         assert_eq!(back.name, "pr-describe");
         assert_eq!(back.status, "active");

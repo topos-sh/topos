@@ -329,6 +329,9 @@ fn catalog_entry(skill_id: &str, name: &str, v: &Version) -> WireSkillIndexEntry
         display_name: None,
         updated_at: 0,
         open_proposals: 0,
+        upstream_host: None,
+        upstream_repo: None,
+        upstream_path: None,
     }
 }
 impl DirectorySource for FakeDirectory {
@@ -978,5 +981,64 @@ fn publish_transfer_keeps_an_existing_governed_pin() {
         m.skills[0].pin.as_deref(),
         Some(pin.as_str()),
         "the standing pin is never clobbered"
+    );
+}
+
+#[test]
+fn a_remote_add_gets_the_governed_copy_suggestion_from_the_catalog_upstream_fields() {
+    use crate::source::{GitHost, RemoteSpec};
+
+    let rig = Rig::new("dedup");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
+    // The catalog's one entry carries the ADDITIVE upstream provenance the suggestion matches on.
+    let mut entry = catalog_entry("s_deploy", "deploy", &v);
+    entry.upstream_host = Some("github.com".into());
+    entry.upstream_repo = Some("owner/dedup".into());
+    entry.upstream_path = Some("skills/deploy".into());
+    let dir = FakeDirectory::new(vec![entry], Vec::new());
+    let ctx = rig.ctx_at(None);
+    let spec = |subdir: Option<&str>, repo: &str| RemoteSpec {
+        host: GitHost::GitHub,
+        owner: "owner".into(),
+        repo: repo.into(),
+        git_ref: None,
+        subdir: subdir.map(str::to_owned),
+    };
+
+    // The exact subdir → the path-exact suggestion, spelled as the paste-ready workspace ref.
+    let got = ops::governed_copy_suggestion(
+        &ctx,
+        &connect(&plane, &dir),
+        &spec(Some("skills/deploy"), "dedup"),
+    )
+    .expect("a governed copy is suggested");
+    assert_eq!(got.workspace, WS_NAME);
+    assert_eq!(got.name, "deploy");
+    assert_eq!(got.reference, "@eng/deploy");
+    assert!(got.same_path);
+
+    // The same repository at another path still gets named — honestly, as a sibling.
+    let sibling = ops::governed_copy_suggestion(&ctx, &connect(&plane, &dir), &spec(None, "dedup"))
+        .expect("the same-repo sibling is suggested");
+    assert!(!sibling.same_path);
+    assert_eq!(sibling.reference, "@eng/deploy");
+
+    // A repo nobody governs answers nothing (the import proceeds with no notice).
+    assert!(
+        ops::governed_copy_suggestion(&ctx, &connect(&plane, &dir), &spec(None, "other")).is_none()
+    );
+
+    // An ENDED session's catalog is never consulted — with the one session ended, no suggestion.
+    sessions::set_session_status(&rig.fs, &rig.layout(), HOST, WS, SESSION_ENDED).unwrap();
+    assert!(
+        ops::governed_copy_suggestion(
+            &ctx,
+            &connect(&plane, &dir),
+            &spec(Some("skills/deploy"), "dedup")
+        )
+        .is_none()
     );
 }

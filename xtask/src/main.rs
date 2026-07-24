@@ -443,6 +443,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             manifest: None,
             reference: None,
             undo: Vec::new(),
+            governed_copy: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],

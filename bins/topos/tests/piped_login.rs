@@ -147,7 +147,12 @@ fn a_piped_login_prints_the_instructions_and_exits_without_the_blocking_wait() {
 
     // Call 1 — begin: card → authorize → WAL. Piped, no --wait → returns promptly (well under the
     // 30s watchdog; a blocking default would have sat out the full ~15-minute code TTL).
-    let out = run_piped(&home, &fx.base, &["login", &fx.base], Duration::from_secs(30));
+    let out = run_piped(
+        &home,
+        &fx.base,
+        &["login", &fx.base],
+        Duration::from_secs(30),
+    );
     assert!(
         out.status.success(),
         "begin exits 0: {}",

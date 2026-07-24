@@ -837,6 +837,9 @@ mod tests {
             display_name: Some(skill_id.to_owned()),
             updated_at: 1,
             open_proposals: 0,
+            upstream_host: None,
+            upstream_repo: None,
+            upstream_path: None,
         }
     }
 

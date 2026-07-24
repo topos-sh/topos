@@ -1303,6 +1303,32 @@ describe("skills index", () => {
     expect(typeof body.skills[0]?.updated_at).toBe("number");
     expect(body.skills[1]).toMatchObject({ skill_id: "s_arch", status: "archived" });
   });
+
+  it("GET /skills — a recorded upstream rides its entry (additive); absent rows omit the fields", async () => {
+    await db.q(
+      `INSERT INTO web.bundle_upstream (bundle_id, workspace_id, host, repo, path)
+       VALUES ('s_alpha', $1, 'github.com', 'owner/alpha', 'skills/alpha')
+       ON CONFLICT (bundle_id) DO NOTHING`,
+      [wsId],
+    );
+    const res = await drive(
+      skillsIndexLoader,
+      req("GET", `/api/v1/workspaces/${wsId}/skills`, { cred: CREDS.mem }),
+      { ws: wsId },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { skills: Record<string, unknown>[] };
+    expect(body.skills[0]).toMatchObject({
+      skill_id: "s_alpha",
+      upstream_host: "github.com",
+      upstream_repo: "owner/alpha",
+      upstream_path: "skills/alpha",
+    });
+    // A bundle nobody imported carries none of the upstream fields (absent, not null).
+    expect(body.skills[2]?.skill_id).toBe("s_beta");
+    expect(body.skills[2]).not.toHaveProperty("upstream_host");
+    await db.q(`DELETE FROM web.bundle_upstream WHERE bundle_id = 's_alpha'`);
+  });
 });
 
 describe("skill current (the conditional-GET currency read)", () => {

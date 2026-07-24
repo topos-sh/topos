@@ -270,3 +270,35 @@ describe("checkBundleUpstream — external changes ALWAYS propose", () => {
     expect(view?.currentCommit).toBeNull();
   });
 });
+
+describe("governedCopiesOf — the import preview's dedup lookup", () => {
+  it("matches by host+repo, path-first, non-deleted only; a foreign repo answers nothing", async () => {
+    const upstream = await import("@/lib/db/upstream.server");
+    // Three copies of owner/dedup: the repo root, a subdir, and a DELETED one (never suggested).
+    await seedBundle(db, wsId, "s_ded_root", "dedup-root");
+    await seedBundle(db, wsId, "s_ded_sub", "dedup-sub");
+    await seedBundle(db, wsId, "s_ded_gone", "dedup-gone", { status: "deleted" });
+    await db.q(
+      `INSERT INTO web.bundle_upstream (bundle_id, workspace_id, host, repo, path)
+       VALUES ('s_ded_root', $1, 'github.com', 'owner/dedup', ''),
+              ('s_ded_sub',  $1, 'github.com', 'owner/dedup', 'skills/deploy'),
+              ('s_ded_gone', $1, 'github.com', 'owner/dedup', 'skills/gone')`,
+      [wsId],
+    );
+
+    const copies = await upstream.governedCopiesOf(wsId, "github.com", "owner/dedup");
+    // Path-ordered, the deleted copy absent.
+    expect(copies.map((c) => ({ name: c.name, path: c.path }))).toEqual([
+      { name: "dedup-root", path: "" },
+      { name: "dedup-sub", path: "skills/deploy" },
+    ]);
+    // The exact-subdir preference is the caller's one-liner over the ordered rows.
+    expect(copies.find((c) => c.path === "skills/deploy")?.name).toBe("dedup-sub");
+
+    // A repo nobody imported — and the same repo on another host — answer nothing.
+    expect(await upstream.governedCopiesOf(wsId, "github.com", "owner/other")).toEqual([]);
+    expect(await upstream.governedCopiesOf(wsId, "example.com", "owner/dedup")).toEqual([]);
+    // Workspace-bound: a foreign workspace sees none of these rows.
+    expect(await upstream.governedCopiesOf("w_other", "github.com", "owner/dedup")).toEqual([]);
+  });
+});

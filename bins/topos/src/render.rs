@@ -451,6 +451,18 @@ pub(crate) fn add_tty(data: &AddData) -> String {
         });
     }
     out.push_str(&breadth_trigger_lines(&data.triggers));
+    // The DEDUP courtesy on a remote import: a connected workspace already governs this source —
+    // name the reference (visible, never blocking; the import above landed as asked).
+    if let Some(g) = &data.governed_copy {
+        out.push_str(&format!(
+            "\nAlready governed: workspace '{}' has this {} as {} — `topos add {}` delivers the \
+             team's copy (updates, review, one shared history) instead of a separate import.",
+            g.workspace,
+            if g.same_path { "source" } else { "repository" },
+            g.reference,
+            g.reference
+        ));
+    }
     out
 }
 

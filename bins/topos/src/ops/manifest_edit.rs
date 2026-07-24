@@ -456,6 +456,7 @@ mod tests {
             manifest: None,
             reference: None,
             undo: Vec::new(),
+            governed_copy: None,
         }
     }
 

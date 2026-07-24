@@ -19,6 +19,17 @@
         }
       ]
     },
+    "governed_copy": {
+      "description": "A GOVERNED COPY of the same upstream source already living in a connected workspace — the\ndedup suggestion on a remote import (\"acme already has this as `@acme/deploy`\"). Disclosed,\nnever blocking: the import proceeded as asked; the reference is the governed alternative.\n**Additive.**",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GovernedCopy"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "harness": {
       "description": "The harness topos recognized the adopted directory as (e.g. Claude Code), or `None` for a plain\ndirectory tracked in place. Disclosed so the agent can see whether auto-update was armed.",
       "anyOf": [
@@ -156,6 +167,34 @@
           "type": "string",
           "const": "explicit_pull_only"
         }
+      ]
+    },
+    "GovernedCopy": {
+      "description": "The dedup suggestion an [`AddData`] carries when a remote import's source is already governed\nin a connected workspace. **INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The skill's catalog name there.",
+          "type": "string"
+        },
+        "reference": {
+          "description": "The paste-ready reference (`@<workspace>/<name>`).",
+          "type": "string"
+        },
+        "same_path": {
+          "description": "Whether the governed copy was imported from the exact same subdirectory (`false` = same\nrepository, different path).",
+          "type": "boolean"
+        },
+        "workspace": {
+          "description": "The workspace's address name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace",
+        "name",
+        "reference",
+        "same_path"
       ]
     },
     "HarnessId": {

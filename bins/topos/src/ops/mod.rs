@@ -48,7 +48,7 @@ mod version_check;
 
 pub(crate) use add::{
     AddRemoteOpts, KeepAsYoursOutcome, add, add_remote, add_remote_fetched, add_with_name,
-    keep_as_yours, resolve_add_target, split_target, tracked_skill_at,
+    governed_copy_suggestion, keep_as_yours, resolve_add_target, split_target, tracked_skill_at,
 };
 pub(crate) use arm::{arm_detected, probe_detected, scrub_all};
 pub(crate) use builtin::{ensure_builtin, is_builtin, restore_builtin};

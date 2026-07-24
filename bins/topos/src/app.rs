@@ -531,6 +531,15 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                         )
                         .and_then(|mut d| {
                             ops::note_added_remote(&ctx, &mut d, global)?;
+                            // The DEDUP courtesy: when a connected workspace already governs this
+                            // source (its catalog's upstream provenance matches), the receipt
+                            // SUGGESTS the governed reference — visible, never blocking (the
+                            // import above landed exactly as asked).
+                            d.governed_copy = ops::governed_copy_suggestion(
+                                &ctx,
+                                &connect_session_transports,
+                                &spec,
+                            );
                             Ok(d)
                         })
                     }

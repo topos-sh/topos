@@ -19,6 +19,7 @@ import {
 import { foldInviteEmail, INVITATION_TTL_MS } from "@/lib/db/queries.roster.server";
 import {
   bundle,
+  bundleUpstream,
   channel,
   invitation,
   notice,
@@ -920,6 +921,11 @@ export interface LaneSkillIndexEntry {
   display_name?: string;
   updated_at: number;
   open_proposals: number;
+  /** The recorded upstream origin, present when the bundle was imported from an external
+   * source — lets a client suggest the governed copy when the same source is added again. */
+  upstream_host?: string;
+  upstream_repo?: string;
+  upstream_path?: string;
 }
 
 /** The workspace catalog — every bundle holding a `current`, ordered by id. */
@@ -940,6 +946,9 @@ export async function laneSkillsIndex(actor: SessionActor): Promise<LaneSkillInd
         SELECT COUNT(*) FROM web.proposal p
         WHERE p.workspace_id = ${ws} AND p.bundle_id = ${bundle.id} AND p.status = 'open'
       )`,
+      upstreamHost: bundleUpstream.host,
+      upstreamRepo: bundleUpstream.repo,
+      upstreamPath: bundleUpstream.path,
     })
     .from(bundle)
     .innerJoin(
@@ -947,6 +956,13 @@ export async function laneSkillsIndex(actor: SessionActor): Promise<LaneSkillInd
       and(
         eq(planeCurrentPointer.workspaceId, bundle.workspaceId),
         eq(planeCurrentPointer.bundleId, bundle.id),
+      ),
+    )
+    .leftJoin(
+      bundleUpstream,
+      and(
+        eq(bundleUpstream.workspaceId, bundle.workspaceId),
+        eq(bundleUpstream.bundleId, bundle.id),
       ),
     )
     .leftJoin(
@@ -970,6 +986,13 @@ export async function laneSkillsIndex(actor: SessionActor): Promise<LaneSkillInd
     ...(r.displayName === null ? {} : { display_name: r.displayName }),
     updated_at: Number(r.updatedAtMs),
     open_proposals: Number(r.openProposals),
+    ...(r.upstreamHost === null || r.upstreamRepo === null
+      ? {}
+      : {
+          upstream_host: r.upstreamHost,
+          upstream_repo: r.upstreamRepo,
+          upstream_path: r.upstreamPath ?? "",
+        }),
   }));
 }
 
