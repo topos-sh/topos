@@ -69,6 +69,8 @@ pub(crate) use invite::{InviteConnectors, InviteOutcome, invite};
 pub(crate) use list::list;
 pub(crate) use list::{DiscoveryRoots, ListFilter, ListOutcome, RemoteScope, list_with};
 pub(crate) use login::{LoginConnectors, login as session_login, logout as session_logout};
+#[cfg(test)]
+pub(crate) use manifest_edit::note_added;
 pub(crate) use manifest_edit::{
     note_added_path, note_added_remote, profile_provided_names, remove_from_manifests,
 };

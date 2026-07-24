@@ -409,14 +409,15 @@ pub(crate) fn manifest_update(
                 })
                 .collect(),
             // Unreachable: the cached delivered set stands in, so resolution (and the local
-            // converge) keep working offline.
+            // converge) keep working offline. Manifest-channel rows are NOT profile items —
+            // their demand is the manifest's own channel line, resolved in its own layer.
             None => prior_sync
                 .workspaces
                 .get(&run.session.workspace_id)
                 .map(|e| {
                     e.delivered
                         .iter()
-                        .filter(|(_, ds)| !ds.withdrawn && !ds.name.is_empty())
+                        .filter(|(_, ds)| !ds.withdrawn && !ds.name.is_empty() && !ds.via_manifest)
                         .map(|(_, ds)| {
                             (
                                 ds.name.clone(),
@@ -475,6 +476,20 @@ pub(crate) fn manifest_update(
     // ---- 3. Reconcile each resolved item. ----
     let mut synced_ids: HashSet<String> = HashSet::new();
     let mut synced_names: HashSet<String> = HashSet::new();
+    // EXCLUDED names claim the set FIRST: an exclude line must withhold a name however it would
+    // arrive — including via a channel's member expansion, which checks this same set. (A name is
+    // either resolved or excluded, never both, so no direct item is shadowed by this seed; the
+    // cleaner below then retires any placements the exclusion ends.)
+    for ex in &resolution.excluded {
+        synced_names.insert(ex.name.clone());
+    }
+    // Channel-expansion bookkeeping: which (workspace-name, channel) pairs FAILED to expand this
+    // run (their members are unknowable — nothing of theirs may be cleaned), which project dirs
+    // own such a failed item, and which member deliveries DID land (recorded into the delivery
+    // cache marked `via_manifest`, so offline surfaces know a manifest channel provides them).
+    let mut failed_channels: HashSet<(String, String)> = HashSet::new();
+    let mut unexpanded_channel_dirs: Vec<PathBuf> = Vec::new();
+    let mut channel_delivered: Vec<(String, String, DeliveredSkill)> = Vec::new();
     let target_names: Vec<String> = opts
         .targets
         .iter()
@@ -503,6 +518,11 @@ pub(crate) fn manifest_update(
             &mut warnings,
             &mut synced_ids,
             &mut synced_names,
+            &mut ChannelBook {
+                failed: &mut failed_channels,
+                unexpanded_dirs: &mut unexpanded_channel_dirs,
+                delivered: &mut channel_delivered,
+            },
         );
     }
     if !target_names.is_empty() {
@@ -525,6 +545,7 @@ pub(crate) fn manifest_update(
             &resolution,
             &project_dirs,
             &synced_ids,
+            &unexpanded_channel_dirs,
             &mut rows,
             &mut warnings,
         );
@@ -573,8 +594,34 @@ pub(crate) fn manifest_update(
                     served_version: to_hex(&ds.version_id),
                     withdrawn: false,
                     via_channels: ds.via_channels.clone(),
+                    via_manifest: false,
                 },
             );
+        }
+        // Channel-EXPANDED deliveries this run (manifest `[channels]` lines) ride the same cache,
+        // marked `via_manifest` — the profile row wins a collision (its provenance is broader).
+        for (ws, skill_id, ds) in &channel_delivered {
+            if *ws == run.session.workspace_id {
+                delivered_cache
+                    .entry(skill_id.clone())
+                    .or_insert_with(|| ds.clone());
+            }
+        }
+        // A channel that FAILED to expand this run froze its members' placements; keep their
+        // prior cache rows too — the provenance must survive the same outage the bytes do. (A
+        // channel line REMOVED from every manifest is never "failed" — its rows lapse here.)
+        if let Some(prior) = prior_sync.workspaces.get(&run.session.workspace_id) {
+            for (skill_id, ds) in &prior.delivered {
+                if ds.via_manifest
+                    && !ds.withdrawn
+                    && !delivered_cache.contains_key(skill_id)
+                    && ds.via_channels.iter().any(|c| {
+                        failed_channels.contains(&(run.session.workspace_name.clone(), c.clone()))
+                    })
+                {
+                    delivered_cache.insert(skill_id.clone(), ds.clone());
+                }
+            }
         }
         sync_updates.push((
             run.session.workspace_id.clone(),
@@ -641,6 +688,28 @@ pub(crate) fn manifest_update(
     })
 }
 
+/// The channel-expansion bookkeeping one sweep accumulates (see `manifest_update`).
+struct ChannelBook<'a> {
+    /// `(workspace-name, channel)` pairs that FAILED to expand this run.
+    failed: &'a mut HashSet<(String, String)>,
+    /// Project dirs owning a failed channel item — the cleaner freezes under them.
+    unexpanded_dirs: &'a mut Vec<PathBuf>,
+    /// `(workspace-id, skill-id, cache-row)` per member a channel expansion claimed.
+    delivered: &'a mut Vec<(String, String, DeliveredSkill)>,
+}
+
+impl ChannelBook<'_> {
+    /// Record one failed expansion: its members are unknowable this run, so nothing under the
+    /// owning project dir may be treated as undemanded.
+    fn note_failure(&mut self, workspace: &str, channel: &str, scope: &ResolvedScope) {
+        self.failed
+            .insert((workspace.to_owned(), channel.to_owned()));
+        if let ResolvedScope::Project { dir } = scope {
+            self.unexpanded_dirs.push(dir.clone());
+        }
+    }
+}
+
 /// Reconcile ONE resolved manifest line (per kind + scope). Failures are isolated per item —
 /// warnings, never an aborted sweep.
 #[allow(clippy::too_many_arguments)]
@@ -655,6 +724,7 @@ fn reconcile_item(
     warnings: &mut Vec<String>,
     synced_ids: &mut HashSet<String>,
     synced_names: &mut HashSet<String>,
+    channels: &mut ChannelBook<'_>,
 ) {
     if !synced_names.insert(item.name.clone()) {
         return; // a channel expansion already claimed the name this run
@@ -768,7 +838,8 @@ fn reconcile_item(
                 synced_ids,
             );
         }
-        // A channel reference: expand against the session's channel index.
+        // A channel reference: expand against the session's channel index. EVERY failure to
+        // expand is booked — the cleaner must not treat the unknowable member set as undemanded.
         (
             _,
             ParsedRef::Channel {
@@ -778,13 +849,16 @@ fn reconcile_item(
             },
         ) => {
             let Some(run) = find_run(runs, host.as_deref(), workspace) else {
+                channels.note_failure(workspace, name, &item.scope);
                 warnings.push(not_connected_line(item, host.as_deref(), workspace));
                 return;
             };
-            let Some(channels) = run.channels(warnings) else {
+            let Some(index) = run.channels(warnings) else {
+                channels.note_failure(&run.session.workspace_name, name, &item.scope);
                 return;
             };
-            let Some(ch) = channels.channels.iter().find(|c| &c.name == name) else {
+            let Some(ch) = index.channels.iter().find(|c| &c.name == name) else {
+                channels.note_failure(&run.session.workspace_name, name, &item.scope);
                 warnings.push(format!(
                     "NOT_AVAILABLE {}: \"{}\" — no such channel in {}, or not visible with your \
                      current access",
@@ -795,15 +869,30 @@ fn reconcile_item(
                 return;
             };
             let Some(catalog) = run.catalog(warnings) else {
+                channels.note_failure(&run.session.workspace_name, name, &item.scope);
                 return;
             };
             for cs in &ch.skills {
                 if !synced_names.insert(cs.name.clone()) {
-                    continue; // a nearer line already claimed this name
+                    continue; // a nearer line (or an exclude) already claimed this name
                 }
                 let Some(entry) = catalog.skills.iter().find(|e| e.skill_id == cs.skill_id) else {
                     continue; // archived / no current — skipped per the resolution rule
                 };
+                // Book the provenance BEFORE the sync (a per-item failure does not unmake the
+                // fact that this channel provides the name).
+                channels.delivered.push((
+                    run.session.workspace_id.clone(),
+                    entry.skill_id.clone(),
+                    DeliveredSkill {
+                        name: entry.name.clone(),
+                        review_required: false,
+                        served_version: entry.version_id.clone(),
+                        withdrawn: false,
+                        via_channels: vec![name.clone()],
+                        via_manifest: true,
+                    },
+                ));
                 sync_workspace_skill(
                     ctx,
                     run,
@@ -1516,7 +1605,10 @@ fn resolve_git_dir(ctx: &Ctx<'_>, project_dir: &Path) -> Option<PathBuf> {
 /// - a PROFILE-dropped skill (in the prior cache, absent from today's delivery, resolved by no
 ///   manifest): snapshot any draft, clean its NON-project placements, reset to never-received;
 /// - a PROJECT-dropped skill (placements under this cwd's project chain that today's resolution
-///   did not manage): snapshot-first clean of exactly those dirs.
+///   did not manage): snapshot-first clean of exactly those dirs — EXCEPT under a project dir
+///   whose channel item failed to expand this run (`unexpanded`): the member set is unknowable
+///   there, so an offline sweep, an ended session, or a transient index failure freezes instead
+///   of deleting.
 #[allow(clippy::too_many_arguments)]
 fn clean_undemanded(
     ctx: &Ctx<'_>,
@@ -1525,10 +1617,12 @@ fn clean_undemanded(
     resolution: &Resolution,
     project_dirs: &[PathBuf],
     synced_ids: &HashSet<String>,
+    unexpanded: &[PathBuf],
     rows: &mut Vec<PullSkill>,
     warnings: &mut Vec<String>,
 ) {
-    // Profile-dropped: prior cache vs today's delivery.
+    // Profile-dropped: prior cache vs today's delivery. Manifest-channel rows are not the
+    // profile's — their lifecycle belongs to the manifest arms below.
     for run in runs {
         let Some(snap) = &run.snapshot else { continue };
         let now: HashSet<&str> = snap.skills.iter().map(|s| s.skill_id.as_str()).collect();
@@ -1536,7 +1630,10 @@ fn clean_undemanded(
             continue;
         };
         for (skill_id, cached) in &prior.delivered {
-            if cached.withdrawn || now.contains(skill_id.as_str()) || synced_ids.contains(skill_id)
+            if cached.withdrawn
+                || cached.via_manifest
+                || now.contains(skill_id.as_str())
+                || synced_ids.contains(skill_id)
             {
                 continue;
             }
@@ -1602,6 +1699,11 @@ fn clean_undemanded(
             .iter()
             .enumerate()
             .filter(|(_, p)| {
+                // A failed channel expansion freezes everything under its project dir — a
+                // member's dir must survive the sweep that could not see the member list.
+                if unexpanded.iter().any(|sd| Path::new(p).starts_with(sd)) {
+                    return false;
+                }
                 project_dirs.iter().any(|pd| {
                     Path::new(p).starts_with(pd)
                         && !resolved_project_names.contains(&(pd.as_path(), lock.name.as_str()))

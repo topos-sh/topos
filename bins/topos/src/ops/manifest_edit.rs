@@ -224,14 +224,24 @@ pub(super) fn local_layers(ctx: &Ctx<'_>) -> Result<Vec<(PathBuf, Manifest)>, Cl
     Ok(out)
 }
 
-/// Whether `token` names `entry_ref` — by the exact reference, or by the reference's last-segment
-/// NAME (the dedupe key both `resolve_layers` and the exclude matching use).
+/// Whether `token` names `entry_ref` — by the exact reference, or by NAME (the last-segment
+/// dedupe key both `resolve_layers` and the exclude matching use). A token that parses in the
+/// reference grammar matches by ITS name too, so `remove @acme/x` claims the canonical
+/// `host/acme/x` line exactly as `remove x` does.
 fn token_matches(token: &str, entry_ref: &str) -> bool {
     if token == entry_ref {
         return true;
     }
     let entry_name = entry_ref.trim_end_matches('/').rsplit('/').next();
-    entry_name == Some(token)
+    entry_name == Some(token) || entry_name.is_some_and(|n| n == token_name(token))
+}
+
+/// The token's last-segment NAME under the reference grammar (the token itself when it does not
+/// parse).
+fn token_name(token: &str) -> String {
+    crate::manifest::refs::parse_ref(token)
+        .map(|p| p.item_name().to_owned())
+        .unwrap_or_else(|_| token.to_owned())
 }
 
 /// The manifest arm of `topos remove`: when EVERY token names a manifest entry (or a name a broader
@@ -246,14 +256,15 @@ fn token_matches(token: &str, entry_ref: &str) -> bool {
 pub(crate) fn remove_from_manifests(
     ctx: &Ctx<'_>,
     tokens: &[String],
-    profile_provided: &[(String, String)],
+    profile_provided: &[ProvidedName],
 ) -> Result<Option<RemoveData>, ClientError> {
     let layers = local_layers(ctx)?;
     if tokens.is_empty() {
         return Ok(None);
     }
-    // Which tokens a local layer's include lines mention, and which the PROFILE delivers (the
-    // broader person layer — `(name, canonical)` pairs from the offline delivery cache).
+    // Which tokens a local layer's include lines mention, and which a BROADER delivery provides —
+    // the person's profile, or a manifest channel's recorded expansion (the offline delivery
+    // cache carries both, channel rows marked `via_manifest`).
     let mentioned = |token: &str| {
         layers.iter().any(|(_, m)| {
             m.skills
@@ -265,7 +276,7 @@ pub(crate) fn remove_from_manifests(
     let provided = |token: &str| {
         profile_provided
             .iter()
-            .find(|(name, canonical)| name == token || canonical == token)
+            .find(|p| p.name == token || p.canonical == token || p.name == token_name(token))
     };
     let hits: Vec<bool> = tokens
         .iter()
@@ -321,11 +332,11 @@ pub(crate) fn remove_from_manifests(
                         .map(|e| (i, "channels", e.reference.clone()))
                 })
         });
-        let (layer_idx, table, entry_ref, profile_only) = match local {
-            Some((i, table, entry_ref)) => (i, table, entry_ref, false),
+        let (layer_idx, table, entry_ref, provided_by) = match local {
+            Some((i, table, entry_ref)) => (i, table, entry_ref, None),
             None => {
-                let (_, canonical) = provided(token).expect("every token matched above");
-                (usize::MAX, "skills", canonical.clone(), true)
+                let p = provided(token).expect("every token matched above");
+                (usize::MAX, "skills", p.canonical.clone(), Some(p))
             }
         };
         let name = entry_ref
@@ -342,8 +353,10 @@ pub(crate) fn remove_from_manifests(
                 .chain(m.channels.iter())
                 .any(|e| token_matches(&name, &e.reference))
         }) || provided(&name).is_some();
-        let removed_here =
-            !profile_only && layer_idx == 0 && !created && ed.remove_entry(table, &entry_ref);
+        let removed_here = provided_by.is_none()
+            && layer_idx == 0
+            && !created
+            && ed.remove_entry(table, &entry_ref);
         let kind = if broader_provides || !removed_here {
             // A broader layer provides it (or the nearest never carried the line): the one
             // negative state — an exclude line in the nearest manifest.
@@ -353,6 +366,26 @@ pub(crate) fn remove_from_manifests(
             RemoveKind::ManifestRemoved
         };
         undo = vec!["topos".to_owned(), "add".to_owned(), entry_ref.clone()];
+        // The exclude note names WHAT still provides the name: the person's profile (with the
+        // everywhere-stopping inverse), or the channel a manifest carries (curation, not this
+        // machine, decides its member list).
+        let note = provided_by.map(|p| {
+            if p.via_manifest {
+                let channel = p
+                    .channels
+                    .first()
+                    .map_or_else(|| "a channel".to_owned(), |c| format!("channel '{c}'"));
+                format!(
+                    "{channel} still provides it — the exclude line withholds it here; its \
+                     member list is channel curation (edit on the web)"
+                )
+            } else {
+                format!(
+                    "your profile still delivers it elsewhere — `topos remove -g {entry_ref}` \
+                     stops it everywhere"
+                )
+            }
+        });
         items.push(RemoveItem {
             name,
             kind,
@@ -360,12 +393,7 @@ pub(crate) fn remove_from_manifests(
             workspace_id: None,
             agent_dirs: Vec::new(),
             bytes_kept: true,
-            note: profile_only.then(|| {
-                format!(
-                    "your profile still delivers it elsewhere — `topos remove -g {entry_ref}` \
-                     stops it everywhere"
-                )
-            }),
+            note,
         });
     }
     ed.write(ctx.fs, &nearest_path)?;
@@ -376,9 +404,22 @@ pub(crate) fn remove_from_manifests(
     }))
 }
 
-/// The `(name, canonical)` pairs the person's profile currently delivers, from the OFFLINE
-/// delivery cache — the "broader person layer" `remove`'s exclude semantics consult.
-pub(crate) fn profile_provided_names(ctx: &Ctx<'_>) -> Vec<(String, String)> {
+/// A name a BROADER delivery than the local manifest lines provides — the person's profile, or a
+/// manifest channel's recorded expansion. What `remove`'s exclude semantics consult.
+pub(crate) struct ProvidedName {
+    /// The catalog name (the dedupe key).
+    pub name: String,
+    /// The canonical host-qualified reference (`host/ws/name`).
+    pub canonical: String,
+    /// Provided by a manifest `[channels]` line's expansion (not the person's profile).
+    pub via_manifest: bool,
+    /// The channels that deliver it (attribution for the receipt note).
+    pub channels: Vec<String>,
+}
+
+/// The names a broader delivery currently provides, from the OFFLINE delivery cache — the
+/// person's profile rows plus the manifest-channel rows the reconcile recorded (`via_manifest`).
+pub(crate) fn profile_provided_names(ctx: &Ctx<'_>) -> Vec<ProvidedName> {
     let status = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
     let mut out = Vec::new();
     for entry in status.workspaces.values() {
@@ -388,7 +429,12 @@ pub(crate) fn profile_provided_names(ctx: &Ctx<'_>) -> Vec<(String, String)> {
         };
         for ds in entry.delivered.values() {
             if !ds.withdrawn && !ds.name.is_empty() {
-                out.push((ds.name.clone(), format!("{host}/{ws}/{}", ds.name)));
+                out.push(ProvidedName {
+                    name: ds.name.clone(),
+                    canonical: format!("{host}/{ws}/{}", ds.name),
+                    via_manifest: ds.via_manifest,
+                    channels: ds.via_channels.clone(),
+                });
             }
         }
     }

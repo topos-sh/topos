@@ -241,6 +241,9 @@ impl FakePlane {
     fn serve_not_found(&self) {
         *self.delivery.lock().unwrap() = Err("nf");
     }
+    fn serve_unreachable(&self) {
+        *self.delivery.lock().unwrap() = Err("unreachable");
+    }
 }
 fn empty_snapshot() -> DeliverySnapshot {
     DeliverySnapshot {
@@ -285,6 +288,7 @@ impl DeliverySource for FakePlane {
     fn fetch_delivery(&self, _ws: &str) -> Result<DeliverySnapshot, PlaneError> {
         match &*self.delivery.lock().unwrap() {
             Ok(s) => Ok(s.clone()),
+            Err(m) if *m == "unreachable" => Err(PlaneError::Unreachable("network down".into())),
             Err(_) => Err(PlaneError::NotFound),
         }
     }
@@ -305,6 +309,8 @@ struct FakeDirectory {
     channels: Vec<WireChannelEntry>,
     calls: CallLog,
     removal: crate::plane::ProfileRemoval,
+    /// When set, the index reads fail (a transport fault) — the freeze suites flip it.
+    unavailable: Arc<Mutex<bool>>,
 }
 
 impl FakeDirectory {
@@ -314,7 +320,17 @@ impl FakeDirectory {
             channels,
             calls: Arc::new(Mutex::new(Vec::new())),
             removal: crate::plane::ProfileRemoval::Removed,
+            unavailable: Arc::new(Mutex::new(false)),
         }
+    }
+    fn set_unavailable(&self, v: bool) {
+        *self.unavailable.lock().unwrap() = v;
+    }
+    fn check_reachable(&self) -> Result<(), ClientError> {
+        if *self.unavailable.lock().unwrap() {
+            return Err(ClientError::Plane("directory unreachable".into()));
+        }
+        Ok(())
     }
 }
 fn catalog_entry(skill_id: &str, name: &str, v: &Version) -> WireSkillIndexEntry {
@@ -339,11 +355,13 @@ impl DirectorySource for FakeDirectory {
         unreachable!("no me read in these flows")
     }
     fn channels_index(&self, _ws: &str) -> Result<WireChannelIndex, ClientError> {
+        self.check_reachable()?;
         Ok(WireChannelIndex {
             channels: self.channels.clone(),
         })
     }
     fn skills_index(&self, _ws: &str) -> Result<WireSkillIndex, ClientError> {
+        self.check_reachable()?;
         Ok(WireSkillIndex {
             skills: self.skills.clone(),
         })
@@ -1062,5 +1080,278 @@ fn a_remote_add_gets_the_governed_copy_suggestion_from_the_catalog_upstream_fiel
             None
         )
         .is_none()
+    );
+}
+
+// =================================================================================================
+// Excludes vs channel expansion + the channel-member freeze suites.
+// =================================================================================================
+
+/// A project with one channel line delivering `deploy`, plus the fakes serving it.
+fn channel_project(tag: &str) -> (Rig, Scratch, FakePlane, FakeDirectory, Version) {
+    let rig = Rig::new(tag);
+    rig.seed_session();
+    let proj = Scratch::new(&format!("proj-{tag}"));
+    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    std::fs::write(
+        proj.0.join("topos.toml"),
+        format!("[channels]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n"),
+    )
+    .unwrap();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    let dir = FakeDirectory::new(
+        vec![catalog_entry("s_deploy", "deploy", &v)],
+        vec![WireChannelEntry {
+            name: "backend".into(),
+            mode: "open".into(),
+            builtin: false,
+            included: true,
+            skills: vec![WireChannelSkill {
+                skill_id: "s_deploy".into(),
+                name: "deploy".into(),
+            }],
+        }],
+    );
+    (rig, proj, plane, dir, v)
+}
+
+#[test]
+fn an_exclude_line_withholds_a_channel_member() {
+    let (rig, proj, plane, dir, _v) = channel_project("chexcl");
+    // The manifest carries the channel AND an exclude of one member — the exclude wins.
+    std::fs::write(
+        proj.0.join("topos.toml"),
+        format!(
+            "exclude = [\"deploy\"]\n[channels]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n"
+        ),
+    )
+    .unwrap();
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert!(
+        !proj.0.join(".claude/skills/deploy").exists(),
+        "an excluded member never lands, however the channel expands"
+    );
+    assert!(
+        !out.data.skills.iter().any(|s| s.skill == "deploy"),
+        "no row for a withheld name"
+    );
+}
+
+#[test]
+fn remove_of_a_channel_member_records_an_exclude_and_the_sweep_round_trips() {
+    let (rig, proj, plane, dir, _v) = channel_project("chrm");
+    let ctx = rig.ctx_at(Some(&proj.0));
+    ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    let placed = proj.0.join(".claude/skills/deploy");
+    assert!(placed.exists());
+
+    // `remove deploy` claims the manifest arm (the channel provides it — the recorded
+    // `via_manifest` cache row is the offline fact): an exclude line, never a tracked-delete.
+    let provided = ops::profile_provided_names(&ctx);
+    assert!(
+        provided
+            .iter()
+            .any(|p| p.name == "deploy" && p.via_manifest),
+        "the cache records the channel-member provenance"
+    );
+    let out = ops::remove_from_manifests(&ctx, &["deploy".to_owned()], &provided)
+        .unwrap()
+        .expect("the manifest arm claims a channel-delivered name");
+    assert!(matches!(
+        out.items[0].kind,
+        topos_types::results::RemoveKind::ManifestExcluded
+    ));
+    assert!(
+        out.items[0]
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("channel 'backend'")),
+        "{:?}",
+        out.items[0].note
+    );
+    let m = crate::manifest::file::read_manifest(&rig.fs, &proj.0.join("topos.toml"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.exclude.len(), 1);
+
+    // The next sweep withholds the member AND cleans its in-checkout dir — no re-install loop.
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert!(!placed.exists(), "the exclusion retires the placement");
+
+    // Adding it back lifts the exclude; the same sweep re-delivers.
+    let mut data = topos_types::results::AddData {
+        skill_id: String::new(),
+        name: String::new(),
+        version_id: "0".repeat(64),
+        bundle_digest: "0".repeat(64),
+        tracked: true,
+        harness: None,
+        harness_slug: None,
+        currency: None,
+        triggers: Vec::new(),
+        origin: None,
+        manifest: None,
+        reference: None,
+        undo: Vec::new(),
+        governed_copy: None,
+    };
+    ops::note_added(
+        &ctx,
+        &mut data,
+        &format!("{HOST}/{WS_NAME}/deploy"),
+        None,
+        false,
+    )
+    .unwrap();
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert!(
+        placed.exists(),
+        "add-back lifts the exclude and re-delivers"
+    );
+}
+
+#[test]
+fn an_offline_sweep_freezes_channel_delivered_project_skills() {
+    let (rig, proj, plane, dir, _v) = channel_project("choffline");
+    let ctx = rig.ctx_at(Some(&proj.0));
+    ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    let placed = proj.0.join(".claude/skills/deploy");
+    assert!(placed.exists());
+
+    // The whole plane is down (the session-start hook's world): NOTHING may be deleted.
+    plane.serve_unreachable();
+    dir.set_unavailable(true);
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(placed.exists(), "an offline sweep freezes, never cleans");
+    assert!(
+        !out.data
+            .skills
+            .iter()
+            .any(|s| s.action == PullAction::Withdrawn),
+        "{:?}",
+        out.data.skills
+    );
+    // Back online: the member is still delivered (the cache rows survived the outage too).
+    plane.serve(empty_snapshot());
+    dir.set_unavailable(false);
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert!(placed.exists());
+}
+
+#[test]
+fn an_ended_session_freezes_channel_delivered_project_skills() {
+    let (rig, proj, plane, dir, _v) = channel_project("chended");
+    let ctx = rig.ctx_at(Some(&proj.0));
+    ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    let placed = proj.0.join(".claude/skills/deploy");
+    assert!(placed.exists());
+
+    // The session ends server-side (uniform 404): the freeze covers the channel's members.
+    plane.serve_not_found();
+    ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(
+        placed.exists(),
+        "an ended session freezes the member in place"
+    );
+    // And the NEXT sweep (the session now locally ended) still leaves it alone.
+    ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(placed.exists());
+}
+
+#[test]
+fn a_transient_channel_index_failure_never_deletes() {
+    let (rig, proj, plane, dir, _v) = channel_project("chflaky");
+    let ctx = rig.ctx_at(Some(&proj.0));
+    ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    let placed = proj.0.join(".claude/skills/deploy");
+    assert!(placed.exists());
+
+    // Delivery answers fine but the channel index read fails (a transient 500).
+    plane.serve(empty_snapshot());
+    dir.set_unavailable(true);
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(
+        placed.exists(),
+        "a transient index failure freezes the members: {:?}",
+        out.warnings
     );
 }
