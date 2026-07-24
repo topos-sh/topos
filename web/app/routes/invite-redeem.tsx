@@ -39,9 +39,9 @@ export const meta: MetaFunction = () => [{ title: "Invitation · Topos" }];
  * page, never an accept as the current account. Every dead token — invalid, expired, revoked,
  * already used — renders ONE constant message that names neither the workspace nor any email.
  *
- * A terminal-first arrival (the CLI's `follow <invite-url>`) rides the same page carrying the
- * device-flow pass-through params; after the accept it continues into `/verify` so sign-in →
- * accept → device approval land as one visit.
+ * A terminal-first arrival (the CLI's `login <invite-url>`) rides the same page carrying the
+ * login-flow pass-through params; after the accept it continues into `/verify` so sign-in →
+ * accept → session approval land as one visit.
  */
 
 /** The URL carries the single-use token — never cached, never indexed. */

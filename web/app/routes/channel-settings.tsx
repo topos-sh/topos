@@ -152,8 +152,9 @@ async function renameChannelIntent(
 
 /**
  * DELETE — owner-only + type-the-channel-name. On success redirect to the channels index.
- * Deleting stops delivery THROUGH this channel only; skills another channel or a direct follow
- * still delivers keep flowing, and devices keep their local copies (an upstream withdrawal).
+ * Deleting stops delivery THROUGH this channel only; skills another channel, a profile, or a
+ * project manifest still delivers keep flowing — what only this channel delivered leaves
+ * machines at their next update (local edits snapshotted first).
  */
 async function deleteChannelIntent(
   request: Request,
@@ -342,9 +343,10 @@ function DeleteChannelForm({ channel, channelId }: { channel: string; channelId:
       <div>
         <h3 className="font-medium text-ink text-sm">Delete this channel</h3>
         <p className="mt-1 text-dim text-sm">
-          Deleting <span className="font-mono">#{channel}</span> stops delivery through it. Skills
-          another channel or a direct follow still delivers keep flowing; devices treat what lapses
-          as an upstream withdrawal and keep their local copies. This can't be undone from here.
+          Deleting <span className="font-mono">{channel}</span> stops delivery through it. Skills
+          another channel, a member's profile, or a project manifest still delivers keep flowing;
+          what only this channel delivered leaves machines at their next update (local edits are
+          snapshotted first). This can't be undone from here.
         </p>
       </div>
       <fetcher.Form method="post" className="space-y-3">

@@ -48,8 +48,8 @@ export default function ChannelsIndex() {
         </Card>
         {channels.length === 1 && channels[0]?.isDefault && (
           <p className="text-faint text-sm">
-            Every workspace starts with <span className="font-mono">#everyone</span>. Create a
-            channel to share a set of skills with just the people who follow it.
+            Every workspace starts with <span className="font-mono">everyone</span>. Create a
+            channel to share a set of skills with just the people and projects that carry it.
           </p>
         )}
       </section>
