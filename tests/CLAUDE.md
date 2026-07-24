@@ -66,6 +66,11 @@ fakes; this directory is for what only a cross-crate composed run can prove.
     ended, freezes the bytes in place, and stays quiet on the sweep after;
   - `deny` answers the resumed login with one typed refusal, sweeps the WAL, mints nothing;
     `logout --all` ends the session server-side (row-witnessed) and deletes the local rows.
+- **`tests/hardening_e2e.rs`** — the post-review hardening journeys: a PINNED project reference
+  (`@ws/name@<digest>`) resolves through the grammar (never a path arm), delivers EXACTLY its
+  pinned version into the checkout, and holds it across a fresh sweep while `current` sits ahead;
+  `publish --to` refuses a nonexistent channel typed (naming the web create path), refuses the
+  workspace-slug near-miss pointedly, and provably mints NO channel.
 - **`tests/uniform_e2e.rs`** — the NON-ORACLE discipline over real HTTP:
   - eight misses — a real-but-foreign workspace, a never-existed one, a wrong path, a garbage
     credential; reads, the me describe, and a profile row-op write alike — answer ONE

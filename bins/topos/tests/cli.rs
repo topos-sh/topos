@@ -377,7 +377,7 @@ fn review_verdict_exclusivity_is_a_clap_usage_error_but_no_verdict_is_the_descri
     let out = run_raw(&home, &["review", &target, "--json"], false);
     assert!(!out.status.success());
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
-    assert_eq!(v["error"]["code"], "ENROLLMENT_FAILED");
+    assert_eq!(v["error"]["code"], "SESSION_REQUIRED");
 
     let _ = std::fs::remove_dir_all(&home);
 }
@@ -474,5 +474,63 @@ fn update_onto_current_flag_shapes_are_usage_errors() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
     assert_eq!(v["error"]["code"], "INVALID_ARGUMENT");
 
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_no_session_add_refusal_carries_the_structural_login_action() {
+    // The most common refusal: `add @acme/foo` with no session. The envelope must carry the fix
+    // STRUCTURALLY — a LOGIN_WORKSPACE next action whose argv holds the CONCRETE address as one
+    // token — beside the prose, and the process must exit nonzero.
+    let home = scratch("nosess-add");
+    let out = run_raw(&home, &["add", "@acme/foo", "--json"], false);
+    assert!(!out.status.success(), "an add failure exits nonzero");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
+    assert_eq!(v["error"]["code"], "SESSION_REQUIRED");
+    let actions = v["next_actions"].as_array().expect("next_actions");
+    assert!(!actions.is_empty(), "the refusal is never prose-only: {v}");
+    assert_eq!(actions[0]["code"], "LOGIN_WORKSPACE");
+    let argv: Vec<&str> = actions[0]["argv"]
+        .as_array()
+        .expect("argv")
+        .iter()
+        .map(|t| t.as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(argv, vec!["topos", "login", "acme", "--json"]);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn reference_shaped_grammar_refusals_never_reach_the_path_arms() {
+    // A reference-shaped token the grammar refuses surfaces its TYPED refusal (teaching the
+    // correct shape) with a nonzero exit — never the filesystem-path arm's canonicalize error or
+    // the discovery arm's NO_UNTRACKED_SKILL wrong-fix answer.
+    let home = scratch("grammar");
+    for (arg, teaches) in [
+        ("@x", "@<workspace>/<skill>"),
+        ("#backend", "channels"),
+        ("@acme/deploy@abc1234", "64-character"),
+        ("topos.example.com/eng/deploy@abc1234", "64-character"),
+    ] {
+        let out = run_raw(&home, &["add", arg, "--json"], false);
+        assert!(!out.status.success(), "{arg}: an add failure exits nonzero");
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");
+        assert_eq!(v["error"]["code"], "INVALID_ARGUMENT", "{arg}: {v}");
+        let msg = v["error"]["context"]["message"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            msg.contains(teaches),
+            "{arg}: the refusal teaches the shape: {msg}"
+        );
+        assert!(
+            !msg.contains("canonicalize"),
+            "{arg}: never the path arm: {msg}"
+        );
+        assert!(
+            !msg.contains("untracked"),
+            "{arg}: never the discovery arm: {msg}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&home);
 }
