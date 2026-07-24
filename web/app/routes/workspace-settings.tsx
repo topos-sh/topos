@@ -1,10 +1,10 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Link, useLoaderData } from "react-router";
 import { AddressBlock } from "@/components/members/address-block";
-import { DeviceApprovalPanel } from "@/components/policy/device-approval-panel";
 import type { LastSetLine } from "@/components/policy/last-set-line";
 import { RegistrationPanel } from "@/components/policy/registration-panel";
 import { ReviewRequiredPanel } from "@/components/policy/review-required-panel";
+import { SessionApprovalPanel } from "@/components/policy/session-approval-panel";
 import { StalenessWindowPanel } from "@/components/policy/staleness-window-panel";
 import { SettingsTabs } from "@/components/settings-tabs";
 import { buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
@@ -12,8 +12,8 @@ import { composition } from "@/composition.server";
 import { requireMemberInScope, requireWorkspaceOwner } from "@/lib/auth/guards.server";
 import { type AuditEventRow, lastAuditEventOfKind, recordAdminEvent } from "@/lib/db/audit.server";
 import {
-  setDeviceApproval,
   setRegistration,
+  setSessionApproval,
   setStalenessWindow,
   workspacePolicyOf,
 } from "@/lib/db/queries.policy.server";
@@ -44,7 +44,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   // The knobs are plain columns on the ONE workspace row; the column DEFAULTs are the canonical
   // fallbacks, so a fresh install shows the true defaults, never a blank. The "last set by"
   // lines read the audit ledger — the same rows the setters land in their own transactions.
-  const [policy, lastReview, lastStaleness, lastRegistration, lastDeviceApproval] =
+  const [policy, lastReview, lastStaleness, lastRegistration, lastSessionApproval] =
     await Promise.all([
       workspacePolicyOf(actor),
       lastAuditEventOfKind(actor, "policy_review_default"),
@@ -52,7 +52,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       registrationGoverns
         ? lastAuditEventOfKind(actor, "policy_registration")
         : Promise.resolve(undefined),
-      lastAuditEventOfKind(actor, "policy_device_approval"),
+      lastAuditEventOfKind(actor, "policy_session_approval"),
     ]);
   return {
     isOwner,
@@ -62,12 +62,12 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     reviewRequired: policy.protectionDefault === "reviewed",
     stalenessWindowMs: policy.stalenessWindowMs,
     registration: policy.registration,
-    deviceApproval: policy.deviceApproval,
+    sessionApproval: policy.sessionApproval,
     lastSet: {
       review: lastSetOf(lastReview),
       staleness: lastSetOf(lastStaleness),
       registration: lastSetOf(lastRegistration),
-      deviceApproval: lastSetOf(lastDeviceApproval),
+      sessionApproval: lastSetOf(lastSessionApproval),
     },
   };
 }
@@ -101,8 +101,8 @@ export async function action({ request, params }: ActionFunctionArgs) {
   if (intent === "set-registration" && composition.tenancy === "single") {
     return registrationIntent(request, ws, formData);
   }
-  if (intent === "set-device-approval") {
-    return deviceApprovalIntent(request, ws, formData);
+  if (intent === "set-session-approval") {
+    return sessionApprovalIntent(request, ws, formData);
   }
   return data({ intent: "unknown" as const, status: "error" as const }, { status: 400 });
 }
@@ -191,16 +191,16 @@ async function registrationIntent(request: Request, ws: string, formData: FormDa
   return { intent: "set-registration" as const, ...result };
 }
 
-/** The device-approval knob — `on` bears non-owner device links pending; default off. */
-async function deviceApprovalIntent(request: Request, ws: string, formData: FormData) {
-  const value = String(formData.get("device_approval") ?? "");
+/** The session-approval knob — `on` bears non-owner logins pending; default off. */
+async function sessionApprovalIntent(request: Request, ws: string, formData: FormData) {
+  const value = String(formData.get("session_approval") ?? "");
   const result = await knobIntent(request, ws, {
-    auditKind: "policy_device_approval",
+    auditKind: "policy_session_approval",
     detail: value,
-    run: (owner) => setDeviceApproval(owner, value),
+    run: (owner) => setSessionApproval(owner, value),
     deniedError: () => "Choose off or required.",
   });
-  return { intent: "set-device-approval" as const, ...result };
+  return { intent: "set-session-approval" as const, ...result };
 }
 
 export default function WorkspaceSettings() {
@@ -212,7 +212,7 @@ export default function WorkspaceSettings() {
     reviewRequired,
     stalenessWindowMs,
     registration,
-    deviceApproval,
+    sessionApproval,
     lastSet,
   } = useLoaderData<typeof loader>();
   const wsPath = useWsPath();
@@ -241,10 +241,10 @@ export default function WorkspaceSettings() {
         stalenessWindowMs={stalenessWindowMs}
         lastSet={lastSet.staleness}
       />
-      <DeviceApprovalPanel
+      <SessionApprovalPanel
         isOwner={isOwner}
-        deviceApproval={deviceApproval}
-        lastSet={lastSet.deviceApproval}
+        sessionApproval={sessionApproval}
+        lastSet={lastSet.sessionApproval}
       />
       {registrationGoverns && (
         <RegistrationPanel
@@ -314,7 +314,7 @@ function AddressSection({ address }: { address: string }) {
       </SectionHeading>
       <Card className="space-y-3 px-4 py-3">
         <p className="text-dim text-sm">
-          Hand this to a teammate or another of your own devices — following it joins the workspace.
+          Hand this to a teammate or another of your own machines — logging in joins the workspace.
         </p>
         <AddressBlock address={address} />
       </Card>

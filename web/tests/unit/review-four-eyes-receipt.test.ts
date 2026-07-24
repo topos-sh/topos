@@ -2,11 +2,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { action as reviewsAction } from "@/routes/api.v1.reviews";
 import {
   createScratchDb,
-  linkDevice,
   type ScratchDb,
   seatUser,
   seedBundle,
-  seedDevice,
+  seedSession,
   seedUser,
 } from "./helpers/scratch-db";
 
@@ -16,8 +15,8 @@ import {
  * FOUR_EYES_REQUIRED denial (before any vault call), and that denial must now ride a DENIED
  * receipt echoing the op_id — otherwise the CLI maps a receipt-less denial to CORRUPT_STATE and
  * its op-WAL wedges (the stored envelope then replays receipt-less forever). Driven through the
- * REAL served action against a scratch Postgres; the seedDevice credential plaintext IS the
- * device id, so `requireDeviceActor` resolves exactly as production does.
+ * REAL served action against a scratch Postgres; the seedSession credential plaintext IS the
+ * device id, so `requireSessionActor` resolves exactly as production does.
  */
 
 const ORIGIN = "http://x";
@@ -35,8 +34,7 @@ beforeAll(async () => {
 
   await seedUser(db, "u_rev", "Reviewer", "rev@example.com");
   await seatUser(db, wsId, "u_rev", "reviewer");
-  await seedDevice(db, "dk_rev", "u_rev", "rev-laptop"); // Bearer plaintext = "dk_rev"
-  await linkDevice(db, "dk_rev", wsId);
+  await seedSession(db, "dk_rev", wsId, "u_rev"); // Bearer plaintext = "dk_rev"
 
   // A `reviewed` bundle + an OPEN proposal the reviewer themselves authored: the self-approve.
   await seedBundle(db, wsId, "s_fe", "four-eyes", {

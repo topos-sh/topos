@@ -3,16 +3,17 @@ import { composition } from "@/composition.server";
 import { checkBelt } from "@/lib/api/belt.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
 import {
-  DEVICE_AUTH_POLL_INTERVAL_SECS,
-  startDeviceAuth,
+  LOGIN_FLOW_POLL_INTERVAL_SECS,
+  startLoginFlow,
   theWorkspace,
 } from "@/lib/db/identity.server";
 import { followBase } from "@/lib/plane/follow-base.server";
 import { isWorkspaceNameShape } from "@/lib/workspace-name";
 
 /**
- * `POST /api/v1/device/authorize` — begin the gh-style device flow toward a workspace named by
- * its address slug (`DeviceAuthStartRequest` → `DeviceAuthStartResponse`).
+ * `POST /api/v1/login/authorize` — begin the gh-style login flow toward ONE workspace named
+ * by its address slug (`LoginStartRequest` → `LoginStartResponse`). A login mints ONE
+ * workspace-scoped session; further workspaces are further logins.
  *
  * SINGLE tenancy: an EMPTY `workspace` names "the workspace this origin itself addresses" (the
  * origin IS its one workspace); a non-empty name must equal this install's workspace, and any
@@ -24,15 +25,15 @@ import { isWorkspaceNameShape } from "@/lib/workspace-name";
  * answers the uniform 404 (such a name can never exist), and a shape-valid one MINTS the flow
  * with the slug recorded, WITHOUT any existence check. Deliberate and load-bearing: this start
  * is unauthenticated, so it must not be a workspace-existence oracle — and a CLI-first stranger
- * must be able to start an enrollment toward a workspace they will create mid-flow (the /verify
+ * must be able to start a login toward a workspace they will create mid-flow (the /verify
  * weave routes a seatless approver through workspace creation and back). Resolution and
- * authorization happen at APPROVAL, behind a session: the approve locks the flow, resolves the
- * recorded slug, and requires the approver's seat in the resolved workspace.
+ * authorization happen at APPROVAL, behind a browser session: the approve locks the flow,
+ * resolves the recorded slug, and requires the approver's seat in the resolved workspace.
  *
- * No credential yet: this is the flow's unauthenticated start (the belt is its only gate). The
- * response's `device_code` is the polling secret — and, on approval, the device's ONE bearer
- * credential (promoted server-side; the poll echoes it back from the field the client already
- * holds).
+ * No credential yet: this is the flow's unauthenticated start (the belt is its only gate).
+ * The response's `device_code` (the RFC 8628 field name — the gh-proven device-authorization
+ * grant shape) is the polling secret — and, on approval, the session's ONE bearer credential
+ * (promoted server-side; the poll echoes it back from the field the client already holds).
  */
 const BODY_CAP = 8 * 1024;
 const MAX_REQUESTED_NAME = 200;
@@ -46,7 +47,7 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   if (request.method !== "POST") {
     return uniformNotFound();
   }
-  const raw = await readCappedBody(request, BODY_CAP, "device authorize body");
+  const raw = await readCappedBody(request, BODY_CAP, "login authorize body");
   if (raw instanceof Response) {
     return raw;
   }
@@ -65,9 +66,9 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     body.requested_name.length > MAX_REQUESTED_NAME ||
     typeof body.workspace !== "string"
   ) {
-    return badRequest("malformed device authorize body");
+    return badRequest("malformed login authorize body");
   }
-  // The optional invitation token a `follow <invite-url>` enrollment carries: recorded (as its
+  // The optional invitation token a `topos login <invite-url>` carries: recorded (as its
   // hash) UNVALIDATED — this start is unauthenticated and must not be a token oracle. The
   // approval resolves it under its own fence.
   if (
@@ -76,7 +77,7 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
       body.invite_token.length === 0 ||
       body.invite_token.length > MAX_INVITE_TOKEN)
   ) {
-    return badRequest("malformed device authorize body: invite_token");
+    return badRequest("malformed login authorize body: invite_token");
   }
 
   let requestedWorkspace: string;
@@ -99,21 +100,20 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     requestedWorkspace = ws.name;
   }
 
-  const flow = await startDeviceAuth(
+  const flow = await startLoginFlow(
     body.requested_name.trim(),
     requestedWorkspace,
     body.invite_token as string | undefined,
   );
   const origin = followBase(request);
   // The code never enters ANY URL: the CLI prints the bare /verify address and the short code
-  // on separate lines, and the human types the code into the page's POST form (the retired
-  // `verification_uri_complete` embedded it in a GET — a leak into history/logs, gone).
+  // on separate lines, and the human types the code into the page's POST form.
   return Response.json({
-    device_code: flow.deviceCode,
+    device_code: flow.flowCode,
     user_code: flow.userCode,
     verification_uri: `${origin}/verify`,
     expires_in_secs: flow.expiresInSecs,
-    interval_secs: DEVICE_AUTH_POLL_INTERVAL_SECS,
+    interval_secs: LOGIN_FLOW_POLL_INTERVAL_SECS,
   });
 }
 

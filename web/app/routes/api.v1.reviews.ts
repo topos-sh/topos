@@ -10,7 +10,7 @@ import {
   okReceiptEnvelope,
 } from "@/lib/api/receipts.server";
 import { badRequest, internalError, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
-import { requireDeviceActor } from "@/lib/auth/guards.server";
+import { requireSessionActor } from "@/lib/auth/guards.server";
 import {
   findReceipt,
   inFinalTx,
@@ -71,7 +71,7 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     return badRequest("a reject carries its reason back to the author");
   }
 
-  const actor = await requireDeviceActor(request, head.workspaceId);
+  const actor = await requireSessionActor(request, head.workspaceId);
   const replay = await findReceipt(actor, head.opId, raw);
   if (replay.kind === "replay") {
     return envelopeResponse(replay.outcome);

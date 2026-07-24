@@ -1,10 +1,9 @@
 import { and, eq, sql } from "drizzle-orm";
-import type { DeviceActor, MemberActor } from "@/lib/auth/guards.server";
+import type { MemberActor, SessionActor } from "@/lib/auth/guards.server";
 import { auditInTx, mintChannelId, mintProposalId } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
 import {
   bundle,
-  bundleSubscription,
   channel,
   channelBundle,
   notice,
@@ -23,7 +22,7 @@ import {
 
 type Tx = Parameters<Parameters<ReturnType<typeof getDb>["transaction"]>[0]>[0];
 
-// ── Op receipts (device-op idempotency) ──────────────────────────────────────────────────────
+// ── Op receipts (session-op idempotency) ──────────────────────────────────────────────────────
 
 export type ReceiptLookup =
   | { kind: "miss" }
@@ -31,19 +30,19 @@ export type ReceiptLookup =
   | { kind: "key_reuse" };
 
 /**
- * The replay probe: same (workspace, device, op_id) + same request bytes replays the stored
+ * The replay probe: same (workspace, session, op_id) + same request bytes replays the stored
  * outcome VERBATIM; the same key with DIFFERENT bytes is a refused key reuse. The request hash
  * is computed IN Postgres (this tier computes no digest).
  */
 export async function findReceipt(
-  actor: DeviceActor,
+  actor: SessionActor,
   opId: string,
   rawBody: string,
 ): Promise<ReceiptLookup> {
   const rows = await getDb().execute(sql`
     SELECT outcome, (request_sha256 = sha256(convert_to(${rawBody}, 'UTF8'))) AS body_match
     FROM ${opReceipt}
-    WHERE workspace_id = ${actor.workspaceId} AND device_id = ${actor.deviceId}
+    WHERE workspace_id = ${actor.workspaceId} AND session_id = ${actor.sessionId}
       AND op_id = ${opId}::uuid
   `);
   const row = rows.rows[0] as { outcome: unknown; body_match: boolean } | undefined;
@@ -56,22 +55,22 @@ export async function findReceipt(
 /** Insert the terminal outcome's receipt slot (same-transaction with the op's row writes). */
 export async function insertReceiptInTx(
   tx: Tx,
-  actor: DeviceActor,
+  actor: SessionActor,
   opId: string,
   rawBody: string,
   outcome: unknown,
 ): Promise<void> {
   await tx.execute(sql`
-    INSERT INTO ${opReceipt} (workspace_id, device_id, op_id, request_sha256, outcome)
-    VALUES (${actor.workspaceId}, ${actor.deviceId}, ${opId}::uuid,
+    INSERT INTO ${opReceipt} (workspace_id, session_id, op_id, request_sha256, outcome)
+    VALUES (${actor.workspaceId}, ${actor.sessionId}, ${opId}::uuid,
             sha256(convert_to(${rawBody}, 'UTF8')), ${JSON.stringify(outcome)}::jsonb)
-    ON CONFLICT (workspace_id, device_id, op_id) DO NOTHING
+    ON CONFLICT (workspace_id, session_id, op_id) DO NOTHING
   `);
 }
 
 /** The standalone variant for ops whose terminal writes need no other row (e.g. a conflict). */
 export async function insertReceipt(
-  actor: DeviceActor,
+  actor: SessionActor,
   opId: string,
   rawBody: string,
   outcome: unknown,
@@ -90,7 +89,7 @@ export interface PublishTarget {
 }
 
 /** The publish/revert gate's read: the bundle row + the resolved protection cascade. A
- * MemberActor suffices (a DeviceActor IS one structurally) — the review pages share it. */
+ * MemberActor suffices (a SessionActor IS one structurally) — the review pages share it. */
 export async function publishTargetOf(
   actor: MemberActor,
   bundleId: string,
@@ -164,7 +163,7 @@ export interface GenesisRegistration {
  */
 export async function registerGenesisBundleInTx(
   tx: Tx,
-  actor: DeviceActor,
+  actor: SessionActor,
   bundleId: string,
   displayName: string | null,
   toChannel: string | null,
@@ -227,13 +226,6 @@ export async function registerGenesisBundleInTx(
       }
     }
   }
-  await tx
-    .insert(bundleSubscription)
-    .values({ userId: actor.userId, workspaceId: ws, bundleId, state: "following" })
-    .onConflictDoUpdate({
-      target: [bundleSubscription.userId, bundleSubscription.bundleId],
-      set: { state: "following", updatedAt: new Date() },
-    });
   // A named `--to` — `everyone` included — rides the ONE gated path every channel placement
   // runs (the old `everyone` string-match bypassed the mode gate).
   if (toChannel !== null) {
@@ -241,7 +233,7 @@ export async function registerGenesisBundleInTx(
   }
   await auditInTx(tx, {
     workspaceId: ws,
-    actor: { userId: actor.userId, deviceId: actor.deviceId, display: actor.display },
+    actor: { userId: actor.userId, sessionId: actor.sessionId, display: actor.display },
     kind: "skill_registered",
     subject: bundleId,
     outcome: "ok",
@@ -253,7 +245,7 @@ export async function registerGenesisBundleInTx(
 /** The `--to` placement inside a publish transaction (create-on-first-use, mode-gated). */
 export async function placeIntoChannelInTx(
   tx: Tx,
-  actor: DeviceActor,
+  actor: SessionActor,
   bundleId: string,
   channelName: string,
 ): Promise<"placed" | "created" | "curated_role_required"> {
@@ -292,7 +284,7 @@ export async function placeIntoChannelInTx(
  */
 export async function openProposalInTx(
   tx: Tx,
-  actor: DeviceActor,
+  actor: SessionActor,
   bundleId: string,
   candidateVersionId: string,
 ): Promise<{ proposalId: string }> {
@@ -338,7 +330,7 @@ export async function openProposalInTx(
   }
   await auditInTx(tx, {
     workspaceId: actor.workspaceId,
-    actor: { userId: actor.userId, deviceId: actor.deviceId, display: actor.display },
+    actor: { userId: actor.userId, sessionId: actor.sessionId, display: actor.display },
     kind: "proposal_opened",
     subject: bundleId,
     outcome: "ok",
@@ -384,7 +376,9 @@ export async function lockOpenProposalInTx(
 /** Resolve a locked proposal row + write the author's verdict notice. */
 export async function resolveProposalInTx(
   tx: Tx,
-  actor: DeviceActor | { userId: string; display: string; workspaceId: string; deviceId?: string },
+  actor:
+    | SessionActor
+    | { userId: string; display: string; workspaceId: string; sessionId?: string },
   row: OpenProposalRow,
   verdict: "approved" | "rejected" | "withdrawn",
   reason: string | null,
@@ -415,7 +409,7 @@ export async function resolveProposalInTx(
   }
   await auditInTx(tx, {
     workspaceId: actor.workspaceId,
-    actor: { userId: actor.userId, deviceId: actor.deviceId, display: actor.display },
+    actor: { userId: actor.userId, sessionId: actor.sessionId, display: actor.display },
     kind: `proposal_${verdict}`,
     subject: row.bundleId,
     outcome: "ok",

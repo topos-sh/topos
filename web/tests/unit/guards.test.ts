@@ -7,7 +7,7 @@ import {
 } from "@/lib/auth/guards.server";
 
 // Pure parts only — DB-free by design. The session-dependent paths (requireSession redirect,
-// requireMember/requireWorkspaceOwner/requireReviewer 404s, the device lane's requireDeviceActor)
+// requireMember/requireWorkspaceOwner/requireReviewer 404s, the device lane's requireSessionActor)
 // exercise a live Better Auth instance / a real credential resolve and are covered by the DB-backed
 // suites; the admission DECISION they all feed into is the exported pure resolveAdmission,
 // truth-tabled below. There is no email gate here anymore: one identity is `user.id`, email is a

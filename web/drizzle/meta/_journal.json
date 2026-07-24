@@ -50,6 +50,13 @@
       "when": 1784757079509,
       "tag": "0006_device-links",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1784862449934,
+      "tag": "0007_manifest-architecture",
+      "breakpoints": true
     }
   ]
 }

@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  asDevice,
+  asSession,
   bootWorkspace,
   createScratchDb,
   type ScratchDb,
   seatUser,
-  seedDevice,
+  seedSession,
   seedUser,
 } from "./helpers/scratch-db";
 
@@ -30,7 +30,7 @@ async function genesisPlacementChannels(
 ): Promise<string[]> {
   const { getDb } = await import("@/lib/db/index.server");
   const custody = await import("@/lib/db/queries.custody.server");
-  const actor = asDevice(wsId, "u_auth", "dk_auth", "member");
+  const actor = asSession(wsId, "u_auth", "dk_auth", "member");
   await getDb().transaction((tx) =>
     custody.registerGenesisBundleInTx(tx, actor, bundleId, displayName, toChannel),
   );
@@ -48,7 +48,7 @@ beforeAll(async () => {
   wsId = await bootWorkspace();
   await seedUser(db, "u_auth", "Author", "author@example.com");
   await seatUser(db, wsId, "u_auth", "member");
-  await seedDevice(db, "dk_auth", "u_auth", "auth-laptop"); // the audit row's actor device
+  await seedSession(db, "dk_auth", wsId, "u_auth"); // the audit row's actor session
 }, 60000);
 
 afterAll(async () => {
@@ -75,7 +75,7 @@ describe("registerGenesisBundleInTx — exclusive placement", () => {
   it("the catalog name `topos` is reserved (the CLI's built-in skill) — minted past like a taken name", async () => {
     const { getDb } = await import("@/lib/db/index.server");
     const custody = await import("@/lib/db/queries.custody.server");
-    const actor = asDevice(wsId, "u_auth", "dk_auth", "member");
+    const actor = asSession(wsId, "u_auth", "dk_auth", "member");
     const reg = await getDb().transaction((tx) =>
       custody.registerGenesisBundleInTx(tx, actor, "s_g_reserved", "Topos", null),
     );
@@ -96,8 +96,8 @@ describe("registerGenesisBundleInTx — a curated `everyone` gates REACH, never 
     const custody = await import("@/lib/db/queries.custody.server");
     const actor =
       role === "reviewer"
-        ? asDevice(wsId, "u_rev", "dk_rev", "reviewer")
-        : asDevice(wsId, "u_auth", "dk_auth", "member");
+        ? asSession(wsId, "u_rev", "dk_rev", "reviewer")
+        : asSession(wsId, "u_auth", "dk_auth", "member");
     const reg = await getDb().transaction((tx) =>
       custody.registerGenesisBundleInTx(tx, actor, bundleId, displayName, toChannel),
     );
@@ -113,7 +113,7 @@ describe("registerGenesisBundleInTx — a curated `everyone` gates REACH, never 
   beforeAll(async () => {
     await seedUser(db, "u_rev", "Reviewer", "reviewer@example.com");
     await seatUser(db, wsId, "u_rev", "reviewer");
-    await seedDevice(db, "dk_rev", "u_rev", "rev-laptop");
+    await seedSession(db, "dk_rev", wsId, "u_rev");
     await db.q(`UPDATE web.channel SET mode = 'curated' WHERE workspace_id = $1 AND is_default`, [
       wsId,
     ]);

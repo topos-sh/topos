@@ -14,7 +14,7 @@ export const OP_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const FILE_MODES = new Set(["100644", "100755"]);
 
 /** The device wire's candidate: files by value + the declared parents + author + message. */
-export interface DeviceCandidate {
+export interface WireCandidate {
   files: { path: string; mode: string; content_base64: string }[];
   parents: string[];
   author: string;
@@ -22,7 +22,7 @@ export interface DeviceCandidate {
 }
 
 /** Validate a device-wire candidate; returns the typed value or a human-readable refusal. */
-export function parseCandidate(raw: unknown): DeviceCandidate | string {
+export function parseCandidate(raw: unknown): WireCandidate | string {
   if (typeof raw !== "object" || raw === null) {
     return "malformed candidate";
   }
@@ -30,7 +30,7 @@ export function parseCandidate(raw: unknown): DeviceCandidate | string {
   if (!Array.isArray(c.files)) {
     return "malformed candidate: files";
   }
-  const files: DeviceCandidate["files"] = [];
+  const files: WireCandidate["files"] = [];
   for (const entry of c.files as unknown[]) {
     const f = entry as { path?: unknown; mode?: unknown; content_base64?: unknown };
     if (

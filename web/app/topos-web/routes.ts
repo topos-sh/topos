@@ -53,9 +53,9 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
   // The member-only signed-in surface: every child mounts under shell.tsx (the login-bounce
   // layout). Same modules in both modes; only the path prefix differs.
   const memberChildren: RouteConfigEntry[] = [
-    // The person-scoped device list is top-level in BOTH modes (a device is a possession of ONE
-    // user, not a workspace resource).
-    route("account/devices", file("your-devices.tsx")),
+    // The person-scoped session list is top-level in BOTH modes (a session belongs to ONE
+    // user, not to the workspace page tree).
+    route("account/sessions", file("your-sessions.tsx")),
     // Self-serve workspace creation + onboarding — MULTI ONLY, top-level like account/devices (a
     // person, not a workspace, is its subject). Single-tenant mints its one workspace at boot, so
     // there is nothing to create and `/new` falls through to the house 404.
@@ -80,7 +80,7 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
     tenancy === "multi"
       ? route(":ws/invite/:token", file("invite-redeem.tsx"))
       : route("invite/:token", file("invite-redeem.tsx")),
-    // The ONE approve ceremony: a signed-in human confirms a device flow by its user code.
+    // The ONE approve ceremony: a signed-in human confirms a login flow by its user code.
     route("verify", file("verify.tsx")),
     route("healthz", file("healthz.ts")),
     route("install", file("install.ts")),
@@ -99,18 +99,13 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
     route(".well-known/agent-skills/topos/:file", file("agent-skills-file.ts")),
     route(".well-known/skills/index.json", file("agent-skills-index-legacy.ts")),
     route("api/auth/*", file("api.auth.ts")),
-    // THE DEVICE LANE — `/api/v1` is the product's one public API, TERMINATING here since the
+    // THE SESSION LANE — `/api/v1` is the product's one public API, TERMINATING here since the
     // identity unification. `:ws` here is the opaque workspace ID (the wire/DB key), unchanged in
     // both tenancy modes. Static segments outrank the splat, which answers the uniform wire 404.
-    route("api/v1/device/authorize", file("api.v1.device-authorize.ts")),
-    route("api/v1/device/token", file("api.v1.device-token.ts")),
-    // The device↔workspace link ops (describe + apply) and the global self-revoke — both
-    // person-scoped (credential → device → user; the link ops must answer the seatless
-    // refusal, the revoke targets the credential's own device).
-    route("api/v1/device/link", file("api.v1.device-link.ts")),
-    route("api/v1/device", file("api.v1.device.ts")),
-    // The already-enrolled device's invite-URL accept — person-scoped (seat-less by design).
-    route("api/v1/invitations/accept", file("api.v1.invitation-accept.ts")),
+    route("api/v1/login/authorize", file("api.v1.login-authorize.ts")),
+    route("api/v1/login/token", file("api.v1.login-token.ts")),
+    // The session self-revoke (`topos logout`): the presented credential names its OWN session.
+    route("api/v1/session", file("api.v1.session.ts")),
     route("api/v1/publish", file("api.v1.publish.ts")),
     route("api/v1/proposals", file("api.v1.propose.ts")),
     route("api/v1/reverts", file("api.v1.reverts.ts")),
@@ -124,9 +119,11 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
       route("invitations", file("api.v1.invitations.ts")),
       route("proposals", file("api.v1.ws-proposals.ts")),
       route("skills", file("api.v1.skills-index.ts")),
-      route("follows/:skill", file("api.v1.follows.ts")),
-      route("exclusions/:skill", file("api.v1.exclusions.ts")),
-      route("channels/:channel/membership", file("api.v1.channel-membership.ts")),
+      // The caller's per-workspace PROFILE (the person-side manifest): the read + the
+      // include/exclude line edits (`add -g` / `remove -g`).
+      route("profile", file("api.v1.profile.ts")),
+      route("profile/skills/:skill", file("api.v1.profile-skill.ts")),
+      route("profile/channels/:channel", file("api.v1.profile-channel.ts")),
       route("channels/:channel/skills/:skill", file("api.v1.curation.ts")),
       route("channels/:channel/protection", file("api.v1.channel-protection.ts")),
       route("skills/:skill/reach", file("api.v1.skill-reach.ts")),
@@ -163,8 +160,8 @@ function memberWorkspaceChildren(
     route("members", file("workspace-members.tsx")),
     route("settings/archive", file("workspace-archive.tsx")),
     route("settings", file("workspace-settings.tsx")),
-    // The workspace's device view (staleness + blind spots) — a tab of the Settings page.
-    route("settings/devices", file("fleet.tsx")),
+    // The workspace's sessions view (approve/remove + applied state) — a Settings tab.
+    route("settings/sessions", file("sessions.tsx")),
     // The whole-catalog export (a zip stream) — a resource route the Settings page links to.
     // Loader-only, so a document GET returns its Response directly; owner-gated in its loader.
     route("settings/export", file("workspace-export.ts")),
@@ -172,7 +169,6 @@ function memberWorkspaceChildren(
     // Skills tab) lives under face-shell, its Members/History/Settings section tabs here.
     route("channels", file("channels-index.tsx")),
     route("channels/new", file("channel-new.tsx")),
-    route("channels/:channel/members", file("channel-members.tsx")),
     route("channels/:channel/history", file("channel-history.tsx")),
     route("channels/:channel/settings", file("channel-settings.tsx")),
     // The skill subpages (the skill FACE itself is under face-shell). Member-only.

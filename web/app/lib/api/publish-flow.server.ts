@@ -1,4 +1,4 @@
-import type { DeviceCandidate } from "@/lib/api/candidate.server";
+import type { WireCandidate } from "@/lib/api/candidate.server";
 import { receiptNow } from "@/lib/api/candidate.server";
 import {
   buildReceipt,
@@ -9,7 +9,7 @@ import {
   okReceiptEnvelope,
 } from "@/lib/api/receipts.server";
 import { badRequest, internalError, uniformNotFound } from "@/lib/api/wire.server";
-import type { DeviceActor } from "@/lib/auth/guards.server";
+import type { SessionActor } from "@/lib/auth/guards.server";
 import {
   inFinalTx,
   insertReceiptInTx,
@@ -34,13 +34,13 @@ import { commitVersion, publishVersion } from "@/lib/plane/custody.server";
  * display as the attribution (the vault stores display strings, never identities).
  */
 export interface PublishFlowArgs {
-  actor: DeviceActor;
+  actor: SessionActor;
   /** The raw request body — the receipt slot's identity input (hashed in Postgres). */
   raw: string;
   opId: string;
   skillId: string;
   expected: number;
-  candidate: DeviceCandidate;
+  candidate: WireCandidate;
   displayName: string | null;
   channel: string | null;
   /** The envelope command (`publish` on both arms — the CLI verb). */

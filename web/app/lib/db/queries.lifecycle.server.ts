@@ -1,6 +1,5 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { MemberActor, OwnerActor } from "@/lib/auth/guards.server";
-import { healDetachmentsInTx } from "@/lib/db/detach.server";
 import { auditInTx } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
 import { bundle, bundleNameHint, channelBundle, notice, proposal } from "@/lib/db/schema.app";
@@ -235,7 +234,6 @@ export async function unarchiveBundle(
       .update(bundle)
       .set({ status: "active", name: row.baseName, baseName: null, archivedAt: null })
       .where(and(eq(bundle.workspaceId, ws), eq(bundle.id, bundleId)));
-    await healDetachmentsInTx(tx, ws, bundleId);
     await auditInTx(tx, {
       workspaceId: ws,
       actor: { userId: actor.userId, display: actor.display },

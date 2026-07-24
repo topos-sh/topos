@@ -106,7 +106,6 @@ const REGISTRY: Record<string, CrumbBuilder> = {
     const ch = params.channel;
     return ch === undefined ? null : [{ label: "Channels", sub: "channels" }, { label: `#${ch}` }];
   },
-  "routes/channel-members": ({ params }) => channelTab(params, "Members"),
   "routes/channel-history": ({ params }) => channelTab(params, "History"),
   "routes/channel-settings": ({ params }) => channelTab(params, "Settings"),
 
@@ -164,11 +163,11 @@ const REGISTRY: Record<string, CrumbBuilder> = {
   // Workspace nav.
   "routes/workspace-members": () => [{ label: "Members" }],
   "routes/workspace-settings": () => [{ label: "Settings" }],
-  "routes/fleet": () => [{ label: "Settings", sub: "settings" }, { label: "Linked devices" }],
+  "routes/sessions": () => [{ label: "Settings", sub: "settings" }, { label: "Sessions" }],
   "routes/workspace-archive": () => [{ label: "Settings", sub: "settings" }, { label: "Archive" }],
 
   // Account-scoped (top-level in both tenancies) — mirrors the page's own title.
-  "routes/your-devices": () => [{ label: "Your devices" }],
+  "routes/your-sessions": () => [{ label: "Your sessions" }],
 
   // Self-serve workspace creation (multi tenancy only, off-workspace — no root crumb precedes it).
   "routes/workspace-new": () => [{ label: "New workspace" }],

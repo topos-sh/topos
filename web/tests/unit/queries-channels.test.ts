@@ -50,8 +50,8 @@ beforeAll(async () => {
   engId = created.channelId;
   await placeBundle(db, wsId, engId, "s_tool");
   await db.q(
-    `INSERT INTO web.channel_member (channel_id, workspace_id, user_id, added_by)
-     VALUES ($1, $2, 'u_ana', 'u_owner')`,
+    `INSERT INTO web.profile_entry (channel_id, workspace_id, user_id, mode)
+     VALUES ($1, $2, 'u_ana', 'include')`,
     [engId, wsId],
   );
 }, 60000);
@@ -64,60 +64,58 @@ describe("channelsOf (the index read)", () => {
   it("lists the default first, then name order, counting implicit membership minus opt-outs", async () => {
     const queries = await q();
     const rows = await queries.channelsOf(asMember(wsId, "u_ana"));
-    expect(rows.map((r) => [r.name, r.isDefault, r.skillCount, r.memberCount])).toEqual([
+    expect(rows.map((r) => [r.name, r.isDefault, r.skillCount, r.audienceCount])).toEqual([
       ["everyone", true, 1, 3],
       ["eng", false, 1, 1],
     ]);
 
-    // An opt-out subtracts from the DEFAULT channel's derived count only.
+    // A profile EXCLUDE subtracts from the DEFAULT channel's derived audience only.
     await db.q(
-      `INSERT INTO web.channel_optout (channel_id, workspace_id, user_id)
-       SELECT id, workspace_id, 'u_bo' FROM web.channel WHERE is_default AND workspace_id = $1`,
+      `INSERT INTO web.profile_entry (channel_id, workspace_id, user_id, mode)
+       SELECT id, workspace_id, 'u_bo', 'exclude' FROM web.channel WHERE is_default AND workspace_id = $1`,
       [wsId],
     );
     const after = await queries.channelsOf(asMember(wsId, "u_ana"));
-    expect(after.map((r) => [r.name, r.memberCount])).toEqual([
+    expect(after.map((r) => [r.name, r.audienceCount])).toEqual([
       ["everyone", 2],
       ["eng", 1],
     ]);
-    await db.q(`DELETE FROM web.channel_optout WHERE user_id = 'u_bo'`);
+    await db.q(`DELETE FROM web.profile_entry WHERE user_id = 'u_bo'`);
   });
 });
 
 describe("channelDetail (the one-channel read)", () => {
-  it("the DEFAULT channel: no member rows, a derived count, and the viewer's opt-out stance", async () => {
+  it("the DEFAULT channel: a derived audience and the viewer's exclude stance", async () => {
     const queries = await q();
     const detail = await queries.channelDetail(asMember(wsId, "u_ana"), "everyone");
     expect(detail).toMatchObject({
       name: "everyone",
       isDefault: true,
-      members: [],
-      defaultMemberCount: 3,
-      viewerIsMember: true,
+      audienceCount: 3,
+      viewerIncluded: true,
     });
     expect(detail?.skills.map((s) => s.skillId)).toEqual(["s_doc"]);
 
     await db.q(
-      `INSERT INTO web.channel_optout (channel_id, workspace_id, user_id)
-       SELECT id, workspace_id, 'u_ana' FROM web.channel WHERE is_default AND workspace_id = $1`,
+      `INSERT INTO web.profile_entry (channel_id, workspace_id, user_id, mode)
+       SELECT id, workspace_id, 'u_ana', 'exclude' FROM web.channel WHERE is_default AND workspace_id = $1`,
       [wsId],
     );
-    const optedOut = await queries.channelDetail(asMember(wsId, "u_ana"), "everyone");
-    expect(optedOut?.viewerIsMember).toBe(false);
-    expect(optedOut?.defaultMemberCount).toBe(2);
-    await db.q(`DELETE FROM web.channel_optout WHERE user_id = 'u_ana'`);
+    const excluded = await queries.channelDetail(asMember(wsId, "u_ana"), "everyone");
+    expect(excluded?.viewerIncluded).toBe(false);
+    expect(excluded?.audienceCount).toBe(2);
+    await db.q(`DELETE FROM web.profile_entry WHERE user_id = 'u_ana' AND mode = 'exclude'`);
   });
 
-  it("a NAMED channel: explicit member rows decide the viewer's stance", async () => {
+  it("a NAMED channel: profile include lines decide the viewer's stance", async () => {
     const queries = await q();
     const asAna = await queries.channelDetail(asMember(wsId, "u_ana"), "eng");
-    expect(asAna?.viewerIsMember).toBe(true);
-    expect(asAna?.members.map((m) => [m.userId, m.display])).toEqual([["u_ana", "Ana"]]);
+    expect(asAna?.viewerIncluded).toBe(true);
     expect(asAna?.skills.map((s) => [s.skillId, s.name, s.status])).toEqual([
       ["s_tool", "tool-helper", "active"],
     ]);
     const asBo = await queries.channelDetail(asMember(wsId, "u_bo"), "eng");
-    expect(asBo?.viewerIsMember).toBe(false);
+    expect(asBo?.viewerIncluded).toBe(false);
     expect(await queries.channelDetail(asMember(wsId, "u_ana"), "nope")).toBeUndefined();
   });
 });
@@ -198,7 +196,7 @@ describe("deleteChannel (id-keyed, owner)", () => {
       await db.q(`SELECT 1 FROM web.channel_bundle WHERE channel_id = $1`, [engId]),
     ).toHaveLength(0);
     expect(
-      await db.q(`SELECT 1 FROM web.channel_member WHERE channel_id = $1`, [engId]),
+      await db.q(`SELECT 1 FROM web.profile_entry WHERE channel_id = $1`, [engId]),
     ).toHaveLength(0);
     // History is append-only and OUTLIVES the row it names.
     const audit = await db.q<{ kind: string }>(
@@ -210,25 +208,27 @@ describe("deleteChannel (id-keyed, owner)", () => {
   });
 });
 
-describe("the default channel's self-service opt-out", () => {
-  it("opting out writes the detach records its lapse earns; opting back in clears them", async () => {
+describe("the viewer's own profile stance (the channel page's self-service arm)", () => {
+  it("removing the DEFAULT channel records the exclude line; including clears it", async () => {
     const queries = await q();
     const ana = asMember(wsId, "u_ana", "member", "Ana");
-    expect(await queries.optOutDefaultChannel(ana)).toBe("left");
-    // s_doc was delivered via the default channel alone → the lapse is recorded, cause-tagged.
-    const detached = await db.q<{ bundle_id: string; cause: string }>(
-      `SELECT bundle_id, cause FROM web.bundle_detachment WHERE user_id = 'u_ana'`,
-    );
-    expect(detached).toEqual([{ bundle_id: "s_doc", cause: "channel_leave" }]);
-    // Idempotence: a second opt-out is the honest not_member.
-    expect(await queries.optOutDefaultChannel(ana)).toBe("not_member");
-
-    expect(await queries.optInDefaultChannel(ana)).toBe("joined");
-    expect(await db.q(`SELECT 1 FROM web.channel_optout WHERE user_id = 'u_ana'`)).toHaveLength(0);
-    // Re-entitled: the record heals (entitlement always wins over a stale record).
-    expect(await db.q(`SELECT 1 FROM web.bundle_detachment WHERE user_id = 'u_ana'`)).toHaveLength(
-      0,
-    );
+    const everyone = (
+      await db.q<{ id: string }>(
+        `SELECT id FROM web.channel WHERE is_default AND workspace_id = $1`,
+        [wsId],
+      )
+    )[0]?.id as string;
+    expect(await queries.removeChannelFromProfile(ana, everyone)).toBe("removed");
+    expect(
+      await db.q(`SELECT 1 FROM web.profile_entry WHERE user_id = 'u_ana' AND mode = 'exclude'`),
+    ).toHaveLength(1);
+    // Idempotent: the exclude line upserts.
+    expect(await queries.removeChannelFromProfile(ana, everyone)).toBe("removed");
+    expect(await queries.includeChannelInProfile(ana, everyone)).toBe("included");
+    expect(
+      await db.q(`SELECT 1 FROM web.profile_entry WHERE user_id = 'u_ana' AND mode = 'exclude'`),
+    ).toHaveLength(0);
+    expect(await queries.includeChannelInProfile(ana, "c_nope")).toBe("unknown_channel");
   });
 });
 
@@ -261,10 +261,10 @@ describe("curation (place / unplace, id-keyed — the web door onto the shared c
         [openId],
       ),
     ).toEqual([{ added_by: "u_ana" }]);
-    // The audit row rides the SAME transaction — web-actor attribution carries no device id.
+    // The audit row rides the SAME transaction — web-actor attribution carries no session id.
     expect(
       await db.q(
-        `SELECT kind, actor_user_id, actor_device_id, details
+        `SELECT kind, actor_user_id, actor_session_id, details
          FROM web.audit_event WHERE subject = $1`,
         [openId],
       ),
@@ -272,7 +272,7 @@ describe("curation (place / unplace, id-keyed — the web door onto the shared c
       {
         kind: "skill_added",
         actor_user_id: "u_ana",
-        actor_device_id: null,
+        actor_session_id: null,
         details: { skillId: "s_place" },
       },
     ]);
@@ -378,22 +378,4 @@ describe("curation (place / unplace, id-keyed — the web door onto the shared c
     expect(await queries.unplaceBundleFromChannel(ana, openId, "s_place")).toBe("not_placed");
   });
 
-  it("placing re-entitles: a standing detachment record heals inside the same transaction", async () => {
-    const queries = await q();
-    // u_bo had detached s_heal (their own lapse, frozen); placing it into the default channel
-    // re-entitles them, and the shared core's heal drops the record — entitlement wins.
-    await seedBundle(db, wsId, "s_heal", "heal-helper");
-    await db.q(
-      `INSERT INTO web.bundle_detachment (user_id, workspace_id, bundle_id, cause)
-       VALUES ('u_bo', $1, 's_heal', 'unfollow')`,
-      [wsId],
-    );
-    const ana = asMember(wsId, "u_ana", "member", "Ana");
-    expect(await queries.placeBundleInChannel(ana, everyoneId, "s_heal")).toBe("placed");
-    expect(
-      await db.q(
-        `SELECT 1 FROM web.bundle_detachment WHERE user_id = 'u_bo' AND bundle_id = 's_heal'`,
-      ),
-    ).toHaveLength(0);
-  });
 });

@@ -18,25 +18,30 @@ import { user, webSchema } from "./schema.auth";
 
 /**
  * The app-owned directory: schema `web` holds EVERY identity, policy, and product row —
- * devices, workspace + seats, invitations, bundles, channels, subscriptions, per-device
- * state, notices, proposals, audit. The plane schema (read-only from this tier) holds byte
- * custody only and joins on opaque ids, never FKs.
+ * sessions, workspace + seats, invitations, bundles, channels, per-person profiles, notices,
+ * proposals, audit. The plane schema (read-only from this tier) holds byte custody only and
+ * joins on opaque ids, never FKs.
+ *
+ * The delivery model is DEMAND ∩ ENTITLEMENT:
+ *   · Entitlement is the SEAT — a seat grants read access to the whole workspace catalog
+ *     (git-clone-level trust). Channels are curated bundle SETS, never access control.
+ *   · Demand is MANIFESTS. The person-side manifest is the per-(user, workspace) PROFILE
+ *     (`profile_entry` rows — server-stored so it roams and is web-editable); project-side
+ *     manifests are `topos.toml` files the client resolves — the server never learns project
+ *     paths. The workspace's default channel is the implicit baseline of every profile;
+ *     excludes are the ONE form of negative state.
  *
  * Integrity posture:
  *   · Same-workspace coherence is FK-ENFORCED: bundle and channel expose (id, workspace_id)
  *     composite keys, and every row that pairs them carries workspace_id pinned by composite
- *     FKs — a channel can never carry another workspace's bundle, a subscription can never
- *     name a foreign bundle. (Residual: device is deliberately workspace-less, so
- *     device_exclusion / device_bundle_state pin bundle-side only.)
+ *     FKs — a channel can never carry another workspace's bundle, a profile entry can never
+ *     name a foreign bundle.
  *   · Standing policy rows anchor to SEAT, not user: deleting a seat cascades away the
- *     member's channel memberships, subscriptions, and opt-outs — revocation is ONE row
- *     delete, and a later re-invite starts clean (no resurrected follows). Lapse RECORDS
- *     (bundle_detachment, audit_event) deliberately do NOT anchor to seat: they exist to
- *     survive removal.
- *   · In-lane protections (CHECKs, FKs, the revoke trigger) are BUG-guards: the app role
- *     owns its schema; append-only tables are append-only by code discipline + review
- *     gates, like every mainstream self-hosted product. The cross-lane boundary (the app
- *     cannot write plane; the vault cannot read web) stays grant-enforced.
+ *     member's profile AND their sessions — revocation is ONE row delete, and a later
+ *     re-invite starts clean.
+ *   · In-lane protections (CHECKs, FKs) are BUG-guards: the app role owns its schema;
+ *     append-only tables are append-only by code discipline + review gates. The cross-lane
+ *     boundary (the app cannot write plane; the vault cannot read web) stays grant-enforced.
  *
  * Validation placement: routes/ceremonies PARSE (types, friendly errors, product rules);
  * this schema is the TYPE of persistent state (integrity constraints + concurrency
@@ -50,124 +55,6 @@ const bytea = customType<{ data: Buffer; driverData: Buffer }>({
     return "bytea";
   },
 });
-
-// ── Devices — a device is a POSSESSION of a user, never an identity ─────────────────────────
-
-export const device = webSchema.table(
-  "device",
-  {
-    /** 'dk_…', server-derived. */
-    id: text("id").primaryKey(),
-    userId: text("user_id")
-      .notNull()
-      .references(() => user.id, { onDelete: "cascade" }),
-    displayName: text("display_name").notNull(),
-    /** SHA-256 of the one bearer credential; the plaintext is delivered once and never stored. */
-    credentialSha256: bytea("credential_sha256").notNull().unique(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true })
-      .defaultNow()
-      .$onUpdate(() => /* @__PURE__ */ new Date())
-      .notNull(),
-    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
-    /** Set-once; NULL = active. Finality is trigger-enforced (see the migration's raw SQL). */
-    revokedAt: timestamp("revoked_at", { withTimezone: true }),
-  },
-  (table) => [
-    index("device_user_idx").on(table.userId),
-    check("device_credential_sha256_check", sql`octet_length(${table.credentialSha256}) = 32`),
-  ],
-);
-
-/**
- * gh-style device-authorization flow; approval mints the device row atomically (the
- * FOR UPDATE-fenced approve+mint in the data layer). 'expired' is NOT a status — expiry is
- * expires_at, one source of truth. Flow state dies with its device (CASCADE): these are
- * short-TTL ceremony rows, not history (audit_event holds the record).
- */
-export const deviceAuthSession = webSchema.table(
-  "device_auth_session",
-  {
-    id: text("id").primaryKey(),
-    /** The short human code the person types at /verify. */
-    userCode: text("user_code").notNull(),
-    deviceCodeSha256: bytea("device_code_sha256").notNull().unique(),
-    requestedName: text("requested_name").notNull(),
-    /**
-     * The workspace ADDRESS SLUG the authorize call named ('' only as the single-tenant
-     * origin-addressed form). Stored, never resolved at mint time: the flow's workspace is
-     * looked up — and the approver's seat in it required — at approval, under the same lock.
-     */
-    requestedWorkspace: text("requested_workspace").default("").notNull(),
-    /**
-     * The RESOLVED workspace id, persisted by the approval inside its fence — the granted
-     * poll's `workspace` decoration reads THIS immutable id, never a re-resolution of the
-     * mutable slug (a rename or delete+recreate inside the TTL must not re-point the flow).
-     */
-    approvedWorkspaceId: text("approved_workspace_id"),
-    /**
-     * SHA-256 of the invitation token a `follow <invite-url>` enrollment carries — recorded
-     * UNVALIDATED at the unauthenticated start (no token oracle); the approval resolves it
-     * under its own fence and weaves accept-the-invitation into the same transaction.
-     */
-    inviteTokenSha256: bytea("invite_token_sha256"),
-    status: text("status").default("pending").notNull(),
-    approvedBy: text("approved_by").references(() => user.id, { onDelete: "set null" }),
-    deviceId: text("device_id").references(() => device.id, { onDelete: "cascade" }),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-  },
-  (table) => [
-    uniqueIndex("device_auth_live_code").on(table.userCode).where(sql`status = 'pending'`),
-    index("device_auth_expires_idx").on(table.expiresAt),
-    check(
-      "device_auth_session_device_code_sha256_check",
-      sql`octet_length(${table.deviceCodeSha256}) = 32`,
-    ),
-    check(
-      "device_auth_session_invite_token_sha256_check",
-      sql`${table.inviteTokenSha256} is null or octet_length(${table.inviteTokenSha256}) = 32`,
-    ),
-    check(
-      "device_auth_session_status_check",
-      sql`${table.status} in ('pending', 'approved', 'denied')`,
-    ),
-    check(
-      "device_auth_session_approved_check",
-      sql`${table.status} <> 'approved' or ${table.deviceId} is not null`,
-    ),
-  ],
-);
-
-/**
- * The device↔workspace LINK — a first-class row, severable by both sides. A device is
- * REGISTERED once (device ↔ server, user-owned: the `device` table above) and LINKED per
- * workspace: authorization on the device lane runs credential → un-revoked device → owner's
- * seat → LIVE LINK. Links are DELETED, never tombstoned (no ghost rows — history lives in
- * audit_event alone); `pending` is the device-approval knob's holding state (an owner approves
- * on the fleet page, or the link was created by an owner and is born active).
- */
-export const deviceLink = webSchema.table(
-  "device_link",
-  {
-    /** 'dl_…', server-minted. */
-    id: text("id").primaryKey(),
-    deviceId: text("device_id")
-      .notNull()
-      .references(() => device.id, { onDelete: "cascade" }),
-    workspaceId: text("workspace_id")
-      .notNull()
-      .references(() => workspace.id, { onDelete: "cascade" }),
-    status: text("status").default("pending").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table) => [
-    unique("device_link_device_id_workspace_id_unique").on(table.deviceId, table.workspaceId),
-    index("device_link_workspace_idx").on(table.workspaceId),
-    index("device_link_device_idx").on(table.deviceId),
-    check("device_link_status_check", sql`${table.status} in ('pending', 'active')`),
-  ],
-);
 
 // ── Workspace + membership ───────────────────────────────────────────────────────────────────
 
@@ -191,11 +78,17 @@ export const workspace = webSchema.table(
       .notNull(),
     registration: text("registration").default("invite_only").notNull(),
     /**
-     * The device-approval knob: 'on' makes a non-owner's new device link born 'pending' until
-     * an owner approves it on the fleet page. Off by default; an owner's own act is always its
+     * The session-approval knob: 'on' makes a non-owner's new session born 'pending' until an
+     * owner approves it on the sessions page. Off by default; an owner's own act is always its
      * own approval.
      */
-    deviceApproval: text("device_approval").default("off").notNull(),
+    sessionApproval: text("session_approval").default("off").notNull(),
+    /**
+     * The owner-set session expiry policy: a session older than this refuses (guard-time
+     * check) and must log in again. NULL = sessions do not expire (the default — the
+     * credential's lifetime is revocation, like a gh CLI login).
+     */
+    sessionMaxAgeMs: bigint("session_max_age_ms", { mode: "number" }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .defaultNow()
@@ -216,7 +109,11 @@ export const workspace = webSchema.table(
       sql`${table.protectionDefault} in ('open', 'reviewed')`,
     ),
     check("workspace_registration_check", sql`${table.registration} in ('invite_only', 'open')`),
-    check("workspace_device_approval_check", sql`${table.deviceApproval} in ('off', 'on')`),
+    check("workspace_session_approval_check", sql`${table.sessionApproval} in ('off', 'on')`),
+    check(
+      "workspace_session_max_age_check",
+      sql`${table.sessionMaxAgeMs} is null or ${table.sessionMaxAgeMs} > 0`,
+    ),
     check(
       "workspace_claim_state_check",
       sql`(${table.claimedAt} is null) <> (${table.claimCodeSha256} is null)`,
@@ -245,6 +142,103 @@ export const seat = webSchema.table(
   ],
 );
 
+// ── Sessions — user × workspace × installation (the ONE credentialed principal) ─────────────
+
+/**
+ * A SESSION is the credentialed attachment of one topos installation to one workspace, as one
+ * person: minted by `topos login <workspace-address>` through the browser-approval flow, its
+ * ONE bearer credential is WORKSPACE-SCOPED (a second workspace is a second login, a second
+ * session, a second credential). Named `cli_session` because Better Auth owns `web.session`
+ * (the browser session); the product noun is just "session".
+ *
+ * Revocable from BOTH sides — the user (self-service: `topos logout`, the account page) and
+ * workspace owners (the sessions page: stolen device, offboarding) — and DELETED, never
+ * tombstoned (history = cause-tagged audit). Seat-anchored by composite FK: removing the seat
+ * cascades the person's sessions in that workspace away in the same delete. `pending` is the
+ * session-approval knob's holding state (delivers nothing until an owner approves).
+ */
+export const cliSession = webSchema.table(
+  "cli_session",
+  {
+    /** 'sn_…', server-minted. */
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id").notNull(),
+    userId: text("user_id").notNull(),
+    /** The installation's self-reported label ("topos CLI (hostname)") — display only. */
+    displayName: text("display_name").notNull(),
+    /** SHA-256 of the one bearer credential; the plaintext is delivered once and never stored. */
+    credentialSha256: bytea("credential_sha256").notNull().unique(),
+    status: text("status").default("active").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+  },
+  (table) => [
+    index("cli_session_workspace_idx").on(table.workspaceId),
+    index("cli_session_user_idx").on(table.userId),
+    foreignKey({
+      name: "cli_session_seat_fk",
+      columns: [table.workspaceId, table.userId],
+      foreignColumns: [seat.workspaceId, seat.userId],
+    }).onDelete("cascade"),
+    check("cli_session_status_check", sql`${table.status} in ('pending', 'active')`),
+    check("cli_session_credential_sha256_check", sql`octet_length(${table.credentialSha256}) = 32`),
+  ],
+);
+
+/**
+ * The gh-style login flow (browser approval); approval mints the session row atomically (the
+ * FOR UPDATE-fenced approve+mint in the data layer). 'expired' is NOT a status — expiry is
+ * expires_at, one source of truth. Flow state dies with its session (CASCADE): these are
+ * short-TTL ceremony rows, not history (audit_event holds the record).
+ */
+export const loginFlow = webSchema.table(
+  "login_flow",
+  {
+    id: text("id").primaryKey(),
+    /** The short human code the person types at /verify. */
+    userCode: text("user_code").notNull(),
+    flowCodeSha256: bytea("flow_code_sha256").notNull().unique(),
+    requestedName: text("requested_name").notNull(),
+    /**
+     * The workspace ADDRESS SLUG the authorize call named ('' only as the single-tenant
+     * origin-addressed form). Stored, never resolved at mint time: the flow's workspace is
+     * looked up — and the approver's seat in it required — at approval, under the same lock.
+     */
+    requestedWorkspace: text("requested_workspace").default("").notNull(),
+    /**
+     * The RESOLVED workspace id, persisted by the approval inside its fence — the granted
+     * poll's `workspace` decoration reads THIS immutable id, never a re-resolution of the
+     * mutable slug (a rename or delete+recreate inside the TTL must not re-point the flow).
+     */
+    approvedWorkspaceId: text("approved_workspace_id"),
+    /**
+     * SHA-256 of the invitation token a `topos login <invite-url>` carries — recorded
+     * UNVALIDATED at the unauthenticated start (no token oracle); the approval resolves it
+     * under its own fence and weaves accept-the-invitation into the same transaction.
+     */
+    inviteTokenSha256: bytea("invite_token_sha256"),
+    status: text("status").default("pending").notNull(),
+    approvedBy: text("approved_by").references(() => user.id, { onDelete: "set null" }),
+    sessionId: text("session_id").references(() => cliSession.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("login_flow_live_code").on(table.userCode).where(sql`status = 'pending'`),
+    index("login_flow_expires_idx").on(table.expiresAt),
+    check("login_flow_flow_code_sha256_check", sql`octet_length(${table.flowCodeSha256}) = 32`),
+    check(
+      "login_flow_invite_token_sha256_check",
+      sql`${table.inviteTokenSha256} is null or octet_length(${table.inviteTokenSha256}) = 32`,
+    ),
+    check("login_flow_status_check", sql`${table.status} in ('pending', 'approved', 'denied')`),
+    check(
+      "login_flow_approved_check",
+      sql`${table.status} <> 'approved' or ${table.sessionId} is not null`,
+    ),
+  ],
+);
+
 /**
  * A claim on a FUTURE user; requires armed SMTP; binds at verified sign-up → seat, OR redeems
  * through the tokened invite link (only the token's SHA-256 is stored — the claim-code
@@ -253,8 +247,9 @@ export const seat = webSchema.table(
  * invitation may carry ONE optional first-destination hint — a bundle OR a channel of its own
  * workspace (at most one; workspace coherence FK-pinned in the migration's raw SQL with a
  * per-column SET NULL, so deleting the hinted thing clears the hint and never the invitation).
- * The token hash is KEPT after consumption: the device-flow grant looks the accepted
- * invitation up by it to decorate the hint.
+ * The hint PREFILLS the newcomer's profile on accept. The token hash is KEPT after
+ * consumption: the login-flow grant looks the accepted invitation up by it to decorate the
+ * hint.
  */
 export const invitation = webSchema.table(
   "invitation",
@@ -382,14 +377,75 @@ export const bundleNameHint = webSchema.table(
   ],
 );
 
-// ── Channels ─────────────────────────────────────────────────────────────────────────────────
+/**
+ * A bundle's UPSTREAM — the external origin it was imported from (a fork that remembers its
+ * parent): host + repo + path, recorded at publish when the published copy carries import
+ * provenance, or by the web add-from-GitHub flow. One upstream per bundle; the server-side
+ * checker polls it and imports new upstream bytes as ordinary PROPOSALS (external changes
+ * ALWAYS propose — the outside world never moves `current`).
+ */
+export const bundleUpstream = webSchema.table(
+  "bundle_upstream",
+  {
+    bundleId: text("bundle_id").primaryKey(),
+    workspaceId: text("workspace_id").notNull(),
+    /** 'github.com' today; the column keeps the door open without branching on it. */
+    host: text("host").notNull(),
+    /** 'owner/repo'. */
+    repo: text("repo").notNull(),
+    /** The subdirectory inside the repo ('' = the repo root). */
+    path: text("path").default("").notNull(),
+    license: text("license"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    /** The checker's bookkeeping: when it last looked, and what commit it saw. */
+    lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
+    lastSeenCommit: text("last_seen_commit"),
+  },
+  (table) => [
+    index("bundle_upstream_ws_idx").on(table.workspaceId),
+    foreignKey({
+      name: "bundle_upstream_bundle_fk",
+      columns: [table.bundleId, table.workspaceId],
+      foreignColumns: [bundle.id, bundle.workspaceId],
+    }).onDelete("cascade"),
+    check("bundle_upstream_repo_check", sql`${table.repo} ~ '^[^/]+/[^/]+$'`),
+  ],
+);
+
+/**
+ * Which upstream commit a VERSION's bytes came from — absent on locally-edited versions, so
+ * divergence from upstream is readable from the version history itself. version_id is the
+ * plane's opaque content digest — no FK across the schema boundary, by design.
+ */
+export const versionUpstream = webSchema.table(
+  "version_upstream",
+  {
+    workspaceId: text("workspace_id").notNull(),
+    bundleId: text("bundle_id").notNull(),
+    versionId: text("version_id").notNull(),
+    commit: text("commit").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.bundleId, table.versionId] }),
+    foreignKey({
+      name: "version_upstream_bundle_fk",
+      columns: [table.bundleId, table.workspaceId],
+      foreignColumns: [bundle.id, bundle.workspaceId],
+    }).onDelete("cascade"),
+  ],
+);
+
+// ── Channels — named, curated BUNDLE SETS (nothing else; never access control) ──────────────
 
 /**
  * Every workspace is born with its default channel ('everyone', is_default = true — one per
- * workspace, partial-unique-enforced). Default-channel membership is IMPLICIT: every seat,
- * MINUS explicit self opt-outs (channel_optout below) — no channel_member rows are
- * materialized for it (no seat↔member double bookkeeping to drift). Deleting or renaming the
- * default channel is refused by the app ceremony.
+ * workspace, partial-unique-enforced). The default channel is the BASELINE: implicit in every
+ * member's profile (personal excludes can subtract individual bundles from it). A channel has
+ * NO membership — people carry a channel by referencing it in their profile, projects by
+ * referencing it in `topos.toml`. `mode` gates who edits its references (open = any member,
+ * curated = reviewer+ — the curation gate). Deleting or renaming the default channel is
+ * refused by the app ceremony.
  */
 export const channel = webSchema.table(
   "channel",
@@ -414,67 +470,6 @@ export const channel = webSchema.table(
     unique("channel_id_workspace_id_unique").on(table.id, table.workspaceId),
     uniqueIndex("channel_one_default").on(table.workspaceId).where(sql`is_default`),
     check("channel_mode_check", sql`${table.mode} in ('open', 'curated')`),
-  ],
-);
-
-/**
- * Membership of NAMED channels (the default channel is implicit, above). Anchored to seat:
- * removing someone's seat removes their channel memberships in the same delete.
- */
-export const channelMember = webSchema.table(
-  "channel_member",
-  {
-    channelId: text("channel_id").notNull(),
-    workspaceId: text("workspace_id").notNull(),
-    userId: text("user_id").notNull(),
-    addedBy: text("added_by").references(() => user.id, { onDelete: "set null" }),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table) => [
-    primaryKey({ columns: [table.channelId, table.userId] }),
-    index("channel_member_user_idx").on(table.userId, table.workspaceId),
-    foreignKey({
-      name: "channel_member_channel_fk",
-      columns: [table.channelId, table.workspaceId],
-      foreignColumns: [channel.id, channel.workspaceId],
-    }).onDelete("cascade"),
-    foreignKey({
-      name: "channel_member_seat_fk",
-      columns: [table.workspaceId, table.userId],
-      foreignColumns: [seat.workspaceId, seat.userId],
-    }).onDelete("cascade"),
-  ],
-);
-
-/**
- * Self opt-out of the DEFAULT channel — the one negative membership row: named channels need
- * none (leaving = deleting your channel_member row), the default channel has no row to
- * delete, so absence lives here. Personal act, self-service both ways (opting back in
- * deletes the row); writes a detach record (cause 'channel_leave') for the bundles it
- * lapses. Only meaningful for is_default channels — the app writes it for no other.
- * Seat-anchored: removal + re-invite starts clean.
- */
-export const channelOptout = webSchema.table(
-  "channel_optout",
-  {
-    channelId: text("channel_id").notNull(),
-    workspaceId: text("workspace_id").notNull(),
-    userId: text("user_id").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table) => [
-    primaryKey({ columns: [table.channelId, table.userId] }),
-    index("channel_optout_user_idx").on(table.userId, table.workspaceId),
-    foreignKey({
-      name: "channel_optout_channel_fk",
-      columns: [table.channelId, table.workspaceId],
-      foreignColumns: [channel.id, channel.workspaceId],
-    }).onDelete("cascade"),
-    foreignKey({
-      name: "channel_optout_seat_fk",
-      columns: [table.workspaceId, table.userId],
-      foreignColumns: [seat.workspaceId, seat.userId],
-    }).onDelete("cascade"),
   ],
 );
 
@@ -503,119 +498,83 @@ export const channelBundle = webSchema.table(
   ],
 );
 
-// ── Person-scoped subscription state ────────────────────────────────────────────────────────
+// ── Profiles — the person-side manifest (ONE per user × workspace, server-stored) ───────────
 
 /**
- * ONE standing stance per (person, bundle) — 'following' (direct follow; survives a channel
- * dropping the bundle) or 'unfollowed' (the negative mask subtracted from the channel-derived
- * union). One row per pair makes "follows AND unfollowed" unrepresentable. Anchored to seat:
- * losing the seat deletes the stance rows — delivery authority ends with membership, and a
- * re-invite starts clean. installed(device) = ((default channels − opt-outs) + member
- * channels' bundles ∪ following) − unfollowed − this device's exclusions.
+ * A PROFILE ENTRY is one line of the person's per-workspace manifest: an INCLUDE of a bundle
+ * or a channel (a standing request — delivery = these ∩ the seat's entitlement), or an
+ * EXCLUDE (the one negative state in the whole system: subtracts a bundle — or a whole
+ * channel, including the implicit default — from this person's baseline). `pin` holds an
+ * optional version digest on a bundle include (NULL = track `current` silently, the
+ * workspace-ref default).
+ *
+ * Exactly one of bundle_id/channel_id is set (CHECK); partial uniques make one stance per
+ * (person, thing) unrepresentable twice. Seat-anchored: losing the seat deletes the profile —
+ * delivery authority ends with membership, and a re-invite starts clean.
  */
-export const bundleSubscription = webSchema.table(
-  "bundle_subscription",
+export const profileEntry = webSchema.table(
+  "profile_entry",
   {
-    userId: text("user_id").notNull(),
     workspaceId: text("workspace_id").notNull(),
-    bundleId: text("bundle_id").notNull(),
-    state: text("state").notNull(),
+    userId: text("user_id").notNull(),
+    mode: text("mode").notNull(),
+    bundleId: text("bundle_id"),
+    channelId: text("channel_id"),
+    /** Version-digest pin on a bundle include; NULL = track current. */
+    pin: text("pin"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    /** When the current state took effect. */
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .defaultNow()
       .$onUpdate(() => /* @__PURE__ */ new Date())
       .notNull(),
   },
   (table) => [
-    primaryKey({ columns: [table.userId, table.bundleId] }),
-    index("bundle_subscription_bundle_idx").on(table.bundleId),
-    check("bundle_subscription_state_check", sql`${table.state} in ('following', 'unfollowed')`),
+    uniqueIndex("profile_entry_bundle_once")
+      .on(table.userId, table.bundleId)
+      .where(sql`bundle_id is not null`),
+    uniqueIndex("profile_entry_channel_once")
+      .on(table.userId, table.channelId)
+      .where(sql`channel_id is not null`),
+    index("profile_entry_ws_user_idx").on(table.workspaceId, table.userId),
+    index("profile_entry_bundle_idx").on(table.bundleId),
+    check("profile_entry_mode_check", sql`${table.mode} in ('include', 'exclude')`),
+    check(
+      "profile_entry_target_check",
+      sql`(${table.bundleId} is null) <> (${table.channelId} is null)`,
+    ),
+    check("profile_entry_pin_check", sql`${table.pin} is null or ${table.bundleId} is not null`),
     foreignKey({
-      name: "bundle_subscription_seat_fk",
+      name: "profile_entry_seat_fk",
       columns: [table.workspaceId, table.userId],
       foreignColumns: [seat.workspaceId, seat.userId],
     }).onDelete("cascade"),
     foreignKey({
-      name: "bundle_subscription_bundle_fk",
+      name: "profile_entry_bundle_fk",
       columns: [table.bundleId, table.workspaceId],
       foreignColumns: [bundle.id, bundle.workspaceId],
     }).onDelete("cascade"),
-  ],
-);
-
-/**
- * The detach RECORD — "delivery lapsed; every device keeps its bytes; the copies are yours."
- * A record of a lapse, never a mask (a later re-follow or channel join simply re-attaches;
- * the app clears the record then). Deliberately NOT seat-anchored: membership_removed is one
- * of its causes, so it must survive the seat's deletion for the fleet page to chase detached
- * copies. Dies with the user or the bundle tombstone's hard purge.
- */
-export const bundleDetachment = webSchema.table(
-  "bundle_detachment",
-  {
-    userId: text("user_id")
-      .notNull()
-      .references(() => user.id, { onDelete: "cascade" }),
-    workspaceId: text("workspace_id").notNull(),
-    bundleId: text("bundle_id").notNull(),
-    cause: text("cause").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table) => [
-    primaryKey({ columns: [table.userId, table.bundleId] }),
-    index("bundle_detachment_ws_idx").on(table.workspaceId, table.bundleId),
-    check(
-      "bundle_detachment_cause_check",
-      sql`${table.cause} in ('unfollow', 'channel_leave', 'membership_removed')`,
-    ),
     foreignKey({
-      name: "bundle_detachment_bundle_fk",
-      columns: [table.bundleId, table.workspaceId],
-      foreignColumns: [bundle.id, bundle.workspaceId],
+      name: "profile_entry_channel_fk",
+      columns: [table.channelId, table.workspaceId],
+      foreignColumns: [channel.id, channel.workspaceId],
     }).onDelete("cascade"),
   ],
 );
 
-// ── Per-device state ─────────────────────────────────────────────────────────────────────────
+// ── Per-session applied state ────────────────────────────────────────────────────────────────
 
 /**
- * Device-scoped INTENT — "not on THIS machine" (the `remove` verb); person-scoped following
- * cannot express it, and without it the fleet cannot distinguish excluded from drifted. Kept
- * distinct from device_bundle_state below: exclusion is user-written intent, state is
- * device-reported fact — different writers, different lifecycles. (device is
- * workspace-less, so this table pins bundle-side coherence only.)
+ * Applied-state truth: session × applied version (version id is an opaque plane digest). The
+ * reconcile only UPSERTS rows for delivered bundles; rows die with the session (CASCADE — a
+ * revoked or re-minted session re-reports fresh). The sessions page reads this for its
+ * per-bundle applied state.
  */
-export const deviceExclusion = webSchema.table(
-  "device_exclusion",
+export const sessionBundleState = webSchema.table(
+  "session_bundle_state",
   {
-    deviceId: text("device_id")
+    sessionId: text("session_id")
       .notNull()
-      .references(() => device.id, { onDelete: "cascade" }),
-    bundleId: text("bundle_id")
-      .notNull()
-      .references(() => bundle.id, { onDelete: "cascade" }),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table) => [
-    primaryKey({ columns: [table.deviceId, table.bundleId] }),
-    index("device_exclusion_bundle_idx").on(table.bundleId),
-  ],
-);
-
-/**
- * Fleet truth: device × applied version (version id is an opaque plane digest). The
- * reconcile only UPSERTS rows for delivered bundles and never deletes: a row whose bundle
- * has left the device's install set is the frozen "last known" record — the fleet derives
- * detached/excluded (vs merely behind) by joining bundle_detachment / device_exclusion
- * over it.
- */
-export const deviceBundleState = webSchema.table(
-  "device_bundle_state",
-  {
-    deviceId: text("device_id")
-      .notNull()
-      .references(() => device.id, { onDelete: "cascade" }),
+      .references(() => cliSession.id, { onDelete: "cascade" }),
     bundleId: text("bundle_id")
       .notNull()
       .references(() => bundle.id, { onDelete: "cascade" }),
@@ -623,8 +582,8 @@ export const deviceBundleState = webSchema.table(
     reportedAt: timestamp("reported_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
-    primaryKey({ columns: [table.deviceId, table.bundleId] }),
-    index("device_bundle_state_bundle_idx").on(table.bundleId),
+    primaryKey({ columns: [table.sessionId, table.bundleId] }),
+    index("session_bundle_state_bundle_idx").on(table.bundleId),
   ],
 );
 
@@ -759,7 +718,8 @@ export const proposalComment = webSchema.table(
  * Append-only by code discipline (no app path updates or deletes audit rows — review-gated);
  * survives workspace/user deletion (no FK on workspace_id; actor FKs SET NULL, actor_display
  * keeps history readable after renames/deletes). Every mutating data-layer op emits its row
- * in the same transaction.
+ * in the same transaction. actor_session_id records WHICH installation acted when the act
+ * came over the session lane; the row outlives the session (SET NULL).
  */
 export const auditEvent = webSchema.table(
   "audit_event",
@@ -767,7 +727,7 @@ export const auditEvent = webSchema.table(
     id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
     workspaceId: text("workspace_id").notNull(),
     actorUserId: text("actor_user_id").references(() => user.id, { onDelete: "set null" }),
-    actorDeviceId: text("actor_device_id").references(() => device.id, {
+    actorSessionId: text("actor_session_id").references(() => cliSession.id, {
       onDelete: "set null",
     }),
     actorDisplay: text("actor_display").notNull(),
@@ -780,7 +740,7 @@ export const auditEvent = webSchema.table(
   (table) => [
     index("audit_ws_time").on(table.workspaceId, table.createdAt),
     index("audit_actor_user").on(table.actorUserId).where(sql`actor_user_id is not null`),
-    index("audit_actor_device").on(table.actorDeviceId).where(sql`actor_device_id is not null`),
+    index("audit_actor_session").on(table.actorSessionId).where(sql`actor_session_id is not null`),
   ],
 );
 
@@ -826,23 +786,23 @@ export const mailEvent = webSchema.table(
 );
 
 /**
- * Device-op idempotency slots (same op_id replays the same outcome). Insert-once by code
+ * Session-op idempotency slots (same op_id replays the same outcome). Insert-once by code
  * discipline; the app's retention sweep deletes by age (the index below).
  */
 export const opReceipt = webSchema.table(
   "op_receipt",
   {
     workspaceId: text("workspace_id").notNull(),
-    deviceId: text("device_id")
+    sessionId: text("session_id")
       .notNull()
-      .references(() => device.id, { onDelete: "cascade" }),
+      .references(() => cliSession.id, { onDelete: "cascade" }),
     opId: uuid("op_id").notNull(),
     requestSha256: bytea("request_sha256").notNull(),
     outcome: jsonb("outcome").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
-    primaryKey({ columns: [table.workspaceId, table.deviceId, table.opId] }),
+    primaryKey({ columns: [table.workspaceId, table.sessionId, table.opId] }),
     // The retention sweep.
     index("op_receipt_retention_idx").on(table.createdAt),
     check("op_receipt_request_sha256_check", sql`octet_length(${table.requestSha256}) = 32`),
@@ -851,8 +811,9 @@ export const opReceipt = webSchema.table(
 
 // ── Relations (query-layer navigation; the FKs above are the integrity) ─────────────────────
 
-export const deviceRelations = relations(device, ({ one }) => ({
-  owner: one(user, { fields: [device.userId], references: [user.id] }),
+export const cliSessionRelations = relations(cliSession, ({ one }) => ({
+  workspace: one(workspace, { fields: [cliSession.workspaceId], references: [workspace.id] }),
+  user: one(user, { fields: [cliSession.userId], references: [user.id] }),
 }));
 
 export const seatRelations = relations(seat, ({ one }) => ({

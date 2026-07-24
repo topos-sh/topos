@@ -3,21 +3,16 @@ import { checkBelt } from "@/lib/api/belt.server";
 import { rowOpResponse } from "@/lib/api/row-envelopes.server";
 import { uniformNotFound } from "@/lib/api/wire.server";
 import { requireSessionActor } from "@/lib/auth/guards.server";
-import { lanePlaceBundle, laneUnplaceBundle } from "@/lib/db/queries.lane.server";
+import { profileIncludeChannel, profileRemoveChannel } from "@/lib/db/queries.lane.server";
 
 /**
- * `PUT | DELETE /api/v1/workspaces/{ws}/channels/{ch}/skills/{skill}` — curation: place (PUT)
- * / remove (DELETE) a bundle reference in a channel. `{ch}` is the channel NAME (created
- * member-level on first placement — a bad new name is a 200 DENIED `BAD_NAME`); `{skill}` is
- * the immutable id. Bodyless, naturally idempotent. Curation on a `curated` channel takes
- * reviewer+ (`CURATED_ROLE_REQUIRED`); an inactive bundle is `SKILL_NOT_ACTIVE`.
+ * `PUT | DELETE /api/v1/workspaces/{ws}/profile/channels/{channel}` — edit the caller's OWN
+ * per-workspace profile: PUT writes the channel include line (`add -g @ws/channels/x`; on the
+ * implicit DEFAULT channel it clears any exclude — the baseline needs no include line),
+ * DELETE removes it (`remove -g`) — the default channel, having no include line, takes an
+ * EXCLUDE line instead (the one negative state). `{channel}` is the channel NAME. Bodyless,
+ * naturally idempotent.
  */
-const CURATION_DENIED = {
-  curated_role_required: "CURATED_ROLE_REQUIRED",
-  bad_name: "BAD_NAME",
-  skill_not_active: "SKILL_NOT_ACTIVE",
-} as const;
-
 export async function action({ request, params }: ActionFunctionArgs): Promise<Response> {
   const belted = checkBelt(request);
   if (belted !== null) {
@@ -28,22 +23,16 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   }
   const actor = await requireSessionActor(request, params.ws ?? "");
   const channel = params.channel ?? "";
-  const skill = params.skill ?? "";
   if (request.method === "PUT") {
-    const status = await lanePlaceBundle(actor, channel, skill);
-    return rowOpResponse(
-      "channel",
-      status,
-      { placed: "placed", created: "created" },
-      CURATION_DENIED,
-    );
+    const status = await profileIncludeChannel(actor, channel);
+    return rowOpResponse("add", status, { included: "included" }, {});
   }
-  const status = await laneUnplaceBundle(actor, channel, skill);
+  const status = await profileRemoveChannel(actor, channel);
   return rowOpResponse(
-    "channel",
+    "remove",
     status,
-    { removed: "removed", not_placed: "not_placed" },
-    CURATION_DENIED,
+    { removed: "removed", excluded: "excluded", not_in_profile: "not_in_profile" },
+    {},
   );
 }
 

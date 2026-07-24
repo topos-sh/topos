@@ -1,14 +1,15 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
-import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
+import { okDataEnvelope } from "@/lib/api/row-envelopes.server";
+import { uniformNotFound } from "@/lib/api/wire.server";
 import { requireSessionActor } from "@/lib/auth/guards.server";
-import { laneReach } from "@/lib/db/queries.lane.server";
+import { profileOf } from "@/lib/db/queries.lane.server";
 
 /**
- * `GET /api/v1/workspaces/{ws}/skills/{skill}/reach` — a bundle's audience (members entitled
- * to it + their non-revoked devices). `{skill}` is the immutable id, validated against the
- * catalog at ANY status; an unknown id is the uniform 404 (never an existence oracle). Pure
- * counts over the entitlement predicate; per-member and hot, never cacheable.
+ * `GET /api/v1/workspaces/{ws}/profile` — the caller's per-workspace PROFILE (the person-side
+ * manifest, server-stored so it roams): every include/exclude line, resolved to names, pins
+ * included. The `add -g`/`remove -g` receipts and `status` read this to phrase "which
+ * manifest line asked for it".
  */
 export async function loader({ request, params }: LoaderFunctionArgs): Promise<Response> {
   const belted = checkBelt(request);
@@ -16,11 +17,15 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
     return belted;
   }
   const actor = await requireSessionActor(request, params.ws ?? "");
-  const reach = await laneReach(actor, params.skill ?? "");
-  if (reach === null) {
-    return uniformNotFound();
-  }
-  return Response.json({ persons: reach.persons, sessions: reach.sessions }, { headers: NO_STORE });
+  const entries = await profileOf(actor);
+  return okDataEnvelope("profile", {
+    entries: entries.map((e) => ({
+      mode: e.mode,
+      kind: e.kind,
+      name: e.name,
+      ...(e.pin === null ? {} : { pin: e.pin }),
+    })),
+  });
 }
 
 /** Any other HTTP method on this served path is the uniform 404 — the door owns it, so a

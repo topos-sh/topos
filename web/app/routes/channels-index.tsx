@@ -85,7 +85,9 @@ function ChannelRow({ channel }: { channel: ChannelSummary }) {
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-faint text-xs">
           <span>{channel.skillCount === 1 ? "1 skill" : `${channel.skillCount} skills`}</span>
           <span aria-hidden="true">·</span>
-          <span>{channel.memberCount === 1 ? "1 member" : `${channel.memberCount} members`}</span>
+          <span>
+            {channel.audienceCount === 1 ? "1 person" : `${channel.audienceCount} people`}
+          </span>
         </div>
       </Link>
     </li>

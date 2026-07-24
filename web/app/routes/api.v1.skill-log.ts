@@ -1,7 +1,7 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
-import { requireDeviceActor } from "@/lib/auth/guards.server";
+import { requireSessionActor } from "@/lib/auth/guards.server";
 import { laneLogOf } from "@/lib/db/queries.lane.server";
 import { custodyLog } from "@/lib/plane/reads.server";
 
@@ -15,7 +15,7 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
   if (belted !== null) {
     return belted;
   }
-  const actor = await requireDeviceActor(request, params.ws ?? "");
+  const actor = await requireSessionActor(request, params.ws ?? "");
   const decorated = await laneLogOf(actor, params.skill ?? "");
   if (decorated === null) {
     return uniformNotFound();

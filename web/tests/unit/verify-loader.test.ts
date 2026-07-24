@@ -39,25 +39,24 @@ interface WorkspaceRow {
   id: string;
   name: string;
   displayName: string;
-  deviceApproval: "off" | "on";
+  sessionApproval: "off" | "on";
 }
 
-const pendingDeviceAuthByChallenge = vi.fn<(hex: string) => Promise<PendingView | null>>();
+const pendingLoginFlowByChallenge = vi.fn<(hex: string) => Promise<PendingView | null>>();
 const theWorkspace = vi.fn<() => Promise<WorkspaceRow | null>>();
 const workspaceByName = vi.fn<(name: string) => Promise<WorkspaceRow | null>>();
 const seatOf = vi.fn<() => Promise<{ role: string } | undefined>>();
 vi.mock("@/lib/db/identity.server", () => ({
-  pendingDeviceAuth: vi.fn(),
-  pendingDeviceAuthByChallenge: (hex: string) => pendingDeviceAuthByChallenge(hex),
-  approveDeviceAuth: vi.fn(),
-  denyDeviceAuth: vi.fn(),
+  pendingLoginFlow: vi.fn(),
+  pendingLoginFlowByChallenge: (hex: string) => pendingLoginFlowByChallenge(hex),
+  approveLoginFlow: vi.fn(),
+  denyLoginFlow: vi.fn(),
   // The REAL born-status rule, restated (a pure function — mocking it away would unpin the
   // awaits-approval copy from the rule the ceremonies run).
-  linkBornStatus: (role: string, knob: string) =>
+  sessionBornStatus: (role: string, knob: string) =>
     role === "owner" ? "active" : knob === "on" ? "pending" : "active",
   // guards.server's imports (unused by the loader under test, present so the mock resolves).
-  deviceActor: vi.fn(),
-  devicePerson: vi.fn(),
+  sessionActor: vi.fn(),
   seatOf: () => seatOf(),
   theWorkspace: () => theWorkspace(),
   workspaceByName: (name: string) => workspaceByName(name),
@@ -86,7 +85,7 @@ beforeAll(async () => {
 beforeEach(() => {
   tenancy = "single";
   session = { user: { id: "u_1", name: "Person", email: "person@example.com" } };
-  pendingDeviceAuthByChallenge.mockReset().mockResolvedValue(null);
+  pendingLoginFlowByChallenge.mockReset().mockResolvedValue(null);
   membershipsFor.mockReset().mockResolvedValue([]);
   theWorkspace.mockReset().mockResolvedValue(null);
   workspaceByName.mockReset().mockResolvedValue(null);
@@ -137,17 +136,17 @@ describe("the challenge resolution (zero typing)", () => {
       id: "w_1",
       name: "acme",
       displayName: "Acme",
-      deviceApproval: "off",
+      sessionApproval: "off",
     });
     seatOf.mockResolvedValue({ role: "member" });
-    pendingDeviceAuthByChallenge.mockResolvedValue(FLOW);
+    pendingLoginFlowByChallenge.mockResolvedValue(FLOW);
     const result = (await call(`http://x/verify?device=${CHALLENGE}`)) as {
       resolved: {
         userCode: string;
         linked: { displayName: string; joining: boolean; awaitsApproval: boolean };
       } | null;
     };
-    expect(pendingDeviceAuthByChallenge).toHaveBeenCalledWith(CHALLENGE);
+    expect(pendingLoginFlowByChallenge).toHaveBeenCalledWith(CHALLENGE);
     expect(result.resolved?.userCode).toBe("AB12-CD34");
     expect(result.resolved?.linked).toEqual({
       name: "acme",
@@ -162,10 +161,10 @@ describe("the challenge resolution (zero typing)", () => {
       id: "w_1",
       name: "acme",
       displayName: "Acme",
-      deviceApproval: "on",
+      sessionApproval: "on",
     });
     seatOf.mockResolvedValue({ role: "member" });
-    pendingDeviceAuthByChallenge.mockResolvedValue(FLOW);
+    pendingLoginFlowByChallenge.mockResolvedValue(FLOW);
     const result = (await call(`http://x/verify?device=${CHALLENGE}`)) as {
       resolved: { linked: { awaitsApproval: boolean } } | null;
     };
@@ -184,9 +183,9 @@ describe("the challenge resolution (zero typing)", () => {
       id: "w_acme",
       name: "acme",
       displayName: "Acme Platform",
-      deviceApproval: "off",
+      sessionApproval: "off",
     });
-    pendingDeviceAuthByChallenge.mockResolvedValue({
+    pendingLoginFlowByChallenge.mockResolvedValue({
       ...FLOW,
       inviteWorkspace: { name: "acme", displayName: "Acme Platform", role: "member" },
     });
@@ -217,7 +216,7 @@ describe("multi tenancy: the workspace-creation weave", () => {
 
   it("a seated person gets the page", async () => {
     membershipsFor.mockResolvedValue([{ displayName: "W One", address: "w-one" }]);
-    pendingDeviceAuthByChallenge.mockResolvedValue(FLOW);
+    pendingLoginFlowByChallenge.mockResolvedValue(FLOW);
     const result = await call(`http://x/verify?device=${CHALLENGE}`);
     expect(result).toMatchObject({ multi: true, device: CHALLENGE });
   });
@@ -227,7 +226,7 @@ describe("multi tenancy: the workspace-creation weave", () => {
   });
 
   it("zero seats + a RESOLVED flow → /new with next AND the slug as a name prefill", async () => {
-    pendingDeviceAuthByChallenge.mockResolvedValue(FLOW);
+    pendingLoginFlowByChallenge.mockResolvedValue(FLOW);
     expectRedirect(
       await call(`http://x/verify?device=${CHALLENGE}`),
       `/new?next=${encodeURIComponent(`/verify?device=${CHALLENGE}`)}&name=acme`,
@@ -235,7 +234,7 @@ describe("multi tenancy: the workspace-creation weave", () => {
   });
 
   it("zero seats + an INVITE-carrying flow stays here — the accept will seat them", async () => {
-    pendingDeviceAuthByChallenge.mockResolvedValue({
+    pendingLoginFlowByChallenge.mockResolvedValue({
       ...FLOW,
       inviteWorkspace: { name: "acme", displayName: "Acme", role: "member" },
     });

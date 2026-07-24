@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { Client } from "pg";
-import type { DeviceActor, MemberActor, OwnerActor, UserActor } from "@/lib/auth/guards.server";
+import type { MemberActor, OwnerActor, SessionActor, UserActor } from "@/lib/auth/guards.server";
 import { applyPlaneDdl } from "../../helpers/plane-ddl";
 import { installTestEnv } from "./test-env";
 
@@ -92,14 +92,21 @@ export function asOwner(workspaceId: string, userId: string, display = userId): 
   return asMember(workspaceId, userId, "owner", display) as OwnerActor;
 }
 
-export function asDevice(
+export function asSession(
   workspaceId: string,
   userId: string,
-  deviceId: string,
+  sessionId: string,
   role: "owner" | "reviewer" | "member" = "member",
   display = userId,
-): DeviceActor {
-  return { userId, display, workspaceId, deviceId, role } as DeviceActor;
+): SessionActor {
+  return {
+    userId,
+    display,
+    workspaceId,
+    sessionId,
+    role,
+    sessionStatus: "active",
+  } as SessionActor;
 }
 
 // ── Row seeds (raw SQL — the scratch database is superuser-owned) ────────────────────────────
@@ -126,32 +133,20 @@ export async function seatUser(
   );
 }
 
-/** A device row without the ceremony — the credential hash is derived from the id (unique). */
-export async function seedDevice(
+/** A session row without the ceremony — the credential hash is derived from the id (unique).
+ * Requires the (workspace, user) seat to exist (the composite FK is the anchoring). */
+export async function seedSession(
   db: ScratchDb,
   id: string,
+  ws: string,
   userId: string,
+  status: "active" | "pending" = "active",
   displayName = id,
 ): Promise<void> {
   await db.q(
-    `INSERT INTO web.device (id, user_id, display_name, credential_sha256)
-     VALUES ($1, $2, $3, sha256(convert_to($1, 'UTF8')))`,
-    [id, userId, displayName],
-  );
-}
-
-/** A device↔workspace link row without the ceremony (default active — the knob-off born state). */
-export async function linkDevice(
-  db: ScratchDb,
-  deviceId: string,
-  ws: string,
-  status: "active" | "pending" = "active",
-): Promise<void> {
-  await db.q(
-    `INSERT INTO web.device_link (id, device_id, workspace_id, status)
-     VALUES ('dl_seed_' || $1 || '_' || substr(md5($2), 1, 8), $1, $2, $3)
-     ON CONFLICT (device_id, workspace_id) DO UPDATE SET status = excluded.status`,
-    [deviceId, ws, status],
+    `INSERT INTO web.cli_session (id, workspace_id, user_id, display_name, credential_sha256, status)
+     VALUES ($1, $2, $3, $4, sha256(convert_to($1, 'UTF8')), $5)`,
+    [id, ws, userId, displayName, status],
   );
 }
 

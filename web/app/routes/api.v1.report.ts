@@ -1,14 +1,13 @@
 import type { ActionFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
-import { requireDeviceActor } from "@/lib/auth/guards.server";
+import { requireSessionActor } from "@/lib/auth/guards.server";
 import { reportApplied } from "@/lib/db/queries.lane.server";
 
 /**
- * `PUT /api/v1/workspaces/{ws}/report` — the device's post-reconcile applied snapshot
- * (`WireAppliedReport`) → 204. Every client-asserted bundle is re-checked against the server's
- * own entitlement predicate, and the reconcile only UPSERTS — a row whose bundle left the
- * install set is the frozen "last known" record the fleet page derives blind spots from.
+ * `PUT /api/v1/workspaces/{ws}/report` — the session's post-reconcile applied snapshot
+ * (`WireAppliedReport`) → 204. A report is the COMPLETE per-workspace snapshot of what the
+ * installation holds (absence is meaningful), workspace-membership-checked per bundle.
  * Small-body-capped; a malformed body is a 400 BEFORE the credential resolve.
  */
 const BODY_CAP = 64 * 1024;
@@ -52,10 +51,10 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
     }
     applied.push({ skillId: row.skill_id, versionId: row.version_id });
   }
-  const actor = await requireDeviceActor(request, params.ws ?? "");
+  const actor = await requireSessionActor(request, params.ws ?? "");
   const outcome = await reportApplied(actor, applied);
-  if (outcome === "unlinked") {
-    // The link vanished between the guard and the write (an unlink/sever won the race) — the
+  if (outcome === "session_ended") {
+    // The session ended between the guard and the write (a revocation won the race) — the
     // same uniform miss the guard itself would have answered a moment later.
     return uniformNotFound();
   }

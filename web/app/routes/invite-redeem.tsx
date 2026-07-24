@@ -17,9 +17,9 @@ import { withInvitationCeremony } from "@/lib/auth/registration.server";
 import { getAuth } from "@/lib/auth/server";
 import {
   acceptInvitationByToken,
-  type DeviceGrantHint,
   declineInvitationByToken,
   invitationPageView,
+  type LoginGrantHint,
   mintInvitationSignIn,
 } from "@/lib/db/identity.server";
 import { mailDelivery } from "@/lib/mail/transport.server";
@@ -86,7 +86,7 @@ function deviceParamsFrom(url: URL): DeviceParams | null {
  * the hinted page, else the workspace root. */
 function acceptLanding(
   workspaceName: string,
-  hint: DeviceGrantHint | null,
+  hint: LoginGrantHint | null,
   device: DeviceParams | null,
 ): string {
   if (device !== null) {

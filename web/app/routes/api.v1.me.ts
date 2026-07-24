@@ -1,7 +1,7 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
-import { requireDeviceActor } from "@/lib/auth/guards.server";
+import { requireSessionActor } from "@/lib/auth/guards.server";
 import { laneMe } from "@/lib/db/queries.lane.server";
 import { workspaceAddress } from "@/lib/ws-url.server";
 
@@ -18,10 +18,10 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
   if (belted !== null) {
     return belted;
   }
-  // One of the exactly TWO pending-tolerant routes: a live pending link proves standing (the
-  // person IS seated), so the normal body answers with `link_status` "pending" instead of the
-  // uniform 404 an unlinked device gets.
-  const actor = await requireDeviceActor(request, params.ws ?? "", { allowPending: true });
+  // One of the exactly TWO pending-tolerant routes: a live pending session proves standing
+  // (the person IS seated), so the normal body answers with `session_status` "pending" instead
+  // of the uniform 404 an unknown credential gets.
+  const actor = await requireSessionActor(request, params.ws ?? "", { allowPending: true });
   const row = await laneMe(actor);
   if (row === null) {
     return uniformNotFound();
@@ -33,7 +33,7 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
     address: workspaceAddress(request, row.name),
     principal: actor.display,
     role: row.role,
-    link_status: actor.linkStatus,
+    session_status: actor.sessionStatus,
     ...(row.invitedBy !== null ? { invited_by: row.invitedBy } : {}),
   };
   return Response.json(body, { headers: NO_STORE });

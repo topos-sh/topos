@@ -68,13 +68,10 @@ describe("archiveBundle", () => {
       `SELECT name, base_name, status FROM web.bundle WHERE id = 's_main'`,
     );
     expect(rows).toEqual([{ name: archivedMainName, base_name: "runbook", status: "archived" }]);
-    // Unplaced from EVERY channel — an upstream withdrawal, no person-detach records.
+    // Unplaced from EVERY channel — an upstream withdrawal.
     expect(await db.q(`SELECT 1 FROM web.channel_bundle WHERE bundle_id = 's_main'`)).toHaveLength(
       0,
     );
-    expect(
-      await db.q(`SELECT 1 FROM web.bundle_detachment WHERE bundle_id = 's_main'`),
-    ).toHaveLength(0);
     // The open proposal auto-closed as 'withdrawn' (the no-verdict terminal), reason carried.
     const proposals = await db.q<{ status: string; resolved_reason: string; resolved_by: string }>(
       `SELECT status, resolved_reason, resolved_by FROM web.proposal WHERE id = 'p_open'`,
