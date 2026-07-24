@@ -859,11 +859,24 @@ pub struct WireMe {
     /// Who invited this principal (absent for a genesis owner).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invited_by: Option<String>,
-    /// THIS device's link to the workspace — `"active"` or `"pending"` (a pending link awaits an
-    /// owner's approval; no skill data flows over it). Serde-defaulted to `"active"` for schema
-    /// stability: a producer predating device links serves only active-equivalent access.
+    /// THIS session's status — `"active"` or `"pending"` (a pending session awaits an owner's
+    /// approval; no skill data flows over it). The session-wire spelling; read through
+    /// [`Self::effective_status`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_status: Option<String>,
+    /// The RETIRED device-link spelling of the same fact — parse-only fallback for a producer
+    /// predating sessions. Serde-defaulted to `"active"` (such a producer serves only
+    /// active-equivalent access).
     #[serde(default = "default_link_status")]
     pub link_status: String,
+}
+
+impl WireMe {
+    /// The one status read: the session spelling when served, else the legacy `link_status`.
+    #[must_use]
+    pub fn effective_status(&self) -> &str {
+        self.session_status.as_deref().unwrap_or(&self.link_status)
+    }
 }
 
 /// One skill reference inside a channel entry.
@@ -890,12 +903,12 @@ pub struct WireChannelEntry {
     pub name: String,
     /// The channel's mode (`open` or `curated`).
     pub mode: String,
-    /// Whether this is the structural `everyone` (roster-derived membership; cannot be joined or left).
+    /// Whether this is the structural `everyone` (delivered by default; a profile exclude is the
+    /// opt-out).
     pub builtin: bool,
-    /// Whether the CALLER is a member (always `true` on `everyone`).
-    pub member: bool,
-    /// How many people the channel reaches (confirmed roster size for `everyone`).
-    pub member_count: u64,
+    /// Whether the CALLER's profile includes this channel (on `everyone`: whether no exclude
+    /// stands).
+    pub included: bool,
     /// The skills the channel references.
     pub skills: Vec<WireChannelSkill>,
 }

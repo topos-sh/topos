@@ -163,21 +163,22 @@ pub(crate) fn plan_targets(
             }
         }
         if !plan.shared_covers.is_empty() {
-            let dir = prior_dir(prior, PlacementKind::Shared, None, adopt).unwrap_or_else(|| {
-                adopt_override(
-                    ctx,
-                    topos_harness::choose_skill_dir(
-                        &coverage::shared_skills_dir(home),
+            let dir =
+                prior_dir(ctx, prior, PlacementKind::Shared, None, adopt).unwrap_or_else(|| {
+                    adopt_override(
+                        ctx,
+                        topos_harness::choose_skill_dir(
+                            &coverage::shared_skills_dir(home),
+                            skill_id,
+                            naming,
+                            &taken,
+                            &owned,
+                        ),
                         skill_id,
                         naming,
-                        &taken,
-                        &owned,
-                    ),
-                    skill_id,
-                    naming,
-                    adopt,
-                )
-            });
+                        adopt,
+                    )
+                });
             plan.targets.push(PlannedTarget {
                 dir,
                 kind: PlacementKind::Shared,
@@ -188,7 +189,7 @@ pub(crate) fn plan_targets(
 
     let active_slug = ctx.harness.id().slug();
     for h in native {
-        let dir = match prior_dir(prior, PlacementKind::Native, Some(h.slug), adopt) {
+        let dir = match prior_dir(ctx, prior, PlacementKind::Native, Some(h.slug), adopt) {
             Some(dir) => dir,
             // The active adapter keeps its own richer `placement_for` for its native dir; every
             // other detected harness resolves through the registry's canonical user skills root
@@ -516,6 +517,7 @@ fn adopt_override(
 /// never reused for an apply of version B). A failed scan or any mismatch means the reservation
 /// lapsed: NOT reusable, and it is replaced like any other stale reservation.
 fn prior_dir(
+    ctx: &Ctx<'_>,
     prior: Option<&PlacementMap>,
     kind: PlacementKind,
     agent: Option<&str>,
@@ -528,11 +530,29 @@ fn prior_dir(
         .find(|(dir, st)| {
             st.kind == kind
                 && st.agent.as_deref() == agent
+                // The mirror of `project_plan`'s project-local rule: a dir recorded INSIDE a
+                // project checkout belongs to that scope — the person plan never reuses it as its
+                // own (kind, agent) slot (it would swallow the home placement whole).
+                && !under_project_manifest(ctx, Path::new(dir))
                 && (st.materialized_sha.is_some()
                     || !topos_harness::dir_taken(Path::new(dir))
                     || adoption_reservation_holds(dir, st, adopt))
         })
         .map(|(dir, _)| PathBuf::from(dir))
+}
+
+/// Whether a dir sits inside some PROJECT checkout — an ancestor holds a `topos.toml` (the
+/// manifest travels with the repo; its placements are that scope's business, never the person
+/// scope's prior).
+pub(crate) fn under_project_manifest(ctx: &Ctx<'_>, dir: &Path) -> bool {
+    let mut cur = dir.parent();
+    while let Some(d) = cur {
+        if ctx.fs.exists(&d.join(crate::manifest::file::MANIFEST_FILE)) {
+            return true;
+        }
+        cur = d.parent();
+    }
+    false
 }
 
 /// Whether a never-materialized-but-occupied placement is a still-valid ADOPTION reservation: its

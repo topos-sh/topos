@@ -96,8 +96,9 @@ pub(crate) fn status(
             let transports = (connectors.session)(s);
             match transports.directory.me(&s.workspace_id) {
                 Ok(me) => {
+                    let pending = me.effective_status() == "pending";
                     probed_principal.get_or_insert(me.principal);
-                    if me.link_status == "pending" {
+                    if pending {
                         (
                             "pending — awaiting owner approval".to_owned(),
                             Some(me.role),

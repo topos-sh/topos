@@ -759,8 +759,7 @@ fn a_channel_reference_expands_against_the_session() {
             name: "backend".into(),
             mode: "open".into(),
             builtin: false,
-            member: false,
-            member_count: 3,
+            included: true,
             skills: vec![WireChannelSkill {
                 skill_id: "s_deploy".into(),
                 name: "deploy".into(),

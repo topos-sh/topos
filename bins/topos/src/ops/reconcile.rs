@@ -1567,16 +1567,10 @@ fn withdraw_person_scope(ctx: &Ctx<'_>, sid: &SkillId) -> Result<String, ClientE
 }
 
 /// Whether a placement dir belongs to some PROJECT checkout — an ancestor holds a `topos.toml`
-/// (the manifest travels with the repo; its placements are that scope's business).
+/// (the manifest travels with the repo; its placements are that scope's business). The ONE
+/// heuristic, shared with the person plan's prior-stability rule.
 fn is_project_placement(ctx: &Ctx<'_>, dir: &Path) -> bool {
-    let mut cur = dir.parent();
-    while let Some(d) = cur {
-        if ctx.fs.exists(&d.join(MANIFEST_FILE)) {
-            return true;
-        }
-        cur = d.parent();
-    }
-    false
+    crate::placement::under_project_manifest(ctx, dir)
 }
 
 /// Snapshot-first clean of exactly `indices` placements: every distinct edited copy is committed

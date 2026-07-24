@@ -172,13 +172,14 @@ fn level_argv(kind: ResourceKind, level: &str) -> Option<String> {
     (level != default).then(|| level.to_owned())
 }
 
-/// The audience the protection governs — the reach (people) for a skill, the member count for a channel.
-/// Best-effort: a read fault answers `None` (the describe degrades, the op does not).
+/// The audience the protection governs — the reach (people) for a skill. A channel's audience is
+/// not on the session wire (delivery is profile math, not membership rows) — the describe simply
+/// omits it. Best-effort: a read fault answers `None` (the describe degrades, the op does not).
 fn read_audience(
     directory: &dyn crate::plane::DirectorySource,
     workspace_id: &str,
     kind: ResourceKind,
-    name: &str,
+    _name: &str,
     skill_id: Option<&str>,
 ) -> Option<u64> {
     match kind {
@@ -186,11 +187,7 @@ fn read_audience(
             let id = skill_id?;
             directory.reach(workspace_id, id).ok().map(|r| r.persons)
         }
-        ResourceKind::Channel => directory
-            .channels_index(workspace_id)
-            .ok()
-            .and_then(|idx| idx.channels.into_iter().find(|c| c.name == name))
-            .map(|c| c.member_count),
+        ResourceKind::Channel => None,
     }
 }
 

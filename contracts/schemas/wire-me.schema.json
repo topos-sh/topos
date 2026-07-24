@@ -20,7 +20,7 @@
       ]
     },
     "link_status": {
-      "description": "THIS device's link to the workspace — `\"active\"` or `\"pending\"` (a pending link awaits an\nowner's approval; no skill data flows over it). Serde-defaulted to `\"active\"` for schema\nstability: a producer predating device links serves only active-equivalent access.",
+      "description": "The RETIRED device-link spelling of the same fact — parse-only fallback for a producer\npredating sessions. Serde-defaulted to `\"active\"` (such a producer serves only\nactive-equivalent access).",
       "type": "string",
       "default": "active"
     },
@@ -35,6 +35,13 @@
     "role": {
       "description": "The caller's role (`owner` / `reviewer` / `member`).",
       "type": "string"
+    },
+    "session_status": {
+      "description": "THIS session's status — `\"active\"` or `\"pending\"` (a pending session awaits an owner's\napproval; no skill data flows over it). The session-wire spelling; read through\n[`Self::effective_status`].",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "workspace_id": {
       "description": "The workspace id.",
