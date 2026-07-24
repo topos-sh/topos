@@ -1127,6 +1127,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
         command: "publish".to_owned(),
         ok: true,
         data: serde_json::to_value(PublishData {
+            manifest: None,
+            reference: None,
+            converted_from: None,
             skill_id: "s_deploy".to_owned(),
             name: "deploy".to_owned(),
             version_id: "d".repeat(64),

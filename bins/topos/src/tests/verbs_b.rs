@@ -1361,7 +1361,7 @@ fn publish_describe_gate(cached_review_required: bool, fresh: Option<bool>) -> P
     };
 
     let ctx = rig.ctx(&inert_p, &file_follow);
-    ops::publish_describe(&ctx, &connectors, None, "pd-skill", false, None, None)
+    ops::publish_describe(&ctx, &connectors, None, None, "pd-skill", false, None, None)
         .expect("describe succeeds")
         .gate
 }
@@ -1521,7 +1521,7 @@ fn publish_describe_previews_the_rebase_merge_for_a_behind_copy() {
             delivery: &del_c,
         };
         let ctx = rig.ctx(&inert_p, &file_follow);
-        ops::publish_describe(&ctx, &connectors, None, "pv-skill", false, None, None)
+        ops::publish_describe(&ctx, &connectors, None, None, "pv-skill", false, None, None)
             .expect("describe succeeds")
             .merge_preview
     };
@@ -1668,7 +1668,7 @@ fn genesis_author_first_publish(rig: &Rig, src: &Scratch) -> String {
     let ok = OkPublish::new(1);
     let connect = |_b: &str| -> Box<dyn ContributeSource> { Box::new(ok.clone()) };
     let out = ops::publish(
-        &ctx, &connect, None, None, "deploy", false, None, None, None,
+        &ctx, &connect, None, None, None, "deploy", false, None, None, None,
     )
     .unwrap();
     assert!(
@@ -1699,7 +1699,7 @@ fn a_genesis_authors_repeat_publish_refuses_no_changes_and_writes_no_wal() {
     let inert_f = InertFollow;
     let ctx = rig.ctx(&inert_p, &inert_f);
     let err = ops::publish(
-        &ctx, &connect, None, None, "deploy", false, None, None, None,
+        &ctx, &connect, None, None, None, "deploy", false, None, None, None,
     )
     .unwrap_err();
     assert!(
@@ -1752,8 +1752,8 @@ fn a_genesis_authors_repeat_publish_describe_is_no_changes() {
     let inert_p = InertPlane;
     let inert_f = InertFollow;
     let ctx = rig.ctx(&inert_p, &inert_f);
-    let err =
-        ops::publish_describe(&ctx, &connectors, None, "deploy", false, None, None).unwrap_err();
+    let err = ops::publish_describe(&ctx, &connectors, None, None, "deploy", false, None, None)
+        .unwrap_err();
     assert!(
         matches!(err, ClientError::NoChanges { .. }),
         "the unfollowed author's repeat describe is NO_CHANGES, got {err:?}"
@@ -1777,8 +1777,10 @@ fn a_genesis_authors_identical_propose_refuses_no_changes() {
     let inert_p = InertPlane;
     let inert_f = InertFollow;
     let ctx = rig.ctx(&inert_p, &inert_f);
-    let err =
-        ops::publish(&ctx, &connect, None, None, "deploy", true, None, None, None).unwrap_err();
+    let err = ops::publish(
+        &ctx, &connect, None, None, None, "deploy", true, None, None, None,
+    )
+    .unwrap_err();
     assert!(
         matches!(err, ClientError::NoChanges { .. }),
         "an identical --propose is NO_CHANGES, got {err:?}"
@@ -1809,7 +1811,7 @@ fn editing_the_draft_lets_a_second_publish_land() {
     let inert_f = InertFollow;
     let ctx = rig.ctx(&inert_p, &inert_f);
     let out = ops::publish(
-        &ctx, &connect, None, None, "deploy", false, None, None, None,
+        &ctx, &connect, None, None, None, "deploy", false, None, None, None,
     )
     .unwrap();
     assert!(
@@ -1859,6 +1861,7 @@ fn a_landed_publish_carries_the_teammate_handoff_line() {
         &connect,
         Some(&dir_c),
         None,
+        None,
         "deploy",
         false,
         None,
@@ -1900,7 +1903,7 @@ fn a_publish_describe_carries_the_teammate_handoff_line() {
         directory: &dir_c,
         delivery: &del_c,
     };
-    let data = ops::publish_describe(&ctx, &connectors, None, "deploy", false, None, None)
+    let data = ops::publish_describe(&ctx, &connectors, None, None, "deploy", false, None, None)
         .expect("describe succeeds");
     assert_eq!(
         data.share_line.as_deref(),
@@ -1971,8 +1974,17 @@ fn describe_placements(
     let inert_p = InertPlane;
     let inert_f = InertFollow;
     let ctx = rig.ctx(&inert_p, &inert_f);
-    let data = ops::publish_describe(&ctx, &connectors, None, "deploy", false, channel, None)
-        .expect("describe succeeds");
+    let data = ops::publish_describe(
+        &ctx,
+        &connectors,
+        None,
+        None,
+        "deploy",
+        false,
+        channel,
+        None,
+    )
+    .expect("describe succeeds");
     (data.placements, data.placement_note)
 }
 

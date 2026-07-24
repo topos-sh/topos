@@ -55,6 +55,11 @@ use super::sync_engine::{self, Invocation};
 pub(crate) struct SessionTransports {
     pub plane: Box<dyn ReconcileTransport>,
     pub directory: Box<dyn DirectorySource>,
+    /// The contribute-write lane (publish / propose / revert / review) under the same credential.
+    pub contribute: Box<dyn crate::plane::ContributeSource>,
+    /// The governance lane (invitations; the session self-revoke). Consumed by the invite fold.
+    #[allow(dead_code)]
+    pub governance: Box<dyn crate::plane::GovernanceSource>,
 }
 
 /// Builds the transports for ONE session (per-workspace credentials — the session model).

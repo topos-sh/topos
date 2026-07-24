@@ -208,6 +208,108 @@ fn not_available(session: &Session, name: &str, e: &ClientError) -> ClientError 
     ))
 }
 
+/// A resolved SESSION write lane — which workspace a governance/write verb acts in, with the
+/// transports built under that session's OWN credential.
+pub(crate) struct WriteLane {
+    pub host: String,
+    pub workspace_name: String,
+    pub workspace_id: String,
+    pub base_url: String,
+    pub transports: SessionTransports,
+}
+
+/// Resolve the session a write verb signs in: `None` when this installation runs on the legacy
+/// enrollment (no sessions — the caller keeps its classic path). A DELIVERED skill's own
+/// workspace wins (the pointer scope must be the skill's, never an ambient guess); else the one
+/// live session, or the `--workspace`-selected one (several without a name refuse typed).
+///
+/// # Errors
+/// [`ClientError::Enrollment`] / [`ClientError::WorkspaceSelection`] from the session selection.
+pub(crate) fn resolve_session_lane(
+    ctx: &Ctx<'_>,
+    connect: &SessionConnect<'_>,
+    explicit: Option<&str>,
+    skill_id: Option<&str>,
+) -> Result<Option<WriteLane>, ClientError> {
+    let all = sessions::read_sessions(ctx.fs, &ctx.layout)?;
+    if all.sessions.is_empty() {
+        return Ok(None);
+    }
+    let delivered_ws = skill_id.and_then(|sid| {
+        use crate::plane::FollowSource;
+        super::reconcile::CacheFollow::load(ctx.fs, &ctx.layout)
+            .followed()
+            .into_iter()
+            .find(|(id, _)| id == sid)
+            .map(|(_, fc)| fc.workspace_id)
+    });
+    let session = match delivered_ws {
+        Some(ws) => all
+            .sessions
+            .iter()
+            .find(|s| s.workspace_id == ws)
+            .cloned()
+            .ok_or_else(|| {
+                ClientError::Enrollment(format!(
+                    "this bundle's workspace has no session on this installation — `topos login` \
+                     it first (workspace id {ws})"
+                ))
+            })?,
+        None => all.resolve_target(explicit)?.clone(),
+    };
+    let transports = connect(&session);
+    Ok(Some(WriteLane {
+        host: session.host.clone(),
+        workspace_name: session.workspace_name.clone(),
+        workspace_id: session.workspace_id.clone(),
+        base_url: session.base_url.clone(),
+        transports,
+    }))
+}
+
+/// The governance-transfer rewrite a LANDED publish performs by default: the nearest manifest
+/// line that referenced this skill as a LOCAL PATH is rewritten to the canonical workspace
+/// reference — the local copy becomes a managed placement of the governed bundle, one act.
+/// Returns the facts for the receipt (`None` when no path line referenced it — an already-governed
+/// republish, or a skill never recorded in a manifest).
+pub(crate) struct GovernedRewrite {
+    pub manifest: String,
+    pub canonical: String,
+    pub from: String,
+}
+
+pub(crate) fn rewrite_to_governed(
+    ctx: &Ctx<'_>,
+    skill_name: &str,
+    host: &str,
+    workspace_name: &str,
+) -> Result<Option<GovernedRewrite>, ClientError> {
+    let canonical = format!("{host}/{workspace_name}/{skill_name}");
+    for (path, manifest) in super::manifest_edit::local_layers(ctx)? {
+        let Some(entry) = manifest.skills.iter().find(|e| {
+            matches!(
+                crate::manifest::refs::parse_ref(&e.reference),
+                Ok(ParsedRef::LocalPath { .. })
+            ) && crate::manifest::refs::parse_ref(&e.reference)
+                .map(|p| p.item_name() == skill_name)
+                .unwrap_or(false)
+        }) else {
+            continue;
+        };
+        let from = entry.reference.clone();
+        let mut ed = crate::manifest::file::ManifestEditor::open(ctx.fs, &path)?;
+        ed.remove_entry("skills", &from);
+        ed.set_entry("skills", &canonical, None);
+        ed.write(ctx.fs, &path)?;
+        return Ok(Some(GovernedRewrite {
+            manifest: path.display().to_string(),
+            canonical,
+            from,
+        }));
+    }
+    Ok(None)
+}
+
 /// `topos add <workspace-ref>` — record the demand and deliver it now. `global` routes the edit
 /// to the SERVER-STORED PROFILE of the workspace the reference resolves to (`-g`); otherwise the
 /// NEAREST `topos.toml` takes the line (created at the git root when none is in reach). Either

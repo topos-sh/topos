@@ -208,7 +208,7 @@ pub(crate) fn note_added_remote(
 
 /// One manifest layer as the `remove` arm reads it (path + parsed content), nearest first, the
 /// personal manifest LAST (the broadest local layer).
-fn local_layers(ctx: &Ctx<'_>) -> Result<Vec<(PathBuf, Manifest)>, ClientError> {
+pub(super) fn local_layers(ctx: &Ctx<'_>) -> Result<Vec<(PathBuf, Manifest)>, ClientError> {
     let mut out = Vec::new();
     if let Some(roots) = &ctx.roots
         && let Some(cwd) = roots.cwd.as_deref()

@@ -770,6 +770,19 @@ pub struct PublishData {
     /// (`topos channel add <channel> <skill>`). **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement_withheld: Option<String>,
+    /// The GOVERNANCE-TRANSFER receipt half: the manifest whose local-path line this publish
+    /// rewrote to the governed workspace reference. Absent when no manifest referenced the bundle
+    /// by path (an already-governed republish). **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<String>,
+    /// The canonical workspace reference the manifest now stores. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    /// The local-path spelling the manifest carried BEFORE the transfer (the inverse is
+    /// `topos add <converted_from>` after a `topos remove <reference>`). **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub converted_from: Option<String>,
     /// The paste-able teammate handoff line (`Ask your agent: …`) — the join instruction that
     /// brings a teammate's machine into the workspace, composed from the workspace's server
     /// origin + address. Absent when the address is not known (a best-effort read — the publish
@@ -1372,6 +1385,9 @@ mod tests {
     #[test]
     fn publish_data_carries_the_move_and_omits_an_absent_added_note() {
         let done = PublishData {
+            manifest: None,
+            reference: None,
+            converted_from: None,
             skill_id: "topos_t00".to_owned(),
             name: "pr-describe".to_owned(),
             version_id: "a".repeat(64),

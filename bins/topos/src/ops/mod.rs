@@ -107,7 +107,9 @@ pub(crate) use pull::{
     quiet_hook_lines, quiet_soft_failure, reset, update_selective,
 };
 pub(crate) use reconcile::{ManifestUpdateOpts, SessionTransports, manifest_update};
-pub(crate) use reference::{add_reference, remove_reference_global};
+pub(crate) use reference::{
+    WriteLane, add_reference, remove_reference_global, resolve_session_lane, rewrite_to_governed,
+};
 // The withdrawal/exclusion clean is driven through `remove`/the reconcile; the direct re-export
 // serves the placement-breadth suite's foreign-preservation regression.
 #[cfg(test)]

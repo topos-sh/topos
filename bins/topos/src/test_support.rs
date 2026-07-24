@@ -2358,6 +2358,7 @@ impl FollowHarness {
                 &ctx,
                 &contribute,
                 None, // directory — the rig asserts the publish outcome, not the handoff line
+                None, // session — the composed rig runs the legacy enrollment lane
                 None, // roots — the harness adopts the skill before publishing (no auto-add)
                 approve,
                 propose,
@@ -2848,7 +2849,7 @@ impl ContributeHarness {
         self.with_write_ctx(|ctx, contribute, governance| {
             let _ = governance;
             match ops::publish(
-                ctx, contribute, None, None, approve, propose, None, None, None,
+                ctx, contribute, None, None, None, approve, propose, None, None, None,
             )
             .map_err(|e| e.to_string())?
             {

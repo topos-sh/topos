@@ -2676,6 +2676,9 @@ mod tests {
     #[test]
     fn publish_tty_leads_with_the_skill_name_never_the_opaque_id() {
         let line = publish_tty(&PublishData {
+            manifest: None,
+            reference: None,
+            converted_from: None,
             skill_id: "topos_a1b2c3".to_owned(),
             name: "smoke-notes".to_owned(),
             version_id: "a".repeat(64),
@@ -2695,6 +2698,9 @@ mod tests {
     #[test]
     fn publish_tty_discloses_a_withheld_curated_placement_next_to_the_success() {
         let line = publish_tty(&PublishData {
+            manifest: None,
+            reference: None,
+            converted_from: None,
             skill_id: "topos_a1b2c3".to_owned(),
             name: "smoke-notes".to_owned(),
             version_id: "a".repeat(64),
@@ -2722,6 +2728,9 @@ mod tests {
         let invite = "Ask your agent: \"Set up Topos for us: fetch https://topos.sh/agent and \
                       follow it. Our workspace: https://topos.sh/acme\"";
         let line = publish_tty(&PublishData {
+            manifest: None,
+            reference: None,
+            converted_from: None,
             skill_id: "topos_a1b2c3".to_owned(),
             name: "smoke-notes".to_owned(),
             version_id: "a".repeat(64),

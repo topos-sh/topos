@@ -312,6 +312,14 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 s.base_url.clone(),
                 Some(s.credential.clone()),
             )),
+            contribute: Box::new(UreqDeviceClient::new(
+                s.base_url.clone(),
+                Some(s.credential.clone()),
+            )),
+            governance: Box::new(UreqDeviceClient::new(
+                s.base_url.clone(),
+                Some(s.credential.clone()),
+            )),
         }
     };
     // The default WEB origin the enrollment doors dial on a fresh install (`follow <bare-ws>`,
@@ -791,7 +799,10 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             let roots = list_discovery(false);
             // A bare ENROLLED publish DESCRIBES what shipping would do (nothing lands on the plane); `--yes`
             // applies. An un-enrolled publish refuses typed inside the op (enroll with `follow` first).
-            if !yes && enrollment.is_some() {
+            let publish_sessions = crate::sessions::read_sessions(&fs, &ctx.layout)
+                .map(|s| !s.sessions.is_empty())
+                .unwrap_or(false);
+            if !yes && (enrollment.is_some() || publish_sessions) {
                 let connectors = ops::PublishDescribeConnectors {
                     directory: &connect_directory,
                     delivery: &connect_delivery,
@@ -799,6 +810,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 let described = ops::publish_describe(
                     &ctx,
                     &connectors,
+                    Some(&connect_session_transports),
                     roots.as_ref(),
                     &target,
                     propose,
@@ -827,6 +839,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 &ctx,
                 &connect_contribute,
                 Some(&connect_directory),
+                Some(&connect_session_transports),
                 roots.as_ref(),
                 &target,
                 propose,

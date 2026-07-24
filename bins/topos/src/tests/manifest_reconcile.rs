@@ -433,6 +433,45 @@ impl DirectorySource for FakeDirectory {
     }
 }
 
+/// Write lanes the reconcile suites never exercise.
+struct NoContribute;
+impl crate::plane::ContributeSource for NoContribute {
+    fn publish(
+        &self,
+        _b: topos_types::requests::PublishRequest,
+    ) -> Result<crate::plane::WriteReceipt, ClientError> {
+        unreachable!("no contribute in these flows")
+    }
+    fn propose(
+        &self,
+        _b: topos_types::requests::ProposeRequest,
+    ) -> Result<crate::plane::WriteReceipt, ClientError> {
+        unreachable!("no contribute in these flows")
+    }
+    fn revert(
+        &self,
+        _b: topos_types::requests::RevertRequest,
+    ) -> Result<crate::plane::WriteReceipt, ClientError> {
+        unreachable!("no contribute in these flows")
+    }
+    fn review(
+        &self,
+        _b: topos_types::requests::ReviewRequest,
+    ) -> Result<crate::plane::WriteReceipt, ClientError> {
+        unreachable!("no contribute in these flows")
+    }
+}
+struct NoGovernance;
+impl crate::plane::GovernanceSource for NoGovernance {
+    fn invite(
+        &self,
+        _w: &str,
+        _b: topos_types::requests::InvitationRequest,
+    ) -> Result<topos_types::requests::InvitationData, ClientError> {
+        unreachable!("no governance in these flows")
+    }
+}
+
 fn connect<'a>(
     plane: &'a FakePlane,
     dir: &'a FakeDirectory,
@@ -440,6 +479,8 @@ fn connect<'a>(
     move |_s: &Session| ops::SessionTransports {
         plane: Box::new(plane.clone()),
         directory: Box::new(dir.clone()),
+        contribute: Box::new(NoContribute),
+        governance: Box::new(NoGovernance),
     }
 }
 
@@ -890,4 +931,33 @@ fn remove_reference_global_names_how_the_removal_settled() {
         out.items[0].note
     );
     assert_eq!(out.undo, vec!["topos", "add", "-g", "acme.test/eng/deploy"]);
+}
+
+#[test]
+fn publish_transfer_rewrites_the_path_line_to_the_governed_reference() {
+    let rig = Rig::new("transfer");
+    let proj = Scratch::new("proj-tr");
+    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    std::fs::write(
+        proj.0.join("topos.toml"),
+        "[skills]\n\"./tools/my-skill\" = \"*\"\n",
+    )
+    .unwrap();
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let rw = ops::rewrite_to_governed(&ctx, "my-skill", HOST, WS_NAME)
+        .unwrap()
+        .expect("the path line is rewritten");
+    assert_eq!(rw.canonical, format!("{HOST}/{WS_NAME}/my-skill"));
+    assert_eq!(rw.from, "./tools/my-skill");
+    let m = crate::manifest::file::read_manifest(&rig.fs, &proj.0.join("topos.toml"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.skills.len(), 1);
+    assert_eq!(m.skills[0].reference, format!("{HOST}/{WS_NAME}/my-skill"));
+    // A second publish finds no path line — the transfer is one-shot.
+    assert!(
+        ops::rewrite_to_governed(&ctx, "my-skill", HOST, WS_NAME)
+            .unwrap()
+            .is_none()
+    );
 }
