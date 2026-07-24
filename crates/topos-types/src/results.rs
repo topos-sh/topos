@@ -795,6 +795,15 @@ pub struct ProposeData {
     /// one local `add` the propose folded in; `None` when the skill was already tracked. **INFERRED.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added: Option<AddedNote>,
+    /// The channel whose placement was WITHHELD by its curated mode on the proposal arm (the
+    /// `--to` placement applies when the proposal opens — reach is curation-gated there too).
+    /// **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_withheld: Option<String>,
+    /// The channel named by `--to` that no longer existed at the proposal's write (the
+    /// in-transaction refusal — never a silent mint). **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_missing: Option<String>,
     /// The GOVERNANCE-TRANSFER receipt half on the PROPOSAL arm: the manifest whose local-path
     /// line this publish rewrote to the governed workspace reference (delivery follows once the
     /// proposal is approved). Absent when no manifest referenced the bundle by path. **INFERRED**

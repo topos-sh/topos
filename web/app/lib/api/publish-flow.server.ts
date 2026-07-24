@@ -132,7 +132,10 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
     (args.forceProposal || (target.protection === "reviewed" && actor.role === "member"));
 
   if (reroute && target !== undefined) {
-    // The propose arm: commit-only ingest, then the proposal row — `current` never moves.
+    // The propose arm: commit-only ingest, then the proposal row — `current` never moves. A
+    // `--to` placement applies HERE too (the bundle is registered; a channel reference is
+    // reach, and delivery starts only when a `current` exists) — mode-gated and
+    // existing-channels-only, exactly like the direct arm, its outcome riding the receipt.
     const committed = await commitVersion(actor.workspaceId, target.bundleId, laneCandidate);
     if (committed.kind === "rejected") {
       return badRequest(committed.message ?? "candidate rejected");
@@ -140,21 +143,12 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
     if (committed.kind !== "ok") {
       return internalError();
     }
-    const receipt = buildReceipt({
-      opId,
-      command,
-      outcome: "NEEDS_REVIEW",
-      workspaceId: actor.workspaceId,
-      skillId: target.bundleId,
-      versionId: committed.value.version_id,
-      bundleDigest: committed.value.bundle_digest,
-      expectedGeneration: expected,
-      createdAt,
-      ...(args.forceProposal ? {} : { details: { downgraded: true } }),
-    });
-    const envelope = okReceiptEnvelope(command, receipt);
-    await inFinalTx(async (tx) => {
+    const envelope = await inFinalTx(async (tx) => {
       await openProposalInTx(tx, actor, target.bundleId, committed.value.version_id);
+      const details: Record<string, unknown> = args.forceProposal ? {} : { downgraded: true };
+      if (channel !== null) {
+        details.placement = await placeIntoChannelInTx(tx, actor, target.bundleId, channel);
+      }
       if (args.upstream != null) {
         await recordUpstreamInTx(
           tx,
@@ -164,7 +158,21 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
           args.upstream,
         );
       }
-      await insertReceiptInTx(tx, actor, opId, raw, envelope);
+      const receipt = buildReceipt({
+        opId,
+        command,
+        outcome: "NEEDS_REVIEW",
+        workspaceId: actor.workspaceId,
+        skillId: target.bundleId,
+        versionId: committed.value.version_id,
+        bundleDigest: committed.value.bundle_digest,
+        expectedGeneration: expected,
+        createdAt,
+        ...(Object.keys(details).length === 0 ? {} : { details }),
+      });
+      const env = okReceiptEnvelope(command, receipt);
+      await insertReceiptInTx(tx, actor, opId, raw, env);
+      return env;
     });
     return envelopeResponse(envelope);
   }

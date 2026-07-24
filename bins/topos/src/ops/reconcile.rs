@@ -1682,7 +1682,16 @@ fn clean_undemanded(
     // channel membership ended): clean the HOME-scope placements topos itself WROTE
     // (materialized; an adopted-in-place source dir is never deleted), snapshot-first, no
     // never-received reset (project placements clean through the project arm; the row lapses at
-    // this sweep's cache write). A member of a channel that FAILED to expand stays frozen.
+    // this sweep's cache write). A member of a channel that FAILED to expand stays frozen — and
+    // so is any name the CURRENT resolution still MENTIONS (a resolved item that merely failed
+    // to sync this run, or an EXCLUDE: a project's exclusion is scope-local, while the home
+    // placement belongs to layers that may still demand it from another directory).
+    let mentioned_names: HashSet<&str> = resolution
+        .items
+        .iter()
+        .map(|i| i.name.as_str())
+        .chain(resolution.excluded.iter().map(|e| e.name.as_str()))
+        .collect();
     for run in runs {
         if run.snapshot.is_none() {
             continue; // offline: everything freezes
@@ -1694,6 +1703,7 @@ fn clean_undemanded(
             if !cached.via_manifest
                 || cached.withdrawn
                 || synced_ids.contains(skill_id)
+                || mentioned_names.contains(cached.name.as_str())
                 || cached.via_channels.iter().any(|c| {
                     failed_channels.contains(&(run.session.workspace_id.clone(), c.clone()))
                 })

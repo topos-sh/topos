@@ -264,11 +264,16 @@ export async function placeIntoChannelInTx(
   channelName: string,
 ): Promise<"placed" | "curated_role_required" | "channel_not_found"> {
   const ws = actor.workspaceId;
+  // FOR KEY SHARE: pin the row against a concurrent DELETE for the rest of this transaction —
+  // without the lock, a delete landing between this read and the channel_bundle insert would
+  // abort the whole final transaction on the FK (after custody already published) instead of
+  // answering the typed refusal.
   const rows = await tx
     .select({ id: channel.id, mode: channel.mode })
     .from(channel)
     .where(and(eq(channel.workspaceId, ws), eq(channel.name, channelName)))
-    .limit(1);
+    .limit(1)
+    .for("key share");
   const row = rows[0];
   if (row === undefined) {
     return "channel_not_found";

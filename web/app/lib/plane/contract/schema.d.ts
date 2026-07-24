@@ -713,6 +713,17 @@ export interface components {
              *     (additive-only).
              */
             manifest?: string | null;
+            /**
+             * @description The channel named by `--to` that no longer existed at the proposal's write (the
+             *     in-transaction refusal — never a silent mint). **INFERRED** (additive-only).
+             */
+            placement_missing?: string | null;
+            /**
+             * @description The channel whose placement was WITHHELD by its curated mode on the proposal arm (the
+             *     `--to` placement applies when the proposal opens — reach is curation-gated there too).
+             *     **INFERRED** (additive-only).
+             */
+            placement_withheld?: string | null;
             /** @description `<skill>@<version_id>` of the candidate. */
             proposal: string;
             /** @description The canonical workspace reference the manifest now stores. **INFERRED** (additive-only). */

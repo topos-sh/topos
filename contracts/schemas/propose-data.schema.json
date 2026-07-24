@@ -39,6 +39,20 @@
         "null"
       ]
     },
+    "placement_missing": {
+      "description": "The channel named by `--to` that no longer existed at the proposal's write (the\nin-transaction refusal — never a silent mint). **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "placement_withheld": {
+      "description": "The channel whose placement was WITHHELD by its curated mode on the proposal arm (the\n`--to` placement applies when the proposal opens — reach is curation-gated there too).\n**INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "proposal": {
       "description": "`<skill>@<version_id>` of the candidate.",
       "type": "string"

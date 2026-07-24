@@ -1724,6 +1724,18 @@ pub(crate) fn propose_tty(data: &ProposeData) -> String {
         short(&data.base_version_id),
         data.proposal,
     );
+    if let Some(ch) = &data.placement_withheld {
+        out.push_str(&format!(
+            "\nchannel '{ch}' is curated — the reference was NOT placed (placement takes \
+             reviewer or owner); a curator places it on the web (the channel's page)."
+        ));
+    }
+    if let Some(ch) = &data.placement_missing {
+        out.push_str(&format!(
+            "\nchannel '{ch}' no longer exists — it was deleted before this proposal opened, so \
+             the reference was NOT placed (nothing was created)."
+        ));
+    }
     if let (Some(manifest), Some(reference), Some(from)) =
         (&data.manifest, &data.reference, &data.converted_from)
     {

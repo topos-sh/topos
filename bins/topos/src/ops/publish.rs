@@ -1198,16 +1198,32 @@ fn map_outcome(
                 origin_note: None,
             }))
         }
-        TerminalOutcome::NeedsReview => Ok(PublishOutcome::Proposed(ProposeData {
-            proposal: format!("{skill_name}@{}", rec.candidate_commit),
-            base_version_id: lock.base_commit.clone(),
-            title: skill_name.to_owned(),
-            body: None,
-            added: None,
-            manifest: None,
-            reference: None,
-            converted_from: None,
-        })),
+        TerminalOutcome::NeedsReview => {
+            // The `--to` placement applies on the proposal arm too — its outcome rides the
+            // receipt details exactly as on a landed publish.
+            let placement_outcome = receipt
+                .receipt
+                .as_ref()
+                .and_then(|r| r.details.as_ref())
+                .and_then(|d| d.get("placement"))
+                .and_then(|p| p.as_str())
+                .map(str::to_owned);
+            let target_channel = || rec.channel.clone().unwrap_or_else(|| "everyone".to_owned());
+            Ok(PublishOutcome::Proposed(ProposeData {
+                proposal: format!("{skill_name}@{}", rec.candidate_commit),
+                base_version_id: lock.base_commit.clone(),
+                title: skill_name.to_owned(),
+                body: None,
+                added: None,
+                placement_withheld: (placement_outcome.as_deref() == Some("curated_role_required"))
+                    .then(target_channel),
+                placement_missing: (placement_outcome.as_deref() == Some("channel_not_found"))
+                    .then(target_channel),
+                manifest: None,
+                reference: None,
+                converted_from: None,
+            }))
+        }
         TerminalOutcome::Conflict => Err(ClientError::Conflict {
             skill: skill_name.to_owned(),
             current: receipt.error.as_ref().and_then(|e| e.current_generation),

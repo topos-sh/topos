@@ -288,8 +288,14 @@ fn trust_rail(
             shadows: item.shadowed_from.iter().map(LayerSource::label).collect(),
         });
     }
-    // Recorded EXCLUDES render as their own rows — the "why not?" half of the rail.
+    // Recorded EXCLUDES render as their own rows — the "why not?" half of the rail. An exclude
+    // a NEARER channel member shadowed (its name claimed above) does not render: the member's
+    // own row already tells the delivered story, and one name must never read as both applied
+    // and excluded.
     for ex in resolution.excluded {
+        if claimed.contains(&ex.name) {
+            continue;
+        }
         let scope = match &ex.by {
             LayerSource::Project { .. } => "project",
             LayerSource::Profile { .. } | LayerSource::Personal => "person",

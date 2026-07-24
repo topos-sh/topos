@@ -1538,3 +1538,58 @@ fn a_dropped_personal_line_cleans_the_written_home_placement() {
         out2.data.skills
     );
 }
+
+#[test]
+fn a_project_exclude_freezes_the_home_placement_it_shadows() {
+    // A PERSONAL-manifest line delivers to the home scope; a PROJECT's exclude of the same name
+    // is scope-LOCAL — sweeping inside that project must withhold delivery there but never
+    // delete the home placement the personal line still demands everywhere else.
+    let rig = Rig::new("excl-freeze");
+    rig.seed_session();
+    std::fs::create_dir_all(rig.layout().home()).unwrap();
+    std::fs::write(
+        rig.layout().home().join("topos.toml"),
+        format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+    )
+    .unwrap();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    let placed = rig.work.0.join("skills/deploy");
+    assert!(placed.exists());
+
+    // A project that EXCLUDES the name: sweeping inside it delivers nothing there and leaves
+    // the home placement whole.
+    let proj = Scratch::new("proj-excl-freeze");
+    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    std::fs::write(proj.0.join("topos.toml"), "exclude = [\"deploy\"]\n").unwrap();
+    let ctx_in = rig.ctx_at(Some(&proj.0));
+    let out = ops::manifest_update(
+        &ctx_in,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(
+        !out.data
+            .skills
+            .iter()
+            .any(|s| s.action == PullAction::Withdrawn),
+        "{:?}",
+        out.data.skills
+    );
+    assert!(
+        placed.exists(),
+        "a scope-local exclude never deletes the home placement"
+    );
+}
