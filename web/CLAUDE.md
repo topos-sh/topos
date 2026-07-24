@@ -1,5 +1,17 @@
 # `web/` — the product web app (TypeScript / React Router 8 on bun)
 
+> **ACTIVE REFACTOR (manifest architecture, staged):** the server side below has moved to the
+> SESSION + PROFILE model — sessions (user × workspace × installation, workspace-scoped bearer
+> credentials, the gh-style `/api/v1/login/*` flow, the Sessions settings tab + account
+> Your-sessions page) replace device + device-link; per-person PROFILES (include/exclude rows,
+> the default channel as the implicit baseline, `/api/v1/workspaces/{ws}/profile*` +
+> the `/profile` editor page) replace subscriptions/channel-membership/opt-outs/exclusions;
+> channels are pure curated bundle sets; UPSTREAM provenance (bundle_upstream +
+> version_upstream, the `skills/import` add-from-GitHub flow, the skill-settings Upstream
+> panel, and the always-propose upstream checker) is live. Paragraphs below that still speak
+> the device/follow vocabulary describe the RETIRED model and are being rewritten with the CLI
+> verb fold; the code is the source of truth.
+
 **THE ONE PUBLIC SURFACE.** This app is everything the world reaches: the signed-in pages below, the
 shareable resource addresses, AND the device API — `/api/v1/…` is served here. Since the identity
 model landed, this tier is the **authority for identity and the whole directory**, in its own Postgres

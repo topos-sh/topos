@@ -134,7 +134,7 @@ function isoSeconds(date: Date): string {
  * hole), plus the unacked notices, the open-proposal count over the demanded set, and the ONE
  * staleness clock.
  */
-export async function deliveryFor(actor: SessionActor): Promise<DeliveryBody> {
+export async function deliveryFor(actor: ProfileActor): Promise<DeliveryBody> {
   const ws = actor.workspaceId;
   return await getDb().transaction(
     async (tx) => {
@@ -345,6 +345,8 @@ export async function laneMe(actor: SessionActor): Promise<LaneMe | null> {
 }
 
 export interface LaneChannel {
+  /** The immutable channel id (the web profile editor's toggle key; the wire route omits it). */
+  channelId: string;
   name: string;
   mode: string;
   builtin: boolean;
@@ -354,7 +356,7 @@ export interface LaneChannel {
 }
 
 /** The workspace channels index (`GET /channels`) — name-sorted, the default included. */
-export async function laneChannels(actor: SessionActor): Promise<LaneChannel[]> {
+export async function laneChannels(actor: ProfileActor): Promise<LaneChannel[]> {
   const ws = actor.workspaceId;
   return await getDb().transaction(
     async (tx) => {
@@ -390,6 +392,7 @@ export async function laneChannels(actor: SessionActor): Promise<LaneChannel[]> 
         ORDER BY ch.name
       `);
       return (channelRows.rows as Record<string, unknown>[]).map((r) => ({
+        channelId: r.id as string,
         name: r.name as string,
         mode: r.mode as string,
         builtin: r.is_default as boolean,
@@ -438,6 +441,16 @@ export async function laneReach(
 
 // ── The profile (the person-side manifest: add -g / remove -g / the web editor) ─────────────
 
+/**
+ * The actor shape BOTH profile doors satisfy: the session lane's SessionActor and the web
+ * page's MemberActor (the ops read only the person + workspace — a profile is personal, so
+ * no role gates apply). Structural, so both branded actors pass without a cast.
+ */
+export interface ProfileActor {
+  readonly userId: string;
+  readonly workspaceId: string;
+}
+
 export interface ProfileEntryView {
   mode: "include" | "exclude";
   kind: "skill" | "channel";
@@ -448,7 +461,7 @@ export interface ProfileEntryView {
 }
 
 /** The person's whole profile in this workspace, resolved to names (name-sorted per group). */
-export async function profileOf(actor: SessionActor): Promise<ProfileEntryView[]> {
+export async function profileOf(actor: ProfileActor): Promise<ProfileEntryView[]> {
   const rows = await getDb().execute(sql`
     SELECT pe.mode, pe.pin, b.name AS bundle_name, b.kind AS bundle_kind, c.name AS channel_name
     FROM web.profile_entry pe
@@ -472,7 +485,7 @@ export async function profileOf(actor: SessionActor): Promise<ProfileEntryView[]
  * NEW identity; the old one is out of circulation).
  */
 export async function profileIncludeBundle(
-  actor: SessionActor,
+  actor: ProfileActor,
   bundleId: string,
   pin: string | null,
 ): Promise<"included" | "unknown_skill" | "skill_not_active"> {
@@ -511,7 +524,7 @@ export type ProfileRemoveOutcome =
  * manifest-layer semantics, applied to the profile.
  */
 export async function profileRemoveBundle(
-  actor: SessionActor,
+  actor: ProfileActor,
   bundleId: string,
 ): Promise<ProfileRemoveOutcome> {
   const ws = actor.workspaceId;
@@ -546,7 +559,7 @@ export async function profileRemoveBundle(
 
 /** `add -g @ws/channels/x`: upsert the channel include (an exclude flips back to include). */
 export async function profileIncludeChannel(
-  actor: SessionActor,
+  actor: ProfileActor,
   channelName: string,
 ): Promise<"included" | "unknown_channel"> {
   const ws = actor.workspaceId;
@@ -579,7 +592,7 @@ export async function profileIncludeChannel(
  * state).
  */
 export async function profileRemoveChannel(
-  actor: SessionActor,
+  actor: ProfileActor,
   channelName: string,
 ): Promise<"removed" | "excluded" | "not_in_profile" | "unknown_channel"> {
   const ws = actor.workspaceId;

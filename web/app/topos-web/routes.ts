@@ -157,6 +157,11 @@ function memberWorkspaceChildren(
   file: (p: string) => string,
 ): RouteConfigEntry[] {
   const children: RouteConfigEntry[] = [
+    // The person's per-workspace PROFILE editor ("Your skills") — the web face of the same
+    // include/exclude lines `topos add -g` / `remove -g` edit.
+    route("profile", file("profile.tsx")),
+    // Add-from-GitHub: server-side fetch → preview → publish WITH upstream provenance.
+    route("skills/import", file("skill-import.tsx")),
     route("members", file("workspace-members.tsx")),
     route("settings/archive", file("workspace-archive.tsx")),
     route("settings", file("workspace-settings.tsx")),

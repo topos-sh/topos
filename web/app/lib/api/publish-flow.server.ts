@@ -47,6 +47,45 @@ export interface PublishFlowArgs {
   command: string;
   /** True on the explicit `POST /v1/proposals` arm — always commit-only. */
   forceProposal: boolean;
+  /** The upstream provenance the publish carries, when the bytes were imported. */
+  upstream?: UpstreamInput | null;
+}
+
+/** The parsed upstream-provenance block a publish may carry. */
+export interface UpstreamInput {
+  host: string;
+  repo: string;
+  path: string;
+  commit: string | null;
+  license: string | null;
+}
+
+/** Record a publish's upstream provenance inside the final transaction: the bundle's ONE
+ * upstream row (upserted — the latest publish's word wins) and, when a commit is named, the
+ * per-version record divergence is read from. */
+async function recordUpstreamInTx(
+  tx: Parameters<Parameters<typeof inFinalTx>[0]>[0],
+  ws: string,
+  bundleId: string,
+  versionId: string,
+  upstream: UpstreamInput,
+): Promise<void> {
+  const { sql } = await import("drizzle-orm");
+  await tx.execute(sql`
+    INSERT INTO web.bundle_upstream (bundle_id, workspace_id, host, repo, path, license)
+    VALUES (${bundleId}, ${ws}, ${upstream.host}, ${upstream.repo}, ${upstream.path},
+            ${upstream.license})
+    ON CONFLICT (bundle_id) DO UPDATE
+      SET host = excluded.host, repo = excluded.repo, path = excluded.path,
+          license = COALESCE(excluded.license, web.bundle_upstream.license)
+  `);
+  if (upstream.commit !== null) {
+    await tx.execute(sql`
+      INSERT INTO web.version_upstream (workspace_id, bundle_id, version_id, commit)
+      VALUES (${ws}, ${bundleId}, ${versionId}, ${upstream.commit})
+      ON CONFLICT (bundle_id, version_id) DO NOTHING
+    `);
+  }
 }
 
 export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
@@ -116,6 +155,15 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
     const envelope = okReceiptEnvelope(command, receipt);
     await inFinalTx(async (tx) => {
       await openProposalInTx(tx, actor, target.bundleId, committed.value.version_id);
+      if (args.upstream != null) {
+        await recordUpstreamInTx(
+          tx,
+          actor.workspaceId,
+          target.bundleId,
+          committed.value.version_id,
+          args.upstream,
+        );
+      }
       await insertReceiptInTx(tx, actor, opId, raw, envelope);
     });
     return envelopeResponse(envelope);
@@ -177,6 +225,15 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
       }
     } else if (channel !== null) {
       details.placement = await placeIntoChannelInTx(tx, actor, bundleId, channel);
+    }
+    if (args.upstream != null) {
+      await recordUpstreamInTx(
+        tx,
+        actor.workspaceId,
+        bundleId,
+        published.value.version_id,
+        args.upstream,
+      );
     }
     const receipt = buildReceipt({
       opId,

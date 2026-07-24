@@ -161,9 +161,19 @@ export interface GenesisRegistration {
  * withheld placement leaves the bundle in NO channel (catalog-only) — the disclosure rides the
  * receipt and the author's self-follow still stands.
  */
+/** The actor shape BOTH publish doors satisfy: the session lane's SessionActor and the web
+ * add-from-GitHub page's MemberActor (sessionId rides into audit when present). */
+export interface PublishActor {
+  readonly userId: string;
+  readonly display: string;
+  readonly workspaceId: string;
+  readonly role: "owner" | "reviewer" | "member";
+  readonly sessionId?: string;
+}
+
 export async function registerGenesisBundleInTx(
   tx: Tx,
-  actor: SessionActor,
+  actor: PublishActor,
   bundleId: string,
   displayName: string | null,
   toChannel: string | null,
@@ -245,7 +255,7 @@ export async function registerGenesisBundleInTx(
 /** The `--to` placement inside a publish transaction (create-on-first-use, mode-gated). */
 export async function placeIntoChannelInTx(
   tx: Tx,
-  actor: SessionActor,
+  actor: PublishActor,
   bundleId: string,
   channelName: string,
 ): Promise<"placed" | "created" | "curated_role_required"> {
