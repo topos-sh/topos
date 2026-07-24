@@ -108,8 +108,8 @@ impl Sessions {
             // credential never rides a write.
             if found.status == SESSION_ENDED {
                 return Err(ClientError::Enrollment(format!(
-                    "the session for '{ws}' has ended — reconnect with `topos login {}/{}`",
-                    found.host, found.workspace_name
+                    "the session for '{}' has ended — reconnect with `topos login {}/{}`",
+                    found.workspace_name, found.host, found.workspace_name
                 )));
             }
             return Ok(found);

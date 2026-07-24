@@ -1216,6 +1216,16 @@ fn refresh_github(
     // External origins carry no local history worth preserving past their pin (the lockfile
     // model: bytes follow the pin) — a SUCCESSFUL swap deletes the stashes.
     let mut stashed: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    let restore = |fs: &dyn crate::fs_seam::FsOps,
+                   stashed: &[(std::path::PathBuf, std::path::PathBuf)]| {
+        // Best-effort, newest-first; a restore failure leaves the stash sibling on disk rather
+        // than deleting anything.
+        for (orig, stash) in stashed.iter().rev() {
+            if !fs.exists(orig) {
+                let _ = fs.rename(stash, orig);
+            }
+        }
+    };
     let stash_dir = |fs: &dyn crate::fs_seam::FsOps,
                      from: &Path,
                      stashed: &mut Vec<(std::path::PathBuf, std::path::PathBuf)>|
@@ -1224,23 +1234,43 @@ fn refresh_github(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "dir".to_owned());
-        let to = from.with_file_name(format!(".topos-refresh-old-{name}"));
-        if fs.exists(&to) {
-            fs.remove_dir_all(&to)?;
+        // A UNIQUE stash name — an existing sibling (a prior failed refresh's backup) is never
+        // deleted to make room; the ladder suffixes past it.
+        let mut to = from.with_file_name(format!(".topos-refresh-old-{name}"));
+        let mut n = 1u32;
+        while fs.exists(&to) {
+            n += 1;
+            if n > 64 {
+                return Err(ClientError::Io(format!(
+                    "stash {}: too many stale refresh backups beside it — clean the                      `.topos-refresh-old-*` siblings first",
+                    from.display()
+                )));
+            }
+            to = from.with_file_name(format!(".topos-refresh-old-{name}.{n}"));
         }
         fs.rename(from, &to)
             .map_err(|e| ClientError::Io(format!("stash {}: {e}", from.display())))?;
         stashed.push((from.to_path_buf(), to));
         Ok(())
     };
-    for scan in &scans {
-        if matches!(scan.status, placement::ScanStatus::Clean { .. }) && ctx.fs.exists(&scan.dir) {
-            stash_dir(ctx.fs, &scan.dir, &mut stashed)?;
+    let mut stash_all = || -> Result<(), ClientError> {
+        for scan in &scans {
+            if matches!(scan.status, placement::ScanStatus::Clean { .. })
+                && ctx.fs.exists(&scan.dir)
+            {
+                stash_dir(ctx.fs, &scan.dir, &mut stashed)?;
+            }
         }
-    }
-    let sidecar_dir = ctx.layout.skill_dir(sid);
-    if ctx.fs.exists(&sidecar_dir) {
-        stash_dir(ctx.fs, &sidecar_dir, &mut stashed)?;
+        let sidecar_dir = ctx.layout.skill_dir(sid);
+        if ctx.fs.exists(&sidecar_dir) {
+            stash_dir(ctx.fs, &sidecar_dir, &mut stashed)?;
+        }
+        Ok(())
+    };
+    // A stash failure MID-LOOP restores what was already moved — the old import stays coherent.
+    if let Err(e) = stash_all() {
+        restore(ctx.fs, &stashed);
+        return Err(e);
     }
     let global = matches!(item.scope, ResolvedScope::Person);
     let installed = super::add_remote_fetched(
@@ -1262,13 +1292,7 @@ fn refresh_github(
             d
         }
         Err(e) => {
-            // Restore the old install (best-effort; a restore failure leaves the stash sibling
-            // on disk rather than deleting anything).
-            for (orig, stash) in stashed.iter().rev() {
-                if !ctx.fs.exists(orig) {
-                    let _ = ctx.fs.rename(stash, orig);
-                }
-            }
+            restore(ctx.fs, &stashed);
             return Err(e);
         }
     };
