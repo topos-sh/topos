@@ -491,9 +491,10 @@ export interface GovernedCopy {
 }
 
 /**
- * The workspace's governed copies of `host`/`repo` (any subdir), non-deleted bundles only — the
- * import preview's dedup lookup ("already in this workspace as …"). Ordered path-first so a
- * caller preferring the exact subdir can take the first match itself.
+ * The workspace's governed copies of `host`/`repo` (any subdir), ACTIVE bundles only (an
+ * archived copy is not delivered, so suggesting `topos add @ws/name` for it would be a false
+ * promise) — the import preview's dedup lookup ("already in this workspace as …"). Ordered
+ * path-first so a caller preferring the exact subdir can take the first match itself.
  */
 export async function governedCopiesOf(
   workspaceId: string,
@@ -505,7 +506,7 @@ export async function governedCopiesOf(
     FROM web.bundle_upstream bu
     JOIN web.bundle b ON b.id = bu.bundle_id AND b.workspace_id = bu.workspace_id
     WHERE bu.workspace_id = ${workspaceId} AND bu.host = ${host} AND bu.repo = ${repo}
-      AND b.status <> 'deleted'
+      AND b.status = 'active'
     ORDER BY bu.path, b.name
   `);
   return (rows.rows as { bundle_id: string; name: string; path: string }[]).map((r) => ({

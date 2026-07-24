@@ -283,10 +283,15 @@ export async function reportApplied(
   const skillIds = pgTextArray(applied.map((a) => a.skillId));
   const versionIds = pgTextArray(applied.map((a) => a.versionId));
   return await getDb().transaction(async (tx) => {
+    // The same liveness the guard decides — active AND unexpired — re-checked inside the
+    // fence: a session may pass the route guard a breath before expiry and must not write
+    // reporting state after it.
     const live = await tx.execute(
-      sql`SELECT id FROM web.cli_session
-          WHERE id = ${actor.sessionId} AND workspace_id = ${ws} AND status = 'active'
-          FOR UPDATE`,
+      sql`SELECT cs.id FROM web.cli_session cs
+          JOIN web.workspace w ON w.id = cs.workspace_id
+          WHERE cs.id = ${actor.sessionId} AND cs.workspace_id = ${ws} AND cs.status = 'active'
+            AND ${sessionUnexpiredSql("cs", "w")}
+          FOR UPDATE OF cs`,
     );
     if (live.rows.length === 0) {
       return "session_ended";
