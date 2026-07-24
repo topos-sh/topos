@@ -269,8 +269,22 @@ fn apply_described(argv: &[String]) -> Safety {
                 "removes the skill from this machine (a followed skill keeps its canonical bytes)",
             ),
         ),
-        // Local-only applies.
-        Some("add") => (Some(false), None),
+        // `add` splits by the target's shape: a WORKSPACE reference (`@ws/name`) resolves the
+        // catalog and delivers over the wire; a PATH adopts offline; everything else (a bare
+        // name, a canonical host ref, an `owner/repo` import) is unknowable from the argv
+        // alone, so its network story is honestly absent.
+        Some("add") => match argv.get(2).map(String::as_str) {
+            Some(t) if t.starts_with('@') => (Some(true), None),
+            Some(t)
+                if t.starts_with("./")
+                    || t.starts_with("../")
+                    || t.starts_with('/')
+                    || t.starts_with('~') =>
+            {
+                (Some(false), None)
+            }
+            _ => (None, None),
+        },
         Some("uninstall") => (
             Some(false),
             Some("deletes the ~/.topos sidecar tree (the stored credential goes with it)"),
@@ -413,6 +427,27 @@ mod tests {
         );
         assert_eq!(plane.needs_network, Some(true));
         assert_eq!(plane.mutates, Some(false));
+    }
+
+    #[test]
+    fn add_network_follows_the_target_shape() {
+        // A workspace reference resolves + delivers over the wire; a path adopts offline; a
+        // bare name (catalog vs local discovery) is honestly unknown.
+        let ws = next_action(
+            ActionCode::from("UNDO".to_owned()),
+            argv(&["topos", "add", "@acme/deploy"]),
+        );
+        assert_eq!(ws.needs_network, Some(true));
+        let path = next_action(
+            ActionCode::from("UNDO".to_owned()),
+            argv(&["topos", "add", "./deploy"]),
+        );
+        assert_eq!(path.needs_network, Some(false));
+        let bare = next_action(
+            ActionCode::from("UNDO".to_owned()),
+            argv(&["topos", "add", "deploy"]),
+        );
+        assert_eq!(bare.needs_network, None);
     }
 
     #[test]

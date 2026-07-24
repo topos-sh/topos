@@ -1034,7 +1034,9 @@ pub(crate) fn governed_copy_suggestion(
             let copy = topos_types::results::GovernedCopy {
                 workspace: s.workspace_name.clone(),
                 name: e.name.clone(),
-                reference: format!("@{}/{}", s.workspace_name, e.name),
+                // The CANONICAL host-qualified spelling — a bare `@ws/name` is ambiguous when
+                // sessions on different servers share a workspace slug.
+                reference: format!("{}/{}/{}", s.host, s.workspace_name, e.name),
                 same_path,
             };
             if same_path {

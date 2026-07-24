@@ -178,7 +178,7 @@
           "type": "string"
         },
         "reference": {
-          "description": "The paste-ready reference (`@<workspace>/<name>`).",
+          "description": "The paste-ready reference, in the canonical host-qualified form\n(`<host>/<workspace>/<name>` — unambiguous however many servers this installation is\nlogged into).",
           "type": "string"
         },
         "same_path": {

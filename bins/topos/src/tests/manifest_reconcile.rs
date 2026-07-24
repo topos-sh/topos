@@ -823,8 +823,14 @@ fn add_reference_records_the_manifest_line_and_delivers_now() {
     let plane = FakePlane::new(log).with_version("s_deploy", &v);
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let ctx = rig.ctx_at(Some(&proj.0));
-    let data =
-        ops::add_reference(&ctx, &connect(&plane, &dir), None, "@eng/deploy", false).unwrap();
+    let data = ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        "acme.test/eng/deploy",
+        false,
+    )
+    .unwrap();
     // The receipt names the manifest FIRST, the canonical stored reference, and the inverse.
     let manifest = proj.0.join("topos.toml");
     assert_eq!(
@@ -898,7 +904,8 @@ fn remove_reference_global_names_how_the_removal_settled() {
     let mut dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     dir.removal = crate::plane::ProfileRemoval::Excluded;
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let out = ops::remove_reference_global(&ctx, &connect(&plane, &dir), "@eng/deploy").unwrap();
+    let out =
+        ops::remove_reference_global(&ctx, &connect(&plane, &dir), "acme.test/eng/deploy").unwrap();
     assert!(matches!(
         out.items[0].kind,
         topos_types::results::RemoveKind::ManifestExcluded
@@ -1018,7 +1025,7 @@ fn a_remote_add_gets_the_governed_copy_suggestion_from_the_catalog_upstream_fiel
     .expect("a governed copy is suggested");
     assert_eq!(got.workspace, WS_NAME);
     assert_eq!(got.name, "deploy");
-    assert_eq!(got.reference, "@eng/deploy");
+    assert_eq!(got.reference, "acme.test/eng/deploy");
     assert!(got.same_path);
 
     // The same repository at another path still gets named — honestly, as a sibling.
@@ -1026,7 +1033,7 @@ fn a_remote_add_gets_the_governed_copy_suggestion_from_the_catalog_upstream_fiel
         ops::governed_copy_suggestion(&ctx, &connect(&plane, &dir), &spec(None, "dedup"), None)
             .expect("the same-repo sibling is suggested");
     assert!(!sibling.same_path);
-    assert_eq!(sibling.reference, "@eng/deploy");
+    assert_eq!(sibling.reference, "acme.test/eng/deploy");
 
     // A bare `add owner/repo` whose import RESOLVED to the governed subdir (a --skill pick or a
     // multi-skill repo) is path-exact by the recorded origin, not the spec's spelling.

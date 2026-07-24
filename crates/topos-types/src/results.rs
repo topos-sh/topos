@@ -517,7 +517,9 @@ pub struct GovernedCopy {
     pub workspace: String,
     /// The skill's catalog name there.
     pub name: String,
-    /// The paste-ready reference (`@<workspace>/<name>`).
+    /// The paste-ready reference, in the canonical host-qualified form
+    /// (`<host>/<workspace>/<name>` — unambiguous however many servers this installation is
+    /// logged into).
     pub reference: String,
     /// Whether the governed copy was imported from the exact same subdirectory (`false` = same
     /// repository, different path).

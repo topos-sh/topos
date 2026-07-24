@@ -28,7 +28,7 @@
         "@acme/deploy"
       ],
       "mutates": true,
-      "needs_network": false
+      "needs_network": true
     }
   ]
 }
