@@ -63,7 +63,18 @@ pub(crate) fn edit_target(
     // layer), so a project edit must never land AT (or above) the home directory — the file
     // would be dead on arrival, read by nothing. Route it to the personal manifest instead
     // (the receipt names that file, so the routing is disclosed).
-    if dir == roots.home || roots.home.starts_with(&dir) {
+    //
+    // Both sides are canonicalized the SAME way before comparing (canonicalizing only one side
+    // makes a symlinked prefix — macOS `/var` → `/private/var` — a spurious match or mismatch),
+    // AND the route fires only when the walk from cwd would actually stop at $HOME (cwd is
+    // at/under home): when cwd sits ABOVE home, the manifest at `dir` is on the live upward path
+    // the walk reads, never dead — so it stays a project edit.
+    let dir_c = canonical_or(&dir);
+    let home_c = canonical_or(&roots.home);
+    let cwd_c = canonical_or(cwd);
+    let cwd_at_or_under_home = cwd_c == home_c || cwd_c.starts_with(&home_c);
+    let edit_at_or_above_home = dir_c == home_c || home_c.starts_with(&dir_c);
+    if cwd_at_or_under_home && edit_at_or_above_home {
         let path = ctx.layout.home().join(MANIFEST_FILE);
         return Ok(Some(EditTarget {
             created: !ctx.fs.exists(&path),
@@ -76,6 +87,15 @@ pub(crate) fn edit_target(
         dir,
         created: true,
     }))
+}
+
+/// A path's canonical form, best-effort: symlinks resolved when the path exists, else the path
+/// itself. Two paths must be canonicalized the SAME way before a `starts_with`/`==` comparison —
+/// canonicalizing only one side makes a symlinked prefix (macOS `/var` → `/private/var`) a
+/// spurious mismatch (or match), which is exactly how a project source under the manifest dir
+/// could wrongly record as an absolute reference.
+fn canonical_or(p: &Path) -> PathBuf {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
 }
 
 /// The manifest spelling of an adopted local path: relative to the manifest's folder when the
@@ -183,12 +203,16 @@ pub(crate) fn note_added_path(
                 .unwrap_or_else(|| source.to_path_buf())
         }
     });
-    if !personal
-        && let Some(target) = edit_target(ctx, false)?
-        && source_abs.starts_with(&target.dir)
-    {
-        let reference = path_reference(&target.dir, &source_abs);
-        return note_added_at(ctx, data, "skills", &target, &reference, None);
+    if !personal && let Some(target) = edit_target(ctx, false)? {
+        // Compare BOTH paths canonically (the source is already canonicalized above): a source
+        // under the manifest's folder ALWAYS records the dir-relative `./path`, never an absolute
+        // one — the manifest dir is canonicalized here only to compute the reference spelling, the
+        // file itself still lands at `target.path`.
+        let dir_c = canonical_or(&target.dir);
+        if source_abs.starts_with(&dir_c) {
+            let reference = path_reference(&dir_c, &source_abs);
+            return note_added_at(ctx, data, "skills", &target, &reference, None);
+        }
     }
     let reference = source_abs.display().to_string();
     note_added(ctx, data, &reference, None, true)
@@ -660,6 +684,46 @@ mod tests {
         with_ctx(&home2, Some(&inside), |ctx| {
             let target = edit_target(ctx, false).unwrap().expect("a target");
             assert_eq!(target.path, ctx.layout.home().join(MANIFEST_FILE));
+        });
+    }
+
+    #[test]
+    fn a_path_add_stays_dir_relative_when_home_nests_under_the_project() {
+        // The Linux CI condition WITHOUT depending on symlink layout: the fake `$HOME` sits UNDER
+        // the project cwd (the composed-suite harness layout — `root/home` below `root`). The
+        // resolution walk from cwd never reaches that home, so the manifest at cwd is ALIVE — a
+        // path source under it must record `./deploy` in the PROJECT manifest, never the absolute
+        // path, and never route to the personal manifest. Before the fix, `$HOME.starts_with(dir)`
+        // fired here (cwd is an ancestor of the nested home) and the reference recorded absolute;
+        // this reproduces on any OS because both paths are consistent (no `/private` divergence to
+        // accidentally dodge the buggy branch).
+        let base = scratch("home-nested").canonicalize().unwrap();
+        let project = base.join("project");
+        let home = project.join("home"); // $HOME nested UNDER the project cwd
+        let src = project.join("deploy");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&src).unwrap();
+
+        with_ctx(&home, Some(&project), |ctx| {
+            let mut data = add_data();
+            note_added_path(ctx, &mut data, &src, false).unwrap();
+            assert_eq!(
+                data.reference.as_deref(),
+                Some("./deploy"),
+                "a source under the manifest dir records the dir-relative reference"
+            );
+            let manifest = project.join(MANIFEST_FILE);
+            assert_eq!(
+                data.manifest.as_deref(),
+                Some(&*manifest.display().to_string()),
+                "the project manifest at cwd takes the line, not the personal one"
+            );
+            let m = read_manifest(ctx.fs, &manifest).unwrap().unwrap();
+            assert_eq!(m.skills[0].reference, "./deploy");
+            assert!(
+                !ctx.layout.home().join(MANIFEST_FILE).exists(),
+                "the personal manifest is untouched"
+            );
         });
     }
 
