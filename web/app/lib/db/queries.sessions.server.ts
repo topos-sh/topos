@@ -1,5 +1,6 @@
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { MemberActor, UserActor } from "@/lib/auth/guards.server";
+import { sessionUnexpiredSql } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
 import { bundle, cliSession, sessionBundleState, workspace } from "@/lib/db/schema.app";
 import { planeCurrentPointer } from "@/lib/db/schema.custody";
@@ -30,6 +31,9 @@ export interface AccountSession {
   status: "active" | "pending";
   createdAtMs: number;
   lastSeenAtMs: number | null;
+  /** Past the workspace's owner-set expiry — the guard's own age predicate: the credential no
+   * longer resolves, so the machine must log in again. */
+  expired: boolean;
 }
 
 /** Every session the signed-in person holds, newest first. */
@@ -44,11 +48,13 @@ export async function sessionsFor(actor: UserActor): Promise<AccountSession[]> {
       status: cliSession.status,
       createdAtMs: sql<string>`(extract(epoch from ${cliSession.createdAt}) * 1000)::bigint`,
       lastSeenAtMs: sql<string>`(extract(epoch from ${cliSession.lastSeenAt}) * 1000)::bigint`,
+      sessionMaxAgeMs: workspace.sessionMaxAgeMs,
     })
     .from(cliSession)
     .innerJoin(workspace, eq(workspace.id, cliSession.workspaceId))
     .where(eq(cliSession.userId, actor.userId))
     .orderBy(sql`${cliSession.createdAt} DESC`);
+  const now = Date.now();
   return rows.map((r) => ({
     sessionId: r.sessionId,
     displayName: r.displayName,
@@ -58,6 +64,8 @@ export async function sessionsFor(actor: UserActor): Promise<AccountSession[]> {
     status: r.status as AccountSession["status"],
     createdAtMs: Number(r.createdAtMs),
     lastSeenAtMs: r.lastSeenAtMs === null ? null : Number(r.lastSeenAtMs),
+    // The guard's own age predicate, mirrored per workspace policy.
+    expired: r.sessionMaxAgeMs !== null && now - Number(r.createdAtMs) > r.sessionMaxAgeMs,
   }));
 }
 
@@ -251,9 +259,13 @@ export async function workspaceSessions(actor: MemberActor): Promise<WorkspaceSe
 
 /** ACTIVE sessions in this workspace — the onboarding checklist's probe. */
 export async function workspaceSessionCount(actor: MemberActor): Promise<number> {
-  const rows = await getDb()
-    .select({ n: sql<number>`count(*)::int` })
-    .from(cliSession)
-    .where(and(eq(cliSession.workspaceId, actor.workspaceId), eq(cliSession.status, "active")));
-  return rows[0]?.n ?? 0;
+  // Live means active AND within the owner-set expiry (the guard's predicate) — an expired
+  // machine is not a working install, so the onboarding probe must not count it.
+  const rows = await getDb().execute(sql`
+    SELECT count(*)::int AS n FROM web.cli_session cs
+    JOIN web.workspace w ON w.id = cs.workspace_id
+    WHERE cs.workspace_id = ${actor.workspaceId} AND cs.status = 'active'
+      AND ${sessionUnexpiredSql("cs", "w")}
+  `);
+  return Number((rows.rows[0] as { n: number | string } | undefined)?.n ?? 0);
 }

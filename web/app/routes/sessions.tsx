@@ -294,13 +294,20 @@ function PendingSessions({
                 <span className="text-faint text-xs">
                   asked {relativeTime(new Date(session.createdAtMs))}
                 </span>
+                {session.expired && (
+                  <span className="text-faint text-xs">
+                    expired while waiting — approval cannot revive it; the person logs in again
+                  </span>
+                )}
                 {isOwner && (
                   <span className="ml-auto flex flex-wrap items-center gap-2">
-                    <SessionArm
-                      intent="approve-session"
-                      sessionId={session.sessionId}
-                      label="Approve"
-                    />
+                    {!session.expired && (
+                      <SessionArm
+                        intent="approve-session"
+                        sessionId={session.sessionId}
+                        label="Approve"
+                      />
+                    )}
                     <SessionArm
                       intent="reject-session"
                       sessionId={session.sessionId}

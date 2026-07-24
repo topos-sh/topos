@@ -257,6 +257,46 @@ describe("session revocation", () => {
     expect(await identity.revokeSessionByCredential(flow.flowCode)).toBe(true);
     expect(await identity.revokeSessionByCredential(flow.flowCode)).toBe(false);
   });
+
+  it("the owner-set expiry applies to EVERY live-session surface: guard, logout, approve", async () => {
+    const identity = await import("@/lib/db/identity.server");
+    const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
+      ?.user_id as string;
+    // An active session and a pending one, both minted now.
+    const active = await identity.startLoginFlow("expiry-box", "");
+    await identity.approveLoginFlow(active.userCode, { userId: owner, display: "O" });
+    await seedUser("u_expiry", "Expiring", "expiry@example.com");
+    await seatUser("u_expiry", "member");
+    await q(`UPDATE web.workspace SET session_approval = 'on' WHERE id = $1`, [wsId]);
+    const pend = await identity.startLoginFlow("expiry-pending-box", "");
+    await identity.approveLoginFlow(pend.userCode, { userId: "u_expiry", display: "E" });
+    await q(`UPDATE web.workspace SET session_approval = 'off' WHERE id = $1`, [wsId]);
+    const pendingId = (
+      await q(`SELECT id FROM web.cli_session WHERE status = 'pending' ORDER BY created_at DESC`)
+    )[0]?.id as string;
+
+    // Arm a 1-hour expiry and age both sessions past it.
+    await q(`UPDATE web.workspace SET session_max_age_ms = 3600000 WHERE id = $1`, [wsId]);
+    await q(
+      `UPDATE web.cli_session SET created_at = now() - interval '2 hours'
+       WHERE credential_sha256 IN (sha256(convert_to($1, 'UTF8')), sha256(convert_to($2, 'UTF8')))`,
+      [active.flowCode, pend.flowCode],
+    );
+    // The guard refuses; the self-logout answers exactly what an unknown bearer gets (no
+    // liveness oracle); an owner cannot approve a pending row whose credential is already dead.
+    expect(await identity.sessionActor(wsId, active.flowCode)).toBeNull();
+    expect(await identity.revokeSessionByCredential(active.flowCode)).toBe(false);
+    expect(await identity.approveSession({ userId: owner, display: "O" }, wsId, pendingId)).toBe(
+      "unknown_session",
+    );
+    // Clearing the policy brings the surfaces back in the same breath.
+    await q(`UPDATE web.workspace SET session_max_age_ms = NULL WHERE id = $1`, [wsId]);
+    expect(await identity.sessionActor(wsId, active.flowCode)).not.toBeNull();
+    expect(await identity.approveSession({ userId: owner, display: "O" }, wsId, pendingId)).toBe(
+      "approved",
+    );
+    expect(await identity.revokeSessionByCredential(active.flowCode)).toBe(true);
+  });
 });
 
 describe("the session-approval knob", () => {

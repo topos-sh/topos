@@ -148,10 +148,15 @@ function SessionRow({ session }: { session: AccountSession }) {
           <code className="block break-all font-mono text-faint text-xs">{session.sessionId}</code>
           <p className="text-faint text-xs">
             logged in {relativeTime(new Date(session.createdAtMs))} · {seen}
+            {session.expired && (
+              <> · past the workspace's session expiry — log in again on that machine</>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {session.status === "pending" ? (
+          {session.expired ? (
+            <Chip tone="pending">expired</Chip>
+          ) : session.status === "pending" ? (
             <Chip tone="pending">awaiting owner approval</Chip>
           ) : (
             <Chip tone="verified">active</Chip>

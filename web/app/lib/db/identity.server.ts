@@ -350,10 +350,16 @@ export async function approveSession(
   sessionId: string,
 ): Promise<"approved" | "unknown_session"> {
   return await getDb().transaction(async (tx) => {
+    // An over-age pending row is refused like a vanished one: approval flips a status, never
+    // re-mints the credential, so approving past the expiry would mint a session that the lane
+    // guard already refuses.
     const updated = await tx.execute(
-      sql`UPDATE web.cli_session SET status = 'active'
-          WHERE id = ${sessionId} AND workspace_id = ${workspaceId} AND status = 'pending'
-          RETURNING id`,
+      sql`UPDATE web.cli_session cs SET status = 'active'
+          FROM web.workspace w
+          WHERE cs.id = ${sessionId} AND cs.workspace_id = ${workspaceId}
+            AND cs.status = 'pending'
+            AND w.id = cs.workspace_id AND ${sessionUnexpiredSql("cs", "w")}
+          RETURNING cs.id`,
     );
     if (updated.rows.length === 0) {
       return "unknown_session";
@@ -425,13 +431,18 @@ export async function revokeOwnSession(
  */
 export async function revokeSessionByCredential(credential: string): Promise<boolean> {
   return await getDb().transaction(async (tx) => {
+    // The expiry predicate applies here too: an over-age credential resolves to nothing, so
+    // the route answers the same uniform 404 an unknown bearer gets (no liveness oracle). The
+    // dead row itself stays for the owner's sessions page until removed there.
     const rows = await tx.execute(
       sql`SELECT s.id, s.user_id, s.workspace_id,
                  COALESCE(NULLIF(btrim(u.name), ''), u.email) AS display
           FROM web.cli_session s
           JOIN web."user" u ON u.id = s.user_id
+          JOIN web.workspace w ON w.id = s.workspace_id
           WHERE s.credential_sha256 = ${sha256OfText(credential)}
-          FOR UPDATE`,
+            AND ${sessionUnexpiredSql("s", "w")}
+          FOR UPDATE OF s`,
     );
     const row = rows.rows[0] as
       | { id: string; user_id: string; workspace_id: string; display: string }
@@ -900,6 +911,21 @@ export interface SessionActorRow {
 }
 
 /**
+ * The ONE session-age predicate (the guard's rule) as a SQL fragment over the given
+ * `cli_session` / `workspace` table aliases: TRUE while the session is within the workspace's
+ * owner-set expiry (`session_max_age_ms`), or always when the policy is unset. Every surface
+ * that treats a session as LIVE — the lane guard, the self-logout lookup, the owner approve,
+ * the session counts, delivery reach — reuses THIS fragment, so no page or route can call a
+ * session live after its credential stopped resolving. The aliases are compile-time constants
+ * at every call site, never user input.
+ */
+export function sessionUnexpiredSql(cs: string, w: string) {
+  return sql.raw(
+    `(${w}.session_max_age_ms IS NULL OR ${cs}.created_at > now() - make_interval(secs => ${w}.session_max_age_ms / 1000.0))`,
+  );
+}
+
+/**
  * credential-hash → live session → seat, one query, fail-closed: an ended session, a
  * mismatched workspace (the credential is WORKSPACE-SCOPED — presenting it against another
  * workspace's path is a miss), a seatless user, or an expired session (the workspace's
@@ -919,8 +945,7 @@ export async function sessionActor(
         WHERE cs.credential_sha256 = ${sha256OfText(credential)}
           AND cs.workspace_id = ${workspaceId}
           AND w.id = cs.workspace_id
-          AND (w.session_max_age_ms IS NULL
-               OR cs.created_at > now() - make_interval(secs => w.session_max_age_ms / 1000.0))
+          AND ${sessionUnexpiredSql("cs", "w")}
           AND u.id = cs.user_id
           AND s.user_id = cs.user_id AND s.workspace_id = cs.workspace_id
         RETURNING cs.id AS session_id, cs.user_id,

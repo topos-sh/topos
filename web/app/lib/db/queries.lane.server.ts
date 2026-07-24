@@ -7,6 +7,7 @@ import {
   mintInvitationId,
   mintInviteToken,
   profileDemandSql,
+  sessionUnexpiredSql,
   supersedeDeclinedInvitationTx,
 } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
@@ -426,11 +427,13 @@ export async function laneReach(
       AND EXISTS (SELECT 1 FROM (${profileDemandSql(sql`s.user_id`, ws)}) e
                   WHERE e.bundle_id = ${bundleId})
   `);
-  // A session counts toward reach only while ACTIVE — a pending session cannot receive
-  // delivery in this workspace, whatever its owner's seat says.
+  // A session counts toward reach only while ACTIVE and within the owner-set expiry — a
+  // pending or expired session cannot receive delivery here, whatever its owner's seat says.
   const sessions = await db.execute(sql`
     SELECT COUNT(*) AS n FROM web.cli_session cs
+    JOIN web.workspace w ON w.id = cs.workspace_id
     WHERE cs.workspace_id = ${ws} AND cs.status = 'active'
+      AND ${sessionUnexpiredSql("cs", "w")}
       AND EXISTS (SELECT 1 FROM (${profileDemandSql(sql`cs.user_id`, ws)}) e
                   WHERE e.bundle_id = ${bundleId})
   `);
