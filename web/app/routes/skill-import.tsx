@@ -4,7 +4,7 @@ import { buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui
 import { requireMemberInScope } from "@/lib/auth/guards.server";
 import { mintBundleId } from "@/lib/db/identity.server";
 import { inFinalTx, registerGenesisBundleInTx } from "@/lib/db/queries.custody.server";
-import { fetchUpstreamTree } from "@/lib/db/upstream.server";
+import { fetchUpstreamTree, resolveTreeSource } from "@/lib/db/upstream.server";
 import { publishVersion } from "@/lib/plane/custody.server";
 import { useWsPath } from "@/lib/ws-path";
 import { wsPathServer } from "@/lib/ws-url.server";
@@ -33,17 +33,25 @@ const REPO_SHAPE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const NAME_SHAPE = /^[a-z0-9][a-z0-9-]*$/;
 const COMMIT_SHAPE = /^[0-9a-f]{7,40}$/;
 
-/** Parse the pasted source into (repo, subdir, ref): `owner/repo[/sub/dir]`, a github.com
- * URL, or a `/tree/<ref>/<subdir>` URL — whose REF is honored (the preview fetches that
- * branch/tag, and the publish still pins the resolved commit). Null on anything else. */
-function parseSource(raw: string): { repo: string; subdir: string; ref: string } | null {
+/** Parse the pasted source: `owner/repo[/sub/dir]`, a github.com URL, or a `/tree/<...>`
+ * URL. A tree URL's remainder is AMBIGUOUS from the text alone (branch names may contain
+ * `/`), so it comes back as `treeRest` for the preview to resolve against the live repo —
+ * the ref is honored, and the publish still pins the resolved commit. Null on anything
+ * else — typed, never guessed. */
+function parseSource(
+  raw: string,
+): { repo: string; subdir: string; treeRest: string[] | null } | null {
   let token = raw.trim();
   token = token.replace(/^https?:\/\//, "").replace(/^github\.com\//, "");
   token = token.replace(/\.git$/, "").replace(/\/+$/, "");
-  const treeMatch = token.match(/^([^/]+\/[^/]+)\/tree\/([^/]+)(?:\/(.*))?$/);
+  const treeMatch = token.match(/^([^/]+\/[^/]+)\/tree\/(.+)$/);
   if (treeMatch?.[1] !== undefined && treeMatch[2] !== undefined) {
     const repo = treeMatch[1];
-    return REPO_SHAPE.test(repo) ? { repo, subdir: treeMatch[3] ?? "", ref: treeMatch[2] } : null;
+    if (!REPO_SHAPE.test(repo)) {
+      return null;
+    }
+    const rest = treeMatch[2].split("/").filter((s) => s.length > 0);
+    return rest.length === 0 ? null : { repo, subdir: "", treeRest: rest };
   }
   const segments = token.split("/").filter((s) => s.length > 0);
   if (segments.length < 2) {
@@ -53,7 +61,7 @@ function parseSource(raw: string): { repo: string; subdir: string; ref: string }
   if (!REPO_SHAPE.test(repo)) {
     return null;
   }
-  return { repo, subdir: segments.slice(2).join("/"), ref: "HEAD" };
+  return { repo, subdir: segments.slice(2).join("/"), treeRest: null };
 }
 
 interface PreviewData {
@@ -98,13 +106,20 @@ export async function action({ request, params }: ActionFunctionArgs) {
       );
     }
     try {
-      const tree = await fetchUpstreamTree(source.repo, source.subdir, source.ref);
+      // A /tree/<...> remainder resolves against the live repo (the ref/subdir split is
+      // unknowable from the text); everything else fetches the default branch directly.
+      const resolved =
+        source.treeRest !== null
+          ? await resolveTreeSource(source.repo, source.treeRest)
+          : { tree: await fetchUpstreamTree(source.repo, source.subdir), subdir: source.subdir };
+      const { tree } = resolved;
+      const subdir = resolved.subdir;
       if (tree.files.length === 0) {
         return data<PreviewData>(
           {
             form: "preview",
             repo: source.repo,
-            subdir: source.subdir,
+            subdir,
             commit: null,
             license: null,
             suggestedName: "",
@@ -117,9 +132,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
       }
       const skillMd = tree.files.find((f) => f.path.toLowerCase() === "skill.md");
       const lastSegment =
-        source.subdir.length > 0
-          ? (source.subdir.split("/").at(-1) ?? "")
-          : (source.repo.split("/")[1] ?? "");
+        subdir.length > 0 ? (subdir.split("/").at(-1) ?? "") : (source.repo.split("/")[1] ?? "");
       const suggestedName = lastSegment
         .toLowerCase()
         .replaceAll(/[^a-z0-9-]+/g, "-")
@@ -128,7 +141,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
       return data<PreviewData>({
         form: "preview",
         repo: source.repo,
-        subdir: source.subdir,
+        subdir,
         commit: tree.commit,
         license: tree.license,
         suggestedName,

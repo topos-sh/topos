@@ -148,12 +148,20 @@ describe("the tar reader", () => {
     // A truncated body (the header claims more bytes than the archive holds).
     const truncated = tarEntry("big.txt", Buffer.from("x".repeat(600))).subarray(0, 700);
     expect(() => untar(Buffer.from(truncated))).toThrow(/truncated/);
-    // A malformed pax record (no length prefix).
+    // An archive that just STOPS (no zero-block end marker) — a cut download, refused.
+    expect(() => untar(tarEntry("ok.txt", Buffer.from("hi")))).toThrow(/end-of-archive/);
+    // A malformed pax record (no length prefix) and one whose length LIES (too short to
+    // frame its own prefix) — both refuse rather than misparse.
     const badPax = Buffer.concat([
       tarEntry("pax_global_header", Buffer.from("comment=abc\n"), "g"),
       Buffer.alloc(1024),
     ]);
     expect(() => untar(badPax)).toThrow(/pax/);
+    const lyingLen = Buffer.concat([
+      tarEntry("pax_global_header", Buffer.from("1 comment=abc\n"), "g"),
+      Buffer.alloc(1024),
+    ]);
+    expect(() => untar(lyingLen)).toThrow(/pax/);
   });
 });
 
@@ -172,6 +180,30 @@ describe("fetchUpstreamTree", () => {
     expect(tree.files.map((f) => f.path).sort()).toEqual(["SKILL.md", "run.sh"]);
     // The license falls back to the repo root when the subdir carries none.
     expect(tree.license).toBe("MIT License");
+  });
+
+  it("resolveTreeSource probes shortest-prefix-first, so slashed branch names resolve", async () => {
+    const { resolveTreeSource } = await import("@/lib/db/upstream.server");
+    const commit = "e".repeat(40);
+    const gz = fixtureTarball(commit, { "skills/x/SKILL.md": "# X\n" });
+    // The repo's branch is `feature/foo` — a fetch of ref `feature` 404s, the two-segment
+    // prefix serves; the remainder is the subdir.
+    const fetcher = async (_repo: string, ref: string) => {
+      if (ref !== "feature/foo") {
+        throw new Error("upstream fetch failed: 404");
+      }
+      return gz;
+    };
+    const resolved = await resolveTreeSource(
+      "owner/repo",
+      ["feature", "foo", "skills", "x"],
+      fetcher,
+    );
+    expect(resolved.ref).toBe("feature/foo");
+    expect(resolved.subdir).toBe("skills/x");
+    expect(resolved.tree.files.map((f) => f.path)).toEqual(["SKILL.md"]);
+    // No prefix resolves → the last 404 surfaces.
+    await expect(resolveTreeSource("owner/repo", ["gone"], fetcher)).rejects.toThrow(/404/);
   });
 });
 

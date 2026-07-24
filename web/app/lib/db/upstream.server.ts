@@ -40,28 +40,29 @@ export function untar(tar: Buffer): { files: TarFile[]; comment: string | null }
   let comment: string | null = null;
   let offset = 0;
   let paxPath: string | null = null;
+  let sawEnd = false;
   while (offset + 512 <= tar.length) {
     const header = tar.subarray(offset, offset + 512);
     if (header.every((b) => b === 0)) {
-      break; // the end-of-archive zero blocks
+      sawEnd = true; // the end-of-archive zero blocks
+      break;
     }
     // The header checksum: the stored field read as spaces, summed bytewise. A mismatch is a
     // damaged or forged archive — refuse whole, never a partial import.
-    const stored = Number.parseInt(cstr(header.subarray(148, 156)), 8);
+    const stored = parseOctal(cstr(header.subarray(148, 156)), "checksum");
     let sum = 0;
     for (let i = 0; i < 512; i++) {
       sum += i >= 148 && i < 156 ? 0x20 : (header[i] ?? 0);
     }
-    if (!Number.isFinite(stored) || stored !== sum) {
+    if (stored !== sum) {
       throw new Error("malformed archive: header checksum mismatch");
     }
     const name = cstr(header.subarray(0, 100));
     const prefix = cstr(header.subarray(345, 500));
-    const mode = Number.parseInt(cstr(header.subarray(100, 108)) || "644", 8);
-    const size = Number.parseInt(cstr(header.subarray(124, 136)) || "0", 8);
-    if (!Number.isFinite(size) || size < 0) {
-      throw new Error("malformed archive: invalid size field");
-    }
+    const modeField = cstr(header.subarray(100, 108));
+    const mode = modeField.length === 0 ? 0o644 : parseOctal(modeField, "mode");
+    const sizeField = cstr(header.subarray(124, 136));
+    const size = sizeField.length === 0 ? 0 : parseOctal(sizeField, "size");
     const typeflag = String.fromCharCode(header[156] ?? 0x30);
     if (offset + 512 + size > tar.length) {
       throw new Error("malformed archive: truncated entry body");
@@ -70,27 +71,33 @@ export function untar(tar: Buffer): { files: TarFile[]; comment: string | null }
     offset += 512 + Math.ceil(size / 512) * 512;
 
     if (typeflag === "g" || typeflag === "x") {
-      // pax headers: `<len> <key>=<value>\n` records. The global header carries codeload's
+      // pax bodies are LENGTH-FRAMED records: `<len> <key>=<value>\n` where <len> counts the
+      // WHOLE record (digits, space, newline). Walk the frames from BYTES — anything
+      // off-frame (no length prefix, a length that lies, a record without `=` or the trailing
+      // newline) refuses whole rather than misparsing. The global header carries codeload's
       // commit comment; an extended header may carry a long `path` for the NEXT entry.
-      for (const line of body.toString("utf8").split("\n")) {
-        if (line.length === 0) {
-          continue;
-        }
-        // A pax record is `<len> <key>=<value>` — a record without the length+space prefix or
-        // the `=` is malformed; refuse rather than misparse.
-        const space = line.indexOf(" ");
-        const eq = line.indexOf("=");
-        if (space < 1 || eq < space || !/^\d+$/.test(line.slice(0, space))) {
+      let pos = 0;
+      while (pos < body.length) {
+        const space = body.indexOf(0x20, pos);
+        const lenToken = space > pos ? body.subarray(pos, space).toString("utf8") : "";
+        const len = /^\d+$/.test(lenToken) ? Number.parseInt(lenToken, 10) : Number.NaN;
+        if (!Number.isFinite(len) || len <= space - pos + 1 || pos + len > body.length) {
           throw new Error("malformed archive: bad pax record");
         }
-        const key = line.slice(space + 1, eq);
-        const value = line.slice(eq + 1);
+        const record = body.subarray(space + 1, pos + len).toString("utf8");
+        const eq = record.indexOf("=");
+        if (!record.endsWith("\n") || eq < 1) {
+          throw new Error("malformed archive: bad pax record");
+        }
+        const key = record.slice(0, eq);
+        const value = record.slice(eq + 1, -1);
         if (typeflag === "g" && key === "comment") {
           comment = value;
         }
         if (typeflag === "x" && key === "path") {
           paxPath = value;
         }
+        pos += len;
       }
       continue;
     }
@@ -112,7 +119,21 @@ export function untar(tar: Buffer): { files: TarFile[]; comment: string | null }
       throw new Error("archive holds too many files");
     }
   }
+  if (!sawEnd) {
+    // The archive ran out without the zero-block end marker — a truncated download must never
+    // import as the files that happened to arrive.
+    throw new Error("malformed archive: missing end-of-archive marker");
+  }
   return { files, comment };
+}
+
+/** Strict octal field parse — junk after (or inside) the digits refuses, never truncates. */
+function parseOctal(raw: string, what: string): number {
+  const token = raw.trim();
+  if (!/^[0-7]+$/.test(token)) {
+    throw new Error(`malformed archive: bad ${what} field`);
+  }
+  return Number.parseInt(token, 8);
 }
 
 function cstr(b: Buffer | Uint8Array): string {
@@ -208,6 +229,33 @@ export async function fetchUpstreamTree(
     licenseOf(inSubdir.map((f) => ({ path: f.path, bytes: f.bytes }))) ??
     licenseOf(stripped.map((f) => ({ path: f.path, bytes: f.bytes })));
   return { commit: comment, files: inSubdir, license };
+}
+
+/**
+ * Resolve a pasted `/tree/<...>` remainder against the LIVE repo. The text alone is
+ * ambiguous — branch names may contain `/` — but git forbids a ref named both `a` and
+ * `a/b`, so probing shortest-prefix-first is unambiguous: the first prefix codeload serves
+ * IS the ref, and the rest is the subdir. Non-404 failures surface immediately.
+ */
+export async function resolveTreeSource(
+  repo: string,
+  rest: string[],
+  fetcher: TarballFetcher = fetchCodeload,
+): Promise<{ tree: UpstreamTree; ref: string; subdir: string }> {
+  let lastError: unknown = null;
+  for (let i = 1; i <= rest.length; i++) {
+    const ref = rest.slice(0, i).join("/");
+    const subdir = rest.slice(i).join("/");
+    try {
+      return { tree: await fetchUpstreamTree(repo, subdir, ref, fetcher), ref, subdir };
+    } catch (error) {
+      if (!(error instanceof Error && error.message.includes("404"))) {
+        throw error;
+      }
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("upstream fetch failed");
 }
 
 function licenseOf(files: { path: string; bytes: Buffer }[]): string | null {
@@ -322,35 +370,44 @@ export async function checkBundleUpstream(
   await db.transaction(async (tx) => {
     // A SYSTEM act: no user id (proposed_by stays NULL); the ON CONFLICT partial unique
     // converges a re-check of the same commit on the one open proposal.
-    await tx.execute(sql`
+    const proposed = await tx.execute(sql`
       INSERT INTO web.proposal (id, workspace_id, bundle_id, candidate_version_id, status)
       VALUES (${`p_${crypto.randomUUID().replaceAll("-", "")}`}, ${row.workspace_id},
               ${bundleId}, ${versionId}, 'open')
       ON CONFLICT (workspace_id, bundle_id, candidate_version_id) WHERE status = 'open'
       DO NOTHING
+      RETURNING id
     `);
     await tx.execute(sql`
       INSERT INTO web.version_upstream (workspace_id, bundle_id, version_id, commit)
       VALUES (${row.workspace_id}, ${bundleId}, ${versionId}, ${tree.commit ?? ""})
       ON CONFLICT (bundle_id, version_id) DO NOTHING
     `);
-    // The provenance narration the review thread shows. The id is DERIVED from the candidate
-    // (the version id's leading hex, UUID-shaped), so two racing checks of the same commit
-    // converge on ONE comment via the PK conflict — never a duplicate thread line.
-    const commentId = `${versionId.slice(0, 8)}-${versionId.slice(8, 12)}-4${versionId.slice(13, 16)}-8${versionId.slice(17, 20)}-${versionId.slice(20, 32)}`;
+    // The provenance narration the review thread shows. The id is DERIVED (in Postgres —
+    // hashing lives DB-side here) from (workspace, bundle, candidate): content-addressed
+    // version ids repeat across workspaces, so the scope must be in the key — and two racing
+    // checks of the same commit converge on ONE comment via the PK conflict, never a
+    // duplicate thread line.
     await tx.execute(sql`
       INSERT INTO web.proposal_comment
         (id, workspace_id, bundle_id, version_id, author_display, body)
-      VALUES (${commentId}, ${row.workspace_id}, ${bundleId}, ${versionId},
-              'upstream watcher',
-              ${`Imported from ${row.repo}${row.path.length > 0 ? `/${row.path}` : ""}${tree.commit === null ? "" : ` @ ${tree.commit.slice(0, 12)}`} — review before it ships.`})
+      VALUES (
+        substr(encode(sha256(convert_to(
+          ${`${row.workspace_id}\n${bundleId}\n${versionId}`}, 'UTF8')), 'hex'), 1, 32)::uuid,
+        ${row.workspace_id}, ${bundleId}, ${versionId},
+        'upstream watcher',
+        ${`Imported from ${row.repo}${row.path.length > 0 ? `/${row.path}` : ""}${tree.commit === null ? "" : ` @ ${tree.commit.slice(0, 12)}`} — review before it ships.`})
       ON CONFLICT (id) DO NOTHING
     `);
-    await tx.execute(sql`
-      INSERT INTO web.audit_event (workspace_id, actor_display, kind, subject, outcome, details)
-      VALUES (${row.workspace_id}, 'upstream watcher', 'upstream_proposal', ${bundleId}, 'ok',
-              ${JSON.stringify({ repo: row.repo, commit: tree.commit, versionId })}::jsonb)
-    `);
+    // The audit row rides the proposal's own insert: a converging duplicate check (a manual
+    // check racing the sweep) lands NO second proposal, so it writes no second audit line.
+    if (proposed.rows.length > 0) {
+      await tx.execute(sql`
+        INSERT INTO web.audit_event (workspace_id, actor_display, kind, subject, outcome, details)
+        VALUES (${row.workspace_id}, 'upstream watcher', 'upstream_proposal', ${bundleId}, 'ok',
+                ${JSON.stringify({ repo: row.repo, commit: tree.commit, versionId })}::jsonb)
+      `);
+    }
   });
   await stamp();
   return { outcome: "proposed", commit: tree.commit, versionId };
@@ -428,20 +485,28 @@ export function armUpstreamChecker(): void {
   }
   const timer = setInterval(async () => {
     try {
-      // The CLAIM: stamp last_checked_at atomically before checking, so two poller instances
-      // (or a tick racing a manual check) never sweep the same bundle in the same window.
-      const rows = await getDb().execute(sql`
-        UPDATE web.bundle_upstream bu SET last_checked_at = now()
-        FROM web.bundle b
-        WHERE b.id = bu.bundle_id AND b.status = 'active'
-          AND (bu.last_checked_at IS NULL OR bu.last_checked_at < now() - interval '5 minutes')
-          AND bu.bundle_id IN (
-            SELECT bu2.bundle_id FROM web.bundle_upstream bu2
-            ORDER BY bu2.last_checked_at NULLS FIRST LIMIT 20
+      // The CLAIM: stamp last_checked_at atomically, ONE row at a time, immediately before
+      // its check — the stamp-to-check window stays a single fetch (~30 s ceiling), never a
+      // whole batch, so a second poller instance can't reclaim rows still being processed
+      // inside the 5-minute guard. SKIP LOCKED keeps two ticks off the same row entirely.
+      for (let n = 0; n < 20; n++) {
+        const rows = await getDb().execute(sql`
+          UPDATE web.bundle_upstream bu SET last_checked_at = now()
+          WHERE (bu.workspace_id, bu.bundle_id) = (
+            SELECT bu2.workspace_id, bu2.bundle_id FROM web.bundle_upstream bu2
+            JOIN web.bundle b ON b.id = bu2.bundle_id AND b.status = 'active'
+            WHERE bu2.last_checked_at IS NULL
+               OR bu2.last_checked_at < now() - interval '5 minutes'
+            ORDER BY bu2.last_checked_at NULLS FIRST
+            LIMIT 1
+            FOR UPDATE OF bu2 SKIP LOCKED
           )
-        RETURNING bu.workspace_id, bu.bundle_id
-      `);
-      for (const row of rows.rows as { workspace_id: string; bundle_id: string }[]) {
+          RETURNING bu.workspace_id, bu.bundle_id
+        `);
+        const row = rows.rows[0] as { workspace_id: string; bundle_id: string } | undefined;
+        if (row === undefined) {
+          break; // nothing due — the tick is done
+        }
         await checkBundleUpstream(row.workspace_id, row.bundle_id);
       }
     } catch {
