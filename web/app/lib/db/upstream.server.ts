@@ -27,9 +27,14 @@ interface TarFile {
   bytes: Buffer;
 }
 
+/** The archive ceilings — a public repo is UNTRUSTED input, so every dimension is bounded. */
+const MAX_ARCHIVE_FILES = 2000;
+
 /** Read a POSIX/pax tarball's REGULAR files + the pax global `comment` (codeload stamps the
- * commit sha there). Anything unsafe — `..` segments, absolute paths, links, devices — is
- * simply skipped: the import wants plain files, never a filesystem side effect. */
+ * commit sha there). STRICT on structure — an invalid header checksum, a malformed size, or a
+ * truncated body THROWS (a damaged archive must never import as partial content) — while
+ * unsafe ENTRIES (`..` segments, absolute paths, links, devices) are skipped: the import wants
+ * plain files, never a filesystem side effect. */
 export function untar(tar: Buffer): { files: TarFile[]; comment: string | null } {
   const files: TarFile[] = [];
   let comment: string | null = null;
@@ -40,11 +45,27 @@ export function untar(tar: Buffer): { files: TarFile[]; comment: string | null }
     if (header.every((b) => b === 0)) {
       break; // the end-of-archive zero blocks
     }
+    // The header checksum: the stored field read as spaces, summed bytewise. A mismatch is a
+    // damaged or forged archive — refuse whole, never a partial import.
+    const stored = Number.parseInt(cstr(header.subarray(148, 156)), 8);
+    let sum = 0;
+    for (let i = 0; i < 512; i++) {
+      sum += i >= 148 && i < 156 ? 0x20 : (header[i] ?? 0);
+    }
+    if (!Number.isFinite(stored) || stored !== sum) {
+      throw new Error("malformed archive: header checksum mismatch");
+    }
     const name = cstr(header.subarray(0, 100));
     const prefix = cstr(header.subarray(345, 500));
     const mode = Number.parseInt(cstr(header.subarray(100, 108)) || "644", 8);
     const size = Number.parseInt(cstr(header.subarray(124, 136)) || "0", 8);
+    if (!Number.isFinite(size) || size < 0) {
+      throw new Error("malformed archive: invalid size field");
+    }
     const typeflag = String.fromCharCode(header[156] ?? 0x30);
+    if (offset + 512 + size > tar.length) {
+      throw new Error("malformed archive: truncated entry body");
+    }
     const body = tar.subarray(offset + 512, offset + 512 + size);
     offset += 512 + Math.ceil(size / 512) * 512;
 
@@ -52,11 +73,17 @@ export function untar(tar: Buffer): { files: TarFile[]; comment: string | null }
       // pax headers: `<len> <key>=<value>\n` records. The global header carries codeload's
       // commit comment; an extended header may carry a long `path` for the NEXT entry.
       for (const line of body.toString("utf8").split("\n")) {
-        const eq = line.indexOf("=");
-        if (eq < 0) {
+        if (line.length === 0) {
           continue;
         }
-        const key = line.slice(line.indexOf(" ") + 1, eq);
+        // A pax record is `<len> <key>=<value>` — a record without the length+space prefix or
+        // the `=` is malformed; refuse rather than misparse.
+        const space = line.indexOf(" ");
+        const eq = line.indexOf("=");
+        if (space < 1 || eq < space || !/^\d+$/.test(line.slice(0, space))) {
+          throw new Error("malformed archive: bad pax record");
+        }
+        const key = line.slice(space + 1, eq);
         const value = line.slice(eq + 1);
         if (typeflag === "g" && key === "comment") {
           comment = value;
@@ -81,6 +108,9 @@ export function untar(tar: Buffer): { files: TarFile[]; comment: string | null }
       continue; // unsafe or degenerate — skipped, never trusted
     }
     files.push({ path: clean, mode, bytes: Buffer.from(body) });
+    if (files.length > MAX_ARCHIVE_FILES) {
+      throw new Error("archive holds too many files");
+    }
   }
   return { files, comment };
 }
@@ -109,6 +139,9 @@ export interface UpstreamTree {
 export type TarballFetcher = (repo: string, ref: string) => Promise<Buffer>;
 
 const MAX_TARBALL_BYTES = 32 * 1024 * 1024;
+/** The DECOMPRESSED ceiling — a small, highly-compressible archive must not inflate without
+ * bound (`gunzipSync` enforces it via `maxOutputLength`, throwing past it). */
+const MAX_UNPACKED_BYTES = 128 * 1024 * 1024;
 
 async function fetchCodeload(repo: string, ref: string): Promise<Buffer> {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
@@ -121,11 +154,26 @@ async function fetchCodeload(repo: string, ref: string): Promise<Buffer> {
   if (!response.ok) {
     throw new Error(`upstream fetch failed: ${response.status}`);
   }
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (bytes.length > MAX_TARBALL_BYTES) {
-    throw new Error("upstream tarball too large");
+  if (response.body === null) {
+    throw new Error("upstream fetch failed: empty body");
   }
-  return bytes;
+  // STREAM with a running cap — never buffer an unbounded body before checking its size.
+  const chunks: Buffer[] = [];
+  let total = 0;
+  const reader = response.body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    total += value.byteLength;
+    if (total > MAX_TARBALL_BYTES) {
+      await reader.cancel();
+      throw new Error("upstream tarball too large");
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks);
 }
 
 /**
@@ -139,7 +187,7 @@ export async function fetchUpstreamTree(
   fetcher: TarballFetcher = fetchCodeload,
 ): Promise<UpstreamTree> {
   const gz = await fetcher(repo, ref);
-  const { files, comment } = untar(gunzipSync(gz));
+  const { files, comment } = untar(gunzipSync(gz, { maxOutputLength: MAX_UNPACKED_BYTES }));
   // codeload prefixes every path with `<repo>-<ref-ish>/` — strip the ONE top segment.
   const stripped = files
     .map((f) => {
@@ -189,10 +237,14 @@ export type UpstreamCheckOutcome =
  * re-check of the same moved commit converges on the one open proposal (the partial unique).
  */
 export async function checkBundleUpstream(
+  workspaceId: string,
   bundleId: string,
   fetcher: TarballFetcher = fetchCodeload,
 ): Promise<UpstreamCheckOutcome> {
   const db = getDb();
+  // WORKSPACE-BOUND: the caller's authorization covered ONE workspace, so the lookup must
+  // never resolve a bundle id from another one (a cross-workspace check would write proposals
+  // where the caller holds no seat).
   const rows = await db.execute(sql`
     SELECT bu.workspace_id, bu.repo, bu.path, bu.last_seen_commit,
            cp.version_id AS current_version_id
@@ -200,7 +252,7 @@ export async function checkBundleUpstream(
     JOIN web.bundle b ON b.id = bu.bundle_id AND b.status = 'active'
     LEFT JOIN plane.current_pointer cp
       ON cp.workspace_id = bu.workspace_id AND cp.bundle_id = bu.bundle_id
-    WHERE bu.bundle_id = ${bundleId}
+    WHERE bu.bundle_id = ${bundleId} AND bu.workspace_id = ${workspaceId}
   `);
   const row = rows.rows[0] as
     | {
@@ -282,11 +334,14 @@ export async function checkBundleUpstream(
       VALUES (${row.workspace_id}, ${bundleId}, ${versionId}, ${tree.commit ?? ""})
       ON CONFLICT (bundle_id, version_id) DO NOTHING
     `);
-    // The provenance narration the review thread shows (idempotent via the client-minted PK).
+    // The provenance narration the review thread shows. The id is DERIVED from the candidate
+    // (the version id's leading hex, UUID-shaped), so two racing checks of the same commit
+    // converge on ONE comment via the PK conflict — never a duplicate thread line.
+    const commentId = `${versionId.slice(0, 8)}-${versionId.slice(8, 12)}-4${versionId.slice(13, 16)}-8${versionId.slice(17, 20)}-${versionId.slice(20, 32)}`;
     await tx.execute(sql`
       INSERT INTO web.proposal_comment
         (id, workspace_id, bundle_id, version_id, author_display, body)
-      VALUES (${crypto.randomUUID()}, ${row.workspace_id}, ${bundleId}, ${versionId},
+      VALUES (${commentId}, ${row.workspace_id}, ${bundleId}, ${versionId},
               'upstream watcher',
               ${`Imported from ${row.repo}${row.path.length > 0 ? `/${row.path}` : ""}${tree.commit === null ? "" : ` @ ${tree.commit.slice(0, 12)}`} — review before it ships.`})
       ON CONFLICT (id) DO NOTHING
@@ -373,14 +428,21 @@ export function armUpstreamChecker(): void {
   }
   const timer = setInterval(async () => {
     try {
+      // The CLAIM: stamp last_checked_at atomically before checking, so two poller instances
+      // (or a tick racing a manual check) never sweep the same bundle in the same window.
       const rows = await getDb().execute(sql`
-        SELECT bu.bundle_id FROM web.bundle_upstream bu
-        JOIN web.bundle b ON b.id = bu.bundle_id AND b.status = 'active'
-        ORDER BY bu.last_checked_at NULLS FIRST
-        LIMIT 20
+        UPDATE web.bundle_upstream bu SET last_checked_at = now()
+        FROM web.bundle b
+        WHERE b.id = bu.bundle_id AND b.status = 'active'
+          AND (bu.last_checked_at IS NULL OR bu.last_checked_at < now() - interval '5 minutes')
+          AND bu.bundle_id IN (
+            SELECT bu2.bundle_id FROM web.bundle_upstream bu2
+            ORDER BY bu2.last_checked_at NULLS FIRST LIMIT 20
+          )
+        RETURNING bu.workspace_id, bu.bundle_id
       `);
-      for (const row of rows.rows as { bundle_id: string }[]) {
-        await checkBundleUpstream(row.bundle_id);
+      for (const row of rows.rows as { workspace_id: string; bundle_id: string }[]) {
+        await checkBundleUpstream(row.workspace_id, row.bundle_id);
       }
     } catch {
       // The sweep is best-effort; the next tick retries.

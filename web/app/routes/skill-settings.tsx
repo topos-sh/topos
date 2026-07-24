@@ -255,7 +255,8 @@ async function protectionIntent(request: Request, ws: string, skill: string, for
  * never move current); the member floor already ran. Answers the checker's typed outcome. */
 async function checkUpstreamIntent(request: Request, ws: string, skillId: string) {
   await requireMember(request, ws);
-  const outcome = await checkBundleUpstream(skillId);
+  // Workspace-bound: the member's authorization covers THIS workspace alone.
+  const outcome = await checkBundleUpstream(ws, skillId);
   return data({ form: "upstream" as const, outcome });
 }
 

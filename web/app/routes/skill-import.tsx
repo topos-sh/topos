@@ -33,16 +33,17 @@ const REPO_SHAPE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const NAME_SHAPE = /^[a-z0-9][a-z0-9-]*$/;
 const COMMIT_SHAPE = /^[0-9a-f]{7,40}$/;
 
-/** Parse the pasted source into (repo, subdir): `owner/repo[/sub/dir]`, a github.com URL, or a
- * `/tree/<ref>/<subdir>` URL. Returns null on anything else — typed, never guessed. */
-function parseSource(raw: string): { repo: string; subdir: string } | null {
+/** Parse the pasted source into (repo, subdir, ref): `owner/repo[/sub/dir]`, a github.com
+ * URL, or a `/tree/<ref>/<subdir>` URL — whose REF is honored (the preview fetches that
+ * branch/tag, and the publish still pins the resolved commit). Null on anything else. */
+function parseSource(raw: string): { repo: string; subdir: string; ref: string } | null {
   let token = raw.trim();
   token = token.replace(/^https?:\/\//, "").replace(/^github\.com\//, "");
   token = token.replace(/\.git$/, "").replace(/\/+$/, "");
-  const treeMatch = token.match(/^([^/]+\/[^/]+)\/tree\/[^/]+(?:\/(.*))?$/);
-  if (treeMatch?.[1] !== undefined) {
+  const treeMatch = token.match(/^([^/]+\/[^/]+)\/tree\/([^/]+)(?:\/(.*))?$/);
+  if (treeMatch?.[1] !== undefined && treeMatch[2] !== undefined) {
     const repo = treeMatch[1];
-    return REPO_SHAPE.test(repo) ? { repo, subdir: treeMatch[2] ?? "" } : null;
+    return REPO_SHAPE.test(repo) ? { repo, subdir: treeMatch[3] ?? "", ref: treeMatch[2] } : null;
   }
   const segments = token.split("/").filter((s) => s.length > 0);
   if (segments.length < 2) {
@@ -52,7 +53,7 @@ function parseSource(raw: string): { repo: string; subdir: string } | null {
   if (!REPO_SHAPE.test(repo)) {
     return null;
   }
-  return { repo, subdir: segments.slice(2).join("/") };
+  return { repo, subdir: segments.slice(2).join("/"), ref: "HEAD" };
 }
 
 interface PreviewData {
@@ -97,12 +98,13 @@ export async function action({ request, params }: ActionFunctionArgs) {
       );
     }
     try {
-      const tree = await fetchUpstreamTree(source.repo, source.subdir);
+      const tree = await fetchUpstreamTree(source.repo, source.subdir, source.ref);
       if (tree.files.length === 0) {
         return data<PreviewData>(
           {
             form: "preview",
-            ...source,
+            repo: source.repo,
+            subdir: source.subdir,
             commit: null,
             license: null,
             suggestedName: "",
@@ -125,7 +127,8 @@ export async function action({ request, params }: ActionFunctionArgs) {
         .slice(0, 60);
       return data<PreviewData>({
         form: "preview",
-        ...source,
+        repo: source.repo,
+        subdir: source.subdir,
         commit: tree.commit,
         license: tree.license,
         suggestedName,
@@ -138,7 +141,8 @@ export async function action({ request, params }: ActionFunctionArgs) {
       return data<PreviewData>(
         {
           form: "preview",
-          ...source,
+          repo: source.repo,
+          subdir: source.subdir,
           commit: null,
           license: null,
           suggestedName: "",

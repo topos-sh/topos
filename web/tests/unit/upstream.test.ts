@@ -137,6 +137,24 @@ describe("the tar reader", () => {
     const parsed = untar(hostile);
     expect(parsed.files).toHaveLength(0);
   });
+
+  it("a damaged archive REFUSES whole — checksum, truncation, malformed pax", async () => {
+    const { untar } = await import("@/lib/db/upstream.server");
+    // A corrupted checksum byte.
+    const good = tarEntry("ok.txt", Buffer.from("hi"));
+    const corrupted = Buffer.concat([good, Buffer.alloc(1024)]);
+    corrupted[150] = 0x39;
+    expect(() => untar(corrupted)).toThrow(/checksum/);
+    // A truncated body (the header claims more bytes than the archive holds).
+    const truncated = tarEntry("big.txt", Buffer.from("x".repeat(600))).subarray(0, 700);
+    expect(() => untar(Buffer.from(truncated))).toThrow(/truncated/);
+    // A malformed pax record (no length prefix).
+    const badPax = Buffer.concat([
+      tarEntry("pax_global_header", Buffer.from("comment=abc\n"), "g"),
+      Buffer.alloc(1024),
+    ]);
+    expect(() => untar(badPax)).toThrow(/pax/);
+  });
 });
 
 describe("fetchUpstreamTree", () => {
@@ -171,7 +189,7 @@ describe("checkBundleUpstream — external changes ALWAYS propose", () => {
     // The upstream moved: new bytes at a new commit.
     const moved = "d".repeat(40);
     const gz = fixtureTarball(moved, { "skills/deploy/SKILL.md": "# Deploy v2\n" });
-    const outcome = await upstream.checkBundleUpstream("s_up", async () => gz);
+    const outcome = await upstream.checkBundleUpstream(wsId, "s_up", async () => gz);
     expect(outcome.outcome).toBe("proposed");
     // ONE open proposal, attributed to NO user, provenance in the thread + version_upstream.
     const proposals = await db.q<{ proposed_by: string | null; status: string }>(
@@ -195,7 +213,7 @@ describe("checkBundleUpstream — external changes ALWAYS propose", () => {
     expect(lastBody.parent).toBe(versionId);
 
     // A re-check of the SAME commit is a fast no-op (last_seen matches).
-    const again = await upstream.checkBundleUpstream("s_up", async () => gz);
+    const again = await upstream.checkBundleUpstream(wsId, "s_up", async () => gz);
     expect(again.outcome).toBe("unchanged");
     expect(
       await db.q(`SELECT 1 FROM web.proposal WHERE bundle_id = 's_up' AND status = 'open'`),
@@ -210,7 +228,9 @@ describe("checkBundleUpstream — external changes ALWAYS propose", () => {
   it("a bundle with no upstream answers no_upstream; upstreamOf reads the panel facts", async () => {
     const upstream = await import("@/lib/db/upstream.server");
     await seedBundle(db, wsId, "s_plain", "plain-skill");
-    expect((await upstream.checkBundleUpstream("s_plain")).outcome).toBe("no_upstream");
+    expect((await upstream.checkBundleUpstream(wsId, "s_plain")).outcome).toBe("no_upstream");
+    // A cross-workspace probe resolves nothing — the check is workspace-bound.
+    expect((await upstream.checkBundleUpstream("w_other", "s_up")).outcome).toBe("no_upstream");
     const view = await upstream.upstreamOf(wsId, "s_up");
     expect(view?.repo).toBe("owner/repo");
     expect(view?.path).toBe("skills/deploy");
