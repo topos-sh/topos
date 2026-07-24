@@ -24,7 +24,7 @@
       ],
       "mutates": true,
       "needs_network": true,
-      "risk_note": "completes device enrollment — a credential is stored on this machine"
+      "risk_note": "completes the login — a session credential is stored on this machine"
     }
   ]
 }

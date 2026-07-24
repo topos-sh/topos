@@ -80,10 +80,11 @@ pub(crate) fn invite(
     }
     // The SESSION lane: the one live session, or the `--workspace`-selected one.
     let lane = super::resolve_session_lane(ctx, connectors.session, workspace, None)?.ok_or_else(
-        || {
-            ClientError::Enrollment(
-                "not connected to a workspace — run `topos login <workspace-address>` first".into(),
-            )
+        || ClientError::SessionRequired {
+            address: "<workspace-address>".to_owned(),
+            message: "not connected to a workspace — run `topos login <workspace-address>` \
+                          first"
+                .into(),
         },
     )?;
     let workspace_id = lane.workspace_id.clone();

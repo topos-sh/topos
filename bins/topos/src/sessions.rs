@@ -107,18 +107,25 @@ impl Sessions {
             // An explicitly named workspace whose session ENDED refuses toward `login` — a dead
             // credential never rides a write.
             if found.status == SESSION_ENDED {
-                return Err(ClientError::Enrollment(format!(
-                    "the session for '{}' has ended — reconnect with `topos login {}/{}`",
-                    found.workspace_name, found.host, found.workspace_name
-                )));
+                let address = format!("{}/{}", found.host, found.workspace_name);
+                return Err(ClientError::SessionRequired {
+                    message: format!(
+                        "the session for '{}' has ended — reconnect with `topos login {address}`",
+                        found.workspace_name
+                    ),
+                    address,
+                });
             }
             return Ok(found);
         }
         let live: Vec<&Session> = self.live().collect();
         match live.as_slice() {
-            [] => Err(ClientError::Enrollment(
-                "not logged into any workspace; run `topos login <workspace-address>` first".into(),
-            )),
+            [] => Err(ClientError::SessionRequired {
+                address: "<workspace-address>".to_owned(),
+                message: "not logged into any workspace; run `topos login <workspace-address>` \
+                          first"
+                    .into(),
+            }),
             [only] => Ok(only),
             _ => Err(ClientError::WorkspaceSelection(format!(
                 "logged into multiple workspaces ({}); pass `--workspace <name>` to choose one",

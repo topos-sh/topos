@@ -1257,6 +1257,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             session_id: None,
             session_status: "awaiting-approval".to_owned(),
             delivered: None,
+            delivered_names: Vec::new(),
             pending: Some(EnrollmentPending {
                 verification_uri: "https://topos.sh/verify".to_owned(),
                 user_code: "WXYZ-1234".to_owned(),
@@ -1291,6 +1292,11 @@ fn fixtures() -> Vec<(&'static str, String)> {
             session_id: Some("sn_01hzy3".to_owned()),
             session_status: "active".to_owned(),
             delivered: Some(3),
+            delivered_names: vec![
+                "deploy".to_owned(),
+                "code-review".to_owned(),
+                "release-notes".to_owned(),
+            ],
             pending: None,
             currency: None,
             triggers: Vec::new(),

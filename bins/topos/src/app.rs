@@ -663,11 +663,13 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                         Err(e) => return emit_err(json, cmd_name, &e, &diag),
                     };
                 if live.is_empty() {
-                    let e = ClientError::Enrollment(
-                        "not connected to a workspace — run `topos login <workspace-address>` \
-                         first"
-                            .into(),
-                    );
+                    let e = ClientError::SessionRequired {
+                        address: "<workspace-address>".to_owned(),
+                        message:
+                            "not connected to a workspace — run `topos login <workspace-address>` \
+                          first"
+                                .into(),
+                    };
                     return emit_err(json, cmd_name, &e, &diag);
                 }
                 let memberships: Vec<(String, String)> = live
@@ -1297,6 +1299,14 @@ fn finish_pull(
                 println!("{}", render::to_json(&envelope));
             } else {
                 let mut text = render::pull_tty(&out.data, &out.warnings);
+                if !out.access_gone.is_empty() {
+                    text.push_str(&format!(
+                        "\nnote: the session{} for {} ended — every skill it delivered stays in \
+                         place, frozen; `topos login <workspace-address>` reconnects.",
+                        if out.access_gone.len() == 1 { "" } else { "s" },
+                        out.access_gone.join(", ")
+                    ));
+                }
                 if unenrolled_dead_end {
                     text.push_str(
                         "\nNot logged in — join your team with `topos login \

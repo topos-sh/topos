@@ -24,6 +24,13 @@
       "format": "uint64",
       "minimum": 0
     },
+    "delivered_names": {
+      "description": "The delivered skills' NAMES (the same best-effort read as `delivered`) — the receipt names\nwhat the acceptance brings, not just a number. **Additive.**",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "display_name": {
       "type": [
         "string",

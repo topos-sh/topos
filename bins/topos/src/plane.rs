@@ -793,7 +793,7 @@ impl PlaneSource for InertPlane {
         _known: Option<KnownCurrent>,
     ) -> Result<PointerFetch, PlaneError> {
         Err(PlaneError::Unavailable(
-            "not enrolled with a plane; run `topos login <workspace-address>` first".into(),
+            "not logged into a workspace; run `topos login <workspace-address>` first".into(),
         ))
     }
     fn fetch_version(
@@ -802,7 +802,7 @@ impl PlaneSource for InertPlane {
         _version_id: [u8; 32],
     ) -> Result<FetchedVersion, PlaneError> {
         Err(PlaneError::Unavailable(
-            "not enrolled with a plane; run `topos login <workspace-address>` first".into(),
+            "not logged into a workspace; run `topos login <workspace-address>` first".into(),
         ))
     }
 }

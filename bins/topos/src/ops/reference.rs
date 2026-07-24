@@ -64,9 +64,12 @@ fn resolve_ref(
                     Some(h) => format!("{h}/{ws}"),
                     None => ws.to_owned(),
                 };
-                Err(ClientError::Enrollment(format!(
-                    "not logged into {address} — run `topos login {address}` first"
-                )))
+                Err(ClientError::SessionRequired {
+                    message: format!(
+                        "not logged into {address} — run `topos login {address}` first"
+                    ),
+                    address,
+                })
             }
             [one] => Ok((*one).clone()),
             several => Err(ClientError::AmbiguousName {
@@ -170,10 +173,14 @@ fn resolve_ref(
             match hits.len() {
                 0 => {
                     if live.is_empty() {
-                        Err(ClientError::Enrollment(format!(
-                            "'{name}' is a catalog reference, but this installation is not \
-                             logged into any workspace — `topos login <workspace-address>` first"
-                        )))
+                        Err(ClientError::SessionRequired {
+                            address: "<workspace-address>".to_owned(),
+                            message: format!(
+                                "'{name}' is a catalog reference, but this installation is not \
+                                 logged into any workspace — run `topos login \
+                                 <workspace-address>` first"
+                            ),
+                        })
                     } else if !unread.is_empty() {
                         Err(ClientError::Plane(format!(
                             "could not read every connected catalog — '{name}' was not found in \
@@ -268,11 +275,12 @@ pub(crate) fn resolve_session_lane(
             .iter()
             .find(|s| s.workspace_id == ws && s.status != sessions::SESSION_ENDED)
             .cloned()
-            .ok_or_else(|| {
-                ClientError::Enrollment(format!(
-                    "this bundle's workspace has no live session on this installation — `topos \
-                     login` it first (workspace id {ws})"
-                ))
+            .ok_or_else(|| ClientError::SessionRequired {
+                address: "<workspace-address>".to_owned(),
+                message: format!(
+                    "this bundle's workspace has no live session on this installation — run \
+                     `topos login <workspace-address>` first (workspace id {ws})"
+                ),
             })?,
         None => all.resolve_target(explicit)?.clone(),
     };

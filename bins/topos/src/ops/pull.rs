@@ -444,6 +444,8 @@ pub(crate) fn quiet_soft_failure(e: &ClientError) -> bool {
         e,
         ClientError::Plane(_)
             | ClientError::Enrollment(_)
+            | ClientError::SessionRequired { .. }
+            | ClientError::NotAvailable(_)
             | ClientError::PlaneRejected(_)
             | ClientError::PlaneTerminal { .. }
             | ClientError::Denied(_)

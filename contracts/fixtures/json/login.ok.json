@@ -4,6 +4,11 @@
   "ok": true,
   "data": {
     "delivered": 3,
+    "delivered_names": [
+      "deploy",
+      "code-review",
+      "release-notes"
+    ],
     "display_name": "Acme",
     "name": "acme",
     "server": "https://topos.sh/api",

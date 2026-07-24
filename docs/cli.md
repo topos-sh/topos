@@ -15,7 +15,7 @@ These work before or after any verb.
 | Flag | Value | Description |
 |---|---|---|
 | `--json` |  | Emit one JSON document on stdout (the agent surface) instead of human text. Never prompts |
-| `--workspace` | `<WORKSPACE>` | Act in a specific workspace when this install follows skills from more than one on the same plane. Accepts the workspace's address NAME (what you joined by) or its opaque id. Selects the workspace for the ambient team verbs (a genesis `publish`, `invite`) and disambiguates a skill name shared across workspaces. Optional — with a single workspace it is inferred |
+| `--workspace` | `<WORKSPACE>` | Act in a specific workspace when this installation holds sessions with more than one on the same server. Accepts the workspace's address NAME (what you logged in by) or its opaque id. Selects the workspace for the ambient team verbs (a genesis `publish`, `invite`) and disambiguates a skill name delivered from several workspaces. Optional — with a single workspace it is inferred |
 
 ## Self-scoped verbs
 
@@ -70,11 +70,11 @@ Create this folder's `topos.toml` — the project MANIFEST `add`/`remove` edit a
 topos add [OPTIONS] <SOURCE>
 ```
 
-Adopt a skill into topos. The source is polymorphic: • a skill NAME (`deploy`, `deploy@claude-code`) — resolved against the untracked skills `topos list` discovers (`@<harness>` disambiguates across harnesses); • a PATH (`./skills/deploy`, `~/x`, `/abs`) — adopt that directory in place; • a REMOTE source (`owner/repo`, `owner/repo#<ref>`, an https://github.com URL) — fetch it. Local adopts are offline. A remote import fetches a public repo (no account); the source's trustworthiness is yours to verify
+Add a skill to this folder's reach — the demand-side edit. The SOURCE is shape-determined: • a WORKSPACE reference (`@<ws>/<name>`, `@<ws>/channels/<name>`, the canonical `<host>/<ws>/<name>`, or a bare catalog name unique across your sessions) — records the line in the nearest `topos.toml` (or, with `-g`, your server-stored profile) and delivers it in the same invocation; an optional `@<digest>` tail pins the version; • a PATH (`./skills/deploy`, `~/x`, `/abs`) — adopt that directory in place (offline); • a GITHUB import (`owner/repo`, `owner/repo#<ref>`, an https://github.com URL) — fetch and pin it (a public repo, no account; the source's trustworthiness is yours to verify). `add topos` restores the built-in topos skill
 
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
-| `<SOURCE>` |  |  | The skill to adopt — a name, a path, or a remote `owner/repo`/github.com URL |
+| `<SOURCE>` |  |  | The source — a workspace reference, a path, or an `owner/repo`/github.com import |
 | `-s, --skill` | `<NAME>` |  | Pick a skill from a repo that holds several (repeatable; `'*'` = all). A lone skill needs none |
 | `-a, --agent` | `<SLUG>` |  | The agent (harness) to land a remote import into (a registry slug, e.g. `cursor`; repeatable; `'*'` = all). Default: the active harness. Ignored for a local path / name adopt |
 | `-g, --global` |  |  | Record PERSON-scoped instead of in the project's `topos.toml`: a workspace reference edits your server-stored PROFILE for that workspace (every machine you log in gets it); a local path records in the personal manifest (`~/.topos/topos.toml`); a remote import lands in the harness's global/user skills dir instead of the project (cwd) dir |
@@ -107,7 +107,7 @@ Reconcile this machine against the manifests covering the current directory and 
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
 | `[TARGETS]...` |  |  | Optional target(s): a resolved manifest name to reconcile; `<name>@<hash>` goes back to that version's bytes. Omitted = the full sweep |
-| `--reset` |  |  | Reset a followed skill to `current`, dropping local edits. Lands with the loss-led describe |
+| `--reset` |  |  | Reset a delivered skill to `current`, dropping local edits. Lands with the loss-led describe |
 | `--yes` |  |  | Apply without the describe step. Parses today; the two-phase describe lands later |
 | `--onto-current` |  |  | Resolve a diverged draft the OTHER way: commit YOUR bytes straight onto `current`, DROPPING the pending three-way merge (the changes it would have merged are disclosed first). Requires exactly one `<skill>` target. Use when you want your version to win outright |
 | `--quiet` |  |  | Emit nothing on stdout (the session-start hook's stdout is injected into the session). Errors still go to stderr with a non-zero exit. Overrides `--json` |
@@ -176,7 +176,7 @@ Ship a draft to the team, ADDING the skill to topos first if it isn't tracked ye
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
 | `<TARGET>` |  |  | The skill to publish: a tracked NAME, an untracked `<skill>` / `<skill>@<harness>` to adopt from discovery, or a `<dir>` to adopt in place — optionally pinned as `<source>@<digest>` |
-| `--to` | `<CHANNEL>` |  | Place the skill's reference into this channel (created on first use; a curated channel needs reviewer+). A brand-new skill with no `--to` lands in `everyone` — under a curated `everyone` a member's genesis publishes catalog-only and a curator places it |
+| `--to` | `<CHANNEL>` |  | Place the skill's reference into this EXISTING channel (`<name>` or `@<ws>/channels/<name>`; a curated channel needs reviewer+; publish never creates a channel — that is a web curation act). A brand-new skill with no `--to` lands in `everyone` — under a curated `everyone` a member's genesis publishes catalog-only and a curator places it |
 | `--propose` |  |  | Open a proposal (a PR) instead of moving `current` |
 | `-m, --message` | `<MSG>` |  | The commit message for this version (threaded into the candidate commit id) |
 | `--yes` |  |  | Apply without the describe step. Parses today; the two-phase describe lands later |
@@ -242,8 +242,8 @@ Invite emails into the workspace. Each address gets a mailed single-use invite l
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
 | `[EMAIL]...` |  |  | The emails to invite (folded to canonical form; each becomes a pending 7-day claim) |
-| `--skill` | `<NAME>` |  | Lead the invitation with this SKILL — accepting follows it for the invitee (at most one of --skill/--channel) |
-| `--channel` | `<NAME>` |  | Lead the invitation with this CHANNEL — accepting joins the invitee to it |
+| `--skill` | `<NAME>` |  | Lead the invitation with this SKILL — accepting adds it to the invitee's profile (at most one of --skill/--channel) |
+| `--channel` | `<NAME>` |  | Lead the invitation with this CHANNEL — accepting adds it to the invitee's profile |
 | `--yes` |  |  | Apply without the describe step. Parses today; the two-phase describe lands later |
 
 ## Maintenance

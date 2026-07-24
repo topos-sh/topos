@@ -639,6 +639,10 @@ pub struct LoginData {
     /// best-effort — absent when the count could not be read).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivered: Option<u64>,
+    /// The delivered skills' NAMES (the same best-effort read as `delivered`) — the receipt names
+    /// what the acceptance brings, not just a number. **Additive.**
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivered_names: Vec<String>,
     /// Present while the login awaits the browser approval (re-run `topos login` to resume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<EnrollmentPending>,

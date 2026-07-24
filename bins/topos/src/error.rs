@@ -169,10 +169,18 @@ pub(crate) enum ClientError {
     /// the local store, so its bytes are unavailable and it cannot be installed. Refused.
     #[error("cannot go back to version '{version}': not in this skill's local history")]
     UnknownGoBackVersion { version: String },
-    /// An enrollment step could not complete (a missing/expired session, a denied verification, a
-    /// malformed link). The message is fixed text or a user-supplied token-free description.
-    #[error("enrollment failed: {0}")]
+    /// A LOGIN-FLOW step could not complete (an expired/denied browser approval, a malformed
+    /// invitation link, a conflicting pending flow). The message is self-contained guidance —
+    /// fixed text or a user-supplied token-free description.
+    #[error("{0}")]
     Enrollment(String),
+    /// A verb needs a live SESSION this installation does not hold (not logged in at all, an
+    /// ended session, a workspace this install never connected to). The message is self-authored
+    /// guidance naming the concrete fix; `address` ALSO rides structurally — the envelope's
+    /// `LOGIN_WORKSPACE` next action carries `topos login <address>` as an executable argv (the
+    /// address as one token, straight from this field), never prose alone.
+    #[error("{message}")]
+    SessionRequired { address: String, message: String },
     /// The ONE not-enrolled refusal every credentialed verb shares: this install has no plane (or
     /// no membership) to act against. The fix is stated in prose AND mirrored structurally — the
     /// envelope carries a `LOGIN_WORKSPACE` next action whose argv template `needs` the
@@ -388,9 +396,12 @@ impl ClientError {
             ClientError::PlacementsDiverged { .. } => "PLACEMENTS_DIVERGED",
             ClientError::UnknownGoBackVersion { .. } => "UNKNOWN_GOBACK_VERSION",
             ClientError::Plane(_) => "PLANE_ERROR",
-            ClientError::Enrollment(_) => "ENROLLMENT_FAILED",
-            // The shared not-enrolled refusal keeps the enrollment family's code.
-            ClientError::NotEnrolled => "ENROLLMENT_FAILED",
+            // The login-flow failures speak session language (the retired enrollment vocabulary
+            // is gone from the wire).
+            ClientError::Enrollment(_) => "LOGIN_FAILED",
+            // The session-required family: the shared refusal and the address-carrying form.
+            ClientError::NotEnrolled => "SESSION_REQUIRED",
+            ClientError::SessionRequired { .. } => "SESSION_REQUIRED",
             ClientError::ApprovalMismatch { .. } => "CONSENT_MISMATCH",
             ClientError::Conflict { .. } => "CONFLICT",
             ClientError::Denied(_) => "DENIED",

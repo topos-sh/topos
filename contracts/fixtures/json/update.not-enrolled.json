@@ -18,7 +18,7 @@
       ],
       "mutates": true,
       "needs_network": true,
-      "risk_note": "enrolls this device when not yet enrolled (browser approval; a credential is stored)",
+      "risk_note": "logs this machine in (browser approval; a session credential is stored)",
       "needs": [
         "workspace-address"
       ]

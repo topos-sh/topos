@@ -28,10 +28,11 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub(crate) json: bool,
 
-    /// Act in a specific workspace when this install follows skills from more than one on the same plane.
-    /// Accepts the workspace's address NAME (what you joined by) or its opaque id. Selects the workspace
-    /// for the ambient team verbs (a genesis `publish`, `invite`) and disambiguates a skill name shared
-    /// across workspaces. Optional — with a single workspace it is inferred.
+    /// Act in a specific workspace when this installation holds sessions with more than one on the
+    /// same server. Accepts the workspace's address NAME (what you logged in by) or its opaque id.
+    /// Selects the workspace for the ambient team verbs (a genesis `publish`, `invite`) and
+    /// disambiguates a skill name delivered from several workspaces. Optional — with a single
+    /// workspace it is inferred.
     #[arg(long, global = true, value_name = "WORKSPACE")]
     pub(crate) workspace: Option<String>,
 
@@ -61,7 +62,7 @@ pub(crate) enum Command {
         /// Optional target(s): a resolved manifest name to reconcile; `<name>@<hash>` goes back
         /// to that version's bytes. Omitted = the full sweep.
         targets: Vec<String>,
-        /// Reset a followed skill to `current`, dropping local edits. Lands with the loss-led describe.
+        /// Reset a delivered skill to `current`, dropping local edits. Lands with the loss-led describe.
         #[arg(long)]
         reset: bool,
         /// Apply without the describe step. Parses today; the two-phase describe lands later.
@@ -115,15 +116,17 @@ pub(crate) enum Command {
     /// the same set here). Any folder, git or not; outside a shared repo the receipt notes the
     /// file stays local. An existing manifest is a clean no-op, never overwritten.
     Init,
-    /// Adopt a skill into topos. The source is polymorphic:
-    ///   • a skill NAME (`deploy`, `deploy@claude-code`) — resolved against the untracked skills
-    ///     `topos list` discovers (`@<harness>` disambiguates across harnesses);
-    ///   • a PATH (`./skills/deploy`, `~/x`, `/abs`) — adopt that directory in place;
-    ///   • a REMOTE source (`owner/repo`, `owner/repo#<ref>`, an https://github.com URL) — fetch it.
-    /// Local adopts are offline. A remote import fetches a public repo (no account); the source's
-    /// trustworthiness is yours to verify.
+    /// Add a skill to this folder's reach — the demand-side edit. The SOURCE is shape-determined:
+    ///   • a WORKSPACE reference (`@<ws>/<name>`, `@<ws>/channels/<name>`, the canonical
+    ///     `<host>/<ws>/<name>`, or a bare catalog name unique across your sessions) — records the
+    ///     line in the nearest `topos.toml` (or, with `-g`, your server-stored profile) and
+    ///     delivers it in the same invocation; an optional `@<digest>` tail pins the version;
+    ///   • a PATH (`./skills/deploy`, `~/x`, `/abs`) — adopt that directory in place (offline);
+    ///   • a GITHUB import (`owner/repo`, `owner/repo#<ref>`, an https://github.com URL) — fetch
+    ///     and pin it (a public repo, no account; the source's trustworthiness is yours to verify).
+    /// `add topos` restores the built-in topos skill.
     Add {
-        /// The skill to adopt — a name, a path, or a remote `owner/repo`/github.com URL.
+        /// The source — a workspace reference, a path, or an `owner/repo`/github.com import.
         source: String,
         /// Pick a skill from a repo that holds several (repeatable; `'*'` = all). A lone skill needs none.
         #[arg(long, short = 's', value_name = "NAME")]
@@ -228,9 +231,11 @@ pub(crate) enum Command {
         /// The skill to publish: a tracked NAME, an untracked `<skill>` / `<skill>@<harness>` to adopt from
         /// discovery, or a `<dir>` to adopt in place — optionally pinned as `<source>@<digest>`.
         target: String,
-        /// Place the skill's reference into this channel (created on first use; a curated channel needs
-        /// reviewer+). A brand-new skill with no `--to` lands in `everyone` — under a curated `everyone`
-        /// a member's genesis publishes catalog-only and a curator places it.
+        /// Place the skill's reference into this EXISTING channel (`<name>` or
+        /// `@<ws>/channels/<name>`; a curated channel needs reviewer+; publish never creates a
+        /// channel — that is a web curation act). A brand-new skill with no `--to` lands in
+        /// `everyone` — under a curated `everyone` a member's genesis publishes catalog-only and a
+        /// curator places it.
         #[arg(long, value_name = "CHANNEL")]
         to: Option<String>,
         /// Open a proposal (a PR) instead of moving `current`.
@@ -306,11 +311,11 @@ pub(crate) enum Command {
     Invite {
         /// The emails to invite (folded to canonical form; each becomes a pending 7-day claim).
         email: Vec<String>,
-        /// Lead the invitation with this SKILL — accepting follows it for the invitee (at most one
-        /// of --skill/--channel).
+        /// Lead the invitation with this SKILL — accepting adds it to the invitee's profile (at
+        /// most one of --skill/--channel).
         #[arg(long, value_name = "NAME", conflicts_with = "channel")]
         skill: Option<String>,
-        /// Lead the invitation with this CHANNEL — accepting joins the invitee to it.
+        /// Lead the invitation with this CHANNEL — accepting adds it to the invitee's profile.
         #[arg(long, value_name = "NAME")]
         channel: Option<String>,
         /// Apply without the describe step. Parses today; the two-phase describe lands later.

@@ -160,6 +160,18 @@ fn next_actions(err: &ClientError) -> Vec<NextAction> {
                 "--json".into(),
             ],
         )],
+        // The session-required refusal with the address IN HAND: the login rides as an
+        // EXECUTABLE argv — the address as ONE token straight from the variant's field, never
+        // re-tokenized out of prose (a placeholder address stays a template via `needs`).
+        ClientError::SessionRequired { address, .. } => vec![crate::actions::next_action(
+            ActionCode::from("LOGIN_WORKSPACE".to_owned()),
+            vec![
+                "topos".into(),
+                "login".into(),
+                address.clone(),
+                "--json".into(),
+            ],
+        )],
         // "upgrade topos" in prose is `topos self-update` structurally.
         ClientError::UnknownSchemaVersion { .. } => vec![crate::actions::next_action(
             ActionCode::from("UPDATE_CLI".to_owned()),
@@ -229,11 +241,6 @@ const STATIC_PROSE_COMMANDS: &[(&str, &str, &[&str])] = &[
         "topos login <server>/<workspace>",
         "RUN_COMMAND",
         &["topos", "login", "<server>/<workspace>", "--json"],
-    ),
-    (
-        "topos auth login",
-        "SIGN_IN",
-        &["topos", "auth", "login", "--json"],
     ),
     (
         "topos update",
@@ -329,11 +336,31 @@ pub(crate) fn session_login_tty(data: &topos_types::results::LoginData) -> Strin
         ),
         _ => match data.delivered {
             Some(0) => s.push_str(" — nothing in your profile delivers here yet."),
-            Some(n) => s.push_str(&format!(
-                " — your profile delivers {n} skill{} here; updates arrive silently (`topos \
-                 update` any time).",
-                if n == 1 { "" } else { "s" }
-            )),
+            Some(n) => {
+                // Name what the acceptance brings (a long list stays readable: first five + a
+                // remainder count).
+                let mut names = data.delivered_names.join(", ");
+                if data.delivered_names.len() > 5 {
+                    names = format!(
+                        "{}, and {} more",
+                        data.delivered_names[..5].join(", "),
+                        data.delivered_names.len() - 5
+                    );
+                }
+                if names.is_empty() {
+                    s.push_str(&format!(
+                        " — your profile delivers {n} skill{} here; updates arrive silently \
+                         (`topos update` any time).",
+                        if n == 1 { "" } else { "s" }
+                    ));
+                } else {
+                    s.push_str(&format!(
+                        " — your profile delivers {n} skill{} here ({names}); updates arrive \
+                         silently (`topos update` any time).",
+                        if n == 1 { "" } else { "s" }
+                    ));
+                }
+            }
             None => s.push('.'),
         },
     }
@@ -394,9 +421,8 @@ pub(crate) fn add_tty(data: &AddData) -> String {
         ));
     }
     out.push_str(&format!(
-        "Adopted '{}' ({}) @ {}",
+        "Adopted '{}' @ {}",
         data.name,
-        data.skill_id,
         short(&data.version_id)
     ));
     // Provenance of a remote import (honest, never a trust claim) — where the bytes came from + license.
@@ -548,7 +574,7 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
     // only when enrolled; the unenrolled output is byte-identical to the accountless local list.
     if let Some(e) = &out.enrollment {
         s.push_str(&format!(
-            "Enrolled at {} — auto-update hook: {}\n",
+            "Connected to {} — auto-update hook: {}\n",
             e.base_url,
             if e.hook_active {
                 "active"
@@ -705,7 +731,7 @@ fn untracked_row(u: &UntrackedEntry) -> String {
 /// is enrolled+followed, else `None` (a purely local skill).
 fn list_row(entry: &SkillEntry, note: Option<(&str, bool)>) -> String {
     let follow_note = match note {
-        Some((mode, true)) => format!("  (following, {mode})"),
+        Some((mode, true)) => format!("  (delivered, {mode})"),
         Some((_, false)) => format!("  (paused — `topos add {}` resumes)", entry.skill),
         None => String::new(),
     };
@@ -1303,27 +1329,18 @@ pub(crate) fn auth_status_next_actions(d: &crate::ops::AuthStatusData) -> Vec<Ne
     if d.signed_in {
         return Vec::new();
     }
-    if d.server.is_none() && d.workspaces.is_empty() {
-        vec![crate::actions::next_action(
-            ActionCode::from("LOGIN_WORKSPACE".to_owned()),
-            vec![
-                "topos".into(),
-                "login".into(),
-                "<workspace-address>".into(),
-                "--json".into(),
-            ],
-        )]
-    } else {
-        vec![crate::actions::next_action(
-            ActionCode::from("SIGN_IN".to_owned()),
-            vec![
-                "topos".into(),
-                "auth".into(),
-                "login".into(),
-                "--json".into(),
-            ],
-        )]
-    }
+    // Signed out — whether never connected or with every session ended, the way (back) in is
+    // the same login flow; `topos auth login` does not exist.
+    let _ = &d.workspaces;
+    vec![crate::actions::next_action(
+        ActionCode::from("LOGIN_WORKSPACE".to_owned()),
+        vec![
+            "topos".into(),
+            "login".into(),
+            "<workspace-address>".into(),
+            "--json".into(),
+        ],
+    )]
 }
 
 pub(crate) fn auth_status_tty(d: &crate::ops::AuthStatusData) -> String {
@@ -1339,11 +1356,11 @@ pub(crate) fn auth_status_tty(d: &crate::ops::AuthStatusData) -> String {
     if !d.signed_in {
         if d.server.is_none() && d.workspaces.is_empty() {
             s.push_str(
-                "\nnot enrolled — join with `topos login <workspace-address>` (ask a teammate \
+                "\nnot connected — join with `topos login <workspace-address>` (ask a teammate \
                  for the address)",
             );
         } else {
-            s.push_str("\nsign back in with `topos auth login`");
+            s.push_str("\nsign back in with `topos login <workspace-address>`");
         }
     }
     for ws in &d.workspaces {
@@ -1394,16 +1411,16 @@ fn remove_item_line(item: &RemoveItem, applied: bool) -> String {
             let manifest = item.manifest.as_deref().unwrap_or("topos.toml");
             format!(
                 "{manifest}: removed '{}' — delivery to this scope ends at the next `topos \
-                 update`; bytes already placed stay until then (undo: topos add {}).",
-                item.name, item.name
+                 update`; bytes already placed stay until then.",
+                item.name
             )
         }
         RemoveKind::ManifestExcluded => {
             let manifest = item.manifest.as_deref().unwrap_or("topos.toml");
             format!(
-                "{manifest}: excluded '{}' — a broader manifest still provides it, so an exclude \
-                 line (the one negative state) now shadows it here (undo: topos add {}).",
-                item.name, item.name
+                "{manifest}: excluded '{}' — a broader layer still provides it, so an exclude \
+                 line (the one negative state) now withholds it here.",
+                item.name
             )
         }
         RemoveKind::TrackedLocalPermanent => {
@@ -1646,8 +1663,8 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
     if let Some(ch) = &data.placement_withheld {
         out.push_str(&format!(
             "\nchannel '{ch}' is curated — the reference was NOT placed (placement takes \
-             reviewer or owner). The skill is in the catalog; a curator places it: `topos \
-             channel add {ch} {}`.",
+             reviewer or owner). The '{}' skill is in the catalog; a curator places it on the \
+             web (the channel's page).",
             data.name,
         ));
     }
@@ -1849,7 +1866,11 @@ pub(crate) fn review_tty(data: &ReviewData) -> String {
 /// renderer (it stays byte-silent).
 pub(crate) fn pull_tty(data: &PullData, warnings: &[String]) -> String {
     if data.skills.is_empty() && warnings.is_empty() {
-        return append_proposals_trailer("No followed skills.".to_owned(), data.proposals_awaiting);
+        return append_proposals_trailer(
+            "Nothing to update here — no manifest or profile demands anything in this directory."
+                .to_owned(),
+            data.proposals_awaiting,
+        );
     }
     let mut up_to_date = 0usize;
     let rows: Vec<(&str, String, Vec<String>)> = data
@@ -1890,7 +1911,7 @@ pub(crate) fn pull_tty(data: &PullData, warnings: &[String]) -> String {
     let total = data.skills.len() + warnings.len();
     if rows.is_empty() && warnings.is_empty() {
         out.push_str(&format!(
-            "Checked {total} followed skill(s) — all up to date."
+            "Checked {total} managed skill(s) — all up to date."
         ));
     } else {
         let mut parts = Vec::new();
@@ -1900,7 +1921,7 @@ pub(crate) fn pull_tty(data: &PullData, warnings: &[String]) -> String {
         if !warnings.is_empty() {
             parts.push(format!("{} failed", warnings.len()));
         }
-        out.push_str(&format!("Checked {total} followed skill(s)"));
+        out.push_str(&format!("Checked {total} managed skill(s)"));
         if !parts.is_empty() {
             out.push_str(&format!(": {}", parts.join(", ")));
         }
@@ -2185,7 +2206,7 @@ mod tests {
             "the withheld placement is disclosed: {line}"
         );
         assert!(
-            line.contains("`topos channel add everyone smoke-notes`"),
+            line.contains("a curator places it on the web"),
             "the curator's way in is named: {line}"
         );
     }
@@ -2339,7 +2360,7 @@ mod tests {
         // Up-to-date rows stay compact: counted in the summary, no `style` action row.
         assert!(!out.contains("style  up to date"), "{out}");
         assert!(
-            out.contains("Checked 7 followed skill(s): 1 up to date."),
+            out.contains("Checked 7 managed skill(s): 1 up to date."),
             "{out}"
         );
         // The reviewer-queue trailer.
@@ -2364,7 +2385,7 @@ mod tests {
         };
         assert_eq!(
             pull_tty(&clean, &[]),
-            "Checked 2 followed skill(s) — all up to date."
+            "Checked 2 managed skill(s) — all up to date."
         );
         // Nothing followed at all.
         let empty = PullData {
@@ -2373,7 +2394,10 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
         };
-        assert_eq!(pull_tty(&empty, &[]), "No followed skills.");
+        assert_eq!(
+            pull_tty(&empty, &[]),
+            "Nothing to update here — no manifest or profile demands anything in this directory."
+        );
         // A failed skill renders visibly and is counted (even when every synced row was current).
         let warnings = vec!["IO_ERROR s_docs: a filesystem operation failed".to_owned()];
         let out = pull_tty(&clean, &warnings);
@@ -2382,7 +2406,7 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.contains("Checked 3 followed skill(s): 2 up to date, 1 failed."),
+            out.contains("Checked 3 managed skill(s): 2 up to date, 1 failed."),
             "{out}"
         );
     }
@@ -2477,7 +2501,7 @@ mod tests {
         let text = list_tty(&out);
         // The header names the plane + hook; the workspace names move to the group headers.
         assert!(
-            text.starts_with("Enrolled at https://topos.example — auto-update hook: active"),
+            text.starts_with("Connected to https://topos.example — auto-update hook: active"),
             "{text}"
         );
         // The workspace group is named by its membership display label; the local skills group separately.
@@ -2491,7 +2515,7 @@ mod tests {
             "workspace group precedes local:\n{text}"
         );
         assert!(text.contains("docs@ababababab"), "{text}");
-        assert!(text.contains("(following, auto)"), "{text}");
+        assert!(text.contains("(delivered, auto)"), "{text}");
         assert!(
             text.contains("paused@") && text.contains("(paused — `topos add paused` resumes)"),
             "{text}"
@@ -2844,13 +2868,19 @@ mod tests {
         assert_eq!(actions[0].argv, vec!["topos", "add", "./deploy", "--json"]);
         assert!(actions[0].needs.is_empty());
 
-        // A sign-in-in-progress refusal mirrors `topos auth login` under its own code.
-        let actions = super::next_actions(&crate::error::ClientError::Enrollment(
-            "a sign-in is in progress; re-run `topos auth login` to finish it first".to_owned(),
-        ));
+        // A SESSION-REQUIRED refusal carries its address as an EXECUTABLE argv, typed.
+        let actions = super::next_actions(&crate::error::ClientError::SessionRequired {
+            address: "acme.test/eng".to_owned(),
+            message: "not logged into acme.test/eng — run `topos login acme.test/eng` first"
+                .to_owned(),
+        });
         assert_eq!(actions.len(), 1, "{actions:?}");
-        assert_eq!(actions[0].code.as_str(), "SIGN_IN");
-        assert_eq!(actions[0].argv, vec!["topos", "auth", "login", "--json"]);
+        assert_eq!(actions[0].code.as_str(), "LOGIN_WORKSPACE");
+        assert_eq!(
+            actions[0].argv,
+            vec!["topos", "login", "acme.test/eng", "--json"]
+        );
+        assert!(actions[0].needs.is_empty());
 
         // An expired flow mirrors the join template, needs and all.
         let actions = super::next_actions(&crate::error::ClientError::Enrollment(
@@ -2948,17 +2978,19 @@ mod tests {
         let text = auth_status_tty(&fresh);
         assert!(text.contains("`topos login <workspace-address>`"), "{text}");
 
-        // Enrolled but signed out: the fix is the concrete `auth login`.
+        // Previously connected but signed out: the same login template (the retired
+        // `topos auth login` spelling names no real command).
         let signed_out = AuthStatusData {
             server: Some("https://topos.sh/api".to_owned()),
             ..fresh
         };
         let actions = auth_status_next_actions(&signed_out);
         assert_eq!(actions.len(), 1, "{actions:?}");
-        assert_eq!(actions[0].code.as_str(), "SIGN_IN");
-        assert!(actions[0].needs.is_empty());
+        assert_eq!(actions[0].code.as_str(), "LOGIN_WORKSPACE");
+        assert_eq!(actions[0].needs, vec!["workspace-address"]);
         let text = auth_status_tty(&signed_out);
-        assert!(text.contains("`topos auth login`"), "{text}");
+        assert!(text.contains("`topos login <workspace-address>`"), "{text}");
+        assert!(!text.contains("auth login"), "{text}");
 
         // Signed in: nothing to fix.
         let signed_in = AuthStatusData {

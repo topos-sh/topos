@@ -92,9 +92,12 @@ fn review_inbox(
 ) -> Result<ReviewIndexData, ClientError> {
     let su = super::connect::session_universe(ctx, connectors.session)?;
     if su.universe.is_empty() {
-        return Err(ClientError::Enrollment(
-            "not connected to a workspace — run `topos login <workspace-address>` first".into(),
-        ));
+        return Err(ClientError::SessionRequired {
+            address: "<workspace-address>".to_owned(),
+            message: "not connected to a workspace — run `topos login <workspace-address>` \
+                          first"
+                .into(),
+        });
     }
     // The server-computed `yours` is the one authority on the session wire (identity is the
     // session's user; no principal file exists client-side any more).
@@ -167,9 +170,14 @@ fn review_describe(
     };
     let (id, workspace_id) = resolve_review_skill(ctx, connectors.session, &skill_name, workspace)?;
     let su = super::connect::session_universe(ctx, connectors.session)?;
-    let directory = su.directory_for(&workspace_id).ok_or_else(|| {
-        ClientError::Enrollment("no session for this workspace — `topos login` it first".into())
-    })?;
+    let directory =
+        su.directory_for(&workspace_id)
+            .ok_or_else(|| ClientError::SessionRequired {
+                address: "<workspace-address>".to_owned(),
+                message:
+                    "no session for this workspace — run `topos login <workspace-address>` first"
+                        .into(),
+            })?;
     let index = directory.proposals_index(&workspace_id)?;
     // The proposal on this skill matching the wanted hash, or its SOLE open proposal for a bare skill.
     let mut candidates: Vec<_> = index
@@ -302,9 +310,14 @@ pub(crate) fn review(
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
 
     let su = super::connect::session_universe(ctx, connectors.session)?;
-    let transport = su.contribute_for(&workspace_id).ok_or_else(|| {
-        ClientError::Enrollment("no session for this workspace — `topos login` it first".into())
-    })?;
+    let transport =
+        su.contribute_for(&workspace_id)
+            .ok_or_else(|| ClientError::SessionRequired {
+                address: "<workspace-address>".to_owned(),
+                message:
+                    "no session for this workspace — run `topos login <workspace-address>` first"
+                        .into(),
+            })?;
 
     // This command's WAL kind — the FULL 3-way verdict (approve / reject / withdraw), each a distinct
     // op kind, so a crashed op of a DIFFERENT verdict can never replay this one's stored receipt.
@@ -537,11 +550,13 @@ fn resolve_review_skill(
                     .map(|s| s.live().next().is_none())
                     .unwrap_or(false) =>
                 {
-                    Err(ClientError::Enrollment(
-                        "not connected to a workspace — run `topos login <workspace-address>` \
-                         first"
-                            .into(),
-                    ))
+                    Err(ClientError::SessionRequired {
+                        address: "<workspace-address>".to_owned(),
+                        message:
+                            "not connected to a workspace — run `topos login <workspace-address>` \
+                          first"
+                                .into(),
+                    })
                 }
                 None => Err(ClientError::NoSuchSkill { name }),
             }

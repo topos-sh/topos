@@ -219,6 +219,7 @@ fn pending_data(wal: &enroll::PendingEnrollment) -> LoginData {
         session_id: None,
         session_status: "awaiting-approval".to_owned(),
         delivered: None,
+        delivered_names: Vec::new(),
         pending: Some(EnrollmentPending {
             verification_uri: wal.verification_uri.clone(),
             user_code: wal.user_code.clone(),
@@ -292,7 +293,7 @@ fn resume(
             let currency = Some(ctx.harness.install_currency_trigger());
             // The acceptance disclosure: what connecting delivers RIGHT NOW (best-effort; a
             // pending session delivers nothing until an owner approves).
-            let delivered = if status == SESSION_ACTIVE {
+            let snapshot = if status == SESSION_ACTIVE {
                 (connectors.delivery)(
                     &session.base_url,
                     &session.credential,
@@ -300,10 +301,14 @@ fn resume(
                 )
                 .fetch_delivery(&session.workspace_id)
                 .ok()
-                .map(|s| s.skills.len() as u64)
             } else {
                 None
             };
+            let delivered = snapshot.as_ref().map(|s| s.skills.len() as u64);
+            let delivered_names = snapshot
+                .as_ref()
+                .map(|s| s.skills.iter().map(|d| d.name.clone()).collect())
+                .unwrap_or_default();
             Ok(LoginData {
                 workspace_id: session.workspace_id,
                 name: session.workspace_name,
@@ -312,6 +317,7 @@ fn resume(
                 session_id: Some(session.session_id),
                 session_status: status.to_owned(),
                 delivered,
+                delivered_names,
                 pending: None,
                 currency,
                 triggers: Vec::new(),
@@ -337,9 +343,10 @@ pub(crate) fn logout(
 ) -> Result<LogoutData, ClientError> {
     let all_sessions = sessions::read_sessions(ctx.fs, &ctx.layout)?;
     if all_sessions.sessions.is_empty() {
-        return Err(ClientError::Enrollment(
-            "not logged into any workspace; nothing to log out of".into(),
-        ));
+        return Err(ClientError::SessionRequired {
+            address: "<workspace-address>".to_owned(),
+            message: "not logged into any workspace; nothing to log out of".into(),
+        });
     }
     let names: Vec<String> = all_sessions
         .sessions
@@ -731,7 +738,7 @@ mod tests {
             // Nothing to log out of → typed.
             let noop = |_b: &str, _c: &str| -> Box<dyn GovernanceSource> { unreachable!() };
             let err = logout(ctx, &noop, None, false).unwrap_err();
-            assert_eq!(err.code(), "ENROLLMENT_FAILED");
+            assert_eq!(err.code(), "SESSION_REQUIRED");
 
             seed_session(ctx, "w_a", "acme");
             seed_session(ctx, "w_b", "beta");

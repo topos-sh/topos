@@ -100,11 +100,11 @@ fn safety(code: &ActionCode, argv: &[String]) -> Safety {
         // `--remote`, `log` only when the skill is followed on an enrolled install (unknowable
         // from the argv alone — left absent there).
         "NEXT_PAGE" => Safety::new(Some(false), page_dials_plane(argv), None),
-        // The pending device flow's resume: polling promotes the approval into a stored credential.
-        "ENROLL_RESUME" => Safety::new(
+        // The pending login flow's resume: polling promotes the approval into a stored session.
+        "ENROLL_RESUME" | "RESUME_LOGIN" => Safety::new(
             Some(true),
             Some(true),
-            Some("completes device enrollment — a credential is stored on this machine"),
+            Some("completes the login — a session credential is stored on this machine"),
         ),
         // The review inbox is a pure plane read.
         "REVIEW_INBOX" => Safety::new(Some(false), Some(true), None),
@@ -127,21 +127,13 @@ fn safety(code: &ActionCode, argv: &[String]) -> Safety {
         // argv (it IS a follow/unfollow/remove invocation) — the same per-verb refinement decides
         // the network story and any caution.
         "UNDO" => apply_described(argv),
-        // The unenrolled dead-ends' join pointer (`topos login <workspace-address>` — usually a
-        // template whose `needs` names the address): following dials, and a fresh install's
-        // follow ENROLLS this device (a credential is stored once the browser approval lands).
+        // The no-session dead-ends' join pointer (`topos login <workspace-address>` — a concrete
+        // address, or a template whose `needs` names it): logging in dials, and a session
+        // credential is stored once the browser approval lands.
         "LOGIN_WORKSPACE" => Safety::new(
             Some(true),
             Some(true),
-            Some(
-                "enrolls this device when not yet enrolled (browser approval; a credential is stored)",
-            ),
-        ),
-        // The signed-out pointer: `auth login` re-runs the device flow.
-        "SIGN_IN" => Safety::new(
-            Some(true),
-            Some(true),
-            Some("re-mints this device's credential (browser approval)"),
+            Some("logs this machine in (browser approval; a session credential is stored)"),
         ),
         // A refusal's prose-named fix, mirrored verbatim (`render::mirror_prose_commands`). The
         // argv is the whole story; only the read-only verbs are classifiable from it.
@@ -262,15 +254,15 @@ fn apply_described(argv: &[String]) -> Safety {
             Some("moves the team's current for every follower (a forward move; nothing deleted)"),
         ),
         Some("review") => (Some(true), Some("settles the proposal for the whole team")),
-        Some("protect") | Some("channel") | Some("invite") => (Some(true), None),
-        // Subscription rows + delivery. With `--agent` the argv may be a device-local scope
-        // change (offline) OR a subscribe recording an include-list (networked) — unknowable
-        // from the argv alone, so the network story is honestly absent there.
-        Some("follow") if has_flag(argv, "--agent") => (None, None),
-        Some("follow") => (Some(true), None),
-        Some("unfollow") => (
+        Some("protect") | Some("invite") => (Some(true), None),
+        // Session verbs: login stores a session credential; logout ends one server-side.
+        Some("login") => (
             Some(true),
-            Some("delivery stops on every device of yours (local copies stay, frozen)"),
+            Some("logs this machine in (browser approval; a session credential is stored)"),
+        ),
+        Some("logout") => (
+            Some(true),
+            Some("ends the session server-side; skills and manifests stay"),
         ),
         // `update --reset --yes` is the loss-led local discard; a plain `update … --yes` syncs.
         Some("update") if has_flag(argv, "--reset") => (
@@ -306,9 +298,10 @@ fn apply_described(argv: &[String]) -> Safety {
         },
         Some("uninstall") => (
             Some(false),
-            Some("deletes the ~/.topos sidecar tree (the stored credential goes with it)"),
+            Some("deletes the ~/.topos sidecar tree (the stored sessions go with it)"),
         ),
-        Some("auth") => (Some(true), None),
+        // `auth status` is the one remaining auth subcommand — a read-only probe.
+        Some("auth") => (Some(false), None),
         _ => (None, None),
     };
     Safety::new(Some(true), needs_network, risk_note)
@@ -365,21 +358,21 @@ mod tests {
     }
 
     #[test]
-    fn the_join_and_sign_in_codes_carry_their_classification() {
-        let follow = next_action(
+    fn the_join_code_carries_its_classification() {
+        let login = next_action(
             ActionCode::from("LOGIN_WORKSPACE".to_owned()),
             argv(&["topos", "login", "<workspace-address>", "--json"]),
         );
         assert_eq!(
-            (follow.mutates, follow.needs_network),
+            (login.mutates, login.needs_network),
             (Some(true), Some(true))
         );
-        let login = next_action(
-            ActionCode::from("SIGN_IN".to_owned()),
-            argv(&["topos", "auth", "login", "--json"]),
+        let resume = next_action(
+            ActionCode::from("RESUME_LOGIN".to_owned()),
+            argv(&["topos", "login", "--json"]),
         );
         assert_eq!(
-            (login.mutates, login.needs_network),
+            (resume.mutates, resume.needs_network),
             (Some(true), Some(true))
         );
         // A mirrored read-only fix classifies as a read; anything else stays honestly unknown.
@@ -555,21 +548,21 @@ mod tests {
         // argv — the one rules module classifies it through the same per-verb refinement.
         let undo = next_action(
             ActionCode::from("UNDO".to_owned()),
-            argv(&["topos", "follow", "acme/skills/deploy"]),
+            argv(&["topos", "login", "acme.test/eng"]),
         );
         assert_eq!((undo.mutates, undo.needs_network), (Some(true), Some(true)));
-        let undo_unfollow = next_action(
+        let undo_logout = next_action(
             ActionCode::from("UNDO".to_owned()),
-            argv(&["topos", "unfollow", "acme/skills/deploy"]),
+            argv(&["topos", "logout", "eng"]),
         );
-        assert_eq!(undo_unfollow.mutates, Some(true));
+        assert_eq!(undo_logout.mutates, Some(true));
         assert!(
-            undo_unfollow
+            undo_logout
                 .risk_note
                 .as_deref()
                 .unwrap_or("")
-                .contains("every device"),
-            "{undo_unfollow:?}"
+                .contains("skills and manifests stay"),
+            "{undo_logout:?}"
         );
     }
 

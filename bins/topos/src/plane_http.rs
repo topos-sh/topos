@@ -531,11 +531,12 @@ impl UreqDeviceClient {
     /// documents the call site's scope; the ONE credential serves every workspace the person's seats
     /// reach (the server authorizes per request).
     fn credential_for(&self, _workspace_id: &str) -> Result<&str, ClientError> {
-        self.credential.as_deref().ok_or_else(|| {
-            ClientError::Enrollment(
-                "not enrolled; run `topos login <workspace-address>` first".into(),
-            )
-        })
+        self.credential
+            .as_deref()
+            .ok_or_else(|| ClientError::SessionRequired {
+                address: "<workspace-address>".to_owned(),
+                message: "not logged in; run `topos login <workspace-address>` first".into(),
+            })
     }
 
     /// POST a JSON body UNAUTHENTICATED (the enrollment routes). See [`Self::post_json_auth`] for the

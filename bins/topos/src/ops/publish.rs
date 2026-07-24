@@ -104,11 +104,12 @@ pub(crate) fn publish(
         .sessions
         .is_empty();
     if !has_sessions {
-        return Err(ClientError::Enrollment(
-            "not connected to a workspace — run `topos login <workspace-address>` first, then \
-             re-run this publish"
+        return Err(ClientError::SessionRequired {
+            address: "<workspace-address>".to_owned(),
+            message: "not connected to a workspace — run `topos login <workspace-address>` \
+                      first, then re-run this publish"
                 .into(),
-        ));
+        });
     }
 
     // Auto-add: adopt an untracked LOCAL source before publishing, and learn the tracked skill name the
@@ -701,9 +702,10 @@ fn enrolled_publish(
     let (base_url, workspace_id) = match &lane {
         Some(l) => (l.base_url.clone(), l.workspace_id.clone()),
         None => {
-            return Err(ClientError::Enrollment(
-                "not connected — run `topos login <workspace-address>` first".into(),
-            ));
+            return Err(ClientError::SessionRequired {
+                address: "<workspace-address>".to_owned(),
+                message: "not connected — run `topos login <workspace-address>` first".into(),
+            });
         }
     };
     // `--to` takes an EXISTING channel — verified before any op is minted (never a silent
