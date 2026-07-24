@@ -42,6 +42,9 @@ function parseSource(
   raw: string,
 ): { repo: string; subdir: string; treeRest: string[] | null } | null {
   let token = raw.trim();
+  if (token.length > 500) {
+    return null; // no real GitHub reference is this long — refuse before any fetch work
+  }
   token = token.replace(/^https?:\/\//, "").replace(/^github\.com\//, "");
   token = token.replace(/\.git$/, "").replace(/\/+$/, "");
   const treeMatch = token.match(/^([^/]+\/[^/]+)\/tree\/(.+)$/);

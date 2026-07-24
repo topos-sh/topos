@@ -44,7 +44,17 @@ export function untar(tar: Buffer): { files: TarFile[]; comment: string | null }
   while (offset + 512 <= tar.length) {
     const header = tar.subarray(offset, offset + 512);
     if (header.every((b) => b === 0)) {
-      sawEnd = true; // the end-of-archive zero blocks
+      // POSIX ends an archive with TWO zero blocks; everything after them is zero padding
+      // (the blocking factor). One lone block — or non-zero bytes past the marker — is a cut
+      // or doctored archive, refused whole.
+      const second = tar.subarray(offset + 512, offset + 1024);
+      if (second.length < 512 || !second.every((b) => b === 0)) {
+        throw new Error("malformed archive: bad end-of-archive marker");
+      }
+      if (!tar.subarray(offset + 1024).every((b) => b === 0)) {
+        throw new Error("malformed archive: data after the end-of-archive marker");
+      }
+      sawEnd = true;
       break;
     }
     // The header checksum: the stored field read as spaces, summed bytewise. A mismatch is a
@@ -231,11 +241,19 @@ export async function fetchUpstreamTree(
   return { commit: comment, files: inSubdir, license };
 }
 
+/** Ref prefixes probed for a `/tree/<...>` remainder — refs deeper than this are not
+ * resolved (and one bounded probe per prefix keeps a hostile many-segment paste cheap). */
+const MAX_REF_PROBES = 5;
+
 /**
  * Resolve a pasted `/tree/<...>` remainder against the LIVE repo. The text alone is
- * ambiguous — branch names may contain `/` — but git forbids a ref named both `a` and
- * `a/b`, so probing shortest-prefix-first is unambiguous: the first prefix codeload serves
- * IS the ref, and the rest is the subdir. Non-404 failures surface immediately.
+ * ambiguous — branch names may contain `/` — so this probes shortest-prefix-first: within
+ * one ref namespace git forbids a name that is both `a` and `a/b`, so the first prefix
+ * codeload serves is the ref and the rest the subdir. A CROSS-namespace shadow (a tag
+ * `a/b` behind a branch `a`) is a deliberate non-goal of this no-API heuristic: it surfaces
+ * as a visibly wrong or empty PREVIEW — the human confirms the resolved commit and file
+ * list before anything lands — never as a silent publish. Non-404 failures surface
+ * immediately.
  */
 export async function resolveTreeSource(
   repo: string,
@@ -243,7 +261,7 @@ export async function resolveTreeSource(
   fetcher: TarballFetcher = fetchCodeload,
 ): Promise<{ tree: UpstreamTree; ref: string; subdir: string }> {
   let lastError: unknown = null;
-  for (let i = 1; i <= rest.length; i++) {
+  for (let i = 1; i <= Math.min(rest.length, MAX_REF_PROBES); i++) {
     const ref = rest.slice(0, i).join("/");
     const subdir = rest.slice(i).join("/");
     try {
