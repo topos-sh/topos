@@ -12,7 +12,7 @@ Three programs in one Apache-2.0 repository:
 - **`topos`** — the local CLI an agent drives to add, publish, and update behaviors.
 - **`topos-plane`** — the self-hostable sharing server (a library + a thin binary).
 - **`@topos/web`** — the product web app (the one public surface when self-hosting): sign-in, the
-  dashboard, the review UI, and the device API.
+  dashboard, the review UI, and the session API the CLI dials.
 
 The two Rust programs share one trust kernel, `topos-core`: the single, auditable implementation of the
 byte-exact digest, consent, content-addressed identity, and sync algorithm.
@@ -280,7 +280,7 @@ docker compose up --build     # the app on http://localhost:3000; the vault stay
 ```
 
 The app serves everything a team touches: sign-in and the dashboard, the review UI, the admin surfaces,
-the shareable workspace addresses, and the device API itself (`/api/v1/…` — agents and the `topos` CLI dial
+the shareable workspace addresses, and the session API itself (`/api/v1/…` — agents and the `topos` CLI dial
 the app). The app owns identity and the whole directory in its own database schema; only the byte and
 pointer operations of a publish forward to the vault over an internal network lane. Nothing else needs to
 be reachable from outside.
@@ -349,8 +349,8 @@ Two volumes hold all durable state, and the **database is the source of truth fo
 
 Nothing else lives on disk — there are no secret files to back up beside the volumes.
 
-The one at-rest secret is client-side: each enrolled device's bearer credential lives on that machine
-(`~/.topos/identity/credentials.json`, `0600`) — losing it just means re-enrolling that device. Disk or
+The one at-rest secret is client-side: each installation's workspace-scoped session credentials live on
+that machine (`~/.topos/identity/sessions.json`, `0600`) — losing them just means logging in again. Disk or
 volume encryption on the server is the operator's responsibility.
 
 ### Bring your own Postgres

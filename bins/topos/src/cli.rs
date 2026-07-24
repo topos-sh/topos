@@ -156,7 +156,7 @@ pub(crate) enum Command {
         #[arg(long, short = 'g')]
         global: bool,
         /// Apply a described removal (a draft's loss-guard, or a permanent local delete).
-        /// Accepted as a no-op on a followed clean skill (which applies immediately).
+        /// Accepted as a no-op on a manifest-line remove (which applies immediately).
         #[arg(long)]
         yes: bool,
     },
@@ -165,8 +165,9 @@ pub(crate) enum Command {
     List {
         /// Narrow to one or more skills by name (errors if a name is ambiguous).
         name: Vec<String>,
-        /// Also list skills available in the workspace(s) you follow (the remote catalog), annotated
-        /// with your follow-state. Requires enrollment; `--workspace` (name or id) narrows.
+        /// Also list skills available in your logged-in workspace(s) (each session's catalog),
+        /// annotated with their delivery state here. Needs a session — run `topos login
+        /// <workspace-address>` first; `--workspace` (name or id) narrows.
         #[arg(long)]
         remote: bool,
         /// Show only locally-tracked skills — skip discovery of untracked harness-dir skills.

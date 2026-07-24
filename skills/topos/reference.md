@@ -93,7 +93,7 @@ Remove skills from this folder's reach. The inverse of `add`: the nearest manife
 |---|---|---|---|
 | `[SKILL]...` |  |  | The skill name(s) to remove |
 | `-g, --global` |  |  | Edit your server-stored PROFILE for the workspace the reference resolves to instead of this folder's manifest — delivery stops on every machine you log in; when a channel or the baseline still provides it, an exclude line is recorded (the receipt says which) |
-| `--yes` |  |  | Apply a described removal (a draft's loss-guard, or a permanent local delete). Accepted as a no-op on a followed clean skill (which applies immediately) |
+| `--yes` |  |  | Apply a described removal (a draft's loss-guard, or a permanent local delete). Accepted as a no-op on a manifest-line remove (which applies immediately) |
 
 
 ### `topos update`
@@ -125,7 +125,7 @@ Inventory the skills on this machine. By default also discovers **untracked** sk
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
 | `[NAME]...` |  |  | Narrow to one or more skills by name (errors if a name is ambiguous) |
-| `--remote` |  |  | Also list skills available in the workspace(s) you follow (the remote catalog), annotated with your follow-state. Requires enrollment; `--workspace` (name or id) narrows |
+| `--remote` |  |  | Also list skills available in your logged-in workspace(s) (each session's catalog), annotated with their delivery state here. Needs a session — run `topos login <workspace-address>` first; `--workspace` (name or id) narrows |
 | `--tracked` |  |  | Show only locally-tracked skills — skip discovery of untracked harness-dir skills |
 | `--footprint` |  |  | Also report the paths topos owns outside skill directories |
 | `--channel` | `<NAME>` |  | Narrow to one channel's skills (repeatable). Lands with the full resolution grammar |

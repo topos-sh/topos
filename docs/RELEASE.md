@@ -29,17 +29,18 @@ check an item off in the same change that lands it.
 
 ## Operational gaps to close (or explicitly accept and document)
 
-- [x] **First-boot workspace standup**: DONE — the binary mints the one-time claim in-band
-      (`topos-plane mint-claim` prints the `/i/` link exactly once; the token never enters tracing), and
-      one `topos follow <claim-link>` seats the first owner. The README's self-host walkthrough shows it.
+- [x] **First-boot workspace standup**: DONE — the app's first boot mints the workspace and prints the
+      one-time claim link (`/claim?code=…`) exactly once to its logs; opening it in a browser creates the
+      first account and seats the owner, and `topos login <address>` then mints that machine's session.
+      The README's self-host walkthrough shows it, and the compose smoke drives the claim page end-to-end.
 - [x] **TLS posture**: the plane serves plain HTTP — the reverse-proxy termination pattern is documented as
       the supported deployment in the README's self-hosting section. DONE.
 - [x] **At-rest key posture**: the server holds no key files — the vault is identity-free and the
       internal-lane bearer arrives via environment, never disk. The one at-rest secret is the CLIENT's
-      device credential (`~/.topos/identity/credentials.json`, plaintext `0600`; at-rest encryption not
+      session credentials (`~/.topos/identity/sessions.json`, plaintext `0600`; at-rest encryption not
       implemented). Accepted for v0, stated as fact in the README's self-hosting Backups section
-      (disk/volume encryption is the operator's; a lost or leaked credential is handled by revoke +
-      re-enroll).
+      (disk/volume encryption is the operator's; a lost or leaked credential is handled by ending the
+      session + logging in again).
 
 ## Release signing (minisign)
 
