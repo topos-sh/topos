@@ -669,7 +669,7 @@ impl EnrollSource for UreqDeviceClient {
             invite_token: invite_token.map(str::to_owned),
         })
         .map_err(|e| ClientError::Corrupt(format!("authorize body: {e}")))?;
-        let url = format!("{}/v1/device/authorize", self.base_url);
+        let url = format!("{}/v1/login/authorize", self.base_url);
         let (status, bytes) = self.post_json(&url, &body, "device authorize")?;
         if classify(status) != HttpClass::Ok {
             return Err(ClientError::Plane(format!(
@@ -695,7 +695,7 @@ impl EnrollSource for UreqDeviceClient {
             device_code: device_code.to_owned(),
         })
         .map_err(|_| ClientError::Corrupt("poll body: could not serialize".to_owned()))?;
-        let url = format!("{}/v1/device/token", self.base_url);
+        let url = format!("{}/v1/login/token", self.base_url);
         let (status, bytes) = self.post_json(&url, &body, "device token poll")?;
         map_poll_response(status, &bytes)
     }
@@ -718,12 +718,15 @@ fn map_poll_response(status: u16, bytes: &[u8]) -> Result<DeviceAuthPoll, Client
         DeviceAuthPollStatus::Denied => DeviceAuthPoll::Denied,
         DeviceAuthPollStatus::Expired => DeviceAuthPoll::Expired,
         DeviceAuthPollStatus::Granted => {
+            // The SESSION wire grants `session_id`/`session_status`; the retired device wire
+            // granted `device_id`/`link_status` — accept either pair (one id, one status).
+            let id = resp.session_id.clone().or(resp.device_id);
             let (Some(credential), Some(device_id), Some(workspace)) =
-                (resp.credential, resp.device_id, resp.workspace)
+                (resp.credential, id, resp.workspace)
             else {
                 // `granted` without its grant halves is a malformed response, not a silent re-poll.
                 return Err(ClientError::WireInvalid(
-                    "a granted device-token poll carried no credential/device/workspace".into(),
+                    "a granted login poll carried no credential/session/workspace".into(),
                 ));
             };
             // The wire boundary: the workspace id becomes a URL segment + a user.json key, so it must
@@ -738,12 +741,18 @@ fn map_poll_response(status: u16, bytes: &[u8]) -> Result<DeviceAuthPoll, Client
                     name: workspace.name,
                     display_name: workspace.display_name,
                 },
+                session_id: resp.session_id,
                 hint: resp.hint.map(|h| crate::plane::GrantHint {
                     kind: h.kind,
                     name: h.name,
                 }),
-                // The FIRST link's born status — an older producer omits it (⇒ active).
-                link_status: LinkStatus::from_wire(resp.link_status.as_deref()),
+                // The session's born status (the retired link spelling accepted as a fallback);
+                // an older producer omits both (⇒ active).
+                link_status: LinkStatus::from_wire(
+                    resp.session_status
+                        .as_deref()
+                        .or(resp.link_status.as_deref()),
+                ),
             })
         }
     })
@@ -772,6 +781,34 @@ impl GovernanceSource for UreqDeviceClient {
         );
         let (status, bytes) = self.post_json_auth(&url, credential, &value, "create invitation")?;
         map_invite_envelope(status, &bytes)
+    }
+
+    fn revoke_session(&self) -> Result<(), ClientError> {
+        // The one-session sign-out — the Bearer credential itself names the session; the server
+        // deletes the row (reported state cascading) and a retry answers the uniform 404.
+        let credential = self.credential_for("")?;
+        let url = format!("{}/v1/session", self.base_url);
+        let resp = self
+            .agent
+            .delete(&url)
+            .header("authorization", format!("Bearer {credential}"))
+            .call()
+            .map_err(|e| ClientError::Plane(format!("session revoke: {e}")))?;
+        let status = resp.status().as_u16();
+        match classify(status) {
+            HttpClass::Ok => {
+                let bytes = read_body(resp).map_err(plane_err)?;
+                map_row_envelope(&bytes)
+            }
+            // The uniform 404: already ended (or a dead credential) — the caller treats it as
+            // already-signed-out and proceeds with the local delete.
+            HttpClass::NotFound => Err(ClientError::TargetNotFound {
+                target: "session".to_owned(),
+            }),
+            HttpClass::NotModified | HttpClass::Other => {
+                Err(ClientError::Plane(format!("session revoke: HTTP {status}")))
+            }
+        }
     }
 
     fn revoke_device(&self) -> Result<(), ClientError> {

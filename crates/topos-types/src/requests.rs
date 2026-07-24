@@ -669,6 +669,15 @@ pub struct DeviceAuthPollResponse {
     /// The registered device's id — present ONLY when `status` is `granted`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
+    /// The minted SESSION's id — the session-model login wire's grant half (a session = user ×
+    /// workspace × installation; the credential is workspace-scoped). Present ONLY when `status`
+    /// is `granted` on a session-serving producer. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// The session's born status — `"active"`, or `"pending"` while the workspace's
+    /// session-approval knob holds it. Absent ⇒ treat as active. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_status: Option<String>,
     /// The joined workspace — present ONLY when `status` is `granted`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<DeviceAuthWorkspace>,
@@ -1225,6 +1234,8 @@ mod tests {
             status: DeviceAuthPollStatus::Pending,
             credential: None,
             device_id: None,
+            session_id: None,
+            session_status: None,
             workspace: None,
             hint: None,
             link_status: None,
@@ -1239,6 +1250,8 @@ mod tests {
             status: DeviceAuthPollStatus::Granted,
             credential: Some("dc_secret".to_owned()),
             device_id: Some("dev_1".to_owned()),
+            session_id: Some("sn_1".to_owned()),
+            session_status: None,
             workspace: Some(DeviceAuthWorkspace {
                 workspace_id: "w_acme".to_owned(),
                 name: "acme".to_owned(),

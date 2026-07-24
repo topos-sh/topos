@@ -174,6 +174,7 @@ mod tests {
             &layout,
             &enroll::PendingEnrollment {
                 schema_version: PERSISTED_SCHEMA_VERSION,
+                host: String::new(),
                 base_url: "https://topos.sh/api".to_owned(),
                 workspace_name: "acme".to_owned(),
                 intent: enroll::EnrollIntentDoc::Follow {

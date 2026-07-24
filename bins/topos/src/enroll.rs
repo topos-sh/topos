@@ -350,6 +350,9 @@ pub(crate) enum EnrollIntentDoc {
     },
     /// An `auth login` re-enrollment — no follow intent; the grant just replaces the credential.
     Login,
+    /// A `topos login <workspace-address>` SESSION login (the session model: the grant mints ONE
+    /// workspace-scoped session into `identity/sessions.json`).
+    Session,
 }
 
 /// The enrollment WAL document — ONE live device-authorization flow, awaiting the human's approval.
@@ -359,6 +362,12 @@ pub(crate) struct PendingEnrollment {
     pub schema_version: u32,
     /// The API base the flow runs against (the card's declared base, re-root-gated).
     pub base_url: String,
+    /// The ADDRESS host the human typed (`topos.sh`, `topos.example.com[:port]`) — the manifest
+    /// grammar's host half, recorded so the minted session carries it. ADDITIVE with a serde
+    /// default (a pre-field WAL reads as empty; the session persist falls back to the base URL's
+    /// host).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub host: String,
     /// The requested workspace ADDRESS slug (the `device/authorize` body's `workspace`). Whether it
     /// exists is never disclosed pre-approval; the granted poll carries the authoritative workspace.
     pub workspace_name: String,
@@ -384,6 +393,7 @@ impl std::fmt::Debug for PendingEnrollment {
         f.debug_struct("PendingEnrollment")
             .field("schema_version", &self.schema_version)
             .field("base_url", &self.base_url)
+            .field("host", &self.host)
             .field("workspace_name", &self.workspace_name)
             .field("intent", &self.intent)
             .field("device_code", &"<redacted>")
@@ -978,6 +988,7 @@ mod tests {
         PendingEnrollment {
             schema_version: PERSISTED_SCHEMA_VERSION,
             base_url: "https://topos.sh/api".to_owned(),
+            host: "topos.sh".to_owned(),
             workspace_name: "acme".to_owned(),
             intent: EnrollIntentDoc::Follow {
                 target: Some(FollowTargetDoc {

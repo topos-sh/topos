@@ -352,6 +352,69 @@ pub(crate) fn to_json(envelope: &JsonEnvelope) -> String {
     serde_json::to_string(envelope).unwrap_or_else(|_| "{\"ok\":false}".to_owned())
 }
 
+/// The `login` receipt — pending (the approval instructions) or the completed session, led by the
+/// acceptance disclosure (what connecting delivers; silent from here).
+pub(crate) fn session_login_tty(data: &topos_types::results::LoginData) -> String {
+    if let Some(p) = &data.pending {
+        let mut s = format!(
+            "Approve this login in your browser:\n  Open: {}\n  Code: {} (the page shows the \
+             same code — confirm it matches)\nThen re-run `topos login` to finish.",
+            p.verification_uri, p.user_code
+        );
+        if !data.name.is_empty() {
+            s = format!("Logging into '{}'.\n{s}", data.name);
+        }
+        return s;
+    }
+    let label = data
+        .display_name
+        .clone()
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| data.name.clone());
+    let mut s = format!("Logged into {label}");
+    if !data.name.is_empty() && data.display_name.as_deref().is_some_and(|d| d != data.name) {
+        s.push_str(&format!(" ({})", data.name));
+    }
+    match data.session_status.as_str() {
+        "pending" => s.push_str(
+            " — the session awaits an owner's approval; delivery starts automatically once \
+             approved (nothing lands until then).",
+        ),
+        _ => match data.delivered {
+            Some(0) => s.push_str(" — nothing in your profile delivers here yet."),
+            Some(n) => s.push_str(&format!(
+                " — your profile delivers {n} skill{} here; updates arrive silently (`topos \
+                 update` any time).",
+                if n == 1 { "" } else { "s" }
+            )),
+            None => s.push('.'),
+        },
+    }
+    s.push_str(&format!(
+        "\nUndo: topos logout{}",
+        if data.name.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", data.name)
+        }
+    ));
+    s
+}
+
+/// The `logout` receipt — the ended sessions + the honest server-side outcome.
+pub(crate) fn session_logout_tty(data: &topos_types::results::LogoutData) -> String {
+    let mut s = format!("Logged out of {}.", data.ended.join(", "));
+    if !data.server_revoked {
+        s.push_str(
+            "\nNote: at least one session could not be revoked server-side (already ended, or \
+             unreachable) — the local sign-out completed regardless; the web sessions page shows \
+             what the server still holds.",
+        );
+    }
+    s.push_str("\nSkills, drafts, and manifests stay; `topos login <address>` signs back in.");
+    s
+}
+
 /// The `init` receipt — the manifest's path, whether it was created, and the honest travel note.
 pub(crate) fn init_tty(data: &topos_types::results::InitData) -> String {
     let mut out = if data.created {

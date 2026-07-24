@@ -305,6 +305,65 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
         Command::Status => unreachable!("status dispatches before state recovery"),
         // `init` — create this folder's `topos.toml` (idempotent; a no-op receipt when it exists).
         Command::Init => finish(json, cmd_name, ops::init(&ctx), render::init_tty, &diag),
+        // `login <address>` — mint ONE workspace-scoped session (the gh-style browser approval;
+        // re-invoking resumes). The same blocking idiom as `follow`: a TTY (or `--wait`) run
+        // re-polls until the approval settles; piped/`--json` without `--wait` never hangs.
+        Command::Login { address, wait } => {
+            let connect_session_delivery =
+                |base: &str, cred: &str, ws: &str| -> Box<dyn crate::plane::DeliverySource> {
+                    Box::new(
+                        UreqPlane::new(base.to_owned(), Some(cred.to_owned()), Default::default())
+                            .with_workspaces(vec![ws.to_owned()]),
+                    )
+                };
+            let connectors = ops::LoginConnectors {
+                enroll: &connect_enroll,
+                delivery: &connect_session_delivery,
+                web_origin: web_origin.clone(),
+            };
+            let first = ops::session_login(&ctx, &connectors, address.as_deref());
+            let stdout_tty = {
+                use std::io::IsTerminal;
+                std::io::stdout().is_terminal()
+            };
+            let policy = WaitPolicy::resolve(json, wait, stdout_tty, &clock);
+            let result = block_on_pending(
+                &clock,
+                &policy,
+                first,
+                session_login_pending_disclosure,
+                None,
+                || ops::session_login(&ctx, &connectors, address.as_deref()),
+            );
+            // The breadth arming sweep + the built-in skill ride the completed login (the
+            // acceptance event is the trigger-arming moment), exactly as on `follow`'s receipt.
+            let result = result.map(|mut data| {
+                if data.currency.is_some() {
+                    data.triggers = breadth_arm(&ctx.roots, harness.as_ref(), &fs);
+                    if let Err(e) = ops::ensure_builtin(&ctx) {
+                        let _ = diag.note(cmd_name, &e);
+                    }
+                }
+                data
+            });
+            finish_session_login(json, cmd_name, result, &diag)
+        }
+        // `logout [<workspace>|--all]` — end session(s); immediate (a fresh `login` is the way
+        // back, and the receipt reports the server-side outcome honestly).
+        Command::Logout { workspace: ws, all } => {
+            let connect_session_revoke = |base: &str, cred: &str| -> Box<dyn GovernanceSource> {
+                Box::new(UreqDeviceClient::new(
+                    base.to_owned(),
+                    Some(cred.to_owned()),
+                ))
+            };
+            finish_session_logout(
+                json,
+                cmd_name,
+                ops::session_logout(&ctx, &connect_session_revoke, ws.as_deref(), all),
+                &diag,
+            )
+        }
         Command::Add {
             source,
             skill,
@@ -2292,6 +2351,74 @@ fn follow_pending_disclosure(out: &ops::FollowOutcome) -> Option<PendingDisclosu
             expires_at_millis: p.expires_at.as_deref().and_then(parse_rfc3339_utc_millis),
         }),
         _ => None,
+    }
+}
+
+/// The pending disclosure for a `login` (session) outcome (None ⇒ the login settled).
+fn session_login_pending_disclosure(
+    out: &topos_types::results::LoginData,
+) -> Option<PendingDisclosure> {
+    out.pending.as_ref().map(|p| PendingDisclosure {
+        verification_uri: p.verification_uri.clone(),
+        user_code: p.user_code.clone(),
+        interval_secs: p.interval_secs,
+        expires_at_millis: p.expires_at.as_deref().and_then(parse_rfc3339_utc_millis),
+    })
+}
+
+/// `login`'s finisher — pending (the browser-approval wait, with the resume next-action) or the
+/// completed session receipt.
+fn finish_session_login(
+    json: bool,
+    command: &str,
+    result: Result<topos_types::results::LoginData, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(data) => {
+            if json {
+                let next_actions = if data.pending.is_some() {
+                    vec![crate::actions::next_action(
+                        topos_types::ActionCode::from("RESUME_LOGIN".to_owned()),
+                        vec!["topos".to_owned(), "login".to_owned(), "--json".to_owned()],
+                    )]
+                } else {
+                    vec![crate::actions::next_action(
+                        topos_types::ActionCode::from("UPDATE".to_owned()),
+                        vec!["topos".to_owned(), "update".to_owned(), "--json".to_owned()],
+                    )]
+                };
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = next_actions;
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::session_login_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
+    }
+}
+
+/// `logout`'s finisher — the ended sessions + the honest server-side outcome.
+fn finish_session_logout(
+    json: bool,
+    command: &str,
+    result: Result<topos_types::results::LogoutData, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(data) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                println!("{}", render::to_json(&render::ok_envelope(command, value)));
+            } else {
+                println!("{}", render::session_logout_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
     }
 }
 

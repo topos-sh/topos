@@ -174,6 +174,7 @@ impl FakeEnroll {
             hint: None,
             link_status: crate::plane::LinkStatus::Active,
             credential: "devc_new".into(),
+            session_id: None,
             device_id: "dev_new".into(),
             workspace: EnrolledWorkspace {
                 workspace_id: WS.into(),
@@ -458,6 +459,7 @@ fn a_follow_owned_wal_refuses_toward_follow() {
         &rig.layout(),
         &enroll::PendingEnrollment {
             schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+            host: String::new(),
             base_url: API.to_owned(),
             workspace_name: "acme".to_owned(),
             intent: enroll::EnrollIntentDoc::Follow {

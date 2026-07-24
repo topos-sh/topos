@@ -163,6 +163,7 @@ impl FakeEnroll {
             hint: None,
             link_status: crate::plane::LinkStatus::Active,
             credential: "devc_secret".into(),
+            session_id: None,
             device_id: "dev_1".into(),
             workspace: EnrolledWorkspace {
                 workspace_id: WS.into(),
@@ -847,6 +848,7 @@ fn a_granted_flow_with_a_pending_first_link_prints_the_receipt_and_skips_the_sub
         hint: None,
         link_status: crate::plane::LinkStatus::Pending,
         credential: "devc_secret".into(),
+        session_id: None,
         device_id: "dev_1".into(),
         workspace: EnrolledWorkspace {
             workspace_id: WS.into(),
@@ -884,6 +886,7 @@ fn a_login_owned_wal_refuses_toward_auth_login() {
         &rig.layout(),
         &enroll::PendingEnrollment {
             schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+            host: String::new(),
             base_url: API.to_owned(),
             workspace_name: "acme".to_owned(),
             intent: enroll::EnrollIntentDoc::Login,
@@ -914,6 +917,7 @@ fn the_recovery_sweep_reaps_an_expired_wal_so_follow_starts_fresh() {
         &rig.layout(),
         &enroll::PendingEnrollment {
             schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+            host: String::new(),
             base_url: API.to_owned(),
             workspace_name: "acme".to_owned(),
             intent: enroll::EnrollIntentDoc::Follow {
@@ -1352,6 +1356,7 @@ fn a_granted_invite_flow_continues_into_the_hinted_skill() {
     let rig = Rig::new("inv-url-hint");
     let log: CallLog = Arc::default();
     let granted_with_hint = DeviceAuthPoll::Granted(EnrolledGrant {
+        session_id: None,
         hint: Some(crate::plane::GrantHint {
             kind: "skill".into(),
             name: "deploy".into(),

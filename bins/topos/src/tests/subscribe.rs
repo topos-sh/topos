@@ -491,6 +491,7 @@ impl EnrollSource for FakeAddressEnroll {
             hint: None,
             link_status: crate::plane::LinkStatus::Active,
             credential: "devc_secret".into(),
+            session_id: None,
             device_id: "dev_1".into(),
             workspace: EnrolledWorkspace {
                 workspace_id: WS.into(),

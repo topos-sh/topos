@@ -29,6 +29,7 @@ mod init;
 mod invite;
 mod list;
 mod log;
+mod login;
 pub(crate) mod loopback;
 mod manifest_edit;
 mod merge_resolve;
@@ -80,6 +81,7 @@ pub(crate) use follow::fmt_rfc3339_millis;
 pub(crate) use init::init;
 pub(crate) use invite::{InviteConnectors, InviteOutcome, invite};
 pub(crate) use list::{DiscoveryRoots, ListFilter, ListOutcome, RemoteScope, list_with};
+pub(crate) use login::{LoginConnectors, login as session_login, logout as session_logout};
 pub(crate) use manifest_edit::{note_added_path, note_added_remote, remove_from_manifests};
 // The `Option<&str>` shim is a test-only convenience (the inline suites + the feature-gated e2e rig);
 // production uses `list_with`, so its re-export is gated to stay warning-clean in a plain build.

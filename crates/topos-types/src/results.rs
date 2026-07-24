@@ -623,6 +623,55 @@ pub struct EnrollmentPending {
     pub interval_secs: Option<u64>,
 }
 
+/// `login <workspace-address>` — the SESSION mint + the acceptance disclosure (what connecting
+/// delivers). A session = user × workspace × installation, carrying ONE workspace-scoped bearer
+/// credential; further workspaces are further logins. Login IS the acceptance: from here delivery
+/// is silent, npm-style. **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct LoginData {
+    /// The logged-into workspace's id (empty while the login is still pending approval).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub workspace_id: String,
+    /// The workspace's ADDRESS name (the slug typed at `login`).
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// The API base this installation dials (from the protocol card).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    /// The minted session's id (`sn_…`) — the handle the web sessions pages show.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// `"active"`, `"pending"` while the workspace's session-approval knob holds it (no data flows
+    /// until an owner approves), or `"awaiting-approval"` while the browser approval is pending.
+    pub session_status: String,
+    /// How many skills the person's profile delivers here right now (the acceptance disclosure;
+    /// best-effort — absent when the count could not be read).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered: Option<u64>,
+    /// Present while the login awaits the browser approval (re-run `topos login` to resume).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<EnrollmentPending>,
+    /// The active adapter's auto-update-trigger outcome, when the login armed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency: Option<crate::TriggerReport>,
+    /// The breadth arming sweep's outcomes (one row per other detected agent).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<BreadthTriggerReport>,
+}
+
+/// `logout [<workspace>|--all]` — end this installation's session(s). **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct LogoutData {
+    /// The sessions ended, by workspace ADDRESS name.
+    pub ended: Vec<String>,
+    /// Whether the server-side revoke landed for EVERY ended session (`false` = at least one was
+    /// already gone server-side, or unreachable — the local sign-out proceeded regardless).
+    pub server_revoked: bool,
+}
+
 /// A single skill offered at `follow` — disclosed, awaiting a direct human yes (TOFU). **INFERRED.**
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]

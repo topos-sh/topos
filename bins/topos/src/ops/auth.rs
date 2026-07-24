@@ -111,6 +111,9 @@ pub(crate) fn login(
             enroll::EnrollIntentDoc::Follow { .. } => Err(ClientError::Enrollment(
                 "an enrollment is in progress; re-run `topos follow` to finish it first".into(),
             )),
+            enroll::EnrollIntentDoc::Session => Err(ClientError::Enrollment(
+                "a login is in progress; re-run `topos login` to finish it first".into(),
+            )),
         };
     }
 
@@ -152,6 +155,7 @@ pub(crate) fn login(
     );
     let wal = enroll::PendingEnrollment {
         schema_version: PERSISTED_SCHEMA_VERSION,
+        host: String::new(),
         base_url: base_url.clone(),
         workspace_name: membership.name.clone(),
         intent: enroll::EnrollIntentDoc::Login,

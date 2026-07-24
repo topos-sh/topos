@@ -36,6 +36,20 @@
         "null"
       ]
     },
+    "session_id": {
+      "description": "The minted SESSION's id — the session-model login wire's grant half (a session = user ×\nworkspace × installation; the credential is workspace-scoped). Present ONLY when `status`\nis `granted` on a session-serving producer. **Additive.**",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_status": {
+      "description": "The session's born status — `\"active\"`, or `\"pending\"` while the workspace's\nsession-approval knob holds it. Absent ⇒ treat as active. **Additive.**",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "status": {
       "description": "The poll status.",
       "$ref": "#/$defs/DeviceAuthPollStatus"

@@ -2764,6 +2764,20 @@
             ],
             "description": "The FIRST device↔workspace link's born status — present ONLY when `status` is `granted`:\n`\"active\"`, or `\"pending\"` when the workspace's device-approval knob gated it (approval\nmints the registration and the first link together server-side). Absent on an older\nproducer ⇒ treat as `\"active\"`."
           },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The minted SESSION's id — the session-model login wire's grant half (a session = user ×\nworkspace × installation; the credential is workspace-scoped). Present ONLY when `status`\nis `granted` on a session-serving producer. **Additive.**"
+          },
+          "session_status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The session's born status — `\"active\"`, or `\"pending\"` while the workspace's\nsession-approval knob holds it. Absent ⇒ treat as active. **Additive.**"
+          },
           "status": {
             "$ref": "#/components/schemas/DeviceAuthPollStatus",
             "description": "The poll status."

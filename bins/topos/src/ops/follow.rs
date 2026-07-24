@@ -689,6 +689,11 @@ fn resume(
                 "a sign-in is in progress; re-run `topos auth login` to finish it first".into(),
             ));
         }
+        enroll::EnrollIntentDoc::Session => {
+            return Err(ClientError::Enrollment(
+                "a login is in progress; re-run `topos login` to finish it first".into(),
+            ));
+        }
         enroll::EnrollIntentDoc::Follow { target, mode } => (target.clone(), *mode),
     };
     let enroll_src = (connectors.enroll)(&wal.base_url);
@@ -1019,6 +1024,7 @@ fn begin_address(
     let wal = enroll::PendingEnrollment {
         schema_version: PERSISTED_SCHEMA_VERSION,
         base_url,
+        host: String::new(),
         workspace_name: intent.workspace_name,
         intent: enroll::EnrollIntentDoc::Follow {
             target: Some(intent.target),

@@ -557,8 +557,11 @@ pub(crate) struct InviteAccepted {
 pub(crate) struct EnrolledGrant {
     /// **SECRET** — the device's plaintext bearer credential (returned by the poll; stored `0600`).
     pub credential: String,
-    /// The registered device's id (the non-secret handle a self-revoke names).
+    /// The registered device's id (the non-secret handle a self-revoke names). On the SESSION
+    /// wire this carries the minted session id when the producer sent no device id.
     pub device_id: String,
+    /// The minted SESSION's id (the session-model wire; `None` from an older producer).
+    pub session_id: Option<String>,
     /// The joined workspace.
     pub workspace: EnrolledWorkspace,
     /// The invitation's first-destination hint — present when the flow carried an invite token
@@ -575,6 +578,7 @@ impl std::fmt::Debug for EnrolledGrant {
         f.debug_struct("EnrolledGrant")
             .field("credential", &"<redacted>")
             .field("device_id", &self.device_id)
+            .field("session_id", &self.session_id)
             .field("workspace", &self.workspace)
             .field("hint", &self.hint)
             .field("link_status", &self.link_status)
@@ -677,6 +681,21 @@ pub(crate) trait GovernanceSource {
     fn revoke_device(&self) -> Result<(), ClientError> {
         Err(ClientError::Plane(
             "this transport serves no device revoke".into(),
+        ))
+    }
+
+    /// `DELETE /v1/session` — end the SESSION this transport's own credential names (`logout`'s
+    /// one call per workspace, no body: the credential IS the session, so nothing client-asserted
+    /// can reach another pocket). After the delete the credential no longer resolves, so a retry
+    /// answers the uniform 404 — already signed out. Default: an erroring body, so fakes that
+    /// never exercise sessions need no impl.
+    ///
+    /// # Errors
+    /// [`ClientError::PlaneTerminal`] on an `ok: false` refusal; [`ClientError::TargetNotFound`]
+    /// on the uniform 404 (already ended); [`ClientError::Plane`] on a transport fault.
+    fn revoke_session(&self) -> Result<(), ClientError> {
+        Err(ClientError::Plane(
+            "this transport serves no session revoke".into(),
         ))
     }
 }

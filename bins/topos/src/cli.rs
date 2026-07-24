@@ -167,6 +167,32 @@ pub(crate) enum Command {
         #[arg(long, value_name = "SECONDS")]
         ttl: Option<u64>,
     },
+    /// Log this installation into a workspace — the browser-approval flow mints ONE
+    /// workspace-scoped SESSION (further workspaces are further logins). The address: a bare
+    /// workspace name (the default server), a bare server origin ("the workspace that origin
+    /// addresses" — self-hosted installs), `<server>/<workspace>`, or an invitation URL from the
+    /// invite mail. Login is the acceptance: the receipt states what connecting delivers; from
+    /// then on updates arrive silently. Re-invoking `login` RESUMES a pending approval.
+    Login {
+        /// The workspace address. Omitted, it resumes a pending login.
+        address: Option<String>,
+        /// Block until the browser approval settles in ONE command. Bare `--wait` waits until the
+        /// code expires; `--wait <seconds>` caps the wait. A TTY blocks by default; a PIPED run
+        /// without `--wait` prints the approval URL and returns — re-invoke to poll.
+        #[arg(long, value_name = "SECONDS", num_args = 0..=1)]
+        wait: Option<Option<u64>>,
+    },
+    /// End this installation's session(s): the server-side revoke per session, then the local
+    /// sign-out (which proceeds regardless — the receipt reports the server outcome honestly).
+    /// Skills, drafts, and manifests stay; `topos login <address>` starts a fresh session.
+    Logout {
+        /// The workspace to log out of (its address name or id). With exactly one session it is
+        /// inferred; with several, name one or pass `--all`.
+        workspace: Option<String>,
+        /// End EVERY session on this installation.
+        #[arg(long)]
+        all: bool,
+    },
     /// Create this folder's `topos.toml` — the project MANIFEST `add`/`remove` edit and
     /// `update`/`status` resolve (committed with the repo, it travels: every teammate's agents get
     /// the same set here). Any folder, git or not; outside a shared repo the receipt notes the
@@ -454,6 +480,8 @@ impl Command {
     pub(crate) fn name(&self) -> &'static str {
         match self {
             Command::Status => "status",
+            Command::Login { .. } => "login",
+            Command::Logout { .. } => "logout",
             Command::Init => "init",
             Command::Follow { .. } => "follow",
             Command::Unfollow { .. } => "unfollow",
@@ -509,6 +537,27 @@ mod tests {
         let out = Cli::try_parse_from(["topos", "init"]).unwrap();
         assert!(matches!(out.command, Some(Command::Init)));
         assert_eq!(out.command.unwrap().name(), "init");
+    }
+
+    #[test]
+    fn login_and_logout_parse_as_top_level_session_verbs() {
+        let login = Cli::try_parse_from(["topos", "login", "acme", "--wait", "30"]).unwrap();
+        assert!(matches!(
+            login.command,
+            Some(Command::Login {
+                wait: Some(Some(30)),
+                ..
+            })
+        ));
+        assert_eq!(login.command.unwrap().name(), "login");
+        // A bare `login` resumes a pending flow.
+        assert!(Cli::try_parse_from(["topos", "login"]).is_ok());
+        let logout = Cli::try_parse_from(["topos", "logout", "acme"]).unwrap();
+        assert!(matches!(
+            logout.command,
+            Some(Command::Logout { all: false, .. })
+        ));
+        assert!(Cli::try_parse_from(["topos", "logout", "--all"]).is_ok());
     }
 
     #[test]
