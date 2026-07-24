@@ -12,28 +12,26 @@ document upgrades losslessly in memory on read); every other persisted doc dispa
 counter (the old `(epoch, seq)` pair is gone). `expected_generation` / `current_generation` /
 `generation` fields are plain numbers everywhere; `ETag = "<generation>"`.
 
-The [`requests`] module carries the PUBLIC device lane the product app serves:
+The [`requests`] module carries the PUBLIC session lane the product app serves:
 
-- the **gh-style device-auth flow** — `DeviceAuthStartRequest { requested_name, workspace }` →
+- the **RFC-8628-shaped login flow** — `DeviceAuthStartRequest { requested_name, workspace }` →
   `DeviceAuthStartResponse { device_code, user_code, verification_uri, verification_uri_complete,
   expires_in_secs, interval_secs }`, and `DeviceAuthPollRequest { device_code }` →
-  `DeviceAuthPollResponse { status: pending|denied|expired|granted, credential?, device_id?,
-  workspace? {workspace_id, name, display_name} }`. Design fact: on approval the `device_code` is
-  PROMOTED to the device's ONE bearer credential server-side; the poll's `credential` field carries
-  it back, so the CLI stores one secret from one field.
+  `DeviceAuthPollResponse { status: pending|denied|expired|granted, credential?, session_id?,
+  session_status?, workspace? {workspace_id, name, display_name}, hint? }` (the RFC field names
+  kept — the gh-proven wire shape; the product nouns are session-model). Design fact: on approval
+  the flow code is PROMOTED to the SESSION's workspace-scoped bearer credential server-side; the
+  poll's `credential` field carries it back, so the CLI stores one secret from one field.
 - the write bodies (`PublishRequest` / `ProposeRequest` / `RevertRequest` / `ReviewRequest` +
   `WireCandidate`/`WireFile`), the read bodies (`WireCurrentRecord`, `WireVersionMeta`,
   `WireProposalList`, `WireSkillIndex`, `WireDelivery` + `WireAppliedReport`, the describe reads
   `WireMe`/`WireChannelIndex`/`WireProposalIndex`/`WireSkillLog`/`WireReach`), the row-op bodies
-  (`ProtectionSetRequest`, `NoticeAckRequest`, `InvitationRequest`/`InvitationData`), the constant
-  `WireProtocolCard`, and the DEVICE-LINK lane (`DeviceLinkRequest` / `DeviceLinkDescribe` /
-  `DeviceLinkData` — a device is registered once per server and LINKED per workspace; the
-  browser-free lane joins an enrolled device to a further workspace, and `DELETE /v1/device` is
-  the global self-revoke the CLI logout runs — no request body). `link_status`
-  ("active"/"pending") rides `WireMe` (defaulted), `WireDelivery` (REQUIRED — a pending link
-  delivers empty sets), `InviteAcceptData` (defaulted), and the granted poll (optional; the first
-  link's born status). The old per-workspace `DeviceRevokeRequest` is RETIRED (a clean wire
-  break, no shim).
+  (`ProtectionSetRequest`, `NoticeAckRequest`, `InvitationRequest`/`InvitationData`), and the
+  constant `WireProtocolCard`. `session_status` ("active"/"pending") rides `WireMe`,
+  `WireDelivery` (a pending session delivers empty sets), and the granted poll — each with the
+  RETIRED `link_status` spelling as a parse-only fallback (`effective_status()` is the one read);
+  `DELETE /v1/session` (no request body) is the self-end the CLI logout runs. The device-link
+  and invitation-accept wire types are DELETED (a clean wire break, no shim).
 
 The old enrollment surface (device/token/passcode/redeem/claim/login/roster DTOs and the bootstrap
 module) is DELETED — enrollment and every identity ceremony live in the product app now; the vault

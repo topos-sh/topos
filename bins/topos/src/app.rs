@@ -433,6 +433,24 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             }
             let single_skill = skill.into_iter().next();
             let single_agent = agent.into_iter().next();
+            // The BUILT-IN's restore: `add topos` clears the durable `remove topos` opt-out and
+            // re-places (adopting a marker-carrying downloaded copy snapshot-first). Intercepted
+            // ahead of every resolution ladder — the name is reserved end-to-end.
+            if ops::is_builtin(&source) {
+                let result = ops::restore_builtin(&ctx)
+                    .map(|sync| serde_json::json!({ "restored": true, "changed": sync.changed }));
+                return finish(
+                    json,
+                    cmd_name,
+                    result,
+                    |_| {
+                        "Restored the built-in `topos` skill on this machine \
+                         (undo: topos remove topos --yes)."
+                            .to_owned()
+                    },
+                    &diag,
+                );
+            }
             // WORKSPACE references first (the shape-determined grammar): `@ws/name`, the
             // canonical `host/ws/name`, `@ws/channels/x` — and a BARE name when this
             // installation runs on sessions (the connected catalogs are its universe; with no
@@ -1232,7 +1250,7 @@ fn finish_pull(
                 let mut text = render::pull_tty(&out.data, &out.warnings);
                 if unenrolled_dead_end {
                     text.push_str(
-                        "\nNot enrolled — join your team with `topos follow \
+                        "\nNot logged in — join your team with `topos login \
                          <workspace-address>` (ask a teammate for the address).",
                     );
                 }

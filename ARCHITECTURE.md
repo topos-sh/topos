@@ -116,18 +116,19 @@ PRIVILEGES` grant, so future vault tables arrive already readable) for its histo
 vault cannot read `web` at all. `scripts/check-db-grants.sh` proves the cross-lane shape by logging in as each
 role.
 
-**The device flow** is a GitHub-style approval. `topos follow <workspace-address>` (or `topos auth login`)
-prints "open `<origin>/verify` and enter AB12-CD34"; the signed-in person approves it with a plain signed-in
-accept (the approval page names the device being enrolled and every workspace the credential will reach), and
-approval mints the device — owned by that person — and its **one bearer credential**.
-The credential is stored only as its SHA-256 on the device row and presented as `Authorization: Bearer` on the
-device lane (`/api/v1/…`), which the app serves itself: `requireDeviceActor` resolves credential → device →
-person → seat in one query, fail-closed, so a revoked device or an unseated person loses access the instant
-the row commits. Revocation is self-service, immediate, and final (trigger-enforced).
+**The login flow** is a GitHub-style approval. `topos login <workspace-address>` prints "open
+`<origin>/verify` and enter AB12-CD34"; the signed-in person approves it with a plain signed-in accept (the
+approval page names the machine logging in and THE ONE workspace the session will reach), and approval mints
+the **session** — user × workspace × installation, owned by that person — and its **workspace-scoped bearer
+credential**. The credential is stored only as its SHA-256 on the session row and presented as
+`Authorization: Bearer` on the session lane (`/api/v1/…`), which the app serves itself: the guard resolves
+credential → session → person → seat in one query, fail-closed, so an ended session or an unseated person
+loses access the instant the row commits. Ending is self-service from the client (`topos logout`) and
+owner-service from the workspace sessions page — either way immediate.
 
-**Delivery and entitlement live app-side.** What a person should have is one predicate over the directory
-rows — `((default channels − opt-outs) ∪ member channels ∪ direct follows) − unfollows`, active bundles only
-— computed in `web` (`entitledBundlesSql`). Reads gate on *entitled ∧ has-a-current-pointer*; no object is
+**Delivery and entitlement live app-side.** What a session should have is one predicate over the directory
+rows — the person's server-stored PROFILE (channel and skill includes minus excludes, the default channel
+included unless excluded), active bundles only — computed in `web`. Reads gate on *entitled ∧ has-a-current-pointer*; no object is
 served by bare hash, and every not-entitled or not-found case returns the same **404**, so the read surface is
 no oracle for which skills exist. Only the byte and pointer ops of a publish-family verb (ingest, the
 `current` compare-and-set, revert, purge, the verified object reads) forward to the vault, over one allowlisted

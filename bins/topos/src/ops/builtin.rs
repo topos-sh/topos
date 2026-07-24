@@ -10,12 +10,12 @@
 //! snapshotted into the sidecar store first; it just never becomes a draft). A pre-existing
 //! `topos` dir is NEVER written by the sweep (the Foreign freeze — marker or not): one whose
 //! SKILL.md frontmatter carries the public copy's provenance marker (a `metadata:` entry,
-//! `topos: builtin`) is a stale DOWNLOADED copy that the CONSENTED `topos follow topos --yes`
+//! `topos: builtin`) is a stale DOWNLOADED copy that the CONSENTED `topos add topos`
 //! adopts — snapshot-first, then force-synced and managed; without the marker the dir is
 //! someone else's and stays a frozen Foreign reservation.
 //!
 //! Device-local surface: `topos remove topos` opts this machine out durably
-//! (`state/builtin.json`), `topos follow topos` re-places it, and the `--agent` include/exclude
+//! (`state/builtin.json`), `topos add topos` re-places it, and the `--agent` include/exclude
 //! scoping works exactly as on a followed skill (the scope lives in the same state doc — the
 //! built-in has no `follows.json` row: it is not a subscription, and the plane never hears of it).
 //! The name `topos` is reserved end-to-end (the placement naming discipline client-side, the
@@ -53,7 +53,7 @@ const INSTALL_MD: &str = include_str!("../../../../skills/topos/INSTALL.md");
 
 /// The provenance line the public SKILL.md carries in its frontmatter (a `metadata` entry, which
 /// skill installers copy verbatim). A pre-existing `topos` placement dir WITH the marker is a
-/// stale downloaded copy of THIS bundle — adopted only by the consented `follow topos --yes`,
+/// stale downloaded copy of THIS bundle — adopted only by the consented `add topos`,
 /// snapshot-first; the silent sweep never writes it. Without it the dir is someone else's and the
 /// Foreign freeze stands everywhere.
 const PROVENANCE_MARKER: &str = "topos: builtin";
@@ -65,7 +65,7 @@ pub(crate) fn is_builtin(id: &str) -> bool {
 }
 
 /// Whether a Foreign-scanned placement holds a DOWNLOADED copy of this skill (see
-/// [`marker_in_frontmatter`]). Gates only the CONSENTED `follow topos --yes` adoption — the
+/// [`marker_in_frontmatter`]). Gates only the CONSENTED `add topos` adoption — the
 /// silent sweep never writes a Foreign dir, marker or not. Best-effort and fail-closed: an absent
 /// or unreadable file answers `false` (never adopt on doubt).
 fn is_downloaded_copy(dir: &std::path::Path) -> bool {
@@ -221,7 +221,7 @@ pub(crate) struct BuiltinSync {
 enum ForeignPosture {
     /// The silent sweep: never write it, marker or not.
     Freeze,
-    /// The consented `follow topos --yes` restore: adopt a MARKED downloaded copy
+    /// The consented `add topos` restore: adopt a MARKED downloaded copy
     /// (snapshot-first); an unmarked dir stays frozen exactly as under [`Self::Freeze`].
     AdoptMarked,
 }
@@ -344,7 +344,7 @@ fn ensure_inner(
             ScanStatus::Clean { digest } => to_hex(digest) != digest_hex,
             ScanStatus::Modified { scanned } => to_hex(&scanned.bundle_digest) != digest_hex,
             // Never a foreign dir (not ours to write) — the ONE exception is the consented
-            // `follow topos --yes` restore, whose AdoptMarked posture takes over a dir holding a
+            // `add topos` restore, whose AdoptMarked posture takes over a dir holding a
             // DOWNLOADED copy of this very skill (the public SKILL.md's provenance marker): the
             // materializer snapshots its bytes into the sidecar store first, then force-syncs
             // like any divergent copy. The silent sweep always passes Freeze. Never an unreadable
@@ -398,7 +398,7 @@ fn ensure_inner(
             snapshot: Some(&|s: &crate::scan::ScannedBundle| {
                 sync_engine::snapshot_draft(ctx, &sp, lock_ref, s).map(|_| ())
             }),
-            // The consented `follow topos --yes` restore takes over the marked downloaded copy —
+            // The consented `add topos` restore takes over the marked downloaded copy —
             // an occupied, never-materialized dir the target filter admitted only under
             // AdoptMarked. The predicate re-proves the marker against the LIVE dir immediately
             // before the overwrite, so a copy that lost it since the describe fails closed. The
@@ -492,7 +492,7 @@ fn create_builtin(ctx: &Ctx<'_>, sid: &SkillId, bundle: &ScannedBundle) -> Resul
 }
 
 // ---------------------------------------------------------------------------------------------
-// `follow topos` — re-place after a remove / repair in place (rides the agent-scope payload).
+// `add topos` — re-place after a remove / repair in place.
 // ---------------------------------------------------------------------------------------------
 
 /// The placement dirs the built-in actually MATERIALIZED (what `remove topos` and `uninstall`
@@ -513,6 +513,19 @@ pub(crate) fn placement_dirs(ctx: &Ctx<'_>) -> Result<Vec<String>, ClientError> 
                 .collect()
         })
         .unwrap_or_default())
+}
+
+/// `add topos` — the opt-out's literal inverse and the downloaded-copy adoption: clear the
+/// durable opt-out, then place/refresh with the AdoptMarked posture (a dir whose SKILL.md carries
+/// the public copy's provenance marker is taken over snapshot-first; an unmarked foreign dir
+/// stays frozen). Idempotent — an already-placed built-in just re-syncs.
+pub(crate) fn restore_builtin(ctx: &Ctx<'_>) -> Result<BuiltinSync, ClientError> {
+    let mut st = read_state(ctx)?;
+    if st.removed {
+        st.removed = false;
+        write_state(ctx, &st)?;
+    }
+    ensure_inner(ctx, &rendered_bundle()?, ForeignPosture::AdoptMarked)
 }
 
 /// `remove topos --yes` — the durable opt-out: mark the state doc FIRST (the fact that must

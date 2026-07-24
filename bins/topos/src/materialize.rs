@@ -79,7 +79,7 @@ pub(crate) struct MaterializeReq<'a> {
     /// (reset / go-back / the merge, whose snapshot-on-touch runs first).
     pub snapshot: Option<SnapshotFn<'a>>,
     /// Consent to OVERWRITE an occupied target the record never materialized (snapshot-first) —
-    /// the one disclosed takeover path: the built-in's consented `follow topos --yes` adoption of a
+    /// the one disclosed takeover path: the built-in's consented `add topos` adoption of a
     /// marked downloaded copy. The predicate RE-PROVES the consent against the LIVE dir immediately
     /// before the overwrite (the built-in re-checks the downloaded-copy marker), so a dir that
     /// changed since the describe fails closed. Everywhere else `None`: a first install into an

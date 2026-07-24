@@ -236,11 +236,6 @@ const STATIC_PROSE_COMMANDS: &[(&str, &str, &[&str])] = &[
         &["topos", "auth", "login", "--json"],
     ),
     (
-        "topos follow",
-        "RUN_COMMAND",
-        &["topos", "follow", "--json"],
-    ),
-    (
         "topos update",
         "UPDATE_SKILLS",
         &["topos", "update", "--json"],
@@ -602,9 +597,9 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
             s.push_str(&untracked_row(u));
         }
     }
-    // The `--remote` catalog — what this install could follow next, grouped by workspace and annotated
-    // with the local follow-state. HONEST: there is no self-serve `follow <skill>` for an ungranted catalog
-    // skill yet, so an `Available` row names where it lives and does NOT promise `topos follow`.
+    // The `--remote` catalog — what this install could add next, grouped by workspace and annotated
+    // with the local delivery state. An `Available` row names where it lives; `topos add <name>`
+    // records the demand.
     if !data.remote_available.is_empty() {
         s.push_str("\nRemote catalog:\n");
         let label_of = |ws_id: &str| -> String {
@@ -651,8 +646,7 @@ pub(crate) fn list_tty(out: &ListOutcome) -> String {
 
 /// One `--remote` catalog row: `<name>  <name>@<short>  <kind>  <state note>` (+ any open-proposal
 /// count). The name falls back to the skill id when the plane discloses no display name; the kind is
-/// the catalog's bundle kind, displayed verbatim (never branched on). HONEST annotations — no
-/// `topos follow <skill>` promise for an `Available` skill (that grant is not self-serve yet).
+/// the catalog's bundle kind, displayed verbatim (never branched on).
 fn remote_row(r: &RemoteSkillEntry) -> String {
     let name = r.display_name.as_deref().unwrap_or(&r.skill_id);
     let note = match r.state {
@@ -700,7 +694,7 @@ fn untracked_row(u: &UntrackedEntry) -> String {
 fn list_row(entry: &SkillEntry, note: Option<(&str, bool)>) -> String {
     let follow_note = match note {
         Some((mode, true)) => format!("  (following, {mode})"),
-        Some((_, false)) => format!("  (not following — `topos follow {}` resumes)", entry.skill),
+        Some((_, false)) => format!("  (paused — `topos add {}` resumes)", entry.skill),
         None => String::new(),
     };
     // The SOURCE / STATUS / CAUSE columns (present once `list` populated them): `[status]` + the source,
@@ -1172,7 +1166,7 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
                 match ws.link_status.as_deref() {
                     Some("pending") => s.push_str(" — awaiting owner approval"),
                     Some("ended") => s.push_str(&format!(
-                        " — no access; relink with `topos follow {}`",
+                        " — no access; reconnect with `topos login {}`",
                         ws.name
                     )),
                     _ => {}
@@ -1506,7 +1500,7 @@ pub(crate) fn invite_describe_tty(
     }
     s.push_str(
         "\nEach address gets a mailed single-use invite link (browser, agent paste-block, or \
-         `topos follow <invite-url>`).",
+         `topos login <invite-url>`).",
     );
     s.push_str(&format!(
         "\nNothing has changed yet — apply with:\n  {}",
@@ -1525,7 +1519,7 @@ pub(crate) fn invite_tty(data: &InvitationData) -> String {
         out.push_str("\nInvitation email sent.");
     }
     out.push_str(&format!(
-        "\nThey join at {} — ask them to run `topos follow {}` and sign in with their invited email.",
+        "\nThey join at {} — ask them to run `topos login {}` and sign in with their invited email.",
         data.address, data.address,
     ));
     out
@@ -1931,7 +1925,7 @@ fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
             Vec::new(),
         ),
         PullAction::Detached => (
-            String::from("detached (you unfollowed) — frozen in place; `topos follow` re-attaches"),
+            String::from("detached (you removed it) — frozen in place; `topos add` re-attaches"),
             Vec::new(),
         ),
         PullAction::Excluded => (
@@ -2441,8 +2435,7 @@ mod tests {
         assert!(text.contains("docs@ababababab"), "{text}");
         assert!(text.contains("(following, auto)"), "{text}");
         assert!(
-            text.contains("paused@")
-                && text.contains("(not following — `topos follow paused` resumes)"),
+            text.contains("paused@") && text.contains("(paused — `topos add paused` resumes)"),
             "{text}"
         );
         // A purely local skill sits under the local group with no follow note; its draft flag still shows.
@@ -2504,12 +2497,12 @@ mod tests {
         assert!(text.contains("Remote catalog:"), "{text}");
         // Grouped under the workspace's membership label.
         assert!(text.contains("  Acme:\n"), "{text}");
-        // Available is honest — it does NOT print `topos follow`.
+        // Available is honest — it does NOT promise a grant.
         assert!(
             text.contains("deploy@abababababab  skill  (available)"),
             "{text}"
         );
-        assert!(!text.contains("topos follow deploy"), "{text}");
+        assert!(!text.contains("topos follow deploy"), "{text}"); // the dead verb never returns
         assert!(
             text.contains("runbook@abababababab  skill  (following)"),
             "{text}"

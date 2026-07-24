@@ -142,11 +142,11 @@ pub(crate) enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Remove skills from this machine (or from specific agents). A followed skill becomes a per-device
-    /// exclusion (your other devices keep receiving it) — applied immediately when the local copy
-    /// is CLEAN (the receipt prints the undo: `topos follow <skill>` re-attaches, bytes are kept);
-    /// with local edits ahead, or for a local-only copy whose delete is permanent, a bare run
-    /// describes first and `--yes` applies.
+    /// Remove skills from this folder's reach. The inverse of `add`: the nearest manifest drops the
+    /// reference (or records an EXCLUDE line when a broader layer still provides the name — the
+    /// receipt names the manifest edited and the paste-ready undo); `-g` edits your server-stored
+    /// profile instead. With local edits ahead, or for a local-only copy whose delete is
+    /// permanent, a bare run describes first and `--yes` applies.
     Remove {
         /// The skill name(s) to remove.
         skill: Vec<String>,
@@ -299,9 +299,9 @@ pub(crate) enum Command {
         yes: bool,
     },
     /// Invite emails into the workspace. Each address gets a mailed single-use invite link (accept in
-    /// the browser, hand the mail's paste-block to an agent, or `topos follow <invite-url>`); every
-    /// CLI invitee starts as a member. Requires prior enrollment. A bare `invite` (no emails) reads
-    /// the workspace address + policy.
+    /// the browser, hand the mail's paste-block to an agent, or `topos login <invite-url>`); every
+    /// CLI invitee starts as a member. Requires a logged-in session. A bare `invite` (no emails)
+    /// reads the workspace address + policy.
     Invite {
         /// The emails to invite (folded to canonical form; each becomes a pending 7-day claim).
         email: Vec<String>,

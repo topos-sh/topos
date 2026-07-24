@@ -51,7 +51,7 @@ pub(crate) use add::{
     resolve_add_target, split_target, tracked_skill_at,
 };
 pub(crate) use arm::{arm_detected, probe_detected, scrub_all};
-pub(crate) use builtin::{ensure_builtin, is_builtin};
+pub(crate) use builtin::{ensure_builtin, is_builtin, restore_builtin};
 pub(crate) use connect::device_challenge;
 // The RFC-3339 emitter round-trips against the render parser's test.
 #[cfg(test)]

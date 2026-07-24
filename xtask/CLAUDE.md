@@ -23,7 +23,7 @@ cargo xtask conformance            # the store matrices (not yet implemented —
 - **`gen-schema [--check]`** — reads the wire types from `topos-types` and emits one JSON-Schema per
   top-level wire type, per-verb `data` payload, and persisted client document into
   `contracts/schemas/`; the SAME run also generates (or `--check`s) the OpenAPI
-  `contracts/openapi/openapi.json` from `topos_plane::openapi()` (the PUBLIC device lane the product
+  `contracts/openapi/openapi.json` from `topos_plane::openapi()` (the PUBLIC session lane the product
   app serves — contract stubs; the vault's internal custody lane stays out of the committed
   contract). **The artifacts are generated — never hand-edit them.**
 - **`gen-fixtures [--check]`** — builds the golden `--json` envelopes FROM the typed shapes and

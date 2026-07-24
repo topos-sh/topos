@@ -43,13 +43,13 @@ publicly reachable: no published port, no public router.
     (chains logged server-side, never on the wire). 401 only on a wrong bearer; an UNARMED lane is
     404-invisible.
 - **`routes/door.rs`** — contract-ONLY stubs (never routed) carrying the `#[utoipa::path]`
-  annotations for the PUBLIC device lane the product app serves: device-auth start/poll (the
-  gh-style flow — on approval the device code is promoted to the device's ONE bearer credential),
+  annotations for the PUBLIC session lane the product app serves: the login flow
+  (`POST /v1/login/authorize|token` — RFC-8628-shaped; on approval the flow code is promoted to
+  the SESSION's workspace-scoped bearer credential), the session self-end (`DELETE /v1/session`),
   publish/propose/revert/review, the reads (current/catalog/version/object/proposals/delivery/
-  me/channels/inbox/log/reach), the row ops, notices-ack, invitations, the browser-free
-  device-link lane (`GET`/`POST /v1/device/link` — person-scoped; an enrolled device joins a
-  further workspace with no second ceremony), and the global device self-revoke
-  (`DELETE /v1/device`).
+  me/channels/inbox/log/reach), the server-stored profile row ops
+  (`PUT`/`DELETE /v1/workspaces/{ws}/profile/{skills|channels}/…`), channel curation, protection,
+  notices-ack, and invitations.
   `openapi()` (emitted to `contracts/openapi/` by `xtask`) is generated from these stubs; the
   internal custody lane stays OUT of the committed contract.
 - **The storage-maintenance scheduler** (`maintenance.rs`): `spawn_maintenance(state, every)` /

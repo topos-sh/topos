@@ -4,7 +4,7 @@
 //! - a FOLLOWED skill → a per-device **exclusion** (`PUT exclusions/{skill}`): delivery stops on THIS
 //!   device, the person keeps following it (every other device still receives it), and the local copy is
 //!   kept as a frozen copy — the agent dirs are cleaned (any draft snapshotted first), never the sidecar
-//!   bytes. Nothing returns at the next sync; `topos follow <name>` re-attaches. This is NOT unfollow —
+//!   bytes. Nothing returns at the next sync; `topos add <name>` re-attaches. This is NOT a detach —
 //!   stopping a skill everywhere is `topos unfollow`. On a CLEAN followed skill the exclusion applies
 //!   immediately with an undo-led receipt (`--yes` an accepted no-op); with a DRAFT ahead (local
 //!   edits) the loss-guard holds the two-phase describe — the draft leaves every agent dir on apply,
@@ -62,7 +62,7 @@ enum Removal {
     /// An untracked copy in an agent dir → a permanent delete of that directory.
     Untracked { name: String, dir: PathBuf },
     /// The built-in `topos` skill → the durable device opt-out (no sweep re-places it;
-    /// `topos follow topos` brings it back).
+    /// `topos add topos` brings it back).
     Builtin { dirs: Vec<PathBuf> },
 }
 
@@ -343,7 +343,7 @@ fn describe_item(removal: &Removal) -> RemoveItem {
             bytes_kept: false,
             note: Some(
                 "the built-in topos skill — the opt-out is durable (no sweep re-places it); \
-                 `topos follow topos` brings it back"
+                 `topos add topos` brings it back"
                     .to_owned(),
             ),
         },
