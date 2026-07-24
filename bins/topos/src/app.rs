@@ -1222,7 +1222,7 @@ fn finish_status(
     match result {
         Ok(data) => {
             if json {
-                let next_actions = if data.enrolled {
+                let next_actions = if !data.sessions.is_empty() {
                     Vec::new()
                 } else {
                     vec![crate::actions::next_action(
@@ -1239,7 +1239,7 @@ fn finish_status(
                 let mut envelope = render::ok_envelope(command, value);
                 envelope.next_actions = next_actions;
                 println!("{}", render::to_json(&envelope));
-            } else if bare && !data.enrolled {
+            } else if bare && data.sessions.is_empty() {
                 println!("{}", render::welcome_tty(&data));
             } else {
                 println!("{}", render::status_tty(&data));

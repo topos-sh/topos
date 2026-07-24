@@ -1414,7 +1414,7 @@ fn discovery_roots(ctx: &Ctx<'_>, item: &ResolvedItem) -> Option<super::Discover
 
 /// Find a tracked skill imported from `origin_source` (+ subdir), by walking the sidecar's origin
 /// docs. Best-effort: unreadable entries are skipped.
-fn find_tracked_github(
+pub(crate) fn find_tracked_github(
     ctx: &Ctx<'_>,
     origin_source: &str,
     subdir: &str,
@@ -1446,7 +1446,7 @@ fn find_tracked_github(
 }
 
 /// Whether a recorded commit satisfies a manifest pin (git-style prefix match, either direction).
-fn commit_matches(recorded: &str, pin: &str) -> bool {
+pub(crate) fn commit_matches(recorded: &str, pin: &str) -> bool {
     !recorded.is_empty() && (recorded.starts_with(pin) || pin.starts_with(recorded))
 }
 

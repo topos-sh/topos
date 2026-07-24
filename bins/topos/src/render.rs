@@ -1170,23 +1170,12 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
                 if d.signed_in {
                     "signed in"
                 } else {
-                    "signed out (`topos auth login` signs back in)"
+                    "signed out (`topos login <workspace-address>` signs back in)"
                 }
             ));
-            for ws in &d.workspaces {
-                s.push_str(&format!("\n  {} ({})", ws.display_name, ws.name));
-                match ws.link_status.as_deref() {
-                    Some("pending") => s.push_str(" — awaiting owner approval"),
-                    Some("ended") => s.push_str(&format!(
-                        " — no access; reconnect with `topos login {}`",
-                        ws.name
-                    )),
-                    _ => {}
-                }
-            }
         }
         None => s.push_str(
-            "\nnot enrolled — join your team with `topos login <workspace-address>` (ask a \
+            "\nnot connected — join your team with `topos login <workspace-address>` (ask a \
              teammate for the address), or create a workspace at https://topos.sh",
         ),
     }
@@ -1208,25 +1197,53 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
             }
         }
     }
-    // The TRUST RAIL: what the manifests covering THIS directory ask for — per line, the one
-    // source that asked and an honest state (phrased from local knowledge only).
+    // The TRUST RAIL: what the manifests covering THIS directory — and the person's profile
+    // layers — resolve to: per line, the one source that asked, the applied version with its
+    // as-of stamp, and an honest state (phrased from local knowledge only). Excludes render as
+    // their own rows.
     if !d.items.is_empty() {
-        s.push_str("\nthis directory (from its manifests):");
+        s.push_str("\nresolved here (manifests + your profile):");
         for item in &d.items {
+            use topos_types::results::StatusItemState;
+            if matches!(item.state, StatusItemState::Excluded) {
+                s.push_str(&format!("\n  {} — excluded by {}", item.name, item.source));
+                for shadow in &item.shadows {
+                    s.push_str(&format!("\n    withholds the mention from {shadow}"));
+                }
+                continue;
+            }
             let state = match item.state {
-                topos_types::results::StatusItemState::Applied => "applied",
-                topos_types::results::StatusItemState::Behind => "behind",
-                topos_types::results::StatusItemState::LocalEdits => "local edits",
-                topos_types::results::StatusItemState::NotAvailable => {
-                    "not available with your current access"
+                StatusItemState::Applied => match &item.applied_as_of {
+                    Some(ts) => format!("applied as of {ts}"),
+                    None => "applied".to_owned(),
+                },
+                StatusItemState::Behind => {
+                    "behind (`topos update` lands the newer version)".to_owned()
                 }
-                topos_types::results::StatusItemState::PendingSession => {
-                    "awaiting session approval"
+                StatusItemState::LocalEdits => {
+                    "local edits ahead of the applied version".to_owned()
                 }
-                topos_types::results::StatusItemState::Unknown => "not yet reconciled",
+                StatusItemState::NotAvailable => {
+                    "not available with your current access".to_owned()
+                }
+                StatusItemState::PendingSession => "awaiting session approval".to_owned(),
+                StatusItemState::Excluded => unreachable!("handled above"),
+                StatusItemState::Unknown => {
+                    "not applied here yet (`topos update` applies it)".to_owned()
+                }
             };
+            let version = item
+                .version
+                .as_deref()
+                .map(|v| format!(" @ {}", short(v)))
+                .unwrap_or_default();
+            let via = item
+                .via
+                .as_deref()
+                .map(|c| format!(" · via channel '{c}'"))
+                .unwrap_or_default();
             s.push_str(&format!(
-                "\n  {} — {state} · {} ({})",
+                "\n  {}{version} — {state} · {}{via} ({})",
                 item.name, item.source, item.scope
             ));
             for shadow in &item.shadows {
@@ -1235,20 +1252,19 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
         }
     }
     s.push_str(&format!(
-        "\nfollowing: {} {}",
-        d.followed_skills,
-        if d.followed_skills == 1 {
+        "\nyour profile delivers: {} {}",
+        d.profile_skills,
+        if d.profile_skills == 1 {
             "skill"
         } else {
             "skills"
         }
     ));
-    if let Some(p) = d.pending_offers
+    if let Some(p) = d.awaiting_first_sync
         && p > 0
     {
         s.push_str(&format!(
-            " — {p} first-receive {} awaiting consent (`topos update` discloses {})",
-            if p == 1 { "offer" } else { "offers" },
+            " — {p} not applied here yet (`topos update` applies {})",
             if p == 1 { "it" } else { "them" },
         ));
     }
@@ -2686,23 +2702,47 @@ mod tests {
     }
 
     #[test]
-    fn status_tty_renders_both_enrollment_faces() {
-        use topos_types::results::{StatusData, StatusTrigger, StatusWorkspace};
-        let enrolled = StatusData {
+    fn status_tty_renders_both_connection_faces() {
+        use topos_types::results::{
+            StatusData, StatusItem, StatusItemState, StatusSession, StatusTrigger,
+        };
+        let connected = StatusData {
             version: "0.1.0".to_owned(),
-            enrolled: true,
             server: Some("https://topos.sh/api".to_owned()),
             signed_in: true,
-            workspaces: vec![StatusWorkspace {
+            profile_skills: 2,
+            awaiting_first_sync: Some(1),
+            sessions: vec![StatusSession {
                 workspace_id: "w_demo".to_owned(),
                 name: "demo".to_owned(),
                 display_name: "Demo".to_owned(),
-                link_status: None,
+                host: "topos.sh".to_owned(),
+                session_status: None,
             }],
-            followed_skills: 2,
-            pending_offers: Some(1),
-            sessions: Vec::new(),
-            items: Vec::new(),
+            items: vec![
+                StatusItem {
+                    name: "deploy".to_owned(),
+                    reference: "topos.sh/demo/deploy".to_owned(),
+                    source: "your profile @ topos.sh/demo".to_owned(),
+                    scope: "person".to_owned(),
+                    via: Some("everyone".to_owned()),
+                    version: Some("a".repeat(64)),
+                    applied_as_of: Some("2026-07-24T00:00:00Z".to_owned()),
+                    state: StatusItemState::Applied,
+                    shadows: Vec::new(),
+                },
+                StatusItem {
+                    name: "noisy".to_owned(),
+                    reference: "noisy".to_owned(),
+                    source: "/repo/topos.toml".to_owned(),
+                    scope: "project".to_owned(),
+                    via: None,
+                    version: None,
+                    applied_as_of: None,
+                    state: StatusItemState::Excluded,
+                    shadows: vec!["your profile @ topos.sh/demo".to_owned()],
+                },
+            ],
             triggers: vec![
                 StatusTrigger {
                     agent: "claude-code".to_owned(),
@@ -2716,42 +2756,57 @@ mod tests {
                 },
             ],
         };
-        let text = status_tty(&enrolled);
+        let text = status_tty(&connected);
         assert!(text.contains("topos 0.1.0"), "{text}");
         assert!(
             text.contains("server: https://topos.sh/api — signed in"),
             "{text}"
         );
-        assert!(text.contains("Demo (demo)"), "{text}");
-        assert!(text.contains("following: 2 skills"), "{text}");
+        assert!(text.contains("topos.sh/demo (Demo)"), "{text}");
+        // The trust rail: the applied row carries its version, the as-of stamp, the ONE source,
+        // and the channel attribution; the exclude renders as its own legible row.
         assert!(
-            text.contains("1 first-receive offer awaiting consent"),
+            text.contains("applied as of 2026-07-24T00:00:00Z"),
             "{text}"
         );
+        assert!(text.contains("your profile @ topos.sh/demo"), "{text}");
+        assert!(text.contains("via channel 'everyone'"), "{text}");
+        assert!(
+            text.contains("noisy — excluded by /repo/topos.toml"),
+            "{text}"
+        );
+        assert!(
+            text.contains("withholds the mention from your profile @ topos.sh/demo"),
+            "{text}"
+        );
+        assert!(text.contains("your profile delivers: 2 skills"), "{text}");
+        assert!(text.contains("1 not applied here yet"), "{text}");
         assert!(text.contains("claude-code: armed"), "{text}");
         assert!(
             text.contains("openclaw: unknown — presence needs"),
             "{text}"
         );
+        // The dead vocabulary stays dead on this surface.
+        assert!(!text.contains("following:"), "{text}");
+        assert!(!text.contains("auth login"), "{text}");
+        assert!(!text.contains("not yet reconciled"), "{text}");
 
-        // The unenrolled face states the fix in prose (join by address, or create a workspace).
+        // The unconnected face states the fix in prose (join by address, or create a workspace).
         let fresh = StatusData {
-            enrolled: false,
             server: None,
             signed_in: false,
-            workspaces: Vec::new(),
-            followed_skills: 0,
-            pending_offers: Some(0),
+            profile_skills: 0,
+            awaiting_first_sync: Some(0),
             sessions: Vec::new(),
             items: Vec::new(),
             triggers: Vec::new(),
-            ..enrolled
+            ..connected
         };
         let text = status_tty(&fresh);
-        assert!(text.contains("not enrolled"), "{text}");
+        assert!(text.contains("not connected"), "{text}");
         assert!(text.contains("`topos login <workspace-address>`"), "{text}");
         assert!(text.contains("https://topos.sh"), "{text}");
-        assert!(text.contains("following: 0 skills"), "{text}");
+        assert!(text.contains("your profile delivers: 0 skills"), "{text}");
 
         // The bare-`topos` welcome stays three lines: what topos is + the two ways in.
         let welcome = welcome_tty(&fresh);

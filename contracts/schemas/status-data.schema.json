@@ -1,32 +1,28 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "StatusData",
-  "description": "`status` result — the one orientation read: enrollment, sign-in, follow counts, per-agent\ntrigger arm state, and the binary version. Computed ENTIRELY from local state (no network).\n**INFERRED** (additive-only).",
+  "description": "`status` result — the one orientation read: the sessions, the resolved trust-rail table for\nthe current directory (the person's profile layers itemized beside the manifests'), per-agent\ntrigger arm state, and the binary version. Computed ENTIRELY from local state (no network).\n**INFERRED** (additive-only).",
   "type": "object",
   "properties": {
-    "enrolled": {
-      "description": "Whether this installation holds any session (a `sessions.json` row exists).",
-      "type": "boolean"
-    },
-    "followed_skills": {
-      "description": "Skills the profiles currently deliver to this installation, counted from the offline\ndelivery cache (withdrawn items excluded).",
-      "type": "integer",
+    "awaiting_first_sync": {
+      "description": "Profile deliveries not yet applied on this machine (never reconciled here — the next\n`topos update` applies them). Absent = not cheaply knowable from local state.",
+      "type": [
+        "integer",
+        "null"
+      ],
       "format": "uint64",
       "minimum": 0
     },
     "items": {
-      "description": "The resolved TRUST-RAIL table for the CURRENT directory: every bundle the local manifests\ncovering it ask for, nearest-first deduped, each with its one source line and state.\n**Additive.**",
+      "description": "The resolved TRUST-RAIL table for the CURRENT directory: every bundle the manifests\ncovering it — and the person's profile layers — resolve to, nearest-first deduped, each\nwith its one source line and an honest state; recorded EXCLUDES appear as their own rows.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/StatusItem"
       }
     },
-    "pending_offers": {
-      "description": "First-receive offers awaiting consent (a delivered skill whose bytes never landed here).\nAbsent = not cheaply knowable from local state.",
-      "type": [
-        "integer",
-        "null"
-      ],
+    "profile_skills": {
+      "description": "Skills the person's server-stored PROFILES deliver to this installation, counted from the\noffline delivery cache (withdrawn and manifest-channel rows excluded).",
+      "type": "integer",
       "format": "uint64",
       "minimum": 0
     },
@@ -38,7 +34,7 @@
       ]
     },
     "sessions": {
-      "description": "This installation's SESSIONS — one per logged-into workspace (the session model; empty =\nlogged into nothing). **Additive.**",
+      "description": "This installation's SESSIONS — one per logged-into workspace (the session model; empty =\nlogged into nothing).",
       "type": "array",
       "items": {
         "$ref": "#/$defs/StatusSession"
@@ -58,26 +54,25 @@
     "version": {
       "description": "The `topos` binary's own version.",
       "type": "string"
-    },
-    "workspaces": {
-      "description": "The connected workspaces — one row per session (empty when logged into nothing).",
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/StatusWorkspace"
-      }
     }
   },
   "required": [
     "version",
-    "enrolled",
     "signed_in",
-    "followed_skills"
+    "profile_skills"
   ],
   "$defs": {
     "StatusItem": {
-      "description": "One resolved line of the trust rail. Every \"why does this agent have X?\" is answered by\n`source` (which manifest line asked for it); every \"why doesn't it?\" by `state`. **INFERRED**\n(additive-only).",
+      "description": "One resolved line of the trust rail. Every \"why does this agent have X?\" is answered by\n`source` (which manifest line — or profile — asked for it); every \"why doesn't it?\" by\n`state` (an exclude renders as its own row). **INFERRED** (additive-only).",
       "type": "object",
       "properties": {
+        "applied_as_of": {
+          "description": "When the applied state was last confirmed against a delivery (RFC-3339 UTC) — the offline\ncache's honesty stamp: \"applied as of this sync\", never a live claim.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "description": "The bundle's name (the dedupe key).",
           "type": "string"
@@ -91,14 +86,14 @@
           "type": "string"
         },
         "shadows": {
-          "description": "Broader manifests this line shadows (their labels) — rendered, never acted on.",
+          "description": "Broader mentions this line shadows (their labels) — on an `excluded` row, the layers\nwhose provision the exclude withholds. Rendered, never acted on.",
           "type": "array",
           "items": {
             "type": "string"
           }
         },
         "source": {
-          "description": "ONE source line: the manifest that asked for it (`<dir>/topos.toml` or\n`~/.topos/topos.toml`).",
+          "description": "ONE source line: the manifest that asked for it (`<dir>/topos.toml`,\n`~/.topos/topos.toml`), or the profile layer (`your profile @ <host>/<ws>`). On an\n`excluded` row, the layer that RECORDED the exclude.",
           "type": "string"
         },
         "state": {
@@ -112,6 +107,13 @@
             "null"
           ],
           "pattern": "^[0-9a-f]{64}$"
+        },
+        "via": {
+          "description": "The channel that delivers it, when the line rides one (`everyone` = the workspace\nbaseline).",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -126,7 +128,7 @@
       "description": "A trust-rail line's state. **INFERRED value set** (additive).",
       "oneOf": [
         {
-          "description": "The bytes are applied and current against the last-known target.",
+          "description": "The bytes are applied and current against the last-known delivered target (see\n`applied_as_of` — the offline cache's stamp, not a live confirmation).",
           "type": "string",
           "const": "applied"
         },
@@ -141,7 +143,12 @@
           "const": "local-edits"
         },
         {
-          "description": "Referenced here but NOT deliverable with your current access — phrased from LOCAL\nknowledge only (no session for its workspace); never from server confirmation.",
+          "description": "An exclude line withholds this name here (the row's `source` recorded it).",
+          "type": "string",
+          "const": "excluded"
+        },
+        {
+          "description": "Referenced here but NOT deliverable with your current access — phrased from LOCAL\nknowledge only (no live session for its workspace); never from server confirmation.",
           "type": "string",
           "const": "not-available"
         },
@@ -151,7 +158,7 @@
           "const": "pending-session"
         },
         {
-          "description": "Not yet applied (never delivered here), or not determinable offline.",
+          "description": "Not applied here yet — `topos update` applies it (or the state is not determinable\noffline).",
           "type": "string",
           "const": "unknown"
         }
@@ -215,34 +222,6 @@
       },
       "required": [
         "agent"
-      ]
-    },
-    "StatusWorkspace": {
-      "description": "One joined workspace in a [`StatusData`]. **INFERRED** (additive-only).",
-      "type": "object",
-      "properties": {
-        "display_name": {
-          "type": "string"
-        },
-        "link_status": {
-          "description": "This installation's session with the workspace, when it is NOT plainly active: `\"pending\"`\n(awaiting an owner's approval — delivery starts automatically once approved) or `\"ended\"`\n(the session was ended server-side — `topos login <address>` reconnects). Absent = active.\n**Additive.**",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "name": {
-          "description": "The ADDRESS name (what you joined by).",
-          "type": "string"
-        },
-        "workspace_id": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "workspace_id",
-        "name",
-        "display_name"
       ]
     }
   }

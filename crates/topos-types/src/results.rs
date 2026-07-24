@@ -1142,7 +1142,8 @@ pub enum PublishGate {
 // INFERRED — `status` (the offline orientation snapshot).
 // =================================================================================================
 
-/// `status` result — the one orientation read: enrollment, sign-in, follow counts, per-agent
+/// `status` result — the one orientation read: the sessions, the resolved trust-rail table for
+/// the current directory (the person's profile layers itemized beside the manifests'), per-agent
 /// trigger arm state, and the binary version. Computed ENTIRELY from local state (no network).
 /// **INFERRED** (additive-only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1150,34 +1151,29 @@ pub enum PublishGate {
 pub struct StatusData {
     /// The `topos` binary's own version.
     pub version: String,
-    /// Whether this installation holds any session (a `sessions.json` row exists).
-    pub enrolled: bool,
     /// The server base URL the sessions dial, when logged in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<String>,
     /// Whether a LIVE (non-ended) session's credential is stored — the signed-in state.
     pub signed_in: bool,
-    /// The connected workspaces — one row per session (empty when logged into nothing).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub workspaces: Vec<StatusWorkspace>,
-    /// Skills the profiles currently deliver to this installation, counted from the offline
-    /// delivery cache (withdrawn items excluded).
-    pub followed_skills: u64,
-    /// First-receive offers awaiting consent (a delivered skill whose bytes never landed here).
-    /// Absent = not cheaply knowable from local state.
+    /// Skills the person's server-stored PROFILES deliver to this installation, counted from the
+    /// offline delivery cache (withdrawn and manifest-channel rows excluded).
+    pub profile_skills: u64,
+    /// Profile deliveries not yet applied on this machine (never reconciled here — the next
+    /// `topos update` applies them). Absent = not cheaply knowable from local state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_offers: Option<u64>,
+    pub awaiting_first_sync: Option<u64>,
     /// Per-agent auto-update trigger state, probed READ-ONLY over the detected agents (nothing is
     /// armed or repaired by `status`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<StatusTrigger>,
     /// This installation's SESSIONS — one per logged-into workspace (the session model; empty =
-    /// logged into nothing). **Additive.**
+    /// logged into nothing).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<StatusSession>,
-    /// The resolved TRUST-RAIL table for the CURRENT directory: every bundle the local manifests
-    /// covering it ask for, nearest-first deduped, each with its one source line and state.
-    /// **Additive.**
+    /// The resolved TRUST-RAIL table for the CURRENT directory: every bundle the manifests
+    /// covering it — and the person's profile layers — resolve to, nearest-first deduped, each
+    /// with its one source line and an honest state; recorded EXCLUDES appear as their own rows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<StatusItem>,
 }
@@ -1201,8 +1197,8 @@ pub struct StatusSession {
 }
 
 /// One resolved line of the trust rail. Every "why does this agent have X?" is answered by
-/// `source` (which manifest line asked for it); every "why doesn't it?" by `state`. **INFERRED**
-/// (additive-only).
+/// `source` (which manifest line — or profile — asked for it); every "why doesn't it?" by
+/// `state` (an exclude renders as its own row). **INFERRED** (additive-only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 pub struct StatusItem {
@@ -1210,19 +1206,29 @@ pub struct StatusItem {
     pub name: String,
     /// The winning reference (canonical where known).
     pub reference: String,
-    /// ONE source line: the manifest that asked for it (`<dir>/topos.toml` or
-    /// `~/.topos/topos.toml`).
+    /// ONE source line: the manifest that asked for it (`<dir>/topos.toml`,
+    /// `~/.topos/topos.toml`), or the profile layer (`your profile @ <host>/<ws>`). On an
+    /// `excluded` row, the layer that RECORDED the exclude.
     pub source: String,
     /// Where the bytes belong: `"project"` (this project's harness dirs) or `"person"` (the home
     /// dirs).
     pub scope: String,
+    /// The channel that delivers it, when the line rides one (`everyone` = the workspace
+    /// baseline).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
     /// The applied version (64-hex), when one is applied locally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
     pub version: Option<String>,
+    /// When the applied state was last confirmed against a delivery (RFC-3339 UTC) — the offline
+    /// cache's honesty stamp: "applied as of this sync", never a live claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_as_of: Option<String>,
     /// The line's state.
     pub state: StatusItemState,
-    /// Broader manifests this line shadows (their labels) — rendered, never acted on.
+    /// Broader mentions this line shadows (their labels) — on an `excluded` row, the layers
+    /// whose provision the exclude withholds. Rendered, never acted on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shadows: Vec<String>,
 }
@@ -1232,35 +1238,23 @@ pub struct StatusItem {
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum StatusItemState {
-    /// The bytes are applied and current against the last-known target.
+    /// The bytes are applied and current against the last-known delivered target (see
+    /// `applied_as_of` — the offline cache's stamp, not a live confirmation).
     Applied,
     /// A newer target is known than what is applied — the next `update` lands it.
     Behind,
     /// Local edits sit ahead of the applied version (a draft).
     LocalEdits,
+    /// An exclude line withholds this name here (the row's `source` recorded it).
+    Excluded,
     /// Referenced here but NOT deliverable with your current access — phrased from LOCAL
-    /// knowledge only (no session for its workspace); never from server confirmation.
+    /// knowledge only (no live session for its workspace); never from server confirmation.
     NotAvailable,
     /// The session that would deliver it is pending an owner's approval.
     PendingSession,
-    /// Not yet applied (never delivered here), or not determinable offline.
+    /// Not applied here yet — `topos update` applies it (or the state is not determinable
+    /// offline).
     Unknown,
-}
-
-/// One joined workspace in a [`StatusData`]. **INFERRED** (additive-only).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct StatusWorkspace {
-    pub workspace_id: String,
-    /// The ADDRESS name (what you joined by).
-    pub name: String,
-    pub display_name: String,
-    /// This installation's session with the workspace, when it is NOT plainly active: `"pending"`
-    /// (awaiting an owner's approval — delivery starts automatically once approved) or `"ended"`
-    /// (the session was ended server-side — `topos login <address>` reconnects). Absent = active.
-    /// **Additive.**
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub link_status: Option<String>,
 }
 
 /// One detected agent's auto-update trigger presence in a [`StatusData`] — a read-only probe of

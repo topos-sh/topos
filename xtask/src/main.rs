@@ -405,7 +405,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         EnrollmentPending, InviteReadData, ListData, LogData, LoginData, LogoutData, MergePreview,
         MergePreviewVerdict, MergeReport, ProtectData, PublishData, PublishDescribeData,
         PublishGate, PullAction, PullData, PullSkill, RemoveData, RemoveItem, RemoveKind,
-        ReviewIndexData, ReviewIndexEntry, SkillEntry, StatusData, StatusTrigger, StatusWorkspace,
+        ReviewIndexData, ReviewIndexEntry, SkillEntry, StatusData, StatusTrigger,
         WorkspaceSyncReport,
     };
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
@@ -1205,20 +1205,19 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ok: true,
         data: serde_json::to_value(StatusData {
             version: "0.1.0".to_owned(),
-            enrolled: true,
             server: Some("https://topos.sh/api".to_owned()),
             signed_in: true,
-            workspaces: vec![StatusWorkspace {
+            profile_skills: 2,
+            awaiting_first_sync: Some(1),
+            sessions: vec![topos_types::results::StatusSession {
                 workspace_id: "w_demo".to_owned(),
                 name: "demo".to_owned(),
                 display_name: "Demo".to_owned(),
-                // An active link omits (the pinned shape stays byte-identical); a pending link
+                host: "topos.sh".to_owned(),
+                // An active session omits its status (the shape stays lean); a pending one
                 // would read "pending" — awaiting owner approval.
-                link_status: None,
+                session_status: None,
             }],
-            followed_skills: 2,
-            pending_offers: Some(1),
-            sessions: Vec::new(),
             items: Vec::new(),
             triggers: vec![
                 StatusTrigger {

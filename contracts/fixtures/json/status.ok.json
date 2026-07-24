@@ -3,10 +3,17 @@
   "command": "status",
   "ok": true,
   "data": {
-    "enrolled": true,
-    "followed_skills": 2,
-    "pending_offers": 1,
+    "awaiting_first_sync": 1,
+    "profile_skills": 2,
     "server": "https://topos.sh/api",
+    "sessions": [
+      {
+        "display_name": "Demo",
+        "host": "topos.sh",
+        "name": "demo",
+        "workspace_id": "w_demo"
+      }
+    ],
     "signed_in": true,
     "triggers": [
       {
@@ -18,14 +25,7 @@
         "note": "presence needs a live scheduler query — not probed offline"
       }
     ],
-    "version": "0.1.0",
-    "workspaces": [
-      {
-        "display_name": "Demo",
-        "name": "demo",
-        "workspace_id": "w_demo"
-      }
-    ]
+    "version": "0.1.0"
   },
   "warnings": [],
   "next_actions": []
