@@ -435,7 +435,8 @@ mod tests {
 
     #[test]
     fn the_grammar_table() {
-        // The artifact table, row by row.
+        // Every documented reference spelling, row by row: bare name, `@ws/name`,
+        // `@ws/channels/x`, `owner/repo`, `./path`, and the canonical host-qualified form.
         assert_eq!(
             parse_ref("code-review").unwrap(),
             ParsedRef::Bare {

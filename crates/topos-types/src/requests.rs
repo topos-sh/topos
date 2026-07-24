@@ -1,7 +1,7 @@
-//! Wire request/response DTOs for the product's public device-lane HTTP routes.
+//! Wire request/response DTOs for the product's public session-lane HTTP routes.
 //!
 //! The JSON bodies the app accepts on `publish` / `propose` / `revert` / `review`, the read bodies
-//! (current / version metadata / proposals / catalog / delivery / describe), and the device-auth
+//! (current / version metadata / proposals / catalog / delivery / describe), and the login-flow
 //! start/poll pair. These are **deserialization shapes** only (no logic): the serving tier parses
 //! them into validated domain types at the edge (parse-don't-validate), and every candidate byte is
 //! **server-rehashed** — a client-supplied id or hash is never trusted.
@@ -9,8 +9,8 @@
 //! **No `created_at` on any request.** The server stamps the receipt's time from its own clock; a
 //! client never supplies a wall clock (an ambient time would be a replay / skew lever).
 //!
-//! **The write credential is the device credential in the `Authorization: Bearer` header — never a
-//! body field.** Keeping the secret out of the body keeps it out of receipt request identities and
+//! **The write credential is the session's workspace-scoped credential in the
+//! `Authorization: Bearer` header — never a body field.** Keeping the secret out of the body keeps it out of receipt request identities and
 //! the client's persisted op-WAL, so a credential rotation between retries never breaks
 //! byte-identical replay. The `op` (publish / propose / revert / review-decision) is derived from
 //! the route, never the body.
@@ -581,48 +581,50 @@ pub struct WireAppliedReport {
 }
 
 // =================================================================================================
-// Device-auth request/response DTOs — the gh-style device flow the APP serves (`POST
-// /v1/device/authorize` + `POST /v1/device/token`). A device asks to join a workspace; a signed-in
-// human approves it in the browser; the poll then returns the device's ONE bearer credential.
+// Login-flow request/response DTOs — the gh-style browser-approval flow the APP serves (`POST
+// /v1/login/authorize` + `POST /v1/login/token`; the field names keep their RFC-8628 spellings). An
+// installation asks to log into a workspace; a signed-in human approves it in the browser; the
+// poll then returns the SESSION's workspace-scoped bearer credential.
 //
-// Design fact: on approval the `device_code` itself is PROMOTED to the device's bearer credential
-// server-side (the same sha256 stored twice — once as the flow row's code hash, once as the device
-// credential hash), and the poll's `credential` field carries it back — so the CLI stores ONE secret
-// from ONE field and no second mint/redeem round-trip exists.
+// Design fact: on approval the `device_code` (the flow code) itself is PROMOTED to the session's
+// bearer credential server-side (the same sha256 stored twice — once as the flow row's code hash,
+// once as the session credential hash), and the poll's `credential` field carries it back — so the
+// CLI stores ONE secret from ONE field and no second mint/redeem round-trip exists.
 // =================================================================================================
 
-/// `POST /v1/device/authorize` body — begin a device-authorization flow toward a workspace named by
-/// its address slug. Whether the name exists is never disclosed on this route: an unknown name runs
-/// the same flow to the same uniform denial.
+/// `POST /v1/login/authorize` body — begin a login flow toward a workspace named by its address
+/// slug. Whether the name exists is never disclosed on this route: an unknown name runs the same
+/// flow to the same uniform denial.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct DeviceAuthStartRequest {
-    /// A human-readable device name shown on the approval page (a confused-deputy guard, not
-    /// authority) and kept as the device's display name once approved.
+    /// A human-readable machine name shown on the approval page (a confused-deputy guard, not
+    /// authority) and kept as the session's display name once approved.
     pub requested_name: String,
-    /// The workspace ADDRESS slug the device asks to join (`topos.sh/<name>` minus the origin). An
+    /// The workspace ADDRESS slug the login targets (`topos.sh/<name>` minus the origin). An
     /// EMPTY string names "the workspace the origin itself addresses" (single-tenant installs, where
     /// the origin IS its one workspace); a non-empty value is the address slug as today.
     pub workspace: String,
-    /// The invitation-link token a `follow <invite-url>` enrollment carries. Recorded on the flow
-    /// (as its hash) UNVALIDATED — this unauthenticated start is never a token oracle; the approval
+    /// The invitation-link token a `login <invite-url>` carries. Recorded on the flow (as its
+    /// hash) UNVALIDATED — this unauthenticated start is never a token oracle; the approval
     /// ceremony resolves it and weaves the invitation accept into its own fence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invite_token: Option<String>,
 }
 
-/// `POST /v1/device/authorize` response — the device-authorization grant (RFC-8628-shaped names).
+/// `POST /v1/login/authorize` response — the login-flow grant (RFC-8628-shaped names).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct DeviceAuthStartResponse {
-    /// The SECRET device code the client polls `device/token` with. On approval this same secret is
-    /// promoted to the device's bearer credential (see the module note), so it is stored like one.
+    /// The SECRET flow code the client polls `login/token` with (the RFC-8628 field name). On
+    /// approval this same secret is promoted to the session's bearer credential (see the module
+    /// note), so it is stored like one.
     pub device_code: String,
     /// The short human-facing code the approval page displays (a cross-check, never typed as a
     /// secret).
@@ -636,18 +638,18 @@ pub struct DeviceAuthStartResponse {
     pub interval_secs: u64,
 }
 
-/// `POST /v1/device/token` body — poll a device-authorization flow for its outcome.
+/// `POST /v1/login/token` body — poll a login flow for its outcome.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct DeviceAuthPollRequest {
-    /// The SECRET device code from `device/authorize`.
+    /// The SECRET flow code from `login/authorize`.
     pub device_code: String,
 }
 
-/// A device-authorization poll status (snake_case). `granted` carries the credential + the joined
+/// A login-flow poll status (snake_case). `granted` carries the credential + the joined
 /// workspace; every other status carries only itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(
@@ -662,14 +664,14 @@ pub enum DeviceAuthPollStatus {
     Denied,
     /// The flow expired before approval.
     Expired,
-    /// Approved — `credential`, `device_id`, and `workspace` are present.
+    /// Approved — `credential`, `session_id`, and `workspace` are present.
     Granted,
 }
 
 /// The first-destination HINT an accepted invitation named — decorated onto a `granted` poll (and
-/// the direct-accept answer) so the enrolled client's post-accept subscribe can target it. `kind`
-/// is the bundle catalog's own tag (`skill` today) or the literal `channel` — displayed and routed
-/// on, never trusted as authority.
+/// the direct-accept answer) so the logged-in client's first `add` can target it. `kind` is the
+/// bundle catalog's own tag (`skill` today) or the literal `channel` — displayed and routed on,
+/// never trusted as authority.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -683,7 +685,7 @@ pub struct DeviceAuthHint {
 }
 
 /// The workspace context a `granted` poll carries — everything the CLI needs to record what it
-/// enrolled into (the id it scopes requests by, the address slug it joined at, and a display name).
+/// logged into (the id it scopes requests by, the address slug it joined at, and a display name).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -692,15 +694,16 @@ pub struct DeviceAuthHint {
 pub struct DeviceAuthWorkspace {
     /// The workspace id (the `{ws}` path segment of every subsequent request).
     pub workspace_id: String,
-    /// The workspace's ADDRESS slug (what the human typed at `follow`).
+    /// The workspace's ADDRESS slug (what the human typed at `login`).
     pub name: String,
     /// The workspace's display name.
     pub display_name: String,
 }
 
-/// `POST /v1/device/token` response — the poll `status`; a `granted` poll carries the device's ONE
-/// bearer credential (the promoted device code — returned here and stored from this ONE field),
-/// its device id, and the joined workspace. A re-poll of an approved flow returns the same answer.
+/// `POST /v1/login/token` response — the poll `status`; a `granted` poll carries the SESSION's
+/// workspace-scoped bearer credential (the promoted flow code — returned here and stored from this
+/// ONE field), the session id, and the joined workspace. A re-poll of an approved flow returns the
+/// same answer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -709,11 +712,12 @@ pub struct DeviceAuthWorkspace {
 pub struct DeviceAuthPollResponse {
     /// The poll status.
     pub status: DeviceAuthPollStatus,
-    /// The device's plaintext bearer credential — present ONLY when `status` is `granted`. Returned
-    /// once per poll; the server stores only its sha256.
+    /// The session's plaintext bearer credential — present ONLY when `status` is `granted`.
+    /// Returned once per poll; the server stores only its sha256.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
-    /// The registered device's id — present ONLY when `status` is `granted`.
+    /// The RETIRED device wire's grant id — parse-only fallback for a producer predating
+    /// [`Self::session_id`]; never served by the session wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
     /// The minted SESSION's id — the session-model login wire's grant half (a session = user ×
@@ -732,10 +736,8 @@ pub struct DeviceAuthPollResponse {
     /// carried an invite token naming one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<DeviceAuthHint>,
-    /// The FIRST device↔workspace link's born status — present ONLY when `status` is `granted`:
-    /// `"active"`, or `"pending"` when the workspace's device-approval knob gated it (approval
-    /// mints the registration and the first link together server-side). Absent on an older
-    /// producer ⇒ treat as `"active"`.
+    /// The RETIRED device-link spelling of [`Self::session_status`] — parse-only fallback for a
+    /// producer predating the session wire. Absent ⇒ treat as `"active"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_status: Option<String>,
 }

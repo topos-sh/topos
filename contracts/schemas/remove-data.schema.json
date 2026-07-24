@@ -39,7 +39,7 @@
           }
         },
         "bytes_kept": {
-          "description": "Whether the sidecar bytes are kept (a followed exclusion / a tracked-local keeps the bytes as a\nfrozen copy; an untracked-local delete removes the only copy there is).",
+          "description": "Whether the sidecar bytes are kept (a manifest edit keeps the tracked bytes as a frozen\ncopy; an untracked-local delete removes the only copy there is).",
           "type": "boolean"
         },
         "kind": {
@@ -80,11 +80,6 @@
     "RemoveKind": {
       "description": "How `remove` treats one skill. **INFERRED value set.**",
       "oneOf": [
-        {
-          "description": "A followed skill → a per-device exclusion (the server keeps delivering it to your other devices).",
-          "type": "string",
-          "const": "followed-exclusion"
-        },
         {
           "description": "The manifest's own include line was deleted — delivery to this scope just ends. **Additive.**",
           "type": "string",

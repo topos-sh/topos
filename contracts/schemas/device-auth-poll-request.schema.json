@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "DeviceAuthPollRequest",
-  "description": "`POST /v1/device/token` body — poll a device-authorization flow for its outcome.",
+  "description": "`POST /v1/login/token` body — poll a login flow for its outcome.",
   "type": "object",
   "properties": {
     "device_code": {
-      "description": "The SECRET device code from `device/authorize`.",
+      "description": "The SECRET flow code from `login/authorize`.",
       "type": "string"
     }
   },

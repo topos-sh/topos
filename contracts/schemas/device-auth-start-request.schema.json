@@ -1,22 +1,22 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "DeviceAuthStartRequest",
-  "description": "`POST /v1/device/authorize` body — begin a device-authorization flow toward a workspace named by\nits address slug. Whether the name exists is never disclosed on this route: an unknown name runs\nthe same flow to the same uniform denial.",
+  "description": "`POST /v1/login/authorize` body — begin a login flow toward a workspace named by its address\nslug. Whether the name exists is never disclosed on this route: an unknown name runs the same\nflow to the same uniform denial.",
   "type": "object",
   "properties": {
     "invite_token": {
-      "description": "The invitation-link token a `follow <invite-url>` enrollment carries. Recorded on the flow\n(as its hash) UNVALIDATED — this unauthenticated start is never a token oracle; the approval\nceremony resolves it and weaves the invitation accept into its own fence.",
+      "description": "The invitation-link token a `login <invite-url>` carries. Recorded on the flow (as its\nhash) UNVALIDATED — this unauthenticated start is never a token oracle; the approval\nceremony resolves it and weaves the invitation accept into its own fence.",
       "type": [
         "string",
         "null"
       ]
     },
     "requested_name": {
-      "description": "A human-readable device name shown on the approval page (a confused-deputy guard, not\nauthority) and kept as the device's display name once approved.",
+      "description": "A human-readable machine name shown on the approval page (a confused-deputy guard, not\nauthority) and kept as the session's display name once approved.",
       "type": "string"
     },
     "workspace": {
-      "description": "The workspace ADDRESS slug the device asks to join (`topos.sh/<name>` minus the origin). An\nEMPTY string names \"the workspace the origin itself addresses\" (single-tenant installs, where\nthe origin IS its one workspace); a non-empty value is the address slug as today.",
+      "description": "The workspace ADDRESS slug the login targets (`topos.sh/<name>` minus the origin). An\nEMPTY string names \"the workspace the origin itself addresses\" (single-tenant installs, where\nthe origin IS its one workspace); a non-empty value is the address slug as today.",
       "type": "string"
     }
   },

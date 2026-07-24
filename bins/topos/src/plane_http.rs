@@ -479,24 +479,27 @@ fn domain_mode(mode: WireFileMode) -> FileMode {
 }
 
 // =================================================================================================
-// UreqDeviceClient — the real DEVICE transport (sibling of the read-lane `UreqPlane`). One client
-// speaks every route a device drives: the UNAUTHENTICATED device-authorization flow
-// (`POST /v1/device/authorize` + `POST /v1/device/token`) and the CREDENTIALED routes — the
-// governance invitation POST + device revoke, the four contribute writes (publish / propose /
-// revert / review), the workspace-catalog GET (`list --remote`), and the member-scoped directory
-// reads/row-ops — each riding `Authorization: Bearer <device credential>` (the ONE credential; the
-// server resolves credential → device → seat → live link). Every terminal protocol outcome of a write
-// comes back as the all-outcome **200 envelope**. The device code and the credential are
-// sensitive — never logged or put in an error.
+// UreqDeviceClient — the real SESSION-LANE transport (sibling of the read-lane `UreqPlane`). One
+// client speaks every route a session drives: the UNAUTHENTICATED login flow
+// (`POST /v1/login/authorize` + `POST /v1/login/token`) and the CREDENTIALED routes — the
+// governance invitation POST + the session self-end (`DELETE /v1/session`), the four contribute
+// writes (publish / propose / revert / review), the workspace-catalog GET (`list --remote`), the
+// profile row ops, and the member-scoped directory reads — each riding `Authorization: Bearer
+// <session credential>` (the workspace-scoped credential; the server resolves credential →
+// live session → person → seat). Every terminal protocol outcome of a write comes back as the
+// all-outcome **200 envelope**. The flow code and the credential are sensitive — never logged or
+// put in an error.
 // =================================================================================================
 
-/// The blocking `ureq` device transport (`EnrollSource` + `GovernanceSource` + `ContributeSource` +
-/// `CatalogSource` + `DirectorySource`). Holds the base URL, one configured agent, and the device's
-/// ONE Bearer credential. The enrollment routes are unauthenticated (they mint the credential the
-/// caller then stores); enrollment-only callers pass `None`.
+/// The blocking `ureq` session-lane transport (`EnrollSource` + `GovernanceSource` +
+/// `ContributeSource` + `CatalogSource` + `DirectorySource`). Holds the base URL, one configured
+/// agent, and ONE session's workspace-scoped Bearer credential. The login-flow routes are
+/// unauthenticated (they mint the credential the caller then stores); login-only callers pass
+/// `None`.
 pub(crate) struct UreqDeviceClient {
     base_url: String,
-    /// **SECRET** — the device's ONE Bearer credential (`None` = signed out / enrollment-only).
+    /// **SECRET** — one session's workspace-scoped Bearer credential (`None` = signed out /
+    /// login-only).
     credential: Option<String>,
     agent: ureq::Agent,
 }
@@ -512,9 +515,9 @@ impl std::fmt::Debug for UreqDeviceClient {
 }
 
 impl UreqDeviceClient {
-    /// Build the transport against `base_url` (trailing slash trimmed) with the device credential,
+    /// Build the transport against `base_url` (trailing slash trimmed) with the session credential,
     /// over the same agent configuration as [`UreqPlane`] (status-as-error OFF + the connect/recv/body
-    /// timeouts). Enrollment-only callers pass `None` (those routes are unauthenticated).
+    /// timeouts). Login-only callers pass `None` (those routes are unauthenticated).
     pub(crate) fn new(base_url: String, credential: Option<String>) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
@@ -672,10 +675,11 @@ impl EnrollSource for UreqDeviceClient {
     }
 }
 
-/// Map a `POST /v1/device/token` response to the typed [`DeviceAuthPoll`]. A `granted` poll must carry
-/// the credential + device id + workspace (the promoted device code IS the credential — there is no
-/// second mint round-trip); the workspace id is validated at this wire boundary (it later keys URL
-/// splices + `user.json`). **Pure** (status + bytes in), so every arm is unit-tested without a socket.
+/// Map a `POST /v1/login/token` response to the typed [`DeviceAuthPoll`]. A `granted` poll must
+/// carry the credential + session id + workspace (the promoted flow code IS the credential — there
+/// is no second mint round-trip); the workspace id is validated at this wire boundary (it later
+/// keys URL splices + the session row). **Pure** (status + bytes in), so every arm is unit-tested
+/// without a socket.
 fn map_poll_response(status: u16, bytes: &[u8]) -> Result<DeviceAuthPoll, ClientError> {
     if classify(status) != HttpClass::Ok {
         return Err(ClientError::Plane(format!(

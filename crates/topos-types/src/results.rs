@@ -870,8 +870,8 @@ pub struct RemoveItem {
     /// The agent directories cleaned (or, on the describe, that would be cleaned).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_dirs: Vec<String>,
-    /// Whether the sidecar bytes are kept (a followed exclusion / a tracked-local keeps the bytes as a
-    /// frozen copy; an untracked-local delete removes the only copy there is).
+    /// Whether the sidecar bytes are kept (a manifest edit keeps the tracked bytes as a frozen
+    /// copy; an untracked-local delete removes the only copy there is).
     pub bytes_kept: bool,
     /// A removal-specific disclosure (the built-in skill's durable opt-out + its way back). Absent
     /// for ordinary removals. **INFERRED** (additive).
@@ -884,8 +884,6 @@ pub struct RemoveItem {
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum RemoveKind {
-    /// A followed skill → a per-device exclusion (the server keeps delivering it to your other devices).
-    FollowedExclusion,
     /// The manifest's own include line was deleted — delivery to this scope just ends. **Additive.**
     ManifestRemoved,
     /// A broader layer still provides the item, so an EXCLUDE line was recorded in the nearest
@@ -1097,20 +1095,20 @@ pub enum PublishGate {
 pub struct StatusData {
     /// The `topos` binary's own version.
     pub version: String,
-    /// Whether this install is enrolled with a plane (the enrollment doc exists).
+    /// Whether this installation holds any session (a `sessions.json` row exists).
     pub enrolled: bool,
-    /// The pinned plane base URL, when enrolled.
+    /// The server base URL the sessions dial, when logged in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<String>,
-    /// Whether the device credential is stored (the signed-in state).
+    /// Whether a LIVE (non-ended) session's credential is stored — the signed-in state.
     pub signed_in: bool,
-    /// The joined workspaces (empty when never enrolled).
+    /// The connected workspaces — one row per session (empty when logged into nothing).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspaces: Vec<StatusWorkspace>,
-    /// Skills this install currently follows (excluding per-device exclusions and unfollowed
-    /// copies).
+    /// Skills the profiles currently deliver to this installation, counted from the offline
+    /// delivery cache (withdrawn items excluded).
     pub followed_skills: u64,
-    /// First-receive offers awaiting consent (a followed skill whose bytes never landed here).
+    /// First-receive offers awaiting consent (a delivered skill whose bytes never landed here).
     /// Absent = not cheaply knowable from local state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_offers: Option<u64>,
@@ -1202,9 +1200,10 @@ pub struct StatusWorkspace {
     /// The ADDRESS name (what you joined by).
     pub name: String,
     pub display_name: String,
-    /// This device's link to the workspace, when it is NOT plainly active: `"pending"` (awaiting an
-    /// owner's approval — delivery starts automatically once approved) or `"ended"` (the link was
-    /// severed or never approved — `topos follow <address>` relinks). Absent = active. **Additive.**
+    /// This installation's session with the workspace, when it is NOT plainly active: `"pending"`
+    /// (awaiting an owner's approval — delivery starts automatically once approved) or `"ended"`
+    /// (the session was ended server-side — `topos login <address>` reconnects). Absent = active.
+    /// **Additive.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_status: Option<String>,
 }

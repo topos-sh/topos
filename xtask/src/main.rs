@@ -796,9 +796,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // the describe with `applied: false`; `--yes` returns it applied) + the reshaped reads.
     // =============================================================================================
 
-    // `remove <skill>` (bare, LOSS-GUARDED) — the DESCRIBE a draft holds: the followed skill has
-    // local edits ahead, so the exclusion waits for `--yes` (a followed CLEAN skill applies
-    // immediately instead — see `remove.ok`). `applied: false` — nothing has changed.
+    // `remove <skill>` (bare, LOSS-GUARDED) — the DESCRIBE a permanent delete holds: the skill is
+    // a tracked, never-published local, so no other copy exists and the delete waits for `--yes`
+    // (a manifest-line remove applies immediately instead — see `remove.ok`). `applied: false` —
+    // nothing has changed.
     let remove_describe = JsonEnvelope {
         schema_version: 1,
         command: "remove".to_owned(),
@@ -806,16 +807,15 @@ fn fixtures() -> Vec<(&'static str, String)> {
         data: serde_json::to_value(RemoveData {
             items: vec![RemoveItem {
                 name: "deploy".to_owned(),
-                kind: RemoveKind::FollowedExclusion,
+                kind: RemoveKind::TrackedLocalPermanent,
                 manifest: None,
-                workspace_id: Some("w_acme".to_owned()),
+                workspace_id: None,
                 agent_dirs: vec!["~/.claude/skills/deploy".to_owned()],
-                bytes_kept: true,
+                bytes_kept: false,
                 note: Some(
-                    "you have local edits ahead of the followed version — removing takes the \
-                     draft out of every agent dir on this device (a snapshot is kept in the \
-                     sidecar). Share it first with `topos publish deploy`, inspect it with \
-                     `topos diff deploy`, or apply with --yes"
+                    "'deploy' was never published — no other copy exists, so removing deletes it \
+                     permanently (the topos entry is dropped too). Share it first with \
+                     `topos publish deploy`, or apply with --yes"
                         .to_owned(),
                 ),
             }],
@@ -832,8 +832,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
-    // `remove <skill>` on a followed CLEAN skill — the IMMEDIATE apply (`applied: true`; the agent
-    // dirs are cleaned, every sidecar byte kept) with the undo-led receipt.
+    // `remove <ref>` naming a manifest line — the IMMEDIATE apply (`applied: true`; the include
+    // line leaves the nearest manifest, every sidecar byte kept) with the undo-led receipt
+    // (`add` is the inverse).
     let remove_ok = JsonEnvelope {
         schema_version: 1,
         command: "remove".to_owned(),
@@ -841,21 +842,21 @@ fn fixtures() -> Vec<(&'static str, String)> {
         data: serde_json::to_value(RemoveData {
             items: vec![RemoveItem {
                 name: "deploy".to_owned(),
-                kind: RemoveKind::FollowedExclusion,
-                manifest: None,
-                workspace_id: Some("w_acme".to_owned()),
-                agent_dirs: vec!["~/.claude/skills/deploy".to_owned()],
+                kind: RemoveKind::ManifestRemoved,
+                manifest: Some("./topos.toml".to_owned()),
+                workspace_id: None,
+                agent_dirs: Vec::new(),
                 bytes_kept: true,
                 note: None,
             }],
             applied: true,
-            undo: argv(&["topos", "follow", "acme/skills/deploy"]),
+            undo: argv(&["topos", "add", "@acme/deploy"]),
         })
         .expect("RemoveData serializes"),
         warnings: vec![],
         next_actions: vec![topos::actions::next_action(
             ActionCode::from("UNDO".to_owned()),
-            argv(&["topos", "follow", "acme/skills/deploy"]),
+            argv(&["topos", "add", "@acme/deploy"]),
         )],
         receipt: None,
         error: None,

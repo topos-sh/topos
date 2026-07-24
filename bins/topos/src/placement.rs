@@ -256,8 +256,9 @@ pub(crate) fn plan_targets(
 }
 
 /// The PROJECT-scope placement plan — where a project manifest's bundles land INSIDE the checkout
-/// (the artifact's "project-scope bundles materialize in the project"): its harness dirs, never
-/// committed (the reconcile keeps them out via `.git/info/exclude`). Mirrors the shared-dir-first
+/// (a project-scope bundle materializes in the project itself, so every agent visiting the
+/// checkout reads the same bytes): its harness dirs, never committed (the reconcile keeps them
+/// out via `.git/info/exclude`). Mirrors the shared-dir-first
 /// policy ROOTED AT THE PROJECT: one `<project>/.agents/skills` copy for the covered detected
 /// agents, plus a native project dir per detected-but-uncovered harness that has one; with nothing
 /// detected, the active adapter's project dir (else `<project>/.claude/skills`). An explicit

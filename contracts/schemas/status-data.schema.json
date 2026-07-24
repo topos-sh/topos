@@ -5,11 +5,11 @@
   "type": "object",
   "properties": {
     "enrolled": {
-      "description": "Whether this install is enrolled with a plane (the enrollment doc exists).",
+      "description": "Whether this installation holds any session (a `sessions.json` row exists).",
       "type": "boolean"
     },
     "followed_skills": {
-      "description": "Skills this install currently follows (excluding per-device exclusions and unfollowed\ncopies).",
+      "description": "Skills the profiles currently deliver to this installation, counted from the offline\ndelivery cache (withdrawn items excluded).",
       "type": "integer",
       "format": "uint64",
       "minimum": 0
@@ -22,7 +22,7 @@
       }
     },
     "pending_offers": {
-      "description": "First-receive offers awaiting consent (a followed skill whose bytes never landed here).\nAbsent = not cheaply knowable from local state.",
+      "description": "First-receive offers awaiting consent (a delivered skill whose bytes never landed here).\nAbsent = not cheaply knowable from local state.",
       "type": [
         "integer",
         "null"
@@ -31,7 +31,7 @@
       "minimum": 0
     },
     "server": {
-      "description": "The pinned plane base URL, when enrolled.",
+      "description": "The server base URL the sessions dial, when logged in.",
       "type": [
         "string",
         "null"
@@ -45,7 +45,7 @@
       }
     },
     "signed_in": {
-      "description": "Whether the device credential is stored (the signed-in state).",
+      "description": "Whether a LIVE (non-ended) session's credential is stored — the signed-in state.",
       "type": "boolean"
     },
     "triggers": {
@@ -60,7 +60,7 @@
       "type": "string"
     },
     "workspaces": {
-      "description": "The joined workspaces (empty when never enrolled).",
+      "description": "The connected workspaces — one row per session (empty when logged into nothing).",
       "type": "array",
       "items": {
         "$ref": "#/$defs/StatusWorkspace"
@@ -225,7 +225,7 @@
           "type": "string"
         },
         "link_status": {
-          "description": "This device's link to the workspace, when it is NOT plainly active: `\"pending\"` (awaiting an\nowner's approval — delivery starts automatically once approved) or `\"ended\"` (the link was\nsevered or never approved — `topos follow <address>` relinks). Absent = active. **Additive.**",
+          "description": "This installation's session with the workspace, when it is NOT plainly active: `\"pending\"`\n(awaiting an owner's approval — delivery starts automatically once approved) or `\"ended\"`\n(the session was ended server-side — `topos login <address>` reconnects). Absent = active.\n**Additive.**",
           "type": [
             "string",
             "null"

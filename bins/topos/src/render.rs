@@ -1378,16 +1378,6 @@ fn remove_item_line(item: &RemoveItem, applied: bool) -> String {
                 item.name, item.name
             )
         }
-        RemoveKind::FollowedExclusion => {
-            let verb = if applied { "Removed" } else { "Would remove" };
-            format!(
-                "{verb} '{}' from THIS device only — your other devices and the team are \
-                 unaffected. The copy leaves this device's agent dirs; topos keeps the canonical bytes \
-                 (so re-attaching needs no re-download), and nothing returns at the next sync. `topos \
-                 follow {}` re-attaches it here (stopping it everywhere is `topos unfollow`).",
-                item.name, item.name
-            )
-        }
         RemoveKind::TrackedLocalPermanent => {
             let verb = if applied { "Deleted" } else { "Would delete" };
             format!(

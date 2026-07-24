@@ -9,11 +9,10 @@
         "agent_dirs": [
           "~/.claude/skills/deploy"
         ],
-        "bytes_kept": true,
-        "kind": "followed-exclusion",
+        "bytes_kept": false,
+        "kind": "tracked-local-permanent",
         "name": "deploy",
-        "note": "you have local edits ahead of the followed version — removing takes the draft out of every agent dir on this device (a snapshot is kept in the sidecar). Share it first with `topos publish deploy`, inspect it with `topos diff deploy`, or apply with --yes",
-        "workspace_id": "w_acme"
+        "note": "'deploy' was never published — no other copy exists, so removing deletes it permanently (the topos entry is dropped too). Share it first with `topos publish deploy`, or apply with --yes"
       }
     ]
   },

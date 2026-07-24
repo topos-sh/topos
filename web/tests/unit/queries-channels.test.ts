@@ -14,11 +14,12 @@ import {
 } from "./helpers/scratch-db";
 
 /**
- * The CHANNELS DAL (queries.channels.server.ts) against a REAL scratch Postgres. A channel is
- * plain rows; the DEFAULT channel's membership is IMPLICIT (every seat minus explicit
- * `channel_optout` rows), the existence ceremonies (create / rename / delete) are id-keyed
- * owner transactions refusing the default channel, and the self-service opt-out writes the
- * detach records its lapse earns — the opt-in clears them.
+ * The CHANNELS DAL (queries.channels.server.ts) against a REAL scratch Postgres. A channel is a
+ * named, curated SET of bundles — plain rows; the DEFAULT channel is the baseline implicit in
+ * every member's profile (audience = every seat minus explicit profile exclude lines), the
+ * existence ceremonies (create / rename / delete) are id-keyed owner transactions refusing the
+ * default channel, and the viewer's own stance is a profile row (include lines carry a named
+ * channel; an exclude line subtracts the default).
  */
 
 let db: ScratchDb;

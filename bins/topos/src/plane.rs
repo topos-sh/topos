@@ -144,42 +144,46 @@ pub(crate) trait PlaneSource {
     fn bind_skill(&self, _workspace_id: &str, _skill_id: &str) {}
 }
 
-/// How a skill is followed — the engine consults this to choose the consent situation. Persisted by
-/// enrollment in `follows.json` (as [`crate::enroll::FollowModeDoc`], mapped 1:1 at load).
+/// How a delivered skill tracks `current` — the engine consults this to choose the consent
+/// situation. Derived from the delivery cache (`state/sync_status.json`): every session-delivered
+/// item is [`FollowMode::Auto`], because login was the acceptance event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FollowMode {
-    /// Auto-apply a new `current` (the standing-follow pre-authorization).
+    /// Auto-apply a new `current` (the standing pre-authorization a session carries).
     Auto,
-    /// One-tap accept each new `current` (`--manual`).
+    /// One-tap accept each new `current` — kept for the kernel's consent table; nothing mints it
+    /// today.
     ConfirmEach,
 }
 
-/// The per-skill follow-state the engine needs. The `workspace_id` is the EXPECTED scope — a served
-/// pointer whose scope names a different workspace (even with the same skill id) is a mis-scoped response
-/// and is rejected. (The read credential lives with the TRANSPORT — a
-/// [`crate::plane_http::SkillCred`] — never here: creds in the transport, consent in the follow seam.)
+/// The per-skill delivery context the engine needs. The `workspace_id` is the EXPECTED scope — a
+/// served pointer whose scope names a different workspace (even with the same skill id) is a
+/// mis-scoped response and is rejected. (The read credential lives with the TRANSPORT — a
+/// [`crate::plane_http::SkillCred`] — never here: creds in the transport, consent in this seam.)
 #[derive(Debug, Clone)]
 pub(crate) struct FollowContext {
-    /// The workspace this skill is followed in — the expected pointer scope.
+    /// The workspace delivering this skill — the expected pointer scope.
     pub workspace_id: String,
     pub mode: FollowMode,
-    /// Whether the workspace gates moves behind review (the follower still only ever receives an
+    /// Whether the workspace gates moves behind review (the receiver still only ever receives an
     /// already-approved `current`; this only selects the consent satisfier).
     pub review_required: bool,
-    /// Whether the skill is currently followed (a `false` skill is inventoried but not pulled).
+    /// Whether the skill is currently delivered (a `false` skill is inventoried but not pulled).
     pub following: bool,
-    /// The DEVICE-LOCAL agent include-list (`follow --agent`): registry slugs this skill's bytes are
-    /// scoped to. Empty = unscoped (every detected agent). Never told to the plane.
+    /// A placement include-list of harness-registry slugs this skill's bytes are scoped to. Empty =
+    /// unscoped (every detected agent) — the ordinary case; only the BUILT-IN skill's own state
+    /// narrows it today. Never told to the plane.
     pub agents: Vec<String>,
-    /// The DEVICE-LOCAL per-agent exclusions (`unfollow --agent` / `remove --agent`) — agents whose
-    /// placement this device cleans and stops maintaining. Never told to the plane.
+    /// Placement-excluded harness slugs — agents whose placement the engine cleans and stops
+    /// maintaining. Empty for everything the reconcile feeds. Never told to the plane.
     pub excluded_agents: Vec<String>,
 }
 
-/// The durable follow-state source. The production impl is [`crate::plane_http::FileFollow`] over the
-/// `follows.json` enrollment doc; [`InertFollow`] (nothing enrolled) and the fixtures follow nothing.
+/// The durable delivery-state source. The production impl is the reconcile's cache-backed
+/// `CacheFollow` (over `state/sync_status.json`); [`InertFollow`] (no sessions) and the fixtures
+/// deliver nothing.
 pub(crate) trait FollowSource {
-    /// The followed skills, each with its follow-state, keyed by stable skill id.
+    /// The delivered skills, each with its context, keyed by stable skill id.
     fn followed(&self) -> Vec<(String, FollowContext)>;
 }
 
