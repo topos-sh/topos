@@ -4,7 +4,7 @@ import { PublishInstructions } from "@/components/shell/publish-dialog";
  * The dashboard's empty state — the enroll-and-publish instruction card. No skill has been
  * published yet, so instead of a dead end it hands the exact copyable lines (the SAME ones the
  * Skills `+ new` dialog shows, via the shared component) composed for THIS workspace's address:
- * ask your agent, or follow + publish on an enrolled device.
+ * ask your agent, or log in + publish on a machine with a session.
  */
 export function NoSkills({ shareAddress }: { shareAddress: string }) {
   return (
@@ -14,7 +14,7 @@ export function NoSkills({ shareAddress }: { shareAddress: string }) {
           No skills published yet
         </h2>
         <p className="mx-auto mt-2 max-w-md text-dim text-sm leading-relaxed">
-          Publish your first skill from an enrolled device — ask the agent you already have, or run
+          Publish your first skill from a logged-in machine — ask the agent you already have, or run
           it yourself. It appears here on the next load.
         </p>
       </div>

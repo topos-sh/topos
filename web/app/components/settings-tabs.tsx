@@ -6,15 +6,15 @@ import { useWsPath } from "@/lib/ws-path";
  * The Settings section's tab header, shared VERBATIM by the settings route modules so they
  * can't drift: General (the workspace policy page), Devices (the read-only workspace fleet), and
  * Archive (the archived-skills list with the delete ceremony). The URLs — `settings`,
- * `settings/devices`, `settings/archive` — are built through the tenancy hook, so the tabs are
+ * `settings/sessions`, `settings/archive` — are built through the tenancy hook, so the tabs are
  * origin-rooted in single and `/:ws`-nested in multi with no per-page branching. The active tab
  * carries `aria-current="page"`.
  */
-export function SettingsTabs({ active }: { active: "general" | "devices" | "archive" }) {
+export function SettingsTabs({ active }: { active: "general" | "sessions" | "archive" }) {
   const wsPath = useWsPath();
   const tabs = [
     { id: "general", label: "General", href: wsPath("settings") },
-    { id: "devices", label: "Devices", href: wsPath("settings/devices") },
+    { id: "sessions", label: "Sessions", href: wsPath("settings/sessions") },
     { id: "archive", label: "Archive", href: wsPath("settings/archive") },
   ] as const;
   return (

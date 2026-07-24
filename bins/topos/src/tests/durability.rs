@@ -305,6 +305,7 @@ fn migration_dispatch_is_fail_closed() {
     check_dispatch::<OpRecord>(
         OpRecord {
             schema_version: 1,
+            upstream: None,
             op_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479".into(),
             workspace_id: "w_demo".into(),
             skill_id: "s_demo".into(),

@@ -144,7 +144,7 @@ test("renders the banner, header, trust panel, and the diff — read-only for a 
   // The CLI hand-off is DEMOTED on a pending proposal: collapsed, full command only inside.
   const cliSummary = page.getByText("Prefer the CLI?");
   await expect(cliSummary).toBeVisible();
-  const handoffHeading = page.getByRole("heading", { name: "Decide on an enrolled device" });
+  const handoffHeading = page.getByRole("heading", { name: "Decide on a logged-in machine" });
   await expect(handoffHeading).not.toBeVisible();
   await cliSummary.click();
   await expect(handoffHeading).toBeVisible();

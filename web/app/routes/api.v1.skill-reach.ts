@@ -1,7 +1,7 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
-import { requireDeviceActor } from "@/lib/auth/guards.server";
+import { requireSessionActor } from "@/lib/auth/guards.server";
 import { laneReach } from "@/lib/db/queries.lane.server";
 
 /**
@@ -15,12 +15,12 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
   if (belted !== null) {
     return belted;
   }
-  const actor = await requireDeviceActor(request, params.ws ?? "");
+  const actor = await requireSessionActor(request, params.ws ?? "");
   const reach = await laneReach(actor, params.skill ?? "");
   if (reach === null) {
     return uniformNotFound();
   }
-  return Response.json({ persons: reach.persons, devices: reach.devices }, { headers: NO_STORE });
+  return Response.json({ persons: reach.persons, sessions: reach.sessions }, { headers: NO_STORE });
 }
 
 /** Any other HTTP method on this served path is the uniform 404 — the door owns it, so a

@@ -2,7 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
 import { rowOpResponse } from "@/lib/api/row-envelopes.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
-import { requireDeviceActor } from "@/lib/auth/guards.server";
+import { requireSessionActor } from "@/lib/auth/guards.server";
 import { laneProtectBundle } from "@/lib/db/queries.lane.server";
 
 /**
@@ -45,7 +45,7 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   if (level !== "open" && level !== "reviewed") {
     return badRequest("a skill protection level must be `reviewed` or `open`");
   }
-  const actor = await requireDeviceActor(request, params.ws ?? "");
+  const actor = await requireSessionActor(request, params.ws ?? "");
   const status = await laneProtectBundle(actor, params.skill ?? "", level);
   return rowOpResponse("protect", status, { set: "set" }, PROTECT_DENIED);
 }

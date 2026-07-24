@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  asDevice,
+  asSession,
   bootWorkspace,
   createScratchDb,
   type ScratchDb,
@@ -49,7 +49,7 @@ afterAll(async () => {
 describe("laneLogOf serves the resolver's DISPLAY, never a raw user id", () => {
   it("resolved → the resolver's display; open → null", async () => {
     const l = await lane();
-    const decorated = await l.laneLogOf(asDevice(wsId, "u_res", "dk_res", "reviewer"), "s_log");
+    const decorated = await l.laneLogOf(asSession(wsId, "u_res", "dk_res", "reviewer"), "s_log");
     expect(decorated).not.toBeNull();
     const byVersion = new Map(
       (decorated?.proposals ?? []).map((p) => [p.versionId, p.resolvedBy] as const),

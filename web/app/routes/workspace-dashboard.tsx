@@ -12,9 +12,9 @@ import { serverEnv } from "@/env.server";
 import { actorFromSession, memberInScope } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
 import { theWorkspace } from "@/lib/db/identity.server";
-import { workspaceDeviceCount } from "@/lib/db/queries.fleet.server";
 import { rosterOf } from "@/lib/db/queries.roster.server";
 import { type SkillIndexRow, skillIndexOf } from "@/lib/db/queries.server";
+import { workspaceSessionCount } from "@/lib/db/queries.sessions.server";
 import { followBase } from "@/lib/plane/follow-base.server";
 import { useWsPath } from "@/lib/ws-path";
 import { workspaceAddress } from "@/lib/ws-url.server";
@@ -71,10 +71,10 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     skillIndexOf(memberActor, workspace.id),
     // Direct seat rows: a seat IS membership, so the count is the roster's length.
     rosterOf(memberActor),
-    workspaceDeviceCount(memberActor),
+    workspaceSessionCount(memberActor),
   ]);
   // The onboarding checklist: live while the workspace is still getting going (nothing
-  // published yet, or fewer than two enrolled devices — one machine is not yet distribution),
+  // published yet, or fewer than two active sessions — one machine is not yet distribution),
   // gone once every step is done, and gone once dismissed (a client-set cookie, read here so
   // the choice never flickers at hydration).
   const publishedSkillCount = index.filter((row) => row.versionId !== null).length;

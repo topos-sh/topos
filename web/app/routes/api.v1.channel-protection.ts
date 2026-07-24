@@ -2,7 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
 import { rowOpResponse } from "@/lib/api/row-envelopes.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
-import { requireDeviceActor } from "@/lib/auth/guards.server";
+import { requireSessionActor } from "@/lib/auth/guards.server";
 import { laneProtectChannel } from "@/lib/db/queries.lane.server";
 
 /**
@@ -43,7 +43,7 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   if (level !== "open" && level !== "curated") {
     return badRequest("a channel protection level must be `curated` or `open`");
   }
-  const actor = await requireDeviceActor(request, params.ws ?? "");
+  const actor = await requireSessionActor(request, params.ws ?? "");
   const status = await laneProtectChannel(actor, params.channel ?? "", level);
   return rowOpResponse("protect", status, { set: "set" }, PROTECT_DENIED);
 }

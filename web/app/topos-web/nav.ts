@@ -50,9 +50,9 @@ export const ossNav: NavEntry[] = [
     section: "workspace",
   },
   {
-    id: "your-devices",
-    label: "Your devices",
-    href: () => "/account/devices",
+    id: "your-sessions",
+    label: "Your sessions",
+    href: () => "/account/sessions",
     icon: "laptop",
     section: "account",
   },

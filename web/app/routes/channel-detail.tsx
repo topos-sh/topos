@@ -20,7 +20,9 @@ import {
   type ChannelPlaceOutcome,
   type ChannelUnplaceOutcome,
   channelDetail,
+  includeChannelInProfile,
   placeBundleInChannel,
+  removeChannelFromProfile,
   unplaceBundleFromChannel,
 } from "@/lib/db/queries.channels.server";
 import { skillIndexOf } from "@/lib/db/queries.server";
@@ -82,6 +84,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 type SkillCurationActionData =
   | { form: "add"; error: string }
   | { form: "remove"; error: string }
+  | { form: "stance"; error: string }
   | { form: "unknown"; error: string };
 
 /**
@@ -120,6 +123,29 @@ export async function action({ request, params }: ActionFunctionArgs) {
   }
   if (intent === "remove-skill") {
     return removeSkillIntent(request, ws, channelId, skillId);
+  }
+  // The viewer's OWN stance: put this set in (or take it out of) their profile — a personal,
+  // self-scoped act (the default channel's remove records the one exclude line).
+  if (intent === "profile-add" || intent === "profile-remove") {
+    const actor = await requireMember(request, ws);
+    try {
+      const outcome =
+        intent === "profile-add"
+          ? await includeChannelInProfile(actor, channelId)
+          : await removeChannelFromProfile(actor, channelId);
+      if (outcome === "unknown_channel") {
+        return data<SkillCurationActionData>(
+          { form: "stance", error: "This channel no longer exists." },
+          { status: 400 },
+        );
+      }
+      return data<SkillCurationActionData>({ form: "stance", error: "" });
+    } catch {
+      return data<SkillCurationActionData>(
+        { form: "stance", error: "That didn't go through. Try again." },
+        { status: 500 },
+      );
+    }
   }
   return data<SkillCurationActionData>(
     { form: "unknown", error: "Unknown action." },
@@ -221,7 +247,60 @@ function ChannelSkillsPage({
     <div className="space-y-6">
       <ChannelHeader name={detail.name} mode={detail.mode} isDefault={detail.isDefault} />
       <ChannelTabs basePath={wsPath(`channels/${detail.name}`)} active="skills" />
+      <StanceSection detail={detail} />
       <SkillsSection detail={detail} addable={addable} canCurate={canCurate} />
+    </div>
+  );
+}
+
+/**
+ * The viewer's own stance on this SET: whether their profile carries it, and the one-click
+ * toggle (self-scoped — a personal profile line, never anyone else's). A channel has no
+ * membership: people carry it by referencing it; the default channel is the implicit baseline
+ * and its remove records the one exclude line.
+ */
+function StanceSection({ detail }: { detail: ChannelDetailData }) {
+  const fetcher = useFetcher<SkillCurationActionData>();
+  const pending = fetcher.state !== "idle";
+  const error =
+    fetcher.data?.form === "stance" && fetcher.data.error.length > 0
+      ? fetcher.data.error
+      : undefined;
+  const audience =
+    detail.audienceCount === 1 ? "1 person's profile" : `${detail.audienceCount} people's profiles`;
+  return (
+    <div
+      data-testid="channel-stance"
+      className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-line-soft bg-panel px-4 py-3"
+    >
+      <span className="text-dim text-sm">
+        {detail.isDefault ? (
+          <>The baseline set — carried by {audience}.</>
+        ) : (
+          <>A curated set — carried by {audience}.</>
+        )}
+      </span>
+      {detail.viewerIncluded ? (
+        <Chip tone="verified">in your skills</Chip>
+      ) : (
+        <Chip tone="neutral">not in your skills</Chip>
+      )}
+      <fetcher.Form method="post" className="ml-auto">
+        <input
+          type="hidden"
+          name="intent"
+          value={detail.viewerIncluded ? "profile-remove" : "profile-add"}
+        />
+        <input type="hidden" name="channel_id" value={detail.channelId} />
+        <button type="submit" disabled={pending} className={buttonClasses("quiet")}>
+          {detail.viewerIncluded ? "Remove from my skills" : "Add to my skills"}
+        </button>
+      </fetcher.Form>
+      {error !== undefined && (
+        <p role="alert" className="w-full text-red-700 text-xs">
+          {error}
+        </p>
+      )}
     </div>
   );
 }

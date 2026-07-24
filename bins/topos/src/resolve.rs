@@ -316,16 +316,6 @@ pub(crate) enum Resolution {
     },
 }
 
-impl Resolution {
-    /// The workspace the resolution lives in.
-    pub(crate) fn workspace_id(&self) -> &str {
-        match self {
-            Resolution::Workspace { workspace_id, .. }
-            | Resolution::Resource { workspace_id, .. } => workspace_id,
-        }
-    }
-}
-
 /// Which kinds a verb accepts — its kind scope. A match OUTSIDE the scope is refused toward the
 /// right spelling (never silently dropped), so a channel name handed to a skill-only selector
 /// answers "that's a channel", not "not found".
@@ -337,7 +327,8 @@ pub(crate) struct KindScope {
 }
 
 impl KindScope {
-    /// Everything — the `follow` scope (workspaces enroll, channels join, skills follow).
+    /// Every kind — the widest scope (test rigs resolve across all three).
+    #[cfg(test)]
     pub(crate) const ALL: KindScope = KindScope {
         workspaces: true,
         channels: true,
@@ -571,13 +562,16 @@ pub(crate) struct TargetSpec {
     pub forced: Option<ResourceKind>,
 }
 
+#[cfg(test)]
 impl TargetSpec {
+    /// A free-form (kind-inferred) target — the test rigs' positional shape.
     pub(crate) fn free(token: &str) -> Self {
         Self {
             token: token.to_owned(),
             forced: None,
         }
     }
+    /// A kind-forced target (the rigs' selector shape).
     pub(crate) fn kinded(token: &str, kind: ResourceKind) -> Self {
         Self {
             token: token.to_owned(),

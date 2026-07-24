@@ -12,7 +12,7 @@ The source of truth for the wire boundary, GENERATED from the Rust types and com
   by `cargo xtask gen-fixtures` (so they cannot drift from the contract); `gen-fixtures --check` is the
   drift gate. The digest golden vector, the consent truth-table, and the commit/identity byte vectors live
   as `topos-core` known-answer tests (the kernel is their source of truth).
-- **`openapi/openapi.json`** — the PRODUCT's device-lane HTTP contract, generated from
+- **`openapi/openapi.json`** — the PRODUCT's session-lane HTTP contract, generated from
   `topos_plane::openapi()` (the annotated handlers + the `topos-types` wire DTOs). Since the door
   cutover the document spans TWO serving tiers behind one public base: the vault's own routes carry
   live handlers, and the member-lane row ops the web app serves carry contract-only stubs

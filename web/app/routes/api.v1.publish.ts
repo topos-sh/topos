@@ -4,7 +4,7 @@ import { parseCandidate, parsePublishHead, receiptNow } from "@/lib/api/candidat
 import { publishFlow } from "@/lib/api/publish-flow.server";
 import { buildReceipt, deniedEnvelope, envelopeResponse } from "@/lib/api/receipts.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
-import { requireDeviceActor } from "@/lib/auth/guards.server";
+import { requireSessionActor } from "@/lib/auth/guards.server";
 import { findReceipt } from "@/lib/db/queries.custody.server";
 
 /**
@@ -47,7 +47,7 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     return badRequest(candidate);
   }
 
-  const actor = await requireDeviceActor(request, head.workspaceId);
+  const actor = await requireSessionActor(request, head.workspaceId);
   const replay = await findReceipt(actor, head.opId, raw);
   if (replay.kind === "replay") {
     return envelopeResponse(replay.outcome);
@@ -74,9 +74,32 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     candidate,
     displayName: typeof body.display_name === "string" ? body.display_name : null,
     channel: typeof body.channel === "string" ? body.channel : null,
+    upstream: parseUpstream(body.upstream),
     command: "publish",
     forceProposal: false,
   });
+}
+
+/** The optional upstream-provenance block (`{host, repo, path?, commit?, license?}`) — parsed
+ * leniently: a malformed block is DROPPED (provenance is an adjunct, never a publish blocker). */
+function parseUpstream(raw: unknown): import("@/lib/api/publish-flow.server").UpstreamInput | null {
+  if (typeof raw !== "object" || raw === null) {
+    return null;
+  }
+  const u = raw as Record<string, unknown>;
+  if (typeof u.host !== "string" || typeof u.repo !== "string") {
+    return null;
+  }
+  if (u.host !== "github.com" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(u.repo)) {
+    return null;
+  }
+  return {
+    host: u.host,
+    repo: u.repo,
+    path: typeof u.path === "string" ? u.path : "",
+    commit: typeof u.commit === "string" ? u.commit : null,
+    license: typeof u.license === "string" ? u.license : null,
+  };
 }
 
 /** Any other HTTP method on this served path is the uniform 404 — the door owns it, so a

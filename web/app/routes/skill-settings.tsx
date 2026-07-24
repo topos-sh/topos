@@ -5,9 +5,10 @@ import { ConfirmButton } from "@/components/confirm";
 import { SaveControls } from "@/components/policy/save-controls";
 import { SkillHeader } from "@/components/skill/skill-header";
 import { SkillTabs } from "@/components/skill/skill-tabs";
-import { Card, SectionHeading } from "@/components/ui";
+import { buttonClasses, Card, SectionHeading } from "@/components/ui";
 import {
   notFound,
+  requireMember,
   requireMemberInScope,
   requireOwnerInScope,
   requireWorkspaceOwner,
@@ -21,6 +22,7 @@ import {
 import { workspacePolicyOf } from "@/lib/db/queries.policy.server";
 import { bundleById, skillIndexRow } from "@/lib/db/queries.server";
 import { resolveSkillName } from "@/lib/db/resolve.server";
+import { checkBundleUpstream, upstreamOf } from "@/lib/db/upstream.server";
 import { isValidSkillName, renameDeniedCopy, SKILL_NAME_MAX } from "@/lib/plane/lifecycle-copy";
 import { useWsPath } from "@/lib/ws-path";
 import { wsPathServer } from "@/lib/ws-url.server";
@@ -59,13 +61,26 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     }
     notFound();
   }
-  const [bundleRow, policy] = await Promise.all([
+  const [bundleRow, policy, upstream] = await Promise.all([
     bundleById(owner, row.skillId),
     workspacePolicyOf(owner),
+    upstreamOf(workspace.id, row.skillId),
   ]);
   const pinned = bundleRow?.protection ?? null;
   return {
     wsName: workspace.name,
+    skillId: row.skillId,
+    upstream:
+      upstream === null
+        ? null
+        : {
+            repo: upstream.repo,
+            path: upstream.path,
+            license: upstream.license,
+            lastCheckedAt: upstream.lastCheckedAt?.toISOString() ?? null,
+            lastSeenCommit: upstream.lastSeenCommit,
+            currentCommit: upstream.currentCommit,
+          },
     skill: row.name,
     currentShort: row.versionId !== null ? row.versionId.slice(0, 12) : "—",
     displayName: row.displayName,
@@ -110,6 +125,9 @@ export async function action({ request, params }: ActionFunctionArgs) {
   }
   if (intent === "set-protection") {
     return protectionIntent(request, ws, skill, formData);
+  }
+  if (intent === "check-upstream") {
+    return checkUpstreamIntent(request, ws, String(formData.get("skill_id") ?? ""));
   }
   return data<SettingsFormError>({ form: "rename", message: "Unknown action." }, { status: 400 });
 }
@@ -233,6 +251,15 @@ async function protectionIntent(request: Request, ws: string, skill: string, for
   return data<SettingsFormError>({ form: "protection", message: "This skill no longer exists." });
 }
 
+/** The on-demand upstream check — reviewer-grade is unnecessary (it can only OPEN a proposal,
+ * never move current); the member floor already ran. Answers the checker's typed outcome. */
+async function checkUpstreamIntent(request: Request, ws: string, skillId: string) {
+  await requireMember(request, ws);
+  // Workspace-bound: the member's authorization covers THIS workspace alone.
+  const outcome = await checkBundleUpstream(ws, skillId);
+  return data({ form: "upstream" as const, outcome });
+}
+
 export default function SkillSettings() {
   const {
     wsName,
@@ -265,9 +292,91 @@ export default function SkillSettings() {
         protection={protection}
         protectionDefault={protectionDefault}
       />
+      <UpstreamPanel />
       <RenameCeremony skill={skill} />
       <ArchiveCeremony skill={skill} />
     </div>
+  );
+}
+
+/**
+ * The UPSTREAM panel — a fork that remembers its parent: where the bundle was imported from,
+ * whether the shipped current still matches an upstream commit (a missing per-version commit =
+ * locally edited since the import — divergence, readable from the history itself), and the
+ * on-demand check. External changes ALWAYS arrive as proposals in the ordinary review queue.
+ */
+function UpstreamPanel() {
+  const { upstream, skillId } = useLoaderData<typeof loader>();
+  const fetcher = useFetcher<{
+    form: "upstream";
+    outcome: { outcome: string; commit?: string | null; message?: string };
+  }>();
+  if (upstream === null) {
+    return null;
+  }
+  const checked = fetcher.data?.form === "upstream" ? fetcher.data.outcome : undefined;
+  const checkedLine =
+    checked === undefined
+      ? undefined
+      : checked.outcome === "proposed"
+        ? "Upstream moved — a proposal is now waiting in the review queue."
+        : checked.outcome === "unchanged" || checked.outcome === "already_current"
+          ? "Up to date with upstream."
+          : `Check failed: ${checked.message ?? "unknown"}`;
+  return (
+    <section aria-labelledby="upstream-heading" className="space-y-3">
+      <SectionHeading>
+        <span id="upstream-heading">Upstream</span>
+      </SectionHeading>
+      <Card className="space-y-3 px-4 py-3" data-testid="upstream-panel">
+        <p className="text-dim text-sm leading-relaxed">
+          Imported from{" "}
+          <a
+            href={`https://github.com/${upstream.repo}`}
+            target="_blank"
+            rel="noreferrer"
+            className="font-mono text-[13px] text-ink underline decoration-hairline"
+          >
+            {upstream.repo}
+            {upstream.path.length > 0 ? `/${upstream.path}` : ""}
+          </a>
+          {upstream.license !== null && <> · license: {upstream.license}</>}
+        </p>
+        <p className="text-faint text-xs">
+          {upstream.currentCommit !== null ? (
+            <>
+              The shipped current matches upstream{" "}
+              <code className="font-mono">{upstream.currentCommit.slice(0, 12)}</code>.
+            </>
+          ) : (
+            <>Edited here since the last import — the workspace's copy has diverged upstream.</>
+          )}
+          {upstream.lastCheckedAt !== null && (
+            <> · last checked {new Date(upstream.lastCheckedAt).toLocaleString()}</>
+          )}
+        </p>
+        {checkedLine !== undefined && (
+          <p role="status" className="text-dim text-sm">
+            {checkedLine}
+          </p>
+        )}
+        <fetcher.Form method="post">
+          <input type="hidden" name="intent" value="check-upstream" />
+          <input type="hidden" name="skill_id" value={skillId} />
+          <button
+            type="submit"
+            disabled={fetcher.state !== "idle"}
+            className={buttonClasses("quiet")}
+          >
+            {fetcher.state !== "idle" ? "Checking…" : "Check for updates"}
+          </button>
+        </fetcher.Form>
+        <p className="text-faint text-xs">
+          Upstream changes never land directly — they arrive as proposals for review, whatever the
+          bundle's protection.
+        </p>
+      </Card>
+    </section>
   );
 }
 

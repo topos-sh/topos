@@ -93,34 +93,25 @@ export async function ensureSeatedUser(
 }
 
 /**
- * Mint a DEVICE row for a user with a KNOWN plaintext credential (the hash is computed in
- * Postgres, like the product's own mint), LINKED to the install's one workspace (active by
- * default — the born state the real ceremony mints under an off knob; pass "pending" for the
- * approval-queue seeds, or null for an unlinked registration). The credential then drives
- * `/api/v1` as that user.
+ * Mint a SESSION row for a user with a KNOWN plaintext credential (the hash is computed in
+ * Postgres, like the product's own mint) in the install's one workspace — active by default
+ * (the born state the real ceremony mints under an off knob; pass "pending" for the
+ * approval-queue seeds). The credential then drives `/api/v1` as that user.
  */
-export async function mintDevice(
+export async function mintSession(
   userId: string,
-  deviceId: string,
+  sessionId: string,
   displayName: string,
   credential: string,
-  linkStatus: "active" | "pending" | null = "active",
+  status: "active" | "pending" = "active",
 ): Promise<void> {
+  const ws = await theWorkspace();
   await adminQuery(
-    `insert into web.device (id, user_id, display_name, credential_sha256)
-     values ($1, $2, $3, sha256(convert_to($4, 'UTF8')))
-     on conflict (id) do nothing`,
-    [deviceId, userId, displayName, credential],
+    `insert into web.cli_session (id, workspace_id, user_id, display_name, credential_sha256, status)
+     values ($1, $2, $3, $4, sha256(convert_to($5, 'UTF8')), $6)
+     on conflict (id) do update set status = excluded.status`,
+    [sessionId, ws.id, userId, displayName, credential, status],
   );
-  if (linkStatus !== null) {
-    const ws = await theWorkspace();
-    await adminQuery(
-      `insert into web.device_link (id, device_id, workspace_id, status)
-       values ('dl_e2e_' || $1, $1, $2, $3)
-       on conflict (device_id, workspace_id) do update set status = excluded.status`,
-      [deviceId, ws.id, linkStatus],
-    );
-  }
 }
 
 // ── Web catalog rows ─────────────────────────────────────────────────────────────────────────

@@ -32,7 +32,7 @@ use std::time::Duration;
 use plane_store::Authority;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection, Executor, PgConnection, PgPool, Row};
-use topos::test_support::FollowHarness;
+use topos::test_support::SessionInstall;
 use topos_plane::{PlaneState, router};
 
 // ── the shared scenario constants ───────────────────────────────────────────────────────────────────
@@ -469,13 +469,16 @@ impl Session {
 
 // ── the composed stack ──────────────────────────────────────────────────────────────────────────────
 
-/// A device-lane grant the harness minted for itself over the REAL device flow — a probe device for
-/// wire-level assertions the CLI has no verb for (channel curation, the uniform-404 probes).
-pub(crate) struct DeviceGrant {
-    /// The one bearer credential (the promoted device code).
+/// A session-lane grant the harness minted for itself over the REAL login flow — a probe session
+/// for wire-level assertions the CLI has no verb for (channel curation, the uniform-404 probes).
+pub(crate) struct SessionGrant {
+    /// The workspace-scoped bearer credential (the promoted flow code).
     pub(crate) credential: String,
-    /// The registered device id (`dk_…` — the non-secret handle).
-    pub(crate) device_id: String,
+    /// The minted session's id (`sn_…` — the non-secret handle).
+    pub(crate) session_id: String,
+    /// The session's born status (`active`, or `pending` under the workspace's session-approval
+    /// knob). Absent on an older producer ⇒ active.
+    pub(crate) session_status: Option<String>,
 }
 
 /// The whole composed stack, one per test: the per-test database, the in-process vault, the spawned
@@ -663,29 +666,31 @@ impl Stack {
         let answer = session.post_form("/verify", &[("intent", "approve"), ("code", user_code)]);
         assert_eq!(answer.status, 200, "the approve lands: {}", answer.body);
         assert!(
-            answer.body.contains("connected"),
+            answer.body.to_lowercase().contains("logged in"),
             "the approve confirmation renders: {}",
             answer.body
         );
     }
 
-    /// Deny a pending device flow (a plain signed-in deny — denying mints nothing).
+    /// Deny a pending login flow (a plain signed-in deny — denying mints nothing).
     pub(crate) fn deny_device(&self, session: &Session, user_code: &str) {
         let answer = session.post_form("/verify", &[("intent", "deny"), ("code", user_code)]);
         assert_eq!(answer.status, 200, "the deny lands: {}", answer.body);
         assert!(
-            answer.body.contains("denied"),
+            answer.body.to_lowercase().contains("denied"),
             "the deny confirmation renders: {}",
             answer.body
         );
     }
 
-    /// Begin a CLI enrollment (`topos follow <address>` call 1 — pends with the user code) and
-    /// approve it as `approver`. The caller resumes (`resume_describe` / `resume_apply` /
-    /// `resume_expect_denied` never — this arm approved).
-    pub(crate) fn enroll_begin_and_approve(&self, client: &FollowHarness, approver: &Session) {
-        let pending = client.follow(&self.address()).expect("follow call 1");
-        assert!(!pending.enrolled, "call 1 only begins enrollment");
+    /// Begin a CLI login (`topos login <address>` call 1 — pends with the user code) and approve
+    /// it as `approver`. The caller resumes (`client.login(None)` — re-invoking IS the resume).
+    pub(crate) fn login_begin_and_approve(&self, client: &SessionInstall, approver: &Session) {
+        let pending = client.login(Some(&self.address())).expect("login call 1");
+        assert_eq!(
+            pending.session_status, "awaiting-approval",
+            "call 1 only begins the flow"
+        );
         let user_code = pending
             .pending
             .expect("the pending arm carries the verification handle")
@@ -693,20 +698,38 @@ impl Stack {
         self.approve_device(approver, &user_code);
     }
 
-    /// Mint a PROBE device grant for the harness itself over the real device flow — for wire-level
-    /// lane calls the CLI has no verb for (curation, membership, the uniform-404 probes). The
-    /// `/verify` approval mints registration + the FIRST device↔workspace link in one fence, so
-    /// the grant arrives already linked to the boot workspace — born per the one rule (an owner
-    /// approver's link is active; a member's is pending when the `device_approval` knob is on).
-    pub(crate) fn mint_device(&self, approver: &Session, requested_name: &str) -> DeviceGrant {
+    /// [`login_begin_and_approve`](Self::login_begin_and_approve) plus the resume: the granted
+    /// second call persists the session row. Returns the resumed receipt's workspace id.
+    pub(crate) fn login_complete(&self, client: &SessionInstall, approver: &Session) -> String {
+        self.login_begin_and_approve(client, approver);
+        let granted = client.login(None).expect("login resume");
+        assert!(granted.pending.is_none(), "the resume settles the flow");
+        granted.workspace_id
+    }
+
+    /// Mint a PROBE session grant for the harness itself over the real login flow — for wire-level
+    /// lane calls the CLI has no verb for (curation, the uniform-404 probes). The `/verify`
+    /// approval mints the session against `workspace` (default the boot workspace) — born per the
+    /// one rule: active, or pending under the workspace's session-approval knob.
+    pub(crate) fn mint_session(&self, approver: &Session, requested_name: &str) -> SessionGrant {
+        self.mint_session_in(approver, requested_name, WS_NAME)
+    }
+
+    /// [`mint_session`](Self::mint_session) against a NAMED workspace slug.
+    pub(crate) fn mint_session_in(
+        &self,
+        approver: &Session,
+        requested_name: &str,
+        workspace: &str,
+    ) -> SessionGrant {
         let start = self.device_post_json(
             None,
-            "/v1/device/authorize",
-            &serde_json::json!({ "requested_name": requested_name, "workspace": WS_NAME }),
+            "/v1/login/authorize",
+            &serde_json::json!({ "requested_name": requested_name, "workspace": workspace }),
         );
-        assert_eq!(start.status, 200, "device authorize: {}", start.body);
+        assert_eq!(start.status, 200, "login authorize: {}", start.body);
         let start: serde_json::Value =
-            serde_json::from_str(&start.body).expect("device authorize JSON");
+            serde_json::from_str(&start.body).expect("login authorize JSON");
         let device_code = start["device_code"]
             .as_str()
             .expect("device_code")
@@ -715,18 +738,19 @@ impl Stack {
         self.approve_device(approver, &user_code);
         let poll = self.device_post_json(
             None,
-            "/v1/device/token",
+            "/v1/login/token",
             &serde_json::json!({ "device_code": device_code }),
         );
-        assert_eq!(poll.status, 200, "device token: {}", poll.body);
-        let poll: serde_json::Value = serde_json::from_str(&poll.body).expect("device token JSON");
+        assert_eq!(poll.status, 200, "login token: {}", poll.body);
+        let poll: serde_json::Value = serde_json::from_str(&poll.body).expect("login token JSON");
         assert_eq!(
             poll["status"], "granted",
             "the approved flow grants: {poll}"
         );
-        DeviceGrant {
+        SessionGrant {
             credential: poll["credential"].as_str().expect("credential").to_owned(),
-            device_id: poll["device_id"].as_str().expect("device_id").to_owned(),
+            session_id: poll["session_id"].as_str().expect("session_id").to_owned(),
+            session_status: poll["session_status"].as_str().map(str::to_owned),
         }
     }
 
@@ -830,6 +854,29 @@ impl Stack {
                 .await
             })
             .expect("open the registration knob");
+    }
+
+    /// Flip the session-approval knob, with an audit note — the direct-row arrangement twin of
+    /// the settings ceremony (member logins born pending until an owner approves).
+    pub(crate) fn set_session_approval(&self, on: bool, note: &str) {
+        let value = if on { "on" } else { "off" };
+        self.rt
+            .block_on(async {
+                sqlx::query("UPDATE web.workspace SET session_approval = $1 WHERE id = $2")
+                    .bind(value)
+                    .bind(&self.workspace_id)
+                    .execute(&self.pool)
+                    .await?;
+                sqlx::query(
+                    "INSERT INTO web.audit_event (workspace_id, actor_display, kind, outcome, details)
+                     VALUES ($1, 'e2e-harness', 'policy_session_approval', 'ok', jsonb_build_object('note', $2::text))",
+                )
+                .bind(&self.workspace_id)
+                .bind(note)
+                .execute(&self.pool)
+                .await
+            })
+            .expect("flip the session-approval knob");
     }
 
     /// Seat an existing account (by email) at `role` — the arrangement step the invitation mailbox

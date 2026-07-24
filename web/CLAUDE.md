@@ -1,34 +1,34 @@
 # `web/` — the product web app (TypeScript / React Router 8 on bun)
 
+> **The MANIFEST architecture is the model here:** sessions (user × workspace × installation,
+> workspace-scoped bearer credentials, the gh-style `/api/v1/login/*` flow, the Sessions
+> settings tab + account Your-sessions page) replaced device + device-link; per-person PROFILES
+> (include/exclude rows, the default channel as the implicit baseline,
+> `/api/v1/workspaces/{ws}/profile*` + the `/profile` editor page) replaced
+> subscriptions/channel-membership/opt-outs/exclusions; channels are pure curated bundle sets;
+> UPSTREAM provenance (bundle_upstream + version_upstream, the `skills/import` add-from-GitHub
+> flow, the skill-settings Upstream panel, and the always-propose upstream checker) is live.
+
 **THE ONE PUBLIC SURFACE.** This app is everything the world reaches: the signed-in pages below, the
 shareable resource addresses, AND the device API — `/api/v1/…` is served here. Since the identity
 model landed, this tier is the **authority for identity and the whole directory**, in its own Postgres
 schema `web`; the vault (the Rust plane) is PURE BYTE CUSTODY behind it, internal-network-only, and the
 app is its one caller.
 
-**The device lane terminates here.** Every `/api/v1/…` path is answered in this tier — there is no splat
-forwarder to the vault anymore. The row ops (delivery · the fleet report · me/channels/reach ·
-subscriptions/follows · curation · exclusions · protection · notices ack · invitations · the
-person-scoped invitation accept · the device-link describe/apply · the global self-revoke) are Drizzle
-queries against this app's OWN `web` schema, behind the device-credential guard (`requireDeviceActor` —
-the presented `Authorization: Bearer` resolved credential → un-revoked device → person's seat → **live
-device link**, the hash computed IN Postgres, so this tier still holds zero crypto). A device is
-**registered once (device ↔ server, user-owned) and LINKED per workspace** — `web.device_link` is a
-first-class row, severable by both sides, DELETED never tombstoned; a seat is to a person what a link
-is to a device. The default guard requires an ACTIVE link; exactly TWO routes answer typed for a
-PENDING one (`GET …/me` and `GET …/delivery`, each carrying `link_status` — delivery's pending body is
-shape-complete and EMPTY), and everything else folds pending/unlinked/unknown into the one uniform 404.
-The link's own ops are person-scoped (`requireDevicePerson`, seat-less: credential → device → user,
-now carrying the resolved device id): `GET/POST /api/v1/device/link` (describe/apply — resolution by
-workspace NAME in both tenancies, the empty string the single-tenant origin form; a seatless caller and
-an unknown name answer ONE byte-identical typed `NOT_A_MEMBER` refusal pointing at the invitation
-path; apply is idempotent and born per the ONE rule) and `DELETE /api/v1/device` (the CLI's simplified
-`auth logout`: revoke + sever every link + reported state in one transaction; a retry answers the
-uniform 404 — already signed out). The old per-workspace `DELETE …/workspaces/{ws}/devices` route is
-RETIRED (clean wire break; the catch-all covers the path). The **born-status rule** is written ONCE
-(`linkBornStatus` in identity.server.ts): an owner's act is its own approval → born `active`; otherwise
-the workspace's `device_approval` knob decides (`off` → active, `on` → pending) — invitation-woven
-links get no exception. The **byte/pointer** ops of a publish-family verb
+**The session lane terminates here.** Every `/api/v1/…` path is answered in this tier — there is no
+splat forwarder to the vault. The reads and row ops (delivery · the fleet report · me/channels/reach ·
+the server-stored profile · curation · protection · notices ack · invitations) are Drizzle queries
+against this app's OWN `web` schema, behind the session guard (the presented `Authorization: Bearer`
+resolved credential → live `web.cli_session` row → person's seat, the hash computed IN Postgres, so
+this tier holds zero crypto). A **session** is user × workspace × installation — minted by the login
+flow (`POST /api/v1/login/authorize|token`, the `/verify` approval a plain signed-in accept), severable
+by both sides (`DELETE /api/v1/session` is the client's self-end; the Sessions settings tab carries the
+owner's approve/reject/remove arms), DELETED never tombstoned. The default guard requires an ACTIVE
+session; exactly TWO routes answer typed for a PENDING one (`GET …/me` and `GET …/delivery`, each
+carrying `session_status` — delivery's pending body is shape-complete and EMPTY), and everything else
+folds pending/ended/unknown into the one uniform 404. The **born-status rule** is written once: an
+owner's approval is its own approval → born `active`; otherwise the workspace's `session_approval`
+knob decides (`off` → active, `on` → pending). The **byte/pointer** ops of a publish-family verb
 (ingest, the `current` CAS, revert, purge, the verified object/version/log reads) are the only things
 that leave this tier: they go through the ONE custody transport, `app/lib/plane/client.server.ts`
 (`vaultFetch` + a runtime route allowlist), to the vault's internal `/internal/v1` custody lane —
@@ -41,15 +41,14 @@ is a login name and a mutable attribute — NOTHING authorizes by email equality
 human-facing DISPLAY is one rule, written twice in lockstep: the profile name, else the email (a
 magic-link sign-up is born with `name = ''`, and a blank never surfaces as a label) —
 `app/lib/person-display.ts` for TS compositions, `app/lib/db/person-display.server.ts` for the SQL
-selects (member lists, attribution, the device-lane actor). Every seat, device,
-subscription, notice, and audit row references a `user.id`. The whole directory lives in schema `web`:
+selects (member lists, attribution, the device-lane actor). Every seat, CLI session,
+profile row, notice, and audit row references a `user.id`. The whole directory lives in schema `web`:
 the Better Auth tables (`user`/`session`/`account`/`verification`), **seats** (workspace membership +
-role), devices + their per-workspace **device_link** rows + the device-auth flow rows, invitations, the
-bundle catalog (each row carrying a `kind`
-tag — `'skill'` today — displayed, never branched on), channels (incl. the implicit default `everyone`
-channel with per-person `channel_optout`), subscriptions (ONE `bundle_subscription` stance row per
-person per bundle), detachment records, notices with read-state, proposals + comments, op receipts, and
-the `audit_event` trail. The DATA ACCESS LAYER (`app/lib/db/queries*.server.ts`) is the one sanctioned
+role), **`cli_session`** rows + the login-flow rows, invitations, the bundle catalog (each row carrying
+a `kind` tag — `'skill'` today — displayed, never branched on), channels (pure curated bundle sets,
+incl. the implicit default `everyone`), the per-person **`profile_entry`** rows (include/exclude; the
+one delivery predicate), upstream provenance (`bundle_upstream`/`version_upstream`), notices with
+read-state, proposals + comments, op receipts, and the `audit_event` trail. The DATA ACCESS LAYER (`app/lib/db/queries*.server.ts`) is the one sanctioned
 door to `web` AND the read-only `plane` custody mirror; every function REQUIRES a branded actor as its
 first argument, and mutating ops emit their audit row in the SAME transaction. ONE named exception:
 the mail transport's `mail_event` send log (`mail-log.server.ts`) is a SYSTEM write with no actor —
@@ -78,22 +77,22 @@ transaction, FOR UPDATE-fenced or single-statement-atomic, audit row inside):
   form, then the resolved card showing the requesting device, the code for the glance-check, and
   EVERY workspace the credential will reach (the approver's seats + the one being joined) — and the
   signed-in person approves with a **plain accept** — a live session plus the explicit approve click
-  IS the whole ceremony — minting the device (owned by that person) + its ONE bearer
-  credential (the device code is promoted to the credential — same plaintext, same stored hash). The
-  flow row records the workspace ADDRESS SLUG the authorize call named — and, when the enrollment
-  came from `follow <invite-url>`, the invite token's hash (recorded UNVALIDATED — the start is
+  IS the whole ceremony — minting the CLI SESSION (owned by that person) + its workspace-scoped
+  bearer credential (the flow code is promoted to the credential — same plaintext, same stored
+  hash). The
+  flow row records the workspace ADDRESS SLUG the authorize call named — and, when the login
+  came from `login <invite-url>`, the invite token's hash (recorded UNVALIDATED — the start is
   never a token oracle); the approval weaves accept-the-invitation into its own fence when the
   approver is the invitation's addressee, and the granted poll decorates the invitation's
   first-destination `hint`. Multi tenancy shape-checks the slug only (an unauthenticated start is
   never a workspace-existence oracle — the workspace may be created mid-flow), and approval resolves
   it under the tenancy grammar and requires the approver's SEAT in the resolved workspace, inside
   the same FOR-UPDATE fence — a missing workspace or a seatless approver gets the same uniform
-  refusal an expired code does. Approval mints REGISTRATION + the FIRST device link together in
-  that fence (born per the one rule; the granted poll and the device-lane invitation accept both
-  report `link_status`; the /verify card shows THE ONE workspace being linked and says further
-  workspaces each take their own explicit link — and, knob-on with a non-owner approver, that the
-  link awaits an owner). The device-lane invitation accept links the accepting device in the accept
-  fence too. On a multi-tenant deployment a signed-in approver with zero seats
+  refusal an expired code does. Approval mints THE SESSION in that fence (born per the one rule;
+  the granted poll reports `session_status`; the /verify card shows THE ONE workspace being logged
+  into and says further workspaces each take their own login — and, knob-on with a non-owner
+  approver, that the session awaits an owner). On a multi-tenant deployment a signed-in approver
+  with zero seats
   anywhere is first woven through workspace creation (`/verify` redirects to `/new` carrying itself
   as `next` + the flow's slug as a `name` prefill) — unless the flow carries an invitation, whose
   accept will seat them right there. The LOOPBACK arrival (the CLI auto-opened the page): the URL
@@ -101,14 +100,15 @@ transaction, FOR UPDATE-fenced or single-statement-atomic, audit row inside):
   `port`/`state` naming the CLI's ephemeral 127.0.0.1 listener; the approve/deny outcome returns as
   ONE state-bound localhost redirect (nothing sensitive rides it — the CLI's poll stays the source
   of truth). The signed-out loader bounce carries the page (validated params only) as `next`.
-  Revocation is self-service, immediate, and FINAL (a DB trigger refuses any un-revoke).
+  Ending a session is immediate on either side (the client's `DELETE /api/v1/session`, the
+  Sessions tab's owner arms) — the row is deleted, the lane 404s from the next request.
 - **The tokened invitation** (`invite-redeem.tsx` at `/invite/<token>` — `/<ws>/invite/<token>` in
   multi — + the ceremonies in `identity.server.ts`): inviting mints a long single-use token per
   address (only its SHA-256 stored — the claim-code pattern; 7-day lapse; re-inviting mints a fresh
   token over the pending row, killing the old link; revoke kills it too), optionally carrying ONE
   first-destination hint (a bundle or channel of its own workspace, composite-FK-pinned with a
   per-column SET NULL). The link travels ONLY in the invitation mail (three CTAs, in order: the
-  browser link, the agent paste-block, the terminal `topos follow <invite-url>` line — hint-led);
+  browser link, the agent paste-block, the terminal `topos login <invite-url>` line — hint-led);
   the inviter's receipts carry the workspace address, never the token. The page is GET-safe
   (viewing never consumes) and branches on the ONE sanctioned email-binding predicate beside
   `bindInvitedSeats`: signed in as the invited address → one-click accept; no such account → the
@@ -120,8 +120,8 @@ transaction, FOR UPDATE-fenced or single-statement-atomic, audit row inside):
   on the invited address → one mailbox round-trip first; already a member → redirect into the
   workspace (nothing consumed). ACCEPT is ONE FOR-UPDATE-fenced transaction beside
   `bindInvitedSeats`: consume the token, write the seat, apply the hint effects AFTER the seat
-  (`bundle_subscription` 'following' / `channel_member`), audit — the hint SUBSCRIBES; nothing
-  lands on any device from a web accept. DECLINE is recorded (the members page shows it;
+  (a `profile_entry` include row), audit — the hint lands in the person's PROFILE; nothing
+  lands on any machine from a web accept. DECLINE is recorded (the members page shows it;
   re-invitable) and deliberately session-less (token possession is the proof). Every dead token —
   invalid, expired, revoked, used — renders ONE constant page naming neither workspace nor email,
   behind the public-read belt. An already-enrolled device accepts with no browser at
@@ -181,17 +181,17 @@ what a ceremony adds is CONFIRMATION of intent, proportional to its reach — th
 - **Settings/policy form saves** are plain submits behind their dirty-reveal Save/Cancel
   (`<SaveControls>`) — no added friction.
 Every attempt lands an `admin_event` audit row, refused typed names included. The grade of a ceremony
-and the reach of its act stay matched IN THE DATABASE: the account page's device sign-out is SELF-ONLY
-(a device is a possession; no owner arm reaches into someone else's pocket), fenced in
-`revokeOwnDevice` — which also severs every device link + per-workspace reported state in the same
-transaction (`device_unlinked` audit rows, cause-tagged), as does seat removal for the removed
-person's devices in that workspace. The LINK ceremonies split by side: SELF unlink (account page,
-per-link) and the owner arms on the fleet page — approve/reject a pending link, remove any link
-(`link_approved` / `link_rejected` / `device_unlinked`; removing ends delivery, never recalls bytes) —
-all wearing the in-place `<ConfirmButton>` two-step. The `/verify` device-approve is a plain signed-in
-accept — a live session plus the explicit approve click is the whole ceremony there. Revoking a pending invitation is the same grade as
-the invite it undoes (the row flips to revoked; re-inviting mints a fresh link), so the owner gate +
-the audited act is the whole ceremony on the members page.
+and the reach of its act stay matched IN THE DATABASE: the account page's session end is SELF-ONLY
+(`revokeOwnSession` — a session is a possession; no owner arm reaches into someone else's pocket),
+and seat removal ends the removed person's sessions in that workspace in the same transaction
+(cause-tagged audit). The SESSION ceremonies split by side: SELF end (the account Your-sessions page,
+per-session `end-session`) and the owner arms on the workspace Sessions tab — approve/reject a
+pending session, remove any session (`session_approved` / `session_rejected` / `session_ended`;
+removing ends delivery and reporting, never recalls bytes) — the people-affecting arms wearing the
+in-place `<ConfirmButton>` two-step. The `/verify` login-approve is a plain signed-in accept — a live
+session plus the explicit approve click is the whole ceremony there. Revoking a pending invitation is
+the same grade as the invite it undoes (the row flips to revoked; re-inviting mints a fresh link), so
+the owner gate + the audited act is the whole ceremony on the members page.
 
 **Mail — ONE transport, whole product.** `app/lib/mail/transport.server.ts` is the only module allowed to
 hold an SMTP client; every product mail rides it — the invite notice (`invite-mail.server.ts`), the
@@ -255,22 +255,18 @@ member of an open channel, reviewer+ of a curated one — adds/removes the chann
 through the same core the device lane runs) · **Members** · **History** · **Settings** (the owner
 rename/delete ceremonies) under one shared tab header (`app/components/channel/channel-tabs.tsx`) —
 the **Settings** page — TABBED into **General** (the workspace policy: review
-default · staleness window · the `device_approval` knob (links born pending until an owner approves,
-on the fleet page) · the `registration` knob · an OWNER-ONLY whole-catalog
-**export** — a `settings/export` resource route streaming a zip of every skill at its current version
-plus a `manifest.json`, one object at a time through the custody transport's verified reads) and
-**Devices** (the workspace fleet view, DEVICE-LINK-driven: the linked devices with staleness +
-per-copy labels — detached/excluded/current/behind — plus the PENDING-link queue and the owner arms;
-severed devices simply no longer appear, so the old removed-upstream and detached-copies ghost
-enumerations are gone) and
-**Archive** (the archived-skills list with the unarchive/delete ceremonies), all under
-one shared tab header (`app/components/settings-tabs.tsx`) at `settings` / `settings/devices` /
-`settings/archive`), the "your
-devices" self-service list (each device carrying its linked-workspace list with per-link SELF unlink
-arms beside the global sign-out; "linked/unlink" is the device↔workspace word, "enrolled" stays
-device↔server), and the first-run claim. It renders state read from its own `web` schema and,
-read-only, from the vault's `plane` schema; it holds no signing key, computes no digest, and initiates no
-device-signed write — publishing stays on the enrolled device.
+default · staleness window · the `session_approval` knob (member logins born pending until an owner
+approves, on the Sessions tab) · the `registration` knob (single tenancy) · an OWNER-ONLY
+whole-catalog **export** — a `settings/export` resource route streaming a zip of every skill at its
+current version plus a `manifest.json`, one object at a time through the custody transport's verified
+reads) and **Sessions** (the workspace's session view, `settings/sessions`: every live session with
+its applied state + staleness, the PENDING queue with the owner approve/reject arms, remove on any —
+ended sessions simply no longer appear) and **Archive** (the archived-skills list with the
+unarchive/delete ceremonies), all under one shared tab header (`app/components/settings-tabs.tsx`)),
+the account **Your sessions** self-service list (every session the person holds across workspaces,
+each with its own end-session arm), and the first-run claim. It renders state read from its own `web`
+schema and, read-only, from the vault's `plane` schema; it holds no signing key, computes no digest,
+and initiates no session-signed write — publishing stays on the logged-in machine.
 
 **The left panel** (`app/components/shell/{shell-chrome,app-sidebar}.tsx`, data from
 `app/lib/shell/chrome.server.ts`) is one shadcn collapsible sidebar shared by both signed-in layouts.

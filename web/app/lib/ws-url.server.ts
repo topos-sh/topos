@@ -5,7 +5,7 @@ import { wsHref } from "@/lib/ws-path";
 /**
  * The server-side companions to `ws-path.ts` — the two things a loader/action builds that the
  * client hook can't: an in-app redirect target that respects the deployment's tenancy grammar, and
- * the FULL shareable workspace address the CLI runs `topos follow <address>` on verbatim. Both read
+ * the FULL shareable workspace address the CLI runs `topos login <address>` on verbatim. Both read
  * `composition.tenancy` so a page never branches on the mode itself.
  */
 

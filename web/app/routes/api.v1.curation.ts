@@ -2,7 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
 import { rowOpResponse } from "@/lib/api/row-envelopes.server";
 import { uniformNotFound } from "@/lib/api/wire.server";
-import { requireDeviceActor } from "@/lib/auth/guards.server";
+import { requireSessionActor } from "@/lib/auth/guards.server";
 import { lanePlaceBundle, laneUnplaceBundle } from "@/lib/db/queries.lane.server";
 
 /**
@@ -26,7 +26,7 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   if (request.method !== "PUT" && request.method !== "DELETE") {
     return uniformNotFound();
   }
-  const actor = await requireDeviceActor(request, params.ws ?? "");
+  const actor = await requireSessionActor(request, params.ws ?? "");
   const channel = params.channel ?? "";
   const skill = params.skill ?? "";
   if (request.method === "PUT") {

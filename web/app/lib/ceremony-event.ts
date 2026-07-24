@@ -13,7 +13,7 @@ export const CEREMONY_EVENT = "topos:ceremony";
 /** The ceremony moments the app announces. */
 export type CeremonyKind =
   | "workspace_created"
-  | "device_approved"
+  | "login_approved"
   | "checklist_step_completed"
   | "checklist_dismissed"
   | "first_publish_seen";

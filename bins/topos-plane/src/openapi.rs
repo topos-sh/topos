@@ -10,14 +10,14 @@ use utoipa::OpenApi;
 
 use topos_types::requests::{
     DeviceAuthHint, DeviceAuthPollRequest, DeviceAuthPollResponse, DeviceAuthPollStatus,
-    DeviceAuthStartRequest, DeviceAuthStartResponse, DeviceAuthWorkspace, DeviceLinkData,
-    DeviceLinkDescribe, DeviceLinkRequest, InvitationData, InvitationRequest, InviteAcceptData,
-    InviteAcceptRequest, NoticeAckRequest, ProposeRequest, ProtectionSetRequest, PublishRequest,
+    DeviceAuthStartRequest, DeviceAuthStartResponse, DeviceAuthWorkspace, InvitationData,
+    InvitationRequest, NoticeAckRequest, ProposeRequest, ProtectionSetRequest, PublishRequest,
     RevertRequest, ReviewRequest, WireAppliedReport, WireAppliedSkill, WireCandidate,
     WireChannelEntry, WireChannelIndex, WireChannelSkill, WireDelivery, WireDeliverySkill,
     WireFile, WireFileMode, WireLogProposal, WireLogVersion, WireMe, WireNotice, WireOpenProposal,
     WireProposalEntry, WireProposalIndex, WireProposalList, WireProtocolCard, WireReach,
-    WireSkillIndex, WireSkillIndexEntry, WireSkillLog, WireVersionFile, WireVersionMeta, WireVia,
+    WireSkillIndex, WireSkillIndexEntry, WireSkillLog, WireUpstream, WireVersionFile,
+    WireVersionMeta, WireVia,
 };
 use topos_types::results::{ProposeData, PublishData, RevertData, ReviewData, ReviewDecision};
 use topos_types::{
@@ -29,7 +29,7 @@ use topos_types::{
 #[openapi(
     info(
         title = "Topos product API (device lane)",
-        description = "The device lane the product app serves: the gh-style device-auth enrollment (start/poll — approval promotes the device code to the device's ONE bearer credential), the publish/propose/revert/review writes, the current/version/object/catalog/proposals reads, the delivery + applied-state report, the describe reads, the row ops, the browser-free device-link lane (describe/create — an enrolled device joins a further workspace without a second ceremony), and the global device self-revoke. Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
+        description = "The session lane the product app serves: the RFC-8628-shaped login flow (start/poll — approval promotes the flow code to the SESSION's workspace-scoped bearer credential), the session self-end, the publish/propose/revert/review writes, the current/version/object/catalog/proposals reads, the delivery + applied-state report, the describe reads, and the row ops (the server-stored profile / channel curation / protection / notices-ack / invitations). Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
         version = "0.0.0",
         license(name = "Apache-2.0"),
     ),
@@ -53,25 +53,21 @@ use topos_types::{
         crate::routes::door::get_log,
         crate::routes::door::get_reach,
         // Row ops.
-        crate::routes::door::follow_skill,
-        crate::routes::door::unfollow_skill,
-        crate::routes::door::exclude_device,
-        crate::routes::door::channel_join,
-        crate::routes::door::channel_leave,
+        crate::routes::door::profile_include_skill,
+        crate::routes::door::profile_remove_skill,
+        crate::routes::door::profile_include_channel,
+        crate::routes::door::profile_remove_channel,
         crate::routes::door::channel_place,
         crate::routes::door::channel_unplace,
         crate::routes::door::set_skill_protection,
         crate::routes::door::set_channel_protection,
         crate::routes::door::ack_notices,
         crate::routes::door::invite,
-        // Enrollment: the device-auth flow, the enrolled device's invitation accept, the
-        // browser-free device-link lane, and the global self-revoke (the CLI logout wire).
-        crate::routes::door::device_auth_start,
-        crate::routes::door::device_auth_poll,
-        crate::routes::door::invite_accept,
-        crate::routes::door::get_device_link,
-        crate::routes::door::create_device_link,
-        crate::routes::door::revoke_device,
+        // Enrollment: the login flow (session minting) + the session self-end (the CLI logout
+        // wire).
+        crate::routes::door::login_authorize,
+        crate::routes::door::login_token,
+        crate::routes::door::end_session,
     ),
     components(schemas(
         // Request DTOs (writes).
@@ -134,7 +130,7 @@ use topos_types::{
         RevertData,
         ReviewData,
         ReviewDecision,
-        // The device-auth flow + the invitation accept.
+        // The login flow (session minting).
         DeviceAuthStartRequest,
         DeviceAuthStartResponse,
         DeviceAuthPollRequest,
@@ -142,17 +138,14 @@ use topos_types::{
         DeviceAuthPollStatus,
         DeviceAuthWorkspace,
         DeviceAuthHint,
-        InviteAcceptRequest,
-        InviteAcceptData,
-        // The device-link lane.
-        DeviceLinkRequest,
-        DeviceLinkDescribe,
-        DeviceLinkData,
+        // The publish provenance adjunct (a GitHub-imported bundle's origin).
+        WireUpstream,
     )),
     tags(
-        (name = "writes", description = "Device-credential writes (publish / propose / revert / review) and the member-lane row ops (follows / channels / exclusions / protection / notices)."),
-        (name = "reads", description = "Device-credential reads (current / bundles / versions / proposals / catalog / delivery / me / channels / log / reach) plus the body-light applied-state report."),
-        (name = "enrollment", description = "The gh-style device-auth flow (start / poll; approval promotes the device code to the ONE bearer credential and mints the FIRST device↔workspace link), the browser-free device-link lane, and the global device self-revoke."),
+        (name = "writes", description = "Session-credential writes (publish / propose / revert / review) and the member-lane row ops (channel curation / protection / notices-ack)."),
+        (name = "reads", description = "Session-credential reads (current / bundles / versions / proposals / catalog / delivery / me / channels / log / reach) plus the body-light applied-state report."),
+        (name = "rows", description = "The server-stored profile row ops (the person's `-g` manifest layer)."),
+        (name = "enrollment", description = "The RFC-8628-shaped login flow (start / poll; approval promotes the flow code to the SESSION's workspace-scoped bearer credential) and the session self-end."),
         (name = "governance", description = "The member-lane invitation (a roster write)."),
     ),
 )]

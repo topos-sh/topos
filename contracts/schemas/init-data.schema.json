@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "InitData",
+  "description": "`init` — create this folder's `topos.toml` (the project manifest `add`/`remove` edit and\n`update`/`status` resolve). **INFERRED** (additive-only).",
+  "type": "object",
+  "properties": {
+    "created": {
+      "description": "`false` when one already existed (the no-op receipt).",
+      "type": "boolean"
+    },
+    "manifest": {
+      "description": "The manifest's path.",
+      "type": "string"
+    },
+    "note": {
+      "description": "A placement note (outside a git repo the file will not travel — stated honestly).",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "manifest",
+    "created"
+  ]
+}

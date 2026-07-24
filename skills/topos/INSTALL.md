@@ -24,8 +24,7 @@ entry, and unpack the `topos` binary onto your PATH. Either way, `topos self-upd
 binary in place from then on (same checksum discipline).
 
 If this page arrived as part of a downloaded `topos` skill, add one step after the install:
-`topos follow topos --yes` lets this machine's topos manage that downloaded copy and keep it
-current (the bare `topos follow topos` only describes).
+`topos add topos` lets this machine's topos manage that downloaded copy and keep it current.
 
 ## Connect it to a workspace
 
@@ -33,18 +32,17 @@ current (the bare `topos follow topos` only describes).
 it looks like `https://topos.sh/<workspace>`. Then:
 
 ```sh
-topos follow <workspace-address>
+topos login <workspace-address>
 ```
 
-Open the printed approval URL in a browser and approve — that enrolls this machine. The command
-then describes what the team offers and prints a `--yes` next action; running that `--yes` is
-what lands the skills, and they stay current from then on.
+Open the printed approval URL in a browser and approve — that logs this machine in. Login is the
+acceptance: what your profile and this folder's manifest demand lands immediately and stays
+current from then on (`topos update` sweeps on demand; `topos add <name>` records more).
 
-**Start fresh.** Sign up at <https://topos.sh> and create a workspace in the browser, then enroll
-this machine against your own address the same way: `topos follow https://topos.sh/<your-workspace>`
-— approve in the browser, then run the printed `--yes` next action to land what the workspace
-offers.
+**Start fresh.** Sign up at <https://topos.sh> and create a workspace in the browser, then log
+this machine in against your own address the same way: `topos login https://topos.sh/<your-workspace>`
+— approve in the browser, and the workspace's deliveries follow.
 
 **Self-host.** The server ships in this same repository as a compose stack — see the Self-hosting
 section of the README at <https://github.com/topos-sh/topos>. Your workspace then lives at your own
-origin, and `topos follow https://topos.example.com` (your server's address) enrolls against it.
+origin, and `topos login https://topos.example.com` (your server's address) logs in against it.

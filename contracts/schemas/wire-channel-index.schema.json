@@ -21,18 +21,12 @@
       "type": "object",
       "properties": {
         "builtin": {
-          "description": "Whether this is the structural `everyone` (roster-derived membership; cannot be joined or left).",
+          "description": "Whether this is the structural `everyone` (delivered by default; a profile exclude is the\nopt-out).",
           "type": "boolean"
         },
-        "member": {
-          "description": "Whether the CALLER is a member (always `true` on `everyone`).",
+        "included": {
+          "description": "Whether the CALLER's profile includes this channel (on `everyone`: whether no exclude\nstands).",
           "type": "boolean"
-        },
-        "member_count": {
-          "description": "How many people the channel reaches (confirmed roster size for `everyone`).",
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
         },
         "mode": {
           "description": "The channel's mode (`open` or `curated`).",
@@ -54,8 +48,7 @@
         "name",
         "mode",
         "builtin",
-        "member",
-        "member_count",
+        "included",
         "skills"
       ]
     },

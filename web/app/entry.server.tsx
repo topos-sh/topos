@@ -9,6 +9,7 @@ import { canonicalOriginRedirect } from "@/lib/canonical.server";
 import { cardResponse } from "@/lib/card.server";
 import { ensureSetup } from "@/lib/db/identity.server";
 import { runMigrations } from "@/lib/db/migrate.server";
+import { armUpstreamChecker } from "@/lib/db/upstream.server";
 import { redactTokenPaths } from "@/lib/sentry-scrub";
 
 /**
@@ -74,6 +75,8 @@ export const handleError = Sentry.createSentryHandleError({ logErrors: true });
  * first request 500'd (`relation "web.workspace" does not exist`) before the gate ever ran.
  */
 await runMigrations();
+// The upstream sweep (external changes ALWAYS propose) — one process-wide interval.
+armUpstreamChecker();
 
 /**
  * The setup ceremony stays first-request-once: it needs the REQUEST origin for the printed

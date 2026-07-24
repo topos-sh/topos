@@ -490,6 +490,54 @@ pub struct AddData {
     /// locally-adopted skill (a path or a discovered name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<SkillOrigin>,
+    /// The MANIFEST this add edited — the trust rail's first half: a `topos.toml` path. Absent when
+    /// no manifest line was written (an internal adopt). **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<String>,
+    /// The reference the manifest line stores (canonical where resolvable). **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    /// The paste-ready inverse (`topos remove <ref>`). Empty when nothing is undoable. **Additive.**
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undo: Vec<String>,
+    /// A GOVERNED COPY of the same upstream source already living in a connected workspace — the
+    /// dedup suggestion on a remote import ("acme already has this as `@acme/deploy`"). Disclosed,
+    /// never blocking: the import proceeded as asked; the reference is the governed alternative.
+    /// **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governed_copy: Option<GovernedCopy>,
+}
+
+/// The dedup suggestion an [`AddData`] carries when a remote import's source is already governed
+/// in a connected workspace. **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct GovernedCopy {
+    /// The workspace's address name.
+    pub workspace: String,
+    /// The skill's catalog name there.
+    pub name: String,
+    /// The paste-ready reference, in the canonical host-qualified form
+    /// (`<host>/<workspace>/<name>` — unambiguous however many servers this installation is
+    /// logged into).
+    pub reference: String,
+    /// Whether the governed copy was imported from the exact same subdirectory (`false` = same
+    /// repository, different path).
+    pub same_path: bool,
+}
+
+/// `init` — create this folder's `topos.toml` (the project manifest `add`/`remove` edit and
+/// `update`/`status` resolve). **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct InitData {
+    /// The manifest's path.
+    pub manifest: String,
+    /// `false` when one already existed (the no-op receipt).
+    pub created: bool,
+    /// A placement note (outside a git repo the file will not travel — stated honestly).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// The `keep it as yours` describe — an `add <name>` that re-forks a RETAINED withdrawn/detached copy
@@ -521,41 +569,6 @@ pub enum KeepReason {
     Detached,
     /// `topos remove` excluded the skill on this device — the agent dirs were cleaned, the sidecar kept.
     RemovedHere,
-}
-
-/// `follow` (enrollment + first-receive). Each offered skill is a TOFU offer, never auto-landed.
-/// **INFERRED** (additive-only). All disclosure fields are optional, so an old consumer ignores
-/// them.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct FollowData {
-    pub workspace_id: String,
-    pub enrolled: bool,
-    /// First-receive offers — empty when the link is membership-only.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skills: Vec<FollowOffer>,
-    /// The workspace display name (disclosed at enrollment).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_display_name: Option<String>,
-    /// The API base URL this machine enrolled against (disclosed from the protocol card — a share
-    /// address may ride another host; this is where the device actually dials).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plane_base_url: Option<String>,
-    /// Present when `follow` returned a pending device-authorization that needs a human verification step
-    /// (the client's two-call enrollment surface — visit the URL, then re-run `follow`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending: Option<EnrollmentPending>,
-    /// The auto-update-trigger outcome, present when completing the enrollment armed the session-start hook
-    /// (a pure follower never runs `add`, so enrollment is where their auto-update gets armed — best-effort:
-    /// a degraded config edit is disclosed here, never a rolled-back enrollment).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub currency: Option<crate::TriggerReport>,
-    /// The breadth arming sweep's outcomes — one row per OTHER detected agent whose auto-update
-    /// trigger was armed alongside the active adapter's (`currency` above). Honest per agent:
-    /// `state`/`currency_kind` follow the same evidence rules every trigger report does, and
-    /// `note` names the consent step still owed (or the docs-level evidence caveat). **Additive.**
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub triggers: Vec<BreadthTriggerReport>,
 }
 
 /// One breadth-sweep trigger outcome for a DETECTED registry agent (beyond the active adapter's
@@ -599,42 +612,53 @@ pub struct EnrollmentPending {
     pub interval_secs: Option<u64>,
 }
 
-/// A single skill offered at `follow` — disclosed, awaiting a direct human yes (TOFU). **INFERRED.**
+/// `login <workspace-address>` — the SESSION mint + the acceptance disclosure (what connecting
+/// delivers). A session = user × workspace × installation, carrying ONE workspace-scoped bearer
+/// credential; further workspaces are further logins. Login IS the acceptance: from here delivery
+/// is silent, npm-style. **INFERRED** (additive-only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct FollowOffer {
-    pub skill_id: String,
-    pub name: String,
-    pub offer: Offer,
-}
-
-/// The typed receipt a PENDING device↔workspace link answers — a `follow` whose link (born at the
-/// device link lane, the enrollment grant, or an invitation accept) awaits an OWNER's approval.
-/// Nothing is subscribed and no bytes land while it is pending; delivery starts automatically
-/// after approval (the quiet sweep stays silent meanwhile), and `topos status` shows the waiting
-/// link. **INFERRED** (additive-only).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct LinkPendingData {
+pub struct LoginData {
+    /// The logged-into workspace's id (empty while the login is still pending approval).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub workspace_id: String,
-    /// The workspace's ADDRESS name.
-    pub workspace_name: String,
+    /// The workspace's ADDRESS name (the slug typed at `login`).
+    pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_display_name: Option<String>,
-    /// Always `"pending"` — the machine-branchable link fact.
-    pub link_status: String,
-    /// Whether THIS invocation also enrolled the device (the first browser ceremony).
-    pub enrolled_now: bool,
+    pub display_name: Option<String>,
+    /// The API base this installation dials (from the protocol card).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    /// The minted session's id (`sn_…`) — the handle the web sessions pages show.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// `"active"`, `"pending"` while the workspace's session-approval knob holds it (no data flows
+    /// until an owner approves), or `"awaiting-approval"` while the browser approval is pending.
+    pub session_status: String,
+    /// How many skills the person's profile delivers here right now (the acceptance disclosure;
+    /// best-effort — absent when the count could not be read).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered: Option<u64>,
+    /// Present while the login awaits the browser approval (re-run `topos login` to resume).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<EnrollmentPending>,
+    /// The active adapter's auto-update-trigger outcome, when the login armed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency: Option<crate::TriggerReport>,
+    /// The breadth arming sweep's outcomes (one row per other detected agent).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<BreadthTriggerReport>,
 }
 
-/// `unfollow` (local — stop following `current`, keep the bytes as a frozen copy). **INFERRED.**
+/// `logout [<workspace>|--all]` — end this installation's session(s). **INFERRED** (additive-only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct UnfollowData {
-    pub skill_id: String,
-    pub following: bool,
-    /// The local bytes are retained, not deleted.
-    pub bytes_kept: bool,
+pub struct LogoutData {
+    /// The sessions ended, by workspace ADDRESS name.
+    pub ended: Vec<String>,
+    /// Whether the server-side revoke landed for EVERY ended session (`false` = at least one was
+    /// already gone server-side, or unreachable — the local sign-out proceeded regardless).
+    pub server_revoked: bool,
 }
 
 /// `log` — local action events (and, with `--team`, partial plane records). The individual event
@@ -697,6 +721,19 @@ pub struct PublishData {
     /// (`topos channel add <channel> <skill>`). **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement_withheld: Option<String>,
+    /// The GOVERNANCE-TRANSFER receipt half: the manifest whose local-path line this publish
+    /// rewrote to the governed workspace reference. Absent when no manifest referenced the bundle
+    /// by path (an already-governed republish). **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<String>,
+    /// The canonical workspace reference the manifest now stores. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    /// The local-path spelling the manifest carried BEFORE the transfer (the inverse is
+    /// `topos add <converted_from>` after a `topos remove <reference>`). **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub converted_from: Option<String>,
     /// The paste-able teammate handoff line (`Ask your agent: …`) — the join instruction that
     /// brings a teammate's machine into the workspace, composed from the workspace's server
     /// origin + address. Absent when the address is not known (a best-effort read — the publish
@@ -847,14 +884,18 @@ pub struct RemoveItem {
     pub name: String,
     /// How the removal behaves for this skill.
     pub kind: RemoveKind,
+    /// The MANIFEST the removal edited (a `topos.toml` path). Absent when no manifest line was
+    /// touched. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<String>,
     /// The workspace the exclusion is recorded in (a followed skill); absent for a local copy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
     /// The agent directories cleaned (or, on the describe, that would be cleaned).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_dirs: Vec<String>,
-    /// Whether the sidecar bytes are kept (a followed exclusion / a tracked-local keeps the bytes as a
-    /// frozen copy; an untracked-local delete removes the only copy there is).
+    /// Whether the sidecar bytes are kept (a manifest edit keeps the tracked bytes as a frozen
+    /// copy; an untracked-local delete removes the only copy there is).
     pub bytes_kept: bool,
     /// A removal-specific disclosure (the built-in skill's durable opt-out + its way back). Absent
     /// for ordinary removals. **INFERRED** (additive).
@@ -867,64 +908,15 @@ pub struct RemoveItem {
 #[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum RemoveKind {
-    /// A followed skill → a per-device exclusion (the server keeps delivering it to your other devices).
-    FollowedExclusion,
+    /// The manifest's own include line was deleted — delivery to this scope just ends. **Additive.**
+    ManifestRemoved,
+    /// A broader layer still provides the item, so an EXCLUDE line was recorded in the nearest
+    /// manifest (the one negative state). **Additive.**
+    ManifestExcluded,
     /// An untracked local copy in an agent dir → permanent delete (no other copy exists).
     UntrackedLocal,
     /// A tracked, never-published local skill → permanent delete (the sidecar entry drops too).
     TrackedLocalPermanent,
-}
-
-/// `channel add|remove <channel> <skill>...` — place / remove skill references in a channel. **INFERRED.**
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct ChannelData {
-    pub channel: String,
-    pub workspace_id: String,
-    /// `add` or `remove`.
-    pub action: ChannelAction,
-    /// The channel's mode (`open` / `curated`) — the gate a placement passes.
-    pub mode: String,
-    /// `true` when this `add` would CREATE the channel (it does not exist yet).
-    pub creates: bool,
-    /// The per-skill placement/removal outcomes.
-    pub items: Vec<ChannelItem>,
-    /// `true` on the `--yes` apply, `false` on the describe.
-    pub applied: bool,
-}
-
-/// `add` vs `remove` for a [`ChannelData`]. **INFERRED value set.**
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum ChannelAction {
-    Add,
-    Remove,
-}
-
-/// One skill's placement/removal in a [`ChannelData`]. **INFERRED.**
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct ChannelItem {
-    pub skill: String,
-    pub skill_id: String,
-    /// `pending` (describe), `placed` / `removed` (applied ok), or `failed` (a mid-flight refusal after
-    /// an earlier one landed — reported honestly, per skill).
-    pub outcome: ChannelItemOutcome,
-    /// The refusal detail when `failed` (e.g. a curated-channel role refusal).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
-/// One skill's channel-op outcome. **INFERRED value set.**
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum ChannelItemOutcome {
-    Pending,
-    Placed,
-    Removed,
-    Failed,
 }
 
 /// `protect <target> [<level>]` — set a skill's or channel's protection level. **INFERRED.**
@@ -1127,20 +1119,20 @@ pub enum PublishGate {
 pub struct StatusData {
     /// The `topos` binary's own version.
     pub version: String,
-    /// Whether this install is enrolled with a plane (the enrollment doc exists).
+    /// Whether this installation holds any session (a `sessions.json` row exists).
     pub enrolled: bool,
-    /// The pinned plane base URL, when enrolled.
+    /// The server base URL the sessions dial, when logged in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<String>,
-    /// Whether the device credential is stored (the signed-in state).
+    /// Whether a LIVE (non-ended) session's credential is stored — the signed-in state.
     pub signed_in: bool,
-    /// The joined workspaces (empty when never enrolled).
+    /// The connected workspaces — one row per session (empty when logged into nothing).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspaces: Vec<StatusWorkspace>,
-    /// Skills this install currently follows (excluding per-device exclusions and unfollowed
-    /// copies).
+    /// Skills the profiles currently deliver to this installation, counted from the offline
+    /// delivery cache (withdrawn items excluded).
     pub followed_skills: u64,
-    /// First-receive offers awaiting consent (a followed skill whose bytes never landed here).
+    /// First-receive offers awaiting consent (a delivered skill whose bytes never landed here).
     /// Absent = not cheaply knowable from local state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_offers: Option<u64>,
@@ -1148,6 +1140,80 @@ pub struct StatusData {
     /// armed or repaired by `status`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<StatusTrigger>,
+    /// This installation's SESSIONS — one per logged-into workspace (the session model; empty =
+    /// logged into nothing). **Additive.**
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<StatusSession>,
+    /// The resolved TRUST-RAIL table for the CURRENT directory: every bundle the local manifests
+    /// covering it ask for, nearest-first deduped, each with its one source line and state.
+    /// **Additive.**
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<StatusItem>,
+}
+
+/// One session in a [`StatusData`] — this installation logged into one workspace. **INFERRED**
+/// (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct StatusSession {
+    pub workspace_id: String,
+    /// The ADDRESS name (what you logged in by).
+    pub name: String,
+    pub display_name: String,
+    /// The server host the workspace lives on (the manifest grammar's host half).
+    pub host: String,
+    /// The session's status, when it is NOT plainly active: `"pending"` (awaiting an owner's
+    /// approval — delivery starts automatically once approved) or `"ended"` (revoked or gone —
+    /// `topos login <address>` starts a fresh one). Absent = active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_status: Option<String>,
+}
+
+/// One resolved line of the trust rail. Every "why does this agent have X?" is answered by
+/// `source` (which manifest line asked for it); every "why doesn't it?" by `state`. **INFERRED**
+/// (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct StatusItem {
+    /// The bundle's name (the dedupe key).
+    pub name: String,
+    /// The winning reference (canonical where known).
+    pub reference: String,
+    /// ONE source line: the manifest that asked for it (`<dir>/topos.toml` or
+    /// `~/.topos/topos.toml`).
+    pub source: String,
+    /// Where the bytes belong: `"project"` (this project's harness dirs) or `"person"` (the home
+    /// dirs).
+    pub scope: String,
+    /// The applied version (64-hex), when one is applied locally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub version: Option<String>,
+    /// The line's state.
+    pub state: StatusItemState,
+    /// Broader manifests this line shadows (their labels) — rendered, never acted on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shadows: Vec<String>,
+}
+
+/// A trust-rail line's state. **INFERRED value set** (additive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum StatusItemState {
+    /// The bytes are applied and current against the last-known target.
+    Applied,
+    /// A newer target is known than what is applied — the next `update` lands it.
+    Behind,
+    /// Local edits sit ahead of the applied version (a draft).
+    LocalEdits,
+    /// Referenced here but NOT deliverable with your current access — phrased from LOCAL
+    /// knowledge only (no session for its workspace); never from server confirmation.
+    NotAvailable,
+    /// The session that would deliver it is pending an owner's approval.
+    PendingSession,
+    /// Not yet applied (never delivered here), or not determinable offline.
+    Unknown,
 }
 
 /// One joined workspace in a [`StatusData`]. **INFERRED** (additive-only).
@@ -1158,9 +1224,10 @@ pub struct StatusWorkspace {
     /// The ADDRESS name (what you joined by).
     pub name: String,
     pub display_name: String,
-    /// This device's link to the workspace, when it is NOT plainly active: `"pending"` (awaiting an
-    /// owner's approval — delivery starts automatically once approved) or `"ended"` (the link was
-    /// severed or never approved — `topos follow <address>` relinks). Absent = active. **Additive.**
+    /// This installation's session with the workspace, when it is NOT plainly active: `"pending"`
+    /// (awaiting an owner's approval — delivery starts automatically once approved) or `"ended"`
+    /// (the session was ended server-side — `topos login <address>` reconnects). Absent = active.
+    /// **Additive.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_status: Option<String>,
 }
@@ -1216,6 +1283,9 @@ mod tests {
     #[test]
     fn publish_data_carries_the_move_and_omits_an_absent_added_note() {
         let done = PublishData {
+            manifest: None,
+            reference: None,
+            converted_from: None,
             skill_id: "topos_t00".to_owned(),
             name: "pr-describe".to_owned(),
             version_id: "a".repeat(64),

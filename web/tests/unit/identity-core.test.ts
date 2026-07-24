@@ -2,17 +2,18 @@ import { execFileSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { DeviceActor } from "@/lib/auth/guards.server";
+import type { SessionActor } from "@/lib/auth/guards.server";
 import { applyPlaneDdl } from "../helpers/plane-ddl";
 import { installTestEnv } from "./helpers/test-env";
 
 /**
- * The identity model's concurrency-critical ceremonies + the entitlement predicate, against a
- * REAL scratch Postgres (the drizzle migration + the plane custody DDL applied verbatim):
- * the claim-consume race, the device flow's one-shot answers, the last-owner fence, the
- * seat-removal detach cascade, the entitlement matrix, revoke finality (the trigger), and the
- * delivery wire shape. Actors are minted by CAST — the one thing production code must never do
- * (the brand is module-private to guards.server.ts).
+ * The identity model's concurrency-critical ceremonies + the profile-demand predicate,
+ * against a REAL scratch Postgres (the drizzle migration + the plane custody DDL applied
+ * verbatim): the claim-consume race, the login flow's one-shot answers, session revocation,
+ * the session-approval knob, the last-owner fence, seat removal ending sessions + profile,
+ * the demand ∩ entitlement delivery matrix, pins, and the delivery wire shape. Actors are
+ * minted by CAST — the one thing production code must never do (the brand is module-private
+ * to guards.server.ts).
  */
 const ADMIN_URL =
   process.env.TEST_DATABASE_URL ?? "postgresql://postgres:identity2@localhost:5443/postgres";
@@ -57,7 +58,7 @@ async function seatUser(userId: string, role: string): Promise<void> {
   ]);
 }
 
-async function seedBundle(id: string, name: string): Promise<void> {
+async function seedBundle(id: string, name: string): Promise<string> {
   await q(`INSERT INTO web.bundle (id, workspace_id, name) VALUES ($1, $2, $3)`, [id, wsId, name]);
   const vid = `${id.replaceAll("_", "")}0`.padEnd(64, "a").slice(0, 64);
   await q(
@@ -75,6 +76,7 @@ async function seedBundle(id: string, name: string): Promise<void> {
      VALUES ($1, $2, $3, $4)`,
     [wsId, id, vid, "d".repeat(64)],
   );
+  return vid;
 }
 
 async function placeInEveryone(bundleId: string): Promise<void> {
@@ -85,8 +87,19 @@ async function placeInEveryone(bundleId: string): Promise<void> {
   );
 }
 
-function deviceActorFor(userId: string, deviceId: string, role: DeviceActor["role"]): DeviceActor {
-  return { userId, display: userId, workspaceId: wsId, deviceId, role } as DeviceActor;
+function sessionActorFor(
+  userId: string,
+  sessionId: string,
+  role: SessionActor["role"],
+): SessionActor {
+  return {
+    userId,
+    display: userId,
+    workspaceId: wsId,
+    sessionId,
+    role,
+    sessionStatus: "active",
+  } as SessionActor;
 }
 
 beforeAll(async () => {
@@ -128,52 +141,54 @@ describe("the claim consume", () => {
   });
 });
 
-describe("the device flow", () => {
+describe("the login flow", () => {
   it("start → approve → poll grants IDEMPOTENTLY (re-poll after a crash still gets the grant)", async () => {
     const identity = await import("@/lib/db/identity.server");
     const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
       ?.user_id as string;
     // The single-tenant resolve ignores the recorded slug ('' is the origin-addressed form).
-    const flow = await identity.startDeviceAuth("laptop", "");
-    expect((await identity.pollDeviceAuth(flow.deviceCode)).status).toBe("pending");
-    expect(await identity.pendingDeviceAuth(flow.userCode)).toEqual({
+    const flow = await identity.startLoginFlow("laptop", "");
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("pending");
+    expect(await identity.pendingLoginFlow(flow.userCode)).toEqual({
       requestedName: "laptop",
       requestedWorkspace: "",
       userCode: flow.userCode,
       inviteWorkspace: null,
     });
-    const approved = await identity.approveDeviceAuth(flow.userCode, {
+    const approved = await identity.approveLoginFlow(flow.userCode, {
       userId: owner,
       display: "Owner",
     });
     expect(approved?.requestedName).toBe("laptop");
-    const granted = await identity.pollDeviceAuth(flow.deviceCode);
+    // An owner's login is its own approval: born active whatever the knob.
+    expect(approved?.sessionStatus).toBe("active");
+    const granted = await identity.pollLoginFlow(flow.flowCode);
     expect(granted.status).toBe("granted");
-    // The grant REPEATS: the CLI's crash-recovery is to re-poll, so a device that received the
+    // The grant REPEATS: the CLI's crash-recovery is to re-poll, so a client that received the
     // grant but crashed before persisting its credential must get the same grant again.
-    const reAfterCrash = await identity.pollDeviceAuth(flow.deviceCode);
+    const reAfterCrash = await identity.pollLoginFlow(flow.flowCode);
     expect(reAfterCrash.status).toBe("granted");
-    expect(reAfterCrash.status === "granted" && reAfterCrash.deviceId).toBe(
-      granted.status === "granted" ? granted.deviceId : "",
+    expect(reAfterCrash.status === "granted" && reAfterCrash.sessionId).toBe(
+      granted.status === "granted" ? granted.sessionId : "",
     );
-    // The credential (the promoted device code) resolves; a bogus one does not.
-    expect(await identity.deviceActor(wsId, flow.deviceCode)).not.toBeNull();
-    expect(await identity.deviceActor(wsId, "not-a-credential")).toBeNull();
+    // The credential (the promoted flow code) resolves; a bogus one does not.
+    expect(await identity.sessionActor(wsId, flow.flowCode)).not.toBeNull();
+    expect(await identity.sessionActor(wsId, "not-a-credential")).toBeNull();
+    // The credential is WORKSPACE-SCOPED: another workspace id resolves nothing.
+    expect(await identity.sessionActor("w_other", flow.flowCode)).toBeNull();
   });
 
   it("deny repeats until the sweep; a re-approve of the same code misses", async () => {
     const identity = await import("@/lib/db/identity.server");
     const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
       ?.user_id as string;
-    const flow = await identity.startDeviceAuth("stolen-box", "");
-    expect(await identity.denyDeviceAuth(flow.userCode, { userId: owner, display: "O" })).toBe(
-      true,
-    );
+    const flow = await identity.startLoginFlow("stolen-box", "");
+    expect(await identity.denyLoginFlow(flow.userCode, { userId: owner, display: "O" })).toBe(true);
     expect(
-      await identity.approveDeviceAuth(flow.userCode, { userId: owner, display: "O" }),
+      await identity.approveLoginFlow(flow.userCode, { userId: owner, display: "O" }),
     ).toBeNull();
-    expect((await identity.pollDeviceAuth(flow.deviceCode)).status).toBe("denied");
-    expect((await identity.pollDeviceAuth(flow.deviceCode)).status).toBe("denied");
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("denied");
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("denied");
   });
 
   it("a SEATLESS approver gets null (and cannot deny); a seated one then completes the flow", async () => {
@@ -181,50 +196,210 @@ describe("the device flow", () => {
     const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
       ?.user_id as string;
     await seedUser("u_seatless", "Seatless", "seatless@example.com");
-    const flow = await identity.startDeviceAuth("drifter-box", "");
+    const flow = await identity.startLoginFlow("drifter-box", "");
     // Approval requires a seat in the flow's workspace — a seatless person's approve AND deny
     // both land the same uniform refusal, and neither consumes the pending flow.
     expect(
-      await identity.approveDeviceAuth(flow.userCode, { userId: "u_seatless", display: "S" }),
+      await identity.approveLoginFlow(flow.userCode, { userId: "u_seatless", display: "S" }),
     ).toBeNull();
     expect(
-      await identity.denyDeviceAuth(flow.userCode, { userId: "u_seatless", display: "S" }),
+      await identity.denyLoginFlow(flow.userCode, { userId: "u_seatless", display: "S" }),
     ).toBe(false);
-    expect((await identity.pollDeviceAuth(flow.deviceCode)).status).toBe("pending");
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("pending");
     expect(
-      await identity.approveDeviceAuth(flow.userCode, { userId: owner, display: "O" }),
+      await identity.approveLoginFlow(flow.userCode, { userId: owner, display: "O" }),
     ).not.toBeNull();
   });
 
   it("an expired pending flow reports expired; the sweep reaps past-TTL rows", async () => {
     const identity = await import("@/lib/db/identity.server");
-    const flow = await identity.startDeviceAuth("slow-machine", "");
-    await q(`UPDATE web.device_auth_session SET expires_at = now() - interval '1 minute'`);
-    expect((await identity.pollDeviceAuth(flow.deviceCode)).status).toBe("expired");
+    const flow = await identity.startLoginFlow("slow-machine", "");
+    await q(`UPDATE web.login_flow SET expires_at = now() - interval '1 minute'`);
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("expired");
     // The row lingers until a sweep (read does not delete); the sweep then reaps it.
-    expect(await identity.pendingDeviceAuth(flow.userCode)).toBeNull();
-    expect(await identity.sweepExpiredDeviceAuth()).toBeGreaterThanOrEqual(1);
-    expect((await identity.pollDeviceAuth(flow.deviceCode)).status).toBe("expired");
+    expect(await identity.pendingLoginFlow(flow.userCode)).toBeNull();
+    expect(await identity.sweepExpiredLoginFlows()).toBeGreaterThanOrEqual(1);
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("expired");
   });
 });
 
-describe("revoke finality", () => {
-  it("revocation is final: the trigger refuses any un-revoke", async () => {
+describe("session revocation", () => {
+  it("ending a session kills the credential; a granted poll then reads expired", async () => {
     const identity = await import("@/lib/db/identity.server");
     const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
       ?.user_id as string;
-    const flow = await identity.startDeviceAuth("short-lived", "");
-    await identity.approveDeviceAuth(flow.userCode, { userId: owner, display: "O" });
-    const granted = await identity.pollDeviceAuth(flow.deviceCode);
+    const flow = await identity.startLoginFlow("short-lived", "");
+    await identity.approveLoginFlow(flow.userCode, { userId: owner, display: "O" });
+    const granted = await identity.pollLoginFlow(flow.flowCode);
     expect(granted.status).toBe("granted");
-    const deviceId = granted.status === "granted" ? granted.deviceId : "";
-    expect(await identity.revokeOwnDevice({ userId: owner, display: "O" }, deviceId)).toBe(true);
-    // The credential dies with the row flip …
-    expect(await identity.deviceActor(wsId, flow.deviceCode)).toBeNull();
-    // … and the flip is one-way: the database itself refuses the resurrection.
-    await expect(
-      q(`UPDATE web.device SET revoked_at = NULL WHERE id = $1`, [deviceId]),
-    ).rejects.toThrow(/revoke|final|one-way/i);
+    const sessionId = granted.status === "granted" ? granted.sessionId : "";
+    expect(await identity.revokeOwnSession({ userId: owner, display: "O" }, sessionId)).toBe(
+      "revoked",
+    );
+    // The credential dies with the row …
+    expect(await identity.sessionActor(wsId, flow.flowCode)).toBeNull();
+    // … the row is DELETED, never tombstoned …
+    expect(await q(`SELECT 1 FROM web.cli_session WHERE id = $1`, [sessionId])).toHaveLength(0);
+    // … and the flow's grant honestly reads expired (start over).
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("expired");
+    // A repeat revoke finds nothing (self-only WHERE answers unknown).
+    expect(await identity.revokeOwnSession({ userId: owner, display: "O" }, sessionId)).toBe(
+      "unknown_session",
+    );
+  });
+
+  it("the CLI logout revokes by the presented credential; a retry misses", async () => {
+    const identity = await import("@/lib/db/identity.server");
+    const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
+      ?.user_id as string;
+    const flow = await identity.startLoginFlow("logout-box", "");
+    await identity.approveLoginFlow(flow.userCode, { userId: owner, display: "O" });
+    expect(await identity.revokeSessionByCredential(flow.flowCode)).toBe(true);
+    expect(await identity.revokeSessionByCredential(flow.flowCode)).toBe(false);
+  });
+
+  it("the owner-set expiry applies to EVERY live-session surface: guard, logout, approve", async () => {
+    const identity = await import("@/lib/db/identity.server");
+    const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
+      ?.user_id as string;
+    // An active session and a pending one, both minted now.
+    const active = await identity.startLoginFlow("expiry-box", "");
+    await identity.approveLoginFlow(active.userCode, { userId: owner, display: "O" });
+    await seedUser("u_expiry", "Expiring", "expiry@example.com");
+    await seatUser("u_expiry", "member");
+    await q(`UPDATE web.workspace SET session_approval = 'on' WHERE id = $1`, [wsId]);
+    const pend = await identity.startLoginFlow("expiry-pending-box", "");
+    await identity.approveLoginFlow(pend.userCode, { userId: "u_expiry", display: "E" });
+    await q(`UPDATE web.workspace SET session_approval = 'off' WHERE id = $1`, [wsId]);
+    const pendingId = (
+      await q(`SELECT id FROM web.cli_session WHERE status = 'pending' ORDER BY created_at DESC`)
+    )[0]?.id as string;
+
+    // Arm a 1-hour expiry and age both sessions past it.
+    await q(`UPDATE web.workspace SET session_max_age_ms = 3600000 WHERE id = $1`, [wsId]);
+    await q(
+      `UPDATE web.cli_session SET created_at = now() - interval '2 hours'
+       WHERE credential_sha256 IN (sha256(convert_to($1, 'UTF8')), sha256(convert_to($2, 'UTF8')))`,
+      [active.flowCode, pend.flowCode],
+    );
+    // The guard refuses; the self-logout answers exactly what an unknown bearer gets (no
+    // liveness oracle); an owner cannot approve a pending row whose credential is already dead.
+    expect(await identity.sessionActor(wsId, active.flowCode)).toBeNull();
+    expect(await identity.revokeSessionByCredential(active.flowCode)).toBe(false);
+    expect(await identity.approveSession({ userId: owner, display: "O" }, wsId, pendingId)).toBe(
+      "unknown_session",
+    );
+    // Clearing the policy brings the surfaces back in the same breath.
+    await q(`UPDATE web.workspace SET session_max_age_ms = NULL WHERE id = $1`, [wsId]);
+    expect(await identity.sessionActor(wsId, active.flowCode)).not.toBeNull();
+    expect(await identity.approveSession({ userId: owner, display: "O" }, wsId, pendingId)).toBe(
+      "approved",
+    );
+    expect(await identity.revokeSessionByCredential(active.flowCode)).toBe(true);
+  });
+});
+
+describe("the session-approval knob", () => {
+  it("knob on: a member's session is born pending, delivers empty, and approve activates it", async () => {
+    const identity = await import("@/lib/db/identity.server");
+    const lane = await import("@/lib/db/queries.lane.server");
+    const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
+      ?.user_id as string;
+    await seedUser("u_knob", "Knobbed", "knob@example.com");
+    await seatUser("u_knob", "member");
+    await q(`UPDATE web.workspace SET session_approval = 'on' WHERE id = $1`, [wsId]);
+    const flow = await identity.startLoginFlow("held-box", "");
+    const approved = await identity.approveLoginFlow(flow.userCode, {
+      userId: "u_knob",
+      display: "K",
+    });
+    expect(approved?.sessionStatus).toBe("pending");
+    const sessionId = approved?.sessionId ?? "";
+    // A pending session resolves only via allowPending; delivery is the shape-complete EMPTY.
+    const row = await identity.sessionActor(wsId, flow.flowCode);
+    expect(row?.sessionStatus).toBe("pending");
+    const pendingActor = {
+      userId: "u_knob",
+      display: "K",
+      workspaceId: wsId,
+      sessionId,
+      role: "member",
+      sessionStatus: "pending",
+    } as SessionActor;
+    const empty = await lane.emptyDeliveryFor(pendingActor);
+    expect(empty.session_status).toBe("pending");
+    expect(empty.skills).toEqual([]);
+    // An owner approves on the sessions page; the session then resolves active.
+    expect(await identity.approveSession({ userId: owner, display: "O" }, wsId, sessionId)).toBe(
+      "approved",
+    );
+    expect((await identity.sessionActor(wsId, flow.flowCode))?.sessionStatus).toBe("active");
+    // An owner's OWN login stays born active under the knob.
+    const ownerFlow = await identity.startLoginFlow("owner-box", "");
+    const ownerApproved = await identity.approveLoginFlow(ownerFlow.userCode, {
+      userId: owner,
+      display: "O",
+    });
+    expect(ownerApproved?.sessionStatus).toBe("active");
+    await q(`UPDATE web.workspace SET session_approval = 'off' WHERE id = $1`, [wsId]);
+  });
+
+  it("reject deletes the pending session; owner remove ends an active one", async () => {
+    const identity = await import("@/lib/db/identity.server");
+    const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
+      ?.user_id as string;
+    await q(`UPDATE web.workspace SET session_approval = 'on' WHERE id = $1`, [wsId]);
+    const flow = await identity.startLoginFlow("rejected-box", "");
+    const approved = await identity.approveLoginFlow(flow.userCode, {
+      userId: "u_knob",
+      display: "K",
+    });
+    expect(
+      await identity.rejectSession(
+        { userId: owner, display: "O" },
+        wsId,
+        approved?.sessionId ?? "",
+      ),
+    ).toBe("rejected");
+    expect(await identity.sessionActor(wsId, flow.flowCode)).toBeNull();
+    await q(`UPDATE web.workspace SET session_approval = 'off' WHERE id = $1`, [wsId]);
+
+    const flow2 = await identity.startLoginFlow("removed-box", "");
+    const approved2 = await identity.approveLoginFlow(flow2.userCode, {
+      userId: "u_knob",
+      display: "K",
+    });
+    expect(approved2?.sessionStatus).toBe("active");
+    expect(
+      await identity.ownerRemoveSession(
+        { userId: owner, display: "O" },
+        wsId,
+        approved2?.sessionId ?? "",
+      ),
+    ).toBe("removed");
+    expect(await identity.sessionActor(wsId, flow2.flowCode)).toBeNull();
+  });
+});
+
+describe("the session expiry policy", () => {
+  it("a session past the workspace max age refuses at the guard", async () => {
+    const identity = await import("@/lib/db/identity.server");
+    const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
+      ?.user_id as string;
+    const flow = await identity.startLoginFlow("aging-box", "");
+    await identity.approveLoginFlow(flow.userCode, { userId: owner, display: "O" });
+    expect(await identity.sessionActor(wsId, flow.flowCode)).not.toBeNull();
+    // The owner sets a max age; a session older than it stops resolving.
+    await q(`UPDATE web.workspace SET session_max_age_ms = 3600000 WHERE id = $1`, [wsId]);
+    await q(
+      `UPDATE web.cli_session SET created_at = now() - interval '2 hours'
+       WHERE credential_sha256 = sha256(convert_to($1, 'UTF8'))`,
+      [flow.flowCode],
+    );
+    expect(await identity.sessionActor(wsId, flow.flowCode)).toBeNull();
+    await q(`UPDATE web.workspace SET session_max_age_ms = NULL WHERE id = $1`, [wsId]);
+    expect(await identity.sessionActor(wsId, flow.flowCode)).not.toBeNull();
+    await identity.revokeSessionByCredential(flow.flowCode);
   });
 });
 
@@ -235,7 +410,7 @@ describe("the last-owner fence", () => {
       ?.user_id as string;
     const acting = { userId: owner, display: "Owner" };
     expect(await identity.setSeatRole(acting, wsId, owner, "member")).toBe("last_owner");
-    expect(await identity.removeSeat(acting, wsId, owner, "membership_removed")).toBe("last_owner");
+    expect(await identity.removeSeat(acting, wsId, owner)).toBe("last_owner");
 
     await seedUser("u_second", "Second Owner", "second@example.com");
     await seatUser("u_second", "owner");
@@ -253,17 +428,17 @@ describe("the last-owner fence", () => {
   });
 });
 
-describe("the entitlement predicate + delivery", () => {
-  it("derives (default − optout) ∪ member channels ∪ follows − unfollows − exclusions", async () => {
+describe("demand ∩ entitlement (the profile) + delivery", () => {
+  it("derives (baseline − channel excludes) ∪ included channels ∪ includes − excludes", async () => {
     const identity = await import("@/lib/db/identity.server");
     const lane = await import("@/lib/db/queries.lane.server");
     await seedUser("u_ent", "Entitled", "entitled@example.com");
     await seatUser("u_ent", "member");
-    const flow = await identity.startDeviceAuth("ent-box", "");
-    await identity.approveDeviceAuth(flow.userCode, { userId: "u_ent", display: "E" });
-    const granted = await identity.pollDeviceAuth(flow.deviceCode);
-    const deviceId = granted.status === "granted" ? granted.deviceId : "";
-    const actor = deviceActorFor("u_ent", deviceId, "member");
+    const flow = await identity.startLoginFlow("ent-box", "");
+    await identity.approveLoginFlow(flow.userCode, { userId: "u_ent", display: "E" });
+    const granted = await identity.pollLoginFlow(flow.flowCode);
+    const sessionId = granted.status === "granted" ? granted.sessionId : "";
+    const actor = sessionActorFor("u_ent", sessionId, "member");
 
     await seedBundle("s_everyone", "via-everyone");
     await placeInEveryone("s_everyone");
@@ -276,59 +451,100 @@ describe("the entitlement predicate + delivery", () => {
       `INSERT INTO web.channel_bundle (channel_id, workspace_id, bundle_id) VALUES ('c_named', $1, 's_named')`,
       [wsId],
     );
-    await seedBundle("s_followed", "via-direct-follow");
+    await seedBundle("s_included", "via-direct-include");
 
-    // Baseline: only the everyone-channel bundle.
+    // Baseline: only the everyone-channel bundle (the default channel is implicit).
     let delivery = await lane.deliveryFor(actor);
     expect(delivery.skills.map((s) => s.skill_id)).toEqual(["s_everyone"]);
     expect(delivery.skills[0]?.via).toEqual({ channels: ["everyone"], direct: false });
 
-    // A named-channel membership adds its bundles.
-    expect(await lane.laneChannelJoin(actor, "named-channel")).toBe("joined");
-    // A direct follow adds the third.
-    expect(await lane.followBundle(actor, "s_followed")).toBe("followed");
+    // A channel include adds its bundles; a bundle include adds the third.
+    expect(await lane.profileIncludeChannel(actor, "named-channel")).toBe("included");
+    expect(await lane.profileIncludeBundle(actor, "s_included", null)).toBe("included");
     delivery = await lane.deliveryFor(actor);
     expect(delivery.skills.map((s) => s.skill_id).sort()).toEqual([
       "s_everyone",
-      "s_followed",
+      "s_included",
       "s_named",
     ]);
 
-    // The unfollow mask beats every source.
-    expect(await lane.unfollowBundle(actor, "s_named")).toBe("unfollowed");
+    // Removing a channel-provided bundle records an EXCLUDE (the one negative state) — and
+    // the exclude beats every providing source.
+    expect(await lane.profileRemoveBundle(actor, "s_named")).toBe("excluded");
     delivery = await lane.deliveryFor(actor);
-    expect(delivery.skills.map((s) => s.skill_id).sort()).toEqual(["s_everyone", "s_followed"]);
-    expect(delivery.detached).toContain("s_named");
+    expect(delivery.skills.map((s) => s.skill_id).sort()).toEqual(["s_everyone", "s_included"]);
 
-    // A device exclusion subtracts from THIS device only and rides `excluded`.
-    expect(await lane.excludeOnDevice(actor, "s_everyone")).toBe("excluded");
+    // Removing a direct include (nothing else provides it) just deletes the line.
+    expect(await lane.profileRemoveBundle(actor, "s_included")).toBe("removed");
     delivery = await lane.deliveryFor(actor);
-    expect(delivery.skills.map((s) => s.skill_id)).toEqual(["s_followed"]);
-    expect(delivery.excluded).toEqual(["s_everyone"]);
+    expect(delivery.skills.map((s) => s.skill_id)).toEqual(["s_everyone"]);
 
-    // The default-channel opt-out removes the everyone union arm.
-    expect(await lane.laneChannelLeave(actor, "everyone")).toBe("left");
+    // Excluding the DEFAULT channel subtracts the baseline.
+    expect(await lane.profileRemoveChannel(actor, "everyone")).toBe("excluded");
     delivery = await lane.deliveryFor(actor);
-    expect(delivery.skills.map((s) => s.skill_id)).toEqual(["s_followed"]);
-    // Rejoining the default channel deletes the opt-out and heals.
-    expect(await lane.laneChannelJoin(actor, "everyone")).toBe("joined");
-    // Following on this device lifts the exclusion.
-    expect(await lane.followBundle(actor, "s_everyone")).toBe("followed");
+    expect(delivery.skills.map((s) => s.skill_id)).toEqual([]);
+    // Re-including the baseline clears the exclude.
+    expect(await lane.profileIncludeChannel(actor, "everyone")).toBe("included");
+    // Re-adding a previously excluded bundle flips the stance back to include.
+    expect(await lane.profileIncludeBundle(actor, "s_named", null)).toBe("included");
     delivery = await lane.deliveryFor(actor);
-    expect(delivery.skills.map((s) => s.skill_id).sort()).toEqual(["s_everyone", "s_followed"]);
+    expect(delivery.skills.map((s) => s.skill_id).sort()).toEqual(["s_everyone", "s_named"]);
+
+    // The profile read serves the resolved lines.
+    const profile = await lane.profileOf(actor);
+    expect(profile.map((e) => `${e.mode}:${e.kind}:${e.name}`).sort()).toEqual([
+      "include:channel:named-channel",
+      "include:skill:via-named-channel",
+    ]);
+  });
+
+  it("a pinned include serves the pinned version; a stale pin falls back to current", async () => {
+    const lane = await import("@/lib/db/queries.lane.server");
+    const sessionRow = await q(`SELECT id FROM web.cli_session WHERE user_id = 'u_ent'`);
+    const actor = sessionActorFor("u_ent", sessionRow[0]?.id as string, "member");
+    const vid = await seedBundle("s_pinned", "pinned-skill");
+    // A second version becomes current; the pin holds the first.
+    const v2 = "e".repeat(64);
+    await q(
+      `INSERT INTO plane.version (workspace_id, bundle_id, version_id, commit_id, author_display)
+       VALUES ($1, 's_pinned', $2, $2, 'seed')`,
+      [wsId, v2],
+    );
+    await q(
+      `UPDATE plane.current_pointer SET version_id = $2, generation = generation + 1
+       WHERE workspace_id = $1 AND bundle_id = 's_pinned'`,
+      [wsId, v2],
+    );
+    await q(
+      `INSERT INTO plane.version_digest (workspace_id, bundle_id, version_id, bundle_digest)
+       VALUES ($1, 's_pinned', $2, $3)`,
+      [wsId, v2, "f".repeat(64)],
+    );
+    expect(await lane.profileIncludeBundle(actor, "s_pinned", vid)).toBe("included");
+    let delivery = await lane.deliveryFor(actor);
+    let pinned = delivery.skills.find((s) => s.skill_id === "s_pinned");
+    expect(pinned?.version_id).toBe(vid);
+    expect(pinned?.pinned).toBe(true);
+    // The pinned version is purged: delivery falls back to current, honestly un-pinned.
+    await q(
+      `DELETE FROM plane.version_digest WHERE workspace_id = $1 AND bundle_id = 's_pinned' AND version_id = $2`,
+      [wsId, vid],
+    );
+    delivery = await lane.deliveryFor(actor);
+    pinned = delivery.skills.find((s) => s.skill_id === "s_pinned");
+    expect(pinned?.version_id).toBe(v2);
+    expect(pinned?.pinned).toBeUndefined();
+    await lane.profileRemoveBundle(actor, "s_pinned");
   });
 
   it("the delivery wire shape carries the pinned fields snake_case", async () => {
     const lane = await import("@/lib/db/queries.lane.server");
-    const device = (
-      await q(
-        `SELECT d.id FROM web.device d JOIN web."user" u ON u.id = d.user_id WHERE u.id = 'u_ent'`,
-      )
-    )[0]?.id as string;
-    const actor = deviceActorFor("u_ent", device, "member");
+    const sessionRow = await q(`SELECT id FROM web.cli_session WHERE user_id = 'u_ent'`);
+    const actor = sessionActorFor("u_ent", sessionRow[0]?.id as string, "member");
     const delivery = await lane.deliveryFor(actor);
     expect(delivery.schema_version).toBe(1);
     expect(delivery.workspace_id).toBe(wsId);
+    expect(delivery.session_status).toBe("active");
     const skill = delivery.skills.find((s) => s.skill_id === "s_everyone");
     expect(skill).toMatchObject({
       skill_id: "s_everyone",
@@ -344,44 +560,55 @@ describe("the entitlement predicate + delivery", () => {
     expect(typeof delivery.proposals_awaiting).toBe("number");
     expect(delivery.staleness_window_ms).toBe(604800000);
   });
+
+  it("the applied report is a complete snapshot: absent bundles drop their rows", async () => {
+    const lane = await import("@/lib/db/queries.lane.server");
+    const sessionRow = await q(`SELECT id FROM web.cli_session WHERE user_id = 'u_ent'`);
+    const sessionId = sessionRow[0]?.id as string;
+    const actor = sessionActorFor("u_ent", sessionId, "member");
+    const vid = "1".repeat(64);
+    expect(
+      await lane.reportApplied(actor, [
+        { skillId: "s_everyone", versionId: vid },
+        { skillId: "s_named", versionId: vid },
+      ]),
+    ).toBe("ok");
+    let rows = await q(`SELECT bundle_id FROM web.session_bundle_state WHERE session_id = $1`, [
+      sessionId,
+    ]);
+    expect(rows.map((r) => r.bundle_id).sort()).toEqual(["s_everyone", "s_named"]);
+    // The next report no longer carries s_named — its row goes (absence is meaningful).
+    expect(await lane.reportApplied(actor, [{ skillId: "s_everyone", versionId: vid }])).toBe("ok");
+    rows = await q(`SELECT bundle_id FROM web.session_bundle_state WHERE session_id = $1`, [
+      sessionId,
+    ]);
+    expect(rows.map((r) => r.bundle_id)).toEqual(["s_everyone"]);
+  });
 });
 
 describe("seat removal", () => {
-  it("writes detach records for the delivered set and cascades the stance rows", async () => {
+  it("ends the person's sessions (audited) and cascades the profile away", async () => {
     const identity = await import("@/lib/db/identity.server");
     const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner' LIMIT 1`))[0]
       ?.user_id as string;
-    const stancesBefore = await q(
-      `SELECT bundle_id, state FROM web.bundle_subscription WHERE user_id = 'u_ent'`,
-    );
-    expect(stancesBefore.length).toBeGreaterThan(0);
+    const profileBefore = await q(`SELECT 1 FROM web.profile_entry WHERE user_id = 'u_ent'`);
+    expect(profileBefore.length).toBeGreaterThan(0);
+    const sessionsBefore = await q(`SELECT id FROM web.cli_session WHERE user_id = 'u_ent'`);
+    expect(sessionsBefore.length).toBeGreaterThan(0);
 
-    expect(
-      await identity.removeSeat(
-        { userId: owner, display: "O" },
-        wsId,
-        "u_ent",
-        "membership_removed",
-      ),
-    ).toBe("ok");
+    expect(await identity.removeSeat({ userId: owner, display: "O" }, wsId, "u_ent")).toBe("ok");
 
-    // The lapse RECORDS survive the seat (they exist to outlive it). The earlier unfollow's
-    // record keeps its ORIGINAL cause (already-detached rows are never re-labelled); the
-    // bundles this removal lapsed carry the removal's.
-    const detached = await q<{ bundle_id: string; cause: string }>(
-      `SELECT bundle_id, cause FROM web.bundle_detachment WHERE user_id = 'u_ent' ORDER BY bundle_id`,
-    );
-    expect(detached.length).toBeGreaterThanOrEqual(2);
-    expect(detached.find((d) => d.bundle_id === "s_named")?.cause).toBe("unfollow");
-    expect(detached.find((d) => d.bundle_id === "s_everyone")?.cause).toBe("membership_removed");
-    expect(detached.find((d) => d.bundle_id === "s_followed")?.cause).toBe("membership_removed");
-    // … while the standing policy rows die with it (re-invite starts clean).
-    expect(await q(`SELECT 1 FROM web.bundle_subscription WHERE user_id = 'u_ent'`)).toHaveLength(
-      0,
-    );
-    expect(await q(`SELECT 1 FROM web.channel_member WHERE user_id = 'u_ent'`)).toHaveLength(0);
-    expect(await q(`SELECT 1 FROM web.channel_optout WHERE user_id = 'u_ent'`)).toHaveLength(0);
+    // The standing rows die with the seat (re-invite starts clean) …
+    expect(await q(`SELECT 1 FROM web.profile_entry WHERE user_id = 'u_ent'`)).toHaveLength(0);
+    expect(await q(`SELECT 1 FROM web.cli_session WHERE user_id = 'u_ent'`)).toHaveLength(0);
     expect(await q(`SELECT 1 FROM web.seat WHERE user_id = 'u_ent'`)).toHaveLength(0);
+    // … and the ending is AUDITED, cause-tagged (history outlives the rows).
+    const audits = await q(
+      `SELECT 1 FROM web.audit_event
+       WHERE workspace_id = $1 AND kind = 'session_ended' AND details ->> 'cause' = 'seat_removed'`,
+      [wsId],
+    );
+    expect(audits.length).toBeGreaterThanOrEqual(1);
   });
 });
 

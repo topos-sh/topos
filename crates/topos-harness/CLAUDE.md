@@ -11,7 +11,7 @@ scheduler probe — health is never claimed on faith, and the footprint stays a 
 
 **Implemented:** the **Claude Code** reference adapter (`claude_code`) — `discover` (probe
 `~/.claude/skills/*/SKILL.md`, confirm by existence, never parse frontmatter), `placement_for` (a pure
-follower's first receive names the folder by the skill's **sanitized display name** — Claude Code invokes a
+function — a receiving install names the folder by the skill's **sanitized display name** — Claude Code invokes a
 skill by its folder name — namespacing by the workspace slug on a name collision (`<skill>-<workspace>`) and falling back to the validated
 id; the display name + workspace slug are UNTRUSTED and routed through `sanitize_skill_dir` to one safe path
 component, so they can never redirect the placement), `currency_kind` = `SessionStart`, and the idempotent,

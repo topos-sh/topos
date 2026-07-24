@@ -3,7 +3,7 @@ import {
   createScratchDb,
   type ScratchDb,
   seatUser,
-  seedDevice,
+  seedSession,
   seedUser,
 } from "./helpers/scratch-db";
 
@@ -50,11 +50,11 @@ beforeAll(async () => {
   await seedWorkspace(WS_OTHER, "elsewhere");
   await seedUser(db, "u_member", "Member", "member@example.com");
   await seatUser(db, WS_REAL, "u_member", "member");
-  // The stranger is a REAL signed-in user with a seat and an enrolled device — just not in
+  // The stranger is a REAL signed-in user with a seat and a live session — just not in
   // acme. Their probe of acme must look exactly like probing a workspace that does not exist.
   await seedUser(db, "u_stranger", "Stranger", "stranger@example.com");
   await seatUser(db, WS_OTHER, "u_stranger", "owner");
-  await seedDevice(db, STRANGER_DEVICE, "u_stranger");
+  await seedSession(db, STRANGER_DEVICE, WS_OTHER, "u_stranger");
 }, 60000);
 
 afterAll(async () => {

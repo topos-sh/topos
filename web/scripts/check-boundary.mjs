@@ -274,10 +274,13 @@ const SESSIONLESS_ROUTES = new Set([
   // The fallback: anonymous is a VALID state (the constant protocol card / house 404 — no
   // existence oracle), so the guard family cannot front it.
   "catch-all",
-  // The device flow's unauthenticated start + poll: no credential EXISTS yet (approval mints
+  // The login flow's unauthenticated start + poll: no credential EXISTS yet (approval mints
   // it); the belt is their gate and the flow rows are single-use, short-TTL.
-  "api.v1.device-authorize",
-  "api.v1.device-token",
+  "api.v1.login-authorize",
+  "api.v1.login-token",
+  // The logout: the presented credential IS the session it ends (possession is the
+  // authorization); a dead credential answers the uniform 404.
+  "api.v1.session",
   // The tokened invitation page: sessionless BY DESIGN (the mailed single-use token is the
   // proof; anonymous viewing + the account-minting accept are the point), uniform constant
   // page on a miss, public-read belted.
@@ -289,7 +292,7 @@ const SESSIONLESS_ROUTES = new Set([
 // membership-or-404 resolution the face modules call on their signed-in arm (their anonymous
 // arm resolves the session itself, teaser-or-404, so the require* wrappers cannot front them).
 const GUARD_CALL =
-  /\b(?:require(?:Session|MemberInScope|Member|OwnerInScope|WorkspaceOwner|Reviewer|DeviceActor|DevicePerson)|memberInScope)\s*\(/;
+  /\b(?:require(?:SessionActor|Session|MemberInScope|Member|OwnerInScope|WorkspaceOwner|Reviewer)|memberInScope)\s*\(/;
 const READS_DATA = /export\s+(?:async\s+)?(?:function|const)\s+(?:loader|action)\b/;
 for (const { rel, text, base } of files) {
   if (!rel.startsWith(ROUTES_DIR)) {

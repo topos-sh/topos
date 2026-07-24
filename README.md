@@ -9,10 +9,10 @@ files (`SKILL.md` + scripts + reference docs); the **whole bundle** is the unit 
 
 Three programs in one Apache-2.0 repository:
 
-- **`topos`** — the local CLI an agent drives to add, follow, publish, and update behaviors.
+- **`topos`** — the local CLI an agent drives to add, publish, and update behaviors.
 - **`topos-plane`** — the self-hostable sharing server (a library + a thin binary).
 - **`@topos/web`** — the product web app (the one public surface when self-hosting): sign-in, the
-  dashboard, the review UI, and the device API.
+  dashboard, the review UI, and the session API the CLI dials.
 
 The two Rust programs share one trust kernel, `topos-core`: the single, auditable implementation of the
 byte-exact digest, consent, content-addressed identity, and sync algorithm.
@@ -29,27 +29,31 @@ curl -fsSL https://topos.sh/install | sh
 
 ```sh
 topos add ~/.claude/skills/pr-describe   # adopt it (offline; no account)
-topos follow https://topos.sh/acme       # enroll this device in your workspace; approve in the browser
+topos login https://topos.sh/acme        # log this machine in; approve in the browser
 topos publish pr-describe                # move `current` to your draft; prints the share line
 ```
 
 Create your workspace in the browser (at [topos.sh](https://topos.sh), or self-host — see below), then
-`topos follow <address>` enrolls this device (approve in the browser; it completes on its own). `publish`
-needs an enrolled device — un-enrolled, it refuses and tells you to `follow` your workspace address first.
-Each publish prints the workspace **address** (`https://topos.sh/<name>`) teammates paste to follow. To pin
-the exact bytes being shipped, add a `@<digest>` suffix (`topos publish pr-describe@<digest>`, where
+`topos login <address>` logs this machine in (approve in the browser; re-run to finish). `publish` needs a
+session — logged out, it refuses and tells you to `login` with your workspace address first. Each publish
+prints the workspace **address** (`https://topos.sh/<name>`) teammates log in with, and a landed publish of
+a local folder moves its governance to the workspace: your manifest line becomes the workspace reference.
+To pin the exact bytes being shipped, add a `@<digest>` suffix (`topos publish pr-describe@<digest>`, where
 `topos list --json` prints each digest) — the publish then refuses on any mismatch.
 
-**Follow your team's skills** — from a teammate's machine:
+**Use your team's skills** — from a teammate's machine:
 
 ```sh
-topos follow https://topos.sh/acme   # your workspace address; approve in the browser, it completes on its own
-topos follow pr-describe              # place the disclosed first version
+topos login https://topos.sh/acme    # your workspace address; approve in the browser, re-run to finish
+topos add pr-describe                # record it in this folder's manifest; delivered immediately
 ```
 
-Following arms a session-start hook that runs `topos update`, so updates the team publishes land byte-exact
-at the start of each session — verified byte-for-byte against the plane's `current` pointer, and never over
-your local edits.
+What a folder's agents should have is its `topos.toml` **manifest** — `add`/`remove` edit the nearest one
+(created at the git root when none exists) and deliver immediately; `-g` edits your server-stored profile,
+which every machine you are logged into converges on. Login arms a session-start hook that runs
+`topos update`, so updates the team publishes land byte-exact at the start of each session — verified
+byte-for-byte against the plane's `current` pointer, and never over your local edits. In a checkout, managed
+copies land in the project's own agent dirs and stay out of commits via `.git/info/exclude`.
 
 **Propose a change back:**
 
@@ -92,20 +96,19 @@ generated straight from the CLI — is in [`docs/cli.md`](docs/cli.md).
 
 | Command | What it does |
 |---|---|
-| `add <dir>` | Adopt a local skill into topos (offline; no server, no account). |
-| `follow <address>` | Enroll in a workspace by its address and subscribe (its channels / skills). Approve in the browser; the command completes on its own. |
-| `follow <skill>` | Place a disclosed first version (or resume an unfollowed skill). |
-| `update [<skill>]` | Apply updates to followed skills. The session-start hook runs this for you. (`pull` is a hidden alias.) |
-| `publish <skill>[@<digest>]` | Move `current` to your draft (or genesis-create a skill); the optional `@<digest>` pins the exact bytes. |
+| `login <address>` · `logout` | Log this machine into a workspace (one browser approval) · end the session. |
+| `init` | Create this folder's `topos.toml` manifest. |
+| `add <name>` / `add @<ws>/<name>` | Record a catalog skill in the nearest manifest (`-g`: your server-stored profile); delivered immediately. `@<ws>/channels/<name>` adds a channel, `owner/repo` imports from GitHub, `<dir>` adopts a local folder. |
+| `remove <name>` | The inverse — drop the line, or record an exclude when a broader layer still provides it. |
+| `update [<skill>]` | Reconcile this folder's manifests + your profile. The session-start hook runs this for you. (`pull` is a hidden alias.) |
+| `publish <skill>[@<digest>]` | Move `current` to your draft (or genesis-create a skill); a landed publish of a local folder transfers its governance to the workspace. The optional `@<digest>` pins the exact bytes. |
 | `publish --propose <skill>` | Open a proposal (a PR) without moving `current`. |
 | `review [<skill>@<hash> --approve\|--reject]` | The review inbox, or resolve a proposal. |
 | `revert <skill> --to <hash>` | Move the team to older bytes — a forward, invertible move. |
-| `channel add\|remove <channel> <skill>…` | Group skills into channels (the distribution unit). |
 | `protect <target> [<level>]` | Set a skill's or channel's protection level. |
 | `invite <emails…>` | Seat teammates as members (they join by the workspace address). |
-| `unfollow <skill>` · `remove <skill>` | Stop following (keep the copy) · take a skill off this device. |
-| `list` · `diff` · `log` | Inventory skills · show a change · show a skill's history. |
-| `auth login\|logout\|status` · `self-update` | Manage this install's sign-in · update the `topos` binary. |
+| `status` · `list` · `diff` · `log` | Sessions + this folder's manifests · inventory · show a change · show a skill's history. |
+| `auth status` · `self-update` | Probe each session's access health · update the `topos` binary. |
 
 Consent is explicit end to end: a `<skill>@<digest>` pin binds the exact bytes, nothing lands that wasn't
 disclosed and pinned, and a diverged local draft is surfaced — never overwritten.
@@ -119,13 +122,13 @@ arrive, and how to share an improvement back (`publish` / `publish --propose`) �
 generated verb reference (the same bytes as `docs/cli.md`, rendered from the CLI itself so it can
 never drift). It re-syncs with the binary on every update sweep; hand edits are overwritten (your
 *other* skills' drafts are sacred — this one documents the binary). Don't want it?
-`topos remove topos --yes` opts the device out durably; `topos follow topos` brings it back. The name
+`topos remove topos --yes` opts the machine out durably; `topos add topos` brings it back. The name
 `topos` is reserved everywhere, so no workspace skill can ever shadow it.
 
 The skill's source lives at the top of this repo — [`skills/topos/`](skills/topos/) — so it also
 works as a plain downloadable skill with no topos installed: `npx skills add topos-sh/topos` places
 the same three files (`SKILL.md`, the generated `reference.md`, and `INSTALL.md`, which covers
-installing the CLI). If you later install topos, one explicit `topos follow topos --yes` hands the
+installing the CLI). If you later install topos, one explicit `topos add topos` hands the
 downloaded copy to it — recognized by its provenance marker, its bytes snapshotted first, kept
 current from then on. Nothing takes over a pre-existing directory silently.
 
@@ -151,10 +154,10 @@ drives — so it surfaces *untracked* skills sitting in any harness's folder, re
 bytes; offline, no account). Support comes in three tiers:
 
 - **auto-update** — topos installs an update trigger inside the harness itself (a session-start hook, or a
-  scheduled job where that is what the harness offers), so followed skills refresh silently and are current
+  scheduled job where that is what the harness offers), so managed skills refresh silently and are current
   before the agent uses them. Where marked *, the harness asks its own one-time confirmation before it will
   run the trigger; until you grant it, that harness behaves like the **delivery** tier.
-- **delivery** — topos installs no trigger inside that harness, but every followed skill is still placed
+- **delivery** — topos installs no trigger inside that harness, but every managed skill is still placed
   into its skills dir whenever the harness is detected (one shared `~/.agents/skills` copy where the harness
   reads that dir, a native copy otherwise) and refreshed by every update sweep on the machine — whether a
   hook in an auto-update harness, a scheduled job, or a manual `topos update` ran it. The harness picks up
@@ -252,11 +255,11 @@ topos reports the trigger honestly as not-yet-active until then.
 
 ## Trust & security
 
-A behavior you follow is code and prose that runs inside your agent, so integrity and consent are the whole
+A behavior you receive is code and prose that runs inside your agent, so integrity and consent are the whole
 point of the tool. A bundle's identity is a **byte-exact sha256** over every file (different bytes are never
 "the same"); a version you pin **is** that hash, so what you pin is exactly what you get; and **nothing lands
 that was not disclosed and pinned**. Trust sits at the level a team already extends to its git host and CI:
-every request is authenticated (a signed-in person or an enrolled device), every mutation of shared state is
+every request is authenticated (a signed-in person or a logged-in session), every mutation of shared state is
 attributed and audit-logged, and access is database policy — a revocation takes effect immediately. Assurance is **visibility** — a fleet
 dashboard and one-command revert — rather than client-side cryptography (there is no pointer signing or key
 pinning; optional signing can layer on later without a redesign). What Topos does *not* do is judge whether
@@ -277,7 +280,7 @@ docker compose up --build     # the app on http://localhost:3000; the vault stay
 ```
 
 The app serves everything a team touches: sign-in and the dashboard, the review UI, the admin surfaces,
-the shareable workspace addresses, and the device API itself (`/api/v1/…` — agents and the `topos` CLI dial
+the shareable workspace addresses, and the session API itself (`/api/v1/…` — agents and the `topos` CLI dial
 the app). The app owns identity and the whole directory in its own database schema; only the byte and
 pointer operations of a publish forward to the vault over an internal network lane. Nothing else needs to
 be reachable from outside.
@@ -295,12 +298,12 @@ Open it in a browser and create the first account (email + password) — that se
 `TOPOS_SETUP_LINK_FILE` also mirrors the line to a file.) The link dies on first use, and the code is only
 ever stored as its hash.
 
-From there you `publish` (after `topos follow <your-address>` enrolls a device) and grow the team:
+From there you `publish` (after `topos login <your-address>` mints this machine's session) and grow the team:
 
 - **Invite teammates** once SMTP is armed (see below): `topos invite <emails…>`, or the roster page. Each
-  person signs up through the invite mail, then runs `topos follow <workspace-address>` and approves the new
-  device at `<origin>/verify` (behind their password). Approval mints that device's one credential; updates
-  then land at session start.
+  person signs up through the invite mail, then runs `topos login <workspace-address>` and approves the new
+  session at `<origin>/verify` (a plain signed-in accept). Approval mints that machine's workspace-scoped
+  credential; updates then land at session start.
 - **No SMTP?** Registration stays closed by design — the claim owner is the only account. Flip
   `registration = 'open'` on the workspace policy page to let anyone with the address sign up (off by
   default), or arm SMTP to invite.
@@ -346,8 +349,8 @@ Two volumes hold all durable state, and the **database is the source of truth fo
 
 Nothing else lives on disk — there are no secret files to back up beside the volumes.
 
-The one at-rest secret is client-side: each enrolled device's bearer credential lives on that machine
-(`~/.topos/identity/credentials.json`, `0600`) — losing it just means re-enrolling that device. Disk or
+The one at-rest secret is client-side: each installation's workspace-scoped session credentials live on
+that machine (`~/.topos/identity/sessions.json`, `0600`) — losing them just means logging in again. Disk or
 volume encryption on the server is the operator's responsibility.
 
 ### Bring your own Postgres

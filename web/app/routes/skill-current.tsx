@@ -33,7 +33,7 @@ export function meta({ params }: { params: { skill?: string } }) {
  * MEMBERS-ONLY: an anonymous browser gets the house 404, indistinguishable from a mistyped path, so
  * nothing about a skill (not even that the address shape names one) leaks to a signed-out visitor.
  * (A non-browser document fetch still got the constant protocol card from the server entry — that
- * machine face is existence-blind and teaches `topos follow` regardless.) A signed-in member gets
+ * machine face is existence-blind and teaches `topos login` regardless.) A signed-in member gets
  * the skill page WITH chrome; a signed-in non-member (or unknown workspace slug) gets the same 404.
  *
  * The Current tab is the DEFAULT skill view: the current version's files + doc preview inline.

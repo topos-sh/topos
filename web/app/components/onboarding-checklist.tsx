@@ -161,7 +161,7 @@ export function OnboardingChecklist({ state }: { state: OnboardingState }) {
             agentPrompt={`Set up Topos for us: fetch ${origin}/agent and follow it. Our workspace: ${shareAddress}`}
             manual={{
               intro: "Install the CLI, then follow this workspace and approve in the browser:",
-              commands: [`curl -fsSL ${origin}/install | sh`, `topos follow ${shareAddress}`],
+              commands: [`curl -fsSL ${origin}/install | sh`, `topos login ${shareAddress}`],
             }}
           />
           <Step
@@ -175,7 +175,7 @@ export function OnboardingChecklist({ state }: { state: OnboardingState }) {
             }
             agentPrompt={AGENT_PUBLISH_PROMPT}
             manual={{
-              intro: "From an enrolled device, publish the skill's directory:",
+              intro: "From a logged-in machine, publish the skill's directory:",
               commands: [PUBLISH_COMMAND],
             }}
           />

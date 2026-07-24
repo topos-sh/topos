@@ -1,37 +1,23 @@
-import { and, asc, count, desc, eq } from "drizzle-orm";
+import { and, asc, count, desc, eq, sql } from "drizzle-orm";
 import type { MemberActor, OwnerActor } from "@/lib/auth/guards.server";
-import {
-  detachExactInTx,
-  entitledIdsInTx,
-  healDetachmentsInTx,
-  reattachInTx,
-} from "@/lib/db/detach.server";
 import { auditInTx, mintChannelId } from "@/lib/db/identity.server";
 import { type Db, getDb, isUniqueViolation } from "@/lib/db/index.server";
-import { personDisplaySql } from "@/lib/db/person-display.server";
-import {
-  bundle,
-  channel,
-  channelBundle,
-  channelMember,
-  channelOptout,
-  seat,
-} from "@/lib/db/schema.app";
-import { user } from "@/lib/db/schema.auth";
+import { bundle, channel, channelBundle, profileEntry, seat } from "@/lib/db/schema.app";
 
 /**
  * The CHANNELS data access layer — reads over the app's own channel tables, the existence
  * ceremonies (create / rename / delete) as plain transactions, and the ONE curation core
- * (place / unplace a bundle reference) that this file's id-keyed web functions AND the device
- * lane's name-keyed ones both run. Every function is actor-first and derives its workspace
- * FROM the actor, so a caller that skipped its guard cannot compile and a wrong-scope read
- * never leaks.
+ * (place / unplace a bundle reference) that this file's id-keyed web functions AND the
+ * session lane's name-keyed ones both run. Every function is actor-first and derives its
+ * workspace FROM the actor, so a caller that skipped its guard cannot compile and a
+ * wrong-scope read never leaks.
  *
- * A channel is plain rows: a named group holding bundle REFERENCES (labels — one bundle,
- * delivered once) and seat-anchored memberships. The DEFAULT channel ('everyone') has IMPLICIT
- * membership: every seat, minus explicit self opt-outs (channel_optout) — it holds no
- * channel_member rows, and rename/delete refuse it. Channel names use the same charset as
- * bundle names; audit rows ride every existence/mode write (subject = the immutable channel id).
+ * A channel is a NAMED, CURATED SET OF BUNDLES — nothing else. It has no membership: people
+ * carry a channel by referencing it in their profile, projects by referencing it in
+ * `topos.toml`. The DEFAULT channel ('everyone') is the BASELINE — implicit in every member's
+ * profile (a profile exclude subtracts it); rename/delete refuse it. `mode` gates who edits
+ * the set (open = any member, curated = reviewer+). Channel names use the same charset as
+ * bundle names; audit rows ride every existence/mode write (subject = the immutable id).
  */
 
 /** The channel-name rule (the old birth mint's bound, kept). */
@@ -55,15 +41,15 @@ export interface ChannelSummary {
   channelId: string;
   name: string;
   mode: "open" | "curated";
-  /** The default channel — its membership is the roster minus opt-outs, not rows. */
+  /** The default channel — the implicit baseline of every member's profile. */
   isDefault: boolean;
   /** Distinct bundle references the channel holds. */
   skillCount: number;
-  /** People the channel reaches (seats − opt-outs for the default; member rows otherwise). */
-  memberCount: number;
+  /** People whose profile carries this set (the baseline: seats − excludes). */
+  audienceCount: number;
 }
 
-/** The seat count — the default channel's structural base membership. */
+/** The seat count — the default channel's structural audience base. */
 async function seatCount(ws: string): Promise<number> {
   const rows = await getDb().select({ n: count() }).from(seat).where(eq(seat.workspaceId, ws));
   return rows[0]?.n ?? 0;
@@ -80,11 +66,11 @@ async function channelByName(ws: string, name: string) {
 
 /**
  * Every channel in the actor's workspace, the default first (then name order), each with its
- * bundle-reference count and its member count.
+ * bundle-reference count and its audience (how many members' profiles carry the set).
  */
 export async function channelsOf(actor: MemberActor): Promise<ChannelSummary[]> {
   const ws = actor.workspaceId;
-  const [channels, skillCounts, memberCounts, optoutCounts, seats] = await Promise.all([
+  const [channels, skillCounts, includeCounts, excludeCounts, seats] = await Promise.all([
     getDb()
       .select()
       .from(channel)
@@ -96,29 +82,29 @@ export async function channelsOf(actor: MemberActor): Promise<ChannelSummary[]> 
       .where(eq(channelBundle.workspaceId, ws))
       .groupBy(channelBundle.channelId),
     getDb()
-      .select({ channelId: channelMember.channelId, n: count() })
-      .from(channelMember)
-      .where(eq(channelMember.workspaceId, ws))
-      .groupBy(channelMember.channelId),
+      .select({ channelId: profileEntry.channelId, n: count() })
+      .from(profileEntry)
+      .where(and(eq(profileEntry.workspaceId, ws), eq(profileEntry.mode, "include")))
+      .groupBy(profileEntry.channelId),
     getDb()
-      .select({ channelId: channelOptout.channelId, n: count() })
-      .from(channelOptout)
-      .where(eq(channelOptout.workspaceId, ws))
-      .groupBy(channelOptout.channelId),
+      .select({ channelId: profileEntry.channelId, n: count() })
+      .from(profileEntry)
+      .where(and(eq(profileEntry.workspaceId, ws), eq(profileEntry.mode, "exclude")))
+      .groupBy(profileEntry.channelId),
     seatCount(ws),
   ]);
   const skills = new Map(skillCounts.map((c) => [c.channelId, c.n]));
-  const members = new Map(memberCounts.map((c) => [c.channelId, c.n]));
-  const optouts = new Map(optoutCounts.map((c) => [c.channelId, c.n]));
+  const includes = new Map(includeCounts.map((c) => [c.channelId, c.n]));
+  const excludes = new Map(excludeCounts.map((c) => [c.channelId, c.n]));
   return channels.map((ch) => ({
     channelId: ch.id,
     name: ch.name,
     mode: ch.mode as ChannelSummary["mode"],
     isDefault: ch.isDefault,
     skillCount: skills.get(ch.id) ?? 0,
-    memberCount: ch.isDefault
-      ? Math.max(0, seats - (optouts.get(ch.id) ?? 0))
-      : (members.get(ch.id) ?? 0),
+    audienceCount: ch.isDefault
+      ? Math.max(0, seats - (excludes.get(ch.id) ?? 0))
+      : (includes.get(ch.id) ?? 0),
   }));
 }
 
@@ -165,14 +151,6 @@ export interface ChannelSkillRef {
   status: "active" | "archived" | "deleted";
 }
 
-/** One membership row of a NAMED channel (the default channel derives instead). */
-export interface ChannelMemberRef {
-  userId: string;
-  display: string;
-  addedBy: string | null;
-  addedAt: Date;
-}
-
 export interface ChannelDetail {
   channelId: string;
   name: string;
@@ -182,18 +160,16 @@ export interface ChannelDetail {
   createdAt: Date;
   /** The bundle references, catalog-name order. */
   skills: ChannelSkillRef[];
-  /** The explicit membership rows (always [] for the default channel — it derives). */
-  members: ChannelMemberRef[];
-  /** What the default channel reaches: seats − opt-outs. */
-  defaultMemberCount: number;
-  /** THIS member's stance: in a named channel, a member row; in the default, no opt-out row. */
-  viewerIsMember: boolean;
+  /** People whose profile carries this set (the baseline: seats − excludes). */
+  audienceCount: number;
+  /** THIS member's stance: the set is in their profile (default: not excluded). */
+  viewerIncluded: boolean;
 }
 
 /**
  * One channel's full read: the row, its bundle references (joined to the catalog), its
- * members, and the VIEWER's own stance (the default channel's self-service leave/rejoin arm
- * renders from it). Undefined when the channel does not exist (the route renders the 404).
+ * audience, and the VIEWER's own stance (the page's add-to/remove-from-my-skills arm renders
+ * from it). Undefined when the channel does not exist (the route renders the 404).
  */
 export async function channelDetail(
   actor: MemberActor,
@@ -204,7 +180,7 @@ export async function channelDetail(
   if (row === undefined) {
     return undefined;
   }
-  const [skills, members, optoutRows, seats, viewerRows] = await Promise.all([
+  const [skills, stanceRows, audience] = await Promise.all([
     getDb()
       .select({
         skillId: channelBundle.bundleId,
@@ -222,39 +198,14 @@ export async function channelDetail(
       )
       .where(and(eq(channelBundle.workspaceId, ws), eq(channelBundle.channelId, row.id)))
       .orderBy(asc(bundle.name)),
-    row.isDefault
-      ? Promise.resolve([])
-      : getDb()
-          .select({
-            userId: channelMember.userId,
-            display: personDisplaySql(user),
-            addedBy: channelMember.addedBy,
-            addedAt: channelMember.createdAt,
-          })
-          .from(channelMember)
-          .innerJoin(user, eq(user.id, channelMember.userId))
-          .where(and(eq(channelMember.workspaceId, ws), eq(channelMember.channelId, row.id)))
-          .orderBy(asc(channelMember.createdAt), asc(channelMember.userId)),
     getDb()
-      .select({ userId: channelOptout.userId })
-      .from(channelOptout)
-      .where(and(eq(channelOptout.workspaceId, ws), eq(channelOptout.channelId, row.id))),
-    seatCount(ws),
-    row.isDefault
-      ? Promise.resolve([])
-      : getDb()
-          .select({ userId: channelMember.userId })
-          .from(channelMember)
-          .where(
-            and(
-              eq(channelMember.workspaceId, ws),
-              eq(channelMember.channelId, row.id),
-              eq(channelMember.userId, actor.userId),
-            ),
-          )
-          .limit(1),
+      .select({ mode: profileEntry.mode })
+      .from(profileEntry)
+      .where(and(eq(profileEntry.channelId, row.id), eq(profileEntry.userId, actor.userId)))
+      .limit(1),
+    channelAudienceCount(ws, row.id, row.isDefault),
   ]);
-  const viewerOptedOut = optoutRows.some((o) => o.userId === actor.userId);
+  const stance = stanceRows[0]?.mode;
   return {
     channelId: row.id,
     name: row.name,
@@ -263,10 +214,105 @@ export async function channelDetail(
     createdBy: row.createdBy,
     createdAt: row.createdAt,
     skills: skills.map((s) => ({ ...s, status: s.status as ChannelSkillRef["status"] })),
-    members,
-    defaultMemberCount: Math.max(0, seats - optoutRows.length),
-    viewerIsMember: row.isDefault ? !viewerOptedOut : viewerRows.length > 0,
+    audienceCount: audience,
+    viewerIncluded: row.isDefault ? stance !== "exclude" : stance === "include",
   };
+}
+
+async function channelAudienceCount(
+  ws: string,
+  channelId: string,
+  isDefault: boolean,
+): Promise<number> {
+  if (isDefault) {
+    const [seats, excludes] = await Promise.all([
+      seatCount(ws),
+      getDb()
+        .select({ n: count() })
+        .from(profileEntry)
+        .where(and(eq(profileEntry.channelId, channelId), eq(profileEntry.mode, "exclude"))),
+    ]);
+    return Math.max(0, seats - (excludes[0]?.n ?? 0));
+  }
+  const includes = await getDb()
+    .select({ n: count() })
+    .from(profileEntry)
+    .where(and(eq(profileEntry.channelId, channelId), eq(profileEntry.mode, "include")));
+  return includes[0]?.n ?? 0;
+}
+
+// ── The viewer's own profile stance (the channel page's self-service arm) ───────────────────
+
+/**
+ * Add this channel to the viewer's profile — for the default channel, clear any exclude (the
+ * baseline needs no include line). Mirrors the session lane's profile ops; a personal act.
+ */
+export async function includeChannelInProfile(
+  actor: MemberActor,
+  channelId: string,
+): Promise<"included" | "unknown_channel"> {
+  const ws = actor.workspaceId;
+  return await getDb().transaction(async (tx) => {
+    const rows = await tx
+      .select({ id: channel.id, isDefault: channel.isDefault })
+      .from(channel)
+      .where(and(eq(channel.workspaceId, ws), eq(channel.id, channelId)))
+      .limit(1);
+    const row = rows[0];
+    if (row === undefined) {
+      return "unknown_channel";
+    }
+    if (row.isDefault) {
+      await tx.execute(sql`
+        DELETE FROM web.profile_entry
+        WHERE user_id = ${actor.userId} AND channel_id = ${row.id} AND mode = 'exclude'
+      `);
+      return "included";
+    }
+    await tx.execute(sql`
+      INSERT INTO web.profile_entry (workspace_id, user_id, mode, channel_id)
+      VALUES (${ws}, ${actor.userId}, 'include', ${row.id})
+      ON CONFLICT (user_id, channel_id) WHERE channel_id is not null
+      DO UPDATE SET mode = 'include', updated_at = now()
+    `);
+    return "included";
+  });
+}
+
+/**
+ * Take this channel out of the viewer's profile — the default channel, being implicit, takes
+ * an EXCLUDE line (the one negative state) instead of a deletion.
+ */
+export async function removeChannelFromProfile(
+  actor: MemberActor,
+  channelId: string,
+): Promise<"removed" | "unknown_channel"> {
+  const ws = actor.workspaceId;
+  return await getDb().transaction(async (tx) => {
+    const rows = await tx
+      .select({ id: channel.id, isDefault: channel.isDefault })
+      .from(channel)
+      .where(and(eq(channel.workspaceId, ws), eq(channel.id, channelId)))
+      .limit(1);
+    const row = rows[0];
+    if (row === undefined) {
+      return "unknown_channel";
+    }
+    if (row.isDefault) {
+      await tx.execute(sql`
+        INSERT INTO web.profile_entry (workspace_id, user_id, mode, channel_id)
+        VALUES (${ws}, ${actor.userId}, 'exclude', ${row.id})
+        ON CONFLICT (user_id, channel_id) WHERE channel_id is not null
+        DO UPDATE SET mode = 'exclude', updated_at = now()
+      `);
+      return "removed";
+    }
+    await tx.execute(sql`
+      DELETE FROM web.profile_entry
+      WHERE user_id = ${actor.userId} AND channel_id = ${row.id} AND mode = 'include'
+    `);
+    return "removed";
+  });
 }
 
 // ── Existence admin (create / rename / delete) ──────────────────────────────────────────────
@@ -278,7 +324,7 @@ export type ChannelCreateOutcome =
 
 /**
  * Create a named channel. The unique index is the race arbiter: a create-race loser maps to
- * the honest `name_taken`, never a 500. Member-level — the same grade as the device lane's
+ * the honest `name_taken`, never a 500. Member-level — the same grade as the session lane's
  * create-on-first-use placement.
  */
 export async function createChannel(
@@ -324,9 +370,9 @@ export type ChannelRenameOutcome =
 
 /**
  * Rename a channel — an owner act keyed on the IMMUTABLE channel id, refusing the default
- * channel typed. References, memberships, and the audit trail survive; only the display name
- * moves (no hint table for channels — a channel name is a grouping label, not a distribution
- * address a device pins).
+ * channel typed. References, profile lines, and the audit trail survive; only the display
+ * name moves (no hint table for channels — a channel name is a grouping label, not a
+ * distribution address a session pins).
  */
 export async function renameChannel(
   actor: OwnerActor,
@@ -382,10 +428,9 @@ export type ChannelDeleteOutcome = "deleted" | "builtin" | "unknown_channel";
 
 /**
  * Delete a channel — an owner act keyed on the immutable id, refusing the default channel.
- * References and memberships CASCADE with the row; deliberately NO person-detach records — a
- * channel deletion is an upstream withdrawal, never a person's own detach; bundles another
- * channel or a direct follow still delivers keep flowing. The audit row keeps the channel id:
- * history is append-only and survives the row.
+ * References and profile lines CASCADE with the row; a channel deletion is an upstream
+ * withdrawal — bundles another channel or a direct include still provides keep flowing. The
+ * audit row keeps the channel id: history is append-only and survives the row.
  */
 export async function deleteChannel(
   actor: OwnerActor,
@@ -424,22 +469,22 @@ export async function deleteChannel(
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
 /**
- * The actor shape BOTH curation doors satisfy: the web page's MemberActor and the device
- * lane's DeviceActor (whose deviceId rides into the audit row when present). The policy —
- * gates, idempotence, healing, audit — is written ONCE against this shape so the two lanes
- * cannot drift; the branded outer functions stay the only entry points.
+ * The actor shape BOTH curation doors satisfy: the web page's MemberActor and the session
+ * lane's SessionActor (whose sessionId rides into the audit row when present). The policy —
+ * gates, idempotence, audit — is written ONCE against this shape so the two lanes cannot
+ * drift; the branded outer functions stay the only entry points.
  */
 interface CurationActor {
   readonly userId: string;
   readonly display: string;
   readonly workspaceId: string;
   readonly role: "owner" | "reviewer" | "member";
-  readonly deviceId?: string;
+  readonly sessionId?: string;
 }
 
 /** The catalog probe every curation door gates on FIRST: NULL = no such bundle in this
  * workspace (checked before any channel resolution, so a bad skill never mints a channel
- * on the device lane and the two doors refuse in the same order). */
+ * on the session lane and the two doors refuse in the same order). */
 export async function bundleStatusInTx(
   tx: Tx,
   ws: string,
@@ -455,11 +500,10 @@ export async function bundleStatusInTx(
 
 /**
  * The place core, INSIDE the caller's transaction, after the caller resolved its channel (the
- * device lane by NAME with create-on-first-use; the web page by ID): the curated-mode role
+ * session lane by NAME with create-on-first-use; the web page by ID): the curated-mode role
  * gate (reviewer+), the idempotent reference insert (ON CONFLICT — a re-place answers
- * 'placed' again), the bundle-scoped detachment heal (anyone re-entitled through this
- * placement self-heals), and the `skill_added` audit row — emitted for the ACT, a re-place of
- * a standing row included.
+ * 'placed' again), and the `skill_added` audit row — emitted for the ACT, a re-place of a
+ * standing row included.
  */
 export async function placeBundleRefInTx(
   tx: Tx,
@@ -479,10 +523,9 @@ export async function placeBundleRefInTx(
       addedBy: actor.userId,
     })
     .onConflictDoNothing();
-  await healDetachmentsInTx(tx, actor.workspaceId, bundleId);
   await auditInTx(tx, {
     workspaceId: actor.workspaceId,
-    actor: { userId: actor.userId, deviceId: actor.deviceId, display: actor.display },
+    actor: { userId: actor.userId, sessionId: actor.sessionId, display: actor.display },
     kind: "skill_added",
     subject: target.id,
     outcome: "ok",
@@ -516,7 +559,7 @@ export async function unplaceBundleRefInTx(
   }
   await auditInTx(tx, {
     workspaceId: actor.workspaceId,
-    actor: { userId: actor.userId, deviceId: actor.deviceId, display: actor.display },
+    actor: { userId: actor.userId, sessionId: actor.sessionId, display: actor.display },
     kind: "skill_removed",
     subject: target.id,
     outcome: "ok",
@@ -545,11 +588,11 @@ export type ChannelPlaceOutcome =
 
 /**
  * Place a bundle reference into a channel — the web page's door onto the one curation core
- * the device lane shares: same gates (the bundle must exist in-workspace and be active; a
- * CURATED channel takes reviewer+), same idempotence, same detachment healing, same audit
- * row. Keyed on the IMMUTABLE channel id like every web ceremony — the page operates on an
- * existing channel, so there is NO create-on-first-use here: an id that does not resolve in
- * the actor's workspace is the honest unknown_channel, never a mint.
+ * the session lane shares: same gates (the bundle must exist in-workspace and be active; a
+ * CURATED channel takes reviewer+), same idempotence, same audit row. Keyed on the IMMUTABLE
+ * channel id like every web ceremony — the page operates on an existing channel, so there is
+ * NO create-on-first-use here: an id that does not resolve in the actor's workspace is the
+ * honest unknown_channel, never a mint.
  */
 export async function placeBundleInChannel(
   actor: MemberActor,
@@ -593,91 +636,4 @@ export async function unplaceBundleFromChannel(
     }
     return await unplaceBundleRefInTx(tx, actor, target, bundleId);
   });
-}
-
-// ── The default channel's self-service opt-out (the ONE negative membership row) ───────────
-
-/**
- * Leave the DEFAULT channel — a personal act: insert the opt-out row, then write detach
- * records (cause 'channel_leave') for exactly the bundles this leave lapsed (before − after
- * over the entitlement union, computed inside the one transaction).
- */
-export async function optOutDefaultChannel(actor: MemberActor): Promise<"left" | "not_member"> {
-  const ws = actor.workspaceId;
-  return await getDb().transaction(async (tx) => {
-    const rows = await tx
-      .select({ id: channel.id })
-      .from(channel)
-      .where(and(eq(channel.workspaceId, ws), eq(channel.isDefault, true)))
-      .limit(1);
-    const def = rows[0];
-    if (def === undefined) {
-      return "not_member";
-    }
-    const before = await entitledIdsInTx(tx, ws, actor.userId);
-    const inserted = await tx
-      .insert(channelOptout)
-      .values({ channelId: def.id, workspaceId: ws, userId: actor.userId })
-      .onConflictDoNothing()
-      .returning({ userId: channelOptout.userId });
-    if (inserted.length === 0) {
-      return "not_member";
-    }
-    const after = new Set(await entitledIdsInTx(tx, ws, actor.userId));
-    await detachExactInTx(
-      tx,
-      ws,
-      actor.userId,
-      before.filter((id) => !after.has(id)),
-      "channel_leave",
-    );
-    await auditInTx(tx, {
-      workspaceId: ws,
-      actor: { userId: actor.userId, display: actor.display },
-      kind: "member_left",
-      subject: def.id,
-      outcome: "ok",
-      details: { userId: actor.userId },
-    });
-    return "left";
-  });
-}
-
-/** Rejoin the DEFAULT channel: delete the opt-out + clear the re-entitled detach records. */
-export async function optInDefaultChannel(actor: MemberActor): Promise<"joined"> {
-  const ws = actor.workspaceId;
-  await getDb().transaction(async (tx) => {
-    const rows = await tx
-      .select({ id: channel.id })
-      .from(channel)
-      .where(and(eq(channel.workspaceId, ws), eq(channel.isDefault, true)))
-      .limit(1);
-    const def = rows[0];
-    if (def === undefined) {
-      return;
-    }
-    const deleted = await tx
-      .delete(channelOptout)
-      .where(
-        and(
-          eq(channelOptout.workspaceId, ws),
-          eq(channelOptout.channelId, def.id),
-          eq(channelOptout.userId, actor.userId),
-        ),
-      )
-      .returning({ userId: channelOptout.userId });
-    if (deleted.length === 0) {
-      return;
-    }
-    await reattachInTx(tx, ws, actor.userId);
-    await auditInTx(tx, {
-      workspaceId: ws,
-      actor: { userId: actor.userId, display: actor.display },
-      kind: "member_joined",
-      subject: def.id,
-      outcome: "ok",
-      details: { userId: actor.userId },
-    });
-  });
-  return "joined";
 }

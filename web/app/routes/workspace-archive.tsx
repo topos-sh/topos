@@ -311,7 +311,7 @@ function DeleteControl({ skillId, archivedName }: { skillId: string; archivedNam
         <input type="hidden" name="skill_id" value={skillId} />
         <p className="text-dim text-xs">
           Deletion drops this skill&apos;s bytes from the server. It cannot recall the copies
-          devices already hold — the Linked devices page shows who still holds them.
+          machines already hold — the Sessions page shows who still holds them.
         </p>
         <ConfirmNameField typedName={archivedName} idPrefix={`delete-${skillId}`} />
         {message !== undefined && (

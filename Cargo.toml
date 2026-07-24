@@ -53,6 +53,9 @@ sha2 = { version = "0.10", default-features = false }  # topos-core: byte-exact 
 hmac = "0.12"                 # plane-store only: HMAC-SHA256 internals — never reaches the client
 unicode-normalization = { version = "0.1", default-features = false } # topos-core: NFC path-collision reject (no_std)
 base64 = "0.22"               # bins/topos: the contribute candidate's content_base64 codec (STANDARD alphabet)
+# bins/topos: the manifest files (`topos.toml`) — read AND format-preserving edit (the cargo-proven
+# editor: comments and layout survive a `topos add`).
+toml_edit = "0.22"
 getrandom = "0.2"             # plane-store: per-ingest op ids + serializable-retry jitter
 gix = { version = "0.85", default-features = false } # topos-gitstore: dumb object mechanics (plumbing-only; members add the lean features they need)
 imara-diff = "0.1"            # topos-gitstore: the diff ENGINE behind the unified-diff renderer (pure-Rust histogram/Myers); we own the unified-diff FORMATTING so the `diff` golden stays byte-stable across its releases

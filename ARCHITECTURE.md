@@ -12,21 +12,25 @@ reference docs); the **whole bundle** is the unit of trust.
 
 The repository holds three programs — two in an Apache-2.0 Cargo workspace, plus a TypeScript app:
 
-- **`topos`** — the local CLI an agent drives to add, follow, publish, and update behaviors across harnesses.
+- **`topos`** — the local CLI an agent drives to log in, add, publish, and update behaviors across harnesses.
 - **`topos-plane`** — the self-hostable **vault**: pure byte custody (a library plus a thin binary),
   internal-network-only.
 - **the web app** (`web/`, React Router on bun) — the one public surface: sign-in, the workspace dashboard,
-  the review UI, the device API, and the whole identity + directory authority.
+  the review UI, the session API, and the whole identity + directory authority.
 
 The two Rust programs share one trust kernel, `topos-core`: the single, auditable implementation of the
 byte-exact digest, the consent rule, and the sync algorithm. Nothing proprietary lives here.
 
 ## The two motions
 
-**Distribute** — an author `publish`es a bundle, a teammate `follow`s it, and every `pull` lands the team's
-`current` byte-exact (digest re-verified in), driven by a session-start hook so updates arrive per session,
-never over local edits. **Contribute** — anyone `publish --propose`s a candidate, a reviewer
-`review --approve`s it to `current` (PR-like), and `revert --to` rolls the team forward to older bytes.
+**Distribute** — an author `publish`es a bundle; a teammate connects once with `topos login
+<workspace-address>` (one browser approval mints a workspace-scoped **session** — the acceptance event) and
+records demand with `add`: a line in the folder's committed `topos.toml` **manifest** (nearest manifest wins,
+walking up like git) or in their server-stored per-workspace **profile**. From then on every `update`
+reconciles what the manifests ask for against what the person's seats allow and lands the team's `current`
+byte-exact (digest re-verified in), driven by a session-start hook — silently, npm-style, never over local
+edits. **Contribute** — anyone `publish --propose`s a candidate, a reviewer `review --approve`s it to
+`current` (PR-like), and `revert --to` rolls the team forward to older bytes.
 
 ## The crate graph (acyclic)
 
@@ -64,7 +68,7 @@ HTTP client, or a mailer — check-arch asserts a default build resolves none of
   custody operations plus a `router(state)` builder, with no extension or callback hook. A separate product
   can compose this library, but the custody logic is never reimplemented and never bypassed.
 - **Disclosure and integrity, not a second permission system.** Nothing lands that was not disclosed and
-  pinned; how much a human sits in the loop is the harness's job. A followed behavior runs with your harness's
+  pinned; how much a human sits in the loop is the harness's job. A delivered behavior runs with your harness's
   permissions, so Topos proves provenance and consent, not that the contents are safe to run.
 
 ## The consent + sync model
@@ -81,7 +85,7 @@ HTTP client, or a mailer — check-arch asserts a default build resolves none of
 
 Topos extends the same trust a team already gives its git host and CI, and nothing more. There is **no
 signing** in the system: no signed pointers, no key pinning, no client-side signature verification, no
-anti-rollback cryptography — a follower trusts the plane it enrolled with as it trusts the git remote it
+anti-rollback cryptography — a client trusts the plane it logs into as it trusts the git remote it
 clones from. The accepted consequence is plain: a compromised server can distribute bad content, the risk
 every team already lives with on its source host. Assurance is **visibility** — inspectable history, durable
 receipts, a one-command revert — and content addressing keeps optional signing open as a later layer.
@@ -92,12 +96,14 @@ Authority splits cleanly across the front tier (the web app) and the back tier (
 
 **The web app is the front tier and the only public surface.** It owns identity and the whole directory in
 its own Postgres schema, `web`: people (`user`, `session`, `account`), **seats** (workspace membership, keyed
-by `user.id`), devices and the enrollment flow, invitations, the bundle catalog (each row carrying a `kind`
-tag — `skill` today — that clients display but never branch on), channels (including the implicit default
-`everyone` channel with per-person opt-out), subscriptions (one stance row per person per bundle), detachment
-records, notices, proposals and comments, op receipts, and the audit trail. Every authorization is decided
-here: `app/lib/auth/guards.server.ts` mints **branded actors** (`requireSession → requireMember →
-requireWorkspaceOwner`/`requireReviewer`, and `requireDeviceActor` for the device lane), and every function
+by `user.id`), **CLI sessions** (`cli_session` — user × workspace × installation, minted by the login flow)
+and the login-flow rows, invitations, the bundle catalog (each row carrying a `kind` tag — `skill` today —
+that clients display but never branch on), channels (named, curated sets of bundles; the default channel is
+every member's baseline), per-person **profiles** (include/exclude rows over that baseline — the person's
+server-stored manifest for the workspace, web-editable), upstream provenance for GitHub-imported bundles,
+notices, proposals and comments, op receipts, and the audit trail. Every authorization is decided here:
+`app/lib/auth/guards.server.ts` mints **branded actors** (`requireSession → requireMember →
+requireWorkspaceOwner`/`requireReviewer`, and `requireSessionActor` for the session lane), and every function
 in the data-access layer (`app/lib/db/queries.server.ts`) requires an actor as its first argument, so a route
 that skipped its guard cannot even compile a query. Misses render **404, never 403**.
 
@@ -116,18 +122,19 @@ PRIVILEGES` grant, so future vault tables arrive already readable) for its histo
 vault cannot read `web` at all. `scripts/check-db-grants.sh` proves the cross-lane shape by logging in as each
 role.
 
-**The device flow** is a GitHub-style approval. `topos follow <workspace-address>` (or `topos auth login`)
-prints "open `<origin>/verify` and enter AB12-CD34"; the signed-in person approves it with a plain signed-in
-accept (the approval page names the device being enrolled and every workspace the credential will reach), and
-approval mints the device — owned by that person — and its **one bearer credential**.
-The credential is stored only as its SHA-256 on the device row and presented as `Authorization: Bearer` on the
-device lane (`/api/v1/…`), which the app serves itself: `requireDeviceActor` resolves credential → device →
-person → seat in one query, fail-closed, so a revoked device or an unseated person loses access the instant
-the row commits. Revocation is self-service, immediate, and final (trigger-enforced).
+**The login flow** is a GitHub-style approval. `topos login <workspace-address>` prints "open
+`<origin>/verify` and enter AB12-CD34"; the signed-in person approves it with a plain signed-in accept (the
+approval page names the machine logging in and THE ONE workspace the session will reach), and approval mints
+the **session** — user × workspace × installation, owned by that person — and its **workspace-scoped bearer
+credential**. The credential is stored only as its SHA-256 on the session row and presented as
+`Authorization: Bearer` on the session lane (`/api/v1/…`), which the app serves itself: the guard resolves
+credential → session → person → seat in one query, fail-closed, so an ended session or an unseated person
+loses access the instant the row commits. Ending is self-service from the client (`topos logout`) and
+owner-service from the workspace sessions page — either way immediate.
 
-**Delivery and entitlement live app-side.** What a person should have is one predicate over the directory
-rows — `((default channels − opt-outs) ∪ member channels ∪ direct follows) − unfollows`, active bundles only
-— computed in `web` (`entitledBundlesSql`). Reads gate on *entitled ∧ has-a-current-pointer*; no object is
+**Delivery and entitlement live app-side.** What a session should have is one predicate over the directory
+rows — the person's server-stored PROFILE (channel and skill includes minus excludes, the default channel
+included unless excluded), active bundles only — computed in `web`. Reads gate on *entitled ∧ has-a-current-pointer*; no object is
 served by bare hash, and every not-entitled or not-found case returns the same **404**, so the read surface is
 no oracle for which skills exist. Only the byte and pointer ops of a publish-family verb (ingest, the
 `current` compare-and-set, revert, purge, the verified object reads) forward to the vault, over one allowlisted
@@ -155,9 +162,9 @@ integrity fault, never folded into the uniform 404.
 
 The system keeps its state in three places.
 
-- **The app's `web` schema** (Postgres) — identity and the whole directory: people, seats, devices,
-  invitations, the catalog, channels, subscriptions, proposals, notices, receipts, and the audit trail.
-  Reached only through the data-access layer, keyed by `user.id`.
+- **The app's `web` schema** (Postgres) — identity and the whole directory: people, seats, CLI sessions,
+  invitations, the catalog, channels, profiles, upstream provenance, proposals, notices, receipts, and the
+  audit trail. Reached only through the data-access layer, keyed by `user.id`.
 - **The vault's `plane` schema** (Postgres) — custody only: the content-addressed version index, the
   `current` pointer, and the upload/object-lifecycle bookkeeping. Raw SQL and raw git reads are private to
   `plane-store`, so no code outside it can run an unbound query or read a bare object.

@@ -29,6 +29,14 @@ pub(crate) struct SyncStatus {
 /// reported its applied state, and the staleness window the workspace policy declares.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkspaceSync {
+    /// The server host the workspace lives on (the manifest grammar's host half) — lets the
+    /// offline surfaces (and the cache-backed follow seam) answer canonical references without a
+    /// session read. Absent on records written before the session model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// The workspace's ADDRESS slug (the manifest grammar's middle).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_name: Option<String>,
     /// When the last successful `GET /delivery` answered (epoch millis).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_delivery_at: Option<i64>,
@@ -52,6 +60,14 @@ pub(crate) struct WorkspaceSync {
 /// read only by offline `list`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DeliveredSkill {
+    /// The catalog's user-facing name at the last delivery — the offline name↔id join the
+    /// cache-backed follow seam and `status`/`list` read. Absent on pre-session records.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// Whether the bundle was effectively `reviewed` at the last delivery (the offline publish
+    /// preflight; the server re-decides authoritatively on every write).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub review_required: bool,
     /// The version id (hex) the plane last served — compared to the local applied version to flag
     /// `behind`. Empty for a withdrawn skill (nothing is served).
     #[serde(default, skip_serializing_if = "String::is_empty")]

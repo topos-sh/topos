@@ -7,7 +7,7 @@ import {
   ensureBundle,
   ensureSeatedUser,
   latestMail,
-  mintDevice,
+  mintSession,
   theWorkspace,
 } from "./seed";
 import { gotoSettled, signIn } from "./sign-in";
@@ -330,13 +330,13 @@ test("a skill-hinted invitation frames, subscribes, and lands on the skill", asy
   const bundleId = "bndl-redeem-skill-0001";
   await ensureBundle({ id: bundleId, name: skillName, displayName: skillName });
 
-  // A device credential for the seated owner, so the device-lane invite carries the skill hint.
+  // A session credential for the seated owner, so the session-lane invite carries the skill hint.
   const ws = await theWorkspace();
   const owner = await ownerUserId();
   const credential = `cred-redeem-skill-${randomBytes(8).toString("hex")}`;
-  await mintDevice(
+  await mintSession(
     owner,
-    `dev-redeem-skill-${randomBytes(6).toString("hex")}`,
+    `sn-redeem-skill-${randomBytes(6).toString("hex")}`,
     "skill-inviter",
     credential,
   );
@@ -371,13 +371,13 @@ test("a skill-hinted invitation frames, subscribes, and lands on the skill", asy
     await context.close();
   }
 
-  // Seated + subscribed: the accept followed the hinted skill for the new person.
+  // Seated + prefilled: the accept wrote the hinted skill into the new person's profile.
   expect(await seatRole(email)).toBe("member");
-  const sub = await adminQuery<{ state: string }>(
-    `select bs.state from web.bundle_subscription bs
-       join web."user" u on u.id = bs.user_id
-     where u.email = $1 and bs.bundle_id = $2`,
+  const line = await adminQuery<{ mode: string }>(
+    `select p.mode from web.profile_entry p
+       join web."user" u on u.id = p.user_id
+     where u.email = $1 and p.bundle_id = $2`,
     [email.toLowerCase(), bundleId],
   );
-  expect(sub[0]?.state).toBe("following");
+  expect(line[0]?.mode).toBe("include");
 });

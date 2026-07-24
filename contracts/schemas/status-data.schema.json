@@ -5,17 +5,24 @@
   "type": "object",
   "properties": {
     "enrolled": {
-      "description": "Whether this install is enrolled with a plane (the enrollment doc exists).",
+      "description": "Whether this installation holds any session (a `sessions.json` row exists).",
       "type": "boolean"
     },
     "followed_skills": {
-      "description": "Skills this install currently follows (excluding per-device exclusions and unfollowed\ncopies).",
+      "description": "Skills the profiles currently deliver to this installation, counted from the offline\ndelivery cache (withdrawn items excluded).",
       "type": "integer",
       "format": "uint64",
       "minimum": 0
     },
+    "items": {
+      "description": "The resolved TRUST-RAIL table for the CURRENT directory: every bundle the local manifests\ncovering it ask for, nearest-first deduped, each with its one source line and state.\n**Additive.**",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/StatusItem"
+      }
+    },
     "pending_offers": {
-      "description": "First-receive offers awaiting consent (a followed skill whose bytes never landed here).\nAbsent = not cheaply knowable from local state.",
+      "description": "First-receive offers awaiting consent (a delivered skill whose bytes never landed here).\nAbsent = not cheaply knowable from local state.",
       "type": [
         "integer",
         "null"
@@ -24,14 +31,21 @@
       "minimum": 0
     },
     "server": {
-      "description": "The pinned plane base URL, when enrolled.",
+      "description": "The server base URL the sessions dial, when logged in.",
       "type": [
         "string",
         "null"
       ]
     },
+    "sessions": {
+      "description": "This installation's SESSIONS — one per logged-into workspace (the session model; empty =\nlogged into nothing). **Additive.**",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/StatusSession"
+      }
+    },
     "signed_in": {
-      "description": "Whether the device credential is stored (the signed-in state).",
+      "description": "Whether a LIVE (non-ended) session's credential is stored — the signed-in state.",
       "type": "boolean"
     },
     "triggers": {
@@ -46,7 +60,7 @@
       "type": "string"
     },
     "workspaces": {
-      "description": "The joined workspaces (empty when never enrolled).",
+      "description": "The connected workspaces — one row per session (empty when logged into nothing).",
       "type": "array",
       "items": {
         "$ref": "#/$defs/StatusWorkspace"
@@ -60,6 +74,122 @@
     "followed_skills"
   ],
   "$defs": {
+    "StatusItem": {
+      "description": "One resolved line of the trust rail. Every \"why does this agent have X?\" is answered by\n`source` (which manifest line asked for it); every \"why doesn't it?\" by `state`. **INFERRED**\n(additive-only).",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The bundle's name (the dedupe key).",
+          "type": "string"
+        },
+        "reference": {
+          "description": "The winning reference (canonical where known).",
+          "type": "string"
+        },
+        "scope": {
+          "description": "Where the bytes belong: `\"project\"` (this project's harness dirs) or `\"person\"` (the home\ndirs).",
+          "type": "string"
+        },
+        "shadows": {
+          "description": "Broader manifests this line shadows (their labels) — rendered, never acted on.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "source": {
+          "description": "ONE source line: the manifest that asked for it (`<dir>/topos.toml` or\n`~/.topos/topos.toml`).",
+          "type": "string"
+        },
+        "state": {
+          "description": "The line's state.",
+          "$ref": "#/$defs/StatusItemState"
+        },
+        "version": {
+          "description": "The applied version (64-hex), when one is applied locally.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "name",
+        "reference",
+        "source",
+        "scope",
+        "state"
+      ]
+    },
+    "StatusItemState": {
+      "description": "A trust-rail line's state. **INFERRED value set** (additive).",
+      "oneOf": [
+        {
+          "description": "The bytes are applied and current against the last-known target.",
+          "type": "string",
+          "const": "applied"
+        },
+        {
+          "description": "A newer target is known than what is applied — the next `update` lands it.",
+          "type": "string",
+          "const": "behind"
+        },
+        {
+          "description": "Local edits sit ahead of the applied version (a draft).",
+          "type": "string",
+          "const": "local-edits"
+        },
+        {
+          "description": "Referenced here but NOT deliverable with your current access — phrased from LOCAL\nknowledge only (no session for its workspace); never from server confirmation.",
+          "type": "string",
+          "const": "not-available"
+        },
+        {
+          "description": "The session that would deliver it is pending an owner's approval.",
+          "type": "string",
+          "const": "pending-session"
+        },
+        {
+          "description": "Not yet applied (never delivered here), or not determinable offline.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "StatusSession": {
+      "description": "One session in a [`StatusData`] — this installation logged into one workspace. **INFERRED**\n(additive-only).",
+      "type": "object",
+      "properties": {
+        "display_name": {
+          "type": "string"
+        },
+        "host": {
+          "description": "The server host the workspace lives on (the manifest grammar's host half).",
+          "type": "string"
+        },
+        "name": {
+          "description": "The ADDRESS name (what you logged in by).",
+          "type": "string"
+        },
+        "session_status": {
+          "description": "The session's status, when it is NOT plainly active: `\"pending\"` (awaiting an owner's\napproval — delivery starts automatically once approved) or `\"ended\"` (revoked or gone —\n`topos login <address>` starts a fresh one). Absent = active.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_id",
+        "name",
+        "display_name",
+        "host"
+      ]
+    },
     "StatusTrigger": {
       "description": "One detected agent's auto-update trigger presence in a [`StatusData`] — a read-only probe of\nthe same artifact the arming sweep manages. **INFERRED** (additive-only).",
       "type": "object",
@@ -95,7 +225,7 @@
           "type": "string"
         },
         "link_status": {
-          "description": "This device's link to the workspace, when it is NOT plainly active: `\"pending\"` (awaiting an\nowner's approval — delivery starts automatically once approved) or `\"ended\"` (the link was\nsevered or never approved — `topos follow <address>` relinks). Absent = active. **Additive.**",
+          "description": "This installation's session with the workspace, when it is NOT plainly active: `\"pending\"`\n(awaiting an owner's approval — delivery starts automatically once approved) or `\"ended\"`\n(the session was ended server-side — `topos login <address>` reconnects). Absent = active.\n**Additive.**",
           "type": [
             "string",
             "null"

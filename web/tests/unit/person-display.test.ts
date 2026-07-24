@@ -4,10 +4,9 @@ import {
   asMember,
   bootWorkspace,
   createScratchDb,
-  linkDevice,
   type ScratchDb,
   seatUser,
-  seedDevice,
+  seedSession,
   seedUser,
 } from "./helpers/scratch-db";
 
@@ -43,18 +42,17 @@ describe("the SQL twin (scratch DB)", () => {
     await seedUser(db, "u_named", "Named Person", "named@example.com");
     await seatUser(db, ws, "u_blank", "member");
     await seatUser(db, ws, "u_named", "member");
-    await seedDevice(db, "dev_blank", "u_blank");
-    await linkDevice(db, "dev_blank", ws);
+    await seedSession(db, "dev_blank", ws, "u_blank");
   }, 60_000);
 
   afterAll(async () => {
     await db.drop();
   });
 
-  it("the device-lane actor resolve coalesces a blank name to the email", async () => {
-    const { deviceActor } = await import("@/lib/db/identity.server");
-    // seedDevice derives the credential hash from the device id.
-    const row = await deviceActor(ws, "dev_blank");
+  it("the session-lane actor resolve coalesces a blank name to the email", async () => {
+    const { sessionActor } = await import("@/lib/db/identity.server");
+    // seedSession derives the credential hash from the session id.
+    const row = await sessionActor(ws, "dev_blank");
     expect(row?.userId).toBe("u_blank");
     expect(row?.userDisplay).toBe("blank@example.com");
   });

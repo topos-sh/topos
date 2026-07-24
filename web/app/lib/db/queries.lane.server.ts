@@ -1,18 +1,13 @@
 import { and, asc, count, eq, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import type { DeviceActor } from "@/lib/auth/guards.server";
-import {
-  detachExactInTx,
-  entitledIdsInTx,
-  pgTextArray,
-  reattachInTx,
-} from "@/lib/db/detach.server";
+import type { SessionActor } from "@/lib/auth/guards.server";
 import {
   auditInTx,
-  entitledBundlesSql,
   mintChannelId,
   mintInvitationId,
   mintInviteToken,
+  profileDemandSql,
+  sessionUnexpiredSql,
   supersedeDeclinedInvitationTx,
 } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
@@ -25,11 +20,8 @@ import {
 import { foldInviteEmail, INVITATION_TTL_MS } from "@/lib/db/queries.roster.server";
 import {
   bundle,
-  bundleSubscription,
+  bundleUpstream,
   channel,
-  channelMember,
-  channelOptout,
-  deviceExclusion,
   invitation,
   notice,
   proposal,
@@ -40,22 +32,31 @@ import { user } from "@/lib/db/schema.auth";
 import { planeCurrentPointer, planeVersionDigest } from "@/lib/db/schema.custody";
 
 /**
- * The DEVICE lane's data access — the row-op half of `/api/v1`, served entirely by this tier
- * since the identity unification (the guarded SQL functions are gone; the policy logic lives
- * HERE, once). Every op takes the branded `DeviceActor` (minted only by requireDeviceActor)
- * and passes the actor's server-resolved person/device — never anything client-asserted beyond
+ * The SESSION lane's data access — the row-op half of `/api/v1`, served entirely by this
+ * tier. Every op takes the branded `SessionActor` (minted only by requireSessionActor) and
+ * passes the actor's server-resolved person/session — never anything client-asserted beyond
  * the credential itself. Role gates read the actor's seat role; existence misses answer the
- * same status vocabulary the old functions spoke so the wire mapping stays byte-shaped.
+ * same status vocabulary as before so the wire mapping stays uniform.
  *
- * Multi-read answers (delivery, the channels index) run inside ONE REPEATABLE READ transaction
- * — one snapshot, so the entitled/detached/notices sets can never straddle a subscription
- * change (a bundle in NEITHER list would read as an upstream withdrawal and get cleaned).
+ * Delivery is DEMAND ∩ ENTITLEMENT: the person-side demand is the profile (profileDemandSql —
+ * the default-channel baseline + included channels + included bundles − excludes), the
+ * entitlement is the seat itself (whole catalog). Project-side demand never reaches this
+ * module: the client resolves `topos.toml` refs through ordinary catalog reads, each one
+ * seat-gated the same way.
+ *
+ * Multi-read answers (delivery, the channels index) run inside ONE REPEATABLE READ
+ * transaction — one snapshot, so the served sets can never straddle a profile change.
  */
 
 const CHANNEL_NAME = /^[a-z0-9][a-z0-9-]*$/;
 const CHANNEL_NAME_MAX = 64;
 
 type Tx = Parameters<Parameters<ReturnType<typeof getDb>["transaction"]>[0]>[0];
+
+/** A `{a,b,c}` Postgres array literal (values validated upstream as opaque ids). */
+function pgTextArray(values: string[]): string {
+  return `{${values.map((v) => `"${v.replaceAll('"', "")}"`).join(",")}}`;
+}
 
 // ── Delivery ─────────────────────────────────────────────────────────────────────────────────
 
@@ -69,7 +70,10 @@ export interface DeliverySkill {
   bundle_digest: string;
   generation: number;
   updated_at: number;
+  /** Why the profile delivers it: which channels carry it, and/or a direct include line. */
   via: { channels: string[]; direct: boolean };
+  /** Set when a profile include pins a version — the served version_id IS the pin then. */
+  pinned?: boolean;
 }
 
 export interface DeliveryNotice {
@@ -89,22 +93,20 @@ export interface DeliveryNotice {
 export interface DeliveryBody {
   schema_version: 1;
   workspace_id: string;
-  /** The device↔workspace link's status; "pending" delivers NOTHING (the empty body below). */
-  link_status: "active" | "pending";
+  /** The session's status; "pending" delivers NOTHING (the empty body below). */
+  session_status: "active" | "pending";
   skills: DeliverySkill[];
-  detached: string[];
-  excluded?: string[];
   notices: DeliveryNotice[];
   proposals_awaiting: number;
   staleness_window_ms: number;
 }
 
 /**
- * The PENDING link's delivery: shape-complete and EMPTY — no data flows over a pending link
- * (skills/detached/excluded/notices empty, zero proposals), but the staleness clock still
- * serves so the client's freshness bookkeeping stays honest while it waits for approval.
+ * The PENDING session's delivery: shape-complete and EMPTY — no data flows over a pending
+ * session (skills/notices empty, zero proposals), but the staleness clock still serves so the
+ * client's freshness bookkeeping stays honest while it waits for approval.
  */
-export async function emptyDeliveryFor(actor: DeviceActor): Promise<DeliveryBody> {
+export async function emptyDeliveryFor(actor: SessionActor): Promise<DeliveryBody> {
   const wsRows = await getDb()
     .select({ stalenessWindowMs: workspace.stalenessWindowMs })
     .from(workspace)
@@ -113,9 +115,8 @@ export async function emptyDeliveryFor(actor: DeviceActor): Promise<DeliveryBody
   return {
     schema_version: 1,
     workspace_id: actor.workspaceId,
-    link_status: "pending",
+    session_status: "pending",
     skills: [],
-    detached: [],
     notices: [],
     proposals_awaiting: 0,
     staleness_window_ms: wsRows[0]?.stalenessWindowMs ?? 604800000,
@@ -128,22 +129,24 @@ function isoSeconds(date: Date): string {
 }
 
 /**
- * The currency answer for ONE enrolled device: the entitled skills (channel union ∪ direct
- * follows − unfollows − this device's exclusions, active + current-holding only, with `via`
- * attribution and the resolved protection), the person's detached set, this device's
- * exclusions, the unacked notices, the open-proposal count over the entitled set, and the ONE
+ * The person-layer answer for ONE session: the profile's demand (default-channel baseline ∪
+ * included channels ∪ included bundles − excludes), active + current-holding only, with `via`
+ * attribution, the resolved protection, and the pin resolution (a pinned include serves the
+ * pinned version when the plane still holds it, else falls back to current — honest, never a
+ * hole), plus the unacked notices, the open-proposal count over the demanded set, and the ONE
  * staleness clock.
  */
-export async function deliveryFor(actor: DeviceActor): Promise<DeliveryBody> {
+export async function deliveryFor(actor: ProfileActor): Promise<DeliveryBody> {
   const ws = actor.workspaceId;
   return await getDb().transaction(
     async (tx) => {
       const skillRows = await tx.execute(sql`
         SELECT b.id AS skill_id, b.name, b.kind, b.display_name,
                COALESCE(b.protection, w.protection_default, 'open') AS protection,
-               cp.version_id, cp.generation,
+               cp.version_id AS current_version_id, cp.generation,
                (extract(epoch from cp.moved_at) * 1000)::bigint AS updated_at,
-               vd.bundle_digest,
+               vd.bundle_digest AS current_digest,
+               pe.pin AS pin, pvd.bundle_digest AS pin_digest,
                COALESCE((
                  SELECT array_agg(ch.name ORDER BY ch.name)
                  FROM web.channel_bundle cb
@@ -151,68 +154,49 @@ export async function deliveryFor(actor: DeviceActor): Promise<DeliveryBody> {
                  WHERE cb.workspace_id = ${ws} AND cb.bundle_id = b.id
                    AND (
                      (ch.is_default AND NOT EXISTS (
-                        SELECT 1 FROM web.channel_optout o
-                        WHERE o.channel_id = ch.id AND o.user_id = ${actor.userId}))
+                        SELECT 1 FROM web.profile_entry px
+                        WHERE px.channel_id = ch.id AND px.user_id = ${actor.userId}
+                          AND px.mode = 'exclude'))
                      OR EXISTS (
-                        SELECT 1 FROM web.channel_member cm
-                        WHERE cm.channel_id = ch.id AND cm.user_id = ${actor.userId})
+                        SELECT 1 FROM web.profile_entry pi
+                        WHERE pi.channel_id = ch.id AND pi.user_id = ${actor.userId}
+                          AND pi.mode = 'include')
                    )
                ), '{}') AS via_channels,
-               EXISTS (
-                 SELECT 1 FROM web.bundle_subscription bs
-                 WHERE bs.user_id = ${actor.userId} AND bs.bundle_id = b.id
-                   AND bs.state = 'following'
-               ) AS direct
-        FROM (${entitledBundlesSql(actor.userId, ws)}) e
+               (pe.bundle_id IS NOT NULL) AS direct
+        FROM (${profileDemandSql(actor.userId, ws)}) e
         JOIN web.bundle b ON b.id = e.bundle_id
         JOIN web.workspace w ON w.id = ${ws}
         JOIN plane.current_pointer cp ON cp.workspace_id = ${ws} AND cp.bundle_id = b.id
         LEFT JOIN plane.version_digest vd
           ON vd.workspace_id = ${ws} AND vd.bundle_id = b.id AND vd.version_id = cp.version_id
-        WHERE NOT EXISTS (
-          SELECT 1 FROM web.device_exclusion dx
-          WHERE dx.device_id = ${actor.deviceId} AND dx.bundle_id = b.id
-        )
+        LEFT JOIN web.profile_entry pe
+          ON pe.user_id = ${actor.userId} AND pe.bundle_id = b.id AND pe.mode = 'include'
+        LEFT JOIN plane.version_digest pvd
+          ON pe.pin IS NOT NULL AND pvd.workspace_id = ${ws} AND pvd.bundle_id = b.id
+             AND pvd.version_id = pe.pin
         ORDER BY b.name
       `);
-      const skills: DeliverySkill[] = (skillRows.rows as Record<string, unknown>[]).map((r) => ({
-        skill_id: r.skill_id as string,
-        name: r.name as string,
-        kind: r.kind as string,
-        ...(r.display_name === null ? {} : { display_name: r.display_name as string }),
-        protection: r.protection as string,
-        version_id: r.version_id as string,
-        // A pointer without its digest row is a custody fault; serve the honest empty string
-        // rather than fail the whole delivery (the client's re-hash will refuse the bundle).
-        bundle_digest: (r.bundle_digest as string | null) ?? "",
-        generation: Number(r.generation),
-        updated_at: Number(r.updated_at),
-        via: { channels: r.via_channels as string[], direct: r.direct as boolean },
-      }));
-
-      // Detached: the person's own lapse records (plus standing unfollow stances), minus
-      // anything re-entitled — every device freezes these in place, never cleaning them.
-      const detachedRows = await tx.execute(sql`
-        SELECT d.bundle_id FROM (
-          SELECT bd.bundle_id FROM web.bundle_detachment bd
-          WHERE bd.workspace_id = ${ws} AND bd.user_id = ${actor.userId}
-          UNION
-          SELECT bs.bundle_id FROM web.bundle_subscription bs
-          WHERE bs.workspace_id = ${ws} AND bs.user_id = ${actor.userId}
-            AND bs.state = 'unfollowed'
-        ) d
-        WHERE d.bundle_id NOT IN (${entitledBundlesSql(actor.userId, ws)})
-        ORDER BY d.bundle_id
-      `);
-      const detached = (detachedRows.rows as { bundle_id: string }[]).map((r) => r.bundle_id);
-
-      const excludedRows = await tx.execute(sql`
-        SELECT dx.bundle_id FROM web.device_exclusion dx
-        JOIN web.bundle b ON b.id = dx.bundle_id
-        WHERE dx.device_id = ${actor.deviceId} AND b.status = 'active'
-        ORDER BY dx.bundle_id
-      `);
-      const excluded = (excludedRows.rows as { bundle_id: string }[]).map((r) => r.bundle_id);
+      const skills: DeliverySkill[] = (skillRows.rows as Record<string, unknown>[]).map((r) => {
+        // Pin resolution: a live pin (its digest row still present) is the served target; a
+        // stale pin (purged version) serves current instead of a hole.
+        const pinLive = r.pin !== null && r.pin_digest !== null;
+        return {
+          skill_id: r.skill_id as string,
+          name: r.name as string,
+          kind: r.kind as string,
+          ...(r.display_name === null ? {} : { display_name: r.display_name as string }),
+          protection: r.protection as string,
+          version_id: (pinLive ? r.pin : r.current_version_id) as string,
+          // A pointer without its digest row is a custody fault; serve the honest empty string
+          // rather than fail the whole delivery (the client's re-hash will refuse the bundle).
+          bundle_digest: ((pinLive ? r.pin_digest : r.current_digest) as string | null) ?? "",
+          generation: Number(r.generation),
+          updated_at: Number(r.updated_at),
+          via: { channels: r.via_channels as string[], direct: r.direct as boolean },
+          ...(pinLive ? { pinned: true } : {}),
+        };
+      });
 
       const noticeRows = await tx.execute(sql`
         SELECT n.id, n.kind, n.payload, n.created_at, b.name AS live_name
@@ -255,7 +239,7 @@ export async function deliveryFor(actor: DeviceActor): Promise<DeliveryBody> {
       const proposalRows = await tx.execute(sql`
         SELECT COUNT(*) AS n FROM web.proposal p
         WHERE p.workspace_id = ${ws} AND p.status = 'open'
-          AND p.bundle_id IN (${entitledBundlesSql(actor.userId, ws)})
+          AND p.bundle_id IN (${profileDemandSql(actor.userId, ws)})
       `);
       const proposalsAwaiting = Number((proposalRows.rows[0] as { n: string | number }).n);
 
@@ -268,10 +252,8 @@ export async function deliveryFor(actor: DeviceActor): Promise<DeliveryBody> {
       const body: DeliveryBody = {
         schema_version: 1,
         workspace_id: ws,
-        link_status: "active",
+        session_status: "active",
         skills,
-        detached,
-        ...(excluded.length > 0 ? { excluded } : {}),
         notices,
         proposals_awaiting: proposalsAwaiting,
         staleness_window_ms: wsRows[0]?.stalenessWindowMs ?? 604800000,
@@ -285,38 +267,47 @@ export async function deliveryFor(actor: DeviceActor): Promise<DeliveryBody> {
 // ── The applied-state report ─────────────────────────────────────────────────────────────────
 
 /**
- * The fleet's applied-state report: UPSERT this device's (bundle, applied version) rows —
- * NEVER delete (a row whose bundle left the install set is the frozen "last known" record the
- * fleet derives blind spots from). A report is CLIENT-ASSERTED data, so every named bundle is
- * re-checked against the server's own entitlement predicate: only truly-delivered bundles are
- * recorded. The write FENCES on the live ACTIVE link (FOR UPDATE): an in-flight report that
- * lost a race with an unlink/sever must not resurrect reported state the sever just deleted —
- * the lock serializes with the severing helper's link delete, and a gone link refuses into the
- * caller's uniform 404 (a relinked device re-reports fresh).
+ * The sessions page's applied-state report: UPSERT this session's (bundle, applied version)
+ * rows and DELETE the rows it no longer reports — the session's report is a complete snapshot
+ * of what the installation holds for this workspace, so absence is meaningful (a removed
+ * project or an edited manifest stops reporting a bundle and the row goes). A report is
+ * CLIENT-ASSERTED data, so every named bundle is re-checked to exist in the workspace. The
+ * write FENCES on the live ACTIVE session row (FOR UPDATE): an in-flight report that lost a
+ * race with a revocation must not resurrect state the ending just cascaded away.
  */
 export async function reportApplied(
-  actor: DeviceActor,
+  actor: SessionActor,
   applied: { skillId: string; versionId: string }[],
-): Promise<"ok" | "unlinked"> {
+): Promise<"ok" | "session_ended"> {
   const ws = actor.workspaceId;
   const skillIds = pgTextArray(applied.map((a) => a.skillId));
   const versionIds = pgTextArray(applied.map((a) => a.versionId));
   return await getDb().transaction(async (tx) => {
-    const link = await tx.execute(
-      sql`SELECT id FROM web.device_link
-          WHERE device_id = ${actor.deviceId} AND workspace_id = ${ws} AND status = 'active'
-          FOR UPDATE`,
+    // The same liveness the guard decides — active AND unexpired — re-checked inside the
+    // fence: a session may pass the route guard a breath before expiry and must not write
+    // reporting state after it.
+    const live = await tx.execute(
+      sql`SELECT cs.id FROM web.cli_session cs
+          JOIN web.workspace w ON w.id = cs.workspace_id
+          WHERE cs.id = ${actor.sessionId} AND cs.workspace_id = ${ws} AND cs.status = 'active'
+            AND ${sessionUnexpiredSql("cs", "w")}
+          FOR UPDATE OF cs`,
     );
-    if (link.rows.length === 0) {
-      return "unlinked";
+    if (live.rows.length === 0) {
+      return "session_ended";
     }
     await tx.execute(sql`
-      INSERT INTO web.device_bundle_state (device_id, bundle_id, applied_version_id, reported_at)
-      SELECT ${actor.deviceId}, r.skill_id, r.version_id, now()
+      INSERT INTO web.session_bundle_state (session_id, bundle_id, applied_version_id, reported_at)
+      SELECT ${actor.sessionId}, r.skill_id, r.version_id, now()
       FROM UNNEST(${skillIds}::text[], ${versionIds}::text[]) AS r(skill_id, version_id)
-      JOIN (${entitledBundlesSql(actor.userId, ws)}) e ON e.bundle_id = r.skill_id
-      ON CONFLICT (device_id, bundle_id) DO UPDATE
+      JOIN web.bundle b ON b.id = r.skill_id AND b.workspace_id = ${ws}
+      ON CONFLICT (session_id, bundle_id) DO UPDATE
         SET applied_version_id = excluded.applied_version_id, reported_at = excluded.reported_at
+    `);
+    await tx.execute(sql`
+      DELETE FROM web.session_bundle_state st
+      WHERE st.session_id = ${actor.sessionId}
+        AND NOT (st.bundle_id = ANY(${skillIds}::text[]))
     `);
     return "ok";
   });
@@ -333,7 +324,7 @@ export interface LaneMe {
 }
 
 /** The caller's own membership facts (`GET /me`). */
-export async function laneMe(actor: DeviceActor): Promise<LaneMe | null> {
+export async function laneMe(actor: SessionActor): Promise<LaneMe | null> {
   const rows = await getDb().execute(sql`
     SELECT w.name, w.display_name, s.role, iu.email AS invited_by
     FROM web.workspace w
@@ -361,16 +352,18 @@ export async function laneMe(actor: DeviceActor): Promise<LaneMe | null> {
 }
 
 export interface LaneChannel {
+  /** The immutable channel id (the web profile editor's toggle key; the wire route omits it). */
+  channelId: string;
   name: string;
   mode: string;
   builtin: boolean;
-  member: boolean;
-  memberCount: number;
+  /** Whether the CALLER's profile references this channel (the default: not excluded). */
+  included: boolean;
   skills: { skillId: string; name: string }[];
 }
 
 /** The workspace channels index (`GET /channels`) — name-sorted, the default included. */
-export async function laneChannels(actor: DeviceActor): Promise<LaneChannel[]> {
+export async function laneChannels(actor: ProfileActor): Promise<LaneChannel[]> {
   const ws = actor.workspaceId;
   return await getDb().transaction(
     async (tx) => {
@@ -394,26 +387,23 @@ export async function laneChannels(actor: DeviceActor): Promise<LaneChannel[]> {
       const channelRows = await tx.execute(sql`
         SELECT ch.id, ch.name, ch.mode, ch.is_default,
           (CASE WHEN ch.is_default
-                THEN NOT EXISTS (SELECT 1 FROM web.channel_optout o
-                                 WHERE o.channel_id = ch.id AND o.user_id = ${actor.userId})
-                ELSE EXISTS (SELECT 1 FROM web.channel_member cm
-                             WHERE cm.channel_id = ch.id AND cm.user_id = ${actor.userId})
-           END) AS member,
-          (CASE WHEN ch.is_default
-                THEN (SELECT COUNT(*) FROM web.seat s WHERE s.workspace_id = ch.workspace_id)
-                     - (SELECT COUNT(*) FROM web.channel_optout o WHERE o.channel_id = ch.id)
-                ELSE (SELECT COUNT(*) FROM web.channel_member cm WHERE cm.channel_id = ch.id)
-           END) AS member_count
+                THEN NOT EXISTS (SELECT 1 FROM web.profile_entry px
+                                 WHERE px.channel_id = ch.id AND px.user_id = ${actor.userId}
+                                   AND px.mode = 'exclude')
+                ELSE EXISTS (SELECT 1 FROM web.profile_entry pi
+                             WHERE pi.channel_id = ch.id AND pi.user_id = ${actor.userId}
+                               AND pi.mode = 'include')
+           END) AS included
         FROM web.channel ch
         WHERE ch.workspace_id = ${ws}
         ORDER BY ch.name
       `);
       return (channelRows.rows as Record<string, unknown>[]).map((r) => ({
+        channelId: r.id as string,
         name: r.name as string,
         mode: r.mode as string,
         builtin: r.is_default as boolean,
-        member: r.member as boolean,
-        memberCount: Number(r.member_count),
+        included: r.included as boolean,
         skills: byChannel.get(r.id as string) ?? [],
       }));
     },
@@ -421,11 +411,11 @@ export async function laneChannels(actor: DeviceActor): Promise<LaneChannel[]> {
   );
 }
 
-/** A bundle's audience (`GET /skills/{skill}/reach`): entitled persons + their live devices. */
+/** A bundle's audience (`GET /skills/{skill}/reach`): demanding persons + their live sessions. */
 export async function laneReach(
-  actor: DeviceActor,
+  actor: SessionActor,
   bundleId: string,
-): Promise<{ persons: number; devices: number } | null> {
+): Promise<{ persons: number; sessions: number } | null> {
   const ws = actor.workspaceId;
   const db = getDb();
   const exists = await db
@@ -439,38 +429,75 @@ export async function laneReach(
   const persons = await db.execute(sql`
     SELECT COUNT(*) AS n FROM web.seat s
     WHERE s.workspace_id = ${ws}
-      AND EXISTS (SELECT 1 FROM (${entitledBundlesSql(sql`s.user_id`, ws)}) e
+      AND EXISTS (SELECT 1 FROM (${profileDemandSql(sql`s.user_id`, ws)}) e
                   WHERE e.bundle_id = ${bundleId})
   `);
-  // A device counts toward reach only through its live ACTIVE link HERE — an unlinked or
-  // pending device cannot receive delivery in this workspace, whatever its owner's seat says.
-  const devices = await db.execute(sql`
-    SELECT COUNT(*) AS n FROM web.device d
-    JOIN web.seat s ON s.workspace_id = ${ws} AND s.user_id = d.user_id
-    JOIN web.device_link dl ON dl.device_id = d.id AND dl.workspace_id = ${ws}
-                           AND dl.status = 'active'
-    WHERE d.revoked_at IS NULL
-      AND EXISTS (SELECT 1 FROM (${entitledBundlesSql(sql`d.user_id`, ws)}) e
+  // A session counts toward reach only while ACTIVE and within the owner-set expiry — a
+  // pending or expired session cannot receive delivery here, whatever its owner's seat says.
+  const sessions = await db.execute(sql`
+    SELECT COUNT(*) AS n FROM web.cli_session cs
+    JOIN web.workspace w ON w.id = cs.workspace_id
+    WHERE cs.workspace_id = ${ws} AND cs.status = 'active'
+      AND ${sessionUnexpiredSql("cs", "w")}
+      AND EXISTS (SELECT 1 FROM (${profileDemandSql(sql`cs.user_id`, ws)}) e
                   WHERE e.bundle_id = ${bundleId})
   `);
   return {
     persons: Number((persons.rows[0] as { n: string | number }).n),
-    devices: Number((devices.rows[0] as { n: string | number }).n),
+    sessions: Number((sessions.rows[0] as { n: string | number }).n),
   };
 }
 
-// ── Subscriptions (the ONE stance row) + exclusions ─────────────────────────────────────────
+// ── The profile (the person-side manifest: add -g / remove -g / the web editor) ─────────────
 
 /**
- * Direct-follow: upsert the ONE stance row to 'following', clear THIS device's exclusion (the
- * device fence is construction — the actor's own resolved device id is the only one named),
- * and clear the person's re-entitled detach records. Archived bundles refuse (a freed name is
- * a NEW identity; the old one is out of circulation).
+ * The actor shape BOTH profile doors satisfy: the session lane's SessionActor and the web
+ * page's MemberActor (the ops read only the person + workspace — a profile is personal, so
+ * no role gates apply). Structural, so both branded actors pass without a cast.
  */
-export async function followBundle(
-  actor: DeviceActor,
+export interface ProfileActor {
+  readonly userId: string;
+  readonly workspaceId: string;
+}
+
+export interface ProfileEntryView {
+  mode: "include" | "exclude";
+  kind: "skill" | "channel";
+  /** The catalog kind for bundles ('skill' today); 'channel' rows repeat the literal. */
+  bundleKind?: string;
+  name: string;
+  pin: string | null;
+}
+
+/** The person's whole profile in this workspace, resolved to names (name-sorted per group). */
+export async function profileOf(actor: ProfileActor): Promise<ProfileEntryView[]> {
+  const rows = await getDb().execute(sql`
+    SELECT pe.mode, pe.pin, b.name AS bundle_name, b.kind AS bundle_kind, c.name AS channel_name
+    FROM web.profile_entry pe
+    LEFT JOIN web.bundle b ON b.id = pe.bundle_id
+    LEFT JOIN web.channel c ON c.id = pe.channel_id
+    WHERE pe.workspace_id = ${actor.workspaceId} AND pe.user_id = ${actor.userId}
+    ORDER BY pe.mode, COALESCE(b.name, c.name)
+  `);
+  return (rows.rows as Record<string, unknown>[]).map((r) => ({
+    mode: r.mode as "include" | "exclude",
+    kind: r.bundle_name !== null ? ("skill" as const) : ("channel" as const),
+    ...(r.bundle_name !== null ? { bundleKind: r.bundle_kind as string } : {}),
+    name: (r.bundle_name ?? r.channel_name) as string,
+    pin: r.pin as string | null,
+  }));
+}
+
+/**
+ * `add -g <skill>`: upsert the include line (an exclude on the same bundle flips to include —
+ * one stance per pair, the flip IS the re-add). Archived bundles refuse (a freed name is a
+ * NEW identity; the old one is out of circulation).
+ */
+export async function profileIncludeBundle(
+  actor: ProfileActor,
   bundleId: string,
-): Promise<"followed" | "unknown_skill" | "skill_not_active"> {
+  pin: string | null,
+): Promise<"included" | "unknown_skill" | "skill_not_active"> {
   const ws = actor.workspaceId;
   return await getDb().transaction(async (tx) => {
     const status = await bundleStatusInTx(tx, ws, bundleId);
@@ -480,78 +507,128 @@ export async function followBundle(
     if (status !== "active") {
       return "skill_not_active";
     }
-    await tx
-      .insert(bundleSubscription)
-      .values({ userId: actor.userId, workspaceId: ws, bundleId, state: "following" })
-      .onConflictDoUpdate({
-        target: [bundleSubscription.userId, bundleSubscription.bundleId],
-        set: { state: "following", updatedAt: new Date() },
-      });
-    await tx
-      .delete(deviceExclusion)
-      .where(
-        and(eq(deviceExclusion.deviceId, actor.deviceId), eq(deviceExclusion.bundleId, bundleId)),
-      );
-    await reattachInTx(tx, ws, actor.userId);
-    return "followed";
+    await tx.execute(sql`
+      INSERT INTO web.profile_entry (workspace_id, user_id, mode, bundle_id, pin)
+      VALUES (${ws}, ${actor.userId}, 'include', ${bundleId}, ${pin})
+      ON CONFLICT (user_id, bundle_id) WHERE bundle_id is not null
+      DO UPDATE SET mode = 'include', pin = excluded.pin, updated_at = now()
+    `);
+    return "included";
+  });
+}
+
+export type ProfileRemoveOutcome =
+  /** The include line was deleted; nothing broader provides it — delivery just ends. */
+  | "removed"
+  /** A broader layer (a channel, the baseline) still provides it — an EXCLUDE line was
+   * recorded (the one negative state; the receipt says so). */
+  | "excluded"
+  /** Neither an include line nor any channel provides it — nothing to do. */
+  | "not_in_profile"
+  | "unknown_skill";
+
+/**
+ * `remove -g <skill>`: delete the include line; when a broader layer (an included channel or
+ * the default baseline) still provides the bundle, record an EXCLUDE line instead — the
+ * manifest-layer semantics, applied to the profile.
+ */
+export async function profileRemoveBundle(
+  actor: ProfileActor,
+  bundleId: string,
+): Promise<ProfileRemoveOutcome> {
+  const ws = actor.workspaceId;
+  return await getDb().transaction(async (tx) => {
+    const status = await bundleStatusInTx(tx, ws, bundleId);
+    if (status === null) {
+      return "unknown_skill";
+    }
+    const deleted = await tx.execute(sql`
+      DELETE FROM web.profile_entry
+      WHERE user_id = ${actor.userId} AND bundle_id = ${bundleId} AND mode = 'include'
+      RETURNING bundle_id
+    `);
+    // Still provided by a channel the profile carries (baseline or include)? Then the removal
+    // needs the one negative state: an exclude line.
+    const provided = await tx.execute(sql`
+      SELECT 1 FROM (${profileDemandSql(actor.userId, ws)}) e
+      WHERE e.bundle_id = ${bundleId}
+    `);
+    if (provided.rows.length > 0) {
+      await tx.execute(sql`
+        INSERT INTO web.profile_entry (workspace_id, user_id, mode, bundle_id)
+        VALUES (${ws}, ${actor.userId}, 'exclude', ${bundleId})
+        ON CONFLICT (user_id, bundle_id) WHERE bundle_id is not null
+        DO UPDATE SET mode = 'exclude', pin = NULL, updated_at = now()
+      `);
+      return "excluded";
+    }
+    return deleted.rows.length > 0 ? "removed" : "not_in_profile";
+  });
+}
+
+/** `add -g @ws/channels/x`: upsert the channel include (an exclude flips back to include). */
+export async function profileIncludeChannel(
+  actor: ProfileActor,
+  channelName: string,
+): Promise<"included" | "unknown_channel"> {
+  const ws = actor.workspaceId;
+  return await getDb().transaction(async (tx) => {
+    const row = await channelByNameInTx(tx, ws, channelName);
+    if (row === undefined) {
+      return "unknown_channel";
+    }
+    if (row.isDefault) {
+      // The baseline is implicit; "including" it = clearing any exclude line.
+      await tx.execute(sql`
+        DELETE FROM web.profile_entry
+        WHERE user_id = ${actor.userId} AND channel_id = ${row.id} AND mode = 'exclude'
+      `);
+      return "included";
+    }
+    await tx.execute(sql`
+      INSERT INTO web.profile_entry (workspace_id, user_id, mode, channel_id)
+      VALUES (${ws}, ${actor.userId}, 'include', ${row.id})
+      ON CONFLICT (user_id, channel_id) WHERE channel_id is not null
+      DO UPDATE SET mode = 'include', updated_at = now()
+    `);
+    return "included";
   });
 }
 
 /**
- * Unfollow: the stance flips to 'unfollowed' (the negative mask — delivery ends on ALL the
- * person's devices, whatever channels still reference it) + the detach records for exactly
- * what this unfollow lapsed. `follow` re-attaches.
+ * `remove -g @ws/channels/x`: delete the include line; the DEFAULT channel — the implicit
+ * baseline with no include line to delete — takes an exclude line instead (the one negative
+ * state).
  */
-export async function unfollowBundle(
-  actor: DeviceActor,
-  bundleId: string,
-): Promise<"unfollowed" | "unknown_skill"> {
+export async function profileRemoveChannel(
+  actor: ProfileActor,
+  channelName: string,
+): Promise<"removed" | "excluded" | "not_in_profile" | "unknown_channel"> {
   const ws = actor.workspaceId;
   return await getDb().transaction(async (tx) => {
-    const status = await bundleStatusInTx(tx, ws, bundleId);
-    if (status === null) {
-      return "unknown_skill";
+    const row = await channelByNameInTx(tx, ws, channelName);
+    if (row === undefined) {
+      return "unknown_channel";
     }
-    const before = await entitledIdsInTx(tx, ws, actor.userId);
-    await tx
-      .insert(bundleSubscription)
-      .values({ userId: actor.userId, workspaceId: ws, bundleId, state: "unfollowed" })
-      .onConflictDoUpdate({
-        target: [bundleSubscription.userId, bundleSubscription.bundleId],
-        set: { state: "unfollowed", updatedAt: new Date() },
-      });
-    const after = new Set(await entitledIdsInTx(tx, ws, actor.userId));
-    await detachExactInTx(
-      tx,
-      ws,
-      actor.userId,
-      before.filter((id) => !after.has(id)),
-      "unfollow",
-    );
-    return "unfollowed";
+    if (row.isDefault) {
+      await tx.execute(sql`
+        INSERT INTO web.profile_entry (workspace_id, user_id, mode, channel_id)
+        VALUES (${ws}, ${actor.userId}, 'exclude', ${row.id})
+        ON CONFLICT (user_id, channel_id) WHERE channel_id is not null
+        DO UPDATE SET mode = 'exclude', updated_at = now()
+      `);
+      return "excluded";
+    }
+    const deleted = await tx.execute(sql`
+      DELETE FROM web.profile_entry
+      WHERE user_id = ${actor.userId} AND channel_id = ${row.id} AND mode = 'include'
+      RETURNING channel_id
+    `);
+    return deleted.rows.length > 0 ? "removed" : "not_in_profile";
   });
 }
 
-/** Exclude a bundle from THIS device (the `remove` verb's row; `follow` here lifts it). */
-export async function excludeOnDevice(
-  actor: DeviceActor,
-  bundleId: string,
-): Promise<"excluded" | "unknown_skill"> {
-  const ws = actor.workspaceId;
-  return await getDb().transaction(async (tx) => {
-    const status = await bundleStatusInTx(tx, ws, bundleId);
-    if (status === null) {
-      return "unknown_skill";
-    }
-    await tx
-      .insert(deviceExclusion)
-      .values({ deviceId: actor.deviceId, bundleId })
-      .onConflictDoNothing();
-    return "excluded";
-  });
-}
-
-// ── Channel membership (join / leave, the default channel included) ─────────────────────────
+// ── Curation (place / unplace, create-on-first-use) ─────────────────────────────────────────
 
 async function channelByNameInTx(tx: Tx, ws: string, name: string) {
   const rows = await tx
@@ -563,122 +640,15 @@ async function channelByNameInTx(tx: Tx, ws: string, name: string) {
 }
 
 /**
- * Join a channel by name. A NAMED channel gets a membership row; the DEFAULT channel's join
- * is the opt-out row's deletion (membership there is implicit). Both clear the re-entitled
- * detach records.
- */
-export async function laneChannelJoin(
-  actor: DeviceActor,
-  channelName: string,
-): Promise<"joined" | "unknown_channel"> {
-  const ws = actor.workspaceId;
-  return await getDb().transaction(async (tx) => {
-    const row = await channelByNameInTx(tx, ws, channelName);
-    if (row === undefined) {
-      return "unknown_channel";
-    }
-    if (row.isDefault) {
-      await tx
-        .delete(channelOptout)
-        .where(
-          and(
-            eq(channelOptout.workspaceId, ws),
-            eq(channelOptout.channelId, row.id),
-            eq(channelOptout.userId, actor.userId),
-          ),
-        );
-    } else {
-      await tx
-        .insert(channelMember)
-        .values({ channelId: row.id, workspaceId: ws, userId: actor.userId })
-        .onConflictDoNothing();
-    }
-    await reattachInTx(tx, ws, actor.userId);
-    await auditInTx(tx, {
-      workspaceId: ws,
-      actor: { userId: actor.userId, deviceId: actor.deviceId, display: actor.display },
-      kind: "member_joined",
-      subject: row.id,
-      outcome: "ok",
-      details: { userId: actor.userId },
-    });
-    return "joined";
-  });
-}
-
-/**
- * Leave a channel by name. A NAMED channel's leave deletes the membership row; the DEFAULT
- * channel's leave INSERTS the opt-out row (the one negative membership row). Both write
- * detach records (cause 'channel_leave') for exactly what the leave lapsed.
- */
-export async function laneChannelLeave(
-  actor: DeviceActor,
-  channelName: string,
-): Promise<"left" | "not_member" | "unknown_channel"> {
-  const ws = actor.workspaceId;
-  return await getDb().transaction(async (tx) => {
-    const row = await channelByNameInTx(tx, ws, channelName);
-    if (row === undefined) {
-      return "unknown_channel";
-    }
-    const before = await entitledIdsInTx(tx, ws, actor.userId);
-    if (row.isDefault) {
-      const inserted = await tx
-        .insert(channelOptout)
-        .values({ channelId: row.id, workspaceId: ws, userId: actor.userId })
-        .onConflictDoNothing()
-        .returning({ userId: channelOptout.userId });
-      if (inserted.length === 0) {
-        return "not_member";
-      }
-    } else {
-      const deleted = await tx
-        .delete(channelMember)
-        .where(
-          and(
-            eq(channelMember.workspaceId, ws),
-            eq(channelMember.channelId, row.id),
-            eq(channelMember.userId, actor.userId),
-          ),
-        )
-        .returning({ userId: channelMember.userId });
-      if (deleted.length === 0) {
-        return "not_member";
-      }
-    }
-    const after = new Set(await entitledIdsInTx(tx, ws, actor.userId));
-    await detachExactInTx(
-      tx,
-      ws,
-      actor.userId,
-      before.filter((id) => !after.has(id)),
-      "channel_leave",
-    );
-    await auditInTx(tx, {
-      workspaceId: ws,
-      actor: { userId: actor.userId, deviceId: actor.deviceId, display: actor.display },
-      kind: "member_left",
-      subject: row.id,
-      outcome: "ok",
-      details: { userId: actor.userId },
-    });
-    return "left";
-  });
-}
-
-// ── Curation (place / unplace, create-on-first-use) ─────────────────────────────────────────
-
-/**
  * Place a bundle reference into a channel — creating the channel on FIRST use (member-level).
  * Everything past the name resolution is the ONE curation core shared with the web page's
  * id-keyed functions (queries.channels.server.ts): the bundle-active gate, the CURATED
- * channel's reviewer+ gate (symmetric with removal), the idempotent insert, the detachment
- * heal, and the audit row. The create-race loser places into the winner's row ('placed',
- * never a raw conflict): ids are minted randomly, so only the name unique can collide, and a
- * re-select resolves it.
+ * channel's reviewer+ gate (symmetric with removal), the idempotent insert, and the audit
+ * row. The create-race loser places into the winner's row ('placed', never a raw conflict):
+ * ids are minted randomly, so only the name unique can collide, and a re-select resolves it.
  */
 export async function lanePlaceBundle(
-  actor: DeviceActor,
+  actor: SessionActor,
   channelName: string,
   bundleId: string,
 ): Promise<
@@ -713,7 +683,7 @@ export async function lanePlaceBundle(
         created = true;
         await auditInTx(tx, {
           workspaceId: ws,
-          actor: { userId: actor.userId, deviceId: actor.deviceId, display: actor.display },
+          actor: { userId: actor.userId, sessionId: actor.sessionId, display: actor.display },
           kind: "channel_created",
           subject: id,
           outcome: "ok",
@@ -737,7 +707,7 @@ export async function lanePlaceBundle(
 
 /** Remove a bundle reference from a channel — symmetric gate with place, the shared core. */
 export async function laneUnplaceBundle(
-  actor: DeviceActor,
+  actor: SessionActor,
   channelName: string,
   bundleId: string,
 ): Promise<"removed" | "not_placed" | "unknown_channel" | "curated_role_required"> {
@@ -755,7 +725,7 @@ export async function laneUnplaceBundle(
 
 /** Tightening takes reviewer+; loosening back to open widens what members can do — owner. */
 function protectionRoleGate(
-  role: DeviceActor["role"],
+  role: SessionActor["role"],
   tightens: boolean,
 ): "owner_role_required" | "reviewer_role_required" | null {
   if (tightens) {
@@ -766,7 +736,7 @@ function protectionRoleGate(
 
 /** Pin a bundle's protection level (`open` | `reviewed`; the route validated the value). */
 export async function laneProtectBundle(
-  actor: DeviceActor,
+  actor: SessionActor,
   bundleId: string,
   level: "open" | "reviewed",
 ): Promise<"set" | "unknown_skill" | "owner_role_required" | "reviewer_role_required"> {
@@ -786,7 +756,7 @@ export async function laneProtectBundle(
     }
     await auditInTx(tx, {
       workspaceId: ws,
-      actor: { userId: actor.userId, deviceId: actor.deviceId, display: actor.display },
+      actor: { userId: actor.userId, sessionId: actor.sessionId, display: actor.display },
       kind: "protect_skill",
       subject: bundleId,
       outcome: "ok",
@@ -798,7 +768,7 @@ export async function laneProtectBundle(
 
 /** Set a channel's mode (`open` | `curated`; the route validated the value). */
 export async function laneProtectChannel(
-  actor: DeviceActor,
+  actor: SessionActor,
   channelName: string,
   mode: "open" | "curated",
 ): Promise<"set" | "unknown_channel" | "owner_role_required" | "reviewer_role_required"> {
@@ -818,7 +788,7 @@ export async function laneProtectChannel(
     }
     await auditInTx(tx, {
       workspaceId: ws,
-      actor: { userId: actor.userId, deviceId: actor.deviceId, display: actor.display },
+      actor: { userId: actor.userId, sessionId: actor.sessionId, display: actor.display },
       kind: `mode_${mode}`,
       subject: updated[0]?.id ?? channelName,
       outcome: "ok",
@@ -830,7 +800,7 @@ export async function laneProtectChannel(
 // ── Notices ack ──────────────────────────────────────────────────────────────────────────────
 
 /** Mark the caller's own notices read by id — idempotent; unknown ids are ignored. */
-export async function laneAckNotices(actor: DeviceActor, ids: string[]): Promise<"acked"> {
+export async function laneAckNotices(actor: SessionActor, ids: string[]): Promise<"acked"> {
   const numeric = ids.map((id) => Number(id)).filter((n) => Number.isSafeInteger(n));
   if (numeric.length === 0) {
     return "acked";
@@ -851,7 +821,7 @@ export async function laneAckNotices(actor: DeviceActor, ids: string[]): Promise
 
 // ── Invitations (a claim on a FUTURE user; requires armed mail — the route gates that) ─────
 
-/** The device lane's minted invitations (folded address + fresh link token per address). */
+/** The session lane's minted invitations (folded address + fresh link token per address). */
 export type LaneInviteOutcome =
   | { outcome: "invited"; minted: { email: string; token: string }[] }
   | { outcome: "owner_role_required" }
@@ -860,15 +830,15 @@ export type LaneInviteOutcome =
   | { outcome: "bad_email" };
 
 /**
- * The device lane's invitation write. Inviting is OWNER-ONLY — the gate runs against the
- * actor's seat role. The optional FIRST-DESTINATION hint (at most one — a skill or a channel of this
- * workspace, named by the caller) must resolve (all-or-none), lands on the invitation row, and
- * is delivered by the accept ceremony: the seat first, then the direct follow / channel
- * membership in the same transaction. Each invitation mints a fresh single-use link token
+ * The session lane's invitation write. Inviting is OWNER-ONLY — the gate runs against the
+ * actor's seat role. The optional FIRST-DESTINATION hint (at most one — a skill or a channel
+ * of this workspace, named by the caller) must resolve (all-or-none), lands on the invitation
+ * row, and is delivered by the accept ceremony as a PROFILE PREFILL: the seat first, then the
+ * include line in the same transaction. Each invitation mints a fresh single-use link token
  * (hash-stored); re-inviting an address supersedes its old link and any declined record.
  */
 export async function laneInvite(
-  actor: DeviceActor,
+  actor: SessionActor,
   emails: string[],
   hint: { skill?: string; channel?: string },
 ): Promise<LaneInviteOutcome> {
@@ -931,7 +901,7 @@ export async function laneInvite(
       `);
       await auditInTx(tx, {
         workspaceId: ws,
-        actor: { userId: actor.userId, deviceId: actor.deviceId, display: actor.display },
+        actor: { userId: actor.userId, sessionId: actor.sessionId, display: actor.display },
         kind: "invitation_created",
         subject: email,
         outcome: "ok",
@@ -946,7 +916,7 @@ export async function laneInvite(
   });
 }
 
-// ── The device-lane catalog read (`GET /v1/workspaces/{ws}/skills`) ─────────────────────────
+// ── The session-lane catalog read (`GET /v1/workspaces/{ws}/skills`) ────────────────────────
 
 export interface LaneSkillIndexEntry {
   skill_id: string;
@@ -959,10 +929,15 @@ export interface LaneSkillIndexEntry {
   display_name?: string;
   updated_at: number;
   open_proposals: number;
+  /** The recorded upstream origin, present when the bundle was imported from an external
+   * source — lets a client suggest the governed copy when the same source is added again. */
+  upstream_host?: string;
+  upstream_repo?: string;
+  upstream_path?: string;
 }
 
 /** The workspace catalog — every bundle holding a `current`, ordered by id. */
-export async function laneSkillsIndex(actor: DeviceActor): Promise<LaneSkillIndexEntry[]> {
+export async function laneSkillsIndex(actor: SessionActor): Promise<LaneSkillIndexEntry[]> {
   const ws = actor.workspaceId;
   const rows = await getDb()
     .select({
@@ -979,6 +954,9 @@ export async function laneSkillsIndex(actor: DeviceActor): Promise<LaneSkillInde
         SELECT COUNT(*) FROM web.proposal p
         WHERE p.workspace_id = ${ws} AND p.bundle_id = ${bundle.id} AND p.status = 'open'
       )`,
+      upstreamHost: bundleUpstream.host,
+      upstreamRepo: bundleUpstream.repo,
+      upstreamPath: bundleUpstream.path,
     })
     .from(bundle)
     .innerJoin(
@@ -986,6 +964,13 @@ export async function laneSkillsIndex(actor: DeviceActor): Promise<LaneSkillInde
       and(
         eq(planeCurrentPointer.workspaceId, bundle.workspaceId),
         eq(planeCurrentPointer.bundleId, bundle.id),
+      ),
+    )
+    .leftJoin(
+      bundleUpstream,
+      and(
+        eq(bundleUpstream.workspaceId, bundle.workspaceId),
+        eq(bundleUpstream.bundleId, bundle.id),
       ),
     )
     .leftJoin(
@@ -1009,10 +994,17 @@ export async function laneSkillsIndex(actor: DeviceActor): Promise<LaneSkillInde
     ...(r.displayName === null ? {} : { display_name: r.displayName }),
     updated_at: Number(r.updatedAtMs),
     open_proposals: Number(r.openProposals),
+    ...(r.upstreamHost === null || r.upstreamRepo === null
+      ? {}
+      : {
+          upstream_host: r.upstreamHost,
+          upstream_repo: r.upstreamRepo,
+          upstream_path: r.upstreamPath ?? "",
+        }),
   }));
 }
 
-// ── The delivery-era helpers other DAL modules share ────────────────────────────────────────
+// ── The shared helpers other DAL modules use ────────────────────────────────────────────────
 
 /** How many seats the workspace holds — the default channel's reach base. */
 export async function workspaceSeatCount(ws: string): Promise<number> {
@@ -1020,9 +1012,9 @@ export async function workspaceSeatCount(ws: string): Promise<number> {
   return rows[0]?.n ?? 0;
 }
 
-/** The open-proposal rows of one bundle (the device lane's list read). */
+/** The open-proposal rows of one bundle (the session lane's list read). */
 export async function openProposalsOf(
-  actor: DeviceActor,
+  actor: SessionActor,
   bundleId: string,
 ): Promise<{ versionId: string; createdAt: Date }[]> {
   const rows = await getDb()
@@ -1059,7 +1051,7 @@ export interface LaneLogProposal {
 }
 
 export async function laneLogOf(
-  actor: DeviceActor,
+  actor: SessionActor,
   bundleId: string,
 ): Promise<{ identity: LaneLogIdentity; proposals: LaneLogProposal[] } | null> {
   const rows = await getDb()
@@ -1113,7 +1105,7 @@ export async function laneLogOf(
 }
 
 /** Every open proposal in the workspace (the review inbox), bundle name joined. */
-export async function openProposalsIndex(actor: DeviceActor): Promise<
+export async function openProposalsIndex(actor: SessionActor): Promise<
   {
     id: string;
     bundleId: string;

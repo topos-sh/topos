@@ -107,7 +107,7 @@ export function AppSidebar({
   const rootHref = workspace === null ? "/app" : wsHref(wsSegment);
 
   // Remember the active workspace client-side (the shadcn `sidebar_state` cookie pattern): the
-  // chrome loader's off-workspace fallback reads this on person-scoped pages (/account/devices),
+  // chrome loader's off-workspace fallback reads this on person-scoped pages (/account/sessions),
   // so leaving the workspace URL space keeps the panel on the seat last worked in.
   const activeWorkspaceId = workspace?.id ?? null;
   useEffect(() => {

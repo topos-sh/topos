@@ -98,7 +98,8 @@ fn good_delivery() -> WireDelivery {
         }],
         proposals_awaiting: 1,
         staleness_window_ms: 604_800_000,
-        link_status: "active".into(),
+        session_status: Some("active".into()),
+        link_status: None,
     }
 }
 
@@ -127,12 +128,20 @@ fn delivery_accepts_valid_and_rejects_bad_version_and_schema_version() {
         "schema_version != 1 must be rejected (const)"
     );
 
-    // The device↔workspace link status is REQUIRED on every delivery (a clean wire break).
-    let mut bad = good.clone();
-    bad.as_object_mut().unwrap().remove("link_status");
+    // The SESSION wire: `session_status` carries the standing; the retired `link_status`
+    // spelling is a parse-only fallback — BOTH are optional on the schema (an older producer
+    // omits both, which reads as active-equivalent access).
+    let mut session_only = good.clone();
+    session_only.as_object_mut().unwrap().remove("link_status");
     assert!(
-        !v.is_valid(&bad),
-        "a delivery without link_status must be rejected (required)"
+        v.is_valid(&session_only),
+        "a session-wire delivery (no link_status) must validate"
+    );
+    let mut neither = session_only.clone();
+    neither.as_object_mut().unwrap().remove("session_status");
+    assert!(
+        v.is_valid(&neither),
+        "a legacy delivery omitting both status spellings must validate (defaulted)"
     );
 
     // An unknown extra field is ACCEPTED — schemars sets no `additionalProperties: false`, so the wire

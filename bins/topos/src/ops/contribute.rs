@@ -49,9 +49,10 @@ pub(crate) struct ReviewSend {
     pub reason: Option<String>,
 }
 
-/// Builds the device-signed contribute transport for a plane base URL — known only after reading
-/// `instance.json`, so it can't be pre-built in the composition root (mirrors `invite`'s connector).
-pub(crate) type ContributeConnect<'a> = dyn Fn(&str) -> Box<dyn ContributeSource> + 'a;
+/// Builds the contribute transport for `(base_url, credential)` — the session lane passes the
+/// session's own workspace-scoped credential; `None` keeps the composition root's default.
+pub(crate) type ContributeConnect<'a> =
+    dyn Fn(&str, Option<&str>) -> Box<dyn ContributeSource> + 'a;
 
 /// Mint a client `op_id`: the raw 16 bytes are bound into the signed frame; the canonical hyphenated UUID
 /// rides the wire (the plane re-parses it back to the SAME 16 bytes, so a lost-ack retry replays it).
@@ -244,6 +245,9 @@ fn send_op(
             let candidate = render_candidate(sp, commit_id, bundle_digest)?;
             if matches!(rec.op, OpKind::PublishDirect) {
                 transport.publish(PublishRequest {
+                    // The provenance rides the WAL from the publish verb (the governance-transfer
+                    // path); a record predating the field replays without one.
+                    upstream: rec.upstream.clone(),
                     channel: rec.channel.clone(),
                     workspace_id: rec.workspace_id.clone(),
                     skill_id: rec.skill_id.clone(),
@@ -663,6 +667,7 @@ mod tests {
         let op_id = "c0000000-0000-4000-8000-000000000001".to_owned();
         // A review op needs no candidate render (send_op builds ReviewRequest from the record's fields).
         let rec = OpRecord {
+            upstream: None,
             schema_version: 1,
             op_id: op_id.clone(),
             workspace_id: "w_acme".to_owned(),
@@ -761,6 +766,7 @@ mod tests {
         let op_id = "d0000000-0000-4000-8000-000000000001".to_owned();
         let rec = OpRecord {
             schema_version: 1,
+            upstream: None,
             op_id: op_id.clone(),
             workspace_id: "w_acme".to_owned(),
             skill_id: "s_deploy".to_owned(),

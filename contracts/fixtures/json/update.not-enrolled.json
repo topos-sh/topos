@@ -9,10 +9,10 @@
   "warnings": [],
   "next_actions": [
     {
-      "code": "FOLLOW_WORKSPACE",
+      "code": "LOGIN_WORKSPACE",
       "argv": [
         "topos",
-        "follow",
+        "login",
         "<workspace-address>",
         "--json"
       ],

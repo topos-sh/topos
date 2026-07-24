@@ -21,7 +21,6 @@ use topos_types::results::{
 };
 
 use crate::ctx::Ctx;
-use crate::enroll::{self, FollowEntry, FollowModeDoc};
 use crate::error::ClientError;
 use crate::plane::{CatalogSource, PlaneError};
 use crate::scan;
@@ -102,7 +101,7 @@ pub(crate) struct ListEnrollment {
 pub(crate) struct FollowNote {
     /// `"auto"` / `"confirm-each"`.
     pub mode: &'static str,
-    /// `false` = the entry is retained but unfollowed (`topos follow <skill>` resumes it).
+    /// `false` = the entry is retained but paused (`topos add <skill>` resumes it).
     pub following: bool,
 }
 
@@ -135,18 +134,12 @@ impl ListFilter {
     }
 }
 
-/// Inventory the tracked skills, optionally narrowed to one name and/or with the footprint, and — under
-/// `--remote` ([`RemoteScope`] present) — the followed workspaces' catalogs annotated with local
-/// follow-state (a per-workspace transport fault DEGRADES to a warning, never failing the whole `list`).
-///
-/// The classic single-name entry point — a thin wrapper over [`list_with`] so the inline tests and the
-/// feature-gated e2e rig keep the `Option<&str>` shape. Production (`app.rs`) calls [`list_with`] with the
-/// full filter, so this shim is compiled only for tests / the `test-fixtures` facade.
+/// The test-only single-name shim over [`list_with`] (the inline suites + the e2e rig).
 ///
 /// # Errors
 /// [`ClientError::NoSuchSkill`] / [`ClientError::AmbiguousName`] when a name filter does not resolve to
 /// exactly one skill; otherwise a read failure.
-#[cfg(any(test, feature = "test-fixtures"))]
+#[cfg(test)]
 pub(crate) fn list(
     ctx: &Ctx<'_>,
     skill: Option<&str>,
@@ -189,19 +182,27 @@ pub(crate) fn list_with(
     // the TTY notes — read it once here (absent ⇒ empty, e.g. unenrolled or a membership-only door). We
     // deliberately do NOT consult `ctx.follow`: `list` already keys its followed bucket + notes off this
     // file read, so the per-entry `workspace_id` shares that single authority (they can only agree).
-    let follows = enroll::read_follows(ctx.fs, &ctx.layout)?
-        .map(|f| f.follows)
-        .unwrap_or_default();
-    // The offline signals the SOURCE/STATUS/CAUSE columns read: the stored device credential (its
-    // absence means every followed workspace is signed out here) and the membership labels (the
-    // friendly source name for a followed skill). Both best-effort — absence just narrows what a
-    // column can say.
-    let signed_in = enroll::read_credentials(ctx.fs, &ctx.layout)?.is_some();
-    let labels: HashMap<String, String> = enroll::read_user(ctx.fs, &ctx.layout)?
-        .map(|u| {
-            u.workspaces
-                .into_iter()
-                .map(|m| (m.workspace_id, m.display_name))
+    // The SESSION-model sources: the delivered cache (per-skill workspace provenance + the
+    // followed bucket) and the sessions file (labels + the signed-in state). Both best-effort —
+    // absence just narrows what a column can say.
+    let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
+    let follows: Vec<(String, String, bool)> = cache
+        .workspaces
+        .iter()
+        .flat_map(|(ws, e)| {
+            e.delivered
+                .iter()
+                .map(|(id, d)| (id.clone(), ws.clone(), d.withdrawn))
+        })
+        .collect();
+    let all_sessions = crate::sessions::read_sessions(ctx.fs, &ctx.layout)?;
+    let signed_in = all_sessions.live().count() > 0;
+    let labels: HashMap<String, String> = Some(())
+        .map(|()| {
+            all_sessions
+                .sessions
+                .iter()
+                .map(|s| (s.workspace_id.clone(), s.display_name.clone()))
                 .collect()
         })
         .unwrap_or_default();
@@ -233,8 +234,8 @@ pub(crate) fn list_with(
         let id_str = id.into_string();
         // The skill's follow entry (a retained-but-paused entry still carries its workspace); `None`
         // for a purely local, never-followed `add`'d skill.
-        let follow_entry = follows.iter().find(|f| f.skill_id == id_str);
-        let workspace_id = follow_entry.map(|f| f.workspace_id.clone());
+        let follow_entry = follows.iter().find(|(fid, _, _)| *fid == id_str);
+        let workspace_id = follow_entry.map(|(_, ws, _)| ws.clone());
         // The recorded remote import origin (best-effort — absence means no upstream).
         let origin_host = doc::read_doc::<crate::ops::add::OriginDoc>(ctx.fs, &paths.origin)
             .ok()
@@ -327,50 +328,39 @@ pub(crate) fn list_with(
         tracked = apply_filter(tracked, filter, &sync)?;
     }
 
-    // The enrolled-state disclosure + the followed bucket, from the same docs the pull engine reads.
-    // `instance.json` present = enrolled (its presence is what `follow` writes); `follows.json` may be
-    // absent (a membership-only enrollment). A followed skill always has a sidecar record (`follow` lays
-    // the first-receive baseline), so the followed bucket is the tracked subset its ids select; a
-    // follows entry with no local record (a foreign/partial state) is simply not listable yet.
-    let mut enrollment = match enroll::read_instance(ctx.fs, &ctx.layout)? {
-        None => None,
-        Some(instance) => {
-            let notes: Vec<Option<FollowNote>> = tracked
-                .iter()
-                .map(|(id, _)| {
-                    follows
-                        .iter()
-                        .find(|f| f.skill_id == *id)
-                        .map(|f| FollowNote {
-                            mode: match f.mode {
-                                FollowModeDoc::Auto => "auto",
-                                FollowModeDoc::ConfirmEach => "confirm-each",
-                            },
-                            following: f.following,
-                        })
-                })
-                .collect();
-            // The per-workspace display names now live per-membership in user.json (instance.json is the
-            // plane record only). Carry every membership's `(id, label)` so the TTY groups the tracked rows
-            // by workspace and names each group — one install can follow skills across several workspaces.
-            let workspace_labels = enroll::read_user(ctx.fs, &ctx.layout)?
-                .map(|u| {
-                    u.workspaces
-                        .into_iter()
-                        .map(|m| {
-                            let label = m.display_name;
-                            (m.workspace_id, label)
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            Some(ListEnrollment {
-                workspace_labels,
-                base_url: instance.base_url,
-                hook_active: ctx.harness.trigger_present(),
-                notes,
+    // The connected-state disclosure + the delivered bucket, from the SESSION-model sources: the
+    // sessions file supplies the header (labels + base), the offline delivery cache the per-row
+    // notes (every delivered bundle syncs auto — the consent layer is retired; login accepted).
+    let mut enrollment = if all_sessions.sessions.is_empty() {
+        None
+    } else {
+        let notes: Vec<Option<FollowNote>> = tracked
+            .iter()
+            .map(|(id, _)| {
+                follows
+                    .iter()
+                    .find(|(fid, _, _)| fid == id)
+                    .map(|(_, _, withdrawn)| FollowNote {
+                        mode: "auto",
+                        following: !withdrawn,
+                    })
             })
-        }
+            .collect();
+        let workspace_labels: Vec<(String, String)> = all_sessions
+            .sessions
+            .iter()
+            .map(|s| (s.workspace_id.clone(), s.display_name.clone()))
+            .collect();
+        Some(ListEnrollment {
+            workspace_labels,
+            base_url: all_sessions
+                .sessions
+                .first()
+                .map(|s| s.base_url.clone())
+                .unwrap_or_default(),
+            hook_active: ctx.harness.trigger_present(),
+            notes,
+        })
     };
     let followed: Vec<SkillEntry> = match &enrollment {
         Some(e) => tracked
@@ -485,7 +475,7 @@ pub(crate) fn list_with(
 /// The result is sorted deterministically by `(workspace_id, skill_id)`.
 fn build_remote(
     scope: &RemoteScope<'_>,
-    follows: &[FollowEntry],
+    follows: &[(String, String, bool)],
     local_versions: &HashMap<String, String>,
     warnings: &mut Vec<String>,
 ) -> Vec<RemoteSkillEntry> {
@@ -536,12 +526,12 @@ fn build_remote(
 fn merge_follow_state(
     entry: &WireSkillIndexEntry,
     workspace_id: &str,
-    follows: &[FollowEntry],
+    follows: &[(String, String, bool)],
     local_versions: &HashMap<String, String>,
 ) -> RemoteFollowState {
     let followed = follows
         .iter()
-        .any(|f| f.skill_id == entry.skill_id && f.workspace_id == workspace_id && f.following);
+        .any(|(id, ws, withdrawn)| id == &entry.skill_id && ws == workspace_id && !withdrawn);
     if !followed {
         return RemoteFollowState::Available;
     }
@@ -665,7 +655,7 @@ fn is_draft(ctx: &Ctx<'_>, map_path: &Path, lock: &Lock) -> Result<bool, ClientE
 /// auto follower whose reconcile already applied the update stays `current`; a confirm-each follower with
 /// a pending offer, or any device that has not re-synced since the plane moved, reads `behind`.
 fn derive_columns(
-    follow: Option<&FollowEntry>,
+    follow: Option<&(String, String, bool)>,
     draft: bool,
     origin_host: Option<String>,
     ws_label: Option<&String>,
@@ -690,8 +680,7 @@ fn derive_columns(
         Some(DetachCause::RemovedUpstream)
     } else {
         match follow {
-            Some(f) if f.excluded_here => Some(DetachCause::ExcludedHere),
-            Some(f) if !f.following => Some(DetachCause::Unfollowed),
+            Some((_, _, true)) => Some(DetachCause::RemovedUpstream),
             Some(_) if !has_credential => Some(DetachCause::SignedOut),
             _ => None,
         }
@@ -797,8 +786,6 @@ mod tests {
 
     // 64-char lowercase-hex version ids (the schema-pinned shape).
     const VER_A: &str = "aa"; // repeated ×32 below
-    const VER_B: &str = "bb";
-    const VER_C: &str = "cc";
     const VER_X: &str = "dd";
     const DIGEST: &str = "ee";
 
@@ -850,6 +837,9 @@ mod tests {
             display_name: Some(skill_id.to_owned()),
             updated_at: 1,
             open_proposals: 0,
+            upstream_host: None,
+            upstream_repo: None,
+            upstream_path: None,
         }
     }
 
@@ -871,105 +861,6 @@ mod tests {
             },
         )
         .unwrap();
-    }
-
-    fn follow_entry(skill_id: &str, workspace_id: &str, following: bool) -> FollowEntry {
-        FollowEntry {
-            skill_id: skill_id.to_owned(),
-            workspace_id: workspace_id.to_owned(),
-            mode: FollowModeDoc::Auto,
-            review_required: false,
-            following,
-            excluded_here: false,
-            agents: Vec::new(),
-            excluded_agents: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn remote_merges_follow_state_and_degrades_a_failed_workspace() {
-        let home = scratch("merge");
-        let layout = Layout::new(&home);
-        let fs = RealFs;
-
-        // Local state: two followed skills in w_acme (one on VER_A, one on VER_B); s_docs not followed.
-        lay_skill(&fs, &layout, "s_deploy", "deploy", VER_A);
-        lay_skill(&fs, &layout, "s_runbook", "runbook", VER_B);
-        enroll::write_follows_merged(
-            &fs,
-            &layout,
-            &[
-                follow_entry("s_deploy", "w_acme", true),
-                follow_entry("s_runbook", "w_acme", true),
-            ],
-        )
-        .unwrap();
-
-        // The catalog for w_acme: s_deploy@A (== local → Following), s_docs@X (not followed → Available),
-        // s_runbook@C (!= local B → FollowingBehind). w_beta's read fails (degrades to a warning).
-        let mut ok = HashMap::new();
-        ok.insert(
-            "w_acme".to_owned(),
-            WireSkillIndex {
-                skills: vec![
-                    catalog_entry("s_deploy", VER_A),
-                    catalog_entry("s_docs", VER_X),
-                    catalog_entry("s_runbook", VER_C),
-                ],
-            },
-        );
-        let fake = FakeCatalog {
-            ok,
-            fail: HashSet::from(["w_beta".to_owned()]),
-            calls: RefCell::new(Vec::new()),
-        };
-
-        let ids = RealIds;
-        let clock = RealClock;
-        let plane = InertPlane;
-        let follow = InertFollow;
-        let harness = ClaudeCode::new(scratch("adapter"), &fs);
-        let ctx = Ctx {
-            fs: &fs,
-            ids: &ids,
-            clock: &clock,
-            device_id: String::new(),
-            layout: layout.clone(),
-            harness: &harness,
-            plane: &plane,
-            follow: &follow,
-            roots: None,
-        };
-
-        let scope = RemoteScope {
-            catalog: &fake,
-            memberships: vec![
-                ("w_acme".to_owned(), "Acme".to_owned()),
-                ("w_beta".to_owned(), "Beta".to_owned()),
-            ],
-            only: None,
-        };
-        let out = list(&ctx, None, false, None, Some(scope)).unwrap();
-
-        // Partial results: w_acme's three skills land even though w_beta failed. Sorted by skill_id.
-        let remote = &out.data.remote_available;
-        assert_eq!(remote.len(), 3, "{remote:?}");
-        assert_eq!(remote[0].skill_id, "s_deploy");
-        assert_eq!(remote[0].state, RemoteFollowState::Following);
-        assert_eq!(remote[1].skill_id, "s_docs");
-        assert_eq!(remote[1].state, RemoteFollowState::Available);
-        assert_eq!(remote[2].skill_id, "s_runbook");
-        assert_eq!(remote[2].state, RemoteFollowState::FollowingBehind);
-        assert!(remote.iter().all(|r| r.workspace_id == "w_acme"));
-
-        // The failed workspace degraded to exactly one warning (never failing the whole list).
-        assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
-        assert!(out.warnings[0].contains("Beta"), "{:?}", out.warnings);
-
-        // Both workspaces were read (the transport presents each one's Bearer credential internally).
-        let calls = fake.calls.borrow();
-        assert_eq!(calls.len(), 2);
-        assert!(calls.contains(&"w_acme".to_owned()) && calls.contains(&"w_beta".to_owned()));
     }
 
     #[test]
@@ -1087,225 +978,5 @@ mod tests {
             fake.calls.borrow().is_empty(),
             "no catalog read is attempted when narrowed to a skill"
         );
-    }
-
-    /// A local ctx over `layout` — the offline column/filter derivations need no plane.
-    fn local_ctx<'a>(
-        fs: &'a RealFs,
-        ids: &'a RealIds,
-        clock: &'a RealClock,
-        harness: &'a ClaudeCode,
-        plane: &'a InertPlane,
-        follow: &'a InertFollow,
-        layout: &Layout,
-    ) -> Ctx<'a> {
-        Ctx {
-            fs,
-            ids,
-            clock,
-            device_id: String::new(),
-            layout: layout.clone(),
-            harness,
-            plane,
-            follow,
-            roots: None,
-        }
-    }
-
-    /// Seed one workspace's delivery cache in `sync_status.json` (served version + withdrawn + via).
-    fn seed_delivered(fs: &RealFs, layout: &Layout, ws: &str, entries: &[(&str, DeliveredSkill)]) {
-        crate::sync_status::record(
-            fs,
-            layout,
-            &[(
-                ws.to_owned(),
-                crate::sync_status::WorkspaceSync {
-                    last_delivery_at: Some(1),
-                    staleness_window_ms: 604_800_000,
-                    delivered: entries
-                        .iter()
-                        .map(|(id, d)| ((*id).to_owned(), d.clone()))
-                        .collect(),
-                    ..Default::default()
-                },
-            )],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn offline_behind_and_removed_upstream_come_from_the_delivery_cache() {
-        let home = scratch("cache-cols");
-        let layout = Layout::new(&home);
-        let fs = RealFs;
-        // Two followed skills (auto), a credential present (so neither is "signed out").
-        lay_skill(&fs, &layout, "s_beh", "beh", VER_A); // local applied @A
-        lay_skill(&fs, &layout, "s_gone", "gone", VER_B);
-        enroll::write_follows_merged(
-            &fs,
-            &layout,
-            &[
-                follow_entry("s_beh", "w_acme", true),
-                follow_entry("s_gone", "w_acme", true),
-            ],
-        )
-        .unwrap();
-        enroll::write_credentials(&fs, &layout, "wsc", "dev_1").unwrap();
-        // The cache: `beh` was last served @C (≠ local A → behind); `gone` was withdrawn.
-        seed_delivered(
-            &fs,
-            &layout,
-            "w_acme",
-            &[
-                (
-                    "s_beh",
-                    DeliveredSkill {
-                        served_version: hex(VER_C),
-                        withdrawn: false,
-                        via_channels: vec!["eng".into()],
-                    },
-                ),
-                (
-                    "s_gone",
-                    DeliveredSkill {
-                        withdrawn: true,
-                        ..DeliveredSkill::default()
-                    },
-                ),
-            ],
-        );
-
-        let (ids, clock, harness, plane, follow) = (
-            RealIds,
-            RealClock,
-            ClaudeCode::new(scratch("adapter-cc"), &fs),
-            InertPlane,
-            InertFollow,
-        );
-        let ctx = local_ctx(&fs, &ids, &clock, &harness, &plane, &follow, &layout);
-        let rows = list(&ctx, None, false, None, None).unwrap().data.tracked;
-
-        let beh = rows.iter().find(|e| e.skill == "beh").unwrap();
-        assert_eq!(beh.status, Some(SkillStatus::Behind));
-        assert!(beh.cause.is_none());
-        let gone = rows.iter().find(|e| e.skill == "gone").unwrap();
-        assert_eq!(gone.status, Some(SkillStatus::Detached));
-        assert_eq!(gone.cause, Some(DetachCause::RemovedUpstream));
-    }
-
-    #[test]
-    fn channel_and_skill_selectors_filter_rows_all_or_none() {
-        let home = scratch("filters");
-        let layout = Layout::new(&home);
-        let fs = RealFs;
-        lay_skill(&fs, &layout, "s_deploy", "deploy", VER_A);
-        lay_skill(&fs, &layout, "s_docs", "docs", VER_B);
-        lay_skill(&fs, &layout, "s_lint", "lint", VER_C);
-        enroll::write_follows_merged(
-            &fs,
-            &layout,
-            &[
-                follow_entry("s_deploy", "w_acme", true),
-                follow_entry("s_docs", "w_acme", true),
-                follow_entry("s_lint", "w_acme", true),
-            ],
-        )
-        .unwrap();
-        enroll::write_credentials(&fs, &layout, "wsc", "dev_1").unwrap();
-        // `deploy` + `docs` ride channel `eng`; `lint` rides `release`.
-        seed_delivered(
-            &fs,
-            &layout,
-            "w_acme",
-            &[
-                ("s_deploy", via(&["eng"])),
-                ("s_docs", via(&["eng"])),
-                ("s_lint", via(&["release"])),
-            ],
-        );
-
-        let (ids, clock, harness, plane, follow) = (
-            RealIds,
-            RealClock,
-            ClaudeCode::new(scratch("adapter-f"), &fs),
-            InertPlane,
-            InertFollow,
-        );
-        let ctx = local_ctx(&fs, &ids, &clock, &harness, &plane, &follow, &layout);
-
-        // `--channel eng` keeps deploy + docs, drops lint.
-        let by_channel = list_with(
-            &ctx,
-            &ListFilter {
-                channels: vec!["eng".into()],
-                ..Default::default()
-            },
-            false,
-            None,
-            None,
-            crate::ops::RowPage::unlimited(),
-        )
-        .unwrap()
-        .data
-        .tracked;
-        let names: Vec<&str> = by_channel.iter().map(|e| e.skill.as_str()).collect();
-        assert_eq!(names, vec!["deploy", "docs"]);
-
-        // `--skill deploy --skill lint` keeps exactly those two (a name selector, union).
-        let by_skill = list_with(
-            &ctx,
-            &ListFilter {
-                skills: vec!["deploy".into(), "lint".into()],
-                ..Default::default()
-            },
-            false,
-            None,
-            None,
-            crate::ops::RowPage::unlimited(),
-        )
-        .unwrap()
-        .data
-        .tracked;
-        let names: Vec<&str> = by_skill.iter().map(|e| e.skill.as_str()).collect();
-        assert_eq!(names, vec!["deploy", "lint"]);
-
-        // ALL-OR-NONE: an unknown `--skill` refuses the whole invocation.
-        assert!(matches!(
-            list_with(
-                &ctx,
-                &ListFilter {
-                    skills: vec!["deploy".into(), "ghost".into()],
-                    ..Default::default()
-                },
-                false,
-                None,
-                None,
-                crate::ops::RowPage::unlimited(),
-            ),
-            Err(ClientError::NoSuchSkill { .. })
-        ));
-        // A `--channel` matching no delivered skill is the uniform not-found.
-        assert!(matches!(
-            list_with(
-                &ctx,
-                &ListFilter {
-                    channels: vec!["nope".into()],
-                    ..Default::default()
-                },
-                false,
-                None,
-                None,
-                crate::ops::RowPage::unlimited(),
-            ),
-            Err(ClientError::TargetNotFound { .. })
-        ));
-    }
-
-    fn via(channels: &[&str]) -> DeliveredSkill {
-        DeliveredSkill {
-            served_version: hex(VER_A),
-            withdrawn: false,
-            via_channels: channels.iter().map(|c| (*c).to_owned()).collect(),
-        }
     }
 }

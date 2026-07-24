@@ -72,6 +72,17 @@
       "description": "The skill this op targets — part of the device-op bound identity.",
       "type": "string"
     },
+    "upstream": {
+      "description": "The upstream-provenance block this publish carries (an imported bundle remembers its\norigin) — replayed byte-identical on a crash retry. `None` for local authorship.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WireUpstream"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "workspace_id": {
       "description": "The workspace this op targets — part of the device-op bound identity.",
       "type": "string"
@@ -225,6 +236,45 @@
           "type": "string",
           "const": "NEEDS_REVIEW"
         }
+      ]
+    },
+    "WireUpstream": {
+      "description": "The upstream-provenance block a publish may carry: where the bundle's bytes originally came\nfrom (`host`/`repo`, the in-repo `path`, the imported `commit`, a recorded license). The server\nrecords it as the bundle's upstream link + the version's upstream commit.",
+      "type": "object",
+      "properties": {
+        "commit": {
+          "description": "The upstream commit the imported bytes came from, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "host": {
+          "description": "The origin host (`github.com` — the only recognized value today).",
+          "type": "string"
+        },
+        "license": {
+          "description": "A license identifier/filename recorded at import time, when found.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The bundle's path within the repo (\"\" / absent = the repo root).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repo": {
+          "description": "The `owner/repo` pair.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "repo"
       ]
     }
   }

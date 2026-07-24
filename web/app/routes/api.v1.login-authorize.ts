@@ -1,0 +1,125 @@
+import type { ActionFunctionArgs } from "react-router";
+import { composition } from "@/composition.server";
+import { checkBelt } from "@/lib/api/belt.server";
+import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
+import {
+  LOGIN_FLOW_POLL_INTERVAL_SECS,
+  startLoginFlow,
+  theWorkspace,
+} from "@/lib/db/identity.server";
+import { followBase } from "@/lib/plane/follow-base.server";
+import { isWorkspaceNameShape } from "@/lib/workspace-name";
+
+/**
+ * `POST /api/v1/login/authorize` — begin the gh-style login flow toward ONE workspace named
+ * by its address slug (`LoginStartRequest` → `LoginStartResponse`). A login mints ONE
+ * workspace-scoped session; further workspaces are further logins.
+ *
+ * SINGLE tenancy: an EMPTY `workspace` names "the workspace this origin itself addresses" (the
+ * origin IS its one workspace); a non-empty name must equal this install's workspace, and any
+ * other name answers the uniform 404 — the same body a wrong path gets. The flow row records
+ * the install's workspace name as the slug it targets.
+ *
+ * MULTI tenancy: there is no origin-scoped default, so an empty name stays the uniform miss. A
+ * non-empty name is validated for SHAPE ONLY (the workspace-name rule) — a shape-invalid name
+ * answers the uniform 404 (such a name can never exist), and a shape-valid one MINTS the flow
+ * with the slug recorded, WITHOUT any existence check. Deliberate and load-bearing: this start
+ * is unauthenticated, so it must not be a workspace-existence oracle — and a CLI-first stranger
+ * must be able to start a login toward a workspace they will create mid-flow (the /verify
+ * weave routes a seatless approver through workspace creation and back). Resolution and
+ * authorization happen at APPROVAL, behind a browser session: the approve locks the flow,
+ * resolves the recorded slug, and requires the approver's seat in the resolved workspace.
+ *
+ * No credential yet: this is the flow's unauthenticated start (the belt is its only gate).
+ * The response's `device_code` (the RFC 8628 field name — the gh-proven device-authorization
+ * grant shape) is the polling secret — and, on approval, the session's ONE bearer credential
+ * (promoted server-side; the poll echoes it back from the field the client already holds).
+ */
+const BODY_CAP = 8 * 1024;
+const MAX_REQUESTED_NAME = 200;
+const MAX_INVITE_TOKEN = 512;
+
+export async function action({ request }: ActionFunctionArgs): Promise<Response> {
+  const belted = checkBelt(request);
+  if (belted !== null) {
+    return belted;
+  }
+  if (request.method !== "POST") {
+    return uniformNotFound();
+  }
+  const raw = await readCappedBody(request, BODY_CAP, "login authorize body");
+  if (raw instanceof Response) {
+    return raw;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return badRequest("malformed JSON body");
+  }
+  const body = parsed as { requested_name?: unknown; workspace?: unknown; invite_token?: unknown };
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    typeof body.requested_name !== "string" ||
+    body.requested_name.trim().length === 0 ||
+    body.requested_name.length > MAX_REQUESTED_NAME ||
+    typeof body.workspace !== "string"
+  ) {
+    return badRequest("malformed login authorize body");
+  }
+  // The optional invitation token a `topos login <invite-url>` carries: recorded (as its
+  // hash) UNVALIDATED — this start is unauthenticated and must not be a token oracle. The
+  // approval resolves it under its own fence.
+  if (
+    body.invite_token !== undefined &&
+    (typeof body.invite_token !== "string" ||
+      body.invite_token.length === 0 ||
+      body.invite_token.length > MAX_INVITE_TOKEN)
+  ) {
+    return badRequest("malformed login authorize body: invite_token");
+  }
+
+  let requestedWorkspace: string;
+  if (composition.tenancy === "multi") {
+    // Shape only — existence is deliberately NOT checked here (see the doc comment above).
+    if (body.workspace.length === 0 || !isWorkspaceNameShape(body.workspace)) {
+      return uniformNotFound();
+    }
+    requestedWorkspace = body.workspace;
+  } else {
+    const ws = await theWorkspace();
+    if (ws === null) {
+      return uniformNotFound();
+    }
+    // An empty workspace addresses "the origin's own workspace" — single-tenant only. A
+    // non-empty name must equal this install's workspace.
+    if (body.workspace !== "" && ws.name !== body.workspace) {
+      return uniformNotFound();
+    }
+    requestedWorkspace = ws.name;
+  }
+
+  const flow = await startLoginFlow(
+    body.requested_name.trim(),
+    requestedWorkspace,
+    body.invite_token as string | undefined,
+  );
+  const origin = followBase(request);
+  // The code never enters ANY URL: the CLI prints the bare /verify address and the short code
+  // on separate lines, and the human types the code into the page's POST form.
+  return Response.json({
+    device_code: flow.flowCode,
+    user_code: flow.userCode,
+    verification_uri: `${origin}/verify`,
+    expires_in_secs: flow.expiresInSecs,
+    interval_secs: LOGIN_FLOW_POLL_INTERVAL_SECS,
+  });
+}
+
+/** Any other HTTP method on this served path is the uniform 404 — the door owns it, so a
+ * wrong-method probe answers the same envelope as a miss, never react-router's 400/405 (which
+ * would leak the route's existence and, in dev, a stack). */
+export function loader(): Response {
+  return uniformNotFound();
+}

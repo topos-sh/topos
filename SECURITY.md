@@ -2,22 +2,22 @@
 
 ## Trust model
 
-A behavior you follow is code and prose that runs inside your agent, so integrity and consent are the
+A behavior you receive is code and prose that runs inside your agent, so integrity and consent are the
 whole point of the tool. Topos borrows the trust model of a git host plus CI — nothing new is invented.
 
 - **TLS everywhere; every request is authenticated.** A request is either a signed-in person (a Better
-  Auth session) or an enrolled device (its one bearer credential); the app↔vault internal lane carries its
-  own shared bearer. There are no anonymous requests and no per-skill credentials.
+  Auth session) or a logged-in CLI session (its workspace-scoped bearer credential); the app↔vault internal
+  lane carries its own shared bearer. There are no anonymous requests and no per-skill credentials.
 - **Access is database policy.** Membership is a **seat** row keyed by a person's identity; the seat, its
-  role, and the device rows decide every authorization, re-resolved from the trusted rows on every request
-  (never a caller-asserted id). Revocation is a row change, effective immediately — and a device revoke is
-  **final**, enforced by a database trigger so no ordinary code path can un-revoke it; rotation is revoke +
-  re-enroll.
+  role, and the CLI-session rows decide every authorization, re-resolved from the trusted rows on every
+  request (never a caller-asserted id). Revocation is a row change, effective immediately — an ended
+  session is gone the instant the row commits, severable by both sides (the client's `logout`, the owner's
+  sessions page); rotation is logout + login.
 - **Versions are content-addressed.** A version's identity IS the sha256 of its bytes; what you pin is
   exactly what you get. The client re-verifies the byte-exact digest on every apply, so corruption or
   tampering in transit or storage is structurally visible — a mismatch is a loud integrity error, never a
   silent overwrite.
-- **No anonymous writes.** Every mutation is attributed to a person or device identity and recorded as a
+- **No anonymous writes.** Every mutation is attributed to a person or session identity and recorded as a
   durable receipt plus an audit event, with all-outcome idempotency — a retried write replays its original
   result and never double-applies.
 - **Server-side gates.** Review-required protection, four-eyes approval (a proposer cannot approve their
@@ -26,13 +26,13 @@ whole point of the tool. Topos borrows the trust model of a git host plus CI —
 
 Assurance is **visibility, not cryptography**: an inspectable history, durable receipts, and a one-command
 revert let a team catch and undo a bad change. Topos proves provenance and consent — it does not judge
-whether an approved behavior is safe to run, and a followed behavior runs with your harness's permissions.
+whether an approved behavior is safe to run, and a received behavior runs with your harness's permissions.
 
 ## Identity
 
 There is **one identity**: a person's `user.id`. Email is a mutable attribute and a login name, never an
 authorization key — nothing anywhere compares an email to decide access, so an address change (or a
-lookalike) can never become an authority event. Every seat, device, subscription, and audit row references
+lookalike) can never become an authority event. Every seat, CLI session, profile, and audit row references
 a `user.id`.
 
 Credentials are **hash-stored, and the hash is computed in the database** (Postgres' built-in SHA-256 over
@@ -51,10 +51,10 @@ The ceremonies that mint identity:
   knob. Every other attempt gets one constant, non-enumerating refusal — the same answer whether the
   address is unknown, uninvited, expired, or already taken. The rule runs as a database hook under every
   sign-up path, so a new auth method cannot reopen it by accident.
-- **Device enrollment** is a GitHub-style flow: the CLI prints "open `<origin>/verify` and enter AB12-CD34";
-  the signed-in person approves it with **a plain signed-in accept** — the live session plus the explicit
-  approve click — which mints the device (owned by that person) and its one bearer credential. Revocation is
-  self-service, immediate, and final.
+- **CLI login** is a GitHub-style flow: the CLI prints "open `<origin>/verify` and enter AB12-CD34"; the
+  signed-in person approves it with **a plain signed-in accept** — the live session plus the explicit
+  approve click — which mints the CLI session (user × workspace × installation, owned by that person) and
+  its workspace-scoped bearer credential. Ending it is self-service (client or owner side) and immediate.
 - **Password recovery** sends reset mail when SMTP is armed; a mail-less solo owner runs a one-shot
   container command that prints a single-use recovery code (`web/scripts/mint-recovery-code.mjs`) — machine
   control on the box is the proof.

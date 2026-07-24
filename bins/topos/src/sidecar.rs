@@ -88,8 +88,8 @@ impl Layout {
         self.locks_dir().join(format!("{id}.lock"))
     }
 
-    /// `locks/identity.lock` — the identity/enrollment writer lock (a fixed name, not an id join; the
-    /// device-id mint, the device-key mint, and every `follows.json` read-merge-write serialize on it).
+    /// `locks/identity.lock` — the identity writer lock (a fixed name, not an id join; the host-id
+    /// mint, the login WAL, and every `sessions.json` read-merge-write serialize on it).
     pub(crate) fn identity_lock_file(&self) -> PathBuf {
         self.locks_dir().join("identity.lock")
     }
@@ -114,34 +114,42 @@ impl Layout {
         self.identity_dir().join("host.json")
     }
 
-    /// `instance.json` — the enrolled plane (a home-level enrollment doc).
+    /// `instance.json` — RETIRED (the pre-session pinned-plane doc). Named only so recovery can
+    /// delete a leftover on sight.
     pub(crate) fn instance_path(&self) -> PathBuf {
         self.home.join("instance.json")
     }
 
-    /// `follows.json` — the durable follow-state (a home-level enrollment doc). Pure subscription state
-    /// now (no secret), but still `0600`-written for continuity + perm hygiene (a pre-migration file on
-    /// disk may still hold a legacy `read_token` until the first read rewrites it).
+    /// `follows.json` — RETIRED (the pre-manifest subscription doc). Named only so recovery can
+    /// delete a leftover on sight (an old file may still hold a legacy `read_token`).
     pub(crate) fn follows_path(&self) -> PathBuf {
         self.home.join("follows.json")
     }
 
-    /// `identity/credentials.json` — the device's ONE bearer credential + its registered device id (a
-    /// `0600` secret: the credential authenticates EVERY request in every workspace the person's seats
-    /// reach). Written whole under the identity lock.
+    /// `identity/credentials.json` — RETIRED (the pre-session machine-wide credential doc, a
+    /// secret). Named only so recovery can delete a leftover on sight — a leftover credential is a
+    /// secret with no reader.
     pub(crate) fn credentials_path(&self) -> PathBuf {
         self.identity_dir().join("credentials.json")
     }
 
-    /// `identity/user.json` — the enrolled workspaces' NON-secret metadata (ids / names / enrolled-at).
-    /// Ordinary perms — it carries no secret.
+    /// `identity/sessions.json` — this installation's SESSIONS (one per workspace, each with its
+    /// own workspace-scoped bearer credential). A `0600` secret, written whole under the identity
+    /// lock.
+    pub(crate) fn sessions_path(&self) -> PathBuf {
+        self.identity_dir().join("sessions.json")
+    }
+
+    /// `identity/user.json` — RETIRED (the pre-session workspace-metadata doc). Named only so
+    /// recovery can delete a leftover on sight.
     pub(crate) fn user_path(&self) -> PathBuf {
         self.identity_dir().join("user.json")
     }
 
-    /// `identity/enrollment.json` — the in-flight enrollment WAL (a `0600` secret: it holds the device
-    /// code and, once redeemed, the workspace credential). Present only between `follow <workspace-address>` and a
-    /// completed re-invoked `follow`; swept by recovery once expired-and-unredeemed, deleted on promotion.
+    /// `identity/enrollment.json` — the in-flight LOGIN WAL (a `0600` secret: it holds the flow
+    /// code and, once redeemed, the workspace credential). Present only between
+    /// `login <workspace-address>` and a completed re-invoked `login`; swept by recovery once
+    /// expired-and-unredeemed, deleted on promotion.
     pub(crate) fn enrollment_path(&self) -> PathBuf {
         self.identity_dir().join("enrollment.json")
     }
@@ -158,9 +166,9 @@ impl Layout {
         self.state_dir().join("sync_status.json")
     }
 
-    /// `state/builtin.json` — the built-in `topos` skill's device-local state: the durable
-    /// `remove topos` opt-out + its `--agent` scope. Not a `follows.json` row (the built-in is not
-    /// a subscription; the plane never hears of it).
+    /// `state/builtin.json` — the built-in `topos` skill's machine-local state: the durable
+    /// `remove topos` opt-out + its placement scope. Never a manifest or profile row (the built-in
+    /// is not a subscription; the plane never hears of it).
     pub(crate) fn builtin_state_path(&self) -> PathBuf {
         self.state_dir().join("builtin.json")
     }
@@ -256,12 +264,20 @@ pub(crate) fn recover(fs: &dyn FsOps, layout: &Layout, now_millis: i64) -> Resul
     crate::logfile::repair_torn_tail(fs, &layout.log_path())?;
     crate::enroll::sweep_expired_wal(fs, layout, now_millis)?;
 
-    // Sweep the retired device-keypair seed (`identity/device.key`) a pre-flip install left behind —
-    // nothing reads or mints it any more (a device authenticates with its ONE bearer credential), so a
-    // leftover secret file is deleted on sight.
-    let dead_key = layout.identity_dir().join("device.key");
-    if fs.exists(&dead_key) {
-        fs.remove_file(&dead_key)?;
+    // Sweep the retired device-era identity documents on sight: the keypair seed, the pinned
+    // instance, the device credential, the membership roster, and the subscription file — the
+    // SESSION model (`identity/sessions.json` + manifests + the delivery cache) replaced them
+    // all, and a leftover credential is a secret with no reader.
+    for dead in [
+        layout.identity_dir().join("device.key"),
+        layout.instance_path(),
+        layout.credentials_path(),
+        layout.user_path(),
+        layout.follows_path(),
+    ] {
+        if fs.exists(&dead) {
+            fs.remove_file(&dead)?;
+        }
     }
 
     // Sweep any orphaned op-WAL temp (`ops/<op_id>.json.tmp`) a faulted WAL write left — harmless litter

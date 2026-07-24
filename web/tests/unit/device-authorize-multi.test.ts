@@ -29,7 +29,7 @@ type RouteAction = (a: {
 }) => Promise<Response>;
 
 async function authorize(body: unknown): Promise<Response> {
-  const { action } = await import("@/routes/api.v1.device-authorize");
+  const { action } = await import("@/routes/api.v1.login-authorize");
   return await (action as RouteAction)({
     request: new Request(`${ORIGIN}/api/v1/device/authorize`, {
       method: "POST",
@@ -56,7 +56,7 @@ async function seedWorkspace(id: string, name: string): Promise<void> {
 
 async function flowRow(userCode: string): Promise<{ requested_workspace: string } | undefined> {
   const rows = await db.q<{ requested_workspace: string }>(
-    `SELECT requested_workspace FROM web.device_auth_session WHERE user_code = $1`,
+    `SELECT requested_workspace FROM web.login_flow WHERE user_code = $1`,
     [userCode],
   );
   return rows[0];
@@ -104,68 +104,72 @@ describe("the authorize matrix (multi)", () => {
 });
 
 describe("approval resolves the slug and requires a seat", () => {
-  it("a member of the flow's workspace approves — device + audit land in THAT workspace", async () => {
+  it("a member of the flow's workspace approves — session + audit land in THAT workspace", async () => {
     const identity = await import("@/lib/db/identity.server");
-    const flow = await identity.startDeviceAuth("member-box", "acme");
-    const approved = await identity.approveDeviceAuth(flow.userCode, {
+    const flow = await identity.startLoginFlow("member-box", "acme");
+    const approved = await identity.approveLoginFlow(flow.userCode, {
       userId: "u_in",
       display: "Insider",
     });
     expect(approved).not.toBeNull();
-    const granted = await identity.pollDeviceAuth(flow.deviceCode);
+    const granted = await identity.pollLoginFlow(flow.flowCode);
     expect(granted.status).toBe("granted");
-    const devices = await db.q<{ user_id: string; display_name: string }>(
-      `SELECT user_id, display_name FROM web.device WHERE id = $1`,
-      [approved?.deviceId as string],
+    const sessions = await db.q<{ user_id: string; display_name: string; workspace_id: string }>(
+      `SELECT user_id, display_name, workspace_id FROM web.cli_session WHERE id = $1`,
+      [approved?.sessionId as string],
     );
-    expect(devices[0]).toEqual({ user_id: "u_in", display_name: "member-box" });
+    expect(sessions[0]).toEqual({
+      user_id: "u_in",
+      display_name: "member-box",
+      workspace_id: wsAcme,
+    });
     const audits = await db.q<{ workspace_id: string }>(
-      `SELECT workspace_id FROM web.audit_event WHERE kind = 'device_approved' AND subject = $1`,
-      [approved?.deviceId as string],
+      `SELECT workspace_id FROM web.audit_event WHERE kind = 'session_created' AND subject = $1`,
+      [approved?.sessionId as string],
     );
     expect(audits).toEqual([{ workspace_id: wsAcme }]);
   });
 
   it("a signed-in NON-member's approve (and deny) is the uniform refusal; the flow survives", async () => {
     const identity = await import("@/lib/db/identity.server");
-    const flow = await identity.startDeviceAuth("coveted-box", "acme");
+    const flow = await identity.startLoginFlow("coveted-box", "acme");
     expect(
-      await identity.approveDeviceAuth(flow.userCode, { userId: "u_out", display: "Outsider" }),
+      await identity.approveLoginFlow(flow.userCode, { userId: "u_out", display: "Outsider" }),
     ).toBeNull();
     expect(
-      await identity.denyDeviceAuth(flow.userCode, { userId: "u_out", display: "Outsider" }),
+      await identity.denyLoginFlow(flow.userCode, { userId: "u_out", display: "Outsider" }),
     ).toBe(false);
-    expect((await identity.pollDeviceAuth(flow.deviceCode)).status).toBe("pending");
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("pending");
     // The seated member can still deny it — the refusals consumed nothing.
     expect(
-      await identity.denyDeviceAuth(flow.userCode, { userId: "u_in", display: "Insider" }),
+      await identity.denyLoginFlow(flow.userCode, { userId: "u_in", display: "Insider" }),
     ).toBe(true);
   });
 
   it("a flow naming a NONEXISTENT slug approves null — until the workspace is created mid-flow", async () => {
     const identity = await import("@/lib/db/identity.server");
-    const flow = await identity.startDeviceAuth("first-box", "ghost-team");
+    const flow = await identity.startLoginFlow("first-box", "ghost-team");
     // Nobody can approve a flow whose workspace does not exist — whoever they are.
     expect(
-      await identity.approveDeviceAuth(flow.userCode, { userId: "u_out", display: "Outsider" }),
+      await identity.approveLoginFlow(flow.userCode, { userId: "u_out", display: "Outsider" }),
     ).toBeNull();
-    expect((await identity.pollDeviceAuth(flow.deviceCode)).status).toBe("pending");
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("pending");
 
     // The create-mid-flow ordering: the workspace is born (and the person seated) AFTER the
     // enrollment started; the SAME flow then approves into it.
     await seedWorkspace("w_ghost", "ghost-team");
     await seatUser(db, "w_ghost", "u_out", "owner");
-    const approved = await identity.approveDeviceAuth(flow.userCode, {
+    const approved = await identity.approveLoginFlow(flow.userCode, {
       userId: "u_out",
       display: "Outsider",
     });
     expect(approved).not.toBeNull();
     const audits = await db.q<{ workspace_id: string }>(
-      `SELECT workspace_id FROM web.audit_event WHERE kind = 'device_approved' AND subject = $1`,
-      [approved?.deviceId as string],
+      `SELECT workspace_id FROM web.audit_event WHERE kind = 'session_created' AND subject = $1`,
+      [approved?.sessionId as string],
     );
     expect(audits).toEqual([{ workspace_id: "w_ghost" }]);
-    expect((await identity.pollDeviceAuth(flow.deviceCode)).status).toBe("granted");
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("granted");
   });
 });
 
@@ -176,11 +180,11 @@ describe("the granted poll's workspace decoration", () => {
     // records what it enrolled into from this one field (it keys every subsequent request's
     // {ws} segment and its local enrollment state on it).
     const identity = await import("@/lib/db/identity.server");
-    const { action } = await import("@/routes/api.v1.device-token");
+    const { action } = await import("@/routes/api.v1.login-token");
     await seedWorkspace("w_beta", "beta-team");
     await seatUser(db, "w_beta", "u_in", "member");
-    const flow = await identity.startDeviceAuth("beta-box", "beta-team");
-    const approved = await identity.approveDeviceAuth(flow.userCode, {
+    const flow = await identity.startLoginFlow("beta-box", "beta-team");
+    const approved = await identity.approveLoginFlow(flow.userCode, {
       userId: "u_in",
       display: "Insider",
     });
@@ -190,16 +194,16 @@ describe("the granted poll's workspace decoration", () => {
       request: new Request(`${ORIGIN}/api/v1/device/token`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ device_code: flow.deviceCode }),
+        body: JSON.stringify({ device_code: flow.flowCode }),
       }),
       params: {},
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       status: "granted",
-      credential: flow.deviceCode,
-      device_id: approved?.deviceId,
-      link_status: "active",
+      credential: flow.flowCode,
+      session_id: approved?.sessionId,
+      session_status: "active",
       workspace: { workspace_id: "w_beta", name: "beta-team", display_name: "beta-team" },
     });
   });
@@ -209,11 +213,11 @@ describe("the granted poll's workspace decoration", () => {
     // decoration must follow that id (the current name comes along), not re-resolve the slug —
     // a recreate under the old slug is a row the approval never covered.
     const identity = await import("@/lib/db/identity.server");
-    const { action } = await import("@/routes/api.v1.device-token");
+    const { action } = await import("@/routes/api.v1.login-token");
     await seedWorkspace("w_gamma", "gamma-team");
     await seatUser(db, "w_gamma", "u_in", "member");
-    const flow = await identity.startDeviceAuth("gamma-box", "gamma-team");
-    const approved = await identity.approveDeviceAuth(flow.userCode, {
+    const flow = await identity.startLoginFlow("gamma-box", "gamma-team");
+    const approved = await identity.approveLoginFlow(flow.userCode, {
       userId: "u_in",
       display: "Insider",
     });
@@ -227,7 +231,7 @@ describe("the granted poll's workspace decoration", () => {
       request: new Request(`${ORIGIN}/api/v1/device/token`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ device_code: flow.deviceCode }),
+        body: JSON.stringify({ device_code: flow.flowCode }),
       }),
       params: {},
     });

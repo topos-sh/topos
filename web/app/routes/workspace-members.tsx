@@ -202,7 +202,7 @@ async function revokeInvitationIntent(request: Request, ws: string, formData: Fo
 
 /**
  * Removing a seat is an owner-only guard-gated act: guard → validate the target → the
- * last-owner-fenced removeSeat (which writes the detach records and the audit row in the same
+ * last-owner-fenced removeSeat (which ends the person's sessions and lands the audit row in the same
  * transaction). The peer-facing confirmation is a client-side in-place arm. The target is the
  * seat's USER ID — the one identity — never an email.
  */
@@ -215,7 +215,7 @@ async function removeIntent(request: Request, ws: string, formData: FormData) {
   }
   let outcome: SeatMutationRefusal | "ok";
   try {
-    outcome = await removeSeat(owner, ws, targetUserId, "membership_removed");
+    outcome = await removeSeat(owner, ws, targetUserId);
   } catch {
     await recordAdminEvent(owner, {
       kind: "member_removed",
@@ -284,7 +284,7 @@ async function leaveIntent(request: Request, ws: string) {
   const actor = await requireMember(request, ws);
   let outcome: SeatMutationRefusal | "ok";
   try {
-    outcome = await removeSeat(actor, ws, actor.userId, "membership_removed");
+    outcome = await removeSeat(actor, ws, actor.userId);
   } catch {
     await recordAdminEvent(actor, { kind: "leave", subject: actor.userId, outcome: "error" });
     return { intent: "leave" as const, status: "error" as const };

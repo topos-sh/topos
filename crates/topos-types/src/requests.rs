@@ -1,7 +1,7 @@
-//! Wire request/response DTOs for the product's public device-lane HTTP routes.
+//! Wire request/response DTOs for the product's public session-lane HTTP routes.
 //!
 //! The JSON bodies the app accepts on `publish` / `propose` / `revert` / `review`, the read bodies
-//! (current / version metadata / proposals / catalog / delivery / describe), and the device-auth
+//! (current / version metadata / proposals / catalog / delivery / describe), and the login-flow
 //! start/poll pair. These are **deserialization shapes** only (no logic): the serving tier parses
 //! them into validated domain types at the edge (parse-don't-validate), and every candidate byte is
 //! **server-rehashed** — a client-supplied id or hash is never trusted.
@@ -9,8 +9,8 @@
 //! **No `created_at` on any request.** The server stamps the receipt's time from its own clock; a
 //! client never supplies a wall clock (an ambient time would be a replay / skew lever).
 //!
-//! **The write credential is the device credential in the `Authorization: Bearer` header — never a
-//! body field.** Keeping the secret out of the body keeps it out of receipt request identities and
+//! **The write credential is the session's workspace-scoped credential in the
+//! `Authorization: Bearer` header — never a body field.** Keeping the secret out of the body keeps it out of receipt request identities and
 //! the client's persisted op-WAL, so a credential rotation between retries never breaks
 //! byte-identical replay. The `op` (publish / propose / revert / review-decision) is derived from
 //! the route, never the body.
@@ -118,6 +118,35 @@ pub struct PublishRequest {
     /// publish itself lands catalog-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
+    /// The external-origin provenance this publish carries to the server (a bundle imported from
+    /// GitHub remembers its parent — the fork-that-remembers model). Absent for ordinary local
+    /// authorship. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<WireUpstream>,
+}
+
+/// The upstream-provenance block a publish may carry: where the bundle's bytes originally came
+/// from (`host`/`repo`, the in-repo `path`, the imported `commit`, a recorded license). The server
+/// records it as the bundle's upstream link + the version's upstream commit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireUpstream {
+    /// The origin host (`github.com` — the only recognized value today).
+    pub host: String,
+    /// The `owner/repo` pair.
+    pub repo: String,
+    /// The bundle's path within the repo ("" / absent = the repo root).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The upstream commit the imported bytes came from, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// A license identifier/filename recorded at import time, when found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
 }
 
 /// `POST /v1/proposals` body — opens a proposal (a PR): ingests a full candidate **without moving
@@ -326,6 +355,18 @@ pub struct WireSkillIndexEntry {
     pub updated_at: i64,
     /// The count of OPEN, non-stale proposals on the skill.
     pub open_proposals: u64,
+    /// The recorded upstream origin's host (`github.com` today) — present when the bundle was
+    /// imported from an external source (the fork-that-remembers-its-parent provenance). Lets a
+    /// client suggest the governed copy when the same source is added again. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_host: Option<String>,
+    /// The upstream `owner/repo`. Present exactly when `upstream_host` is. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_repo: Option<String>,
+    /// The subdirectory inside the upstream repo (`""` = the repo root). Present exactly when
+    /// `upstream_host` is. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_path: Option<String>,
 }
 
 /// `GET /v1/workspaces/{ws}/skills` response body — the workspace catalog (every skill holding a `current`),
@@ -458,6 +499,8 @@ pub struct WireDelivery {
     pub skills: Vec<WireDeliverySkill>,
     /// The skill ids the person detached (unfollowed, or lapsed via a channel leave / removal) and that are
     /// NOT currently re-entitled — every device freezes these in place, never cleaning them.
+    /// RETIRED on the session wire (a current server never sends it); defaulted for the transition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detached: Vec<String>,
     /// The skill ids THIS DEVICE excludes ("not on this device") — the third actor in the who-acts
     /// split, alongside the person (`detached`) and upstream (absent from `skills` entirely). The copy
@@ -476,11 +519,27 @@ pub struct WireDelivery {
     /// body must never fail to parse over one new field).
     #[serde(default = "default_staleness_window_ms")]
     pub staleness_window_ms: u64,
-    /// THIS device's link to the workspace — `"active"` or `"pending"`. REQUIRED: the delivery
-    /// answer is meaningless without it (a `"pending"` delivery carries empty `skills` /
-    /// `detached` / `excluded` / `notices` and `proposals_awaiting: 0` — no data flows over a
-    /// pending link; the client skips the workspace quietly and `topos status` shows the wait).
-    pub link_status: String,
+    /// THIS session's standing — `"active"` or `"pending"`. A `"pending"` delivery carries empty
+    /// `skills` / `notices` and `proposals_awaiting: 0` — no data flows over a pending session;
+    /// the client skips the workspace quietly and `topos status` shows the wait. Serde-defaulted
+    /// only so the retired `link_status` spelling still parses during the wire transition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_status: Option<String>,
+    /// RETIRED spelling of [`Self::session_status`] (the device-link wire) — read as a fallback,
+    /// never produced by a current server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_status: Option<String>,
+}
+
+impl WireDelivery {
+    /// The effective session standing: `session_status`, else the retired `link_status` spelling,
+    /// else active (a producer predating both serves only active-equivalent access).
+    #[must_use]
+    pub fn effective_status(&self) -> Option<&str> {
+        self.session_status
+            .as_deref()
+            .or(self.link_status.as_deref())
+    }
 }
 
 /// The default bundle kind — the fallback when a producer predating the catalog `kind` omits it
@@ -534,48 +593,50 @@ pub struct WireAppliedReport {
 }
 
 // =================================================================================================
-// Device-auth request/response DTOs — the gh-style device flow the APP serves (`POST
-// /v1/device/authorize` + `POST /v1/device/token`). A device asks to join a workspace; a signed-in
-// human approves it in the browser; the poll then returns the device's ONE bearer credential.
+// Login-flow request/response DTOs — the gh-style browser-approval flow the APP serves (`POST
+// /v1/login/authorize` + `POST /v1/login/token`; the field names keep their RFC-8628 spellings). An
+// installation asks to log into a workspace; a signed-in human approves it in the browser; the
+// poll then returns the SESSION's workspace-scoped bearer credential.
 //
-// Design fact: on approval the `device_code` itself is PROMOTED to the device's bearer credential
-// server-side (the same sha256 stored twice — once as the flow row's code hash, once as the device
-// credential hash), and the poll's `credential` field carries it back — so the CLI stores ONE secret
-// from ONE field and no second mint/redeem round-trip exists.
+// Design fact: on approval the `device_code` (the flow code) itself is PROMOTED to the session's
+// bearer credential server-side (the same sha256 stored twice — once as the flow row's code hash,
+// once as the session credential hash), and the poll's `credential` field carries it back — so the
+// CLI stores ONE secret from ONE field and no second mint/redeem round-trip exists.
 // =================================================================================================
 
-/// `POST /v1/device/authorize` body — begin a device-authorization flow toward a workspace named by
-/// its address slug. Whether the name exists is never disclosed on this route: an unknown name runs
-/// the same flow to the same uniform denial.
+/// `POST /v1/login/authorize` body — begin a login flow toward a workspace named by its address
+/// slug. Whether the name exists is never disclosed on this route: an unknown name runs the same
+/// flow to the same uniform denial.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct DeviceAuthStartRequest {
-    /// A human-readable device name shown on the approval page (a confused-deputy guard, not
-    /// authority) and kept as the device's display name once approved.
+    /// A human-readable machine name shown on the approval page (a confused-deputy guard, not
+    /// authority) and kept as the session's display name once approved.
     pub requested_name: String,
-    /// The workspace ADDRESS slug the device asks to join (`topos.sh/<name>` minus the origin). An
+    /// The workspace ADDRESS slug the login targets (`topos.sh/<name>` minus the origin). An
     /// EMPTY string names "the workspace the origin itself addresses" (single-tenant installs, where
     /// the origin IS its one workspace); a non-empty value is the address slug as today.
     pub workspace: String,
-    /// The invitation-link token a `follow <invite-url>` enrollment carries. Recorded on the flow
-    /// (as its hash) UNVALIDATED — this unauthenticated start is never a token oracle; the approval
+    /// The invitation-link token a `login <invite-url>` carries. Recorded on the flow (as its
+    /// hash) UNVALIDATED — this unauthenticated start is never a token oracle; the approval
     /// ceremony resolves it and weaves the invitation accept into its own fence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invite_token: Option<String>,
 }
 
-/// `POST /v1/device/authorize` response — the device-authorization grant (RFC-8628-shaped names).
+/// `POST /v1/login/authorize` response — the login-flow grant (RFC-8628-shaped names).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct DeviceAuthStartResponse {
-    /// The SECRET device code the client polls `device/token` with. On approval this same secret is
-    /// promoted to the device's bearer credential (see the module note), so it is stored like one.
+    /// The SECRET flow code the client polls `login/token` with (the RFC-8628 field name). On
+    /// approval this same secret is promoted to the session's bearer credential (see the module
+    /// note), so it is stored like one.
     pub device_code: String,
     /// The short human-facing code the approval page displays (a cross-check, never typed as a
     /// secret).
@@ -589,18 +650,18 @@ pub struct DeviceAuthStartResponse {
     pub interval_secs: u64,
 }
 
-/// `POST /v1/device/token` body — poll a device-authorization flow for its outcome.
+/// `POST /v1/login/token` body — poll a login flow for its outcome.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
     derive(schemars::JsonSchema, utoipa::ToSchema)
 )]
 pub struct DeviceAuthPollRequest {
-    /// The SECRET device code from `device/authorize`.
+    /// The SECRET flow code from `login/authorize`.
     pub device_code: String,
 }
 
-/// A device-authorization poll status (snake_case). `granted` carries the credential + the joined
+/// A login-flow poll status (snake_case). `granted` carries the credential + the joined
 /// workspace; every other status carries only itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(
@@ -615,14 +676,14 @@ pub enum DeviceAuthPollStatus {
     Denied,
     /// The flow expired before approval.
     Expired,
-    /// Approved — `credential`, `device_id`, and `workspace` are present.
+    /// Approved — `credential`, `session_id`, and `workspace` are present.
     Granted,
 }
 
 /// The first-destination HINT an accepted invitation named — decorated onto a `granted` poll (and
-/// the direct-accept answer) so the enrolled client's post-accept subscribe can target it. `kind`
-/// is the bundle catalog's own tag (`skill` today) or the literal `channel` — displayed and routed
-/// on, never trusted as authority.
+/// the direct-accept answer) so the logged-in client's first `add` can target it. `kind` is the
+/// bundle catalog's own tag (`skill` today) or the literal `channel` — displayed and routed on,
+/// never trusted as authority.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -636,7 +697,7 @@ pub struct DeviceAuthHint {
 }
 
 /// The workspace context a `granted` poll carries — everything the CLI needs to record what it
-/// enrolled into (the id it scopes requests by, the address slug it joined at, and a display name).
+/// logged into (the id it scopes requests by, the address slug it joined at, and a display name).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -645,15 +706,16 @@ pub struct DeviceAuthHint {
 pub struct DeviceAuthWorkspace {
     /// The workspace id (the `{ws}` path segment of every subsequent request).
     pub workspace_id: String,
-    /// The workspace's ADDRESS slug (what the human typed at `follow`).
+    /// The workspace's ADDRESS slug (what the human typed at `login`).
     pub name: String,
     /// The workspace's display name.
     pub display_name: String,
 }
 
-/// `POST /v1/device/token` response — the poll `status`; a `granted` poll carries the device's ONE
-/// bearer credential (the promoted device code — returned here and stored from this ONE field),
-/// its device id, and the joined workspace. A re-poll of an approved flow returns the same answer.
+/// `POST /v1/login/token` response — the poll `status`; a `granted` poll carries the SESSION's
+/// workspace-scoped bearer credential (the promoted flow code — returned here and stored from this
+/// ONE field), the session id, and the joined workspace. A re-poll of an approved flow returns the
+/// same answer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -662,13 +724,23 @@ pub struct DeviceAuthWorkspace {
 pub struct DeviceAuthPollResponse {
     /// The poll status.
     pub status: DeviceAuthPollStatus,
-    /// The device's plaintext bearer credential — present ONLY when `status` is `granted`. Returned
-    /// once per poll; the server stores only its sha256.
+    /// The session's plaintext bearer credential — present ONLY when `status` is `granted`.
+    /// Returned once per poll; the server stores only its sha256.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
-    /// The registered device's id — present ONLY when `status` is `granted`.
+    /// The RETIRED device wire's grant id — parse-only fallback for a producer predating
+    /// [`Self::session_id`]; never served by the session wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
+    /// The minted SESSION's id — the session-model login wire's grant half (a session = user ×
+    /// workspace × installation; the credential is workspace-scoped). Present ONLY when `status`
+    /// is `granted` on a session-serving producer. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// The session's born status — `"active"`, or `"pending"` while the workspace's
+    /// session-approval knob holds it. Absent ⇒ treat as active. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_status: Option<String>,
     /// The joined workspace — present ONLY when `status` is `granted`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<DeviceAuthWorkspace>,
@@ -676,10 +748,8 @@ pub struct DeviceAuthPollResponse {
     /// carried an invite token naming one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<DeviceAuthHint>,
-    /// The FIRST device↔workspace link's born status — present ONLY when `status` is `granted`:
-    /// `"active"`, or `"pending"` when the workspace's device-approval knob gated it (approval
-    /// mints the registration and the first link together server-side). Absent on an older
-    /// producer ⇒ treat as `"active"`.
+    /// The RETIRED device-link spelling of [`Self::session_status`] — parse-only fallback for a
+    /// producer predating the session wire. Absent ⇒ treat as `"active"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_status: Option<String>,
 }
@@ -729,113 +799,6 @@ pub struct InvitationData {
     pub invited: Vec<String>,
     /// Whether invitation mail was sent server-side (`true` only when the server can send mail).
     pub mailed: bool,
-}
-
-/// `POST /v1/invitations/accept` body — the ALREADY-ENROLLED device consuming an invite URL: the
-/// bearer credential authenticates the person (seat-LESS by construction — the caller has no seat
-/// in the invitation's workspace yet), and the token names the invitation. The same ceremony
-/// fences as the browser accept apply; an invalid/expired/consumed token answers the uniform 404.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct InviteAcceptRequest {
-    /// The invitation-link token (the mailed single-use secret).
-    pub token: String,
-}
-
-/// `POST /v1/invitations/accept` success `data` — the joined workspace + the optional
-/// first-destination hint the client's post-accept subscribe targets. Nothing lands on any device
-/// from this accept: bytes still move only through the device-side two-phase describe/consent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct InviteAcceptData {
-    /// The workspace the accept seated the person in.
-    pub workspace: DeviceAuthWorkspace,
-    /// The invitation's first-destination hint, when it named one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hint: Option<DeviceAuthHint>,
-    /// The ACCEPTING device's link to the joined workspace — `"active"` or `"pending"` (the accept
-    /// also links the device, born per the workspace's device-approval knob; no exception for
-    /// invitations). Serde-defaulted to `"active"` for a producer predating device links.
-    #[serde(default = "default_link_status")]
-    pub link_status: String,
-}
-
-// =================================================================================================
-// The device-link lane — a device is REGISTERED once (device ↔ server, one browser ceremony ever)
-// and LINKED per workspace (device ↔ workspace, a first-class row, severable by both sides). The
-// browser-free lane below joins an ENROLLED device to a further workspace the person's seats reach:
-// person-scoped (seat checked server-side, no link required), so a second workspace never re-runs
-// the device flow. `DELETE /v1/device` is the global self-revoke (`auth logout`'s one call).
-// =================================================================================================
-
-/// `GET /v1/device/link?workspace=<address-slug>` success `data` — the link DESCRIBE (nothing
-/// mutates): where THIS device stands with the named workspace, and what a link would be born as.
-/// An EMPTY `workspace` value names the origin's own workspace (the same convention as
-/// [`DeviceAuthStartRequest::workspace`]). A seatless caller — or an unknown workspace name,
-/// byte-identically (no existence oracle) — answers the all-outcome envelope's `NOT_A_MEMBER`
-/// refusal pointing at the invitation path.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct DeviceLinkDescribe {
-    /// The workspace id (the `{ws}` path segment a linked device's requests scope by).
-    pub workspace_id: String,
-    /// The workspace's ADDRESS slug.
-    pub name: String,
-    /// The workspace's display name.
-    pub display_name: String,
-    /// The workspace's full address (the share link — server-built).
-    pub address: String,
-    /// The caller's role on the roster (`owner` / `reviewer` / `member`).
-    pub role: String,
-    /// THIS device's current link — `"none"` (no link yet), `"pending"`, or `"active"`.
-    pub link_status: String,
-    /// What a link created NOW would be born as — `"active"`, or `"pending"` when the workspace's
-    /// device-approval knob gates it (owner-created links are always born active).
-    pub born: String,
-}
-
-/// `POST /v1/device/link` body — link THIS device (the Bearer credential's) to a workspace the
-/// person's seats reach, by address slug (empty = the origin's own workspace). Idempotent: an
-/// existing link answers ok with its current status.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct DeviceLinkRequest {
-    /// The workspace ADDRESS slug (empty = the origin's own workspace).
-    pub workspace: String,
-}
-
-/// `POST /v1/device/link` success `data` — the created (or re-affirmed) link: the joined workspace
-/// and the link's status (`"active"`, or `"pending"` awaiting an owner's approval — no data flows
-/// until it turns active). A seatless caller / unknown name answers `NOT_A_MEMBER`, exactly as the
-/// describe does.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    feature = "contract-derives",
-    derive(schemars::JsonSchema, utoipa::ToSchema)
-)]
-pub struct DeviceLinkData {
-    /// The workspace id.
-    pub workspace_id: String,
-    /// The workspace's ADDRESS slug.
-    pub name: String,
-    /// The workspace's display name.
-    pub display_name: String,
-    /// The workspace's full address (server-built).
-    pub address: String,
-    /// The link's status — `"active"` or `"pending"`.
-    pub link_status: String,
 }
 
 // =================================================================================================
@@ -910,11 +873,24 @@ pub struct WireMe {
     /// Who invited this principal (absent for a genesis owner).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invited_by: Option<String>,
-    /// THIS device's link to the workspace — `"active"` or `"pending"` (a pending link awaits an
-    /// owner's approval; no skill data flows over it). Serde-defaulted to `"active"` for schema
-    /// stability: a producer predating device links serves only active-equivalent access.
+    /// THIS session's status — `"active"` or `"pending"` (a pending session awaits an owner's
+    /// approval; no skill data flows over it). The session-wire spelling; read through
+    /// [`Self::effective_status`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_status: Option<String>,
+    /// The RETIRED device-link spelling of the same fact — parse-only fallback for a producer
+    /// predating sessions. Serde-defaulted to `"active"` (such a producer serves only
+    /// active-equivalent access).
     #[serde(default = "default_link_status")]
     pub link_status: String,
+}
+
+impl WireMe {
+    /// The one status read: the session spelling when served, else the legacy `link_status`.
+    #[must_use]
+    pub fn effective_status(&self) -> &str {
+        self.session_status.as_deref().unwrap_or(&self.link_status)
+    }
 }
 
 /// One skill reference inside a channel entry.
@@ -941,12 +917,12 @@ pub struct WireChannelEntry {
     pub name: String,
     /// The channel's mode (`open` or `curated`).
     pub mode: String,
-    /// Whether this is the structural `everyone` (roster-derived membership; cannot be joined or left).
+    /// Whether this is the structural `everyone` (delivered by default; a profile exclude is the
+    /// opt-out).
     pub builtin: bool,
-    /// Whether the CALLER is a member (always `true` on `everyone`).
-    pub member: bool,
-    /// How many people the channel reaches (confirmed roster size for `everyone`).
-    pub member_count: u64,
+    /// Whether the CALLER's profile includes this channel (on `everyone`: whether no exclude
+    /// stands).
+    pub included: bool,
     /// The skills the channel references.
     pub skills: Vec<WireChannelSkill>,
 }
@@ -1131,6 +1107,7 @@ mod tests {
     fn publish_request_round_trips_snake_case_no_created_at() {
         let req = PublishRequest {
             channel: None,
+            upstream: None,
             workspace_id: "w_demo".to_owned(),
             skill_id: "s_prdescribe".to_owned(),
             op_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_owned(),
@@ -1225,6 +1202,8 @@ mod tests {
             status: DeviceAuthPollStatus::Pending,
             credential: None,
             device_id: None,
+            session_id: None,
+            session_status: None,
             workspace: None,
             hint: None,
             link_status: None,
@@ -1239,6 +1218,8 @@ mod tests {
             status: DeviceAuthPollStatus::Granted,
             credential: Some("dc_secret".to_owned()),
             device_id: Some("dev_1".to_owned()),
+            session_id: Some("sn_1".to_owned()),
+            session_status: None,
             workspace: Some(DeviceAuthWorkspace {
                 workspace_id: "w_acme".to_owned(),
                 name: "acme".to_owned(),
@@ -1292,13 +1273,17 @@ mod tests {
             display_name: None,
             updated_at: 1_700_000_000_000,
             open_proposals: 0,
+            upstream_host: None,
+            upstream_repo: None,
+            upstream_path: None,
         };
         let v = serde_json::to_value(&entry).unwrap();
         // The new fields ride under their snake_case spellings.
         assert_eq!(v["name"], "pr-describe");
         assert_eq!(v["status"], "active");
-        // An absent display_name omits (skip_serializing_if).
+        // An absent display_name omits (skip_serializing_if), as do the upstream fields.
         assert!(v.get("display_name").is_none());
+        assert!(v.get("upstream_host").is_none());
         let back: WireSkillIndexEntry = serde_json::from_value(v).unwrap();
         assert_eq!(back.name, "pr-describe");
         assert_eq!(back.status, "active");
@@ -1340,7 +1325,8 @@ mod tests {
             }],
             proposals_awaiting: 2,
             staleness_window_ms: 604_800_000,
-            link_status: "active".to_owned(),
+            session_status: Some("active".to_owned()),
+            link_status: None,
         };
         let v = serde_json::to_value(&delivery).unwrap();
         assert_eq!(v["schema_version"], 1);
@@ -1358,8 +1344,10 @@ mod tests {
         assert!(v["notices"][0].get("message").is_none());
         // The ONE staleness clock rides every delivery.
         assert_eq!(v["staleness_window_ms"], 604_800_000_u64);
-        // The device↔workspace link status is REQUIRED on every delivery.
-        assert_eq!(v["link_status"], "active");
+        // The session status rides every delivery; the legacy link_status spelling omits when
+        // absent (never serialized as null).
+        assert_eq!(v["session_status"], "active");
+        assert!(v.get("link_status").is_none());
         let back: WireDelivery = serde_json::from_value(v).unwrap();
         assert_eq!(back.skills.len(), 1);
         assert_eq!(back.skills[0].via.channels, vec!["everyone".to_owned()]);
@@ -1378,20 +1366,21 @@ mod tests {
         }))
         .unwrap();
         assert!(pending.skills.is_empty() && pending.notices.is_empty());
-        assert_eq!(pending.link_status, "pending");
-        // A delivery WITHOUT the required link_status fails to parse (a clean wire break).
-        assert!(
-            serde_json::from_value::<WireDelivery>(serde_json::json!({
-                "schema_version": 1,
-                "workspace_id": "w_demo",
-                "skills": [],
-                "detached": [],
-                "notices": [],
-                "proposals_awaiting": 0,
-                "staleness_window_ms": 604800000,
-            }))
-            .is_err()
-        );
+        // The retired `link_status` spelling still parses (the transition fallback) …
+        assert_eq!(pending.effective_status(), Some("pending"));
+        // … and the SESSION spelling wins when both are present.
+        let session: WireDelivery = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "workspace_id": "w_demo",
+            "skills": [],
+            "notices": [],
+            "proposals_awaiting": 0,
+            "staleness_window_ms": 604800000,
+            "session_status": "active",
+        }))
+        .unwrap();
+        assert_eq!(session.effective_status(), Some("active"));
+        assert!(session.detached.is_empty(), "defaulted on the session wire");
     }
 
     #[test]
@@ -1451,38 +1440,9 @@ mod tests {
     }
 
     #[test]
-    fn link_lane_bodies_round_trip_and_link_status_defaults_ride_the_legacy_shapes() {
-        // The link DESCRIBE: current status + what a link would be born as.
-        let describe = DeviceLinkDescribe {
-            workspace_id: "w_acme".to_owned(),
-            name: "acme".to_owned(),
-            display_name: "Acme".to_owned(),
-            address: "https://topos.example/acme".to_owned(),
-            role: "member".to_owned(),
-            link_status: "none".to_owned(),
-            born: "pending".to_owned(),
-        };
-        let v = serde_json::to_value(&describe).unwrap();
-        assert_eq!(v["link_status"], "none");
-        assert_eq!(v["born"], "pending");
-        let back: DeviceLinkDescribe = serde_json::from_value(v).unwrap();
-        assert_eq!(back.name, "acme");
-        // The link REQUEST: the address slug alone (empty = the origin's own workspace).
-        let req: DeviceLinkRequest =
-            serde_json::from_value(serde_json::json!({ "workspace": "" })).unwrap();
-        assert_eq!(req.workspace, "");
-        // The link DATA: the joined workspace + the born status.
-        let data = DeviceLinkData {
-            workspace_id: "w_acme".to_owned(),
-            name: "acme".to_owned(),
-            display_name: "Acme".to_owned(),
-            address: "https://topos.example/acme".to_owned(),
-            link_status: "pending".to_owned(),
-        };
-        let v = serde_json::to_value(&data).unwrap();
-        assert_eq!(v["link_status"], "pending");
-        // `WireMe` / `InviteAcceptData` DEFAULT the link status to "active" (schema stability —
-        // a producer predating device links serves only active-equivalent access).
+    fn link_status_defaults_ride_the_legacy_shapes() {
+        // `WireMe` DEFAULTS the link status to "active" (schema stability — a producer predating
+        // the session standing serves only active-equivalent access).
         let me: WireMe = serde_json::from_value(serde_json::json!({
             "workspace_id": "w_acme",
             "name": "acme",
@@ -1493,11 +1453,6 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(me.link_status, "active");
-        let accept: InviteAcceptData = serde_json::from_value(serde_json::json!({
-            "workspace": { "workspace_id": "w_acme", "name": "acme", "display_name": "Acme" },
-        }))
-        .unwrap();
-        assert_eq!(accept.link_status, "active");
         // The granted poll's absent link_status stays absent (an older producer ⇒ treat as active).
         let poll: DeviceAuthPollResponse = serde_json::from_value(serde_json::json!({
             "status": "granted",

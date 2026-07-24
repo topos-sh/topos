@@ -89,12 +89,12 @@ printf '%s' "$card_json" | grep -q '"api_base_url":"http://localhost:3000/api"' 
 [ "$card_json" = "$card_json_deep" ] || { echo "FAIL: JSON card differs between / and a deep path"; exit 1; }
 card_md_root="$(curl -s http://localhost:3000/)"
 card_md_deep="$(curl -s http://localhost:3000/some/deep/path)"
-printf '%s' "$card_md_root" | grep -q 'topos follow' || { echo "FAIL: markdown card missing the follow teaching"; exit 1; }
+printf '%s' "$card_md_root" | grep -q 'topos login' || { echo "FAIL: markdown card missing the login teaching"; exit 1; }
 [ "$card_md_root" = "$card_md_deep" ] || { echo "FAIL: markdown card differs between / and a deep path"; exit 1; }
 echo "PASS: both card faces answer, byte-identical, with the app-rooted api base."
 
-# ── the device lane answers the uniform miss on an unknown credential ────────────────────────────────
-echo "== probing the device lane with an unknown bearer =="
+# ── the session lane answers the uniform miss on an unknown credential ───────────────────────────────
+echo "== probing the session lane with an unknown bearer =="
 lane="$(curl -s -o /dev/null -w '%{http_code}' \
   -H 'Authorization: Bearer smoke-unknown-credential' \
   http://localhost:3000/api/v1/workspaces/ws-smoke-unknown/delivery || true)"
@@ -102,7 +102,7 @@ if [ "$lane" != "404" ]; then
   echo "FAIL: unknown-credential delivery answered '$lane', wanted the uniform 404"
   exit 1
 fi
-echo "PASS: the device lane answers the uniform 404."
+echo "PASS: the session lane answers the uniform 404."
 
 # ── THE CLAIM CEREMONY: the preset code seats a first owner ──────────────────────────────────────────
 echo "== claiming the workspace with the preset setup code =="

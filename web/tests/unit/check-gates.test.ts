@@ -92,7 +92,7 @@ describe("check-boundary self-test", () => {
   it("fires on the custody lane spelled outside app/lib/plane/", () => {
     const app = fixtureApp({
       "routes/rogue.ts":
-        'export function loader() { requireDeviceActor(0); return "/internal/v1/workspaces"; }\n',
+        'export function loader() { requireSessionActor(0); return "/internal/v1/workspaces"; }\n',
     });
     const run = runGate(BOUNDARY, app);
     expect(run.code).toBe(1);

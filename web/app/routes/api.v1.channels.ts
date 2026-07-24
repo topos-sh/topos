@@ -1,7 +1,7 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
-import { requireDeviceActor } from "@/lib/auth/guards.server";
+import { requireSessionActor } from "@/lib/auth/guards.server";
 import { laneChannels } from "@/lib/db/queries.lane.server";
 
 /**
@@ -14,15 +14,15 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
   if (belted !== null) {
     return belted;
   }
-  const actor = await requireDeviceActor(request, params.ws ?? "");
+  const actor = await requireSessionActor(request, params.ws ?? "");
   const channels = await laneChannels(actor);
   const body = {
     channels: channels.map((c) => ({
       name: c.name,
       mode: c.mode,
       builtin: c.builtin,
-      member: c.member,
-      member_count: c.memberCount,
+      included: c.included,
+
       skills: c.skills.map((s) => ({ skill_id: s.skillId, name: s.name })),
     })),
   };

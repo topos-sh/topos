@@ -1,7 +1,7 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
-import { requireDeviceActor } from "@/lib/auth/guards.server";
+import { requireSessionActor } from "@/lib/auth/guards.server";
 import { publishTargetOf } from "@/lib/db/queries.custody.server";
 import { custodyCurrent } from "@/lib/plane/reads.server";
 
@@ -16,7 +16,7 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
   if (belted !== null) {
     return belted;
   }
-  const actor = await requireDeviceActor(request, params.ws ?? "");
+  const actor = await requireSessionActor(request, params.ws ?? "");
   const skillId = params.skill ?? "";
   const target = await publishTargetOf(actor, skillId);
   if (target === undefined || target.status === "deleted") {

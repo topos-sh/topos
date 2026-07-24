@@ -2,7 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
 import { deniedCodeEnvelope, okDataEnvelope } from "@/lib/api/row-envelopes.server";
 import { badRequest, internalError, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
-import { requireDeviceActor } from "@/lib/auth/guards.server";
+import { requireSessionActor } from "@/lib/auth/guards.server";
 import { laneInvite, laneMe } from "@/lib/db/queries.lane.server";
 import { inviteMailDelivery, sendInviteEmail } from "@/lib/mail/invite-mail.server";
 import { agentDocUrl, inviteUrl, workspaceAddress } from "@/lib/ws-url.server";
@@ -57,7 +57,7 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
     return badRequest("an invitation carries at most one first destination — skill OR channel");
   }
 
-  const actor = await requireDeviceActor(request, params.ws ?? "");
+  const actor = await requireSessionActor(request, params.ws ?? "");
   if (!inviteMailDelivery().canSend) {
     return deniedCodeEnvelope("invite", "MAIL_NOT_CONFIGURED");
   }

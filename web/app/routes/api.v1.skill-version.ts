@@ -2,7 +2,7 @@ import type { LoaderFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
 import { HEX_64 } from "@/lib/api/candidate.server";
 import { badRequest, NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
-import { requireDeviceActor } from "@/lib/auth/guards.server";
+import { requireSessionActor } from "@/lib/auth/guards.server";
 import { publishTargetOf } from "@/lib/db/queries.custody.server";
 import { custodyVersionMeta } from "@/lib/plane/reads.server";
 
@@ -21,7 +21,7 @@ export async function loader({ request, params }: LoaderFunctionArgs): Promise<R
   if (!HEX_64.test(versionId)) {
     return badRequest("malformed version id");
   }
-  const actor = await requireDeviceActor(request, params.ws ?? "");
+  const actor = await requireSessionActor(request, params.ws ?? "");
   const target = await publishTargetOf(actor, params.skill ?? "");
   if (target === undefined || target.status === "deleted") {
     return uniformNotFound();

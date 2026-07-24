@@ -1,29 +1,30 @@
 ---
 name: topos
-description: Manage this machine's shared team skills with the topos CLI — see what is managed, update it, follow more, and share local improvements back. Use when asked to set up topos for our team or to share prompts/skills across the team, when editing any skill in a skills directory, when asked about team skills, skill updates, or sharing a skill, when a change to a shared process is worth giving back, or when this session worked something out — a hard-won fix, a corrected approach, a reusable workflow — a teammate could use as a skill. Also use when a team's shared skills are wanted on a machine that does not have topos yet — this skill covers installing it.
+description: Manage this machine's shared team skills with the topos CLI — see what is managed, update it, add more, and share local improvements back. Use when asked to set up topos for our team or to share prompts/skills across the team, when editing any skill in a skills directory, when asked about team skills, skill updates, or sharing a skill, when a change to a shared process is worth giving back, or when this session worked something out — a hard-won fix, a dead end turned working path, a reusable workflow — a teammate could use as a skill. Also use when a team's shared skills are wanted on a machine that does not have topos yet — this skill covers installing it.
 metadata:
   topos: builtin
 ---
 
 # topos — shared skills for every agent on the team
 
-A team publishes skills to a workspace; every enrolled machine converges on the team's current
-version automatically. Skills next to this file may be topos-managed copies: they update on
-their own, and your edits to them are drafts you can share back.
+A team publishes skills to a workspace; every logged-in machine converges on the team's current
+version automatically. What a folder's agents should have is its `topos.toml` manifest (nearest
+one wins, walking up like git); your server-stored profile covers you everywhere else. Skills
+next to this file may be topos-managed copies: they update on their own, and your edits to them
+are drafts you can share back.
 
 Run `topos --version` first. If it is missing, this is a downloaded copy on a machine not yet
 set up: read `INSTALL.md` next to this file, OFFER the install (show the command; run nothing
-until the user says yes), then `topos follow topos --yes` — that yes covers it. The generated
-verb reference is `reference.md` next to this file; `topos <verb> --help` matches it.
+until the user says yes), then `topos add topos` — that adopts this copy. The generated verb
+reference is `reference.md` next to this file; `topos <verb> --help` matches it.
 
 ## Driving the CLI
 
 - Add `--json` to any verb for exactly one machine-readable envelope — never a prompt.
 - topos asks first only when an act REACHES your team, LOSES local work, or TRUSTS something
   new — those verbs are two-phase: bare DESCRIBES (nothing written) and returns the paste-ready
-  `--yes` argv; `--yes` applies. Everything self-scoped and reversible (a skill `unfollow`, a
-  `remove` of a clean followed skill, re-following a skill this machine already trusted, the
-  `--agent` placement scoping) applies immediately and prints its undo — read the receipt's
+  `--yes` argv; `--yes` applies. Everything self-scoped and reversible (an `add`, a `remove` of
+  a clean copy, `login`) applies immediately and prints its undo — read the receipt's
   `undo`/next action to reverse it. Tell the person what changed afterward.
 - Describe once, then act: when a describe matches what the user already asked for, apply
   `--yes` immediately — repeating a describe or survey is never progress. Acting decisively
@@ -38,23 +39,41 @@ verb reference is `reference.md` next to this file; `topos <verb> --help` matche
 ## What is managed here
 
 ```
-topos list --json
+topos status                      # sessions, this folder's manifests, triggers — offline
+topos list --json                 # every tracked skill, with source and status columns
 ```
 
 Rows carry source (workspace address = team-managed, `built-in`, an origin host, `local`) and
-status (`current` / `behind` / `draft` / `detached`, plus the detach cause). Check before
-treating a skill dir as hand-authored — editing a team-managed skill creates a draft, not a
-private fork. `topos list --remote` adds the catalog this machine does not follow yet.
+status (`current` / `behind` / `draft`, plus a cause where one applies). Check before treating
+a skill dir as hand-authored — editing a team-managed skill creates a draft, not a private
+fork. `topos list --remote` adds the connected catalogs this folder does not use yet.
 
 ## Staying current
 
 A session-start trigger runs `topos update --quiet`; `topos update` is the same sweep on
-demand, `topos update <skill>` targets one. Updates never destroy drafts — they merge around
-them; a conflict freezes the copy with a marked way out.
+demand, `topos update <skill>` targets one. The sweep resolves this folder's manifest chain
+plus your profile and converges every placement. Updates never destroy drafts — they merge
+around them; a conflict freezes the copy with a marked way out.
+
+## Adding skills (the manifest is the demand)
+
+```
+topos add <name>                  # a connected catalog's skill, by bare name when unique
+topos add @<workspace>/<name>     # the same, workspace-qualified; pins with @<digest>
+topos add @<workspace>/channels/<name>   # a whole channel
+topos add owner/repo              # import from GitHub (pin rides the manifest)
+topos add ./dir                   # adopt a local folder in place
+topos remove <name>               # the inverse — drops the line, or records an exclude
+```
+
+`add`/`remove` edit the NEAREST `topos.toml` (created at the git root when none exists) and
+deliver immediately; `-g` targets your server-stored profile instead — every machine you are
+logged into converges on it. In a checkout, managed copies land in the project's own agent
+dirs and stay out of commits via `.git/info/exclude`.
 
 ## Sharing an improvement back (do this — it is the point)
 
-An edit to a team-managed skill is a DRAFT ahead of the followed version. Offer to share it:
+An edit to a team-managed skill is a DRAFT ahead of the published version. Offer to share it:
 
 ```
 topos diff <skill>                # what changed vs the team's current
@@ -65,7 +84,9 @@ topos publish --propose <skill>   # always propose (a reviewer approves first)
 `topos review` is the proposal inbox (approve, or reject with a reason). A draft may also stay
 local — divergence is allowed. For a NEW skill, meet the distill bar below, then
 `topos add <dir>` (local, reversible), bare `topos publish <name>` to describe, `--yes` to ship
-(`--to <channel>` places it; a first publish defaults to `everyone`).
+(`--to <channel>` places it; a first publish defaults to `everyone`). A landed publish of a
+local folder moves its governance to the workspace: the manifest line becomes the workspace
+reference, so teammates — and this machine — follow the published skill from then on.
 
 ## Distilling what this session figured out (offer it — once, at a pause)
 
@@ -92,19 +113,18 @@ that must not leave the machine — strip or stop; run the bare `topos publish <
 show its reach and gate line, apply `--yes` only after they agree, with `-m` carrying one honest
 provenance line ("Distilled by <agent> while <what was solved>").
 
-## Following, scoping, removing
+## Sessions (logging in)
 
 ```
-topos follow <skill>              # follow a catalog skill on this machine
-topos follow <server>/<workspace> # join a workspace (first time: browser approval; further
-                                  # workspaces on the same server link with no browser step)
-topos follow <skill> --agent <a>  # place only for specific agents ('*' clears)
-topos remove <skill>              # off THIS machine (the team copy is untouched)
-topos unfollow <skill>            # stop following on every machine of yours
+topos login <server>/<workspace>  # one browser approval mints this machine's session
+topos login <invite-url>          # the invitation mail's terminal line, verbatim
+topos logout [<workspace>|--all]  # end it — skills, drafts, and manifests stay
 ```
 
-People ops (roster, roles, leaving) live in the workspace web app; `topos invite <email>` is
-the one roster verb here.
+Login IS the acceptance: from then on the workspace's deliveries arrive silently. Further
+workspaces are further logins; each session is approved in the browser by you. People ops
+(roster, roles, leaving) live in the workspace web app; `topos invite <email>` is the one
+roster verb here.
 
 ## Setting up topos for a team (no workspace yet)
 
@@ -113,11 +133,11 @@ the only browser moments are theirs:
 
 1. Create the workspace at <https://topos.sh/new> (they sign up and pick a name in the
    browser), or self-host per `INSTALL.md`. The address — `topos.sh/<name>` — is the
-   workspace's one handle: enrollment, invites, and every publish receipt all speak it.
-2. Enroll THIS machine: `topos follow <address>`. Show your human the printed approval URL —
+   workspace's one handle: login, invites, and every publish receipt all speak it.
+2. Log THIS machine in: `topos login <address>`. Show your human the printed approval URL —
    they open it in a browser and approve; never approve in their place. Piped runs print the
-   approval URL and return; re-invoke `follow` to poll, `--wait <seconds>` to block with a cap.
-   Then run the printed `topos follow <address> --yes` — that lands what the workspace offers.
+   approval URL and return; re-invoke `topos login` to poll, `--wait <seconds>` to block with
+   a cap.
 3. Seat teammates: `topos invite <email>` per person (bare describes, `--yes` sends).
 4. Hand each teammate the join line for their own agent — an invite seats them, but only this
    line brings their machine in:
@@ -131,7 +151,7 @@ the only browser moments are theirs:
 ## This skill itself
 
 This bundle rides the binary: re-placed when triggers arm, re-synced every sweep — hand edits
-here are overwritten. A downloaded copy is adopted only by an explicit `topos follow topos
---yes` (a `topos` dir that is not a downloaded copy of this skill stays untouched).
-`topos remove topos --yes` opts this machine out durably; `follow topos --yes` brings it back.
+here are overwritten. A downloaded copy is adopted only by an explicit `topos add topos` (a
+`topos` dir that is not a downloaded copy of this skill stays untouched).
+`topos remove topos --yes` opts this machine out durably; `topos add topos` brings it back.
 The name `topos` is reserved.

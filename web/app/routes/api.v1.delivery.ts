@@ -1,25 +1,24 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
 import { NO_STORE, uniformNotFound } from "@/lib/api/wire.server";
-import { requireDeviceActor } from "@/lib/auth/guards.server";
+import { requireSessionActor } from "@/lib/auth/guards.server";
 import { deliveryFor, emptyDeliveryFor } from "@/lib/db/queries.lane.server";
 
 /**
- * `GET /api/v1/workspaces/{ws}/delivery` — the auto-update answer for ONE enrolled device,
- * assembled in ONE snapshot transaction (the entitled/detached/notices sets can never straddle
- * a subscription change). Per-device, hot, never cacheable. One of the exactly TWO
- * pending-tolerant routes: a PENDING link answers the shape-complete EMPTY body with
- * `link_status` "pending" — no data flows over a pending link, but the client learns its
- * standing instead of a phantom 404.
+ * `GET /api/v1/workspaces/{ws}/delivery` — the person-layer answer for ONE session (the
+ * profile's demand ∩ the seat's entitlement), assembled in ONE snapshot transaction. Per-
+ * session, hot, never cacheable. One of the exactly TWO pending-tolerant routes: a PENDING
+ * session answers the shape-complete EMPTY body with `session_status` "pending" — no data
+ * flows over a pending session, but the client learns its standing instead of a phantom 404.
  */
 export async function loader({ request, params }: LoaderFunctionArgs): Promise<Response> {
   const belted = checkBelt(request);
   if (belted !== null) {
     return belted;
   }
-  const actor = await requireDeviceActor(request, params.ws ?? "", { allowPending: true });
+  const actor = await requireSessionActor(request, params.ws ?? "", { allowPending: true });
   const body =
-    actor.linkStatus === "pending" ? await emptyDeliveryFor(actor) : await deliveryFor(actor);
+    actor.sessionStatus === "pending" ? await emptyDeliveryFor(actor) : await deliveryFor(actor);
   return Response.json(body, { headers: NO_STORE });
 }
 

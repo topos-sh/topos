@@ -127,10 +127,10 @@ fn safety(code: &ActionCode, argv: &[String]) -> Safety {
         // argv (it IS a follow/unfollow/remove invocation) — the same per-verb refinement decides
         // the network story and any caution.
         "UNDO" => apply_described(argv),
-        // The unenrolled dead-ends' join pointer (`topos follow <workspace-address>` — usually a
+        // The unenrolled dead-ends' join pointer (`topos login <workspace-address>` — usually a
         // template whose `needs` names the address): following dials, and a fresh install's
         // follow ENROLLS this device (a credential is stored once the browser approval lands).
-        "FOLLOW_WORKSPACE" => Safety::new(
+        "LOGIN_WORKSPACE" => Safety::new(
             Some(true),
             Some(true),
             Some(
@@ -196,6 +196,23 @@ fn verb(argv: &[String]) -> Option<&str> {
 
 fn has_flag(argv: &[String], flag: &str) -> bool {
     argv.iter().any(|a| a == flag)
+}
+
+/// `add`'s positional SOURCE token: the first non-flag token past the verb, skipping the VALUES
+/// of the value-taking selectors (`-s/--skill`, `-a/--agent`) so a flag's argument is never
+/// mistaken for the source.
+fn add_source_token(argv: &[String]) -> Option<&str> {
+    let mut it = argv.iter().skip(2);
+    while let Some(t) = it.next() {
+        match t.as_str() {
+            "-s" | "--skill" | "-a" | "--agent" => {
+                let _ = it.next();
+            }
+            t if t.starts_with('-') => {}
+            t => return Some(t),
+        }
+    }
+    None
 }
 
 /// Whether a `FETCH_FULL_DIFF` argv reaches the plane: a bare `topos diff <skill>` is the local
@@ -269,8 +286,24 @@ fn apply_described(argv: &[String]) -> Safety {
                 "removes the skill from this machine (a followed skill keeps its canonical bytes)",
             ),
         ),
-        // Local-only applies.
-        Some("add") => (Some(false), None),
+        // `add -g` writes the server-stored profile — networked whatever the target. Otherwise
+        // the FIRST non-flag token decides by shape: a WORKSPACE reference (`@ws/name`) resolves
+        // the catalog and delivers over the wire; a PATH adopts offline; everything else (a bare
+        // name, a canonical host ref, an `owner/repo` import) is unknowable from the argv alone,
+        // so its network story is honestly absent.
+        Some("add") if has_flag(argv, "-g") || has_flag(argv, "--global") => (Some(true), None),
+        Some("add") => match add_source_token(argv) {
+            Some(t) if t.starts_with('@') => (Some(true), None),
+            Some(t)
+                if t.starts_with("./")
+                    || t.starts_with("../")
+                    || t.starts_with('/')
+                    || t.starts_with('~') =>
+            {
+                (Some(false), None)
+            }
+            _ => (None, None),
+        },
         Some("uninstall") => (
             Some(false),
             Some("deletes the ~/.topos sidecar tree (the stored credential goes with it)"),
@@ -309,8 +342,8 @@ mod tests {
         // A template argv declares its holes — whole-token and embedded placeholders alike,
         // deduped in first-appearance order.
         let template = next_action(
-            ActionCode::from("FOLLOW_WORKSPACE".to_owned()),
-            argv(&["topos", "follow", "<workspace-address>", "--json"]),
+            ActionCode::from("LOGIN_WORKSPACE".to_owned()),
+            argv(&["topos", "login", "<workspace-address>", "--json"]),
         );
         assert_eq!(template.needs, vec!["workspace-address"]);
         let embedded = next_action(
@@ -334,8 +367,8 @@ mod tests {
     #[test]
     fn the_join_and_sign_in_codes_carry_their_classification() {
         let follow = next_action(
-            ActionCode::from("FOLLOW_WORKSPACE".to_owned()),
-            argv(&["topos", "follow", "<workspace-address>", "--json"]),
+            ActionCode::from("LOGIN_WORKSPACE".to_owned()),
+            argv(&["topos", "login", "<workspace-address>", "--json"]),
         );
         assert_eq!(
             (follow.mutates, follow.needs_network),
@@ -413,6 +446,43 @@ mod tests {
         );
         assert_eq!(plane.needs_network, Some(true));
         assert_eq!(plane.mutates, Some(false));
+    }
+
+    #[test]
+    fn add_network_follows_the_target_shape() {
+        // A workspace reference resolves + delivers over the wire; a path adopts offline; a
+        // bare name (catalog vs local discovery) is honestly unknown.
+        let ws = next_action(
+            ActionCode::from("UNDO".to_owned()),
+            argv(&["topos", "add", "@acme/deploy"]),
+        );
+        assert_eq!(ws.needs_network, Some(true));
+        let path = next_action(
+            ActionCode::from("UNDO".to_owned()),
+            argv(&["topos", "add", "./deploy"]),
+        );
+        assert_eq!(path.needs_network, Some(false));
+        let bare = next_action(
+            ActionCode::from("UNDO".to_owned()),
+            argv(&["topos", "add", "deploy"]),
+        );
+        assert_eq!(bare.needs_network, None);
+        // A selector's VALUE is never mistaken for the source; `-g` is networked regardless.
+        let flagged = next_action(
+            ActionCode::from("UNDO".to_owned()),
+            argv(&["topos", "add", "--skill", "deploy", "@acme/foo"]),
+        );
+        assert_eq!(flagged.needs_network, Some(true));
+        let flagged_path = next_action(
+            ActionCode::from("UNDO".to_owned()),
+            argv(&["topos", "add", "-a", "cursor", "./deploy"]),
+        );
+        assert_eq!(flagged_path.needs_network, Some(false));
+        let global = next_action(
+            ActionCode::from("UNDO".to_owned()),
+            argv(&["topos", "add", "-g", "deploy"]),
+        );
+        assert_eq!(global.needs_network, Some(true));
     }
 
     #[test]

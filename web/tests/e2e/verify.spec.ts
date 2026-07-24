@@ -3,44 +3,44 @@ import { MEMBER_EMAIL, WORKSPACE_ADDRESS } from "./env";
 import { adminQuery } from "./seed";
 
 /**
- * The gh-style DEVICE-APPROVE ceremony end to end, over the TWO-STATE /verify page: the CLI half
- * is the real `/api/v1/device/*` flow (start → poll), the browser half is /verify — a signed-in
+ * The gh-style LOGIN-APPROVE ceremony end to end, over the TWO-STATE /verify page: the CLI half
+ * is the real `/api/v1/login/*` flow (start → poll), the browser half is /verify — a signed-in
  * person TYPES the short user code into a POST lookup form (the code never rides a URL anymore),
- * sees exactly what is asking and everywhere the credential will reach, and approves with a PLAIN
- * ACCEPT (a live session plus the explicit click mints a credential that acts as them) or denies.
- * Terminal poll answers are delivered ONCE.
+ * sees exactly what is asking and THE ONE workspace the session will reach, and approves with a
+ * PLAIN ACCEPT (a live browser session plus the explicit click mints a workspace-scoped
+ * credential that acts as them) or denies. Terminal poll answers repeat until the sweep.
  *
  * Runs with the suite's default storage state (the claimed owner) except the signed-out leg.
  */
 
 test.describe.configure({ mode: "serial" });
 
-interface DeviceFlowStart {
+interface LoginFlowStart {
   device_code: string;
   user_code: string;
   /** The whole start response — asserted against for the retired code-embedding URL. */
   raw: Record<string, unknown>;
 }
 
-async function startDeviceFlow(page: Page, requestedName: string): Promise<DeviceFlowStart> {
-  const response = await page.request.post("/api/v1/device/authorize", {
+async function startLoginFlow(page: Page, requestedName: string): Promise<LoginFlowStart> {
+  const response = await page.request.post("/api/v1/login/authorize", {
     data: { requested_name: requestedName, workspace: WORKSPACE_ADDRESS },
   });
-  expect(response.ok(), `device authorize failed: ${response.status()}`).toBe(true);
+  expect(response.ok(), `login authorize failed: ${response.status()}`).toBe(true);
   const raw = (await response.json()) as Record<string, unknown>;
   return { device_code: String(raw.device_code), user_code: String(raw.user_code), raw };
 }
 
-async function pollDeviceFlow(
+async function pollLoginFlow(
   page: Page,
   deviceCode: string,
 ): Promise<{
   status: string;
   credential?: string;
-  device_id?: string;
+  session_id?: string;
   workspace?: { name: string };
 }> {
-  const response = await page.request.post("/api/v1/device/token", {
+  const response = await page.request.post("/api/v1/login/token", {
     data: { device_code: deviceCode },
   });
   expect(response.ok()).toBe(true);
@@ -73,14 +73,14 @@ test.describe("signed out", () => {
 
 test("an unknown code is an honest in-page state, never a 404", async ({ page }) => {
   await lookUp(page, "ZZZZ-9999");
-  await expect(page.getByRole("heading", { name: "Approve a device" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Approve a login" })).toBeVisible();
   await expect(page.getByText("No pending request for that code")).toBeVisible();
 });
 
 test("approve is a plain signed-in accept: the click mints the credential the poll delivers", async ({
   page,
 }) => {
-  const flow = await startDeviceFlow(page, "e2e-laptop");
+  const flow = await startLoginFlow(page, "e2e-laptop");
   // The reworked start: the code never enters ANY URL — the retired `verification_uri_complete`
   // (which embedded the code in a GET) is gone, and `verification_uri` is the bare /verify page.
   expect(flow.raw.verification_uri_complete).toBeUndefined();
@@ -88,7 +88,7 @@ test("approve is a plain signed-in accept: the click mints the credential the po
   expect(String(flow.raw.verification_uri)).not.toContain("code");
 
   // Before approval the terminal's poll is still pending.
-  expect((await pollDeviceFlow(page, flow.device_code)).status).toBe("pending");
+  expect((await pollLoginFlow(page, flow.device_code)).status).toBe("pending");
 
   await lookUp(page, flow.user_code);
   // The resolved request names what is asking, honestly (the name also rides the approve button's
@@ -96,56 +96,57 @@ test("approve is a plain signed-in accept: the click mints the credential the po
   // names THE ONE workspace being linked — the grant IS one link, and the card says further
   // workspaces each take their own.
   await expect(page.getByText("“e2e-laptop”", { exact: true })).toBeVisible();
-  await expect(page.getByText("wants to act as you", { exact: false })).toBeVisible();
+  await expect(page.getByText("wants to log in as you", { exact: false })).toBeVisible();
   await expect(page.getByText(flow.user_code, { exact: false }).first()).toBeVisible();
-  await expect(page.getByText("Approving links it to", { exact: false })).toBeVisible();
+  await expect(page.getByText("Approving logs it into", { exact: false })).toBeVisible();
   await expect(
-    page.getByText("further workspace takes its own explicit link", { exact: false }),
+    page.getByText("Any further workspace is its own login", { exact: false }),
   ).toBeVisible();
 
   // A plain signed-in accept — the click alone mints the credential; approval needs no extra
   // confirmation.
   await page.getByRole("button", { name: "Approve “e2e-laptop”" }).click();
-  await expect(page.getByRole("heading", { name: "Device connected" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Logged in" })).toBeVisible();
 
   // The poll delivers the grant: the presented device_code IS the promoted credential.
-  const granted = await pollDeviceFlow(page, flow.device_code);
+  const granted = await pollLoginFlow(page, flow.device_code);
   expect(granted.status).toBe("granted");
   expect(granted.credential).toBe(flow.device_code);
   expect(granted.workspace?.name).toBe(WORKSPACE_ADDRESS);
 
-  // The minted device row: owned by the approver, named as requested, hash-stored credential.
+  // The minted session row: owned by the approver, named as requested, hash-stored credential.
   const rows = await adminQuery<{ id: string; display_name: string; email: string }>(
-    `select d.id, d.display_name, u.email from web.device d join web."user" u on u.id = d.user_id
-     where d.id = $1`,
-    [granted.device_id],
+    `select s.id, s.display_name, u.email
+     from web.cli_session s join web."user" u on u.id = s.user_id
+     where s.id = $1`,
+    [granted.session_id],
   );
   expect(rows[0]?.display_name).toBe("e2e-laptop");
   expect(rows[0]?.email).toBe(MEMBER_EMAIL);
 
   // The grant REPEATS (idempotent): a re-poll after a crash re-delivers the same credential, so
   // a client that crashed before persisting recovers by polling again.
-  const rePoll = await pollDeviceFlow(page, flow.device_code);
+  const rePoll = await pollLoginFlow(page, flow.device_code);
   expect(rePoll.status).toBe("granted");
   expect(rePoll.credential).toBe(flow.device_code);
 });
 
 test("deny destroys the pending request and mints nothing", async ({ page }) => {
-  const flow = await startDeviceFlow(page, "e2e-stranger");
+  const flow = await startLoginFlow(page, "e2e-stranger");
   await lookUp(page, flow.user_code);
   await expect(page.getByText("“e2e-stranger”", { exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "Deny — this isn’t my device" }).click();
+  await page.getByRole("button", { name: "Deny — this isn’t me" }).click();
   await expect(page.getByRole("heading", { name: "Request denied" })).toBeVisible();
 
-  // The device learns the denial on its next poll — repeatably (terminal answers are delivered
+  // The machine learns the denial on its next poll — repeatably (terminal answers are delivered
   // idempotently until the expiry sweep reaps the row).
-  expect((await pollDeviceFlow(page, flow.device_code)).status).toBe("denied");
-  expect((await pollDeviceFlow(page, flow.device_code)).status).toBe("denied");
+  expect((await pollLoginFlow(page, flow.device_code)).status).toBe("denied");
+  expect((await pollLoginFlow(page, flow.device_code)).status).toBe("denied");
 
   // Nothing was minted for the denied request.
   const rows = await adminQuery<{ n: string }>(
-    `select count(*)::text as n from web.device where display_name = 'e2e-stranger'`,
+    `select count(*)::text as n from web.cli_session where display_name = 'e2e-stranger'`,
   );
   expect(rows[0]?.n).toBe("0");
 });

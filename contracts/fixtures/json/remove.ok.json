@@ -6,19 +6,16 @@
     "applied": true,
     "items": [
       {
-        "agent_dirs": [
-          "~/.claude/skills/deploy"
-        ],
         "bytes_kept": true,
-        "kind": "followed-exclusion",
-        "name": "deploy",
-        "workspace_id": "w_acme"
+        "kind": "manifest-removed",
+        "manifest": "./topos.toml",
+        "name": "deploy"
       }
     ],
     "undo": [
       "topos",
-      "follow",
-      "acme/skills/deploy"
+      "add",
+      "@acme/deploy"
     ]
   },
   "warnings": [],
@@ -27,8 +24,8 @@
       "code": "UNDO",
       "argv": [
         "topos",
-        "follow",
-        "acme/skills/deploy"
+        "add",
+        "@acme/deploy"
       ],
       "mutates": true,
       "needs_network": true

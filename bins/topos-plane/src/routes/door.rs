@@ -5,22 +5,20 @@
 //! artifact whichever tier serves an operation. The stub bodies never run and nothing routes to
 //! them.
 //!
-//! The lane: the gh-style device-auth start/poll (enrollment — on approval the device code is
-//! promoted to the device's ONE bearer credential and the FIRST device↔workspace link is minted
-//! with it), the browser-free device-link lane (describe + create; person-scoped) and the global
-//! device self-revoke, the publish/propose/revert/review writes, the
-//! current/version/object/catalog/proposals reads, the delivery + applied-state report, the
-//! describe reads (me / channels / reach / review inbox / log), and the row ops (follows /
-//! exclusions / channel membership + curation / protection / notices-ack / invitations).
+//! The lane: the RFC-8628-shaped login start/poll (on approval the flow code is promoted to the
+//! SESSION's workspace-scoped bearer credential), the session self-end, the
+//! publish/propose/revert/review writes, the current/version/object/catalog/proposals reads, the
+//! delivery + applied-state report, the describe reads (me / channels / reach / review inbox /
+//! log), and the row ops (the server-stored profile / channel curation / protection / notices-ack
+//! / invitations).
 
 #![allow(dead_code)] // contract-only: referenced by the OpenAPI derive, routed by the web app.
 
 use topos_types::requests::{
     DeviceAuthPollRequest, DeviceAuthPollResponse, DeviceAuthStartRequest, DeviceAuthStartResponse,
-    DeviceLinkRequest, InvitationRequest, InviteAcceptRequest, NoticeAckRequest, ProposeRequest,
-    ProtectionSetRequest, PublishRequest, RevertRequest, ReviewRequest, WireAppliedReport,
-    WireChannelIndex, WireDelivery, WireMe, WireProposalIndex, WireProposalList, WireReach,
-    WireSkillIndex, WireSkillLog, WireVersionMeta,
+    InvitationRequest, NoticeAckRequest, ProposeRequest, ProtectionSetRequest, PublishRequest,
+    RevertRequest, ReviewRequest, WireAppliedReport, WireChannelIndex, WireDelivery, WireMe,
+    WireProposalIndex, WireProposalList, WireReach, WireSkillIndex, WireSkillLog, WireVersionMeta,
 };
 use topos_types::{JsonEnvelope, WireCurrentRecord};
 
@@ -78,93 +76,76 @@ pub(crate) fn get_reach() {}
 
 #[utoipa::path(
     put,
-    path = "/v1/workspaces/{ws}/follows/{skill}",
-    tag = "writes",
+    path = "/v1/workspaces/{ws}/profile/skills/{skill}",
+    tag = "rows",
     params(
-        ("ws" = String, Path, description = "Workspace id."),
-        ("skill" = String, Path, description = "The skill's immutable id to direct-follow (the client resolves the address to it)."),
-        ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
+        ("ws" = String, Path, description = "The workspace id."),
+        ("skill" = String, Path, description = "The skill's immutable id to include in the caller's server-stored profile (the `-g` manifest layer). An optional JSON body `{\"pin\": \"<64-hex>\"}` pins the version."),
+        ("Authorization" = String, Header, description = "`Bearer <session credential>`."),
     ),
     responses(
-        (status = 200, description = "The subscription outcome (followed, or a 200 DENIED SKILL_NOT_ACTIVE).", body = JsonEnvelope),
-        (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 200, description = "The all-outcome envelope: the profile row is present (idempotent — re-including converges, a new pin replaces the old).", body = JsonEnvelope),
+        (status = 400, description = "Malformed pin.", body = JsonEnvelope),
+        (status = 404, description = "Missing/blank credential, an ended session, or an unknown skill (indistinguishable).", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
 )]
-pub(crate) fn follow_skill() {}
+pub(crate) fn profile_include_skill() {}
 
 #[utoipa::path(
     delete,
-    path = "/v1/workspaces/{ws}/follows/{skill}",
-    tag = "writes",
+    path = "/v1/workspaces/{ws}/profile/skills/{skill}",
+    tag = "rows",
     params(
-        ("ws" = String, Path, description = "Workspace id."),
-        ("skill" = String, Path, description = "The skill's immutable id to unfollow (person-scoped negative mask)."),
-        ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
+        ("ws" = String, Path, description = "The workspace id."),
+        ("skill" = String, Path, description = "The skill's immutable id to drop from the caller's server-stored profile."),
+        ("Authorization" = String, Header, description = "`Bearer <session credential>`."),
     ),
     responses(
-        (status = 200, description = "The subscription outcome (unfollowed, or a 200 DENIED SKILL_NOT_ACTIVE).", body = JsonEnvelope),
-        (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 200, description = "The all-outcome envelope; `data.status` names HOW the removal settled — `removed` (the row is gone), `excluded` (the skill still arrives via a channel, so the profile records the negative stance instead), or `not_in_profile` (nothing to remove).", body = JsonEnvelope),
+        (status = 404, description = "Missing/blank credential, an ended session, or an unknown skill (indistinguishable).", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
 )]
-pub(crate) fn unfollow_skill() {}
+pub(crate) fn profile_remove_skill() {}
 
 #[utoipa::path(
     put,
-    path = "/v1/workspaces/{ws}/exclusions/{skill}",
-    tag = "writes",
+    path = "/v1/workspaces/{ws}/profile/channels/{ch}",
+    tag = "rows",
     params(
-        ("ws" = String, Path, description = "Workspace id."),
-        ("skill" = String, Path, description = "The followed skill's immutable id to exclude from THIS device."),
-        ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
+        ("ws" = String, Path, description = "The workspace id."),
+        ("ch" = String, Path, description = "The channel name to include in the caller's server-stored profile."),
+        ("Authorization" = String, Header, description = "`Bearer <session credential>`."),
     ),
     responses(
-        (status = 200, description = "The subscription outcome (excluded, or a 200 DENIED SKILL_NOT_ACTIVE).", body = JsonEnvelope),
-        (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 200, description = "The all-outcome envelope: the profile row is present (idempotent).", body = JsonEnvelope),
+        (status = 404, description = "Missing/blank credential, an ended session, or an unknown channel (indistinguishable).", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
 )]
-pub(crate) fn exclude_device() {}
-
-#[utoipa::path(
-    put,
-    path = "/v1/workspaces/{ws}/channels/{ch}/membership",
-    tag = "writes",
-    params(
-        ("ws" = String, Path, description = "Workspace id."),
-        ("ch" = String, Path, description = "The channel name to join."),
-        ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
-    ),
-    responses(
-        (status = 200, description = "The membership outcome (joined, or a 200 DENIED CHANNEL_BUILTIN for `everyone`).", body = JsonEnvelope),
-        (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
-        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
-        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
-    ),
-)]
-pub(crate) fn channel_join() {}
+pub(crate) fn profile_include_channel() {}
 
 #[utoipa::path(
     delete,
-    path = "/v1/workspaces/{ws}/channels/{ch}/membership",
-    tag = "writes",
+    path = "/v1/workspaces/{ws}/profile/channels/{ch}",
+    tag = "rows",
     params(
-        ("ws" = String, Path, description = "Workspace id."),
-        ("ch" = String, Path, description = "The channel name to leave."),
-        ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
+        ("ws" = String, Path, description = "The workspace id."),
+        ("ch" = String, Path, description = "The channel name to drop from the caller's server-stored profile."),
+        ("Authorization" = String, Header, description = "`Bearer <session credential>`."),
     ),
     responses(
-        (status = 200, description = "The membership outcome (left / not_member, or a 200 DENIED CHANNEL_BUILTIN for `everyone`).", body = JsonEnvelope),
-        (status = 404, description = "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).", body = JsonEnvelope),
+        (status = 200, description = "The all-outcome envelope; `data.status` mirrors the skill route's removal outcomes.", body = JsonEnvelope),
+        (status = 404, description = "Missing/blank credential, an ended session, or an unknown channel (indistinguishable).", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
 )]
-pub(crate) fn channel_leave() {}
+pub(crate) fn profile_remove_channel() {}
 
 #[utoipa::path(
     put,
@@ -318,51 +299,35 @@ pub(crate) fn get_delivery() {}
 )]
 pub(crate) fn put_report() {}
 
-// ── the device-auth flow (enrollment — the app serves it; the vault never sees this lane) ───────
+// ── the login flow (SESSION minting — the app serves it; the vault never sees this lane) ───────
 
 #[utoipa::path(
     post,
-    path = "/v1/device/authorize",
+    path = "/v1/login/authorize",
     tag = "enrollment",
     request_body = DeviceAuthStartRequest,
     responses(
-        (status = 200, description = "The device-authorization grant: the secret device_code to poll with (promoted to the device's ONE bearer credential on approval), the human-facing user_code, and the BARE approval URL (the code never rides a URL; the approval page's lookup is a POST). An invite_token in the body is recorded on the flow unvalidated — never a token oracle.", body = DeviceAuthStartResponse),
+        (status = 200, description = "The login-flow grant (RFC-8628-shaped): the secret device_code to poll with (promoted to the SESSION's workspace-scoped bearer credential on approval), the human-facing user_code, and the BARE approval URL (the code never rides a URL). An invite_token in the body is recorded on the flow unvalidated — never a token oracle.", body = DeviceAuthStartResponse),
         (status = 400, description = "Malformed body.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Internal fault.", body = JsonEnvelope),
     ),
 )]
-pub(crate) fn device_auth_start() {}
+pub(crate) fn login_authorize() {}
 
 #[utoipa::path(
     post,
-    path = "/v1/device/token",
+    path = "/v1/login/token",
     tag = "enrollment",
     request_body = DeviceAuthPollRequest,
     responses(
-        (status = 200, description = "The poll status; `granted` carries the ONE bearer credential (the promoted device code), the device id, the joined workspace, and — when the flow carried an invitation naming one — the first-destination hint.", body = DeviceAuthPollResponse),
+        (status = 200, description = "The poll status; `granted` carries the minted SESSION's credential (the promoted flow code), the session id + status, the joined workspace, and — when the flow carried an invitation naming one — the first-destination hint.", body = DeviceAuthPollResponse),
         (status = 400, description = "Malformed body.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Internal fault.", body = JsonEnvelope),
     ),
 )]
-pub(crate) fn device_auth_poll() {}
-
-#[utoipa::path(
-    post,
-    path = "/v1/invitations/accept",
-    tag = "enrollment",
-    request_body = InviteAcceptRequest,
-    params(("Authorization" = String, Header, description = "`Bearer <device credential>` — PERSON-scoped: the caller has no seat in the invitation's workspace yet.")),
-    responses(
-        (status = 200, description = "OK carries the InviteAcceptData (the joined workspace + the optional first-destination hint); the ceremony fences answer 200 DENIED INVITE_OTHER_ACCOUNT / EMAIL_UNVERIFIED (no address is ever echoed).", body = JsonEnvelope),
-        (status = 400, description = "Malformed body.", body = JsonEnvelope),
-        (status = 404, description = "Missing/blank credential, a revoked device, or a dead token — invalid, expired, revoked, or already consumed (indistinguishable).", body = JsonEnvelope),
-        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
-        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
-    ),
-)]
-pub(crate) fn invite_accept() {}
+pub(crate) fn login_token() {}
 
 // ── the writes (publish / propose / revert / review) ─────────────────────────────────────────────
 
@@ -558,55 +523,20 @@ pub(crate) fn get_proposals() {}
 )]
 pub(crate) fn get_log() {}
 
-// ── the device-link lane + the global self-revoke ────────────────────────────────────────────────
-// A device is REGISTERED once (device ↔ server, one browser ceremony ever) and LINKED per
-// workspace (device ↔ workspace, a first-class row, severable by both sides). The link ops are
-// PERSON-scoped: the seat is checked server-side, no link is required — an enrolled device joins a
-// further workspace browser-free, and a second device flow is never run against the same server.
-
-#[utoipa::path(
-    get,
-    path = "/v1/device/link",
-    tag = "enrollment",
-    params(
-        ("workspace" = String, Query, description = "The workspace ADDRESS slug (an EMPTY value names the origin's own workspace — the same convention as the device-auth start)."),
-        ("Authorization" = String, Header, description = "`Bearer <device credential>` — PERSON-scoped: the seat is checked, no link is required."),
-    ),
-    responses(
-        (status = 200, description = "The all-outcome envelope. OK carries the DeviceLinkDescribe (this device's current link — none/pending/active — and what a link would be born as: active, or pending under the workspace's device-approval knob); a seatless caller OR an unknown workspace name answers a byte-identical 200 DENIED NOT_A_MEMBER pointing at the invitation path (no existence oracle).", body = JsonEnvelope),
-        (status = 404, description = "Missing/blank credential or a revoked device (indistinguishable).", body = JsonEnvelope),
-        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
-        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
-    ),
-)]
-pub(crate) fn get_device_link() {}
-
-#[utoipa::path(
-    post,
-    path = "/v1/device/link",
-    tag = "enrollment",
-    request_body = DeviceLinkRequest,
-    params(("Authorization" = String, Header, description = "`Bearer <device credential>` — PERSON-scoped: the seat is checked, no link is required.")),
-    responses(
-        (status = 200, description = "The all-outcome envelope. OK carries the DeviceLinkData (the joined workspace + the link's status: born active, or pending under the workspace's device-approval knob — owner-created links are always active). IDEMPOTENT: an existing link answers ok with its current status. A seatless caller OR an unknown workspace name answers the byte-identical 200 DENIED NOT_A_MEMBER.", body = JsonEnvelope),
-        (status = 400, description = "Malformed body.", body = JsonEnvelope),
-        (status = 404, description = "Missing/blank credential or a revoked device (indistinguishable).", body = JsonEnvelope),
-        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
-        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
-    ),
-)]
-pub(crate) fn create_device_link() {}
+// ── the session self-end ─────────────────────────────────────────────────────────────────────────
+// A session is user × workspace × installation; its credential is workspace-scoped. Ending it is
+// the client's own act (`topos logout`) — the owner-side end is a directory row the web app owns.
 
 #[utoipa::path(
     delete,
-    path = "/v1/device",
+    path = "/v1/session",
     tag = "enrollment",
-    params(("Authorization" = String, Header, description = "`Bearer <device credential>`.")),
+    params(("Authorization" = String, Header, description = "`Bearer <session credential>`.")),
     responses(
-        (status = 200, description = "The global self-revoke landed (no body sent): THIS credential's device is revoked server-side — its links and per-workspace reported state are deleted with it. A retry answers the uniform 404 (already signed out).", body = JsonEnvelope),
-        (status = 404, description = "Missing/blank credential or an already-revoked device (indistinguishable) — the caller treats this as already-signed-out.", body = JsonEnvelope),
+        (status = 200, description = "The self-end landed (no body sent): THIS credential's session is ended server-side and its reported state deleted with it. A retry answers the uniform 404 (already ended).", body = JsonEnvelope),
+        (status = 404, description = "Missing/blank credential or an already-ended session (indistinguishable) — the caller treats this as already-signed-out.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
     ),
 )]
-pub(crate) fn revoke_device() {}
+pub(crate) fn end_session() {}

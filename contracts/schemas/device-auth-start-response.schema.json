@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "DeviceAuthStartResponse",
-  "description": "`POST /v1/device/authorize` response — the device-authorization grant (RFC-8628-shaped names).",
+  "description": "`POST /v1/login/authorize` response — the login-flow grant (RFC-8628-shaped names).",
   "type": "object",
   "properties": {
     "device_code": {
-      "description": "The SECRET device code the client polls `device/token` with. On approval this same secret is\npromoted to the device's bearer credential (see the module note), so it is stored like one.",
+      "description": "The SECRET flow code the client polls `login/token` with (the RFC-8628 field name). On\napproval this same secret is promoted to the session's bearer credential (see the module\nnote), so it is stored like one.",
       "type": "string"
     },
     "expires_in_secs": {

@@ -110,7 +110,7 @@ describe("cardResponse — the served card", () => {
     expect(card.headers.get("x-robots-tag")).toBe("noindex");
     const text = await card.text();
     expect(text).toContain("# A Topos resource address");
-    expect(text).toContain("topos follow");
+    expect(text).toContain("topos login");
     // The checksummed installer one-liner is taught verbatim.
     expect(text).toContain(INSTALL_LINE);
   });

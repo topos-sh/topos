@@ -4,13 +4,12 @@ import { adminQuery, ensureBundle, ensureSeatedUser, theWorkspace } from "./seed
 import { gotoSettled, signIn } from "./sign-in";
 
 /**
- * The channel surfaces, now split into section TABS (Skills · Members · History · Settings) exactly
- * like the skill view: the index (everyone first + counts), member-level create, the Skills FACE
- * (skill references), the Members tab (the default channel's self-service stance over
- * `channel_optout`; named channels' explicit rows), the id-keyed History tab that outlives a rename
- * and survives a delete in the ledger, and the Settings tab hosting the two owner
- * existence-ceremonies (rename — an in-place confirm; delete — type the channel name) with a quiet
- * read-only note for non-owners.
+ * The channel surfaces — a channel is a named, CURATED SET OF BUNDLES (nothing else): the index
+ * (everyone first + audience counts), member-level create, the Skills FACE (the set + the
+ * viewer's own profile-stance arm — the baseline's remove records the one exclude line), the
+ * id-keyed History tab that outlives a rename and survives a delete in the ledger, and the
+ * Settings tab hosting the two owner existence-ceremonies (rename — an in-place confirm;
+ * delete — type the channel name) with a quiet read-only note for non-owners.
  *
  * All rows live in the app's own `web` schema. The suite's default identity is the claimed OWNER;
  * serial so the mutating tests keep a deterministic order.
@@ -34,8 +33,8 @@ test.beforeAll(async () => {
     [GUILD, RENAMED, DOOMED, CURATED],
   ]);
   await adminQuery(
-    `delete from web.channel_optout o using web."user" u
-     where u.id = o.user_id and u.email = $1`,
+    `delete from web.profile_entry p using web."user" u
+     where u.id = p.user_id and u.email = $1`,
     [MEMBER_EMAIL],
   );
   await ensureBundle({ id: SKILL_ID, name: SKILL_NAME });
@@ -48,11 +47,13 @@ test("the index lists everyone first; a member creates a channel and lands on it
   await theWorkspace();
   await gotoSettled(page, `/channels`);
 
-  // `everyone` is implicit membership — the roster minus opt-outs, marked as such. Scope to the
+  // `everyone` is the BASELINE — implicit in every member's profile, marked as such. Scope to the
   // content region: the left panel now lists channels too, so an unscoped listitem would double-match.
   const everyone = page.getByRole("main").getByRole("listitem").filter({ hasText: "everyone" });
   await expect(everyone).toBeVisible();
-  await expect(everyone.getByText("every member, minus opt-outs")).toBeVisible();
+  await expect(
+    everyone.getByText("the baseline — every member's profile starts with it"),
+  ).toBeVisible();
 
   // Member-level create on the relocated Rails-style form (the same grade as the CLI's
   // create-on-first-use placement); the sidebar's Channels `+ new` links here.
@@ -100,21 +101,17 @@ test("the channel face shows the four section tabs, Skills active; each tab navi
   await theWorkspace();
   await gotoSettled(page, `/channels/${GUILD}`);
 
-  // The face IS the Skills tab — pressed, the other three quiet. Scope to the channel nav: the left
+  // The face IS the Skills tab — pressed, the other two quiet. Scope to the channel nav: the left
   // panel and the workspace nav also carry Skills/Settings links.
   const tabs = () => page.getByRole("navigation", { name: "Channel sections" });
   await expect(tabs().getByRole("link", { name: "Skills" })).toHaveAttribute(
     "aria-current",
     "page",
   );
-  await expect(tabs().getByRole("link", { name: "Members" })).toBeVisible();
   await expect(tabs().getByRole("link", { name: "History" })).toBeVisible();
   await expect(tabs().getByRole("link", { name: "Settings" })).toBeVisible();
-
-  // Members tab → the members section.
-  await tabs().getByRole("link", { name: "Members" }).click();
-  await page.waitForURL(`**/channels/${GUILD}/members`);
-  await expect(page.getByRole("heading", { name: "Members" })).toBeVisible();
+  // A channel has no membership — there is no Members tab to offer.
+  await expect(tabs().getByRole("link", { name: "Members" })).toHaveCount(0);
 
   // History tab → the id-keyed audit trail (the UI create landed a row).
   await tabs().getByRole("link", { name: "History" }).click();
@@ -132,32 +129,35 @@ test("the channel face shows the four section tabs, Skills active; each tab navi
   await page.waitForURL((u) => u.pathname.endsWith(`/channels/${GUILD}`));
 });
 
-test("the default channel's stance is self-service on the Members tab; Settings states it's structural", async ({
+test("the default channel's stance is self-service on the face; Settings states it's structural", async ({
   page,
 }) => {
+  // The stance arm acts on the SIGNED-IN OWNER's own profile (the suite's default identity).
   await theWorkspace();
-  await gotoSettled(page, `/channels/everyone/members`);
-  await expect(page.getByText("You're in.", { exact: false })).toBeVisible();
+  await gotoSettled(page, `/channels/everyone`);
+  const stance = page.getByTestId("channel-stance");
+  await expect(stance.getByText("in your skills", { exact: true })).toBeVisible();
 
-  // LEAVE — the member's own stance, a plain one-click toggle (no confirmation ceremony).
-  await page.getByRole("button", { name: "Leave everyone" }).click();
-  await expect(page.getByText("You've opted out", { exact: false })).toBeVisible();
-  const optedOut = await adminQuery<{ n: string }>(
-    `select count(*)::text as n from web.channel_optout o
-     join web."user" u on u.id = o.user_id where u.email = $1`,
-    [MEMBER_EMAIL],
+  // REMOVE — the viewer's own stance, a plain one-click toggle (self-scoped, no ceremony).
+  // The baseline has no include line to delete, so the removal records the ONE exclude line.
+  await stance.getByRole("button", { name: "Remove from my skills" }).click();
+  await expect(stance.getByText("not in your skills", { exact: true })).toBeVisible();
+  const excluded = await adminQuery<{ n: string }>(
+    `select count(*)::text as n from web.profile_entry p
+     join web.channel c on c.id = p.channel_id
+     where c.is_default and p.mode = 'exclude'`,
   );
-  expect(optedOut[0]?.n).toBe("1");
+  expect(excluded[0]?.n).toBe("1");
 
-  // REJOIN — deletes the opt-out row; delivery resumes on the next update.
-  await page.getByRole("button", { name: "Rejoin everyone" }).click();
-  await expect(page.getByText("You're in.", { exact: false })).toBeVisible();
-  const rejoined = await adminQuery<{ n: string }>(
-    `select count(*)::text as n from web.channel_optout o
-     join web."user" u on u.id = o.user_id where u.email = $1`,
-    [MEMBER_EMAIL],
+  // ADD BACK — clears the exclude; the baseline flows again on the next update.
+  await stance.getByRole("button", { name: "Add to my skills" }).click();
+  await expect(stance.getByText("in your skills", { exact: true })).toBeVisible();
+  const cleared = await adminQuery<{ n: string }>(
+    `select count(*)::text as n from web.profile_entry p
+     join web.channel c on c.id = p.channel_id
+     where c.is_default and p.mode = 'exclude'`,
   );
-  expect(rejoined[0]?.n).toBe("0");
+  expect(cleared[0]?.n).toBe("0");
 
   // The everyone channel offers NO existence ceremonies — its Settings tab states it's structural.
   await gotoSettled(page, `/channels/everyone/settings`);

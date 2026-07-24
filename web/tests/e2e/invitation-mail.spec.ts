@@ -65,8 +65,8 @@ test("invite → verified sign-up → the seat binds and the member lands in the
 
   // The notice mail rode the transport carrying the workspace ADDRESS — never a tokened link.
   const notice = await latestMail("invite", INVITEE);
-  // Single-tenant grammar: the follow line carries the BARE origin (the install IS the workspace).
-  expect(notice.text).toContain(`topos follow ${BASE_URL}`);
+  // Single-tenant grammar: the login line carries the BARE origin (the install IS the workspace).
+  expect(notice.text).toContain(`topos login ${BASE_URL}`);
 
   // The INVITEE signs up in their own browser. Registration is invite_only, so this succeeds
   // ONLY because the pending invitation + armed mail admit it.

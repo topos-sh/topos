@@ -1,10 +1,11 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data, Link, useLoaderData } from "react-router";
 import { AddressBlock } from "@/components/members/address-block";
-import { DeviceApprovalPanel } from "@/components/policy/device-approval-panel";
 import type { LastSetLine } from "@/components/policy/last-set-line";
 import { RegistrationPanel } from "@/components/policy/registration-panel";
 import { ReviewRequiredPanel } from "@/components/policy/review-required-panel";
+import { SessionApprovalPanel } from "@/components/policy/session-approval-panel";
+import { SessionMaxAgePanel } from "@/components/policy/session-max-age-panel";
 import { StalenessWindowPanel } from "@/components/policy/staleness-window-panel";
 import { SettingsTabs } from "@/components/settings-tabs";
 import { buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
@@ -12,8 +13,9 @@ import { composition } from "@/composition.server";
 import { requireMemberInScope, requireWorkspaceOwner } from "@/lib/auth/guards.server";
 import { type AuditEventRow, lastAuditEventOfKind, recordAdminEvent } from "@/lib/db/audit.server";
 import {
-  setDeviceApproval,
   setRegistration,
+  setSessionApproval,
+  setSessionMaxAge,
   setStalenessWindow,
   workspacePolicyOf,
 } from "@/lib/db/queries.policy.server";
@@ -44,7 +46,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   // The knobs are plain columns on the ONE workspace row; the column DEFAULTs are the canonical
   // fallbacks, so a fresh install shows the true defaults, never a blank. The "last set by"
   // lines read the audit ledger — the same rows the setters land in their own transactions.
-  const [policy, lastReview, lastStaleness, lastRegistration, lastDeviceApproval] =
+  const [policy, lastReview, lastStaleness, lastRegistration, lastSessionApproval, lastMaxAge] =
     await Promise.all([
       workspacePolicyOf(actor),
       lastAuditEventOfKind(actor, "policy_review_default"),
@@ -52,7 +54,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       registrationGoverns
         ? lastAuditEventOfKind(actor, "policy_registration")
         : Promise.resolve(undefined),
-      lastAuditEventOfKind(actor, "policy_device_approval"),
+      lastAuditEventOfKind(actor, "policy_session_approval"),
+      lastAuditEventOfKind(actor, "policy_session_max_age"),
     ]);
   return {
     isOwner,
@@ -62,12 +65,14 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     reviewRequired: policy.protectionDefault === "reviewed",
     stalenessWindowMs: policy.stalenessWindowMs,
     registration: policy.registration,
-    deviceApproval: policy.deviceApproval,
+    sessionApproval: policy.sessionApproval,
+    sessionMaxAgeMs: policy.sessionMaxAgeMs,
     lastSet: {
       review: lastSetOf(lastReview),
       staleness: lastSetOf(lastStaleness),
       registration: lastSetOf(lastRegistration),
-      deviceApproval: lastSetOf(lastDeviceApproval),
+      sessionApproval: lastSetOf(lastSessionApproval),
+      sessionMaxAge: lastSetOf(lastMaxAge),
     },
   };
 }
@@ -101,8 +106,11 @@ export async function action({ request, params }: ActionFunctionArgs) {
   if (intent === "set-registration" && composition.tenancy === "single") {
     return registrationIntent(request, ws, formData);
   }
-  if (intent === "set-device-approval") {
-    return deviceApprovalIntent(request, ws, formData);
+  if (intent === "set-session-approval") {
+    return sessionApprovalIntent(request, ws, formData);
+  }
+  if (intent === "set-session-max-age") {
+    return sessionMaxAgeIntent(request, ws, formData);
   }
   return data({ intent: "unknown" as const, status: "error" as const }, { status: 400 });
 }
@@ -191,16 +199,37 @@ async function registrationIntent(request: Request, ws: string, formData: FormDa
   return { intent: "set-registration" as const, ...result };
 }
 
-/** The device-approval knob — `on` bears non-owner device links pending; default off. */
-async function deviceApprovalIntent(request: Request, ws: string, formData: FormData) {
-  const value = String(formData.get("device_approval") ?? "");
+/**
+ * The session expiry — entered in days (empty = no expiry), converted to milliseconds at hour
+ * granularity like the staleness window. Enforcement is the session guard's, so a landed change
+ * takes effect on the very next lane request.
+ */
+async function sessionMaxAgeIntent(request: Request, ws: string, formData: FormData) {
+  const raw = String(formData.get("session_max_age_days") ?? "").trim();
+  const days = Number(raw);
+  // Empty clears the policy (no expiry); a NaN/zero input becomes 0, which the setter refuses
+  // as bad_value (honest, not a crash).
+  const maxAgeMs =
+    raw === "" ? null : Number.isFinite(days) ? Math.round(days * 24) * 3_600_000 : 0;
   const result = await knobIntent(request, ws, {
-    auditKind: "policy_device_approval",
+    auditKind: "policy_session_max_age",
+    detail: maxAgeMs === null ? "off" : String(maxAgeMs),
+    run: (owner) => setSessionMaxAge(owner, maxAgeMs),
+    deniedError: () => "Enter an expiry between 1 hour and 366 days, or leave empty for none.",
+  });
+  return { intent: "set-session-max-age" as const, ...result };
+}
+
+/** The session-approval knob — `on` bears non-owner logins pending; default off. */
+async function sessionApprovalIntent(request: Request, ws: string, formData: FormData) {
+  const value = String(formData.get("session_approval") ?? "");
+  const result = await knobIntent(request, ws, {
+    auditKind: "policy_session_approval",
     detail: value,
-    run: (owner) => setDeviceApproval(owner, value),
+    run: (owner) => setSessionApproval(owner, value),
     deniedError: () => "Choose off or required.",
   });
-  return { intent: "set-device-approval" as const, ...result };
+  return { intent: "set-session-approval" as const, ...result };
 }
 
 export default function WorkspaceSettings() {
@@ -212,7 +241,8 @@ export default function WorkspaceSettings() {
     reviewRequired,
     stalenessWindowMs,
     registration,
-    deviceApproval,
+    sessionApproval,
+    sessionMaxAgeMs,
     lastSet,
   } = useLoaderData<typeof loader>();
   const wsPath = useWsPath();
@@ -241,10 +271,15 @@ export default function WorkspaceSettings() {
         stalenessWindowMs={stalenessWindowMs}
         lastSet={lastSet.staleness}
       />
-      <DeviceApprovalPanel
+      <SessionApprovalPanel
         isOwner={isOwner}
-        deviceApproval={deviceApproval}
-        lastSet={lastSet.deviceApproval}
+        sessionApproval={sessionApproval}
+        lastSet={lastSet.sessionApproval}
+      />
+      <SessionMaxAgePanel
+        isOwner={isOwner}
+        sessionMaxAgeMs={sessionMaxAgeMs}
+        lastSet={lastSet.sessionMaxAge}
       />
       {registrationGoverns && (
         <RegistrationPanel
@@ -304,7 +339,7 @@ function ExportSection() {
 
 /**
  * The workspace address — its own pane section. Sharing and joining speak this address:
- * `topos follow <address>`.
+ * `topos login <address>`.
  */
 function AddressSection({ address }: { address: string }) {
   return (
@@ -314,7 +349,7 @@ function AddressSection({ address }: { address: string }) {
       </SectionHeading>
       <Card className="space-y-3 px-4 py-3">
         <p className="text-dim text-sm">
-          Hand this to a teammate or another of your own devices — following it joins the workspace.
+          Hand this to a teammate or another of your own machines — logging in joins the workspace.
         </p>
         <AddressBlock address={address} />
       </Card>

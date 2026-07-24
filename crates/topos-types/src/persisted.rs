@@ -329,6 +329,10 @@ pub struct OpRecord {
     /// value. `None` when no placement was requested (and for a revert/review and pre-existing WALs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
+    /// The upstream-provenance block this publish carries (an imported bundle remembers its
+    /// origin) — replayed byte-identical on a crash retry. `None` for local authorship.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<crate::requests::WireUpstream>,
     /// The stored terminal receipt, once one is known (the source of idempotent-retry truth).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_receipt: Option<Receipt>,

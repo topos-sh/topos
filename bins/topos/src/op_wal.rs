@@ -138,6 +138,7 @@ mod tests {
 
     fn rec(op_id: &str, ws: &str, skill: &str) -> OpRecord {
         OpRecord {
+            upstream: None,
             schema_version: 1,
             op_id: op_id.to_owned(),
             workspace_id: ws.to_owned(),

@@ -2,80 +2,19 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Topos product API (device lane)",
-    "description": "The device lane the product app serves: the gh-style device-auth enrollment (start/poll — approval promotes the device code to the device's ONE bearer credential), the publish/propose/revert/review writes, the current/version/object/catalog/proposals reads, the delivery + applied-state report, the describe reads, the row ops, the browser-free device-link lane (describe/create — an enrolled device joins a further workspace without a second ceremony), and the global device self-revoke. Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
+    "description": "The session lane the product app serves: the RFC-8628-shaped login flow (start/poll — approval promotes the flow code to the SESSION's workspace-scoped bearer credential), the session self-end, the publish/propose/revert/review writes, the current/version/object/catalog/proposals reads, the delivery + applied-state report, the describe reads, and the row ops (the server-stored profile / channel curation / protection / notices-ack / invitations). Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
     "license": {
       "name": "Apache-2.0"
     },
     "version": "0.0.0"
   },
   "paths": {
-    "/v1/device": {
-      "delete": {
-        "tags": [
-          "enrollment"
-        ],
-        "operationId": "revoke_device",
-        "parameters": [
-          {
-            "name": "Authorization",
-            "in": "header",
-            "description": "`Bearer <device credential>`.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The global self-revoke landed (no body sent): THIS credential's device is revoked server-side — its links and per-workspace reported state are deleted with it. A retry answers the uniform 404 (already signed out).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Missing/blank credential or an already-revoked device (indistinguishable) — the caller treats this as already-signed-out.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited (Retry-After header).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Integrity / internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/device/authorize": {
+    "/v1/login/authorize": {
       "post": {
         "tags": [
           "enrollment"
         ],
-        "operationId": "device_auth_start",
+        "operationId": "login_authorize",
         "requestBody": {
           "content": {
             "application/json": {
@@ -88,7 +27,7 @@
         },
         "responses": {
           "200": {
-            "description": "The device-authorization grant: the secret device_code to poll with (promoted to the device's ONE bearer credential on approval), the human-facing user_code, and the BARE approval URL (the code never rides a URL; the approval page's lookup is a POST). An invite_token in the body is recorded on the flow unvalidated — never a token oracle.",
+            "description": "The login-flow grant (RFC-8628-shaped): the secret device_code to poll with (promoted to the SESSION's workspace-scoped bearer credential on approval), the human-facing user_code, and the BARE approval URL (the code never rides a URL). An invite_token in the body is recorded on the flow unvalidated — never a token oracle.",
             "content": {
               "application/json": {
                 "schema": {
@@ -130,161 +69,12 @@
         }
       }
     },
-    "/v1/device/link": {
-      "get": {
-        "tags": [
-          "enrollment"
-        ],
-        "operationId": "get_device_link",
-        "parameters": [
-          {
-            "name": "workspace",
-            "in": "query",
-            "description": "The workspace ADDRESS slug (an EMPTY value names the origin's own workspace — the same convention as the device-auth start).",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "Authorization",
-            "in": "header",
-            "description": "`Bearer <device credential>` — PERSON-scoped: the seat is checked, no link is required.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The all-outcome envelope. OK carries the DeviceLinkDescribe (this device's current link — none/pending/active — and what a link would be born as: active, or pending under the workspace's device-approval knob); a seatless caller OR an unknown workspace name answers a byte-identical 200 DENIED NOT_A_MEMBER pointing at the invitation path (no existence oracle).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Missing/blank credential or a revoked device (indistinguishable).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited (Retry-After header).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Integrity / internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      },
+    "/v1/login/token": {
       "post": {
         "tags": [
           "enrollment"
         ],
-        "operationId": "create_device_link",
-        "parameters": [
-          {
-            "name": "Authorization",
-            "in": "header",
-            "description": "`Bearer <device credential>` — PERSON-scoped: the seat is checked, no link is required.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DeviceLinkRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "The all-outcome envelope. OK carries the DeviceLinkData (the joined workspace + the link's status: born active, or pending under the workspace's device-approval knob — owner-created links are always active). IDEMPOTENT: an existing link answers ok with its current status. A seatless caller OR an unknown workspace name answers the byte-identical 200 DENIED NOT_A_MEMBER.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed body.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Missing/blank credential or a revoked device (indistinguishable).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited (Retry-After header).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Integrity / internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/device/token": {
-      "post": {
-        "tags": [
-          "enrollment"
-        ],
-        "operationId": "device_auth_poll",
+        "operationId": "login_token",
         "requestBody": {
           "content": {
             "application/json": {
@@ -297,7 +87,7 @@
         },
         "responses": {
           "200": {
-            "description": "The poll status; `granted` carries the ONE bearer credential (the promoted device code), the device id, the joined workspace, and — when the flow carried an invitation naming one — the first-destination hint.",
+            "description": "The poll status; `granted` carries the minted SESSION's credential (the promoted flow code), the session id + status, the joined workspace, and — when the flow carried an invitation naming one — the first-destination hint.",
             "content": {
               "application/json": {
                 "schema": {
@@ -328,87 +118,6 @@
           },
           "500": {
             "description": "Internal fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/invitations/accept": {
-      "post": {
-        "tags": [
-          "enrollment"
-        ],
-        "operationId": "invite_accept",
-        "parameters": [
-          {
-            "name": "Authorization",
-            "in": "header",
-            "description": "`Bearer <device credential>` — PERSON-scoped: the caller has no seat in the invitation's workspace yet.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/InviteAcceptRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "OK carries the InviteAcceptData (the joined workspace + the optional first-destination hint); the ceremony fences answer 200 DENIED INVITE_OTHER_ACCOUNT / EMAIL_UNVERIFIED (no address is ever echoed).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed body.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Missing/blank credential, a revoked device, or a dead token — invalid, expired, revoked, or already consumed (indistinguishable).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited (Retry-After header).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Integrity / internal store fault.",
             "content": {
               "application/json": {
                 "schema": {
@@ -744,6 +453,67 @@
         }
       }
     },
+    "/v1/session": {
+      "delete": {
+        "tags": [
+          "enrollment"
+        ],
+        "operationId": "end_session",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "`Bearer <session credential>`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The self-end landed (no body sent): THIS credential's session is ended server-side and its reported state deleted with it. A retry answers the uniform 404 (already ended).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Missing/blank credential or an already-ended session (indistinguishable) — the caller treats this as already-signed-out.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (Retry-After header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Integrity / internal store fault.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/workspaces/{ws}/channels": {
       "get": {
         "tags": [
@@ -777,162 +547,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/WireChannelIndex"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited (Retry-After header).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Integrity / internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/workspaces/{ws}/channels/{ch}/membership": {
-      "put": {
-        "tags": [
-          "writes"
-        ],
-        "operationId": "channel_join",
-        "parameters": [
-          {
-            "name": "ws",
-            "in": "path",
-            "description": "Workspace id.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "ch",
-            "in": "path",
-            "description": "The channel name to join.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "Authorization",
-            "in": "header",
-            "description": "`Bearer <workspace credential>`.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The membership outcome (joined, or a 200 DENIED CHANNEL_BUILTIN for `everyone`).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited (Retry-After header).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Integrity / internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "writes"
-        ],
-        "operationId": "channel_leave",
-        "parameters": [
-          {
-            "name": "ws",
-            "in": "path",
-            "description": "Workspace id.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "ch",
-            "in": "path",
-            "description": "The channel name to leave.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "Authorization",
-            "in": "header",
-            "description": "`Bearer <workspace credential>`.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The membership outcome (left / not_member, or a 200 DENIED CHANNEL_BUILTIN for `everyone`).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
                 }
               }
             }
@@ -1313,241 +927,6 @@
         }
       }
     },
-    "/v1/workspaces/{ws}/exclusions/{skill}": {
-      "put": {
-        "tags": [
-          "writes"
-        ],
-        "operationId": "exclude_device",
-        "parameters": [
-          {
-            "name": "ws",
-            "in": "path",
-            "description": "Workspace id.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "skill",
-            "in": "path",
-            "description": "The followed skill's immutable id to exclude from THIS device.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "Authorization",
-            "in": "header",
-            "description": "`Bearer <workspace credential>`.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The subscription outcome (excluded, or a 200 DENIED SKILL_NOT_ACTIVE).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited (Retry-After header).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Integrity / internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/workspaces/{ws}/follows/{skill}": {
-      "put": {
-        "tags": [
-          "writes"
-        ],
-        "operationId": "follow_skill",
-        "parameters": [
-          {
-            "name": "ws",
-            "in": "path",
-            "description": "Workspace id.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "skill",
-            "in": "path",
-            "description": "The skill's immutable id to direct-follow (the client resolves the address to it).",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "Authorization",
-            "in": "header",
-            "description": "`Bearer <workspace credential>`.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The subscription outcome (followed, or a 200 DENIED SKILL_NOT_ACTIVE).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited (Retry-After header).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Integrity / internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "writes"
-        ],
-        "operationId": "unfollow_skill",
-        "parameters": [
-          {
-            "name": "ws",
-            "in": "path",
-            "description": "Workspace id.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "skill",
-            "in": "path",
-            "description": "The skill's immutable id to unfollow (person-scoped negative mask).",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "Authorization",
-            "in": "header",
-            "description": "`Bearer <workspace credential>`.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The subscription outcome (unfollowed, or a 200 DENIED SKILL_NOT_ACTIVE).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited (Retry-After header).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Integrity / internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/workspaces/{ws}/invitations": {
       "post": {
         "tags": [
@@ -1767,6 +1146,328 @@
           },
           "404": {
             "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (Retry-After header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Integrity / internal store fault.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workspaces/{ws}/profile/channels/{ch}": {
+      "put": {
+        "tags": [
+          "rows"
+        ],
+        "operationId": "profile_include_channel",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "The workspace id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ch",
+            "in": "path",
+            "description": "The channel name to include in the caller's server-stored profile.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "`Bearer <session credential>`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The all-outcome envelope: the profile row is present (idempotent).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Missing/blank credential, an ended session, or an unknown channel (indistinguishable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (Retry-After header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Integrity / internal store fault.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "rows"
+        ],
+        "operationId": "profile_remove_channel",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "The workspace id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ch",
+            "in": "path",
+            "description": "The channel name to drop from the caller's server-stored profile.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "`Bearer <session credential>`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The all-outcome envelope; `data.status` mirrors the skill route's removal outcomes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Missing/blank credential, an ended session, or an unknown channel (indistinguishable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (Retry-After header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Integrity / internal store fault.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workspaces/{ws}/profile/skills/{skill}": {
+      "put": {
+        "tags": [
+          "rows"
+        ],
+        "operationId": "profile_include_skill",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "The workspace id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "skill",
+            "in": "path",
+            "description": "The skill's immutable id to include in the caller's server-stored profile (the `-g` manifest layer). An optional JSON body `{\"pin\": \"<64-hex>\"}` pins the version.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "`Bearer <session credential>`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The all-outcome envelope: the profile row is present (idempotent — re-including converges, a new pin replaces the old).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed pin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Missing/blank credential, an ended session, or an unknown skill (indistinguishable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (Retry-After header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Integrity / internal store fault.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "rows"
+        ],
+        "operationId": "profile_remove_skill",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "The workspace id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "skill",
+            "in": "path",
+            "description": "The skill's immutable id to drop from the caller's server-stored profile.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "`Bearer <session credential>`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The all-outcome envelope; `data.status` names HOW the removal settled — `removed` (the row is gone), `excluded` (the skill still arrives via a channel, so the profile records the negative stance instead), or `not_in_profile` (nothing to remove).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Missing/blank credential, an ended session, or an unknown skill (indistinguishable).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2696,7 +2397,7 @@
       },
       "DeviceAuthHint": {
         "type": "object",
-        "description": "The first-destination HINT an accepted invitation named — decorated onto a `granted` poll (and\nthe direct-accept answer) so the enrolled client's post-accept subscribe can target it. `kind`\nis the bundle catalog's own tag (`skill` today) or the literal `channel` — displayed and routed\non, never trusted as authority.",
+        "description": "The first-destination HINT an accepted invitation named — decorated onto a `granted` poll (and\nthe direct-accept answer) so the logged-in client's first `add` can target it. `kind` is the\nbundle catalog's own tag (`skill` today) or the literal `channel` — displayed and routed on,\nnever trusted as authority.",
         "required": [
           "kind",
           "name"
@@ -2714,20 +2415,20 @@
       },
       "DeviceAuthPollRequest": {
         "type": "object",
-        "description": "`POST /v1/device/token` body — poll a device-authorization flow for its outcome.",
+        "description": "`POST /v1/login/token` body — poll a login flow for its outcome.",
         "required": [
           "device_code"
         ],
         "properties": {
           "device_code": {
             "type": "string",
-            "description": "The SECRET device code from `device/authorize`."
+            "description": "The SECRET flow code from `login/authorize`."
           }
         }
       },
       "DeviceAuthPollResponse": {
         "type": "object",
-        "description": "`POST /v1/device/token` response — the poll `status`; a `granted` poll carries the device's ONE\nbearer credential (the promoted device code — returned here and stored from this ONE field),\nits device id, and the joined workspace. A re-poll of an approved flow returns the same answer.",
+        "description": "`POST /v1/login/token` response — the poll `status`; a `granted` poll carries the SESSION's\nworkspace-scoped bearer credential (the promoted flow code — returned here and stored from this\nONE field), the session id, and the joined workspace. A re-poll of an approved flow returns the\nsame answer.",
         "required": [
           "status"
         ],
@@ -2737,14 +2438,14 @@
               "string",
               "null"
             ],
-            "description": "The device's plaintext bearer credential — present ONLY when `status` is `granted`. Returned\nonce per poll; the server stores only its sha256."
+            "description": "The session's plaintext bearer credential — present ONLY when `status` is `granted`.\nReturned once per poll; the server stores only its sha256."
           },
           "device_id": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The registered device's id — present ONLY when `status` is `granted`."
+            "description": "The RETIRED device wire's grant id — parse-only fallback for a producer predating\n[`Self::session_id`]; never served by the session wire."
           },
           "hint": {
             "oneOf": [
@@ -2762,7 +2463,21 @@
               "string",
               "null"
             ],
-            "description": "The FIRST device↔workspace link's born status — present ONLY when `status` is `granted`:\n`\"active\"`, or `\"pending\"` when the workspace's device-approval knob gated it (approval\nmints the registration and the first link together server-side). Absent on an older\nproducer ⇒ treat as `\"active\"`."
+            "description": "The RETIRED device-link spelling of [`Self::session_status`] — parse-only fallback for a\nproducer predating the session wire. Absent ⇒ treat as `\"active\"`."
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The minted SESSION's id — the session-model login wire's grant half (a session = user ×\nworkspace × installation; the credential is workspace-scoped). Present ONLY when `status`\nis `granted` on a session-serving producer. **Additive.**"
+          },
+          "session_status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The session's born status — `\"active\"`, or `\"pending\"` while the workspace's\nsession-approval knob holds it. Absent ⇒ treat as active. **Additive.**"
           },
           "status": {
             "$ref": "#/components/schemas/DeviceAuthPollStatus",
@@ -2783,7 +2498,7 @@
       },
       "DeviceAuthPollStatus": {
         "type": "string",
-        "description": "A device-authorization poll status (snake_case). `granted` carries the credential + the joined\nworkspace; every other status carries only itself.",
+        "description": "A login-flow poll status (snake_case). `granted` carries the credential + the joined\nworkspace; every other status carries only itself.",
         "enum": [
           "pending",
           "denied",
@@ -2793,7 +2508,7 @@
       },
       "DeviceAuthStartRequest": {
         "type": "object",
-        "description": "`POST /v1/device/authorize` body — begin a device-authorization flow toward a workspace named by\nits address slug. Whether the name exists is never disclosed on this route: an unknown name runs\nthe same flow to the same uniform denial.",
+        "description": "`POST /v1/login/authorize` body — begin a login flow toward a workspace named by its address\nslug. Whether the name exists is never disclosed on this route: an unknown name runs the same\nflow to the same uniform denial.",
         "required": [
           "requested_name",
           "workspace"
@@ -2804,21 +2519,21 @@
               "string",
               "null"
             ],
-            "description": "The invitation-link token a `follow <invite-url>` enrollment carries. Recorded on the flow\n(as its hash) UNVALIDATED — this unauthenticated start is never a token oracle; the approval\nceremony resolves it and weaves the invitation accept into its own fence."
+            "description": "The invitation-link token a `login <invite-url>` carries. Recorded on the flow (as its\nhash) UNVALIDATED — this unauthenticated start is never a token oracle; the approval\nceremony resolves it and weaves the invitation accept into its own fence."
           },
           "requested_name": {
             "type": "string",
-            "description": "A human-readable device name shown on the approval page (a confused-deputy guard, not\nauthority) and kept as the device's display name once approved."
+            "description": "A human-readable machine name shown on the approval page (a confused-deputy guard, not\nauthority) and kept as the session's display name once approved."
           },
           "workspace": {
             "type": "string",
-            "description": "The workspace ADDRESS slug the device asks to join (`topos.sh/<name>` minus the origin). An\nEMPTY string names \"the workspace the origin itself addresses\" (single-tenant installs, where\nthe origin IS its one workspace); a non-empty value is the address slug as today."
+            "description": "The workspace ADDRESS slug the login targets (`topos.sh/<name>` minus the origin). An\nEMPTY string names \"the workspace the origin itself addresses\" (single-tenant installs, where\nthe origin IS its one workspace); a non-empty value is the address slug as today."
           }
         }
       },
       "DeviceAuthStartResponse": {
         "type": "object",
-        "description": "`POST /v1/device/authorize` response — the device-authorization grant (RFC-8628-shaped names).",
+        "description": "`POST /v1/login/authorize` response — the login-flow grant (RFC-8628-shaped names).",
         "required": [
           "device_code",
           "user_code",
@@ -2829,7 +2544,7 @@
         "properties": {
           "device_code": {
             "type": "string",
-            "description": "The SECRET device code the client polls `device/token` with. On approval this same secret is\npromoted to the device's bearer credential (see the module note), so it is stored like one."
+            "description": "The SECRET flow code the client polls `login/token` with (the RFC-8628 field name). On\napproval this same secret is promoted to the session's bearer credential (see the module\nnote), so it is stored like one."
           },
           "expires_in_secs": {
             "type": "integer",
@@ -2855,7 +2570,7 @@
       },
       "DeviceAuthWorkspace": {
         "type": "object",
-        "description": "The workspace context a `granted` poll carries — everything the CLI needs to record what it\nenrolled into (the id it scopes requests by, the address slug it joined at, and a display name).",
+        "description": "The workspace context a `granted` poll carries — everything the CLI needs to record what it\nlogged into (the id it scopes requests by, the address slug it joined at, and a display name).",
         "required": [
           "workspace_id",
           "name",
@@ -2868,100 +2583,11 @@
           },
           "name": {
             "type": "string",
-            "description": "The workspace's ADDRESS slug (what the human typed at `follow`)."
+            "description": "The workspace's ADDRESS slug (what the human typed at `login`)."
           },
           "workspace_id": {
             "type": "string",
             "description": "The workspace id (the `{ws}` path segment of every subsequent request)."
-          }
-        }
-      },
-      "DeviceLinkData": {
-        "type": "object",
-        "description": "`POST /v1/device/link` success `data` — the created (or re-affirmed) link: the joined workspace\nand the link's status (`\"active\"`, or `\"pending\"` awaiting an owner's approval — no data flows\nuntil it turns active). A seatless caller / unknown name answers `NOT_A_MEMBER`, exactly as the\ndescribe does.",
-        "required": [
-          "workspace_id",
-          "name",
-          "display_name",
-          "address",
-          "link_status"
-        ],
-        "properties": {
-          "address": {
-            "type": "string",
-            "description": "The workspace's full address (server-built)."
-          },
-          "display_name": {
-            "type": "string",
-            "description": "The workspace's display name."
-          },
-          "link_status": {
-            "type": "string",
-            "description": "The link's status — `\"active\"` or `\"pending\"`."
-          },
-          "name": {
-            "type": "string",
-            "description": "The workspace's ADDRESS slug."
-          },
-          "workspace_id": {
-            "type": "string",
-            "description": "The workspace id."
-          }
-        }
-      },
-      "DeviceLinkDescribe": {
-        "type": "object",
-        "description": "`GET /v1/device/link?workspace=<address-slug>` success `data` — the link DESCRIBE (nothing\nmutates): where THIS device stands with the named workspace, and what a link would be born as.\nAn EMPTY `workspace` value names the origin's own workspace (the same convention as\n[`DeviceAuthStartRequest::workspace`]). A seatless caller — or an unknown workspace name,\nbyte-identically (no existence oracle) — answers the all-outcome envelope's `NOT_A_MEMBER`\nrefusal pointing at the invitation path.",
-        "required": [
-          "workspace_id",
-          "name",
-          "display_name",
-          "address",
-          "role",
-          "link_status",
-          "born"
-        ],
-        "properties": {
-          "address": {
-            "type": "string",
-            "description": "The workspace's full address (the share link — server-built)."
-          },
-          "born": {
-            "type": "string",
-            "description": "What a link created NOW would be born as — `\"active\"`, or `\"pending\"` when the workspace's\ndevice-approval knob gates it (owner-created links are always born active)."
-          },
-          "display_name": {
-            "type": "string",
-            "description": "The workspace's display name."
-          },
-          "link_status": {
-            "type": "string",
-            "description": "THIS device's current link — `\"none\"` (no link yet), `\"pending\"`, or `\"active\"`."
-          },
-          "name": {
-            "type": "string",
-            "description": "The workspace's ADDRESS slug."
-          },
-          "role": {
-            "type": "string",
-            "description": "The caller's role on the roster (`owner` / `reviewer` / `member`)."
-          },
-          "workspace_id": {
-            "type": "string",
-            "description": "The workspace id (the `{ws}` path segment a linked device's requests scope by)."
-          }
-        }
-      },
-      "DeviceLinkRequest": {
-        "type": "object",
-        "description": "`POST /v1/device/link` body — link THIS device (the Bearer credential's) to a workspace the\nperson's seats reach, by address slug (empty = the origin's own workspace). Idempotent: an\nexisting link answers ok with its current status.",
-        "required": [
-          "workspace"
-        ],
-        "properties": {
-          "workspace": {
-            "type": "string",
-            "description": "The workspace ADDRESS slug (empty = the origin's own workspace)."
           }
         }
       },
@@ -3018,47 +2644,6 @@
               "null"
             ],
             "description": "The first-destination SKILL hint (a bundle name in this workspace). At most one of\n`skill`/`channel` may be set."
-          }
-        }
-      },
-      "InviteAcceptData": {
-        "type": "object",
-        "description": "`POST /v1/invitations/accept` success `data` — the joined workspace + the optional\nfirst-destination hint the client's post-accept subscribe targets. Nothing lands on any device\nfrom this accept: bytes still move only through the device-side two-phase describe/consent.",
-        "required": [
-          "workspace"
-        ],
-        "properties": {
-          "hint": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/DeviceAuthHint",
-                "description": "The invitation's first-destination hint, when it named one."
-              }
-            ]
-          },
-          "link_status": {
-            "type": "string",
-            "description": "The ACCEPTING device's link to the joined workspace — `\"active\"` or `\"pending\"` (the accept\nalso links the device, born per the workspace's device-approval knob; no exception for\ninvitations). Serde-defaulted to `\"active\"` for a producer predating device links."
-          },
-          "workspace": {
-            "$ref": "#/components/schemas/DeviceAuthWorkspace",
-            "description": "The workspace the accept seated the person in."
-          }
-        }
-      },
-      "InviteAcceptRequest": {
-        "type": "object",
-        "description": "`POST /v1/invitations/accept` body — the ALREADY-ENROLLED device consuming an invite URL: the\nbearer credential authenticates the person (seat-LESS by construction — the caller has no seat\nin the invitation's workspace yet), and the token names the invitation. The same ceremony\nfences as the browser accept apply; an invalid/expired/consumed token answers the uniform 404.",
-        "required": [
-          "token"
-        ],
-        "properties": {
-          "token": {
-            "type": "string",
-            "description": "The invitation-link token (the mailed single-use secret)."
           }
         }
       },
@@ -3329,6 +2914,13 @@
             "type": "string",
             "description": "The byte-exact digest of the shipped bytes — computed over the draft before any network call;\nan optional `<skill>@<digest>` pin gates it."
           },
+          "converted_from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The local-path spelling the manifest carried BEFORE the transfer (the inverse is\n`topos add <converted_from>` after a `topos remove <reference>`). **INFERRED**\n(additive-only)."
+          },
           "current_generation": {
             "type": "integer",
             "format": "int64",
@@ -3342,6 +2934,13 @@
             ],
             "description": "The paste-able teammate handoff line (`Ask your agent: …`) — the join instruction that\nbrings a teammate's machine into the workspace, composed from the workspace's server\norigin + address. Absent when the address is not known (a best-effort read — the publish\nitself is unaffected). **INFERRED** (additive-only)."
           },
+          "manifest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The GOVERNANCE-TRANSFER receipt half: the manifest whose local-path line this publish\nrewrote to the governed workspace reference. Absent when no manifest referenced the bundle\nby path (an already-governed republish). **INFERRED** (additive-only)."
+          },
           "name": {
             "type": "string",
             "description": "The skill's NAME — the handle humans speak and the TTY success line leads with\n(`Published <name>@…`); the opaque `skill_id` above stays the machine key."
@@ -3352,6 +2951,13 @@
               "null"
             ],
             "description": "The channel whose placement was WITHHELD by its curated mode (the receipt's\n`details.placement = curated_role_required`): the publish itself landed — catalog + moved\npointer — but the skill's reference was NOT placed into this channel (the `--to` target, or\nthe default `everyone` for a brand-new skill). A reviewer or owner places it\n(`topos channel add <channel> <skill>`). **INFERRED** (additive-only)."
+          },
+          "reference": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The canonical workspace reference the manifest now stores. **INFERRED** (additive-only)."
           },
           "skill_id": {
             "type": "string"
@@ -3404,6 +3010,17 @@
           "skill_id": {
             "type": "string",
             "description": "The target skill id within the workspace."
+          },
+          "upstream": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WireUpstream",
+                "description": "The external-origin provenance this publish carries to the server (a bundle imported from\nGitHub remembers its parent — the fork-that-remembers model). Absent for ordinary local\nauthorship. **Additive.**"
+              }
+            ]
           },
           "workspace_id": {
             "type": "string",
@@ -3744,24 +3361,17 @@
           "name",
           "mode",
           "builtin",
-          "member",
-          "member_count",
+          "included",
           "skills"
         ],
         "properties": {
           "builtin": {
             "type": "boolean",
-            "description": "Whether this is the structural `everyone` (roster-derived membership; cannot be joined or left)."
+            "description": "Whether this is the structural `everyone` (delivered by default; a profile exclude is the\nopt-out)."
           },
-          "member": {
+          "included": {
             "type": "boolean",
-            "description": "Whether the CALLER is a member (always `true` on `everyone`)."
-          },
-          "member_count": {
-            "type": "integer",
-            "format": "int64",
-            "description": "How many people the channel reaches (confirmed roster size for `everyone`).",
-            "minimum": 0
+            "description": "Whether the CALLER's profile includes this channel (on `everyone`: whether no exclude\nstands)."
           },
           "mode": {
             "type": "string",
@@ -3844,10 +3454,8 @@
           "schema_version",
           "workspace_id",
           "skills",
-          "detached",
           "notices",
-          "proposals_awaiting",
-          "link_status"
+          "proposals_awaiting"
         ],
         "properties": {
           "detached": {
@@ -3855,7 +3463,7 @@
             "items": {
               "type": "string"
             },
-            "description": "The skill ids the person detached (unfollowed, or lapsed via a channel leave / removal) and that are\nNOT currently re-entitled — every device freezes these in place, never cleaning them."
+            "description": "The skill ids the person detached (unfollowed, or lapsed via a channel leave / removal) and that are\nNOT currently re-entitled — every device freezes these in place, never cleaning them.\nRETIRED on the session wire (a current server never sends it); defaulted for the transition."
           },
           "excluded": {
             "type": "array",
@@ -3865,8 +3473,11 @@
             "description": "The skill ids THIS DEVICE excludes (\"not on this device\") — the third actor in the who-acts\nsplit, alongside the person (`detached`) and upstream (absent from `skills` entirely). The copy\nleaves this device; the person keeps receiving it on every other device; `follow` here lifts it.\nSent so the client narrates the true CAUSE instead of mistaking an exclusion written elsewhere\n(the web, a second tool) for an upstream withdrawal."
           },
           "link_status": {
-            "type": "string",
-            "description": "THIS device's link to the workspace — `\"active\"` or `\"pending\"`. REQUIRED: the delivery\nanswer is meaningless without it (a `\"pending\"` delivery carries empty `skills` /\n`detached` / `excluded` / `notices` and `proposals_awaiting: 0` — no data flows over a\npending link; the client skips the workspace quietly and `topos status` shows the wait)."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RETIRED spelling of [`Self::session_status`] (the device-link wire) — read as a fallback,\nnever produced by a current server."
           },
           "notices": {
             "type": "array",
@@ -3886,6 +3497,13 @@
             "format": "int32",
             "description": "Always `1` for this contract version (the schema pins it `const`).",
             "minimum": 0
+          },
+          "session_status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "THIS session's standing — `\"active\"` or `\"pending\"`. A `\"pending\"` delivery carries empty\n`skills` / `notices` and `proposals_awaiting: 0` — no data flows over a pending session;\nthe client skips the workspace quietly and `topos status` shows the wait. Serde-defaulted\nonly so the retired `link_status` spelling still parses during the wire transition."
           },
           "skills": {
             "type": "array",
@@ -4173,7 +3791,7 @@
           },
           "link_status": {
             "type": "string",
-            "description": "THIS device's link to the workspace — `\"active\"` or `\"pending\"` (a pending link awaits an\nowner's approval; no skill data flows over it). Serde-defaulted to `\"active\"` for schema\nstability: a producer predating device links serves only active-equivalent access."
+            "description": "The RETIRED device-link spelling of the same fact — parse-only fallback for a producer\npredating sessions. Serde-defaulted to `\"active\"` (such a producer serves only\nactive-equivalent access)."
           },
           "name": {
             "type": "string",
@@ -4186,6 +3804,13 @@
           "role": {
             "type": "string",
             "description": "The caller's role (`owner` / `reviewer` / `member`)."
+          },
+          "session_status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "THIS session's status — `\"active\"` or `\"pending\"` (a pending session awaits an owner's\napproval; no skill data flows over it). The session-wire spelling; read through\n[`Self::effective_status`]."
           },
           "workspace_id": {
             "type": "string",
@@ -4498,6 +4123,27 @@
             "format": "int64",
             "description": "When `current` last moved (epoch milliseconds)."
           },
+          "upstream_host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The recorded upstream origin's host (`github.com` today) — present when the bundle was\nimported from an external source (the fork-that-remembers-its-parent provenance). Lets a\nclient suggest the governed copy when the same source is added again. **Additive.**"
+          },
+          "upstream_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The subdirectory inside the upstream repo (`\"\"` = the repo root). Present exactly when\n`upstream_host` is. **Additive.**"
+          },
+          "upstream_repo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The upstream `owner/repo`. Present exactly when `upstream_host` is. **Additive.**"
+          },
           "version_id": {
             "type": "string",
             "description": "The `current` version's commit id (64-char lowercase hex)."
@@ -4551,6 +4197,45 @@
               "$ref": "#/components/schemas/WireLogVersion"
             },
             "description": "The versions, newest first where orderable (the ancestry walk stops at reclaimed history;\ntombstoned leftovers follow unordered)."
+          }
+        }
+      },
+      "WireUpstream": {
+        "type": "object",
+        "description": "The upstream-provenance block a publish may carry: where the bundle's bytes originally came\nfrom (`host`/`repo`, the in-repo `path`, the imported `commit`, a recorded license). The server\nrecords it as the bundle's upstream link + the version's upstream commit.",
+        "required": [
+          "host",
+          "repo"
+        ],
+        "properties": {
+          "commit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The upstream commit the imported bytes came from, when known."
+          },
+          "host": {
+            "type": "string",
+            "description": "The origin host (`github.com` — the only recognized value today)."
+          },
+          "license": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A license identifier/filename recorded at import time, when found."
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bundle's path within the repo (\"\" / absent = the repo root)."
+          },
+          "repo": {
+            "type": "string",
+            "description": "The `owner/repo` pair."
           }
         }
       },
@@ -4647,15 +4332,19 @@
   "tags": [
     {
       "name": "writes",
-      "description": "Device-credential writes (publish / propose / revert / review) and the member-lane row ops (follows / channels / exclusions / protection / notices)."
+      "description": "Session-credential writes (publish / propose / revert / review) and the member-lane row ops (channel curation / protection / notices-ack)."
     },
     {
       "name": "reads",
-      "description": "Device-credential reads (current / bundles / versions / proposals / catalog / delivery / me / channels / log / reach) plus the body-light applied-state report."
+      "description": "Session-credential reads (current / bundles / versions / proposals / catalog / delivery / me / channels / log / reach) plus the body-light applied-state report."
+    },
+    {
+      "name": "rows",
+      "description": "The server-stored profile row ops (the person's `-g` manifest layer)."
     },
     {
       "name": "enrollment",
-      "description": "The gh-style device-auth flow (start / poll; approval promotes the device code to the ONE bearer credential and mints the FIRST device↔workspace link), the browser-free device-link lane, and the global device self-revoke."
+      "description": "The RFC-8628-shaped login flow (start / poll; approval promotes the flow code to the SESSION's workspace-scoped bearer credential) and the session self-end."
     },
     {
       "name": "governance",

@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoginData",
+  "description": "`login <workspace-address>` — the SESSION mint + the acceptance disclosure (what connecting\ndelivers). A session = user × workspace × installation, carrying ONE workspace-scoped bearer\ncredential; further workspaces are further logins. Login IS the acceptance: from here delivery\nis silent, npm-style. **INFERRED** (additive-only).",
+  "type": "object",
+  "properties": {
+    "currency": {
+      "description": "The active adapter's auto-update-trigger outcome, when the login armed it.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TriggerReport"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "delivered": {
+      "description": "How many skills the person's profile delivers here right now (the acceptance disclosure;\nbest-effort — absent when the count could not be read).",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "display_name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "name": {
+      "description": "The workspace's ADDRESS name (the slug typed at `login`).",
+      "type": "string"
+    },
+    "pending": {
+      "description": "Present while the login awaits the browser approval (re-run `topos login` to resume).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EnrollmentPending"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "server": {
+      "description": "The API base this installation dials (from the protocol card).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "description": "The minted session's id (`sn_…`) — the handle the web sessions pages show.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_status": {
+      "description": "`\"active\"`, `\"pending\"` while the workspace's session-approval knob holds it (no data flows\nuntil an owner approves), or `\"awaiting-approval\"` while the browser approval is pending.",
+      "type": "string"
+    },
+    "triggers": {
+      "description": "The breadth arming sweep's outcomes (one row per other detected agent).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/BreadthTriggerReport"
+      }
+    },
+    "workspace_id": {
+      "description": "The logged-into workspace's id (empty while the login is still pending approval).",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "session_status"
+  ],
+  "$defs": {
+    "BreadthTriggerReport": {
+      "description": "One breadth-sweep trigger outcome for a DETECTED registry agent (beyond the active adapter's\nown [`crate::TriggerReport`]). `agent` is the registry slug; the state/kind pair follows the\nsame honesty rule everywhere: only `active` carries a live kind, everything else advertises\nthe explicit-pull floor. **Additive.**",
+      "type": "object",
+      "properties": {
+        "agent": {
+          "description": "The registry slug (e.g. `cursor`, `opencode`).",
+          "type": "string"
+        },
+        "currency_kind": {
+          "$ref": "#/$defs/CurrencyKind"
+        },
+        "marker_id": {
+          "type": "string"
+        },
+        "note": {
+          "description": "The consent step still owed, or the evidence-level caveat — `None` when nothing needs saying.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/TriggerState"
+        },
+        "touched_path": {
+          "description": "The config file the (un)install edited, when it edited one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agent",
+        "currency_kind",
+        "state",
+        "marker_id"
+      ]
+    },
+    "CurrencyKind": {
+      "description": "What fires the update check for a harness — drives HONEST receipt copy (\"current by next session\",\n\"within about a minute\", …). `ExplicitPullOnly` is the honest-degrade floor.",
+      "oneOf": [
+        {
+          "description": "A session-boundary hook runs the sweep (Claude Code's SessionStart; Hermes's\n`on_session_start`/`on_session_reset`) — updates are current when a session begins.",
+          "type": "string",
+          "const": "session_start"
+        },
+        {
+          "description": "A harness-scheduled recurring job runs the sweep (OpenClaw's silent cron) — updates land\nwithin the cadence while the harness's scheduler is running.",
+          "type": "string",
+          "const": "scheduled"
+        },
+        {
+          "description": "No automatic trigger is provably live — updates land on an explicit `topos update`.",
+          "type": "string",
+          "const": "explicit_pull_only"
+        }
+      ]
+    },
+    "EnrollmentPending": {
+      "description": "A pending device-authorization a `follow` surfaced — the human opens `verification_uri` and\nenters `user_code` there (or the invitation page the URI names weaves them through); the client\nre-polls. The code never rides a URL. **INFERRED.**",
+      "type": "object",
+      "properties": {
+        "expires_at": {
+          "description": "The session expiry as an RFC-3339 string, if it expires.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "interval_secs": {
+          "description": "The minimum poll interval, in seconds — a headless agent re-invokes no faster than this.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "user_code": {
+          "description": "The short human-facing code the approval page asks for and displays back (the glance-check\nagainst this terminal — never typed as a secret, never part of a URL).",
+          "type": "string"
+        },
+        "verification_uri": {
+          "description": "The page the human opens to approve the session — the bare approval address (or, for an\ninvitation enrollment, the invitation page that weaves accept + approval). Never embeds the\ncode.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "verification_uri",
+        "user_code"
+      ]
+    },
+    "HarnessId": {
+      "type": "string",
+      "enum": [
+        "claude-code",
+        "openclaw",
+        "hermes"
+      ]
+    },
+    "TriggerReport": {
+      "description": "The result of installing a auto-update trigger — what was touched + the marker, so re-install is\nidempotent (the marker is a managed sentinel block in the config edit, NEVER in skill bytes).",
+      "type": "object",
+      "properties": {
+        "currency_kind": {
+          "$ref": "#/$defs/CurrencyKind"
+        },
+        "harness": {
+          "$ref": "#/$defs/HarnessId"
+        },
+        "marker_id": {
+          "description": "`topos` + harness id + schema version + command identity.",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/TriggerState"
+        },
+        "touched_path": {
+          "description": "The config file edited (never a skill dir).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "harness",
+        "currency_kind",
+        "marker_id",
+        "state"
+      ]
+    },
+    "TriggerState": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "active",
+            "inactive",
+            "degraded"
+          ]
+        },
+        {
+          "description": "An equivalent command exists without our marker — adopt-or-leave, never blind-append.",
+          "type": "string",
+          "const": "already_present_unmanaged"
+        }
+      ]
+    }
+  }
+}

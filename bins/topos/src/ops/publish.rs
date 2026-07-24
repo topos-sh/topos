@@ -8,7 +8,7 @@
 //! It persists an op-WAL before the first send (so an uncertain retry replays the same
 //! `op_id`), and maps the plane's typed outcome.
 //!
-//! An UN-ENROLLED publish is refused typed — enrollment is `topos follow <workspace-address>` (the
+//! An UN-ENROLLED publish is refused typed — enrollment is `topos login <workspace-address>` (the
 //! device-authorization flow), and workspaces are born server-side, never from a publish.
 
 use topos_core::digest::to_hex;
@@ -20,19 +20,36 @@ use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
 use topos_types::results::{PublishDescribeData, PublishGate};
 
+use super::connect::{DeliveryConnect, DirectoryConnect};
 use super::contribute::{self, ContributeConnect, PUBLISH_MESSAGE};
-use super::follow::{DeliveryConnect, DirectoryConnect};
 use super::sync_engine;
 use super::{
     DiscoveryRoots, add, add_with_name, parse_hex32, resolve_add_target, resolve_skill,
-    resolve_skill_in_workspace, split_target, tracked_skill_at, write_workspace_for_skill,
+    resolve_skill_in_workspace, split_target, tracked_skill_at,
 };
 use crate::ctx::Ctx;
-use crate::enroll;
 use crate::error::ClientError;
 use crate::plane::WriteReceipt;
 use crate::source::{self, SourceSpec};
 use crate::{doc, op_wal, scan, sidecar};
+
+/// The wire spelling of a recorded import origin (`origin.json` → the publish body's provenance
+/// block): `source` is `<host>/<owner>/<repo>` — split into the host and the `owner/repo` pair.
+fn origin_to_wire(
+    origin: &topos_types::results::SkillOrigin,
+) -> topos_types::requests::WireUpstream {
+    let (host, repo) = origin
+        .source
+        .split_once('/')
+        .map_or((origin.source.as_str(), ""), |(h, r)| (h, r));
+    topos_types::requests::WireUpstream {
+        host: host.to_owned(),
+        repo: repo.to_owned(),
+        path: origin.subdir.clone().filter(|s| !s.is_empty()),
+        commit: origin.commit.clone(),
+        license: origin.license.clone(),
+    }
+}
 
 /// The result of `publish`: either `current` moved (a direct publish), or a proposal opened
 /// (`--propose`, or the protection gate's downgrade).
@@ -56,7 +73,7 @@ const GENESIS: u64 = 0;
 /// refused BEFORE any local adoption, so it never mutates local state.
 ///
 /// # Errors
-/// [`ClientError::Enrollment`] if not enrolled (run `topos follow <workspace-address>` first);
+/// [`ClientError::Enrollment`] if not enrolled (run `topos login <workspace-address>` first);
 /// [`ClientError::InvalidArgument`] if the source is remote/unsupported (add it first);
 /// [`ClientError::HarnessMismatch`] if a `@<harness>` names a different harness than the tracked skill;
 /// the `add`-family errors ([`ClientError::AmbiguousHarness`] / [`ClientError::NoUntrackedSkill`] / …) when
@@ -70,6 +87,7 @@ pub(crate) fn publish(
     ctx: &Ctx<'_>,
     connect: &ContributeConnect<'_>,
     directory: Option<&DirectoryConnect<'_>>,
+    session: Option<&super::reconcile::SessionConnect<'_>>,
     roots: Option<&DiscoveryRoots>,
     target: &str,
     propose: bool,
@@ -80,11 +98,15 @@ pub(crate) fn publish(
     // Split off an optional `@<digest>` consent pin (64-hex only); everything else is the SOURCE.
     let (source_str, pin) = parse_target(target);
 
-    // Enrollment first — BEFORE any local adoption, so an un-enrolled publish never mutates local
-    // state. Sharing needs a workspace, and joining one is the device flow, not a publish.
-    if enroll::read_instance(ctx.fs, &ctx.layout)?.is_none() {
+    // A connection first — BEFORE any local adoption, so an unconnected publish never mutates
+    // local state. Sharing needs a workspace; joining one is `login`, not a publish.
+    let has_sessions = !crate::sessions::read_sessions(ctx.fs, &ctx.layout)?
+        .sessions
+        .is_empty();
+    if !has_sessions {
         return Err(ClientError::Enrollment(
-            "not enrolled — run `topos follow <workspace-address>` first, then re-run this publish"
+            "not connected to a workspace — run `topos login <workspace-address>` first, then \
+             re-run this publish"
                 .into(),
         ));
     }
@@ -97,6 +119,7 @@ pub(crate) fn publish(
         ctx,
         connect,
         directory,
+        session.filter(|_| has_sessions),
         &skill_name,
         propose,
         channel,
@@ -105,6 +128,36 @@ pub(crate) fn publish(
         message,
     )?;
     Ok(stamp_added(outcome, added))
+}
+
+/// Normalize a `--to` channel target: a channel REFERENCE spelling (`@ws/channels/x`, the
+/// canonical `host/ws/channels/x`) resolves to its NAME after the workspace is checked against
+/// the lane this publish signs in — a reference into a different workspace refuses typed. A bare
+/// name (or any non-reference token) passes through untouched.
+fn normalize_channel_target(
+    channel: Option<&str>,
+    lane: Option<&super::WriteLane>,
+) -> Result<Option<String>, ClientError> {
+    let Some(raw) = channel else { return Ok(None) };
+    if let Ok(crate::manifest::refs::ParsedRef::Channel {
+        host,
+        workspace,
+        name,
+    }) = crate::manifest::refs::parse_ref(raw)
+    {
+        if let Some(l) = lane {
+            let host_ok = host.as_deref().is_none_or(|h| h == l.host);
+            if !host_ok || workspace != l.workspace_name {
+                return Err(ClientError::InvalidArgument(format!(
+                    "`--to {raw}` names a channel in another workspace — this publish lands in \
+                     {}/{}",
+                    l.host, l.workspace_name
+                )));
+            }
+        }
+        return Ok(Some(name));
+    }
+    Ok(Some(raw.to_owned()))
 }
 
 /// The seams `publish`'s describe needs, both read only AFTER the local scan: the directory connector
@@ -132,6 +185,7 @@ pub(crate) struct PublishDescribeConnectors<'a> {
 pub(crate) fn publish_describe(
     ctx: &Ctx<'_>,
     connectors: &PublishDescribeConnectors<'_>,
+    session: Option<&super::reconcile::SessionConnect<'_>>,
     roots: Option<&DiscoveryRoots>,
     target: &str,
     propose: bool,
@@ -158,9 +212,29 @@ pub(crate) fn publish_describe(
         Err(e) => return Err(e),
     };
 
-    let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or(ClientError::NotEnrolled)?;
     let (id, lock) = resolve_skill_in_workspace(ctx, &skill_name, workspace)?;
-    let workspace_id = write_workspace_for_skill(ctx, id.as_str(), workspace)?;
+    let lane = match session {
+        Some(sc) => super::resolve_session_lane(ctx, sc, workspace, Some(id.as_str()))?,
+        None => None,
+    };
+    let channel = normalize_channel_target(channel, lane.as_ref())?;
+    let channel = channel.as_deref();
+    let (base_url, workspace_id) = match &lane {
+        Some(l) => (l.base_url.clone(), l.workspace_id.clone()),
+        None => return Err(ClientError::NotEnrolled),
+    };
+    // Under a session lane the delivered set IS the follow-state (the cache-backed seam).
+    let cache_follow = lane
+        .as_ref()
+        .map(|_| super::reconcile::CacheFollow::load(ctx.fs, &ctx.layout));
+    let lane_ctx;
+    let ctx = match (&lane, &cache_follow) {
+        (Some(l), Some(cf)) => {
+            lane_ctx = super::pull::ctx_with_plane_and_follow(ctx, &*l.transports.plane, cf);
+            &lane_ctx
+        }
+        _ => ctx,
+    };
     let sp = ctx.layout.published(&id);
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
 
@@ -220,10 +294,12 @@ pub(crate) fn publish_describe(
     // offline. A genesis (unfollowed) skill has no server protection — its first publish keeps the
     // no-gate path.
     let review_required = match &follow_entry {
-        Some(fc) => {
-            fresh_review_required(connectors, &instance.base_url, &workspace_id, id.as_str())
-                .unwrap_or(fc.review_required)
-        }
+        Some(fc) => match &lane {
+            Some(l) => fresh_review_required_via(&*l.transports.plane, &workspace_id, id.as_str())
+                .unwrap_or(fc.review_required),
+            None => fresh_review_required(connectors, &base_url, &workspace_id, id.as_str())
+                .unwrap_or(fc.review_required),
+        },
         None => false,
     };
     let gate = if propose || review_required {
@@ -233,7 +309,14 @@ pub(crate) fn publish_describe(
     };
 
     // Network reads AFTER the local scan: the audience (reach) + the workspace address (the share line).
-    let directory = (connectors.directory)(&instance.base_url);
+    let legacy_dir;
+    let directory: &dyn crate::plane::DirectorySource = match &lane {
+        Some(l) => &*l.transports.directory,
+        None => {
+            legacy_dir = (connectors.directory)(&base_url);
+            &*legacy_dir
+        }
+    };
     let reach = directory
         .reach(&workspace_id, id.as_str())
         .ok()
@@ -344,6 +427,15 @@ fn fresh_review_required(
     skill_id: &str,
 ) -> Option<bool> {
     let delivery = (connectors.delivery)(base_url);
+    fresh_review_required_via(&*delivery, workspace_id, skill_id)
+}
+
+/// [`fresh_review_required`] over an already-built delivery transport (the session lane's).
+fn fresh_review_required_via(
+    delivery: &dyn crate::plane::DeliverySource,
+    workspace_id: &str,
+    skill_id: &str,
+) -> Option<bool> {
     let snapshot = delivery.fetch_delivery(workspace_id).ok()?;
     snapshot
         .skills
@@ -511,6 +603,7 @@ fn enrolled_publish(
     ctx: &Ctx<'_>,
     connect: &ContributeConnect<'_>,
     directory: Option<&DirectoryConnect<'_>>,
+    session: Option<&super::reconcile::SessionConnect<'_>>,
     skill_name: &str,
     propose: bool,
     channel: Option<&str>,
@@ -518,17 +611,40 @@ fn enrolled_publish(
     workspace: Option<&str>,
     message: Option<&str>,
 ) -> Result<PublishOutcome, ClientError> {
-    let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
-        ClientError::Enrollment(
-            "not enrolled — run `topos follow <workspace-address>` first".into(),
-        )
-    })?;
-
-    // The `--workspace` filter disambiguates a name shared across workspaces. A FOLLOWED skill signs in
-    // its OWN workspace (the pointer scope); a brand-new local skill (a genesis publish, no follow entry)
-    // is AMBIENT — the single membership or the `--workspace`-selected one.
+    // The `--workspace` filter disambiguates a name shared across workspaces. A DELIVERED skill signs in
+    // its OWN workspace (the pointer scope); a brand-new local skill (a genesis publish, no delivery)
+    // is AMBIENT — the single session/membership or the `--workspace`-selected one.
     let (id, lock) = resolve_skill_in_workspace(ctx, skill_name, workspace)?;
-    let workspace_id = write_workspace_for_skill(ctx, id.as_str(), workspace)?;
+    // The SESSION lane (the manifest model): the workspace + transports resolve from the
+    // logged-in sessions; the legacy device enrollment keeps its instance.json path below.
+    let lane = match session {
+        Some(sc) => super::resolve_session_lane(ctx, sc, workspace, Some(id.as_str()))?,
+        None => None,
+    };
+    let channel = normalize_channel_target(channel, lane.as_ref())?;
+    let channel = channel.as_deref();
+    let (base_url, workspace_id) = match &lane {
+        Some(l) => (l.base_url.clone(), l.workspace_id.clone()),
+        None => {
+            return Err(ClientError::Enrollment(
+                "not connected — run `topos login <workspace-address>` first".into(),
+            ));
+        }
+    };
+    // Under a session lane, the delivered set IS the follow-state (the cache-backed seam) — the
+    // no-change and gate reads below see the same truth the reconcile writes.
+    let outer_ctx = ctx;
+    let cache_follow = lane
+        .as_ref()
+        .map(|_| super::reconcile::CacheFollow::load(ctx.fs, &ctx.layout));
+    let lane_ctx;
+    let ctx = match (&lane, &cache_follow) {
+        (Some(l), Some(cf)) => {
+            lane_ctx = super::pull::ctx_with_plane_and_follow(ctx, &*l.transports.plane, cf);
+            &lane_ctx
+        }
+        _ => ctx,
+    };
     let sp = ctx.layout.published(&id);
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
 
@@ -539,7 +655,14 @@ fn enrolled_publish(
         });
     }
 
-    let transport = connect(&instance.base_url);
+    let legacy_transport;
+    let transport: &dyn crate::plane::ContributeSource = match &lane {
+        Some(l) => &*l.transports.contribute,
+        None => {
+            legacy_transport = connect(&base_url, None);
+            &*legacy_transport
+        }
+    };
     let map: PlacementMap = doc::read_map(ctx.fs, &sp.map)?
         .ok_or_else(|| ClientError::Corrupt("missing placement map".to_owned()))?;
 
@@ -608,18 +731,37 @@ fn enrolled_publish(
         )?,
     };
 
-    let receipt = contribute::run_write(ctx, &*transport, &sp, &rec, None)?;
-    map_outcome(
-        ctx,
-        &sp,
-        &lock,
-        &map,
-        &rec,
-        &receipt,
-        skill_name,
-        directory,
-        &instance.base_url,
-    )
+    let receipt = contribute::run_write(ctx, transport, &sp, &rec, None)?;
+    let legacy_dir;
+    let dir_ref: Option<&dyn crate::plane::DirectorySource> = match (&lane, directory) {
+        (Some(l), _) => Some(&*l.transports.directory),
+        (None, Some(c)) => {
+            legacy_dir = c(&base_url);
+            Some(&*legacy_dir)
+        }
+        (None, None) => None,
+    };
+    let mut outcome = map_outcome(ctx, &sp, &lock, &map, &rec, &receipt, skill_name, dir_ref)?;
+    // GOVERNANCE TRANSFER, by default: a LANDED publish of a bundle some manifest referenced as
+    // a LOCAL PATH rewrites that line to the canonical workspace reference — the local copy is
+    // now a managed placement of the governed bundle; the receipt states each part.
+    if let (Some(l), PublishOutcome::Published(data)) = (&lane, &mut outcome)
+        && let Some(rw) = super::rewrite_to_governed(
+            outer_ctx,
+            &lock.name,
+            &l.host,
+            &l.workspace_name,
+            &map.placements
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect::<Vec<_>>(),
+        )?
+    {
+        data.manifest = Some(rw.manifest);
+        data.reference = Some(rw.canonical);
+        data.converted_from = Some(rw.from);
+    }
+    Ok(outcome)
 }
 
 /// The teammate handoff line — the one paste-ready instruction that brings a teammate's machine
@@ -808,8 +950,15 @@ fn build_publish_op(
     let op_id = uuid::Uuid::from_bytes(op_id_bytes)
         .as_hyphenated()
         .to_string();
+    // The upstream provenance rides the WAL when the skill was imported from an external
+    // origin (`origin.json`) — the server records the fork-that-remembers link.
+    let upstream = doc::read_doc::<super::add::OriginDoc>(ctx.fs, &sp.origin)
+        .ok()
+        .flatten()
+        .map(|o| origin_to_wire(&o.origin));
     Ok(OpRecord {
         schema_version: PERSISTED_SCHEMA_VERSION,
+        upstream,
         op_id,
         workspace_id: workspace_id.to_owned(),
         skill_id: id.to_owned(),
@@ -842,8 +991,7 @@ fn map_outcome(
     rec: &OpRecord,
     receipt: &WriteReceipt,
     skill_name: &str,
-    directory: Option<&DirectoryConnect<'_>>,
-    base_url: &str,
+    directory: Option<&dyn crate::plane::DirectorySource>,
 ) -> Result<PublishOutcome, ClientError> {
     match receipt.outcome() {
         TerminalOutcome::Ok => {
@@ -868,9 +1016,8 @@ fn map_outcome(
             // The teammate handoff line on the landed receipt — the same `me.address` source the
             // describe's share line reads, fetched best-effort AFTER the publish settled (a failed
             // read just leaves the line off; it never fails a landed publish).
-            let invite_line = directory.and_then(|connect| {
-                (connect)(base_url)
-                    .me(&rec.workspace_id)
+            let invite_line = directory.and_then(|d| {
+                d.me(&rec.workspace_id)
                     .ok()
                     .and_then(|m| teammate_invite_line(&m.address))
             });
@@ -882,6 +1029,9 @@ fn map_outcome(
                 current_generation: new_gen,
                 added: None,
                 placement_withheld,
+                manifest: None,
+                reference: None,
+                converted_from: None,
                 invite_line,
             }))
         }

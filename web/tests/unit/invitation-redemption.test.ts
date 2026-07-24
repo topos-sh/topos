@@ -147,12 +147,13 @@ describe("accept", () => {
     );
     expect(seat[0]?.role).toBe("member");
     expect(seat[0]?.invited_by).toBe(INVITER);
-    // The hint effect: the direct follow, written AFTER the seat, same transaction.
-    const sub = await db.q(
-      `SELECT state FROM web.bundle_subscription WHERE user_id = 'u_accept' AND bundle_id = 's_deploy'`,
+    // The hint effect: the profile PREFILL (an include line), written AFTER the seat, same
+    // transaction.
+    const line = await db.q(
+      `SELECT mode FROM web.profile_entry WHERE user_id = 'u_accept' AND bundle_id = 's_deploy'`,
       [],
     );
-    expect(sub[0]?.state).toBe("following");
+    expect(line[0]?.mode).toBe("include");
     // Consumed: the row flips accepted; the audit trail carries the act.
     const inv = await db.q(
       `SELECT status, accepted_by FROM web.invitation WHERE email = 'accept@x.test'`,
@@ -168,7 +169,7 @@ describe("accept", () => {
     expect(audit[0]?.n).toBe(1);
   });
 
-  it("a channel hint joins the channel", async () => {
+  it("a channel hint prefills the channel include", async () => {
     const token = await invite("chan@x.test", { channelId: "c_eng" });
     await verifiedUser("u_chan", "chan@x.test");
     const { acceptInvitationByToken } = await import("@/lib/db/identity.server");
@@ -181,11 +182,11 @@ describe("accept", () => {
     if (result.outcome === "accepted") {
       expect(result.hint).toEqual({ kind: "channel", name: "eng" });
     }
-    const member = await db.q(
-      `SELECT 1 FROM web.channel_member WHERE channel_id = 'c_eng' AND user_id = 'u_chan'`,
+    const line = await db.q(
+      `SELECT 1 FROM web.profile_entry WHERE channel_id = 'c_eng' AND user_id = 'u_chan' AND mode = 'include'`,
       [],
     );
-    expect(member.length).toBe(1);
+    expect(line.length).toBe(1);
   });
 
   it("an archived hint lands the seat and simply drops the hint", async () => {
@@ -202,11 +203,8 @@ describe("accept", () => {
     if (result.outcome === "accepted") {
       expect(result.hint).toBeNull();
     }
-    const sub = await db.q(
-      `SELECT 1 FROM web.bundle_subscription WHERE user_id = 'u_hintgone'`,
-      [],
-    );
-    expect(sub.length).toBe(0);
+    const line = await db.q(`SELECT 1 FROM web.profile_entry WHERE user_id = 'u_hintgone'`, []);
+    expect(line.length).toBe(0);
   });
 
   it("two racing accepts serialize — exactly one consumes", async () => {
@@ -340,21 +338,21 @@ describe("the device-flow weave", () => {
     const token = await invite("weave@x.test", { bundleId: "s_deploy" });
     await verifiedUser("u_weave", "weave@x.test");
     const identity = await import("@/lib/db/identity.server");
-    const flow = await identity.startDeviceAuth("weave laptop", "", token);
+    const flow = await identity.startLoginFlow("weave laptop", "", token);
     // The pending views disclose the invitation's workspace to the code/challenge holder.
-    const pending = await identity.pendingDeviceAuth(flow.userCode);
+    const pending = await identity.pendingLoginFlow(flow.userCode);
     expect(pending?.inviteWorkspace?.name).toBeDefined();
     // The challenge lookup resolves the same flow with zero typing.
     const challenge = await db.q(
-      `SELECT encode(device_code_sha256, 'hex') AS hex FROM web.device_auth_session
+      `SELECT encode(flow_code_sha256, 'hex') AS hex FROM web.login_flow
        WHERE user_code = $1`,
       [flow.userCode],
     );
-    const byChallenge = await identity.pendingDeviceAuthByChallenge(challenge[0]?.hex as string);
+    const byChallenge = await identity.pendingLoginFlowByChallenge(challenge[0]?.hex as string);
     expect(byChallenge?.userCode).toBe(flow.userCode);
     // The SEATLESS invited person approves: the weave accepts the invitation first, so the
     // seat requirement passes in the same transaction.
-    const approved = await identity.approveDeviceAuth(flow.userCode, {
+    const approved = await identity.approveLoginFlow(flow.userCode, {
       userId: "u_weave",
       display: "W",
     });
@@ -365,7 +363,7 @@ describe("the device-flow weave", () => {
     );
     expect(seat.length).toBe(1);
     // The granted poll decorates the hint the invitation named.
-    const poll = await identity.pollDeviceAuth(flow.deviceCode);
+    const poll = await identity.pollLoginFlow(flow.flowCode);
     expect(poll.status).toBe("granted");
     if (poll.status === "granted") {
       expect(poll.hint).toEqual({ kind: "skill", name: "deploy" });
@@ -376,10 +374,10 @@ describe("the device-flow weave", () => {
     const token = await invite("weave2@x.test");
     await verifiedUser("u_notmine", "other2@x.test");
     const identity = await import("@/lib/db/identity.server");
-    const flow = await identity.startDeviceAuth("laptop", "", token);
+    const flow = await identity.startLoginFlow("laptop", "", token);
     // Seatless AND not the addressee: the weave refuses the accept, the seat check refuses the
     // approval — the same uniform null an expired code gets. The invitation stays live.
-    const approved = await identity.approveDeviceAuth(flow.userCode, {
+    const approved = await identity.approveLoginFlow(flow.userCode, {
       userId: "u_notmine",
       display: "N",
     });
@@ -394,15 +392,15 @@ describe("the device-flow weave", () => {
     const token = await invite("rollback@x.test");
     await verifiedUser("u_rollback", "rollback@x.test");
     const identity = await import("@/lib/db/identity.server");
-    const flow = await identity.startDeviceAuth("laptop", "", token);
+    const flow = await identity.startLoginFlow("laptop", "", token);
     // Expire the flow after minting (the FOR-UPDATE liveness gate then finds no live row → the
     // whole approval — accept included — rolls back).
     await db.q(
-      `UPDATE web.device_auth_session SET expires_at = now() - interval '1 minute'
+      `UPDATE web.login_flow SET expires_at = now() - interval '1 minute'
        WHERE user_code = $1`,
       [flow.userCode],
     );
-    const approved = await identity.approveDeviceAuth(flow.userCode, {
+    const approved = await identity.approveLoginFlow(flow.userCode, {
       userId: "u_rollback",
       display: "R",
     });
@@ -414,17 +412,5 @@ describe("the device-flow weave", () => {
       [],
     );
     expect(seat.length).toBe(0);
-  });
-
-  it("devicePerson resolves a credential seat-lessly, fail-closed", async () => {
-    const identity = await import("@/lib/db/identity.server");
-    await seedUser(db, "u_dev", "Dev", "dev@x.test");
-    const { seedDevice } = await import("./helpers/scratch-db");
-    await seedDevice(db, "dk_person", "u_dev");
-    // The seeded credential hash derives from the id itself.
-    const person = await identity.devicePerson("dk_person");
-    expect(person?.userId).toBe("u_dev");
-    expect(person?.email).toBe("dev@x.test");
-    expect(await identity.devicePerson("dk_bogus")).toBeNull();
   });
 });

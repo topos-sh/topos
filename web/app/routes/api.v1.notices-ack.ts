@@ -2,7 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { checkBelt } from "@/lib/api/belt.server";
 import { rowOpResponse } from "@/lib/api/row-envelopes.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
-import { requireDeviceActor } from "@/lib/auth/guards.server";
+import { requireSessionActor } from "@/lib/auth/guards.server";
 import { laneAckNotices } from "@/lib/db/queries.lane.server";
 
 /**
@@ -40,7 +40,7 @@ export async function action({ request, params }: ActionFunctionArgs): Promise<R
   ) {
     return badRequest("malformed notices ack body");
   }
-  const actor = await requireDeviceActor(request, params.ws ?? "");
+  const actor = await requireSessionActor(request, params.ws ?? "");
   const status = await laneAckNotices(actor, ids as string[]);
   return rowOpResponse("notices", status, { acked: "acked" }, {});
 }

@@ -18,8 +18,10 @@ export interface WorkspacePolicy {
   /** The protection DEFAULT an unpinned bundle inherits (`reviewed` = review-required). */
   protectionDefault: "open" | "reviewed";
   registration: "invite_only" | "open";
-  /** The device-approval knob: 'on' → a non-owner's new device link is born pending. */
-  deviceApproval: "off" | "on";
+  /** The session-approval knob: 'on' → a non-owner's new session is born pending. */
+  sessionApproval: "off" | "on";
+  /** The owner-set session expiry (ms), or null — the default — when sessions never expire. */
+  sessionMaxAgeMs: number | null;
 }
 
 /** The workspace's policy knobs, one read. */
@@ -29,7 +31,8 @@ export async function workspacePolicyOf(actor: MemberActor): Promise<WorkspacePo
       stalenessWindowMs: workspace.stalenessWindowMs,
       protectionDefault: workspace.protectionDefault,
       registration: workspace.registration,
-      deviceApproval: workspace.deviceApproval,
+      sessionApproval: workspace.sessionApproval,
+      sessionMaxAgeMs: workspace.sessionMaxAgeMs,
     })
     .from(workspace)
     .where(eq(workspace.id, actor.workspaceId))
@@ -42,7 +45,8 @@ export async function workspacePolicyOf(actor: MemberActor): Promise<WorkspacePo
     stalenessWindowMs: row.stalenessWindowMs,
     protectionDefault: row.protectionDefault as WorkspacePolicy["protectionDefault"],
     registration: row.registration as WorkspacePolicy["registration"],
-    deviceApproval: row.deviceApproval as WorkspacePolicy["deviceApproval"],
+    sessionApproval: row.sessionApproval as WorkspacePolicy["sessionApproval"],
+    sessionMaxAgeMs: row.sessionMaxAgeMs,
   };
 }
 
@@ -104,20 +108,53 @@ export async function setRegistration(
   return "set";
 }
 
-export type DeviceApprovalOutcome = "set" | "bad_value";
+export type SessionMaxAgeOutcome = "set" | "bad_value";
+
+/** The session-expiry bounds: 1 hour .. 366 days (`null` = no expiry, the default). */
+const SESSION_MAX_AGE_MIN_MS = 3_600_000;
+const SESSION_MAX_AGE_MAX_MS = 31_622_400_000;
 
 /**
- * The device-approval knob — `off` (the default: a member's new device link is born active)
- * or `on` (born pending until an owner approves it on the fleet page). An owner's own act is
- * always its own approval, whatever this says. Owner-only.
+ * The owner-set session expiry — the maximum age of a CLI session's credential. The guard
+ * enforces it at resolve time (`sessionActor` treats an over-age session as no session, the
+ * uniform 404), so a change is effective on the next request; the machine logs in again.
+ * `null` clears it (sessions never expire — the default). Owner-only.
  */
-export async function setDeviceApproval(
+export async function setSessionMaxAge(
+  actor: OwnerActor,
+  maxAgeMs: number | null,
+): Promise<SessionMaxAgeOutcome> {
+  if (
+    maxAgeMs !== null &&
+    (!Number.isSafeInteger(maxAgeMs) ||
+      maxAgeMs < SESSION_MAX_AGE_MIN_MS ||
+      maxAgeMs > SESSION_MAX_AGE_MAX_MS)
+  ) {
+    return "bad_value";
+  }
+  await setKnob(
+    actor,
+    { sessionMaxAgeMs: maxAgeMs },
+    "policy_session_max_age",
+    maxAgeMs === null ? "off" : String(maxAgeMs),
+  );
+  return "set";
+}
+
+export type SessionApprovalOutcome = "set" | "bad_value";
+
+/**
+ * The session-approval knob — `off` (the default: a member's new session is born active)
+ * or `on` (born pending until an owner approves it on the sessions page). An owner's own act
+ * is always its own approval, whatever this says. Owner-only.
+ */
+export async function setSessionApproval(
   actor: OwnerActor,
   value: string,
-): Promise<DeviceApprovalOutcome> {
+): Promise<SessionApprovalOutcome> {
   if (value !== "off" && value !== "on") {
     return "bad_value";
   }
-  await setKnob(actor, { deviceApproval: value }, "policy_device_approval", value);
+  await setKnob(actor, { sessionApproval: value }, "policy_session_approval", value);
   return "set";
 }

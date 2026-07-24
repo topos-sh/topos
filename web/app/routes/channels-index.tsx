@@ -12,7 +12,7 @@ export function meta({ params }: { params: { ws?: string } }) {
 /**
  * The channel list — every named group in the workspace, `everyone` first. Plain rows read
  * straight from the app's own tables: mode, the default marker, and the two reach counts
- * (skill references and members). Each row links to the channel's detail page; the create form is
+ * (skill references and audience). Each row links to the channel's detail page; the create form is
  * its own Rails-style `channels/new` route (channel-new.tsx).
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
@@ -48,8 +48,8 @@ export default function ChannelsIndex() {
         </Card>
         {channels.length === 1 && channels[0]?.isDefault && (
           <p className="text-faint text-sm">
-            Every workspace starts with <span className="font-mono">#everyone</span>. Create a
-            channel to share a set of skills with just the people who follow it.
+            Every workspace starts with <span className="font-mono">everyone</span>. Create a
+            channel to share a set of skills with just the people and projects that carry it.
           </p>
         )}
       </section>
@@ -79,13 +79,17 @@ function ChannelRow({ channel }: { channel: ChannelSummary }) {
           </span>
           <Chip tone={channel.mode === "curated" ? "pending" : "neutral"}>{channel.mode}</Chip>
           {channel.isDefault && (
-            <span className="text-faint text-xs">every member, minus opt-outs</span>
+            <span className="text-faint text-xs">
+              the baseline — every member's profile starts with it
+            </span>
           )}
         </div>
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-faint text-xs">
           <span>{channel.skillCount === 1 ? "1 skill" : `${channel.skillCount} skills`}</span>
           <span aria-hidden="true">·</span>
-          <span>{channel.memberCount === 1 ? "1 member" : `${channel.memberCount} members`}</span>
+          <span>
+            {channel.audienceCount === 1 ? "1 person" : `${channel.audienceCount} people`}
+          </span>
         </div>
       </Link>
     </li>

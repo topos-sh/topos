@@ -52,7 +52,8 @@ describe("workspacePolicyOf (the reads)", () => {
       stalenessWindowMs: DEFAULT_WINDOW_MS,
       protectionDefault: "open",
       registration: "invite_only",
-      deviceApproval: "off",
+      sessionApproval: "off",
+      sessionMaxAgeMs: null,
     });
     expect(await queries.stalenessWindowOf(asMember(wsId, "u_owner"))).toBe(DEFAULT_WINDOW_MS);
   });
@@ -100,18 +101,50 @@ describe("setRegistration (the open-sign-up knob)", () => {
   });
 });
 
-describe("setDeviceApproval (the device-approval knob)", () => {
+describe("setSessionApproval (the session-approval knob)", () => {
   it("sets 'on' and back to 'off', audited; refuses any other value", async () => {
     const queries = await q();
     const owner = asOwner(wsId, "u_owner", "Owner");
-    expect(await queries.setDeviceApproval(owner, "on")).toBe("set");
-    expect((await queries.workspacePolicyOf(asMember(wsId, "u_owner"))).deviceApproval).toBe("on");
-    expect(await queries.setDeviceApproval(owner, "off")).toBe("set");
-    expect((await queries.workspacePolicyOf(asMember(wsId, "u_owner"))).deviceApproval).toBe("off");
+    expect(await queries.setSessionApproval(owner, "on")).toBe("set");
+    expect((await queries.workspacePolicyOf(asMember(wsId, "u_owner"))).sessionApproval).toBe("on");
+    expect(await queries.setSessionApproval(owner, "off")).toBe("set");
+    expect((await queries.workspacePolicyOf(asMember(wsId, "u_owner"))).sessionApproval).toBe(
+      "off",
+    );
 
-    expect(await queries.setDeviceApproval(owner, "maybe")).toBe("bad_value");
-    expect(await auditRows("policy_device_approval")).toEqual([
+    expect(await queries.setSessionApproval(owner, "maybe")).toBe("bad_value");
+    expect(await auditRows("policy_session_approval")).toEqual([
       { subject: "on", outcome: "ok" },
+      { subject: "off", outcome: "ok" },
+    ]);
+  });
+});
+
+describe("setSessionMaxAge (the session-expiry knob: 1 hour .. 366 days, null = no expiry)", () => {
+  it("sets a bounded age, clears with null, audits both; refuses everything outside", async () => {
+    const queries = await q();
+    const owner = asOwner(wsId, "u_owner", "Owner");
+    const HOUR_MS = 3_600_000;
+
+    expect(await queries.setSessionMaxAge(owner, HOUR_MS)).toBe("set");
+    expect((await queries.workspacePolicyOf(asMember(wsId, "u_owner"))).sessionMaxAgeMs).toBe(
+      HOUR_MS,
+    );
+    expect(await queries.setSessionMaxAge(owner, MAX_WINDOW_MS)).toBe("set");
+    // null CLEARS the policy — sessions never expire (the column default).
+    expect(await queries.setSessionMaxAge(owner, null)).toBe("set");
+    expect((await queries.workspacePolicyOf(asMember(wsId, "u_owner"))).sessionMaxAgeMs).toBe(null);
+
+    expect(await queries.setSessionMaxAge(owner, 0)).toBe("bad_value");
+    expect(await queries.setSessionMaxAge(owner, HOUR_MS - 1)).toBe("bad_value");
+    expect(await queries.setSessionMaxAge(owner, MAX_WINDOW_MS + 1)).toBe("bad_value");
+    expect(await queries.setSessionMaxAge(owner, HOUR_MS + 0.5)).toBe("bad_value");
+    expect(await queries.setSessionMaxAge(owner, Number.NaN)).toBe("bad_value");
+    // The clear stands; the refusals wrote nothing.
+    expect((await queries.workspacePolicyOf(asMember(wsId, "u_owner"))).sessionMaxAgeMs).toBe(null);
+    expect(await auditRows("policy_session_max_age")).toEqual([
+      { subject: String(HOUR_MS), outcome: "ok" },
+      { subject: String(MAX_WINDOW_MS), outcome: "ok" },
       { subject: "off", outcome: "ok" },
     ]);
   });

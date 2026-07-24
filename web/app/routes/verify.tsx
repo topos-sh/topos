@@ -21,28 +21,28 @@ import {
 import { getAuth } from "@/lib/auth/server";
 import { announceCeremony } from "@/lib/ceremony-event";
 import {
-  approveDeviceAuth,
-  denyDeviceAuth,
-  linkBornStatus,
-  type PendingDeviceAuthView,
-  pendingDeviceAuth,
-  pendingDeviceAuthByChallenge,
+  approveLoginFlow,
+  denyLoginFlow,
+  type PendingLoginFlowView,
+  pendingLoginFlow,
+  pendingLoginFlowByChallenge,
   seatOf,
+  sessionBornStatus,
   theWorkspace,
   workspaceByName,
 } from "@/lib/db/identity.server";
 import { membershipsFor } from "@/lib/db/queries.server";
 
-export const meta: MetaFunction = () => [{ title: "Approve a device · Topos" }];
+export const meta: MetaFunction = () => [{ title: "Approve a login · Topos" }];
 
 /**
- * The ONE device-approve ceremony (the gh-style device flow's browser half), TWO-STATE: the
- * code-entry form, or the resolved request card. A device that wants to act as you shows a
- * short code and points here; a SIGNED-IN person types that code into a POST form — the code
- * never enters ANY URL (no GET lookup, no code-embedding link) — sees exactly what is asking
- * and EVERYWHERE the credential will reach, and approves or denies. A LIVE SESSION plus the
- * explicit approve click IS the whole ceremony. Denying destroys a pending request and mints
- * nothing.
+ * The ONE login-approve ceremony (the gh-style device-authorization flow's browser half),
+ * TWO-STATE: the code-entry form, or the resolved request card. A machine that wants to act
+ * as you in ONE workspace shows a short code and points here; a SIGNED-IN person types that
+ * code into a POST form — the code never enters ANY URL (no GET lookup, no code-embedding
+ * link) — sees exactly what is asking and THE ONE workspace the session will reach, and
+ * approves or denies. A LIVE browser session plus the explicit approve click IS the whole
+ * ceremony. Denying destroys a pending request and mints nothing.
  *
  * The LOOPBACK arrival (the CLI auto-opened this page): the URL carries `device` — the hex of
  * the flow's device-code HASH (the same value the store keys the row by; identifying, never
@@ -94,14 +94,14 @@ function selfPath(device: string | null, loopback: Loopback | null): string {
   return `/verify${search === "" ? "" : `?${search}`}`;
 }
 
-/** The ONE workspace this approval would link the device to — the resolved card's subject. */
+/** The ONE workspace this approval logs the machine into — the resolved card's subject. */
 interface LinkTarget {
   name: string;
   displayName: string;
   /** The approver holds no seat there yet (an invitation accept — or `/new` — will seat them). */
   joining: boolean;
-  /** The link will be born pending: the device-approval knob is on and the approver (or the
-   * invitation's role) is not an owner. */
+  /** The session will be born pending: the session-approval knob is on and the approver (or
+   * the invitation's role) is not an owner. */
   awaitsApproval: boolean;
 }
 
@@ -110,12 +110,11 @@ interface LinkTarget {
  * (the ceremony re-resolves under its own lock): an invitation names its workspace; otherwise
  * the tenancy grammar decides (single → the install's one workspace, multi → the recorded
  * slug, which may not exist yet — a CLI-first person creates it mid-flow and returns owning
- * it). The approval mints registration + THIS one link; further workspaces each take their own
- * explicit link from the device.
+ * it). The approval mints THIS one workspace's session; further workspaces are further logins.
  */
 async function linkTargetOf(
   actor: UserActor,
-  pending: PendingDeviceAuthView,
+  pending: PendingLoginFlowView,
   multi: boolean,
 ): Promise<LinkTarget> {
   const ws =
@@ -126,7 +125,7 @@ async function linkTargetOf(
         : await theWorkspace();
   if (ws == null) {
     // Multi tenancy, a workspace not created yet: the approver will create it through the
-    // `/new` weave and own it — a link created by its owner is born active.
+    // `/new` weave and own it — a session its owner mints is born active.
     return {
       name: pending.requestedWorkspace,
       displayName: pending.requestedWorkspace,
@@ -136,14 +135,14 @@ async function linkTargetOf(
   }
   const seat = await seatOf(actor.userId, ws.id);
   const role = (seat?.role ?? pending.inviteWorkspace?.role ?? "member") as Parameters<
-    typeof linkBornStatus
+    typeof sessionBornStatus
   >[0];
-  const knob = ((ws as { deviceApproval?: string }).deviceApproval ?? "off") as "off" | "on";
+  const knob = ((ws as { sessionApproval?: string }).sessionApproval ?? "off") as "off" | "on";
   return {
     name: ws.name,
     displayName: ws.displayName,
     joining: seat === undefined,
-    awaitsApproval: linkBornStatus(role, knob) === "pending",
+    awaitsApproval: sessionBornStatus(role, knob) === "pending",
   };
 }
 
@@ -155,7 +154,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   if (actor === null) {
     throw redirect(`/login?next=${encodeURIComponent(self)}`);
   }
-  const resolved = device === null ? null : await pendingDeviceAuthByChallenge(device);
+  const resolved = device === null ? null : await pendingLoginFlowByChallenge(device);
   const multi = composition.tenancy === "multi";
   const memberships = await membershipsFor(actor);
   if (
@@ -206,7 +205,7 @@ export async function action({ request }: ActionFunctionArgs) {
     if (userCode === "") {
       throw data(null, { status: 400 });
     }
-    const pending = await pendingDeviceAuth(userCode);
+    const pending = await pendingLoginFlow(userCode);
     if (pending === null) {
       return { kind: "miss" as const };
     }
@@ -229,7 +228,7 @@ export async function action({ request }: ActionFunctionArgs) {
     // ceremony itself resolves the flow's workspace and requires the approver's seat in it —
     // accepting a carried invitation first when the approver is its addressee — and a refusal
     // is indistinguishable from an expired code.
-    const approved = await approveDeviceAuth(userCode, {
+    const approved = await approveLoginFlow(userCode, {
       userId: actor.userId,
       display: actor.display,
     });
@@ -246,7 +245,7 @@ export async function action({ request }: ActionFunctionArgs) {
     return { kind: "approved" as const, name: approved.requestedName };
   }
 
-  const denied = await denyDeviceAuth(userCode, {
+  const denied = await denyLoginFlow(userCode, {
     userId: actor.userId,
     display: actor.display,
   });
@@ -268,7 +267,7 @@ export default function VerifyPage() {
   const { resolved, loopback } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
 
-  // The `device_approved` ceremony announcement, fired ONCE when the approval-success state
+  // The `login_approved` ceremony announcement, fired ONCE when the approval-success state
   // renders. Ref-guarded so dev strict-mode's doubled effect and re-renders of the same
   // success never re-dispatch; leaving the success state (a fresh lookup) re-arms it for the
   // next distinct approval.
@@ -284,14 +283,14 @@ export default function VerifyPage() {
       return;
     }
     announcedApproval.current = true;
-    announceCeremony("device_approved");
+    announceCeremony("login_approved");
   }, [approved]);
 
   if (actionData !== undefined && "kind" in actionData && actionData.kind === "approved") {
     return (
       <Shell>
-        <PlainState heading="Device connected">
-          {actionData.name} is connected — you can close this tab; the device picks the approval up
+        <PlainState heading="Logged in">
+          {actionData.name} is logged in — you can close this tab; the machine picks the approval up
           on its next poll.
         </PlainState>
       </Shell>
@@ -301,7 +300,7 @@ export default function VerifyPage() {
     return (
       <Shell>
         <PlainState heading="Request denied">
-          Nothing was connected — the device is told on its next poll.
+          Nothing was connected — the machine is told on its next poll.
         </PlainState>
       </Shell>
     );
@@ -317,13 +316,13 @@ export default function VerifyPage() {
     <Shell>
       <div className="flex flex-col gap-6">
         <div className="flex flex-col gap-2 text-center">
-          <p className="font-medium text-faint text-xs uppercase tracking-wide">Device approval</p>
+          <p className="font-medium text-faint text-xs uppercase tracking-wide">Login approval</p>
           <h1 className="font-display font-semibold text-ink text-lg tracking-[-0.02em]">
-            Approve a device
+            Approve a login
           </h1>
           {card === null && (
             <p className="text-dim text-sm">
-              Enter the code your device shows — it looks like{" "}
+              Enter the code your terminal shows — it looks like{" "}
               <code className="font-mono text-ink">AB29-CD34</code>.
             </p>
           )}
@@ -371,16 +370,16 @@ function CodeLookup() {
 }
 
 /** One resolved-card row shape shared by loader (challenge) and action (lookup) arrivals. */
-interface ResolvedCard extends PendingDeviceAuthView {
+interface ResolvedCard extends PendingLoginFlowView {
   linked: LinkTarget;
 }
 
 /**
  * State two: the resolved request. What is asking, the CODE for the glance-check against the
- * terminal, THE ONE workspace being linked (the grant IS one link — further workspaces each
- * take their own explicit link from the device), and the two arms. The approve form posts the
- * RESOLVED code as a hidden field — the approval applies to exactly the request shown, never
- * to whatever a lookup input held.
+ * terminal, THE ONE workspace being logged into (a login is one workspace's session — further
+ * workspaces are further logins), and the two arms. The approve form posts the RESOLVED code
+ * as a hidden field — the approval applies to exactly the request shown, never to whatever a
+ * lookup input held.
  */
 function PendingRequest({ card, loopback }: { card: ResolvedCard; loopback: Loopback | null }) {
   const navigation = useNavigation();
@@ -398,7 +397,7 @@ function PendingRequest({ card, loopback }: { card: ResolvedCard; loopback: Loop
   return (
     <div className="flex flex-col gap-4 rounded-md border border-line-soft bg-ground p-4">
       <p className="text-ink text-sm">
-        Device <span className="font-medium">“{card.requestedName}”</span> wants to act as you.
+        <span className="font-medium">“{card.requestedName}”</span> wants to log in as you.
       </p>
       <p className="text-dim text-sm">
         Its code is <code className="font-mono text-ink">{card.userCode}</code> — confirm it matches
@@ -406,26 +405,26 @@ function PendingRequest({ card, loopback }: { card: ResolvedCard; loopback: Loop
       </p>
       <div className="text-dim text-sm">
         <p>
-          Approving links it to{" "}
+          Approving logs it into{" "}
           <span className="font-medium text-ink">{card.linked.displayName}</span>
           {card.linked.joining && <span className="text-faint"> — which you join on approve</span>}.
         </p>
         {card.inviteWorkspace !== null && (
           <p className="mt-2">
-            This enrollment carries an invitation to{" "}
+            This login carries an invitation to{" "}
             <span className="font-medium text-ink">{card.inviteWorkspace.displayName}</span> —
             approving accepts it.
           </p>
         )}
         {card.linked.awaitsApproval && (
           <p className="mt-2">
-            Device approval is on there: the link waits until a workspace owner approves it —
+            Session approval is on there: the session waits until a workspace owner approves it —
             nothing is delivered before that.
           </p>
         )}
         <p className="mt-2">
-          It publishes, follows, and reads there until you sign it out from your devices. Any
-          further workspace takes its own explicit link from the device.
+          It publishes, syncs, and reads there until you end the session — from your sessions page
+          or with topos logout. Any further workspace is its own login.
         </p>
       </div>
       <Form method="post" className="flex flex-col gap-3">
@@ -449,7 +448,7 @@ function PendingRequest({ card, loopback }: { card: ResolvedCard; loopback: Loop
           disabled={submitting}
           className={`${buttonClasses("danger")} min-h-11 w-full`}
         >
-          Deny — this isn’t my device
+          Deny — this isn’t me
         </button>
       </Form>
     </div>
@@ -459,7 +458,7 @@ function PendingRequest({ card, loopback }: { card: ResolvedCard; loopback: Loop
 function PlainState({ heading, children }: { heading: string; children: ReactNode }) {
   return (
     <div className="flex flex-col items-center gap-2 text-center">
-      <p className="font-medium text-faint text-xs uppercase tracking-wide">Device approval</p>
+      <p className="font-medium text-faint text-xs uppercase tracking-wide">Login approval</p>
       <h1 className="font-display font-semibold text-ink text-lg tracking-[-0.02em]">{heading}</h1>
       <p className="text-dim text-sm">{children}</p>
     </div>

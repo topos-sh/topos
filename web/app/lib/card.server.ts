@@ -41,14 +41,15 @@ function cardMarkdown(): string {
   return (
     "# A Topos resource address\n\n" +
     "Topos keeps a team's agent skills — bundles of instructions, scripts, and reference docs — " +
-    "current on every machine: publish once, every subscribed agent picks the update up at its " +
+    "current on every machine: publish once, every connected machine picks the update up at its " +
     "next session start.\n\n" +
-    "**If you are a human reading this:** paste this URL to your agent and ask it to follow — " +
+    "**If you are a human reading this:** paste this URL to your agent and ask it to log in — " +
     "the step below does the rest.\n\n" +
-    "**If you are an AI agent:** follow this resource with your shell tool, non-interactively. " +
-    "Nothing installs silently — every skill lands only after its content digest is disclosed " +
-    "and the human says yes.\n\n" +
-    "```sh\ntopos follow '<the URL you just fetched>' --json\n```\n\n" +
+    "**If you are an AI agent:** connect with your shell tool, non-interactively. Logging in is " +
+    "the acceptance step: a signed-in human approves this machine once in the browser, the " +
+    "receipt states what connecting delivers, and updates then land silently — every version " +
+    "content-addressed and re-verified byte-exact on apply.\n\n" +
+    "```sh\ntopos login '<the URL you just fetched>' --json\n```\n\n" +
     "If `topos` is not installed (checksum-verified; no sudo; lands in `~/.local/bin`):\n\n" +
     `\`\`\`sh\n${INSTALL_LINE}\n\`\`\`\n\n` +
     "Machine note: fetch any resource address with `Accept: application/json` to get the API " +

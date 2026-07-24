@@ -18,7 +18,6 @@ use topos_types::persisted::{Lock, LockedFile, PlacementMap, SwapCapability, Syn
 use topos_types::results::{AddData, KeepAsYoursData, KeepReason, SkillOrigin, UntrackedEntry};
 
 use crate::ctx::Ctx;
-use crate::enroll;
 use crate::error::ClientError;
 use crate::git_source::{GitTarballSource, RepoFile, extract_tree};
 use crate::id::SkillId;
@@ -265,6 +264,11 @@ pub(crate) fn add_with_name(
         triggers: Vec::new(),
         // Set by the remote-import wrapper ([`add_remote`]); a local adopt has no upstream.
         origin: None,
+        // Set by the manifest-edit step at the composition root (the verb records the demand line).
+        manifest: None,
+        reference: None,
+        undo: Vec::new(),
+        governed_copy: None,
     })
 }
 
@@ -307,6 +311,19 @@ pub(crate) fn add_remote(
     roots: &super::DiscoveryRoots,
     opts: &AddRemoteOpts,
 ) -> Result<AddData, ClientError> {
+    let targz = source.fetch(spec)?;
+    add_remote_fetched(ctx, &targz, spec, roots, opts)
+}
+
+/// [`add_remote`] over an ALREADY-FETCHED tarball — the seam the pin-refresh path uses so the
+/// network round-trip (and its failure modes) happen BEFORE any old bytes are deleted.
+pub(crate) fn add_remote_fetched(
+    ctx: &Ctx<'_>,
+    targz: &[u8],
+    spec: &RemoteSpec,
+    roots: &super::DiscoveryRoots,
+    opts: &AddRemoteOpts,
+) -> Result<AddData, ClientError> {
     ctx.fs.create_dir_all(ctx.layout.home())?;
 
     // 1. Destination harness + scope. Default: the active harness (the one topos drives + can arm auto-updates
@@ -333,10 +350,9 @@ pub(crate) fn add_remote(
         topos_harness::registry::skills_root(&slug, scope, &roots.home, roots.cwd.as_deref())
             .ok_or_else(|| ClientError::InvalidArgument(destination_hint(&slug, opts.global)))?;
 
-    // 2. Fetch + extract + select the skill (all typed; a multi-skill repo self-corrects via `--skill`).
+    // 2. Extract + select the skill (all typed; a multi-skill repo self-corrects via `--skill`).
     let source_label = spec.label();
-    let targz = source.fetch(spec)?;
-    let repo = extract_tree(&targz)?;
+    let repo = extract_tree(targz)?;
     let selected = repo.select(
         spec.subdir.as_deref(),
         opts.skill.as_deref(),
@@ -449,11 +465,14 @@ pub(crate) fn keep_as_yours(
         }
         Err(e) => return Err(e),
     };
-    // Only a FOLLOWED skill can be withdrawn/detached — a purely-local (genesis) skill is not a fork case.
-    let follows = enroll::read_follows(ctx.fs, &ctx.layout)?
-        .map(|f| f.follows)
-        .unwrap_or_default();
-    let Some(entry) = follows.iter().find(|f| f.skill_id == sid.as_str()) else {
+    // Only a DELIVERED skill can be withdrawn/detached — the offline delivery cache is the
+    // session-model record; a purely-local (genesis) skill is not a fork case.
+    let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
+    let Some((entry_ws, entry)) = cache.workspaces.iter().find_map(|(ws, e)| {
+        e.delivered
+            .get(sid.as_str())
+            .map(|d| (ws.clone(), d.clone()))
+    }) else {
         return Ok(None);
     };
     // Placement state: a withdrawal / exclusion CLEANED the agent dirs; a detach (unfollow) LEFT them.
@@ -463,13 +482,9 @@ pub(crate) fn keep_as_yours(
         .unwrap_or_default();
     let present = placements.iter().any(|p| ctx.fs.exists(Path::new(p)));
 
-    // The retained reason — or NOT a fork case (a live followed skill stays the ordinary already-tracked
-    // answer; `!following` outranks the rest, then the per-device exclusion, then an upstream withdrawal).
-    let reason = if !entry.following {
-        KeepReason::Detached
-    } else if entry.excluded_here {
-        KeepReason::RemovedHere
-    } else if !present {
+    // The retained reason — or NOT a fork case (a live delivered skill stays the ordinary
+    // already-tracked answer; a WITHDRAWN cache row or a cleaned placement is the retained state).
+    let reason = if entry.withdrawn || !present {
         KeepReason::WithdrawnUpstream
     } else {
         return Ok(None);
@@ -487,7 +502,7 @@ pub(crate) fn keep_as_yours(
         return Ok(Some(KeepAsYoursOutcome::Described {
             data: KeepAsYoursData {
                 name: name.to_owned(),
-                workspace_id: Some(entry.workspace_id.clone()),
+                workspace_id: Some(entry_ws.clone()),
                 reason,
                 has_draft,
             },
@@ -643,7 +658,6 @@ fn retained_head(store: &Store, base: [u8; 32]) -> Result<RetainedTree, ClientEr
 /// bytes as a new local skill, so the old (ghost) entry must go before the re-adopt (else the
 /// already-tracked guard refuses the path) and so `list` stops showing a detached ghost afterward.
 fn retire_tracked(ctx: &Ctx<'_>, sid: &SkillId) -> Result<(), ClientError> {
-    enroll::remove_follow(ctx.fs, &ctx.layout, sid.as_str())?;
     let skill_dir = ctx.layout.skill_dir(sid);
     if ctx.fs.exists(&skill_dir) {
         ctx.fs.remove_dir_all(&skill_dir)?;
@@ -972,6 +986,66 @@ fn registry_attribution(source_abs: &Path) -> Option<topos_harness::registry::Ha
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
     let cwd = std::env::current_dir().ok();
     topos_harness::registry::attribute_path(source_abs, &home, cwd.as_deref())
+}
+
+/// Consult each ACTIVE session's catalog for a GOVERNED copy of `spec`'s source — the dedup
+/// suggestion a remote import's receipt carries ("acme already has this as `@acme/deploy`").
+/// Matching is by upstream host + `owner/repo` over the catalog's additive upstream fields; a
+/// path-exact match wins over a same-repo sibling. `imported_subdir` is the skill path the
+/// import actually SELECTED inside the repo (the recorded origin — a `--skill` pick or a
+/// multi-skill repo resolves deeper than the spec's own subdir), so path-exactness is judged
+/// against what landed, not what was typed. Best-effort by design: no sessions, a transport
+/// fault, or an upstream-less catalog all answer `None` — the suggestion is a courtesy, never
+/// a gate on the import (npm shape: warn beside the act, never block it).
+pub(crate) fn governed_copy_suggestion(
+    ctx: &Ctx<'_>,
+    connect: &super::reconcile::SessionConnect<'_>,
+    spec: &RemoteSpec,
+    imported_subdir: Option<&str>,
+) -> Option<topos_types::results::GovernedCopy> {
+    let sessions = crate::sessions::read_sessions(ctx.fs, &ctx.layout).ok()?;
+    let want_host = spec.host.domain();
+    let want_repo = format!("{}/{}", spec.owner, spec.repo);
+    let want_path = imported_subdir
+        .or(spec.subdir.as_deref())
+        .unwrap_or_default();
+    let mut sibling: Option<topos_types::results::GovernedCopy> = None;
+    for s in &sessions.sessions {
+        // Only an ACTIVE session's catalog is this person's universe (pending delivers nothing).
+        if s.status != crate::sessions::SESSION_ACTIVE {
+            continue;
+        }
+        let transports = connect(s);
+        let Ok(index) = transports.directory.skills_index(&s.workspace_id) else {
+            continue;
+        };
+        for e in index.skills {
+            if e.status != "active" {
+                continue;
+            }
+            let (Some(host), Some(repo)) = (e.upstream_host.as_deref(), e.upstream_repo.as_deref())
+            else {
+                continue;
+            };
+            if host != want_host || repo != want_repo {
+                continue;
+            }
+            let same_path = e.upstream_path.as_deref().unwrap_or("") == want_path;
+            let copy = topos_types::results::GovernedCopy {
+                workspace: s.workspace_name.clone(),
+                name: e.name.clone(),
+                // The CANONICAL host-qualified spelling — a bare `@ws/name` is ambiguous when
+                // sessions on different servers share a workspace slug.
+                reference: format!("{}/{}/{}", s.host, s.workspace_name, e.name),
+                same_path,
+            };
+            if same_path {
+                return Some(copy);
+            }
+            sibling.get_or_insert(copy);
+        }
+    }
+    sibling
 }
 
 /// Refuse a source path that is equal to, an ancestor of, or a descendant of `~/.topos/` (canonicalized,

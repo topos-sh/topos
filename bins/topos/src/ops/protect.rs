@@ -11,7 +11,8 @@
 
 use topos_types::results::ProtectData;
 
-use super::follow::{DirectoryConnect, build_universe_via};
+use super::connect::DirectoryConnect;
+use super::reconcile::SessionConnect;
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::resolve::{self, Resolution, ResourceKind};
@@ -19,7 +20,10 @@ use crate::resolve::{self, Resolution, ResourceKind};
 /// The seams `protect` needs — the directory connector builds the universe, reads the audience, and
 /// writes the protection level.
 pub(crate) struct ProtectConnectors<'a> {
+    #[allow(dead_code)]
     pub directory: &'a DirectoryConnect<'a>,
+    /// The per-session transports (each read/write rides its session's own credential).
+    pub session: &'a SessionConnect<'a>,
 }
 
 /// The verb's outcome — the two-phase pair.
@@ -47,11 +51,16 @@ pub(crate) fn protect(
     yes: bool,
 ) -> Result<ProtectOutcome, ClientError> {
     let _ = workspace; // the grammar's qualified path / a unique bare name already scopes the target
-    let (base_url, universe) = build_universe_via(ctx, connectors.directory)?;
-    let base_url = base_url.ok_or(ClientError::NotEnrolled)?;
+    let su = super::connect::session_universe(ctx, connectors.session)?;
+    if su.universe.is_empty() {
+        return Err(ClientError::Enrollment(
+            "not connected to a workspace — run `topos login <workspace-address>` first".into(),
+        ));
+    }
+    let universe = &su.universe;
 
     let parsed = resolve::parse_target(target)?;
-    let resolution = resolve::resolve_one(&universe, &parsed, resolve::KindScope::SUBSCRIBABLE)?
+    let resolution = resolve::resolve_one(universe, &parsed, resolve::KindScope::SUBSCRIBABLE)?
         .ok_or_else(|| resolve::not_found(target))?;
 
     let (workspace_id, kind, name, skill_id) = match resolution {
@@ -75,9 +84,11 @@ pub(crate) fn protect(
     let level = resolve_level(kind, level)?;
     let loosening = level == "open";
 
-    let directory = (connectors.directory)(&base_url);
+    let directory = su.directory_for(&workspace_id).ok_or_else(|| {
+        ClientError::Enrollment("no session for this workspace — `topos login` it first".into())
+    })?;
     // The audience the protection governs (best-effort — a read fault degrades the describe, never the op).
-    let audience = read_audience(&*directory, &workspace_id, kind, &name, skill_id.as_deref());
+    let audience = read_audience(directory, &workspace_id, kind, &name, skill_id.as_deref());
 
     let note = match (kind, loosening) {
         (ResourceKind::Skill, true) => {
@@ -161,13 +172,14 @@ fn level_argv(kind: ResourceKind, level: &str) -> Option<String> {
     (level != default).then(|| level.to_owned())
 }
 
-/// The audience the protection governs — the reach (people) for a skill, the member count for a channel.
-/// Best-effort: a read fault answers `None` (the describe degrades, the op does not).
+/// The audience the protection governs — the reach (people) for a skill. A channel's audience is
+/// not on the session wire (delivery is profile math, not membership rows) — the describe simply
+/// omits it. Best-effort: a read fault answers `None` (the describe degrades, the op does not).
 fn read_audience(
     directory: &dyn crate::plane::DirectorySource,
     workspace_id: &str,
     kind: ResourceKind,
-    name: &str,
+    _name: &str,
     skill_id: Option<&str>,
 ) -> Option<u64> {
     match kind {
@@ -175,11 +187,7 @@ fn read_audience(
             let id = skill_id?;
             directory.reach(workspace_id, id).ok().map(|r| r.persons)
         }
-        ResourceKind::Channel => directory
-            .channels_index(workspace_id)
-            .ok()
-            .and_then(|idx| idx.channels.into_iter().find(|c| c.name == name))
-            .map(|c| c.member_count),
+        ResourceKind::Channel => None,
     }
 }
 

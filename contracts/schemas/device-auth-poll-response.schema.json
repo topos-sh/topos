@@ -1,18 +1,18 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "DeviceAuthPollResponse",
-  "description": "`POST /v1/device/token` response — the poll `status`; a `granted` poll carries the device's ONE\nbearer credential (the promoted device code — returned here and stored from this ONE field),\nits device id, and the joined workspace. A re-poll of an approved flow returns the same answer.",
+  "description": "`POST /v1/login/token` response — the poll `status`; a `granted` poll carries the SESSION's\nworkspace-scoped bearer credential (the promoted flow code — returned here and stored from this\nONE field), the session id, and the joined workspace. A re-poll of an approved flow returns the\nsame answer.",
   "type": "object",
   "properties": {
     "credential": {
-      "description": "The device's plaintext bearer credential — present ONLY when `status` is `granted`. Returned\nonce per poll; the server stores only its sha256.",
+      "description": "The session's plaintext bearer credential — present ONLY when `status` is `granted`.\nReturned once per poll; the server stores only its sha256.",
       "type": [
         "string",
         "null"
       ]
     },
     "device_id": {
-      "description": "The registered device's id — present ONLY when `status` is `granted`.",
+      "description": "The RETIRED device wire's grant id — parse-only fallback for a producer predating\n[`Self::session_id`]; never served by the session wire.",
       "type": [
         "string",
         "null"
@@ -30,7 +30,21 @@
       ]
     },
     "link_status": {
-      "description": "The FIRST device↔workspace link's born status — present ONLY when `status` is `granted`:\n`\"active\"`, or `\"pending\"` when the workspace's device-approval knob gated it (approval\nmints the registration and the first link together server-side). Absent on an older\nproducer ⇒ treat as `\"active\"`.",
+      "description": "The RETIRED device-link spelling of [`Self::session_status`] — parse-only fallback for a\nproducer predating the session wire. Absent ⇒ treat as `\"active\"`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "description": "The minted SESSION's id — the session-model login wire's grant half (a session = user ×\nworkspace × installation; the credential is workspace-scoped). Present ONLY when `status`\nis `granted` on a session-serving producer. **Additive.**",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_status": {
+      "description": "The session's born status — `\"active\"`, or `\"pending\"` while the workspace's\nsession-approval knob holds it. Absent ⇒ treat as active. **Additive.**",
       "type": [
         "string",
         "null"
@@ -57,7 +71,7 @@
   ],
   "$defs": {
     "DeviceAuthHint": {
-      "description": "The first-destination HINT an accepted invitation named — decorated onto a `granted` poll (and\nthe direct-accept answer) so the enrolled client's post-accept subscribe can target it. `kind`\nis the bundle catalog's own tag (`skill` today) or the literal `channel` — displayed and routed\non, never trusted as authority.",
+      "description": "The first-destination HINT an accepted invitation named — decorated onto a `granted` poll (and\nthe direct-accept answer) so the logged-in client's first `add` can target it. `kind` is the\nbundle catalog's own tag (`skill` today) or the literal `channel` — displayed and routed on,\nnever trusted as authority.",
       "type": "object",
       "properties": {
         "kind": {
@@ -75,7 +89,7 @@
       ]
     },
     "DeviceAuthPollStatus": {
-      "description": "A device-authorization poll status (snake_case). `granted` carries the credential + the joined\nworkspace; every other status carries only itself.",
+      "description": "A login-flow poll status (snake_case). `granted` carries the credential + the joined\nworkspace; every other status carries only itself.",
       "oneOf": [
         {
           "description": "Not yet approved — keep polling at the interval.",
@@ -93,14 +107,14 @@
           "const": "expired"
         },
         {
-          "description": "Approved — `credential`, `device_id`, and `workspace` are present.",
+          "description": "Approved — `credential`, `session_id`, and `workspace` are present.",
           "type": "string",
           "const": "granted"
         }
       ]
     },
     "DeviceAuthWorkspace": {
-      "description": "The workspace context a `granted` poll carries — everything the CLI needs to record what it\nenrolled into (the id it scopes requests by, the address slug it joined at, and a display name).",
+      "description": "The workspace context a `granted` poll carries — everything the CLI needs to record what it\nlogged into (the id it scopes requests by, the address slug it joined at, and a display name).",
       "type": "object",
       "properties": {
         "display_name": {
@@ -108,7 +122,7 @@
           "type": "string"
         },
         "name": {
-          "description": "The workspace's ADDRESS slug (what the human typed at `follow`).",
+          "description": "The workspace's ADDRESS slug (what the human typed at `login`).",
           "type": "string"
         },
         "workspace_id": {
