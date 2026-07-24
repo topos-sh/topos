@@ -552,6 +552,7 @@ fn describe_item(removal: &Removal) -> RemoveItem {
         } => RemoveItem {
             name: name.clone(),
             kind: RemoveKind::FollowedExclusion,
+            manifest: None,
             workspace_id: Some(workspace_id.clone()),
             agent_dirs: Vec::new(),
             bytes_kept: true,
@@ -560,6 +561,7 @@ fn describe_item(removal: &Removal) -> RemoveItem {
         Removal::TrackedLocal { name, dirs, .. } => RemoveItem {
             name: name.clone(),
             kind: RemoveKind::TrackedLocalPermanent,
+            manifest: None,
             workspace_id: None,
             agent_dirs: dirs.iter().map(|d| d.display().to_string()).collect(),
             bytes_kept: false,
@@ -568,6 +570,7 @@ fn describe_item(removal: &Removal) -> RemoveItem {
         Removal::Untracked { name, dir } => RemoveItem {
             name: name.clone(),
             kind: RemoveKind::UntrackedLocal,
+            manifest: None,
             workspace_id: None,
             agent_dirs: vec![dir.display().to_string()],
             bytes_kept: false,
@@ -576,6 +579,7 @@ fn describe_item(removal: &Removal) -> RemoveItem {
         Removal::Builtin { dirs } => RemoveItem {
             name: super::builtin::BUILTIN_NAME.to_owned(),
             kind: RemoveKind::TrackedLocalPermanent,
+            manifest: None,
             workspace_id: None,
             agent_dirs: dirs.iter().map(|d| d.display().to_string()).collect(),
             bytes_kept: false,

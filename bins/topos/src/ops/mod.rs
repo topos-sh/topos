@@ -25,10 +25,12 @@ mod channel;
 mod contribute;
 mod diff;
 mod follow;
+mod init;
 mod invite;
 mod list;
 mod log;
 pub(crate) mod loopback;
+mod manifest_edit;
 mod merge_resolve;
 mod protect;
 mod publish;
@@ -75,8 +77,10 @@ pub(crate) use follow::{
 // Test-only re-export: the waiting-line parser round-trips against the disclosures' emitter.
 #[cfg(test)]
 pub(crate) use follow::fmt_rfc3339_millis;
+pub(crate) use init::init;
 pub(crate) use invite::{InviteConnectors, InviteOutcome, invite};
 pub(crate) use list::{DiscoveryRoots, ListFilter, ListOutcome, RemoteScope, list_with};
+pub(crate) use manifest_edit::{note_added_path, note_added_remote, remove_from_manifests};
 // The `Option<&str>` shim is a test-only convenience (the inline suites + the feature-gated e2e rig);
 // production uses `list_with`, so its re-export is gated to stay warning-clean in a plain build.
 #[cfg(any(test, feature = "test-fixtures"))]

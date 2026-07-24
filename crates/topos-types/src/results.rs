@@ -490,6 +490,30 @@ pub struct AddData {
     /// locally-adopted skill (a path or a discovered name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<SkillOrigin>,
+    /// The MANIFEST this add edited — the trust rail's first half: a `topos.toml` path. Absent when
+    /// no manifest line was written (an internal adopt). **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<String>,
+    /// The reference the manifest line stores (canonical where resolvable). **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    /// The paste-ready inverse (`topos remove <ref>`). Empty when nothing is undoable. **Additive.**
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undo: Vec<String>,
+}
+
+/// `init` — create this folder's `topos.toml` (the project manifest `add`/`remove` edit and
+/// `update`/`status` resolve). **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct InitData {
+    /// The manifest's path.
+    pub manifest: String,
+    /// `false` when one already existed (the no-op receipt).
+    pub created: bool,
+    /// A placement note (outside a git repo the file will not travel — stated honestly).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// The `keep it as yours` describe — an `add <name>` that re-forks a RETAINED withdrawn/detached copy
@@ -847,6 +871,10 @@ pub struct RemoveItem {
     pub name: String,
     /// How the removal behaves for this skill.
     pub kind: RemoveKind,
+    /// The MANIFEST the removal edited (a `topos.toml` path). Absent when no manifest line was
+    /// touched. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<String>,
     /// The workspace the exclusion is recorded in (a followed skill); absent for a local copy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
@@ -869,6 +897,11 @@ pub struct RemoveItem {
 pub enum RemoveKind {
     /// A followed skill → a per-device exclusion (the server keeps delivering it to your other devices).
     FollowedExclusion,
+    /// The manifest's own include line was deleted — delivery to this scope just ends. **Additive.**
+    ManifestRemoved,
+    /// A broader layer still provides the item, so an EXCLUDE line was recorded in the nearest
+    /// manifest (the one negative state). **Additive.**
+    ManifestExcluded,
     /// An untracked local copy in an agent dir → permanent delete (no other copy exists).
     UntrackedLocal,
     /// A tracked, never-published local skill → permanent delete (the sidecar entry drops too).

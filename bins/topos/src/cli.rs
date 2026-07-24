@@ -167,6 +167,11 @@ pub(crate) enum Command {
         #[arg(long, value_name = "SECONDS")]
         ttl: Option<u64>,
     },
+    /// Create this folder's `topos.toml` — the project MANIFEST `add`/`remove` edit and
+    /// `update`/`status` resolve (committed with the repo, it travels: every teammate's agents get
+    /// the same set here). Any folder, git or not; outside a shared repo the receipt notes the
+    /// file stays local. An existing manifest is a clean no-op, never overwritten.
+    Init,
     /// Adopt a skill into topos. The source is polymorphic:
     ///   • a skill NAME (`deploy`, `deploy@claude-code`) — resolved against the untracked skills
     ///     `topos list` discovers (`@<harness>` disambiguates across harnesses);
@@ -184,7 +189,9 @@ pub(crate) enum Command {
         /// `'*'` = all). Default: the active harness. Ignored for a local path / name adopt.
         #[arg(long, short = 'a', value_name = "SLUG")]
         agent: Vec<String>,
-        /// Land a remote import in the harness's global/user skills dir instead of the project (cwd) dir.
+        /// Record in the PERSONAL manifest (`~/.topos/topos.toml`) instead of the project's
+        /// `topos.toml`; a remote import also lands in the harness's global/user skills dir
+        /// instead of the project (cwd) dir.
         #[arg(long, short = 'g')]
         global: bool,
         /// Apply without the describe step. Parses today; the two-phase describe lands later.
@@ -447,6 +454,7 @@ impl Command {
     pub(crate) fn name(&self) -> &'static str {
         match self {
             Command::Status => "status",
+            Command::Init => "init",
             Command::Follow { .. } => "follow",
             Command::Unfollow { .. } => "unfollow",
             // `pull` is a hidden alias of `update` — the envelope always reads "update".
@@ -494,6 +502,13 @@ mod tests {
         assert!(bare.command.is_none());
         let bare_json = Cli::try_parse_from(["topos", "--json"]).unwrap();
         assert!(bare_json.command.is_none() && bare_json.json);
+    }
+
+    #[test]
+    fn init_parses_and_names_itself() {
+        let out = Cli::try_parse_from(["topos", "init"]).unwrap();
+        assert!(matches!(out.command, Some(Command::Init)));
+        assert_eq!(out.command.unwrap().name(), "init");
     }
 
     #[test]

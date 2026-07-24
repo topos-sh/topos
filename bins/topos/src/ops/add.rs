@@ -265,6 +265,10 @@ pub(crate) fn add_with_name(
         triggers: Vec::new(),
         // Set by the remote-import wrapper ([`add_remote`]); a local adopt has no upstream.
         origin: None,
+        // Set by the manifest-edit step at the composition root (the verb records the demand line).
+        manifest: None,
+        reference: None,
+        undo: Vec::new(),
     })
 }
 

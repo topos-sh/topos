@@ -303,6 +303,8 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
     match command {
         // Dispatched BEFORE state recovery above — the read-only promise admits no sweep write.
         Command::Status => unreachable!("status dispatches before state recovery"),
+        // `init` — create this folder's `topos.toml` (idempotent; a no-op receipt when it exists).
+        Command::Init => finish(json, cmd_name, ops::init(&ctx), render::init_tty, &diag),
         Command::Add {
             source,
             skill,
@@ -336,13 +338,23 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             // bare name resolves against `list`'s untracked discovery; a remote `owner/repo`/URL fetches +
             // imports. No prompts — a remote import is fully non-interactive (the source's trust is the
             // user/agent's to verify).
+            // Every adopt also records its MANIFEST line (the demand side: what this folder — or,
+            // under `-g`, the person — uses); the receipt names the manifest first with the inverse.
             let result = match crate::source::classify(&source) {
-                crate::source::SourceSpec::LocalPath(p) => ops::add(&ctx, &p),
+                crate::source::SourceSpec::LocalPath(p) => ops::add(&ctx, &p).and_then(|mut d| {
+                    ops::note_added_path(&ctx, &mut d, &p, global)?;
+                    Ok(d)
+                }),
                 crate::source::SourceSpec::LocalName(name) => match list_discovery(false) {
                     // Adopt the resolved dir UNDER its resolved name — so `list`/`add`/`publish`/`diff`
                     // agree on the name even for a harness the active adapter does not recognize.
-                    Some(roots) => ops::resolve_add_target(&ctx, &roots, &name)
-                        .and_then(|(p, n)| ops::add_with_name(&ctx, &p, Some(&n))),
+                    Some(roots) => {
+                        ops::resolve_add_target(&ctx, &roots, &name).and_then(|(p, n)| {
+                            let mut d = ops::add_with_name(&ctx, &p, Some(&n))?;
+                            ops::note_added_path(&ctx, &mut d, &p, global)?;
+                            Ok(d)
+                        })
+                    }
                     None => Err(ClientError::InvalidArgument(
                         "cannot resolve a skill name without $HOME set — adopt a directory by \
                          path (`topos add ./<dir>`)"
@@ -363,6 +375,10 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                                 global,
                             },
                         )
+                        .and_then(|mut d| {
+                            ops::note_added_remote(&ctx, &mut d, global)?;
+                            Ok(d)
+                        })
                     }
                     None => Err(ClientError::InvalidArgument(
                         "cannot import a remote skill without $HOME set (needed to resolve the \
@@ -955,6 +971,25 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             }
         }
         Command::Remove { skill, agent, yes } => {
+            // The MANIFEST arm first: a target naming a manifest line edits the NEAREST manifest
+            // (delete the include, or record the one negative state — an exclude — when a broader
+            // layer still provides it). Immediate and reversible, so `--yes` is an accepted no-op;
+            // the classic tracked/untracked removal owns everything the manifests don't mention.
+            if agent.is_empty() {
+                match ops::remove_from_manifests(&ctx, &skill) {
+                    Ok(Some(data)) => {
+                        let _ = yes;
+                        return finish_remove(
+                            json,
+                            cmd_name,
+                            Ok(ops::RemoveOutcome::Applied(data)),
+                            &diag,
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(e) => return emit_err(json, cmd_name, &e, &diag),
+                }
+            }
             let connectors = ops::RemoveConnectors {
                 directory: &connect_directory,
             };
@@ -1731,7 +1766,7 @@ fn add_multi(
     let mut out = Vec::with_capacity(skill_opts.len() * agent_opts.len());
     for s in &skill_opts {
         for a in &agent_opts {
-            out.push(ops::add_remote(
+            let mut data = ops::add_remote(
                 ctx,
                 &git,
                 &spec,
@@ -1741,7 +1776,10 @@ fn add_multi(
                     harness: a.clone(),
                     global,
                 },
-            )?);
+            )?;
+            // Each landed (skill × harness) records its manifest line like the single-select path.
+            ops::note_added_remote(ctx, &mut data, global)?;
+            out.push(data);
         }
     }
     Ok(out)

@@ -97,7 +97,7 @@ Adopt a skill into topos. The source is polymorphic: • a skill NAME (`deploy`,
 | `<SOURCE>` |  |  | The skill to adopt — a name, a path, or a remote `owner/repo`/github.com URL |
 | `-s, --skill` | `<NAME>` |  | Pick a skill from a repo that holds several (repeatable; `'*'` = all). A lone skill needs none |
 | `-a, --agent` | `<SLUG>` |  | The agent (harness) to land a remote import into (a registry slug, e.g. `cursor`; repeatable; `'*'` = all). Default: the active harness. Ignored for a local path / name adopt |
-| `-g, --global` |  |  | Land a remote import in the harness's global/user skills dir instead of the project (cwd) dir |
+| `-g, --global` |  |  | Record in the PERSONAL manifest (`~/.topos/topos.toml`) instead of the project's `topos.toml`; a remote import also lands in the harness's global/user skills dir instead of the project (cwd) dir |
 | `--yes` |  |  | Apply without the describe step. Parses today; the two-phase describe lands later |
 
 

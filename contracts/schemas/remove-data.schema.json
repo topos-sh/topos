@@ -46,6 +46,13 @@
           "description": "How the removal behaves for this skill.",
           "$ref": "#/$defs/RemoveKind"
         },
+        "manifest": {
+          "description": "The MANIFEST the removal edited (a `topos.toml` path). Absent when no manifest line was\ntouched. **Additive.**",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "type": "string"
         },
@@ -77,6 +84,16 @@
           "description": "A followed skill → a per-device exclusion (the server keeps delivering it to your other devices).",
           "type": "string",
           "const": "followed-exclusion"
+        },
+        {
+          "description": "The manifest's own include line was deleted — delivery to this scope just ends. **Additive.**",
+          "type": "string",
+          "const": "manifest-removed"
+        },
+        {
+          "description": "A broader layer still provides the item, so an EXCLUDE line was recorded in the nearest\nmanifest (the one negative state). **Additive.**",
+          "type": "string",
+          "const": "manifest-excluded"
         },
         {
           "description": "An untracked local copy in an agent dir → permanent delete (no other copy exists).",

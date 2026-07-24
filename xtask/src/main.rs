@@ -171,6 +171,10 @@ fn schemas() -> Vec<(&'static str, String)> {
             emit(schemars::schema_for!(topos_types::results::AddData)),
         ),
         (
+            "init-data",
+            emit(schemars::schema_for!(topos_types::results::InitData)),
+        ),
+        (
             "follow-data",
             emit(schemars::schema_for!(topos_types::results::FollowData)),
         ),
@@ -474,6 +478,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
             triggers: Vec::new(),
             // Adopted from a local dir, not a remote source — no upstream origin.
             origin: None,
+            // The fixture adopt writes no manifest line (no machine roots in the fixture rig).
+            manifest: None,
+            reference: None,
+            undo: Vec::new(),
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -920,6 +928,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             items: vec![RemoveItem {
                 name: "deploy".to_owned(),
                 kind: RemoveKind::FollowedExclusion,
+                manifest: None,
                 workspace_id: Some("w_acme".to_owned()),
                 agent_dirs: vec!["~/.claude/skills/deploy".to_owned()],
                 bytes_kept: true,
@@ -954,6 +963,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             items: vec![RemoveItem {
                 name: "deploy".to_owned(),
                 kind: RemoveKind::FollowedExclusion,
+                manifest: None,
                 workspace_id: Some("w_acme".to_owned()),
                 agent_dirs: vec!["~/.claude/skills/deploy".to_owned()],
                 bytes_kept: true,

@@ -352,13 +352,43 @@ pub(crate) fn to_json(envelope: &JsonEnvelope) -> String {
     serde_json::to_string(envelope).unwrap_or_else(|_| "{\"ok\":false}".to_owned())
 }
 
+/// The `init` receipt — the manifest's path, whether it was created, and the honest travel note.
+pub(crate) fn init_tty(data: &topos_types::results::InitData) -> String {
+    let mut out = if data.created {
+        format!(
+            "Created {} — record skills with `topos add`; `topos update` reconciles agents in \
+             this folder against it.",
+            data.manifest
+        )
+    } else {
+        format!("{} already exists — nothing changed.", data.manifest)
+    };
+    if let Some(note) = &data.note {
+        out.push_str(&format!("\nNote: {note}."));
+    }
+    out
+}
+
 pub(crate) fn add_tty(data: &AddData) -> String {
-    let mut out = format!(
+    let mut out = String::new();
+    // The MANIFEST edited comes FIRST (the trust rail's first half: which manifest line asked for
+    // it), with the paste-ready inverse.
+    if let (Some(manifest), Some(reference)) = (&data.manifest, &data.reference) {
+        out.push_str(&format!(
+            "{manifest}: added \"{reference}\" (undo: {})\n",
+            if data.undo.is_empty() {
+                format!("topos remove {reference}")
+            } else {
+                data.undo.join(" ")
+            }
+        ));
+    }
+    out.push_str(&format!(
         "Adopted '{}' ({}) @ {}",
         data.name,
         data.skill_id,
         short(&data.version_id)
-    );
+    ));
     // Provenance of a remote import (honest, never a trust claim) — where the bytes came from + license.
     if let Some(o) = &data.origin {
         out.push_str("\nImported from ");
@@ -1755,6 +1785,22 @@ fn remove_item_line(item: &RemoveItem, applied: bool) -> String {
         return format!("{verb} '{}'{dirs} — {note}.", item.name);
     }
     match item.kind {
+        RemoveKind::ManifestRemoved => {
+            let manifest = item.manifest.as_deref().unwrap_or("topos.toml");
+            format!(
+                "{manifest}: removed '{}' — delivery to this scope ends at the next `topos \
+                 update`; bytes already placed stay until then (undo: topos add {}).",
+                item.name, item.name
+            )
+        }
+        RemoveKind::ManifestExcluded => {
+            let manifest = item.manifest.as_deref().unwrap_or("topos.toml");
+            format!(
+                "{manifest}: excluded '{}' — a broader manifest still provides it, so an exclude \
+                 line (the one negative state) now shadows it here (undo: topos add {}).",
+                item.name, item.name
+            )
+        }
         RemoveKind::FollowedExclusion => {
             let verb = if applied { "Removed" } else { "Would remove" };
             format!(

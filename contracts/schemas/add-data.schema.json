@@ -37,6 +37,13 @@
         "null"
       ]
     },
+    "manifest": {
+      "description": "The MANIFEST this add edited — the trust rail's first half: a `topos.toml` path. Absent when\nno manifest line was written (an internal adopt). **Additive.**",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "name": {
       "type": "string"
     },
@@ -51,6 +58,13 @@
         }
       ]
     },
+    "reference": {
+      "description": "The reference the manifest line stores (canonical where resolvable). **Additive.**",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "skill_id": {
       "type": "string"
     },
@@ -62,6 +76,13 @@
       "type": "array",
       "items": {
         "$ref": "#/$defs/BreadthTriggerReport"
+      }
+    },
+    "undo": {
+      "description": "The paste-ready inverse (`topos remove <ref>`). Empty when nothing is undoable. **Additive.**",
+      "type": "array",
+      "items": {
+        "type": "string"
       }
     },
     "version_id": {
