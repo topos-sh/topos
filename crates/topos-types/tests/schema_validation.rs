@@ -98,7 +98,8 @@ fn good_delivery() -> WireDelivery {
         }],
         proposals_awaiting: 1,
         staleness_window_ms: 604_800_000,
-        link_status: "active".into(),
+        session_status: Some("active".into()),
+        link_status: None,
     }
 }
 

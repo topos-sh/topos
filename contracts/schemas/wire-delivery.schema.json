@@ -5,7 +5,7 @@
   "type": "object",
   "properties": {
     "detached": {
-      "description": "The skill ids the person detached (unfollowed, or lapsed via a channel leave / removal) and that are\nNOT currently re-entitled — every device freezes these in place, never cleaning them.",
+      "description": "The skill ids the person detached (unfollowed, or lapsed via a channel leave / removal) and that are\nNOT currently re-entitled — every device freezes these in place, never cleaning them.\nRETIRED on the session wire (a current server never sends it); defaulted for the transition.",
       "type": "array",
       "items": {
         "type": "string"
@@ -19,8 +19,11 @@
       }
     },
     "link_status": {
-      "description": "THIS device's link to the workspace — `\"active\"` or `\"pending\"`. REQUIRED: the delivery\nanswer is meaningless without it (a `\"pending\"` delivery carries empty `skills` /\n`detached` / `excluded` / `notices` and `proposals_awaiting: 0` — no data flows over a\npending link; the client skips the workspace quietly and `topos status` shows the wait).",
-      "type": "string"
+      "description": "RETIRED spelling of [`Self::session_status`] (the device-link wire) — read as a fallback,\nnever produced by a current server.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "notices": {
       "description": "The unacked, person-scoped notices (verdicts, proposal closures, …).",
@@ -41,6 +44,13 @@
       "format": "uint32",
       "const": 1,
       "minimum": 0
+    },
+    "session_status": {
+      "description": "THIS session's standing — `\"active\"` or `\"pending\"`. A `\"pending\"` delivery carries empty\n`skills` / `notices` and `proposals_awaiting: 0` — no data flows over a pending session;\nthe client skips the workspace quietly and `topos status` shows the wait. Serde-defaulted\nonly so the retired `link_status` spelling still parses during the wire transition.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "skills": {
       "description": "The entitled skills — everything this device should have (a possibly-empty list).",
@@ -65,10 +75,8 @@
     "schema_version",
     "workspace_id",
     "skills",
-    "detached",
     "notices",
-    "proposals_awaiting",
-    "link_status"
+    "proposals_awaiting"
   ],
   "$defs": {
     "WireDeliverySkill": {

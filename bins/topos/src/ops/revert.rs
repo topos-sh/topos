@@ -176,6 +176,7 @@ pub(crate) fn revert(
             .map_err(|_| ClientError::Corrupt("forward-revert commit id preimage".to_owned()))?;
             OpRecord {
                 schema_version: PERSISTED_SCHEMA_VERSION,
+                upstream: None,
                 op_id: contribute::new_op_id(ctx),
                 workspace_id: workspace_id.clone(),
                 skill_id: id.to_string(),

@@ -244,6 +244,9 @@ fn send_op(
             let candidate = render_candidate(sp, commit_id, bundle_digest)?;
             if matches!(rec.op, OpKind::PublishDirect) {
                 transport.publish(PublishRequest {
+                    // The provenance rides the WAL from the publish verb (the governance-transfer
+                    // path); a record predating the field replays without one.
+                    upstream: rec.upstream.clone(),
                     channel: rec.channel.clone(),
                     workspace_id: rec.workspace_id.clone(),
                     skill_id: rec.skill_id.clone(),
@@ -663,6 +666,7 @@ mod tests {
         let op_id = "c0000000-0000-4000-8000-000000000001".to_owned();
         // A review op needs no candidate render (send_op builds ReviewRequest from the record's fields).
         let rec = OpRecord {
+            upstream: None,
             schema_version: 1,
             op_id: op_id.clone(),
             workspace_id: "w_acme".to_owned(),
@@ -761,6 +765,7 @@ mod tests {
         let op_id = "d0000000-0000-4000-8000-000000000001".to_owned();
         let rec = OpRecord {
             schema_version: 1,
+            upstream: None,
             op_id: op_id.clone(),
             workspace_id: "w_acme".to_owned(),
             skill_id: "s_deploy".to_owned(),

@@ -37,6 +37,7 @@ mod protect;
 mod publish;
 mod pull;
 mod quiet_gate;
+mod reconcile;
 mod remove;
 mod revert;
 mod review;
@@ -102,6 +103,7 @@ pub(crate) use pull::{
     PullOutcome, PullScope, ReconcileOpts, ResetOutcome, TargetMode, pull, pull_reconcile_with,
     quiet_hook_lines, quiet_soft_failure, reset, update_selective,
 };
+pub(crate) use reconcile::{ManifestUpdateOpts, SessionTransports, manifest_update};
 // The withdrawal/exclusion clean is driven through `remove`/the reconcile; the direct re-export
 // serves the placement-breadth suite's foreign-preservation regression.
 #[cfg(test)]

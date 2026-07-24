@@ -1160,6 +1160,8 @@ mod tests {
                 (
                     "s_beh",
                     DeliveredSkill {
+                        name: String::new(),
+                        review_required: false,
                         served_version: hex(VER_C),
                         withdrawn: false,
                         via_channels: vec!["eng".into()],
@@ -1303,6 +1305,8 @@ mod tests {
 
     fn via(channels: &[&str]) -> DeliveredSkill {
         DeliveredSkill {
+            name: String::new(),
+            review_required: false,
             served_version: hex(VER_A),
             withdrawn: false,
             via_channels: channels.iter().map(|c| (*c).to_owned()).collect(),

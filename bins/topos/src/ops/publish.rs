@@ -34,6 +34,24 @@ use crate::plane::WriteReceipt;
 use crate::source::{self, SourceSpec};
 use crate::{doc, op_wal, scan, sidecar};
 
+/// The wire spelling of a recorded import origin (`origin.json` → the publish body's provenance
+/// block): `source` is `<host>/<owner>/<repo>` — split into the host and the `owner/repo` pair.
+fn origin_to_wire(
+    origin: &topos_types::results::SkillOrigin,
+) -> topos_types::requests::WireUpstream {
+    let (host, repo) = origin
+        .source
+        .split_once('/')
+        .map_or((origin.source.as_str(), ""), |(h, r)| (h, r));
+    topos_types::requests::WireUpstream {
+        host: host.to_owned(),
+        repo: repo.to_owned(),
+        path: origin.subdir.clone().filter(|s| !s.is_empty()),
+        commit: origin.commit.clone(),
+        license: origin.license.clone(),
+    }
+}
+
 /// The result of `publish`: either `current` moved (a direct publish), or a proposal opened
 /// (`--propose`, or the protection gate's downgrade).
 #[derive(Debug)]
@@ -808,8 +826,15 @@ fn build_publish_op(
     let op_id = uuid::Uuid::from_bytes(op_id_bytes)
         .as_hyphenated()
         .to_string();
+    // The upstream provenance rides the WAL when the skill was imported from an external
+    // origin (`origin.json`) — the server records the fork-that-remembers link.
+    let upstream = doc::read_doc::<super::add::OriginDoc>(ctx.fs, &sp.origin)
+        .ok()
+        .flatten()
+        .map(|o| origin_to_wire(&o.origin));
     Ok(OpRecord {
         schema_version: PERSISTED_SCHEMA_VERSION,
+        upstream,
         op_id,
         workspace_id: workspace_id.to_owned(),
         skill_id: id.to_owned(),

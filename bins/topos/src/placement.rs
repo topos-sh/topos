@@ -252,6 +252,141 @@ pub(crate) fn plan_targets(
     plan
 }
 
+/// The PROJECT-scope placement plan — where a project manifest's bundles land INSIDE the checkout
+/// (the artifact's "project-scope bundles materialize in the project"): its harness dirs, never
+/// committed (the reconcile keeps them out via `.git/info/exclude`). Mirrors the shared-dir-first
+/// policy ROOTED AT THE PROJECT: one `<project>/.agents/skills` copy for the covered detected
+/// agents, plus a native project dir per detected-but-uncovered harness that has one; with nothing
+/// detected, the active adapter's project dir (else `<project>/.claude/skills`). An explicit
+/// manifest `[placement]` override pins ONE project-relative dir instead (harness-independent —
+/// one location every agent reads). Prior-dir stability considers ONLY placements under the
+/// project root, so a same-skill person-scope record never leaks into the project plan.
+pub(crate) fn project_plan(
+    ctx: &Ctx<'_>,
+    project_dir: &Path,
+    skill_id: &str,
+    naming: PlacementNaming<'_>,
+    override_dir: Option<&str>,
+    prior: Option<&PlacementMap>,
+    adopt: Option<[u8; 32]>,
+) -> PlacementPlan {
+    let owned = owned_predicate(prior);
+    let taken =
+        |p: &Path| topos_harness::dir_taken(p) || recorded_by_another_skill(ctx, skill_id, p);
+    // Prior stability, PROJECT-LOCAL: the recorded dir for a (kind, agent) key is reused only when
+    // it sits under this project (a home-dir record for the same key belongs to the person scope).
+    let prior_in = |kind: PlacementKind, agent: Option<&str>| -> Option<PathBuf> {
+        let map = prior?;
+        map.placements
+            .iter()
+            .zip(&map.placement_state)
+            .find(|(dir, st)| {
+                Path::new(dir).starts_with(project_dir)
+                    && st.kind == kind
+                    && st.agent.as_deref() == agent
+                    && (st.materialized_sha.is_some()
+                        || !topos_harness::dir_taken(Path::new(dir))
+                        || adoption_reservation_holds(dir, st, adopt))
+            })
+            .map(|(dir, _)| PathBuf::from(dir))
+    };
+    let choose = |root: &Path| {
+        adopt_override(
+            ctx,
+            topos_harness::choose_skill_dir(root, skill_id, naming, &taken, &owned),
+            skill_id,
+            naming,
+            adopt,
+        )
+    };
+    let mut plan = PlacementPlan::default();
+
+    // An explicit override is the WHOLE plan: one dir, every agent reads it.
+    if let Some(rel) = override_dir {
+        let root = project_dir.join(rel.trim_start_matches("./"));
+        let dir = prior_in(PlacementKind::Native, None).unwrap_or_else(|| choose(&root));
+        plan.targets.push(PlannedTarget {
+            dir,
+            kind: PlacementKind::Native,
+            agent: None,
+        });
+        return plan;
+    }
+
+    let home = ctx.roots.as_ref().map(|r| r.home.clone());
+    let detected: Vec<&'static registry::KnownHarness> = match &ctx.roots {
+        Some(roots) => registry::detected_harnesses(&roots.home, Some(project_dir)),
+        None => Vec::new(),
+    };
+
+    let mut native: Vec<&'static registry::KnownHarness> = Vec::new();
+    for h in &detected {
+        let support = coverage::shared_dir_support(h.slug);
+        if support.covered() {
+            plan.shared_covers.push(CoveredAgent {
+                slug: h.slug.to_owned(),
+                docs_level: support.docs_level(),
+            });
+        } else {
+            native.push(h);
+        }
+    }
+    if !plan.shared_covers.is_empty() {
+        let dir = prior_in(PlacementKind::Shared, None)
+            .unwrap_or_else(|| choose(&project_dir.join(".agents/skills")));
+        plan.targets.push(PlannedTarget {
+            dir,
+            kind: PlacementKind::Shared,
+            agent: None,
+        });
+    }
+    for h in native {
+        let Some(root) = home.as_deref().and_then(|home| {
+            registry::skills_root(
+                h.slug,
+                registry::SkillScope::Project,
+                home,
+                Some(project_dir),
+            )
+        }) else {
+            continue; // no project-scope dir for this harness — nothing to place in-project
+        };
+        let dir = prior_in(PlacementKind::Native, Some(h.slug)).unwrap_or_else(|| choose(&root));
+        if plan.targets.iter().any(|t| t.dir == dir) {
+            continue;
+        }
+        plan.targets.push(PlannedTarget {
+            dir,
+            kind: PlacementKind::Native,
+            agent: Some(h.slug.to_owned()),
+        });
+    }
+
+    if plan.targets.is_empty() {
+        // Nothing detected (or nothing with a project dir): the active adapter's project root,
+        // else the Claude-Code-shaped default — a project manifest must always have somewhere to
+        // land, and `.claude/skills` is the one convention every teammate's machine resolves.
+        let active = ctx.harness.id().slug();
+        let root = home
+            .as_deref()
+            .and_then(|home| {
+                registry::skills_root(
+                    active,
+                    registry::SkillScope::Project,
+                    home,
+                    Some(project_dir),
+                )
+            })
+            .unwrap_or_else(|| project_dir.join(".claude/skills"));
+        plan.targets.push(PlannedTarget {
+            dir: prior_in(PlacementKind::Native, Some(active)).unwrap_or_else(|| choose(&root)),
+            kind: PlacementKind::Native,
+            agent: Some(active.to_owned()),
+        });
+    }
+    plan
+}
+
 /// The classic single-placement plan (no detection): the prior record's targets as-is — except a
 /// STALE adoption reservation (never materialized, dir occupied, the occupant no longer matching
 /// its recorded digest), which is re-chosen fresh so [`reconcile_map`] can replace it (mirroring

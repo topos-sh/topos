@@ -462,6 +462,8 @@ pub(crate) fn pull_reconcile_with(
             delivered_cache.insert(
                 ds.skill_id.clone(),
                 DeliveredSkill {
+                    name: ds.name.clone(),
+                    review_required: ds.review_required,
                     served_version: to_hex(&ds.version_id),
                     withdrawn: false,
                     via_channels: ds.via_channels.clone(),
@@ -588,6 +590,8 @@ pub(crate) fn pull_reconcile_with(
         sync_updates.push((
             ws.clone(),
             WorkspaceSync {
+                host: None,
+                workspace_name: None,
                 last_delivery_at: Some(now_millis),
                 last_report_at: if report_ok {
                     Some(now_millis)
@@ -1192,7 +1196,7 @@ fn read_sync(ctx: &Ctx<'_>, sid: &SkillId) -> Result<Option<SyncState>, ClientEr
 /// Scoping to the delivered set is load-bearing: reporting a withdrawn or frozen skill would tell
 /// the fleet page this device still serves bytes it does not, and would revive the very detach
 /// record the plane wrote.
-fn applied_snapshot(
+pub(super) fn applied_snapshot(
     ctx: &Ctx<'_>,
     delivered: &HashSet<&str>,
 ) -> Result<Vec<(String, [u8; 32])>, ClientError> {

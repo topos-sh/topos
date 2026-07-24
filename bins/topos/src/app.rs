@@ -296,6 +296,24 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             .with_workspaces(workspaces),
         )
     };
+    // The per-SESSION transports (the manifest model): one byte/delivery lane + one directory
+    // lane per logged-in workspace, each under that session's OWN workspace-scoped credential.
+    let connect_session_transports = |s: &crate::sessions::Session| -> ops::SessionTransports {
+        ops::SessionTransports {
+            plane: Box::new(
+                UreqPlane::new(
+                    s.base_url.clone(),
+                    Some(s.credential.clone()),
+                    Default::default(),
+                )
+                .with_workspaces(vec![s.workspace_id.clone()]),
+            ),
+            directory: Box::new(UreqDeviceClient::new(
+                s.base_url.clone(),
+                Some(s.credential.clone()),
+            )),
+        }
+    };
     // The default WEB origin the enrollment doors dial on a fresh install (`follow <bare-ws>`,
     // `auth login`): the env override, else the hosted web origin (the card re-roots onto the API).
     let web_origin = resolve_web_origin(std::env::var("TOPOS_PLANE_URL").ok());
@@ -945,12 +963,41 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             } else {
                 false
             };
+            // The MANIFEST model owns `update` whenever this installation runs on sessions (or has
+            // no legacy enrollment at all — the solo/manifest-only shape): resolve the manifest
+            // layers from cwd + the logged-in profiles and reconcile. The classic delivery sweep
+            // stays only for a pre-session enrolled install. Model-independent forms: the go-back
+            // (`<skill>@<hash>`), `--reset`, `--onto-current`, and the `--channel`/`--skill`
+            // selectors keep their classic paths.
+            let has_sessions = crate::sessions::read_sessions(&fs, &ctx.layout)
+                .map(|s| !s.sessions.is_empty())
+                .unwrap_or(false);
+            let manifest_model = has_sessions || enrollment.is_none();
+            let goback_target = targets
+                .len()
+                .eq(&1)
+                .then(|| targets[0].clone())
+                .filter(|t| t.split_once('@').is_some_and(|(_, r)| !r.is_empty()));
             let result = if has_selectors {
                 if onto_current {
                     Err(ClientError::InvalidArgument(
                         "--onto-current takes a single <skill> target, not selectors or several targets"
                             .into(),
                     ))
+                } else if manifest_model {
+                    let mut all_targets = targets.clone();
+                    all_targets.extend(skill.iter().cloned());
+                    all_targets.extend(channel.iter().cloned());
+                    let git = crate::plane_http::UreqGitSource::new();
+                    ops::manifest_update(
+                        &ctx,
+                        &connect_session_transports,
+                        Some(&git),
+                        &ops::ManifestUpdateOpts {
+                            targets: all_targets,
+                            ack_notices: !quiet,
+                        },
+                    )
                 } else {
                     ops::update_selective(
                         &ctx,
@@ -976,6 +1023,17 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                          this binary; `topos self-update` updates the binary itself"
                             .into(),
                     ))
+                } else if manifest_model && !onto_current && goback_target.is_none() {
+                    let git = crate::plane_http::UreqGitSource::new();
+                    ops::manifest_update(
+                        &ctx,
+                        &connect_session_transports,
+                        Some(&git),
+                        &ops::ManifestUpdateOpts {
+                            targets: target.into_iter().collect(),
+                            ack_notices: !quiet,
+                        },
+                    )
                 } else {
                     pull_with_name_fallback(&ctx, target, onto_current, delivery, &reconcile_opts)
                 }

@@ -861,7 +861,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
         }],
         staleness_window_ms: 604_800_000,
         proposals_awaiting: 1,
-        link_status: "active".to_owned(),
+        session_status: Some("active".to_owned()),
+        link_status: None,
     };
 
     // The PENDING-link delivery: no data flows over a pending link — the server answers empty
@@ -876,7 +877,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
         notices: vec![],
         staleness_window_ms: 604_800_000,
         proposals_awaiting: 0,
-        link_status: "pending".to_owned(),
+        session_status: Some("pending".to_owned()),
+        link_status: None,
     };
 
     // =============================================================================================

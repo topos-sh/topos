@@ -102,6 +102,26 @@ pub(crate) fn sync_one_with(
     inv: Invocation,
     target: Option<&topos_types::WireCurrentRecord>,
 ) -> Result<PullSkill, ClientError> {
+    sync_one_planned(ctx, skill_id, follow, inv, target, None)
+}
+
+/// How a sync derives its placement plan — the scope seam: `None` keeps the person-scope default
+/// ([`placement::plan_for_skill`] — home harness dirs); the manifest reconcile passes a
+/// project-scope planner for items a project `topos.toml` demands (the bytes belong INSIDE that
+/// checkout). The fn is re-invoked whenever the engine re-plans (the adoption-lapse correction),
+/// so both plan sites stay scope-consistent.
+pub(crate) type PlanFn<'a> =
+    dyn Fn(&Ctx<'_>, &str, &Lock, &PlacementMap) -> crate::placement::PlacementPlan + 'a;
+
+/// [`sync_one_with`] with an explicit placement-plan source (see [`PlanFn`]).
+pub(crate) fn sync_one_planned(
+    ctx: &Ctx<'_>,
+    skill_id: &crate::id::SkillId,
+    follow: &FollowContext,
+    inv: Invocation,
+    target: Option<&topos_types::WireCurrentRecord>,
+    plan_fn: Option<&PlanFn<'_>>,
+) -> Result<PullSkill, ClientError> {
     let explicit = inv.is_explicit();
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
     let sp = ctx.layout.published(skill_id);
@@ -196,7 +216,11 @@ pub(crate) fn sync_one_with(
     // coverage adds a target; a record only ever leaves through an explicit verb). The reconciled
     // map carries every recorded placement — appended targets are never-materialized until an apply.
     let applied_eq_observed = sync.applied == sync.observed;
-    let plan = placement::plan_for_skill(ctx, skill_id, &lock, &map);
+    let make_plan = |map: &PlacementMap| match plan_fn {
+        Some(f) => f(ctx, skill_id, &lock, map),
+        None => placement::plan_for_skill(ctx, skill_id, &lock, map),
+    };
+    let plan = make_plan(&map);
     let map = placement::reconcile_map(&map, &plan);
     let managed = placement::managed_indices(&map, &plan);
     let work = compute_work(ctx, &map, &lock, &name)?;
@@ -279,7 +303,7 @@ pub(crate) fn sync_one_with(
                 st.pre_existing_sha = None;
             }
         }
-        let plan = placement::plan_for_skill(ctx, skill_id, &lock, &corrected);
+        let plan = make_plan(&corrected);
         let map = placement::reconcile_map(&corrected, &plan);
         let managed = placement::managed_indices(&map, &plan);
         let work = compute_work(ctx, &map, &lock, &name)?;

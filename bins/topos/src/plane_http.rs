@@ -282,6 +282,7 @@ impl crate::plane::DeliverySource for UreqPlane {
         let body = self.bearer_get(&url, &cred)?;
         let wire: topos_types::requests::WireDelivery = serde_json::from_slice(&body)
             .map_err(|e| PlaneError::Malformed(format!("delivery body: {e}")))?;
+        let link_status = LinkStatus::from_wire(wire.effective_status());
         let mut skills = Vec::with_capacity(wire.skills.len());
         for ds in wire.skills {
             skills.push(crate::plane::DeliverySkill {
@@ -302,7 +303,7 @@ impl crate::plane::DeliverySource for UreqPlane {
             proposals_awaiting: wire.proposals_awaiting,
             notices: wire.notices,
             staleness_window_ms: wire.staleness_window_ms,
-            link_status: LinkStatus::from_wire(Some(&wire.link_status)),
+            link_status,
         })
     }
 

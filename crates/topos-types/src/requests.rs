@@ -118,6 +118,35 @@ pub struct PublishRequest {
     /// publish itself lands catalog-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
+    /// The external-origin provenance this publish carries to the server (a bundle imported from
+    /// GitHub remembers its parent — the fork-that-remembers model). Absent for ordinary local
+    /// authorship. **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<WireUpstream>,
+}
+
+/// The upstream-provenance block a publish may carry: where the bundle's bytes originally came
+/// from (`host`/`repo`, the in-repo `path`, the imported `commit`, a recorded license). The server
+/// records it as the bundle's upstream link + the version's upstream commit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireUpstream {
+    /// The origin host (`github.com` — the only recognized value today).
+    pub host: String,
+    /// The `owner/repo` pair.
+    pub repo: String,
+    /// The bundle's path within the repo ("" / absent = the repo root).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The upstream commit the imported bytes came from, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// A license identifier/filename recorded at import time, when found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
 }
 
 /// `POST /v1/proposals` body — opens a proposal (a PR): ingests a full candidate **without moving
@@ -458,6 +487,8 @@ pub struct WireDelivery {
     pub skills: Vec<WireDeliverySkill>,
     /// The skill ids the person detached (unfollowed, or lapsed via a channel leave / removal) and that are
     /// NOT currently re-entitled — every device freezes these in place, never cleaning them.
+    /// RETIRED on the session wire (a current server never sends it); defaulted for the transition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detached: Vec<String>,
     /// The skill ids THIS DEVICE excludes ("not on this device") — the third actor in the who-acts
     /// split, alongside the person (`detached`) and upstream (absent from `skills` entirely). The copy
@@ -476,11 +507,27 @@ pub struct WireDelivery {
     /// body must never fail to parse over one new field).
     #[serde(default = "default_staleness_window_ms")]
     pub staleness_window_ms: u64,
-    /// THIS device's link to the workspace — `"active"` or `"pending"`. REQUIRED: the delivery
-    /// answer is meaningless without it (a `"pending"` delivery carries empty `skills` /
-    /// `detached` / `excluded` / `notices` and `proposals_awaiting: 0` — no data flows over a
-    /// pending link; the client skips the workspace quietly and `topos status` shows the wait).
-    pub link_status: String,
+    /// THIS session's standing — `"active"` or `"pending"`. A `"pending"` delivery carries empty
+    /// `skills` / `notices` and `proposals_awaiting: 0` — no data flows over a pending session;
+    /// the client skips the workspace quietly and `topos status` shows the wait. Serde-defaulted
+    /// only so the retired `link_status` spelling still parses during the wire transition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_status: Option<String>,
+    /// RETIRED spelling of [`Self::session_status`] (the device-link wire) — read as a fallback,
+    /// never produced by a current server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_status: Option<String>,
+}
+
+impl WireDelivery {
+    /// The effective session standing: `session_status`, else the retired `link_status` spelling,
+    /// else active (a producer predating both serves only active-equivalent access).
+    #[must_use]
+    pub fn effective_status(&self) -> Option<&str> {
+        self.session_status
+            .as_deref()
+            .or(self.link_status.as_deref())
+    }
 }
 
 /// The default bundle kind — the fallback when a producer predating the catalog `kind` omits it
@@ -1140,6 +1187,7 @@ mod tests {
     fn publish_request_round_trips_snake_case_no_created_at() {
         let req = PublishRequest {
             channel: None,
+            upstream: None,
             workspace_id: "w_demo".to_owned(),
             skill_id: "s_prdescribe".to_owned(),
             op_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_owned(),
@@ -1353,7 +1401,8 @@ mod tests {
             }],
             proposals_awaiting: 2,
             staleness_window_ms: 604_800_000,
-            link_status: "active".to_owned(),
+            session_status: Some("active".to_owned()),
+            link_status: None,
         };
         let v = serde_json::to_value(&delivery).unwrap();
         assert_eq!(v["schema_version"], 1);
@@ -1391,20 +1440,21 @@ mod tests {
         }))
         .unwrap();
         assert!(pending.skills.is_empty() && pending.notices.is_empty());
-        assert_eq!(pending.link_status, "pending");
-        // A delivery WITHOUT the required link_status fails to parse (a clean wire break).
-        assert!(
-            serde_json::from_value::<WireDelivery>(serde_json::json!({
-                "schema_version": 1,
-                "workspace_id": "w_demo",
-                "skills": [],
-                "detached": [],
-                "notices": [],
-                "proposals_awaiting": 0,
-                "staleness_window_ms": 604800000,
-            }))
-            .is_err()
-        );
+        // The retired `link_status` spelling still parses (the transition fallback) …
+        assert_eq!(pending.effective_status(), Some("pending"));
+        // … and the SESSION spelling wins when both are present.
+        let session: WireDelivery = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "workspace_id": "w_demo",
+            "skills": [],
+            "notices": [],
+            "proposals_awaiting": 0,
+            "staleness_window_ms": 604800000,
+            "session_status": "active",
+        }))
+        .unwrap();
+        assert_eq!(session.effective_status(), Some("active"));
+        assert!(session.detached.is_empty(), "defaulted on the session wire");
     }
 
     #[test]

@@ -6,6 +6,7 @@ mod auth;
 mod builtin_skill;
 mod durability;
 mod follow;
+mod manifest_reconcile;
 mod placement_breadth;
 mod publish_autoadd;
 mod seams;

@@ -1476,6 +1476,8 @@ impl FollowHarness {
             &[(
                 ws.to_owned(),
                 crate::sync_status::WorkspaceSync {
+                    host: None,
+                    workspace_name: None,
                     last_delivery_at: Some(last_delivery_at_ms),
                     last_report_at: None,
                     staleness_window_ms: window_ms,

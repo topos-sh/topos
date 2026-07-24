@@ -2337,23 +2337,6 @@ pub(crate) fn lay_first_receive_baseline(
     workspace_slug: Option<&str>,
     incoming_digest: Option<&[u8; 32]>,
 ) -> Result<(), ClientError> {
-    let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
-    if ctx.fs.exists(&ctx.layout.skill_dir(skill_id)) {
-        return Ok(());
-    }
-
-    let (staging_base, sp) = ctx.layout.staging(skill_id);
-    if ctx.fs.exists(&staging_base) {
-        ctx.fs.remove_dir_all(&staging_base)?;
-    }
-    ctx.fs.create_dir_all(&sp.store)?;
-    // An empty embedded-git store the first received version is later written into. The full-tree
-    // durability set is exactly right HERE (and only here + `add`'s staging import): the store is a
-    // fresh `init_bare`, so the whole tree IS this op's writes (the repo scaffolding — HEAD / config /
-    // objects/ / refs/) and never carries history.
-    let store = Store::init(&sp.store)?;
-    super::sync_engine::fsync_batch(ctx, &store.durability_set()?)?;
-
     // The placement TARGETS come from the engine (shared-dir-first over the detected agents; the
     // classic active-adapter dir when nothing is detected). The id is the validated newtype, honoring
     // the adapter/registry "callers pass an already-validated id" contract; the display name +
@@ -2372,6 +2355,35 @@ pub(crate) fn lay_first_receive_baseline(
         None,
         incoming_digest.copied(),
     );
+    lay_baseline_with_plan(ctx, skill_id, name, &plan, incoming_digest)
+}
+
+/// [`lay_first_receive_baseline`] with the placement plan already computed — the manifest
+/// reconcile's entry for PROJECT-scope arrivals (their targets root at the demanding checkout,
+/// not the home harness dirs).
+pub(crate) fn lay_baseline_with_plan(
+    ctx: &Ctx<'_>,
+    skill_id: &crate::id::SkillId,
+    name: String,
+    plan: &crate::placement::PlacementPlan,
+    incoming_digest: Option<&[u8; 32]>,
+) -> Result<(), ClientError> {
+    let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
+    if ctx.fs.exists(&ctx.layout.skill_dir(skill_id)) {
+        return Ok(());
+    }
+
+    let (staging_base, sp) = ctx.layout.staging(skill_id);
+    if ctx.fs.exists(&staging_base) {
+        ctx.fs.remove_dir_all(&staging_base)?;
+    }
+    ctx.fs.create_dir_all(&sp.store)?;
+    // An empty embedded-git store the first received version is later written into. The full-tree
+    // durability set is exactly right HERE (and only here + `add`'s staging import): the store is a
+    // fresh `init_bare`, so the whole tree IS this op's writes (the repo scaffolding — HEAD / config /
+    // objects/ / refs/) and never carries history.
+    let store = Store::init(&sp.store)?;
+    super::sync_engine::fsync_batch(ctx, &store.durability_set()?)?;
     doc::write_doc(
         ctx.fs,
         &sp.sync,
@@ -2397,7 +2409,7 @@ pub(crate) fn lay_first_receive_baseline(
         harness_layer: None,
         harness_slug: Some(ctx.harness.id().slug().to_owned()),
     };
-    let mut map = crate::placement::reconcile_map(&baseline, &plan);
+    let mut map = crate::placement::reconcile_map(&baseline, plan);
     // Record the ADOPTIONS durably: a planned dir that already exists under the display name with
     // byte-identical content gets its digest into `pre_existing_sha` — the reservation later plans
     // reuse (and the sticky prior-bytes record uninstall restores). `materialized_sha` stays None:
