@@ -1230,6 +1230,80 @@ pub struct StatusData {
     /// armed or repaired by `status`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<StatusTrigger>,
+    /// This installation's SESSIONS — one per logged-into workspace (the session model; empty =
+    /// logged into nothing). **Additive.**
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<StatusSession>,
+    /// The resolved TRUST-RAIL table for the CURRENT directory: every bundle the local manifests
+    /// covering it ask for, nearest-first deduped, each with its one source line and state.
+    /// **Additive.**
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<StatusItem>,
+}
+
+/// One session in a [`StatusData`] — this installation logged into one workspace. **INFERRED**
+/// (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct StatusSession {
+    pub workspace_id: String,
+    /// The ADDRESS name (what you logged in by).
+    pub name: String,
+    pub display_name: String,
+    /// The server host the workspace lives on (the manifest grammar's host half).
+    pub host: String,
+    /// The session's status, when it is NOT plainly active: `"pending"` (awaiting an owner's
+    /// approval — delivery starts automatically once approved) or `"ended"` (revoked or gone —
+    /// `topos login <address>` starts a fresh one). Absent = active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_status: Option<String>,
+}
+
+/// One resolved line of the trust rail. Every "why does this agent have X?" is answered by
+/// `source` (which manifest line asked for it); every "why doesn't it?" by `state`. **INFERRED**
+/// (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct StatusItem {
+    /// The bundle's name (the dedupe key).
+    pub name: String,
+    /// The winning reference (canonical where known).
+    pub reference: String,
+    /// ONE source line: the manifest that asked for it (`<dir>/topos.toml` or
+    /// `~/.topos/topos.toml`).
+    pub source: String,
+    /// Where the bytes belong: `"project"` (this project's harness dirs) or `"person"` (the home
+    /// dirs).
+    pub scope: String,
+    /// The applied version (64-hex), when one is applied locally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub version: Option<String>,
+    /// The line's state.
+    pub state: StatusItemState,
+    /// Broader manifests this line shadows (their labels) — rendered, never acted on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shadows: Vec<String>,
+}
+
+/// A trust-rail line's state. **INFERRED value set** (additive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum StatusItemState {
+    /// The bytes are applied and current against the last-known target.
+    Applied,
+    /// A newer target is known than what is applied — the next `update` lands it.
+    Behind,
+    /// Local edits sit ahead of the applied version (a draft).
+    LocalEdits,
+    /// Referenced here but NOT deliverable with your current access — phrased from LOCAL
+    /// knowledge only (no session for its workspace); never from server confirmation.
+    NotAvailable,
+    /// The session that would deliver it is pending an owner's approval.
+    PendingSession,
+    /// Not yet applied (never delivered here), or not determinable offline.
+    Unknown,
 }
 
 /// One joined workspace in a [`StatusData`]. **INFERRED** (additive-only).

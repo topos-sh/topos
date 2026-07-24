@@ -7,11 +7,17 @@
 //! answers "what is this, and where am I" without dialing anything.
 
 use topos_types::persisted::SyncState;
-use topos_types::results::{StatusData, StatusWorkspace};
+use topos_types::results::{
+    StatusData, StatusItem, StatusItemState, StatusSession, StatusWorkspace,
+};
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
-use crate::{doc, enroll};
+use crate::manifest::file::MANIFEST_FILE;
+use crate::manifest::refs::ParsedRef;
+use crate::manifest::resolve::{Layer, LayerSource, ResolvedScope, resolve_layers};
+use crate::manifest::walk;
+use crate::{doc, enroll, sessions};
 
 /// The all-zero sentinel a first-receive baseline carries (`follow` lays it; accepting the offer
 /// replaces it) — a followed skill whose sync doc still holds it has a PENDING first-receive offer.
@@ -74,6 +80,19 @@ pub(crate) fn status_snapshot(ctx: &Ctx<'_>) -> Result<StatusData, ClientError> 
         }
     }
 
+    // This installation's SESSIONS (the session model — one per logged-into workspace).
+    let session_rows: Vec<StatusSession> = sessions::read_sessions(ctx.fs, &ctx.layout)?
+        .sessions
+        .into_iter()
+        .map(|s| StatusSession {
+            workspace_id: s.workspace_id,
+            name: s.workspace_name,
+            display_name: s.display_name,
+            host: s.host,
+            session_status: (s.status != sessions::SESSION_ACTIVE).then_some(s.status),
+        })
+        .collect();
+
     Ok(StatusData {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         enrolled: instance.is_some(),
@@ -83,7 +102,100 @@ pub(crate) fn status_snapshot(ctx: &Ctx<'_>) -> Result<StatusData, ClientError> 
         followed_skills: followed,
         pending_offers: pending,
         triggers: Vec::new(),
+        items: trust_rail(ctx, &session_rows)?,
+        sessions: session_rows,
     })
+}
+
+/// The TRUST-RAIL table for the current directory, from LOCAL knowledge only (the project
+/// manifest chain + the personal manifest + the stored sessions — never a network read): per
+/// resolved line, the winning reference, ONE source label, the scope, and an honest state.
+fn trust_rail(
+    ctx: &Ctx<'_>,
+    session_rows: &[StatusSession],
+) -> Result<Vec<StatusItem>, ClientError> {
+    // The local layers: this folder's chain (nearest first), then the personal manifest.
+    let mut layers: Vec<Layer> = Vec::new();
+    if let Some(roots) = &ctx.roots
+        && let Some(cwd) = roots.cwd.as_deref()
+    {
+        for l in walk::project_layers(ctx.fs, cwd, Some(&roots.home))? {
+            layers.push(Layer::project(l.dir, l.manifest));
+        }
+    }
+    if let Some(personal) =
+        crate::manifest::file::read_manifest(ctx.fs, &ctx.layout.home().join(MANIFEST_FILE))?
+    {
+        layers.push(Layer::personal(personal));
+    }
+    if layers.is_empty() {
+        return Ok(Vec::new());
+    }
+    let resolution = resolve_layers(&layers);
+    let mut items = Vec::with_capacity(resolution.items.len());
+    for item in resolution.items {
+        let state = match &item.parsed {
+            // A local folder: its presence IS the delivery (adopted in place).
+            ParsedRef::LocalPath { raw } => {
+                let base = match &item.source {
+                    LayerSource::Project { dir } => dir.clone(),
+                    _ => ctx.layout.home().to_path_buf(),
+                };
+                let dir = if std::path::Path::new(raw).is_absolute() {
+                    std::path::PathBuf::from(raw)
+                } else {
+                    base.join(raw.trim_start_matches("./"))
+                };
+                if ctx.fs.exists(&dir) {
+                    StatusItemState::Applied
+                } else {
+                    StatusItemState::Unknown
+                }
+            }
+            // A workspace reference resolves through the session its HOST/WORKSPACE names — the
+            // honest line comes from the LOCAL session file, never a server answer.
+            ParsedRef::Skill {
+                host, workspace, ..
+            }
+            | ParsedRef::Channel {
+                host, workspace, ..
+            } => match host {
+                Some(h) => {
+                    match session_rows
+                        .iter()
+                        .find(|s| &s.host == h && &s.name == workspace)
+                    {
+                        None => StatusItemState::NotAvailable,
+                        Some(s) if s.session_status.as_deref() == Some("pending") => {
+                            StatusItemState::PendingSession
+                        }
+                        Some(s) if s.session_status.as_deref() == Some("ended") => {
+                            StatusItemState::NotAvailable
+                        }
+                        // Connected — whether the bytes are current is the reconcile's answer.
+                        Some(_) => StatusItemState::Unknown,
+                    }
+                }
+                // A host-less `@ws/…` spelling (hand-written): not resolvable offline.
+                None => StatusItemState::Unknown,
+            },
+            // External + bare spellings: nothing local answers them yet.
+            ParsedRef::GitHub { .. } | ParsedRef::Bare { .. } => StatusItemState::Unknown,
+        };
+        items.push(StatusItem {
+            name: item.name,
+            reference: item.reference,
+            source: item.source.label(),
+            scope: match item.scope {
+                ResolvedScope::Project { .. } => "project".to_owned(),
+                ResolvedScope::Person => "person".to_owned(),
+            },
+            version: None,
+            state,
+            shadows: item.shadowed_from.iter().map(LayerSource::label).collect(),
+        });
+    }
+    Ok(items)
 }
 
 #[cfg(test)]
@@ -132,6 +244,81 @@ mod tests {
             roots: None,
         };
         status_snapshot(&ctx).expect("status snapshot")
+    }
+
+    /// A snapshot with machine roots (the trust-rail walk needs a cwd) — `home.0` doubles as the
+    /// user home; the sidecar sits beside it.
+    fn snapshot_at(home: &TempHome, cwd: &std::path::Path) -> StatusData {
+        let fs = RealFs;
+        let harness = topos_harness::ClaudeCode::new(home.0.join(".claude"), &fs);
+        let ctx = Ctx {
+            fs: &fs,
+            ids: &RealIds,
+            clock: &RealClock,
+            device_id: String::new(),
+            layout: Layout::new(&home.0.join(".topos")),
+            harness: &harness,
+            plane: &InertPlane,
+            follow: &InertFollow,
+            roots: Some(crate::ctx::AgentRoots {
+                home: home.0.clone(),
+                cwd: Some(cwd.to_path_buf()),
+            }),
+        };
+        status_snapshot(&ctx).expect("status snapshot")
+    }
+
+    #[test]
+    fn the_trust_rail_resolves_local_manifests_and_sessions_offline() {
+        let home = TempHome::new();
+        let repo = home.0.join("repo");
+        std::fs::create_dir_all(repo.join("tools/my-skill")).unwrap();
+        std::fs::write(
+            repo.join(MANIFEST_FILE),
+            "exclude = [\"noisy\"]\n[skills]\n\"./tools/my-skill\" = \"*\"\n\"topos.sh/acme/deploy\" = \"*\"\n\"topos.example.com/eng/api\" = \"*\"\n",
+        )
+        .unwrap();
+        // One session: acme on topos.sh, PENDING. eng@topos.example.com has none.
+        let fs = RealFs;
+        let layout = Layout::new(&home.0.join(".topos"));
+        crate::sessions::upsert_session(
+            &fs,
+            &layout,
+            crate::sessions::Session {
+                host: "topos.sh".to_owned(),
+                base_url: "https://topos.sh/api".to_owned(),
+                workspace_id: "w_acme".to_owned(),
+                workspace_name: "acme".to_owned(),
+                display_name: "Acme".to_owned(),
+                session_id: "sn_1".to_owned(),
+                credential: "c".to_owned(),
+                status: crate::sessions::SESSION_PENDING.to_owned(),
+                logged_in_at: 1,
+            },
+        )
+        .unwrap();
+
+        let d = snapshot_at(&home, &repo);
+        // Sessions render with their non-active status.
+        assert_eq!(d.sessions.len(), 1);
+        assert_eq!(d.sessions[0].host, "topos.sh");
+        assert_eq!(d.sessions[0].session_status.as_deref(), Some("pending"));
+        // The table: three resolved lines, each with its one source + an honest state.
+        let by_name = |n: &str| d.items.iter().find(|i| i.name == n).unwrap();
+        let local = by_name("my-skill");
+        assert!(matches!(local.state, StatusItemState::Applied));
+        assert_eq!(local.scope, "project");
+        assert!(local.source.ends_with("topos.toml"), "{}", local.source);
+        // A workspace ref whose session is PENDING says so; one with NO session is the honest
+        // not-available line — phrased from local knowledge, nothing dialed.
+        assert!(matches!(
+            by_name("deploy").state,
+            StatusItemState::PendingSession
+        ));
+        assert!(matches!(
+            by_name("api").state,
+            StatusItemState::NotAvailable
+        ));
     }
 
     /// Every file under `dir`, as `relative path → bytes` — the byte-identity oracle.

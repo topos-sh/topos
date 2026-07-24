@@ -1357,6 +1357,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
             }],
             followed_skills: 2,
             pending_offers: Some(1),
+            sessions: Vec::new(),
+            items: Vec::new(),
             triggers: vec![
                 StatusTrigger {
                     agent: "claude-code".to_owned(),

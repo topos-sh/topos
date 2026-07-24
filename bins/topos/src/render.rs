@@ -1708,6 +1708,50 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
              teammate for the address), or create a workspace at https://topos.sh",
         ),
     }
+    // The SESSIONS this installation holds (the session model — one per workspace).
+    if !d.sessions.is_empty() {
+        s.push_str("\nsessions:");
+        for sess in &d.sessions {
+            s.push_str(&format!(
+                "\n  {}/{} ({})",
+                sess.host, sess.name, sess.display_name
+            ));
+            match sess.session_status.as_deref() {
+                Some("pending") => s.push_str(" — awaiting owner approval"),
+                Some("ended") => s.push_str(&format!(
+                    " — ended; `topos login {}/{}` starts a fresh one",
+                    sess.host, sess.name
+                )),
+                _ => {}
+            }
+        }
+    }
+    // The TRUST RAIL: what the manifests covering THIS directory ask for — per line, the one
+    // source that asked and an honest state (phrased from local knowledge only).
+    if !d.items.is_empty() {
+        s.push_str("\nthis directory (from its manifests):");
+        for item in &d.items {
+            let state = match item.state {
+                topos_types::results::StatusItemState::Applied => "applied",
+                topos_types::results::StatusItemState::Behind => "behind",
+                topos_types::results::StatusItemState::LocalEdits => "local edits",
+                topos_types::results::StatusItemState::NotAvailable => {
+                    "not available with your current access"
+                }
+                topos_types::results::StatusItemState::PendingSession => {
+                    "awaiting session approval"
+                }
+                topos_types::results::StatusItemState::Unknown => "not yet reconciled",
+            };
+            s.push_str(&format!(
+                "\n  {} — {state} · {} ({})",
+                item.name, item.source, item.scope
+            ));
+            for shadow in &item.shadows {
+                s.push_str(&format!("\n    shadows {shadow}"));
+            }
+        }
+    }
     s.push_str(&format!(
         "\nfollowing: {} {}",
         d.followed_skills,
@@ -3219,6 +3263,8 @@ mod tests {
             }],
             followed_skills: 2,
             pending_offers: Some(1),
+            sessions: Vec::new(),
+            items: Vec::new(),
             triggers: vec![
                 StatusTrigger {
                     agent: "claude-code".to_owned(),
@@ -3258,6 +3304,8 @@ mod tests {
             workspaces: Vec::new(),
             followed_skills: 0,
             pending_offers: Some(0),
+            sessions: Vec::new(),
+            items: Vec::new(),
             triggers: Vec::new(),
             ..enrolled
         };
