@@ -98,12 +98,21 @@ impl Sessions {
     /// [`ClientError::WorkspaceSelection`] naming the joined workspaces when there are several.
     pub(crate) fn resolve_target(&self, explicit: Option<&str>) -> Result<&Session, ClientError> {
         if let Some(ws) = explicit {
-            return self.find(ws).ok_or_else(|| {
+            let found = self.find(ws).ok_or_else(|| {
                 ClientError::WorkspaceSelection(format!(
                     "not logged into workspace '{ws}'; logged-in workspaces: {}",
                     self.names().join(", ")
                 ))
-            });
+            })?;
+            // An explicitly named workspace whose session ENDED refuses toward `login` — a dead
+            // credential never rides a write.
+            if found.status == SESSION_ENDED {
+                return Err(ClientError::Enrollment(format!(
+                    "the session for '{ws}' has ended — reconnect with `topos login {}/{}`",
+                    found.host, found.workspace_name
+                )));
+            }
+            return Ok(found);
         }
         let live: Vec<&Session> = self.live().collect();
         match live.as_slice() {

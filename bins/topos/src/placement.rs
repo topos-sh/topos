@@ -305,10 +305,13 @@ pub(crate) fn project_plan(
     let mut plan = PlacementPlan::default();
 
     // An explicit override is the WHOLE plan: one dir, every agent reads it. The belt half of
-    // the escape guard (the reconcile validates + warns first): a value that is absolute or
-    // climbs out of the checkout is IGNORED — a committed manifest must never place outside it.
-    if let Some(rel) = override_dir.filter(|r| safe_project_rel(r)) {
-        let root = project_dir.join(rel.trim_start_matches("./"));
+    // the escape guard (the reconcile validates + warns first): a value that is absolute, climbs
+    // out of the checkout, or RESOLVES outside it through a committed symlink is IGNORED — a
+    // committed manifest must never place outside its own checkout.
+    if let Some(root) = override_dir
+        .filter(|r| safe_project_rel(r))
+        .and_then(|rel| override_root_within(project_dir, rel))
+    {
         let dir = prior_in(PlacementKind::Native, None).unwrap_or_else(|| choose(&root));
         plan.targets.push(PlannedTarget {
             dir,
@@ -541,6 +544,25 @@ fn prior_dir(
                     || adoption_reservation_holds(dir, st, adopt))
         })
         .map(|(dir, _)| PathBuf::from(dir))
+}
+
+/// Resolve a lexically-safe override to its root, PROVING resolved containment: the deepest
+/// EXISTING ancestor of the joined path must canonicalize inside the canonicalized project dir —
+/// a committed symlink (`tools -> /outside`) on the way would otherwise carry the placement out
+/// of the checkout. `None` (override ignored) when containment cannot be proven.
+fn override_root_within(project_dir: &Path, rel: &str) -> Option<PathBuf> {
+    let root = project_dir.join(rel.trim_start_matches("./"));
+    let proj_real = project_dir.canonicalize().ok()?;
+    let mut probe = root.clone();
+    let real_prefix = loop {
+        match probe.canonicalize() {
+            Ok(r) => break r,
+            // Walk up to the deepest existing ancestor; the loop terminates at project_dir
+            // (which canonicalized above) or bails at the filesystem root.
+            Err(_) => probe = probe.parent()?.to_path_buf(),
+        }
+    };
+    real_prefix.starts_with(&proj_real).then_some(root)
 }
 
 /// Whether a manifest `[placement]` value is a SAFE project-relative path: non-empty, relative,

@@ -1209,17 +1209,41 @@ fn refresh_github(
         let repo_tree = crate::git_source::extract_tree(&targz)?;
         repo_tree.select(spec.subdir.as_deref(), None, &spec.repo, &spec.label())?;
     }
-    // Clean re-import: drop the recorded placements (clean copies of the OLD pin) and the sidecar
-    // record, then adopt afresh at the new pin — external origins carry no local history worth
-    // preserving past their pin (the lockfile model: bytes follow the pin).
+    // Clean re-import: STASH the recorded placements (clean copies of the OLD pin) and the
+    // sidecar record aside — sibling renames, same filesystem — then adopt afresh at the new pin.
+    // The install can still fail past the prefetch (an occupied destination, an io fault); a
+    // failure RESTORES the stashes, so the valid old import is never lost to a refused new one.
+    // External origins carry no local history worth preserving past their pin (the lockfile
+    // model: bytes follow the pin) — a SUCCESSFUL swap deletes the stashes.
+    let mut stashed: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    let stash_dir = |fs: &dyn crate::fs_seam::FsOps,
+                     from: &Path,
+                     stashed: &mut Vec<(std::path::PathBuf, std::path::PathBuf)>|
+     -> Result<(), ClientError> {
+        let name = from
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "dir".to_owned());
+        let to = from.with_file_name(format!(".topos-refresh-old-{name}"));
+        if fs.exists(&to) {
+            fs.remove_dir_all(&to)?;
+        }
+        fs.rename(from, &to)
+            .map_err(|e| ClientError::Io(format!("stash {}: {e}", from.display())))?;
+        stashed.push((from.to_path_buf(), to));
+        Ok(())
+    };
     for scan in &scans {
         if matches!(scan.status, placement::ScanStatus::Clean { .. }) && ctx.fs.exists(&scan.dir) {
-            ctx.fs.remove_dir_all(&scan.dir)?;
+            stash_dir(ctx.fs, &scan.dir, &mut stashed)?;
         }
     }
-    ctx.fs.remove_dir_all(&ctx.layout.skill_dir(sid))?;
+    let sidecar_dir = ctx.layout.skill_dir(sid);
+    if ctx.fs.exists(&sidecar_dir) {
+        stash_dir(ctx.fs, &sidecar_dir, &mut stashed)?;
+    }
     let global = matches!(item.scope, ResolvedScope::Person);
-    let data = super::add_remote_fetched(
+    let installed = super::add_remote_fetched(
         ctx,
         &targz,
         &spec,
@@ -1229,7 +1253,25 @@ fn refresh_github(
             harness: None,
             global,
         },
-    )?;
+    );
+    let data = match installed {
+        Ok(d) => {
+            for (_, stash) in &stashed {
+                let _ = ctx.fs.remove_dir_all(stash);
+            }
+            d
+        }
+        Err(e) => {
+            // Restore the old install (best-effort; a restore failure leaves the stash sibling
+            // on disk rather than deleting anything).
+            for (orig, stash) in stashed.iter().rev() {
+                if !ctx.fs.exists(orig) {
+                    let _ = ctx.fs.rename(stash, orig);
+                }
+            }
+            return Err(e);
+        }
+    };
     Ok(PullSkill {
         skill: data.name,
         workspace_id: None,
