@@ -26,7 +26,7 @@ export function PublishInstructions({ shareAddress }: { shareAddress: string }) 
   const agentHeadingId = useId();
   const cliHeadingId = useId();
   const agentPrompt = AGENT_PUBLISH_PROMPT;
-  const followCommand = `topos follow ${shareAddress}`;
+  const followCommand = `topos login ${shareAddress}`;
   const publishCommand = PUBLISH_COMMAND;
   return (
     <>
@@ -70,8 +70,8 @@ export function PublishDialog({
         <DialogHeader>
           <DialogTitle>Publish from your agent</DialogTitle>
           <DialogDescription>
-            Topos never writes a skill here — publishing runs on the enrolled device that holds the
-            bytes. Ask the agent you already have, or run it yourself.
+            Topos never writes a skill here — publishing runs on the logged-in machine that holds
+            the bytes. Ask the agent you already have, or run it yourself.
           </DialogDescription>
         </DialogHeader>
         <PublishInstructions shareAddress={shareAddress} />

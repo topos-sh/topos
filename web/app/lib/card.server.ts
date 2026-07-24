@@ -48,7 +48,7 @@ function cardMarkdown(): string {
     "**If you are an AI agent:** follow this resource with your shell tool, non-interactively. " +
     "Nothing installs silently — every skill lands only after its content digest is disclosed " +
     "and the human says yes.\n\n" +
-    "```sh\ntopos follow '<the URL you just fetched>' --json\n```\n\n" +
+    "```sh\ntopos login '<the URL you just fetched>' --json\n```\n\n" +
     "If `topos` is not installed (checksum-verified; no sudo; lands in `~/.local/bin`):\n\n" +
     `\`\`\`sh\n${INSTALL_LINE}\n\`\`\`\n\n` +
     "Machine note: fetch any resource address with `Accept: application/json` to get the API " +

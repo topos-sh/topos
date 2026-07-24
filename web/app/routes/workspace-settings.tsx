@@ -304,7 +304,7 @@ function ExportSection() {
 
 /**
  * The workspace address — its own pane section. Sharing and joining speak this address:
- * `topos follow <address>`.
+ * `topos login <address>`.
  */
 function AddressSection({ address }: { address: string }) {
   return (

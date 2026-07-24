@@ -24,4 +24,3 @@ pub(crate) mod file;
 pub(crate) mod refs;
 pub(crate) mod resolve;
 pub(crate) mod walk;
-

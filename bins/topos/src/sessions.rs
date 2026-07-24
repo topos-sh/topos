@@ -119,7 +119,10 @@ impl Sessions {
     }
 
     fn names(&self) -> Vec<String> {
-        self.sessions.iter().map(|s| s.workspace_name.clone()).collect()
+        self.sessions
+            .iter()
+            .map(|s| s.workspace_name.clone())
+            .collect()
     }
 }
 
@@ -142,7 +145,8 @@ pub(crate) fn upsert_session(
         .retain(|s| !(s.host == session.host && s.workspace_id == session.workspace_id));
     all.sessions.push(session);
     all.sessions.sort_by(|a, b| {
-        (a.host.as_str(), a.workspace_name.as_str()).cmp(&(b.host.as_str(), b.workspace_name.as_str()))
+        (a.host.as_str(), a.workspace_name.as_str())
+            .cmp(&(b.host.as_str(), b.workspace_name.as_str()))
     });
     write_sessions_locked(fs, layout, &all)
 }
@@ -238,7 +242,10 @@ mod tests {
         assert_eq!(all.sessions.len(), 2);
         assert_eq!(all.find("acme").unwrap().credential, "cred-fresh");
         assert_eq!(all.find("w_b").unwrap().status, SESSION_PENDING);
-        assert_eq!(all.find_on_host("topos.sh", "beta").unwrap().workspace_id, "w_b");
+        assert_eq!(
+            all.find_on_host("topos.sh", "beta").unwrap().workspace_id,
+            "w_b"
+        );
         assert!(all.find_on_host("elsewhere.dev", "beta").is_none());
     }
 
@@ -256,8 +263,14 @@ mod tests {
         upsert_session(&fs, &layout, session("w_b", "beta", SESSION_ACTIVE)).unwrap();
         let all = read_sessions(&fs, &layout).unwrap();
         assert!(all.resolve_target(None).is_err());
-        assert_eq!(all.resolve_target(Some("beta")).unwrap().workspace_id, "w_b");
-        assert_eq!(all.resolve_target(Some("w_a")).unwrap().workspace_name, "acme");
+        assert_eq!(
+            all.resolve_target(Some("beta")).unwrap().workspace_id,
+            "w_b"
+        );
+        assert_eq!(
+            all.resolve_target(Some("w_a")).unwrap().workspace_name,
+            "acme"
+        );
         assert!(all.resolve_target(Some("nope")).is_err());
     }
 
@@ -268,7 +281,11 @@ mod tests {
         upsert_session(&fs, &layout, session("w_a", "acme", SESSION_PENDING)).unwrap();
         set_session_status(&fs, &layout, "w_a", SESSION_ACTIVE).unwrap();
         assert_eq!(
-            read_sessions(&fs, &layout).unwrap().find("w_a").unwrap().status,
+            read_sessions(&fs, &layout)
+                .unwrap()
+                .find("w_a")
+                .unwrap()
+                .status,
             SESSION_ACTIVE
         );
         set_session_status(&fs, &layout, "w_a", SESSION_ENDED).unwrap();
@@ -290,7 +307,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(layout.sessions_path()).unwrap().permissions().mode();
+            let mode = std::fs::metadata(layout.sessions_path())
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600, "sessions.json must be 0600");
         }
     }

@@ -68,11 +68,9 @@ impl ParsedRef {
                     subdir.rsplit('/').next().unwrap_or(repo)
                 }
             }
-            ParsedRef::LocalPath { raw } => raw
-                .trim_end_matches('/')
-                .rsplit('/')
-                .next()
-                .unwrap_or(raw),
+            ParsedRef::LocalPath { raw } => {
+                raw.trim_end_matches('/').rsplit('/').next().unwrap_or(raw)
+            }
         }
     }
 
@@ -148,7 +146,9 @@ fn err(message: impl Into<String>) -> RefError {
 /// digits, hyphens; must start alphanumeric.
 fn is_name(s: &str) -> bool {
     !s.is_empty()
-        && s.bytes().next().is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && s.bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
         && s.bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
@@ -328,9 +328,7 @@ pub(crate) fn parse_ref(raw: &str) -> Result<ParsedRef, RefError> {
     if first == "github.com" || had_scheme {
         // `github.com/owner/repo[/sub/dir]` (or any scheme-carrying URL that got here).
         return match rest.as_slice() {
-            [owner, repo, subdir @ ..]
-                if is_github_segment(owner) && is_github_segment(repo) =>
-            {
+            [owner, repo, subdir @ ..] if is_github_segment(owner) && is_github_segment(repo) => {
                 Ok(ParsedRef::GitHub {
                     owner: (*owner).to_string(),
                     repo: repo.trim_end_matches(".git").to_string(),
@@ -429,7 +427,12 @@ mod tests {
 
     #[test]
     fn the_hash_sigil_is_banned() {
-        for bad in ["#backend", "@acme/#backend", "acme#backend", "topos.sh/acme/x#y"] {
+        for bad in [
+            "#backend",
+            "@acme/#backend",
+            "acme#backend",
+            "topos.sh/acme/x#y",
+        ] {
             let e = parse_ref(bad).unwrap_err();
             assert!(e.message.contains("channels"), "{bad}: {e}");
         }
@@ -504,13 +507,24 @@ mod tests {
 
     #[test]
     fn item_names_dedupe_on_the_last_segment() {
-        assert_eq!(parse_ref("@acme/code-review").unwrap().item_name(), "code-review");
-        assert_eq!(parse_ref("vercel-labs/skills").unwrap().item_name(), "skills");
         assert_eq!(
-            parse_ref("github.com/o/r/tools/find-skills").unwrap().item_name(),
+            parse_ref("@acme/code-review").unwrap().item_name(),
+            "code-review"
+        );
+        assert_eq!(
+            parse_ref("vercel-labs/skills").unwrap().item_name(),
+            "skills"
+        );
+        assert_eq!(
+            parse_ref("github.com/o/r/tools/find-skills")
+                .unwrap()
+                .item_name(),
             "find-skills"
         );
-        assert_eq!(parse_ref("./tools/my-skill").unwrap().item_name(), "my-skill");
+        assert_eq!(
+            parse_ref("./tools/my-skill").unwrap().item_name(),
+            "my-skill"
+        );
     }
 
     #[test]
@@ -541,7 +555,12 @@ mod tests {
         // A host-less workspace ref cannot canonicalize without a session.
         assert_eq!(parse_ref("@acme/x").unwrap().canonical(None), None);
         // Bare names never canonicalize (they resolve first).
-        assert_eq!(parse_ref("code-review").unwrap().canonical(Some("topos.sh")), None);
+        assert_eq!(
+            parse_ref("code-review")
+                .unwrap()
+                .canonical(Some("topos.sh")),
+            None
+        );
     }
 
     #[test]

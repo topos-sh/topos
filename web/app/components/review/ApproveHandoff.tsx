@@ -9,7 +9,7 @@ import {
 import { CopyCommand } from "./CopyCommand";
 
 /**
- * The CLI hand-off: the same decision on an enrolled device, as copyable commands (the device's
+ * The CLI hand-off: the same decision on a logged-in machine, as copyable commands (the session's
  * credential authenticates the action). The browser decision panel is the primary surface —
  * the page renders this collapsed ("Prefer the CLI?") on the pending state only. `skill` is the
  * catalog NAME (commands address a skill by its user-facing name).
@@ -19,7 +19,7 @@ export function ApproveHandoff({ skill, versionId }: { skill: string; versionId:
   return (
     <Card className="flex flex-col gap-4 p-4">
       <div className="flex flex-col gap-1">
-        <SectionHeading>Decide on an enrolled device</SectionHeading>
+        <SectionHeading>Decide on a logged-in machine</SectionHeading>
         <p className="text-sm text-dim">
           The same decision as a command — run it where the skill is enrolled.
         </p>

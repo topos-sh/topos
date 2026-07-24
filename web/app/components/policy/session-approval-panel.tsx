@@ -13,7 +13,7 @@ type SessionApproval = "off" | "on";
 /**
  * The session-approval knob — whether a non-owner's NEW LOGIN waits for an owner. Off
  * (the default): a member's device links and receives immediately. On: new device links are born
- * pending until an owner approves them, on the Linked devices page (Settings → Devices); nothing
+ * pending until an owner approves them, on the Sessions page (Settings → Sessions); nothing
  * is delivered over a pending link. A link an owner creates is always its own approval — active
  * immediately. Owner-only, a plain dirty-reveal save like every policy knob.
  */

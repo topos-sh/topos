@@ -3,7 +3,7 @@ import { serverEnv } from "@/env.server";
 /**
  * The two public bases this app discloses, now that it IS the door:
  *
- *  - `followBase` — the origin a shareable resource address rides (`topos follow
+ *  - `followBase` — the origin a shareable resource address rides (`topos login
  *    <base>/<address>`, the invite mail, the settings page's address block). The app serves those
  *    addresses itself (every one answers the constant protocol card to a non-browser fetcher).
  *  - `apiBase` — the API base the protocol card teaches a client to re-root onto: this origin's

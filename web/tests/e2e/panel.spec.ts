@@ -27,7 +27,7 @@ test("the panel carries Skills + Channels; the publish dialog hands the exact li
 
   // The Skills `+ new` opens the publish-from-your-agent dialog with the exact lines, composed for
   // this workspace's real address (single-tenant → the bare origin, no slug). The web app authors
-  // no bundle — the lines are copyable placeholders the person runs on the enrolled device.
+  // no bundle — the lines are copyable placeholders the person runs on a logged-in machine.
   await publishNew.click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByRole("heading", { name: "Publish from your agent" })).toBeVisible();
@@ -37,7 +37,7 @@ test("the panel carries Skills + Channels; the publish dialog hands the exact li
       exact: true,
     }),
   ).toBeVisible();
-  await expect(dialog.getByText(`topos follow ${BASE_URL}`, { exact: true })).toBeVisible();
+  await expect(dialog.getByText(`topos login ${BASE_URL}`, { exact: true })).toBeVisible();
   await expect(
     dialog.getByText("topos publish <path-to-skill-directory>", { exact: true }),
   ).toBeVisible();

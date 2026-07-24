@@ -69,10 +69,7 @@ fn corrupt(path: &Path, what: impl std::fmt::Display) -> ClientError {
 }
 
 /// Read + parse a manifest file. `Ok(None)` when the file does not exist.
-pub(crate) fn read_manifest(
-    fs: &dyn FsOps,
-    path: &Path,
-) -> Result<Option<Manifest>, ClientError> {
+pub(crate) fn read_manifest(fs: &dyn FsOps, path: &Path) -> Result<Option<Manifest>, ClientError> {
     let Some(bytes) = fs.read_opt(path)? else {
         return Ok(None);
     };
@@ -81,7 +78,11 @@ pub(crate) fn read_manifest(
     Ok(Some(manifest_from(&doc, path)?))
 }
 
-fn entries_of(doc: &DocumentMut, table: &str, path: &Path) -> Result<Vec<ManifestEntry>, ClientError> {
+fn entries_of(
+    doc: &DocumentMut,
+    table: &str,
+    path: &Path,
+) -> Result<Vec<ManifestEntry>, ClientError> {
     let Some(item) = doc.get(table) else {
         return Ok(Vec::new());
     };
@@ -95,7 +96,11 @@ fn entries_of(doc: &DocumentMut, table: &str, path: &Path) -> Result<Vec<Manifes
             .ok_or_else(|| corrupt(path, format!("[{table}] \"{key}\" is not a string")))?;
         out.push(ManifestEntry {
             reference: key.to_string(),
-            pin: if spec == "*" { None } else { Some(spec.to_string()) },
+            pin: if spec == "*" {
+                None
+            } else {
+                Some(spec.to_string())
+            },
         });
     }
     Ok(out)
@@ -301,13 +306,20 @@ skill = ".agents/skills"
             m.placement,
             vec![("topos.sh/acme/code-review".into(), ".claude/skills".into())]
         );
-        assert_eq!(m.placement_kind, vec![("skill".into(), ".agents/skills".into())]);
+        assert_eq!(
+            m.placement_kind,
+            vec![("skill".into(), ".agents/skills".into())]
+        );
     }
 
     #[test]
     fn missing_file_reads_none_and_garbage_refuses() {
         let dir = scratch("miss");
-        assert!(read_manifest(&RealFs, &dir.join(MANIFEST_FILE)).unwrap().is_none());
+        assert!(
+            read_manifest(&RealFs, &dir.join(MANIFEST_FILE))
+                .unwrap()
+                .is_none()
+        );
         let bad = dir.join("bad.toml");
         std::fs::write(&bad, "[skills\n").unwrap();
         assert!(read_manifest(&RealFs, &bad).is_err());

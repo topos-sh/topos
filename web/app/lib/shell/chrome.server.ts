@@ -51,7 +51,7 @@ export interface SidebarWorkspace {
   displayName: string;
   /** The address slug — the `:ws` segment the sidebar nests its links under in multi tenancy. */
   address: string;
-  /** The FULL shareable address the publish dialog composes its `topos follow` line from
+  /** The FULL shareable address the publish dialog composes its `topos login` line from
    *  (single → the bare origin, multi → `<origin>/<name>`). */
   shareAddress: string;
   skills: SidebarSkill[];

@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
  * `TOPOS_MAIL_SMTP_*`, production is a deliberate no-op and `inviteMailDelivery().canSend` is
  * false; with them, production really sends. The mail carries the TOKENED invite URL through
  * three CTAs in a fixed order — the browser link first, the agent paste-block second, the
- * terminal `topos follow` line third — and a hinted invitation leads with its first
+ * terminal `topos login` line third — and a hinted invitation leads with its first
  * destination.
  */
 
@@ -115,7 +115,7 @@ describe("sendInviteEmail in test mode", () => {
       const agentAt = recorded.text.indexOf(
         `Set up Topos for us: fetch ${INVITE.agentUrl} and follow it. Our invite: ${INVITE.inviteUrl}`,
       );
-      const terminalAt = recorded.text.indexOf(`topos follow ${INVITE.inviteUrl}`);
+      const terminalAt = recorded.text.indexOf(`topos login ${INVITE.inviteUrl}`);
       expect(browserAt).toBeGreaterThan(-1);
       expect(agentAt).toBeGreaterThan(browserAt);
       expect(terminalAt).toBeGreaterThan(agentAt);
@@ -162,7 +162,7 @@ describe("sendInviteEmail in production mode", () => {
     };
     expect(message.to).toBe(INVITE.to);
     expect(message.subject).toBe("You're invited to Acme <Platform> on Topos");
-    expect(message.text).toContain(`topos follow ${INVITE.inviteUrl}`);
+    expect(message.text).toContain(`topos login ${INVITE.inviteUrl}`);
     expect(message.html).toContain("Acme &lt;Platform&gt;");
   });
 

@@ -89,7 +89,7 @@ test.describe("anonymous — the constant protocol card + teaser (no existence o
     const textReal = await real.text();
     expect(textReal).toBe(await missing.text());
     expect(textReal).toContain(TEASER_MARKER);
-    expect(textReal).toContain("topos follow");
+    expect(textReal).toContain("topos login");
     expect(textReal).not.toContain(WS_DISPLAY_NAME);
   });
 

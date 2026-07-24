@@ -22,9 +22,9 @@ export function ResourcePage() {
       <Card className="space-y-3 px-4 py-4">
         <p className="text-ink text-sm">
           <strong>Have an agent?</strong> Paste this page&apos;s URL to it and ask it to follow — it
-          runs <code className="font-mono">topos follow &lt;this page&apos;s URL&gt;</code> and
-          walks you through the rest. Nothing installs silently: every skill lands only after its
-          content digest is disclosed and you say yes.
+          runs <code className="font-mono">topos add &lt;this page&apos;s URL&gt;</code> and walks
+          you through the rest. Nothing installs silently: every skill lands only after its content
+          digest is disclosed and you say yes.
         </p>
       </Card>
       <Card className="space-y-3 px-4 py-4">

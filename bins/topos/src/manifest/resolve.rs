@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use crate::manifest::file::Manifest;
-use crate::manifest::refs::{parse_ref, ParsedRef};
+use crate::manifest::refs::{ParsedRef, parse_ref};
 
 /// Which manifest a layer IS — the trust rail's "which manifest line asked for it".
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,7 +146,11 @@ pub(crate) struct Resolution {
 /// The exclude key an `exclude = […]` line claims: the last path segment (so an exclude by
 /// bare name and by full reference both work — the receipt writes the full form).
 fn exclude_name(reference: &str) -> &str {
-    reference.trim_end_matches('/').rsplit('/').next().unwrap_or(reference)
+    reference
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(reference)
 }
 
 /// Resolve the layer chain (already ordered nearest-first) into the delivered set. Pure:
@@ -271,7 +275,10 @@ mod tests {
                 dir("/repo/api"),
                 manifest(&[("topos.sh/acme/deploy@1111111", None)], &[]),
             ),
-            Layer::project(dir("/repo"), manifest(&[("topos.sh/acme/deploy", None)], &[])),
+            Layer::project(
+                dir("/repo"),
+                manifest(&[("topos.sh/acme/deploy", None)], &[]),
+            ),
             Layer::profile(
                 "topos.sh".into(),
                 "acme".into(),
@@ -284,7 +291,12 @@ mod tests {
         assert_eq!(item.name, "deploy");
         // The nearest layer's pin wins; the two broader mentions are recorded as shadowed.
         assert_eq!(item.pin.as_deref(), Some("1111111"));
-        assert_eq!(item.scope, ResolvedScope::Project { dir: dir("/repo/api") });
+        assert_eq!(
+            item.scope,
+            ResolvedScope::Project {
+                dir: dir("/repo/api")
+            }
+        );
         assert_eq!(item.shadowed_from.len(), 2);
     }
 
@@ -313,7 +325,10 @@ mod tests {
     #[test]
     fn a_nearer_include_shadows_a_broader_exclude() {
         let layers = vec![
-            Layer::project(dir("/repo/api"), manifest(&[("topos.sh/acme/x", None)], &[])),
+            Layer::project(
+                dir("/repo/api"),
+                manifest(&[("topos.sh/acme/x", None)], &[]),
+            ),
             Layer::project(dir("/repo"), manifest(&[], &["topos.sh/acme/x"])),
         ];
         let r = resolve_layers(&layers);

@@ -20,7 +20,7 @@ const MEMBER_ONE = "roster-m1@example.com";
 const MEMBER_TWO = "roster-m2@example.com";
 const INVITED = "dana-roster@example.com";
 // Single-tenant grammar: the install's ORIGIN is the workspace address — no slug suffix.
-const FOLLOW_LINE = `topos follow ${BASE_URL}`;
+const FOLLOW_LINE = `topos login ${BASE_URL}`;
 
 test.describe.configure({ mode: "serial" });
 
@@ -61,7 +61,7 @@ test("the members page: the roster rows, the address block, and the sole owner's
   await expect(m1.getByText("member", { exact: true })).toBeVisible();
   await expect(m1.getByRole("button", { name: "Change role" })).toBeVisible();
 
-  // The share surface is the workspace ADDRESS — `topos follow <origin>/<address>`.
+  // The share surface is the workspace ADDRESS — `topos login <origin>/<address>`.
   await expect(page.getByText(FOLLOW_LINE).first()).toBeVisible();
 });
 

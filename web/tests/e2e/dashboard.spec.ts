@@ -6,7 +6,7 @@ import {
   adminQuery,
   ensureBundle,
   ensureProposal,
-  mintDevice,
+  mintSession,
   seedCustody,
   theWorkspace,
 } from "./seed";
@@ -32,8 +32,8 @@ test.beforeAll(async () => {
       `select user_id from web.seat where role = 'owner' limit 1`,
     )
   )[0]?.user_id as string;
-  await adminQuery(`delete from web.device where id = $1`, [DEVICE_ID]);
-  await mintDevice(owner, DEVICE_ID, "publisher", CREDENTIAL);
+  await adminQuery(`delete from web.cli_session where id = $1`, [DEVICE_ID]);
+  await mintSession(owner, DEVICE_ID, "publisher", CREDENTIAL);
   // A fresh run of the hero on a reused database: the genesis name must be free.
   await adminQuery(`delete from web.bundle where name like 'release-checklist%'`, []);
 });

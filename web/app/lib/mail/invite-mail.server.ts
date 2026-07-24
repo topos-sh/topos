@@ -72,7 +72,7 @@ function inviteLines({
     `  ${inviteUrl}\n\n` +
     `Or ask your agent to join — paste this to it:\n\n` +
     `  ${agentPaste}\n\n` +
-    `Or from a terminal: topos follow ${inviteUrl}\n\n` +
+    `Or from a terminal: topos login ${inviteUrl}\n\n` +
     `This link is for you alone and lapses after a while. If you weren't expecting it, you can ignore this email.\n`;
   const html =
     `<p>${escapeHtml(invitedBy)} invited you to <strong>${escapeHtml(workspaceDisplayName)}</strong> on Topos — shared skills for your AI agents.${
@@ -83,7 +83,7 @@ function inviteLines({
     `<p><a href="${escapeHtml(inviteUrl)}">Accept in your browser</a></p>` +
     `<p>Or ask your agent to join — paste this to it:</p>` +
     `<p><code>${escapeHtml(agentPaste)}</code></p>` +
-    `<p>Or from a terminal: <code>topos follow ${escapeHtml(inviteUrl)}</code></p>` +
+    `<p>Or from a terminal: <code>topos login ${escapeHtml(inviteUrl)}</code></p>` +
     `<p>This link is for you alone and lapses after a while. If you weren't expecting it, you can ignore this email.</p>`;
   return { subject, text, html };
 }

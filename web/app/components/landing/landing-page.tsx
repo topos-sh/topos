@@ -143,7 +143,7 @@ const VERBS: { tag: string; main?: boolean; prompt: string; out: string; ok: str
   {
     tag: "Join",
     prompt: "[pastes topos.sh/acme]",
-    out: "● topos follow topos.sh/acme",
+    out: "● topos login topos.sh/acme",
     ok: "  approve this device in your browser — then I keep it current.",
   },
   {

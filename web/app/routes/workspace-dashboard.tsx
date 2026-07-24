@@ -74,7 +74,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     workspaceSessionCount(memberActor),
   ]);
   // The onboarding checklist: live while the workspace is still getting going (nothing
-  // published yet, or fewer than two enrolled devices — one machine is not yet distribution),
+  // published yet, or fewer than two active sessions — one machine is not yet distribution),
   // gone once every step is done, and gone once dismissed (a client-set cookie, read here so
   // the choice never flickers at hydration).
   const publishedSkillCount = index.filter((row) => row.versionId !== null).length;

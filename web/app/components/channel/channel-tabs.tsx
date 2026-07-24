@@ -1,14 +1,14 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router";
 
-type ActiveTab = "skills" | "members" | "history" | "settings";
+type ActiveTab = "skills" | "history" | "settings";
 
 /**
- * The channel's section switcher — Skills / Members / History / Settings as PURE LINKS (no client
+ * The channel's section switcher — Skills / History / Settings as PURE LINKS (no client
  * state), mirroring the skill view's SkillTabs. Each tab is a real route, so the active tab is
  * decided by whichever page renders this bar, every tab is a shareable URL, and switching is an
- * ordinary navigation with blocking SSR. Skills is the channel FACE itself (`basePath`); Members,
- * History, and Settings are member-only sub-routes. The active tab reads pressed — ink text under a
+ * ordinary navigation with blocking SSR. Skills is the channel FACE itself (`basePath`);
+ * History and Settings are member-only sub-routes. The active tab reads pressed — ink text under a
  * 2px accent underline; the rest stay quiet (dim) until hovered. Both variants carry a `border-b-2`
  * (accent vs transparent) so the row height never shifts as the active tab moves. `basePath` is the
  * name-keyed channel URL the caller built through `useWsPath` (origin-rooted in single tenancy,
@@ -19,9 +19,6 @@ export function ChannelTabs({ basePath, active }: { basePath: string; active: Ac
     <nav aria-label="Channel sections" className="flex border-line-soft border-b">
       <Tab to={basePath} isActive={active === "skills"}>
         Skills
-      </Tab>
-      <Tab to={`${basePath}/members`} isActive={active === "members"}>
-        Members
       </Tab>
       <Tab to={`${basePath}/history`} isActive={active === "history"}>
         History

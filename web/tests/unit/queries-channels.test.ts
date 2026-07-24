@@ -235,20 +235,16 @@ describe("the viewer's own profile stance (the channel page's self-service arm)"
 describe("curation (place / unplace, id-keyed — the web door onto the shared core)", () => {
   const openId = "c_cur_open";
   const curatedId = "c_cur_locked";
-  let everyoneId = "";
 
   // Fresh fixtures — the earlier suites deleted `eng`, so this block stands on its own: one
   // open channel, one curated, an active bundle, an archived one, and a reviewer seat.
   beforeAll(async () => {
-    const queries = await q();
     await seedChannel(db, wsId, openId, "cur-open");
     await seedChannel(db, wsId, curatedId, "cur-locked", "curated");
     await seedBundle(db, wsId, "s_place", "place-helper");
     await seedBundle(db, wsId, "s_arch", "arch-helper", { status: "archived" });
     await seedUser(db, "u_rev", "Rev", "rev@example.com");
     await seatUser(db, wsId, "u_rev", "reviewer");
-    const everyone = await queries.channelKeyByName(asMember(wsId, "u_ana"), "everyone");
-    everyoneId = everyone?.channelId ?? "";
   });
 
   it("a member places into an OPEN channel: the reference row + the attributed skill_added audit", async () => {
@@ -377,5 +373,4 @@ describe("curation (place / unplace, id-keyed — the web door onto the shared c
     ).toEqual([{ details: { skillId: "s_place" } }]);
     expect(await queries.unplaceBundleFromChannel(ana, openId, "s_place")).toBe("not_placed");
   });
-
 });

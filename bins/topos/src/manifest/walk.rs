@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::ClientError;
 use crate::fs_seam::FsOps;
-use crate::manifest::file::{read_manifest, Manifest, MANIFEST_FILE};
+use crate::manifest::file::{MANIFEST_FILE, Manifest, read_manifest};
 
 /// One discovered project layer: the folder holding the manifest + its parsed content.
 #[derive(Debug, Clone)]
@@ -95,12 +95,19 @@ mod tests {
         )
         .unwrap();
         // A manifest at "home" itself must NOT appear (the personal layer is read separately).
-        std::fs::write(root.join(MANIFEST_FILE), "[skills]\n\"topos.sh/acme/x\" = \"*\"\n").unwrap();
+        std::fs::write(
+            root.join(MANIFEST_FILE),
+            "[skills]\n\"topos.sh/acme/x\" = \"*\"\n",
+        )
+        .unwrap();
 
         let layers = project_layers(&RealFs, &nested, Some(&root)).unwrap();
         assert_eq!(layers.len(), 2);
         assert_eq!(layers[0].dir, nested);
-        assert_eq!(layers[0].manifest.skills[0].reference, "topos.sh/acme/api-only");
+        assert_eq!(
+            layers[0].manifest.skills[0].reference,
+            "topos.sh/acme/api-only"
+        );
         assert_eq!(layers[1].dir, repo);
     }
 
@@ -109,7 +116,11 @@ mod tests {
         let root = scratch("none");
         let deep = root.join("a/b");
         std::fs::create_dir_all(&deep).unwrap();
-        assert!(project_layers(&RealFs, &deep, Some(&root)).unwrap().is_empty());
+        assert!(
+            project_layers(&RealFs, &deep, Some(&root))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
