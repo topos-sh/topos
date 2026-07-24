@@ -1332,6 +1332,61 @@ fn an_ended_session_freezes_channel_delivered_project_skills() {
 }
 
 #[test]
+fn publish_to_takes_an_existing_channel_never_a_silent_mint() {
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(
+        Vec::new(),
+        vec![WireChannelEntry {
+            name: "backend".into(),
+            mode: "open".into(),
+            builtin: false,
+            included: true,
+            skills: Vec::new(),
+        }],
+    );
+    let mk_lane = || ops::WriteLane {
+        host: HOST.into(),
+        workspace_name: WS_NAME.into(),
+        workspace_id: WS.into(),
+        base_url: format!("https://{HOST}/api"),
+        transports: ops::SessionTransports {
+            plane: Box::new(plane.clone()),
+            directory: Box::new(dir.clone()),
+            contribute: Box::new(NoContribute),
+            governance: Box::new(NoGovernance),
+        },
+    };
+    let lane = mk_lane();
+    // An existing channel passes; no `--to` passes trivially.
+    ops::check_channel_exists(&*lane.transports.directory, &lane, Some("backend")).unwrap();
+    ops::check_channel_exists(&*lane.transports.directory, &lane, None).unwrap();
+    // A nonexistent channel refuses typed, naming the create path — NEVER a silent mint.
+    let err =
+        ops::check_channel_exists(&*lane.transports.directory, &lane, Some("acme")).unwrap_err();
+    assert_eq!(err.code(), "NOT_FOUND", "{err}");
+    assert!(
+        err.to_string().contains("create 'acme' on the web"),
+        "{err}"
+    );
+    assert!(err.to_string().contains("nothing was published"), "{err}");
+    // The value equal to the WORKSPACE slug gets the pointed fix.
+    let err =
+        ops::check_channel_exists(&*lane.transports.directory, &lane, Some(WS_NAME)).unwrap_err();
+    assert_eq!(err.code(), "INVALID_ARGUMENT", "{err}");
+    assert!(
+        err.to_string()
+            .contains("names the workspace, not a channel"),
+        "{err}"
+    );
+    // An unreadable index refuses retryable rather than risk a silent server-side create.
+    dir.set_unavailable(true);
+    let err =
+        ops::check_channel_exists(&*lane.transports.directory, &lane, Some("backend")).unwrap_err();
+    assert_eq!(err.code(), "PLANE_ERROR", "{err}");
+}
+
+#[test]
 fn an_unreadable_catalog_answers_retryable_never_a_false_miss() {
     // A transient catalog-read failure must NOT race into "not in any connected workspace's
     // catalog" — the deterministic answer is a retryable transport error naming the unread

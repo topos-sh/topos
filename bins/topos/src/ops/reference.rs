@@ -300,20 +300,19 @@ pub(crate) struct GovernedRewrite {
     pub from: String,
 }
 
-pub(crate) fn rewrite_to_governed(
+/// The READ-ONLY probe behind [`rewrite_to_governed`] (the describe predicts with it): the
+/// nearest manifest whose LOCAL-PATH entry resolves to one of the skill's placement dirs, with
+/// the entry's spelling. Mutates nothing.
+pub(crate) fn find_path_line(
     ctx: &Ctx<'_>,
-    skill_name: &str,
-    host: &str,
-    workspace_name: &str,
     skill_dirs: &[std::path::PathBuf],
-) -> Result<Option<GovernedRewrite>, ClientError> {
+) -> Result<Option<(std::path::PathBuf, String)>, ClientError> {
     // Canonicalize the placement dirs once (macOS `/var` → `/private/var`); a dir that no longer
     // exists keeps its lexical form.
     let dirs: Vec<std::path::PathBuf> = skill_dirs
         .iter()
         .map(|d| d.canonicalize().unwrap_or_else(|_| d.clone()))
         .collect();
-    let canonical = format!("{host}/{workspace_name}/{skill_name}");
     for (path, manifest) in super::manifest_edit::local_layers(ctx)? {
         let manifest_dir = path.parent().map(std::path::Path::to_path_buf);
         let Some(entry) = manifest.skills.iter().find(|e| {
@@ -337,21 +336,35 @@ pub(crate) fn rewrite_to_governed(
         }) else {
             continue;
         };
-        let from = entry.reference.clone();
-        let already_governed = manifest.skills.iter().any(|e| e.reference == canonical);
-        let mut ed = crate::manifest::file::ManifestEditor::open(ctx.fs, &path)?;
-        ed.remove_entry("skills", &from);
-        if !already_governed {
-            ed.set_entry("skills", &canonical, None);
-        }
-        ed.write(ctx.fs, &path)?;
-        return Ok(Some(GovernedRewrite {
-            manifest: path.display().to_string(),
-            canonical,
-            from,
-        }));
+        return Ok(Some((path, entry.reference.clone())));
     }
     Ok(None)
+}
+
+pub(crate) fn rewrite_to_governed(
+    ctx: &Ctx<'_>,
+    skill_name: &str,
+    host: &str,
+    workspace_name: &str,
+    skill_dirs: &[std::path::PathBuf],
+) -> Result<Option<GovernedRewrite>, ClientError> {
+    let canonical = format!("{host}/{workspace_name}/{skill_name}");
+    let Some((path, from)) = find_path_line(ctx, skill_dirs)? else {
+        return Ok(None);
+    };
+    let manifest = crate::manifest::file::read_manifest(ctx.fs, &path)?.unwrap_or_default();
+    let already_governed = manifest.skills.iter().any(|e| e.reference == canonical);
+    let mut ed = crate::manifest::file::ManifestEditor::open(ctx.fs, &path)?;
+    ed.remove_entry("skills", &from);
+    if !already_governed {
+        ed.set_entry("skills", &canonical, None);
+    }
+    ed.write(ctx.fs, &path)?;
+    Ok(Some(GovernedRewrite {
+        manifest: path.display().to_string(),
+        canonical,
+        from,
+    }))
 }
 
 /// `topos add <workspace-ref>` — record the demand and deliver it now. `global` routes the edit

@@ -1492,12 +1492,12 @@ pub(crate) fn invite_describe_tty(
     }
     if let Some(skill) = &data.skill {
         s.push_str(&format!(
-            "\nLeads with the {skill} skill — accepting follows it for them."
+            "\nLeads with the {skill} skill — accepting adds it to their profile."
         ));
     }
     if let Some(channel) = &data.channel {
         s.push_str(&format!(
-            "\nLeads with #{channel} — accepting joins them to it."
+            "\nLeads with the {channel} channel — accepting adds it to their profile."
         ));
     }
     s.push_str(
@@ -1562,8 +1562,8 @@ pub(crate) fn publish_describe_tty(
     }
     if !data.placements.is_empty() {
         s.push_str(&format!(
-            "\n  places into: #{}",
-            data.placements.join(", #")
+            "\n  places into channel: {}",
+            data.placements.join(", ")
         ));
         if let Some(note) = &data.placement_note {
             s.push_str(&format!(" — {note}"));
@@ -1593,6 +1593,15 @@ pub(crate) fn publish_describe_tty(
     if let Some(undo) = &data.undo {
         s.push_str(&format!("\n  undo: {undo}"));
     }
+    // The predicted governance transfer — the manifest edit the apply would perform.
+    if let (Some(manifest), Some(reference), Some(from)) =
+        (&data.manifest, &data.reference, &data.converted_from)
+    {
+        s.push_str(&format!(
+            "\n  governance transfer: {manifest} — the \"{from}\" line becomes \"{reference}\" \
+             (the local copy becomes a managed placement of the governed bundle)"
+        ));
+    }
     s.push_str(&format!(
         "\nNothing has landed yet — apply with:\n  {}",
         argv_line(yes_argv)
@@ -1620,10 +1629,25 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
     // the curated channel's reference did not — placement takes reviewer or owner.
     if let Some(ch) = &data.placement_withheld {
         out.push_str(&format!(
-            "\n#{ch} is curated — the reference was NOT placed (placement takes reviewer or \
-             owner). The skill is in the catalog; a curator places it: `topos channel add {ch} {}`.",
+            "\nchannel '{ch}' is curated — the reference was NOT placed (placement takes \
+             reviewer or owner). The skill is in the catalog; a curator places it: `topos \
+             channel add {ch} {}`.",
             data.name,
         ));
+    }
+    // The governance transfer, stated on the receipt with its inverse (a manifest edit — there
+    // is no one-command undo, so the inverse is named as the edit it is).
+    if let (Some(manifest), Some(reference), Some(from)) =
+        (&data.manifest, &data.reference, &data.converted_from)
+    {
+        out.push_str(&format!(
+            "\ngovernance transfer: {manifest} — \"{from}\" is now \"{reference}\" (the local \
+             copy is a managed placement of the governed bundle; to undo, edit that manifest and \
+             restore the \"{from}\" line)"
+        ));
+    }
+    if let Some(note) = &data.origin_note {
+        out.push_str(&format!("\nnote: {note}"));
     }
     // The teammate handoff, after the confirmation: the one line to hand someone not yet in the
     // workspace (the skill page URL answers only for members, so it never recruits anyone).
@@ -1640,12 +1664,22 @@ pub(crate) fn propose_tty(data: &ProposeData) -> String {
         None => String::new(),
     };
     // Honest: this is NEEDS_REVIEW — a proposal opened, `current` did NOT move.
-    format!(
+    let mut out = format!(
         "{prefix}Opened proposal {} on base {}. Awaiting review — a reviewer runs `topos review {} --approve`.",
         data.proposal,
         short(&data.base_version_id),
         data.proposal,
-    )
+    );
+    if let (Some(manifest), Some(reference), Some(from)) =
+        (&data.manifest, &data.reference, &data.converted_from)
+    {
+        out.push_str(&format!(
+            "\ngovernance transfer: {manifest} — \"{from}\" is now \"{reference}\" (delivery \
+             follows once the proposal is approved; to undo, edit that manifest and restore the \
+             \"{from}\" line)"
+        ));
+    }
+    out
 }
 
 pub(crate) fn revert_tty(data: &RevertData) -> String {
@@ -2104,6 +2138,7 @@ mod tests {
             added: None,
             placement_withheld: None,
             invite_line: None,
+            origin_note: None,
         });
         assert!(line.starts_with("Published smoke-notes@"), "{line}");
         assert!(
@@ -2126,10 +2161,11 @@ mod tests {
             added: None,
             placement_withheld: Some("everyone".to_owned()),
             invite_line: None,
+            origin_note: None,
         });
         assert!(line.starts_with("Published smoke-notes@"), "{line}");
         assert!(
-            line.contains("#everyone is curated — the reference was NOT placed"),
+            line.contains("channel 'everyone' is curated — the reference was NOT placed"),
             "the withheld placement is disclosed: {line}"
         );
         assert!(
@@ -2156,6 +2192,7 @@ mod tests {
             added: None,
             placement_withheld: None,
             invite_line: Some(invite.to_owned()),
+            origin_note: None,
         });
         assert!(line.starts_with("Published smoke-notes@"), "{line}");
         let handoff = format!("\nbring a teammate: {invite}");
@@ -2187,6 +2224,9 @@ mod tests {
                 origin_note: None,
                 placement_note: None,
                 merge_preview: None,
+                manifest: None,
+                reference: None,
+                converted_from: None,
             },
             &["topos".to_owned(), "publish".to_owned(), "--yes".to_owned()],
         );

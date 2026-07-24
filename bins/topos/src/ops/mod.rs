@@ -84,6 +84,9 @@ pub(crate) use publish::{PublishDescribeConnectors, PublishOutcome, publish, pub
 pub(crate) use protect::{ProtectConnectors, ProtectOutcome, protect};
 #[cfg(test)]
 pub(crate) use publish::ensure_tracked;
+// The `--to` existing-channel gate — unit-proven over the reconcile suite's directory fake.
+#[cfg(test)]
+pub(crate) use publish::check_channel_exists;
 pub(crate) use pull::{
     PullOutcome, PullScope, ReconcileOpts, ResetOutcome, TargetMode, pull, quiet_hook_lines,
     quiet_soft_failure, reset,
@@ -93,7 +96,8 @@ pub(crate) use reconcile::{
     manifest_update,
 };
 pub(crate) use reference::{
-    WriteLane, add_reference, remove_reference_global, resolve_session_lane, rewrite_to_governed,
+    WriteLane, add_reference, find_path_line, remove_reference_global, resolve_session_lane,
+    rewrite_to_governed,
 };
 // The withdrawal/exclusion clean is driven through `remove`/the reconcile; the direct re-export
 // serves the placement-breadth suite's foreign-preservation regression.

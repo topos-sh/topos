@@ -160,6 +160,43 @@ fn normalize_channel_target(
     Ok(Some(raw.to_owned()))
 }
 
+/// `--to <channel>` must name an EXISTING channel — publish never silently mints one (creating a
+/// channel is a deliberate curation act, done on the web). A value equal to the workspace slug
+/// gets the pointed fix (this publish already lands in that workspace); an unreadable index
+/// refuses retryable rather than risk a silent server-side create. Checked on the describe AND
+/// the apply, before any op is minted.
+pub(crate) fn check_channel_exists(
+    directory: &dyn crate::plane::DirectorySource,
+    lane: &super::WriteLane,
+    channel: Option<&str>,
+) -> Result<(), ClientError> {
+    let Some(ch) = channel else { return Ok(()) };
+    if ch == lane.workspace_name {
+        return Err(ClientError::InvalidArgument(format!(
+            "`--to {ch}` names the workspace, not a channel — this publish already lands in \
+             {}/{}; `--to` places the skill into a CHANNEL (e.g. `--to everyone`, or `--to \
+             @{}/channels/<name>`)",
+            lane.host, lane.workspace_name, lane.workspace_name
+        )));
+    }
+    let index = directory.channels_index(&lane.workspace_id).map_err(|e| {
+        ClientError::Plane(format!(
+            "could not verify channel '{ch}' in {}: {} — nothing was published; retry",
+            lane.workspace_name,
+            crate::render::safe_message(&e)
+        ))
+    })?;
+    if !index.channels.iter().any(|c| c.name == ch) {
+        return Err(ClientError::NotAvailable(format!(
+            "there is no channel '{ch}' in {}, or it is not visible with your current access — \
+             nothing was published; pick an existing channel (`--to everyone` reaches the \
+             default), or create '{ch}' on the web (the workspace's Channels page) first",
+            lane.workspace_name
+        )));
+    }
+    Ok(())
+}
+
 /// The seams `publish`'s describe needs, both read only AFTER the local scan: the directory connector
 /// reads the audience (reach) + the workspace address (the share line); the delivery connector reads the
 /// FRESH per-skill protection the gate turns on — the one server fact the sidecar's cached follow-state
@@ -317,6 +354,11 @@ pub(crate) fn publish_describe(
             &*legacy_dir
         }
     };
+    // `--to` takes an EXISTING channel — the describe refuses exactly where the apply would
+    // (never a described placement into a channel the apply would have silently minted).
+    if let Some(l) = &lane {
+        check_channel_exists(directory, l, channel)?;
+    }
     let reach = directory
         .reach(&workspace_id, id.as_str())
         .ok()
@@ -343,7 +385,8 @@ pub(crate) fn publish_describe(
     // so up front whenever the target resolves CURATED against a member caller. The mode rides
     // the channel index the client already reads (`/channels`); a failed read degrades to the
     // plain placement line — same as the reach/share reads, the describe keeps working offline.
-    // (A `--to` naming a channel absent from the index is create-on-first-use, born `open`.)
+    // (A `--to` naming a channel absent from the index was already refused above — publish
+    // never silently mints a channel.)
     let placement_note = placement_target
         .as_ref()
         .is_some_and(|target| {
@@ -386,12 +429,41 @@ pub(crate) fn publish_describe(
             ))
         })
         .flatten();
-    let origin_note = doc::read_doc::<add::OriginDoc>(ctx.fs, &sp.origin)?.map(|o| {
-        format!(
-            "this skill was imported from {} — publishing makes the team copy the source of truth",
-            o.origin.source
-        )
-    });
+    let origin_note = match doc::read_doc::<add::OriginDoc>(ctx.fs, &sp.origin)? {
+        Some(o) => {
+            let mut note = format!(
+                "this skill was imported from {} — publishing makes the team copy the source of \
+                 truth",
+                o.origin.source
+            );
+            if let Some(l) = &lane
+                && let Some(asym) = origin_asymmetry_note(ctx, &sp, &skill_name, l)?
+            {
+                note.push_str("; ");
+                note.push_str(&asym);
+            }
+            Some(note)
+        }
+        None => None,
+    };
+    // The PREDICTED governance transfer: the manifest line the apply would rewrite (read-only).
+    let (transfer_manifest, transfer_reference, transfer_from) = match &lane {
+        Some(l) => match super::find_path_line(
+            ctx,
+            &map.placements
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect::<Vec<_>>(),
+        )? {
+            Some((path, from)) => (
+                Some(path.display().to_string()),
+                Some(format!("{}/{}/{skill_name}", l.host, l.workspace_name)),
+                Some(from),
+            ),
+            None => (None, None, None),
+        },
+        None => (None, None, None),
+    };
 
     Ok(PublishDescribeData {
         skill: skill_name,
@@ -411,6 +483,9 @@ pub(crate) fn publish_describe(
         origin_note,
         placement_note,
         merge_preview,
+        manifest: transfer_manifest,
+        reference: transfer_reference,
+        converted_from: transfer_from,
     })
 }
 
@@ -631,6 +706,11 @@ fn enrolled_publish(
             ));
         }
     };
+    // `--to` takes an EXISTING channel — verified before any op is minted (never a silent
+    // server-side create).
+    if let Some(l) = &lane {
+        check_channel_exists(&*l.transports.directory, l, channel)?;
+    }
     // Under a session lane, the delivered set IS the follow-state (the cache-backed seam) — the
     // no-change and gate reads below see the same truth the reconcile writes.
     let outer_ctx = ctx;
@@ -742,26 +822,79 @@ fn enrolled_publish(
         (None, None) => None,
     };
     let mut outcome = map_outcome(ctx, &sp, &lock, &map, &rec, &receipt, skill_name, dir_ref)?;
-    // GOVERNANCE TRANSFER, by default: a LANDED publish of a bundle some manifest referenced as
-    // a LOCAL PATH rewrites that line to the canonical workspace reference — the local copy is
-    // now a managed placement of the governed bundle; the receipt states each part.
-    if let (Some(l), PublishOutcome::Published(data)) = (&lane, &mut outcome)
-        && let Some(rw) = super::rewrite_to_governed(
-            outer_ctx,
-            &lock.name,
-            &l.host,
-            &l.workspace_name,
-            &map.placements
-                .iter()
-                .map(std::path::PathBuf::from)
-                .collect::<Vec<_>>(),
-        )?
-    {
-        data.manifest = Some(rw.manifest);
-        data.reference = Some(rw.canonical);
-        data.converted_from = Some(rw.from);
+    // GOVERNANCE TRANSFER, by default: a landed publish — OR an opened proposal (`--propose`,
+    // the reviewed-bundle downgrade) — of a bundle some manifest referenced as a LOCAL PATH
+    // rewrites that line to the canonical workspace reference: the local copy is now a managed
+    // placement of the governed bundle (on the proposal arm, delivery follows approval); the
+    // receipt states each part. Without the proposal arm the path line would sit forever — the
+    // publish IS the transfer act, whichever gate it went through.
+    if let Some(l) = &lane {
+        let dirs: Vec<std::path::PathBuf> = map
+            .placements
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect();
+        match &mut outcome {
+            PublishOutcome::Published(data) => {
+                if let Some(rw) = super::rewrite_to_governed(
+                    outer_ctx,
+                    &lock.name,
+                    &l.host,
+                    &l.workspace_name,
+                    &dirs,
+                )? {
+                    data.manifest = Some(rw.manifest);
+                    data.reference = Some(rw.canonical);
+                    data.converted_from = Some(rw.from);
+                }
+                data.origin_note = origin_asymmetry_note(outer_ctx, &sp, &lock.name, l)?;
+            }
+            PublishOutcome::Proposed(data) => {
+                if let Some(rw) = super::rewrite_to_governed(
+                    outer_ctx,
+                    &lock.name,
+                    &l.host,
+                    &l.workspace_name,
+                    &dirs,
+                )? {
+                    data.manifest = Some(rw.manifest);
+                    data.reference = Some(rw.canonical);
+                    data.converted_from = Some(rw.from);
+                }
+            }
+        }
     }
     Ok(outcome)
+}
+
+/// The GitHub-import asymmetry, disclosed: publishing an imported skill does NOT rewrite a
+/// manifest's origin-pin line (`github.com/…` refs are pinned demand, deliberately outside the
+/// path-line transfer) — when one still references this bundle's recorded origin, the receipt
+/// says the project keeps tracking that pin until the line is swapped for the governed reference.
+fn origin_asymmetry_note(
+    ctx: &Ctx<'_>,
+    sp: &sidecar::SkillPaths,
+    skill_name: &str,
+    lane: &super::WriteLane,
+) -> Result<Option<String>, ClientError> {
+    let Some(origin) = doc::read_doc::<add::OriginDoc>(ctx.fs, &sp.origin)? else {
+        return Ok(None);
+    };
+    let origin_ref = match origin.origin.subdir.as_deref() {
+        Some(sub) if !sub.is_empty() => format!("{}/{sub}", origin.origin.source),
+        _ => origin.origin.source.clone(),
+    };
+    let tracked = super::manifest_edit::local_layers(ctx)?
+        .into_iter()
+        .any(|(_, m)| m.skills.iter().any(|e| e.reference == origin_ref));
+    Ok(tracked.then(|| {
+        format!(
+            "a manifest still tracks the GitHub origin pin ({origin_ref}) — that line is not \
+             rewritten; the project keeps following the pin until you swap it for the governed \
+             copy (`topos remove {origin_ref}`, then `topos add @{}/{skill_name}`)",
+            lane.workspace_name
+        )
+    }))
 }
 
 /// The teammate handoff line — the one paste-ready instruction that brings a teammate's machine
@@ -1033,6 +1166,7 @@ fn map_outcome(
                 reference: None,
                 converted_from: None,
                 invite_line,
+                origin_note: None,
             }))
         }
         TerminalOutcome::NeedsReview => Ok(PublishOutcome::Proposed(ProposeData {
@@ -1041,6 +1175,9 @@ fn map_outcome(
             title: skill_name.to_owned(),
             body: None,
             added: None,
+            manifest: None,
+            reference: None,
+            converted_from: None,
         })),
         TerminalOutcome::Conflict => Err(ClientError::Conflict {
             skill: skill_name.to_owned(),

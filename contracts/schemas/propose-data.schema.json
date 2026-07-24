@@ -25,9 +25,30 @@
         "null"
       ]
     },
+    "converted_from": {
+      "description": "The local-path spelling the manifest carried BEFORE the transfer. **INFERRED**\n(additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "manifest": {
+      "description": "The GOVERNANCE-TRANSFER receipt half on the PROPOSAL arm: the manifest whose local-path\nline this publish rewrote to the governed workspace reference (delivery follows once the\nproposal is approved). Absent when no manifest referenced the bundle by path. **INFERRED**\n(additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "proposal": {
       "description": "`<skill>@<version_id>` of the candidate.",
       "type": "string"
+    },
+    "reference": {
+      "description": "The canonical workspace reference the manifest now stores. **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "title": {
       "type": "string"

@@ -9,6 +9,13 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
+    "converted_from": {
+      "description": "The local-path spelling the manifest carries today (what the transfer would replace).\n**INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "gate": {
       "description": "The gate outcome: an OPEN bundle lands directly; a REVIEWED one becomes a proposal.",
       "$ref": "#/$defs/PublishGate"
@@ -23,6 +30,13 @@
     "is_revert": {
       "description": "Whether this publish restores an ancestor's bytes (a revert-shaped publish, same gate).",
       "type": "boolean"
+    },
+    "manifest": {
+      "description": "The PREDICTED governance transfer: the manifest whose local-path line the apply would\nrewrite to the governed workspace reference. Absent when no manifest references the bundle\nby path. **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "merge_preview": {
       "description": "The PREDICTED conflict verdict when the draft's base is BEHIND the last-known observed\n`current` (the apply would refuse with CONFLICT — rebase first): a pure in-memory three-way\ndry run of the draft onto that current, from already-local bytes only. Absent = unknown\n(up to date, or the needed version is not locally held — the describe never adds a network\ncall for it). **INFERRED** (additive-only).",
@@ -64,6 +78,13 @@
       ],
       "format": "uint64",
       "minimum": 0
+    },
+    "reference": {
+      "description": "The canonical workspace reference the manifest would store. **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "share_line": {
       "description": "The paste-able share line (`<address>/skills/<name>`), when the workspace address is known.\nA members' deep link — it answers only for people already in the workspace.",

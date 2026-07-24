@@ -740,6 +740,12 @@ pub struct PublishData {
     /// itself is unaffected). **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invite_line: Option<String>,
+    /// An honesty note about the bundle's GitHub origin, when one is recorded: publishing does
+    /// NOT rewrite a manifest's origin-pin line (`github.com/…`), so when one still references
+    /// the origin this says the project keeps tracking the pin until the line is swapped for the
+    /// governed reference. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_note: Option<String>,
 }
 
 /// The disclosure a `publish` attaches when it ADDED the skill to topos before shipping — the auto-add
@@ -779,6 +785,19 @@ pub struct ProposeData {
     /// one local `add` the propose folded in; `None` when the skill was already tracked. **INFERRED.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added: Option<AddedNote>,
+    /// The GOVERNANCE-TRANSFER receipt half on the PROPOSAL arm: the manifest whose local-path
+    /// line this publish rewrote to the governed workspace reference (delivery follows once the
+    /// proposal is approved). Absent when no manifest referenced the bundle by path. **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<String>,
+    /// The canonical workspace reference the manifest now stores. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    /// The local-path spelling the manifest carried BEFORE the transfer. **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub converted_from: Option<String>,
 }
 
 /// `revert` (a **forward** git-revert restoring older bytes as a new, higher-generation version —
@@ -1094,6 +1113,18 @@ pub struct PublishDescribeData {
     /// call for it). **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_preview: Option<MergePreview>,
+    /// The PREDICTED governance transfer: the manifest whose local-path line the apply would
+    /// rewrite to the governed workspace reference. Absent when no manifest references the bundle
+    /// by path. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<String>,
+    /// The canonical workspace reference the manifest would store. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    /// The local-path spelling the manifest carries today (what the transfer would replace).
+    /// **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub converted_from: Option<String>,
 }
 
 /// The gate a `publish` describe predicts. **INFERRED value set.**
@@ -1294,6 +1325,7 @@ mod tests {
             added: None,
             placement_withheld: None,
             invite_line: None,
+            origin_note: None,
         };
         let v = serde_json::to_value(&done).unwrap();
         assert_eq!(v["version_id"], "a".repeat(64));

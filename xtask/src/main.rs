@@ -959,6 +959,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
             placement_note: None,
             // An up-to-date copy predicts nothing — the additive preview omits (absent = unknown).
             merge_preview: None,
+            manifest: None,
+            reference: None,
+            converted_from: None,
         })
         .expect("PublishDescribeData serializes"),
         warnings: vec![],
@@ -994,6 +997,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                  it. Our workspace: https://topos.sh/acme\""
                     .to_owned(),
             ),
+            origin_note: None,
         })
         .expect("PublishData serializes"),
         warnings: vec![],
