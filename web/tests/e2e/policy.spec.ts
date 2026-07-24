@@ -21,7 +21,7 @@ test.describe.configure({ mode: "serial" });
 async function resetKnobs(): Promise<void> {
   await adminQuery(
     `update web.workspace set protection_default = 'open',
-       staleness_window_ms = 604800000, registration = 'open'`,
+       staleness_window_ms = 604800000, registration = 'open', session_max_age_ms = null`,
   );
 }
 
@@ -78,6 +78,39 @@ test("the staleness window converts days to milliseconds and persists", async ({
   await expect.poll(async () => knob("staleness_window_ms")).toBe(FOURTEEN_DAYS_MS);
   await gotoSettled(page, `/settings`);
   await expect(page.getByLabel("Staleness window (days)")).toHaveValue("14");
+});
+
+test("the session expiry sets in days, shows on the sessions page, and clears to no-expiry", async ({
+  page,
+}) => {
+  await theWorkspace();
+  await gotoSettled(page, `/settings`);
+
+  // The default: empty field = sessions never expire.
+  const expiry = page.getByLabel("Session expiry (days)");
+  await expect(expiry).toHaveValue("");
+  await expiry.fill("30");
+  await page.getByRole("button", { name: "Save session expiry" }).click();
+  await expect.poll(async () => knob("session_max_age_ms")).toBe("2592000000"); // 30 * 86_400_000
+  await gotoSettled(page, `/settings`);
+  await expect(page.getByLabel("Session expiry (days)")).toHaveValue("30");
+  await expect(page.getByText(/Last set: 30 days, by /)).toBeVisible();
+
+  // The sessions page states the policy where sessions are read.
+  await gotoSettled(page, `/settings/sessions`);
+  await expect(page.getByTestId("sessions-expiry-policy")).toContainText(
+    "Sessions here expire after 30 days",
+  );
+
+  // Clearing the field clears the policy — back to no expiry, stated honestly on both pages.
+  await gotoSettled(page, `/settings`);
+  await page.getByLabel("Session expiry (days)").fill("");
+  await page.getByRole("button", { name: "Save session expiry" }).click();
+  await expect.poll(async () => knob("session_max_age_ms")).toBe(null);
+  await gotoSettled(page, `/settings/sessions`);
+  await expect(page.getByTestId("sessions-expiry-policy")).toContainText(
+    "Sessions here do not expire",
+  );
 });
 
 test("the registration knob closes sign-up with one Save", async ({ page }) => {

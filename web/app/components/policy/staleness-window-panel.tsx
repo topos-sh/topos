@@ -19,10 +19,11 @@ const FIELD_CLASSES =
   "block h-11 w-40 rounded-md border border-line px-3 text-sm text-ink placeholder:text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25";
 
 /**
- * The fleet clock: how long a device may go without reporting before the fleet page calls it
- * stale. Entered in DAYS (hour granularity is fine — the action rounds to the nearest hour and
- * converts to milliseconds; the database bounds it to 1ms .. 366 days). An owner edits it and
- * saves (the owner guard is the whole ceremony); a non-owner sees the current window read-only.
+ * The reporting clock: how long a session may go without reporting before the Sessions page
+ * calls it stale. Entered in DAYS (hour granularity is fine — the action rounds to the nearest
+ * hour and converts to milliseconds; the database bounds it to 1ms .. 366 days). An owner edits
+ * it and saves (the owner guard is the whole ceremony); a non-owner sees the current window
+ * read-only.
  */
 export function StalenessWindowPanel({
   isOwner,
@@ -41,8 +42,8 @@ export function StalenessWindowPanel({
       </SectionHeading>
       <Card className="space-y-3 px-4 py-3">
         <p className="text-sm text-dim">
-          A device is called stale on the Linked devices page once it goes this long without
-          reporting. Default is 7 days.
+          A session is called stale on the Sessions page once it goes this long without reporting.
+          Default is 7 days.
         </p>
         {isOwner ? (
           <StalenessWindowControl initialDays={days} />

@@ -53,6 +53,7 @@ describe("workspacePolicyOf (the reads)", () => {
       protectionDefault: "open",
       registration: "invite_only",
       sessionApproval: "off",
+      sessionMaxAgeMs: null,
     });
     expect(await queries.stalenessWindowOf(asMember(wsId, "u_owner"))).toBe(DEFAULT_WINDOW_MS);
   });
@@ -114,6 +115,36 @@ describe("setSessionApproval (the session-approval knob)", () => {
     expect(await queries.setSessionApproval(owner, "maybe")).toBe("bad_value");
     expect(await auditRows("policy_session_approval")).toEqual([
       { subject: "on", outcome: "ok" },
+      { subject: "off", outcome: "ok" },
+    ]);
+  });
+});
+
+describe("setSessionMaxAge (the session-expiry knob: 1 hour .. 366 days, null = no expiry)", () => {
+  it("sets a bounded age, clears with null, audits both; refuses everything outside", async () => {
+    const queries = await q();
+    const owner = asOwner(wsId, "u_owner", "Owner");
+    const HOUR_MS = 3_600_000;
+
+    expect(await queries.setSessionMaxAge(owner, HOUR_MS)).toBe("set");
+    expect((await queries.workspacePolicyOf(asMember(wsId, "u_owner"))).sessionMaxAgeMs).toBe(
+      HOUR_MS,
+    );
+    expect(await queries.setSessionMaxAge(owner, MAX_WINDOW_MS)).toBe("set");
+    // null CLEARS the policy — sessions never expire (the column default).
+    expect(await queries.setSessionMaxAge(owner, null)).toBe("set");
+    expect((await queries.workspacePolicyOf(asMember(wsId, "u_owner"))).sessionMaxAgeMs).toBe(null);
+
+    expect(await queries.setSessionMaxAge(owner, 0)).toBe("bad_value");
+    expect(await queries.setSessionMaxAge(owner, HOUR_MS - 1)).toBe("bad_value");
+    expect(await queries.setSessionMaxAge(owner, MAX_WINDOW_MS + 1)).toBe("bad_value");
+    expect(await queries.setSessionMaxAge(owner, HOUR_MS + 0.5)).toBe("bad_value");
+    expect(await queries.setSessionMaxAge(owner, Number.NaN)).toBe("bad_value");
+    // The clear stands; the refusals wrote nothing.
+    expect((await queries.workspacePolicyOf(asMember(wsId, "u_owner"))).sessionMaxAgeMs).toBe(null);
+    expect(await auditRows("policy_session_max_age")).toEqual([
+      { subject: String(HOUR_MS), outcome: "ok" },
+      { subject: String(MAX_WINDOW_MS), outcome: "ok" },
       { subject: "off", outcome: "ok" },
     ]);
   });

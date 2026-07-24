@@ -20,6 +20,8 @@ export interface WorkspacePolicy {
   registration: "invite_only" | "open";
   /** The session-approval knob: 'on' → a non-owner's new session is born pending. */
   sessionApproval: "off" | "on";
+  /** The owner-set session expiry (ms), or null — the default — when sessions never expire. */
+  sessionMaxAgeMs: number | null;
 }
 
 /** The workspace's policy knobs, one read. */
@@ -30,6 +32,7 @@ export async function workspacePolicyOf(actor: MemberActor): Promise<WorkspacePo
       protectionDefault: workspace.protectionDefault,
       registration: workspace.registration,
       sessionApproval: workspace.sessionApproval,
+      sessionMaxAgeMs: workspace.sessionMaxAgeMs,
     })
     .from(workspace)
     .where(eq(workspace.id, actor.workspaceId))
@@ -43,6 +46,7 @@ export async function workspacePolicyOf(actor: MemberActor): Promise<WorkspacePo
     protectionDefault: row.protectionDefault as WorkspacePolicy["protectionDefault"],
     registration: row.registration as WorkspacePolicy["registration"],
     sessionApproval: row.sessionApproval as WorkspacePolicy["sessionApproval"],
+    sessionMaxAgeMs: row.sessionMaxAgeMs,
   };
 }
 
@@ -101,6 +105,39 @@ export async function setRegistration(
     return "bad_value";
   }
   await setKnob(actor, { registration: value }, "policy_registration", value);
+  return "set";
+}
+
+export type SessionMaxAgeOutcome = "set" | "bad_value";
+
+/** The session-expiry bounds: 1 hour .. 366 days (`null` = no expiry, the default). */
+const SESSION_MAX_AGE_MIN_MS = 3_600_000;
+const SESSION_MAX_AGE_MAX_MS = 31_622_400_000;
+
+/**
+ * The owner-set session expiry — the maximum age of a CLI session's credential. The guard
+ * enforces it at resolve time (`sessionActor` treats an over-age session as no session, the
+ * uniform 404), so a change is effective on the next request; the machine logs in again.
+ * `null` clears it (sessions never expire — the default). Owner-only.
+ */
+export async function setSessionMaxAge(
+  actor: OwnerActor,
+  maxAgeMs: number | null,
+): Promise<SessionMaxAgeOutcome> {
+  if (
+    maxAgeMs !== null &&
+    (!Number.isSafeInteger(maxAgeMs) ||
+      maxAgeMs < SESSION_MAX_AGE_MIN_MS ||
+      maxAgeMs > SESSION_MAX_AGE_MAX_MS)
+  ) {
+    return "bad_value";
+  }
+  await setKnob(
+    actor,
+    { sessionMaxAgeMs: maxAgeMs },
+    "policy_session_max_age",
+    maxAgeMs === null ? "off" : String(maxAgeMs),
+  );
   return "set";
 }
 

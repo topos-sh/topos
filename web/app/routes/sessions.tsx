@@ -112,6 +112,7 @@ export default function SessionsPage() {
         <SettingsTabs active="sessions" />
         {actionData !== undefined && <ActionReceipt status={actionData.status} />}
         <IntroCopy wholeWorkspace={view.wholeWorkspace} />
+        <ExpiryPolicyNote sessionMaxAgeMs={view.sessionMaxAgeMs} isOwner={isOwner} />
         {(pending.length > 0 || view.sessionApproval === "on") && (
           <PendingSessions sessions={pending} isOwner={isOwner} />
         )}
@@ -193,6 +194,52 @@ function IntroCopy({ wholeWorkspace }: { wholeWorkspace: boolean }) {
       )}
     </p>
   );
+}
+
+/**
+ * The workspace's session-expiry policy, stated where sessions are read (set on Settings →
+ * General, owner-only). An expiry is enforced by the session guard, so an over-age session
+ * simply stops working — the machine logs in again.
+ */
+function ExpiryPolicyNote({
+  sessionMaxAgeMs,
+  isOwner,
+}: {
+  sessionMaxAgeMs: number | null;
+  isOwner: boolean;
+}) {
+  const wsPath = useWsPath();
+  return (
+    <p data-testid="sessions-expiry-policy" className="text-faint text-sm leading-relaxed">
+      {sessionMaxAgeMs === null ? (
+        <>Sessions here do not expire — a login stands until it is ended from either side.</>
+      ) : (
+        <>
+          Sessions here expire after {formatAge(sessionMaxAgeMs)}: past that age a login stops
+          working and the machine logs in again.
+        </>
+      )}{" "}
+      {isOwner && (
+        <>
+          Set on the{" "}
+          <Link to={wsPath("settings")} className="text-ink underline decoration-hairline">
+            General settings
+          </Link>{" "}
+          page.
+        </>
+      )}
+    </p>
+  );
+}
+
+/** A calm "30 days" / "12 hours" age label for the expiry-policy line. */
+function formatAge(ms: number): string {
+  const hours = Math.round(ms / 3_600_000);
+  if (hours < 24) {
+    return hours === 1 ? "1 hour" : `${hours} hours`;
+  }
+  const days = Math.round((ms / 86_400_000) * 10) / 10;
+  return days === 1 ? "1 day" : `${days} days`;
 }
 
 /**

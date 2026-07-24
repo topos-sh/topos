@@ -5,6 +5,7 @@ import type { LastSetLine } from "@/components/policy/last-set-line";
 import { RegistrationPanel } from "@/components/policy/registration-panel";
 import { ReviewRequiredPanel } from "@/components/policy/review-required-panel";
 import { SessionApprovalPanel } from "@/components/policy/session-approval-panel";
+import { SessionMaxAgePanel } from "@/components/policy/session-max-age-panel";
 import { StalenessWindowPanel } from "@/components/policy/staleness-window-panel";
 import { SettingsTabs } from "@/components/settings-tabs";
 import { buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
@@ -14,6 +15,7 @@ import { type AuditEventRow, lastAuditEventOfKind, recordAdminEvent } from "@/li
 import {
   setRegistration,
   setSessionApproval,
+  setSessionMaxAge,
   setStalenessWindow,
   workspacePolicyOf,
 } from "@/lib/db/queries.policy.server";
@@ -44,7 +46,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   // The knobs are plain columns on the ONE workspace row; the column DEFAULTs are the canonical
   // fallbacks, so a fresh install shows the true defaults, never a blank. The "last set by"
   // lines read the audit ledger — the same rows the setters land in their own transactions.
-  const [policy, lastReview, lastStaleness, lastRegistration, lastSessionApproval] =
+  const [policy, lastReview, lastStaleness, lastRegistration, lastSessionApproval, lastMaxAge] =
     await Promise.all([
       workspacePolicyOf(actor),
       lastAuditEventOfKind(actor, "policy_review_default"),
@@ -53,6 +55,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         ? lastAuditEventOfKind(actor, "policy_registration")
         : Promise.resolve(undefined),
       lastAuditEventOfKind(actor, "policy_session_approval"),
+      lastAuditEventOfKind(actor, "policy_session_max_age"),
     ]);
   return {
     isOwner,
@@ -63,11 +66,13 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     stalenessWindowMs: policy.stalenessWindowMs,
     registration: policy.registration,
     sessionApproval: policy.sessionApproval,
+    sessionMaxAgeMs: policy.sessionMaxAgeMs,
     lastSet: {
       review: lastSetOf(lastReview),
       staleness: lastSetOf(lastStaleness),
       registration: lastSetOf(lastRegistration),
       sessionApproval: lastSetOf(lastSessionApproval),
+      sessionMaxAge: lastSetOf(lastMaxAge),
     },
   };
 }
@@ -103,6 +108,9 @@ export async function action({ request, params }: ActionFunctionArgs) {
   }
   if (intent === "set-session-approval") {
     return sessionApprovalIntent(request, ws, formData);
+  }
+  if (intent === "set-session-max-age") {
+    return sessionMaxAgeIntent(request, ws, formData);
   }
   return data({ intent: "unknown" as const, status: "error" as const }, { status: 400 });
 }
@@ -191,6 +199,27 @@ async function registrationIntent(request: Request, ws: string, formData: FormDa
   return { intent: "set-registration" as const, ...result };
 }
 
+/**
+ * The session expiry — entered in days (empty = no expiry), converted to milliseconds at hour
+ * granularity like the staleness window. Enforcement is the session guard's, so a landed change
+ * takes effect on the very next lane request.
+ */
+async function sessionMaxAgeIntent(request: Request, ws: string, formData: FormData) {
+  const raw = String(formData.get("session_max_age_days") ?? "").trim();
+  const days = Number(raw);
+  // Empty clears the policy (no expiry); a NaN/zero input becomes 0, which the setter refuses
+  // as bad_value (honest, not a crash).
+  const maxAgeMs =
+    raw === "" ? null : Number.isFinite(days) ? Math.round(days * 24) * 3_600_000 : 0;
+  const result = await knobIntent(request, ws, {
+    auditKind: "policy_session_max_age",
+    detail: maxAgeMs === null ? "off" : String(maxAgeMs),
+    run: (owner) => setSessionMaxAge(owner, maxAgeMs),
+    deniedError: () => "Enter an expiry between 1 hour and 366 days, or leave empty for none.",
+  });
+  return { intent: "set-session-max-age" as const, ...result };
+}
+
 /** The session-approval knob — `on` bears non-owner logins pending; default off. */
 async function sessionApprovalIntent(request: Request, ws: string, formData: FormData) {
   const value = String(formData.get("session_approval") ?? "");
@@ -213,6 +242,7 @@ export default function WorkspaceSettings() {
     stalenessWindowMs,
     registration,
     sessionApproval,
+    sessionMaxAgeMs,
     lastSet,
   } = useLoaderData<typeof loader>();
   const wsPath = useWsPath();
@@ -245,6 +275,11 @@ export default function WorkspaceSettings() {
         isOwner={isOwner}
         sessionApproval={sessionApproval}
         lastSet={lastSet.sessionApproval}
+      />
+      <SessionMaxAgePanel
+        isOwner={isOwner}
+        sessionMaxAgeMs={sessionMaxAgeMs}
+        lastSet={lastSet.sessionMaxAge}
       />
       {registrationGoverns && (
         <RegistrationPanel
