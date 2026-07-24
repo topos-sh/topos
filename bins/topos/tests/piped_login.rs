@@ -1,13 +1,14 @@
-//! The PIPED enrollment default, proven over the real binary: an agent harness surfaces a
-//! command's output only when it exits, so a piped `topos follow <address>` (no `--json`, no
-//! `--wait`) must NEVER sit in the human blocking wait — it prints the approval instructions,
-//! performs its invocation's one poll, and exits 0 with the WAL pending for the next re-invoke.
+//! The PIPED login default, proven over the real binary: an agent harness surfaces a command's
+//! output only when it exits, so a piped `topos login <address>` (no `--json`, no `--wait`) must
+//! NEVER sit in the human blocking wait — it prints the approval instructions, performs its
+//! invocation's one poll, and exits 0 with the WAL pending for the next re-invoke.
 //! `--wait <seconds>` stays the explicit piped opt-in, capped at its deadline.
 //!
 //! The fixture is a real loopback HTTP server (std `TcpListener`, one thread) answering the
-//! constant protocol card, the device-authorize start, and an always-`pending` token poll — the
-//! exact wire the binary dials; the binary itself runs as a child with PIPED stdio (the point of
-//! the test), fenced by a watchdog far under the ~15-minute code TTL the old default waited out.
+//! constant protocol card, the `/v1/login/authorize` start, and an always-`pending`
+//! `/v1/login/token` poll — the exact wire the binary dials; the binary itself runs as a child
+//! with PIPED stdio (the point of the test), fenced by a watchdog far under the ~15-minute code
+//! TTL a blocking default would have waited out.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -21,7 +22,7 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_topos")
 }
 
-/// A unique, self-created scratch home for one enrollment (`TOPOS_HOME`).
+/// A unique, self-created scratch home for one login (`TOPOS_HOME`).
 fn scratch(tag: &str) -> PathBuf {
     use std::sync::atomic::AtomicU32;
     static N: AtomicU32 = AtomicU32::new(0);
@@ -32,9 +33,9 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
-/// The loopback enrollment fixture: serves the constant protocol card at any path, the
-/// device-authorize start, and an always-`pending` token poll. Returns the base URL, a live poll
-/// counter, and a stop flag the test sets on teardown.
+/// The loopback login fixture: serves the constant protocol card at any path, the
+/// `/v1/login/authorize` start, and an always-`pending` token poll. Returns the base URL, a live
+/// poll counter, and a stop flag the test sets on teardown.
 struct Fixture {
     base: String,
     polls: Arc<AtomicUsize>,
@@ -68,7 +69,7 @@ fn spawn_fixture() -> Fixture {
     Fixture { base, polls, stop }
 }
 
-/// Answer one enrollment request. Every response carries `Connection: close`, so ureq opens a
+/// Answer one login-wire request. Every response carries `Connection: close`, so ureq opens a
 /// fresh connection per request and each accept sees exactly one.
 fn handle(mut stream: TcpStream, base: &str, polls: &AtomicUsize) {
     // A stream accepted from a non-blocking listener inherits the flag on macOS — force it
@@ -79,12 +80,12 @@ fn handle(mut stream: TcpStream, base: &str, polls: &AtomicUsize) {
     let n = stream.read(&mut buf).unwrap_or(0);
     let request = String::from_utf8_lossy(&buf[..n]);
     let line = request.lines().next().unwrap_or("");
-    let body = if line.contains("/v1/device/authorize") {
-        // The device-authorize start: a short poll interval keeps a --wait run brisk.
+    let body = if line.contains("/v1/login/authorize") {
+        // The login start: a short poll interval keeps a --wait run brisk.
         format!(
             r#"{{"device_code":"dc_secret","user_code":"WXYZ-3N3X","verification_uri":"{base}/verify","expires_in_secs":900,"interval_secs":1}}"#
         )
-    } else if line.contains("/v1/device/token") {
+    } else if line.contains("/v1/login/token") {
         polls.fetch_add(1, Ordering::Relaxed);
         r#"{"status":"pending"}"#.to_owned()
     } else {
@@ -107,7 +108,7 @@ impl Drop for Fixture {
 
 /// Run `topos <args>` as a CHILD with PIPED stdio (the point: stdout is not a TTY), under a
 /// watchdog far below the code's ~15-minute TTL. Returns the captured output, or panics if the
-/// child overran the watchdog (the old blocking default would have).
+/// child overran the watchdog (a blocking default would have).
 fn run_piped(home: &Path, base: &str, args: &[&str], watchdog: Duration) -> Output {
     let mut child = Command::new(bin())
         .env("TOPOS_HOME", home)
@@ -140,18 +141,13 @@ fn run_piped(home: &Path, base: &str, args: &[&str], watchdog: Duration) -> Outp
 }
 
 #[test]
-fn a_piped_follow_prints_the_instructions_and_exits_without_the_blocking_wait() {
+fn a_piped_login_prints_the_instructions_and_exits_without_the_blocking_wait() {
     let fx = spawn_fixture();
     let home = scratch("begin");
 
     // Call 1 — begin: card → authorize → WAL. Piped, no --wait → returns promptly (well under the
-    // 30s watchdog; the old default would have blocked the full ~15-minute code TTL).
-    let out = run_piped(
-        &home,
-        &fx.base,
-        &["follow", &fx.base],
-        Duration::from_secs(30),
-    );
+    // 30s watchdog; a blocking default would have sat out the full ~15-minute code TTL).
+    let out = run_piped(&home, &fx.base, &["login", &fx.base], Duration::from_secs(30));
     assert!(
         out.status.success(),
         "begin exits 0: {}",
@@ -178,13 +174,13 @@ fn a_piped_follow_prints_the_instructions_and_exits_without_the_blocking_wait() 
     // The pending WAL is persisted for the re-invoke.
     assert!(
         home.join("identity/enrollment.json").exists(),
-        "the enrollment WAL is on disk"
+        "the login WAL is on disk"
     );
     // Begin performs the authorize, not a token poll — the poll is the resume's job.
     assert_eq!(fx.polls.load(Ordering::Relaxed), 0, "begin does not poll");
 
     // Re-invoke — resume: a SINGLE poll, still pending, exits promptly again (never a blocking loop).
-    let out = run_piped(&home, &fx.base, &["follow"], Duration::from_secs(30));
+    let out = run_piped(&home, &fx.base, &["login"], Duration::from_secs(30));
     assert!(
         out.status.success(),
         "resume exits 0: {}",
@@ -213,7 +209,7 @@ fn an_explicit_wait_cap_blocks_piped_then_returns_at_the_deadline() {
     let out = run_piped(
         &home,
         &fx.base,
-        &["follow", &fx.base, "--wait", "1"],
+        &["login", &fx.base, "--wait", "1"],
         Duration::from_secs(30),
     );
     let elapsed = started.elapsed();

@@ -120,24 +120,35 @@ fn json_envelope_apply_receipt_on_ungated_arms_describe_on_gated() {
     let src = scratch("yes-scope-src");
     let skill = src.join("pr-describe");
     copy_tree(&fixture(), &skill);
-    let (ok, _) = run(&home, &["--json", "add", skill.to_str().unwrap()]);
+    let (ok, v) = run(&home, &["--json", "add", skill.to_str().unwrap()]);
     assert!(ok, "add should exit 0");
+    // The add recorded a manifest line (an out-of-tree path ref lands in the personal manifest)
+    // and disclosed its inverse — `remove <path>` — in the receipt.
+    let undo: Vec<String> = v["data"]["undo"]
+        .as_array()
+        .expect("the add receipt carries its undo argv")
+        .iter()
+        .map(|t| t.as_str().expect("argv token").to_owned())
+        .collect();
+    assert_eq!(undo[..2], ["topos".to_owned(), "remove".to_owned()]);
+    let path_token = undo[2].clone();
 
-    // UNGATED (the local-pause fallback of a skill unfollow): the bare run APPLIES — the receipt
-    // document (not a `describe` wrapper), `bytes_kept`. This skill was never actively followed,
-    // so the pause is a no-op and the receipt honestly offers NO undo (a bare `follow
-    // pr-describe` here would even read as a bareword enrollment) — the undo-led shape on a real
-    // flip is proven in the composed-stack suite.
-    let (ok, v) = run(&home, &["--json", "unfollow", "pr-describe"]);
-    assert!(ok, "the bare skill unfollow applies: {v}");
-    assert_eq!(v["command"], "unfollow");
+    // UNGATED (the manifest-line remove): dropping the line is immediate and reversible — the
+    // bare run APPLIES with the receipt document (not a `describe` wrapper), `bytes_kept` (the
+    // tracked bytes stay in the sidecar), and the undo-led next action (`add` the path back).
+    let (ok, v) = run(&home, &["--json", "remove", &path_token]);
+    assert!(ok, "the manifest-line remove applies: {v}");
+    assert_eq!(v["command"], "remove");
     assert!(v["data"].get("describe").is_none(), "an apply receipt: {v}");
-    assert_eq!(v["data"]["bytes_kept"], true);
-    assert!(
-        v["data"].get("undo").is_none(),
-        "a no-op pause offers no undo: {v}"
+    assert_eq!(v["data"]["applied"], true);
+    assert_eq!(v["data"]["items"][0]["kind"], "manifest-removed");
+    assert_eq!(v["data"]["items"][0]["bytes_kept"], true);
+    assert_eq!(v["next_actions"][0]["code"], "UNDO");
+    assert_eq!(
+        v["next_actions"][0]["argv"].as_array().map(Vec::len),
+        Some(3),
+        "the undo is the `add <path>` inverse: {v}"
     );
-    assert_eq!(v["next_actions"], serde_json::json!([]));
 
     // GATED (a local-only `remove` — the permanent delete of the only copy): the bare run answers
     // the DESCRIBE envelope, `applied: false`, the `--yes` apply next action; nothing is deleted.
@@ -361,8 +372,8 @@ fn review_verdict_exclusivity_is_a_clap_usage_error_but_no_verdict_is_the_descri
     assert!(stderr.contains("Usage"), "{stderr}");
 
     // NO verdict is allowed by clap (the group is OPTIONAL) — a bare target is the two-phase describe.
-    // Un-enrolled there is nothing to describe (the proposal lives on the plane), so it fails with the
-    // enrollment error, exit 1 — a runtime domain refusal, not a clap usage error.
+    // With no session there is nothing to describe (the proposal lives on the plane), so it refuses
+    // toward `topos login`, exit 1 — a runtime domain refusal, not a clap usage error.
     let out = run_raw(&home, &["review", &target, "--json"], false);
     assert!(!out.status.success());
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON stdout");

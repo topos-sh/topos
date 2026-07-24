@@ -530,6 +530,19 @@ fn resolve_review_skill(
         Err(ClientError::NoSuchSkill { name }) => {
             match resolve_catalog_skill(ctx, session, &name, workspace)? {
                 Some(found) => Ok(found),
+                // With NO live session there is no catalog anywhere the name could have resolved
+                // against — the honest refusal is the connection (the same line the bare inbox
+                // answers), not a claim about the skill's existence.
+                None if crate::sessions::read_sessions(ctx.fs, &ctx.layout)
+                    .map(|s| s.live().next().is_none())
+                    .unwrap_or(false) =>
+                {
+                    Err(ClientError::Enrollment(
+                        "not connected to a workspace — run `topos login <workspace-address>` \
+                         first"
+                            .into(),
+                    ))
+                }
                 None => Err(ClientError::NoSuchSkill { name }),
             }
         }
