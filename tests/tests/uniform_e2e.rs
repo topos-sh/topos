@@ -104,6 +104,7 @@ fn a_pending_session_gets_exactly_two_typed_answers_until_the_owner_approves() {
     assert_eq!(me["session_status"], "pending");
 
     // Every OTHER route answers the uniform 404 — byte-identical to a garbage credential's miss.
+    // Reads AND row-op writes alike: the profile PUT is gated exactly like the catalog read.
     let gated = stack.device_get(
         &grant.credential,
         &format!("/v1/workspaces/{}/skills", stack.workspace_id),
@@ -114,6 +115,18 @@ fn a_pending_session_gets_exactly_two_typed_answers_until_the_owner_approves() {
     );
     assert_eq!(gated.status, 404);
     assert_eq!(gated.body, garbage.body, "the pending gate has no oracle");
+    let gated_write = stack.device_put(
+        &grant.credential,
+        &format!(
+            "/v1/workspaces/{}/profile/skills/s_x0000000000000000000000000000",
+            stack.workspace_id
+        ),
+    );
+    assert_eq!(gated_write.status, 404);
+    assert_eq!(
+        gated_write.body, garbage.body,
+        "a pending session's row-op write is the same uniform miss"
+    );
 
     // The OWNER approves on the sessions page — the same lane now delivers.
     let approve = owner.post_form(

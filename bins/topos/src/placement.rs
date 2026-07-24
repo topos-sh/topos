@@ -304,8 +304,10 @@ pub(crate) fn project_plan(
     };
     let mut plan = PlacementPlan::default();
 
-    // An explicit override is the WHOLE plan: one dir, every agent reads it.
-    if let Some(rel) = override_dir {
+    // An explicit override is the WHOLE plan: one dir, every agent reads it. The belt half of
+    // the escape guard (the reconcile validates + warns first): a value that is absolute or
+    // climbs out of the checkout is IGNORED — a committed manifest must never place outside it.
+    if let Some(rel) = override_dir.filter(|r| safe_project_rel(r)) {
         let root = project_dir.join(rel.trim_start_matches("./"));
         let dir = prior_in(PlacementKind::Native, None).unwrap_or_else(|| choose(&root));
         plan.targets.push(PlannedTarget {
@@ -539,6 +541,18 @@ fn prior_dir(
                     || adoption_reservation_holds(dir, st, adopt))
         })
         .map(|(dir, _)| PathBuf::from(dir))
+}
+
+/// Whether a manifest `[placement]` value is a SAFE project-relative path: non-empty, relative,
+/// and every component ordinary (no `..`, no root) — so `project_dir.join(value)` provably stays
+/// inside the checkout.
+pub(crate) fn safe_project_rel(raw: &str) -> bool {
+    use std::path::Component;
+    let p = Path::new(raw);
+    !raw.trim().is_empty()
+        && p.is_relative()
+        && p.components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
 /// Whether a dir sits inside some PROJECT checkout — an ancestor holds a `topos.toml` (the

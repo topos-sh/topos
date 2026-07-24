@@ -922,7 +922,16 @@ fn publish_transfer_rewrites_the_path_line_to_the_governed_reference() {
     )
     .unwrap();
     let ctx = rig.ctx_at(Some(&proj.0));
-    let rw = ops::rewrite_to_governed(&ctx, "my-skill", HOST, WS_NAME)
+    let skill_dir = proj.0.join("tools/my-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    // A DIFFERENT dir sharing the basename must never be rewritten (match is by resolved path).
+    let decoy = Scratch::new("decoy-tr");
+    let miss =
+        ops::rewrite_to_governed(&ctx, "my-skill", HOST, WS_NAME, &[decoy.0.join("my-skill")])
+            .unwrap();
+    assert!(miss.is_none(), "a same-name foreign dir never matches");
+    let dirs = vec![skill_dir];
+    let rw = ops::rewrite_to_governed(&ctx, "my-skill", HOST, WS_NAME, &dirs)
         .unwrap()
         .expect("the path line is rewritten");
     assert_eq!(rw.canonical, format!("{HOST}/{WS_NAME}/my-skill"));
@@ -934,8 +943,40 @@ fn publish_transfer_rewrites_the_path_line_to_the_governed_reference() {
     assert_eq!(m.skills[0].reference, format!("{HOST}/{WS_NAME}/my-skill"));
     // A second publish finds no path line — the transfer is one-shot.
     assert!(
-        ops::rewrite_to_governed(&ctx, "my-skill", HOST, WS_NAME)
+        ops::rewrite_to_governed(&ctx, "my-skill", HOST, WS_NAME, &dirs)
             .unwrap()
             .is_none()
+    );
+}
+
+#[test]
+fn publish_transfer_keeps_an_existing_governed_pin() {
+    let rig = Rig::new("transfer-pin");
+    let proj = Scratch::new("proj-pin");
+    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    let pin = "c".repeat(64);
+    std::fs::write(
+        proj.0.join("topos.toml"),
+        format!(
+            "[skills]\n\"./tools/my-skill\" = \"*\"\n\"{HOST}/{WS_NAME}/my-skill\" = \"{pin}\"\n"
+        ),
+    )
+    .unwrap();
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let skill_dir = proj.0.join("tools/my-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    let rw = ops::rewrite_to_governed(&ctx, "my-skill", HOST, WS_NAME, &[skill_dir])
+        .unwrap()
+        .expect("the path line is removed");
+    assert_eq!(rw.from, "./tools/my-skill");
+    let m = crate::manifest::file::read_manifest(&rig.fs, &proj.0.join("topos.toml"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.skills.len(), 1, "the governed entry survives alone");
+    assert_eq!(m.skills[0].reference, format!("{HOST}/{WS_NAME}/my-skill"));
+    assert_eq!(
+        m.skills[0].pin.as_deref(),
+        Some(pin.as_str()),
+        "the standing pin is never clobbered"
     );
 }

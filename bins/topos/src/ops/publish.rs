@@ -746,8 +746,16 @@ fn enrolled_publish(
     // a LOCAL PATH rewrites that line to the canonical workspace reference — the local copy is
     // now a managed placement of the governed bundle; the receipt states each part.
     if let (Some(l), PublishOutcome::Published(data)) = (&lane, &mut outcome)
-        && let Some(rw) =
-            super::rewrite_to_governed(outer_ctx, &lock.name, &l.host, &l.workspace_name)?
+        && let Some(rw) = super::rewrite_to_governed(
+            outer_ctx,
+            &lock.name,
+            &l.host,
+            &l.workspace_name,
+            &map.placements
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect::<Vec<_>>(),
+        )?
     {
         data.manifest = Some(rw.manifest);
         data.reference = Some(rw.canonical);

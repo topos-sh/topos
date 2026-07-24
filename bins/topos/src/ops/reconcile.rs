@@ -762,7 +762,7 @@ fn reconcile_item(
                 &CatalogTarget::from_entry(entry),
                 item.pin.as_deref(),
                 &item.scope,
-                placement_override(project_manifests, item),
+                placement_override(project_manifests, item, warnings),
                 rows,
                 warnings,
                 synced_ids,
@@ -811,7 +811,7 @@ fn reconcile_item(
                     &CatalogTarget::from_entry(entry),
                     None,
                     &item.scope,
-                    placement_override(project_manifests, item),
+                    placement_override(project_manifests, item, warnings),
                     rows,
                     warnings,
                     synced_ids,
@@ -841,7 +841,7 @@ fn reconcile_item(
                     &CatalogTarget::from_entry(entry),
                     item.pin.as_deref(),
                     &item.scope,
-                    placement_override(project_manifests, item),
+                    placement_override(project_manifests, item, warnings),
                     rows,
                     warnings,
                     synced_ids,
@@ -1190,15 +1190,6 @@ fn refresh_github(
                 .into(),
         });
     }
-    // Clean re-import: drop the recorded placements (clean copies of the OLD pin) and the sidecar
-    // record, then adopt afresh at the new pin — external origins carry no local history worth
-    // preserving past their pin (the lockfile model: bytes follow the pin).
-    for scan in &scans {
-        if matches!(scan.status, placement::ScanStatus::Clean { .. }) && ctx.fs.exists(&scan.dir) {
-            ctx.fs.remove_dir_all(&scan.dir)?;
-        }
-    }
-    ctx.fs.remove_dir_all(&ctx.layout.skill_dir(sid))?;
     let Some(roots) = discovery_roots(ctx, item) else {
         return Err(ClientError::InvalidArgument(
             "cannot re-import without $HOME set".into(),
@@ -1211,10 +1202,26 @@ fn refresh_github(
         git_ref: item.pin.clone(),
         subdir: (!subdir.is_empty()).then(|| subdir.to_owned()),
     };
+    // PREFETCH the new pin's archive and prove it extracts + selects BEFORE any old byte is
+    // deleted — a transient fetch failure or a bad archive must leave the old install whole.
+    let targz = git.fetch(&spec)?;
+    {
+        let repo_tree = crate::git_source::extract_tree(&targz)?;
+        repo_tree.select(spec.subdir.as_deref(), None, &spec.repo, &spec.label())?;
+    }
+    // Clean re-import: drop the recorded placements (clean copies of the OLD pin) and the sidecar
+    // record, then adopt afresh at the new pin — external origins carry no local history worth
+    // preserving past their pin (the lockfile model: bytes follow the pin).
+    for scan in &scans {
+        if matches!(scan.status, placement::ScanStatus::Clean { .. }) && ctx.fs.exists(&scan.dir) {
+            ctx.fs.remove_dir_all(&scan.dir)?;
+        }
+    }
+    ctx.fs.remove_dir_all(&ctx.layout.skill_dir(sid))?;
     let global = matches!(item.scope, ResolvedScope::Person);
-    let data = super::add_remote(
+    let data = super::add_remote_fetched(
         ctx,
-        git,
+        &targz,
         &spec,
         &roots,
         &super::AddRemoteOpts {
@@ -1289,16 +1296,20 @@ fn commit_matches(recorded: &str, pin: &str) -> bool {
 }
 
 /// The explicit `[placement]` override for `item` from its OWN project manifest: a per-reference
-/// pin first, else the per-kind (`skill`) pin. Project layers only.
+/// pin first, else the per-kind (`skill`) pin. Project layers only. The value must be a RELATIVE
+/// path that stays inside the project (no `..`, not absolute) — a committed manifest must never be
+/// able to aim managed bytes outside its own checkout; a hostile/mistaken value is ignored with a
+/// warning and the default placement engages.
 fn placement_override(
     project_manifests: &[(PathBuf, crate::manifest::file::Manifest)],
     item: &ResolvedItem,
+    warnings: &mut Vec<String>,
 ) -> Option<String> {
     let LayerSource::Project { dir } = &item.source else {
         return None;
     };
     let (_, manifest) = project_manifests.iter().find(|(d, _)| d == dir)?;
-    manifest
+    let raw = manifest
         .placement
         .iter()
         .find(|(r, _)| {
@@ -1314,7 +1325,16 @@ fn placement_override(
                 .iter()
                 .find(|(k, _)| k == "skill")
                 .map(|(_, d)| d.clone())
-        })
+        })?;
+    if crate::placement::safe_project_rel(&raw) {
+        Some(raw)
+    } else {
+        warnings.push(format!(
+            "PLACEMENT_OVERRIDE_IGNORED {}: the [placement] value {raw:?} must be a relative              path inside the project (no `..`, not absolute) — using the default placement",
+            item.name
+        ));
+        None
+    }
 }
 
 /// Keep a project-scope skill's landed dirs out of commits: one `.git/info/exclude` line per

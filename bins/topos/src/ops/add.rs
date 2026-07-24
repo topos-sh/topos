@@ -310,6 +310,19 @@ pub(crate) fn add_remote(
     roots: &super::DiscoveryRoots,
     opts: &AddRemoteOpts,
 ) -> Result<AddData, ClientError> {
+    let targz = source.fetch(spec)?;
+    add_remote_fetched(ctx, &targz, spec, roots, opts)
+}
+
+/// [`add_remote`] over an ALREADY-FETCHED tarball — the seam the pin-refresh path uses so the
+/// network round-trip (and its failure modes) happen BEFORE any old bytes are deleted.
+pub(crate) fn add_remote_fetched(
+    ctx: &Ctx<'_>,
+    targz: &[u8],
+    spec: &RemoteSpec,
+    roots: &super::DiscoveryRoots,
+    opts: &AddRemoteOpts,
+) -> Result<AddData, ClientError> {
     ctx.fs.create_dir_all(ctx.layout.home())?;
 
     // 1. Destination harness + scope. Default: the active harness (the one topos drives + can arm auto-updates
@@ -336,10 +349,9 @@ pub(crate) fn add_remote(
         topos_harness::registry::skills_root(&slug, scope, &roots.home, roots.cwd.as_deref())
             .ok_or_else(|| ClientError::InvalidArgument(destination_hint(&slug, opts.global)))?;
 
-    // 2. Fetch + extract + select the skill (all typed; a multi-skill repo self-corrects via `--skill`).
+    // 2. Extract + select the skill (all typed; a multi-skill repo self-corrects via `--skill`).
     let source_label = spec.label();
-    let targz = source.fetch(spec)?;
-    let repo = extract_tree(&targz)?;
+    let repo = extract_tree(targz)?;
     let selected = repo.select(
         spec.subdir.as_deref(),
         opts.skill.as_deref(),

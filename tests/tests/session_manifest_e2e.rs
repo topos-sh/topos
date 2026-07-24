@@ -227,7 +227,18 @@ fn the_session_manifest_hero_loop() {
         )
     });
     assert!(person_dir.join("SKILL.md").is_file());
+    // The remove's next sweep CLEANS the undemanded person-scope placement (the project checkout's
+    // copy is that scope's business and stays).
     dev.remove_global("@acme/deploy").expect("profile remove");
+    dev.update(&[], None).expect("the post-remove sweep");
+    assert!(
+        !person_dir.exists(),
+        "the profile drop cleans the person-scope placement"
+    );
+    assert!(
+        placed.join("SKILL.md").is_file(),
+        "the project checkout's copy is untouched by the profile drop"
+    );
 
     // ── the OWNER ends the dev session: one typed line, then a freeze — bytes stay ──────────────
     owner_session_arm(&owner, "remove-session", &dev_session_id);

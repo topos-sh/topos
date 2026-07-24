@@ -244,15 +244,17 @@ pub(crate) fn resolve_session_lane(
             .map(|(_, fc)| fc.workspace_id)
     });
     let session = match delivered_ws {
+        // LIVE sessions only — an ended row must refuse toward `login`, never lend its dead
+        // credential to a write (the non-delivered arm's resolve_target already filters).
         Some(ws) => all
             .sessions
             .iter()
-            .find(|s| s.workspace_id == ws)
+            .find(|s| s.workspace_id == ws && s.status != sessions::SESSION_ENDED)
             .cloned()
             .ok_or_else(|| {
                 ClientError::Enrollment(format!(
-                    "this bundle's workspace has no session on this installation — `topos login` \
-                     it first (workspace id {ws})"
+                    "this bundle's workspace has no live session on this installation — `topos \
+                     login` it first (workspace id {ws})"
                 ))
             })?,
         None => all.resolve_target(explicit)?.clone(),
@@ -268,10 +270,13 @@ pub(crate) fn resolve_session_lane(
 }
 
 /// The governance-transfer rewrite a LANDED publish performs by default: the nearest manifest
-/// line that referenced this skill as a LOCAL PATH is rewritten to the canonical workspace
-/// reference — the local copy becomes a managed placement of the governed bundle, one act.
-/// Returns the facts for the receipt (`None` when no path line referenced it — an already-governed
-/// republish, or a skill never recorded in a manifest).
+/// line whose LOCAL PATH resolves to one of THIS skill's placement dirs is rewritten to the
+/// canonical workspace reference — the local copy becomes a managed placement of the governed
+/// bundle, one act. The match is by RESOLVED PATH, never by name (two dirs may share a basename;
+/// the wrong line must never be rewritten — no path match, no rewrite). An already-present
+/// canonical entry is kept untouched (its pin survives); only the path line is removed then.
+/// Returns the facts for the receipt (`None` when no path line referenced it — an
+/// already-governed republish, or a skill never recorded in a manifest).
 pub(crate) struct GovernedRewrite {
     pub manifest: String,
     pub canonical: String,
@@ -283,23 +288,45 @@ pub(crate) fn rewrite_to_governed(
     skill_name: &str,
     host: &str,
     workspace_name: &str,
+    skill_dirs: &[std::path::PathBuf],
 ) -> Result<Option<GovernedRewrite>, ClientError> {
+    // Canonicalize the placement dirs once (macOS `/var` → `/private/var`); a dir that no longer
+    // exists keeps its lexical form.
+    let dirs: Vec<std::path::PathBuf> = skill_dirs
+        .iter()
+        .map(|d| d.canonicalize().unwrap_or_else(|_| d.clone()))
+        .collect();
     let canonical = format!("{host}/{workspace_name}/{skill_name}");
     for (path, manifest) in super::manifest_edit::local_layers(ctx)? {
+        let manifest_dir = path.parent().map(std::path::Path::to_path_buf);
         let Some(entry) = manifest.skills.iter().find(|e| {
-            matches!(
+            if !matches!(
                 crate::manifest::refs::parse_ref(&e.reference),
                 Ok(ParsedRef::LocalPath { .. })
-            ) && crate::manifest::refs::parse_ref(&e.reference)
-                .map(|p| p.item_name() == skill_name)
-                .unwrap_or(false)
+            ) {
+                return false;
+            }
+            let raw = std::path::Path::new(&e.reference);
+            let resolved = if raw.is_absolute() {
+                raw.to_path_buf()
+            } else {
+                match &manifest_dir {
+                    Some(dir) => dir.join(e.reference.trim_start_matches("./")),
+                    None => return false,
+                }
+            };
+            let resolved = resolved.canonicalize().unwrap_or(resolved);
+            dirs.contains(&resolved)
         }) else {
             continue;
         };
         let from = entry.reference.clone();
+        let already_governed = manifest.skills.iter().any(|e| e.reference == canonical);
         let mut ed = crate::manifest::file::ManifestEditor::open(ctx.fs, &path)?;
         ed.remove_entry("skills", &from);
-        ed.set_entry("skills", &canonical, None);
+        if !already_governed {
+            ed.set_entry("skills", &canonical, None);
+        }
         ed.write(ctx.fs, &path)?;
         return Ok(Some(GovernedRewrite {
             manifest: path.display().to_string(),
