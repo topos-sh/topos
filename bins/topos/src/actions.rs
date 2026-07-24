@@ -269,11 +269,13 @@ fn apply_described(argv: &[String]) -> Safety {
                 "removes the skill from this machine (a followed skill keeps its canonical bytes)",
             ),
         ),
-        // `add` splits by the target's shape: a WORKSPACE reference (`@ws/name`) resolves the
-        // catalog and delivers over the wire; a PATH adopts offline; everything else (a bare
-        // name, a canonical host ref, an `owner/repo` import) is unknowable from the argv
-        // alone, so its network story is honestly absent.
-        Some("add") => match argv.get(2).map(String::as_str) {
+        // `add -g` writes the server-stored profile — networked whatever the target. Otherwise
+        // the FIRST non-flag token decides by shape: a WORKSPACE reference (`@ws/name`) resolves
+        // the catalog and delivers over the wire; a PATH adopts offline; everything else (a bare
+        // name, a canonical host ref, an `owner/repo` import) is unknowable from the argv alone,
+        // so its network story is honestly absent.
+        Some("add") if has_flag(argv, "-g") || has_flag(argv, "--global") => (Some(true), None),
+        Some("add") => match argv.iter().skip(2).find(|t| !t.starts_with('-')) {
             Some(t) if t.starts_with('@') => (Some(true), None),
             Some(t)
                 if t.starts_with("./")

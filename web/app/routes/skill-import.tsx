@@ -15,7 +15,7 @@ import { inFinalTx, registerGenesisBundleInTx } from "@/lib/db/queries.custody.s
 import { fetchUpstreamTree, governedCopiesOf, resolveTreeSource } from "@/lib/db/upstream.server";
 import { publishVersion } from "@/lib/plane/custody.server";
 import { useWsPath } from "@/lib/ws-path";
-import { wsPathServer } from "@/lib/ws-url.server";
+import { workspaceAddress, wsPathServer } from "@/lib/ws-url.server";
 
 export function meta() {
   return [{ title: "Add from GitHub" }];
@@ -34,7 +34,13 @@ export function meta() {
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const { workspace } = await requireMemberInScope(request, params);
-  return { wsName: workspace.name };
+  // The canonical reference's HOST half — the same origin resolution as the login address, so
+  // the dedup notice's `topos add <host>/<ws>/<name>` line is unambiguous however many servers
+  // the reader's installation is logged into.
+  return {
+    wsName: workspace.name,
+    refHost: new URL(workspaceAddress(request, workspace.name)).host,
+  };
 }
 
 const REPO_SHAPE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -328,7 +334,7 @@ export default function SkillImport() {
 
 function PreviewCard({ preview }: { preview: PreviewData }) {
   const navigation = useNavigation();
-  const { wsName } = useLoaderData<typeof loader>();
+  const { wsName, refHost } = useLoaderData<typeof loader>();
   const wsPath = useWsPath();
   const busy = navigation.state !== "idle";
   return (
@@ -355,7 +361,7 @@ function PreviewCard({ preview }: { preview: PreviewData }) {
             </Link>
             {" — "}
             <code className="font-mono text-[13px]">
-              topos add @{wsName}/{preview.already.name}
+              topos add {refHost}/{wsName}/{preview.already.name}
             </code>{" "}
             delivers the governed copy. Publishing again creates a second, separate skill.
           </p>

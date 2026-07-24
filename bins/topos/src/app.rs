@@ -428,7 +428,14 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             // loop the single-select path per (skill × harness) combination, disclosing each landing. `-s *`
             // expands to every skill in the repo; `-a *` to every harness DETECTED on this machine.
             if has_star || skill.len() > 1 || agent.len() > 1 {
-                let result = add_multi(&ctx, &source, &skill, &agent, global);
+                let result = add_multi(
+                    &ctx,
+                    &connect_session_transports,
+                    &source,
+                    &skill,
+                    &agent,
+                    global,
+                );
                 return finish_add_many(json, cmd_name, result, &diag);
             }
             let single_skill = skill.into_iter().next();
@@ -1481,6 +1488,7 @@ fn finish_log(
 /// [`ops::add_remote`] returns for a given combination (all-or-error).
 fn add_multi(
     ctx: &Ctx<'_>,
+    connect: &ops::SessionConnect<'_>,
     source: &str,
     skills: &[String],
     agents: &[String],
@@ -1547,8 +1555,12 @@ fn add_multi(
                     global,
                 },
             )?;
-            // Each landed (skill × harness) records its manifest line like the single-select path.
+            // Each landed (skill × harness) records its manifest line like the single-select
+            // path — and carries the same dedup courtesy, judged against ITS resolved subdir.
             ops::note_added_remote(ctx, &mut data, global)?;
+            let imported_subdir = data.origin.as_ref().and_then(|o| o.subdir.clone());
+            data.governed_copy =
+                ops::governed_copy_suggestion(ctx, connect, &spec, imported_subdir.as_deref());
             out.push(data);
         }
     }

@@ -87,7 +87,8 @@ pub(crate) use pull::{
     quiet_soft_failure, reset,
 };
 pub(crate) use reconcile::{
-    CacheFollow, ManifestUpdateOpts, SessionRoutedPlane, SessionTransports, manifest_update,
+    CacheFollow, ManifestUpdateOpts, SessionConnect, SessionRoutedPlane, SessionTransports,
+    manifest_update,
 };
 pub(crate) use reference::{
     WriteLane, add_reference, remove_reference_global, resolve_session_lane, rewrite_to_governed,
