@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use crate::manifest::file::Manifest;
-use crate::manifest::refs::{ParsedRef, parse_ref};
+use crate::manifest::refs::{ParsedRef, entry_pin_error, parse_ref};
 
 /// Which manifest a layer IS — the trust rail's "which manifest line asked for it".
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,6 +209,18 @@ pub(crate) fn resolve_layers(layers: &[Layer]) -> Resolution {
                         continue;
                     }
                 };
+                // The entry VALUE is a pin spec too — validated with the same per-kind rules
+                // the `@pin` spelling gets (a handwritten manifest is no back door).
+                if let Some(pin) = &entry.pin
+                    && let Err(e) = entry_pin_error(&parsed, pin)
+                {
+                    out.issues.push(ManifestIssue {
+                        source: layer.source.clone(),
+                        reference: entry.reference.clone(),
+                        message: e.message,
+                    });
+                    continue;
+                }
                 let kind = kind_hint.unwrap_or(match &parsed {
                     ParsedRef::Channel { .. } => ItemKind::Channel,
                     ParsedRef::GitHub { .. } => ItemKind::GitHub,
@@ -270,10 +282,11 @@ mod tests {
 
     #[test]
     fn nearest_manifest_wins_on_a_name() {
+        let pin = "1".repeat(64);
         let layers = vec![
             Layer::project(
                 dir("/repo/api"),
-                manifest(&[("topos.sh/acme/deploy@1111111", None)], &[]),
+                manifest(&[("topos.sh/acme/deploy", Some(&pin))], &[]),
             ),
             Layer::project(
                 dir("/repo"),
@@ -290,7 +303,7 @@ mod tests {
         let item = &r.items[0];
         assert_eq!(item.name, "deploy");
         // The nearest layer's pin wins; the two broader mentions are recorded as shadowed.
-        assert_eq!(item.pin.as_deref(), Some("1111111"));
+        assert_eq!(item.pin.as_deref(), Some(pin.as_str()));
         assert_eq!(
             item.scope,
             ResolvedScope::Project {
@@ -371,6 +384,36 @@ mod tests {
         assert_eq!(r.items.len(), 1);
         assert_eq!(r.items[0].kind, ItemKind::Channel);
         assert_eq!(r.items[0].name, "backend");
+    }
+
+    #[test]
+    fn a_bad_entry_pin_is_an_issue_never_a_stop() {
+        let layers = vec![Layer::project(
+            dir("/repo"),
+            manifest(
+                &[
+                    // A workspace pin must be the FULL digest.
+                    ("topos.sh/acme/short-pinned", Some("abc1234")),
+                    // A GitHub pin is commit-shaped, never the 64-hex digest length.
+                    ("github.com/o/r", Some(&"1".repeat(64))),
+                    ("topos.sh/acme/fine", None),
+                ],
+                &[],
+            ),
+        )];
+        let r = resolve_layers(&layers);
+        assert_eq!(r.items.len(), 1);
+        assert_eq!(r.items[0].name, "fine");
+        assert_eq!(r.issues.len(), 2);
+        // A channel entry takes no pin at all.
+        let mut m = manifest(&[], &[]);
+        m.channels.push(ManifestEntry {
+            reference: "topos.sh/acme/channels/backend".into(),
+            pin: Some("1".repeat(64)),
+        });
+        let r = resolve_layers(&[Layer::project(dir("/repo"), m)]);
+        assert!(r.items.is_empty());
+        assert_eq!(r.issues.len(), 1);
     }
 
     #[test]

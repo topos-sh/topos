@@ -56,7 +56,7 @@ CREATE TABLE "web"."profile_entry" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "profile_entry_mode_check" CHECK ("web"."profile_entry"."mode" in ('include', 'exclude')),
 	CONSTRAINT "profile_entry_target_check" CHECK (("web"."profile_entry"."bundle_id" is null) <> ("web"."profile_entry"."channel_id" is null)),
-	CONSTRAINT "profile_entry_pin_check" CHECK ("web"."profile_entry"."pin" is null or "web"."profile_entry"."bundle_id" is not null)
+	CONSTRAINT "profile_entry_pin_check" CHECK ("web"."profile_entry"."pin" is null or ("web"."profile_entry"."bundle_id" is not null and "web"."profile_entry"."mode" = 'include'))
 );
 --> statement-breakpoint
 CREATE TABLE "web"."session_bundle_state" (

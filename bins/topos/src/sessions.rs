@@ -151,11 +151,13 @@ pub(crate) fn upsert_session(
     write_sessions_locked(fs, layout, &all)
 }
 
-/// Flip one session's LOCAL status (active↔pending, or the local `ended` mark). No-op when the
-/// session is unknown.
+/// Flip one session's LOCAL status (active↔pending, or the local `ended` mark), keyed by the
+/// SAME composite identity the upsert uses — (host, workspace id) — so a same-id workspace on
+/// another server is never touched. No-op when the session is unknown.
 pub(crate) fn set_session_status(
     fs: &dyn FsOps,
     layout: &Layout,
+    host: &str,
     workspace_id: &str,
     status: &str,
 ) -> Result<(), ClientError> {
@@ -163,7 +165,7 @@ pub(crate) fn set_session_status(
     let mut all = read_sessions(fs, layout)?;
     let mut touched = false;
     for s in &mut all.sessions {
-        if s.workspace_id == workspace_id && s.status != status {
+        if s.host == host && s.workspace_id == workspace_id && s.status != status {
             s.status = status.to_string();
             touched = true;
         }
@@ -174,16 +176,19 @@ pub(crate) fn set_session_status(
     Ok(())
 }
 
-/// Delete one session's row (a settled logout). No-op when unknown.
+/// Delete one session's row (a settled logout) — the (host, workspace id) composite, like
+/// every mutation here. No-op when unknown.
 pub(crate) fn remove_session(
     fs: &dyn FsOps,
     layout: &Layout,
+    host: &str,
     workspace_id: &str,
 ) -> Result<(), ClientError> {
     let _guard = fs.lock_exclusive(&layout.identity_lock_file())?;
     let mut all = read_sessions(fs, layout)?;
     let before = all.sessions.len();
-    all.sessions.retain(|s| s.workspace_id != workspace_id);
+    all.sessions
+        .retain(|s| !(s.host == host && s.workspace_id == workspace_id));
     if all.sessions.len() != before {
         write_sessions_locked(fs, layout, &all)?;
     }
@@ -279,7 +284,7 @@ mod tests {
         let fs = RealFs;
         let layout = scratch("flip");
         upsert_session(&fs, &layout, session("w_a", "acme", SESSION_PENDING)).unwrap();
-        set_session_status(&fs, &layout, "w_a", SESSION_ACTIVE).unwrap();
+        set_session_status(&fs, &layout, "topos.sh", "w_a", SESSION_ACTIVE).unwrap();
         assert_eq!(
             read_sessions(&fs, &layout)
                 .unwrap()
@@ -288,12 +293,24 @@ mod tests {
                 .status,
             SESSION_ACTIVE
         );
-        set_session_status(&fs, &layout, "w_a", SESSION_ENDED).unwrap();
+        // Another host's same-id workspace is a different session — untouched.
+        set_session_status(&fs, &layout, "elsewhere.dev", "w_a", SESSION_PENDING).unwrap();
+        assert_eq!(
+            read_sessions(&fs, &layout)
+                .unwrap()
+                .find("w_a")
+                .unwrap()
+                .status,
+            SESSION_ACTIVE
+        );
+        set_session_status(&fs, &layout, "topos.sh", "w_a", SESSION_ENDED).unwrap();
         // An ended session leaves the fan-out but stays listed (status shows it once).
         let all = read_sessions(&fs, &layout).unwrap();
         assert_eq!(all.live().count(), 0);
         assert_eq!(all.sessions.len(), 1);
-        remove_session(&fs, &layout, "w_a").unwrap();
+        remove_session(&fs, &layout, "elsewhere.dev", "w_a").unwrap();
+        assert_eq!(read_sessions(&fs, &layout).unwrap().sessions.len(), 1);
+        remove_session(&fs, &layout, "topos.sh", "w_a").unwrap();
         assert!(read_sessions(&fs, &layout).unwrap().sessions.is_empty());
     }
 

@@ -12,8 +12,8 @@
 //!
 //! Pinned rules: bare `@name` (no slash) is INVALID SYNTAX (also closes the PowerShell
 //! splatting edge); the `#` sigil is BANNED everywhere; everything after `@` is lowercase
-//! letters, digits, hyphens, and slashes. A trailing `@<pin>` names a version (a content
-//! digest for workspace bundles, a commit for GitHub refs).
+//! letters, digits, hyphens, and slashes. A trailing `@<pin>` names a version — the FULL
+//! 64-hex content digest for workspace bundles, a 7–40-hex commit for GitHub refs.
 //!
 //! Manifests always store the CANONICAL host-qualified form ([`ParsedRef::canonical`] — the
 //! CLI canonicalizes on write), so a `topos.toml` read anywhere is never ambiguous, and
@@ -173,6 +173,44 @@ fn is_host(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
 }
 
+/// Validate a pin's length for its arm: a workspace bundle pins the FULL 64-hex content
+/// digest (an abbreviation could never be resolved consistently across surfaces); a GitHub
+/// ref pins a commit (7–40 hex — git's own abbreviation rules).
+fn check_pin(pin: &Option<String>, github: bool) -> Result<(), RefError> {
+    if let Some(p) = pin {
+        if github {
+            if p.len() < 7 || p.len() > 40 {
+                return Err(err(
+                    "a GitHub pin is a commit hash — 7 to 40 hex characters",
+                ));
+            }
+        } else if p.len() != 64 {
+            return Err(err(
+                "a skill pin is the full 64-character version digest (from `topos log`)",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate a manifest ENTRY VALUE as a pin for its reference's kind — the same rules the
+/// `@pin` spelling gets, applied to the `"<ref>" = "<pin>"` form (a handwritten manifest is
+/// no back door): hex only; 64 for a workspace bundle, 7–40 for a GitHub commit; a channel
+/// or path entry takes no pin at all.
+pub(crate) fn entry_pin_error(parsed: &ParsedRef, pin: &str) -> Result<(), RefError> {
+    if !pin.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(err("a pin is hex — a version digest or a commit hash"));
+    }
+    match parsed {
+        ParsedRef::Bare { .. } | ParsedRef::Skill { .. } => {
+            check_pin(&Some(pin.to_string()), false)
+        }
+        ParsedRef::GitHub { .. } => check_pin(&Some(pin.to_string()), true),
+        ParsedRef::Channel { .. } => Err(err("a channel entry takes no version pin")),
+        ParsedRef::LocalPath { .. } => Err(err("a local path entry takes no version pin")),
+    }
+}
+
 /// Split a trailing `@<pin>` off a spelling (the version pin: `<ref>@<hex-digest>` /
 /// `owner/repo@<commit>`). Only the LAST `@` counts, and only when what follows looks like a
 /// pin (hex, 7–64 chars) — so the leading workspace sigil never collides.
@@ -189,6 +227,29 @@ fn split_pin(s: &str) -> (&str, Option<String>) {
         }
     }
     (s, None)
+}
+
+/// The one GitHub-arm constructor: strip a `.git` tail, refuse an empty repo (a bare
+/// `owner/.git` would canonicalize to nonsense), validate the commit-shaped pin.
+fn github_ref(
+    owner: &str,
+    repo: &str,
+    subdir: &[&str],
+    pin: Option<String>,
+) -> Result<ParsedRef, RefError> {
+    let repo = repo.trim_end_matches(".git");
+    if repo.is_empty() {
+        return Err(err(
+            "a GitHub reference needs a repository name — `owner/repo`",
+        ));
+    }
+    check_pin(&pin, true)?;
+    Ok(ParsedRef::GitHub {
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+        subdir: subdir.join("/"),
+        pin,
+    })
 }
 
 /// Parse ONE reference by shape. See the module table; every arm is total — a spelling either
@@ -242,6 +303,7 @@ pub(crate) fn parse_ref(raw: &str) -> Result<ParsedRef, RefError> {
                         "`@{rest}` is not a workspace reference — lowercase letters, digits, and hyphens only",
                     )));
                 }
+                check_pin(&pin, false)?;
                 return Ok(ParsedRef::Skill {
                     host: None,
                     workspace: (*ws).to_string(),
@@ -280,6 +342,7 @@ pub(crate) fn parse_ref(raw: &str) -> Result<ParsedRef, RefError> {
                 "`{name}` is not a skill name — lowercase letters, digits, and hyphens only",
             )));
         }
+        check_pin(&pin, false)?;
         return Ok(ParsedRef::Bare {
             name: name.to_string(),
             pin,
@@ -296,19 +359,25 @@ pub(crate) fn parse_ref(raw: &str) -> Result<ParsedRef, RefError> {
         // `host/workspace/name` or `host/workspace/channels/name` — a canonical workspace ref
         // (also exactly a skill/channel page URL on that host).
         return match rest.as_slice() {
-            [ws, name] if is_name(ws) && is_name(name) => Ok(ParsedRef::Skill {
-                host: Some(first.to_string()),
-                workspace: (*ws).to_string(),
-                name: (*name).to_string(),
-                pin,
-            }),
+            [ws, name] if is_name(ws) && is_name(name) => {
+                check_pin(&pin, false)?;
+                Ok(ParsedRef::Skill {
+                    host: Some(first.to_string()),
+                    workspace: (*ws).to_string(),
+                    name: (*name).to_string(),
+                    pin,
+                })
+            }
             // The skill page URL shape (`/skills/<name>`) parses too — paste-a-URL works.
-            [ws, "skills", name] if is_name(ws) && is_name(name) => Ok(ParsedRef::Skill {
-                host: Some(first.to_string()),
-                workspace: (*ws).to_string(),
-                name: (*name).to_string(),
-                pin,
-            }),
+            [ws, "skills", name] if is_name(ws) && is_name(name) => {
+                check_pin(&pin, false)?;
+                Ok(ParsedRef::Skill {
+                    host: Some(first.to_string()),
+                    workspace: (*ws).to_string(),
+                    name: (*name).to_string(),
+                    pin,
+                })
+            }
             [ws, "channels", name] if is_name(ws) && is_name(name) => {
                 if pin.is_some() {
                     return Err(err("a channel reference takes no version pin"));
@@ -326,15 +395,11 @@ pub(crate) fn parse_ref(raw: &str) -> Result<ParsedRef, RefError> {
     }
 
     if first == "github.com" || had_scheme {
-        // `github.com/owner/repo[/sub/dir]` (or any scheme-carrying URL that got here).
+        // `github.com/owner/repo[/sub/dir]` (or any scheme-carrying URL that got here) — the
+        // SAME constructor as the bare shorthand, so the URL spelling gets the same guards.
         return match rest.as_slice() {
             [owner, repo, subdir @ ..] if is_github_segment(owner) && is_github_segment(repo) => {
-                Ok(ParsedRef::GitHub {
-                    owner: (*owner).to_string(),
-                    repo: repo.trim_end_matches(".git").to_string(),
-                    subdir: subdir.join("/"),
-                    pin,
-                })
+                github_ref(owner, repo, subdir, pin)
             }
             _ => Err(err(format!(
                 "`{token}` is not a GitHub reference — `github.com/<owner>/<repo>[/<subdir>]`",
@@ -347,12 +412,7 @@ pub(crate) fn parse_ref(raw: &str) -> Result<ParsedRef, RefError> {
     parts.extend(rest);
     match parts.as_slice() {
         [owner, repo, subdir @ ..] if is_github_segment(owner) && is_github_segment(repo) => {
-            Ok(ParsedRef::GitHub {
-                owner: (*owner).to_string(),
-                repo: repo.trim_end_matches(".git").to_string(),
-                subdir: subdir.join("/"),
-                pin,
-            })
+            github_ref(owner, repo, subdir, pin)
         }
         _ => Err(err(format!(
             "`{token}` is not a reference — `owner/repo` reads as GitHub; a workspace is `@<workspace>/<skill>`",
@@ -440,23 +500,43 @@ mod tests {
 
     #[test]
     fn pins_split_off_the_tail() {
+        let digest = "0123456789abcdef".repeat(4);
         assert_eq!(
-            parse_ref("@acme/deploy@abc1234").unwrap(),
-            skill(None, "acme", "deploy", Some("abc1234"))
+            parse_ref(&format!("@acme/deploy@{digest}")).unwrap(),
+            skill(None, "acme", "deploy", Some(&digest))
         );
         assert_eq!(
-            parse_ref("code-review@0123456789abcdef").unwrap(),
+            parse_ref(&format!("code-review@{digest}")).unwrap(),
             ParsedRef::Bare {
                 name: "code-review".into(),
-                pin: Some("0123456789abcdef".into())
+                pin: Some(digest.clone())
             }
         );
         match parse_ref("vercel-labs/skills@deadbeef00").unwrap() {
             ParsedRef::GitHub { pin, .. } => assert_eq!(pin.as_deref(), Some("deadbeef00")),
             other => panic!("{other:?}"),
         }
+        // A skill pin must be the FULL digest — an abbreviation refuses typed …
+        let e = parse_ref("@acme/deploy@abc1234").unwrap_err();
+        assert!(e.message.contains("64-character"), "{e}");
+        // … and a GitHub pin is commit-shaped (7–40 hex), never the 64-hex digest length.
+        assert!(parse_ref(&format!("vercel-labs/skills@{digest}")).is_err());
         // A channel takes no pin.
-        assert!(parse_ref("@acme/channels/backend@abc1234").is_err());
+        assert!(parse_ref(&format!("@acme/channels/backend@{digest}")).is_err());
+    }
+
+    #[test]
+    fn an_empty_repo_after_the_git_strip_refuses() {
+        assert!(parse_ref("owner/.git").is_err());
+        // The URL spellings run the SAME constructor — same guards.
+        assert!(parse_ref("github.com/owner/.git").is_err());
+        assert!(parse_ref("https://github.com/owner/.git").is_err());
+        assert!(parse_ref(&format!("https://github.com/owner/repo@{}", "1".repeat(64))).is_err());
+        // A real repo's `.git` tail still strips cleanly.
+        match parse_ref("owner/repo.git").unwrap() {
+            ParsedRef::GitHub { repo, .. } => assert_eq!(repo, "repo"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

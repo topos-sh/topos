@@ -2304,7 +2304,7 @@
         },
         "profile_entry_pin_check": {
           "name": "profile_entry_pin_check",
-          "value": "\"web\".\"profile_entry\".\"pin\" is null or \"web\".\"profile_entry\".\"bundle_id\" is not null"
+          "value": "\"web\".\"profile_entry\".\"pin\" is null or (\"web\".\"profile_entry\".\"bundle_id\" is not null and \"web\".\"profile_entry\".\"mode\" = 'include')"
         }
       },
       "isRLSEnabled": false

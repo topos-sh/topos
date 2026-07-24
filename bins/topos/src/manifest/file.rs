@@ -155,15 +155,19 @@ pub(crate) struct ManifestEditor {
 }
 
 impl ManifestEditor {
-    /// Open an existing manifest for editing, or start a fresh one.
+    /// Open an existing manifest for editing, or start a fresh one. The document is VALIDATED
+    /// whole on open (the same read path [`read_manifest`] runs), so a parseable-but-malformed
+    /// file — `[skills]` as a string, a non-array `exclude` — refuses typed HERE and the edit
+    /// methods' table invariants hold ([`Self::table_mut`] can then never meet a non-table).
     pub(crate) fn open(fs: &dyn FsOps, path: &Path) -> Result<Self, ClientError> {
-        let doc = match fs.read_opt(path)? {
+        let doc: DocumentMut = match fs.read_opt(path)? {
             Some(bytes) => {
                 let text = String::from_utf8(bytes).map_err(|_| corrupt(path, "not UTF-8"))?;
                 text.parse().map_err(|e| corrupt(path, e))?
             }
             None => DocumentMut::new(),
         };
+        manifest_from(&doc, path)?;
         Ok(Self { doc })
     }
 
@@ -270,6 +274,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_malformed_but_parseable_manifest_refuses_at_open_never_panics() {
+        let dir = scratch("malformed");
+        let path = dir.join(MANIFEST_FILE);
+        std::fs::write(&path, "skills = \"not-a-table\"\n").unwrap();
+        assert!(ManifestEditor::open(&RealFs, &path).is_err());
+        std::fs::write(&path, "exclude = \"not-an-array\"\n").unwrap();
+        assert!(ManifestEditor::open(&RealFs, &path).is_err());
     }
 
     #[test]

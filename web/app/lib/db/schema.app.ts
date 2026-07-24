@@ -542,7 +542,10 @@ export const profileEntry = webSchema.table(
       "profile_entry_target_check",
       sql`(${table.bundleId} is null) <> (${table.channelId} is null)`,
     ),
-    check("profile_entry_pin_check", sql`${table.pin} is null or ${table.bundleId} is not null`),
+    check(
+      "profile_entry_pin_check",
+      sql`${table.pin} is null or (${table.bundleId} is not null and ${table.mode} = 'include')`,
+    ),
     foreignKey({
       name: "profile_entry_seat_fk",
       columns: [table.workspaceId, table.userId],
