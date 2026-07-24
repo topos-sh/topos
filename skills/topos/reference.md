@@ -97,7 +97,7 @@ Adopt a skill into topos. The source is polymorphic: • a skill NAME (`deploy`,
 | `<SOURCE>` |  |  | The skill to adopt — a name, a path, or a remote `owner/repo`/github.com URL |
 | `-s, --skill` | `<NAME>` |  | Pick a skill from a repo that holds several (repeatable; `'*'` = all). A lone skill needs none |
 | `-a, --agent` | `<SLUG>` |  | The agent (harness) to land a remote import into (a registry slug, e.g. `cursor`; repeatable; `'*'` = all). Default: the active harness. Ignored for a local path / name adopt |
-| `-g, --global` |  |  | Record in the PERSONAL manifest (`~/.topos/topos.toml`) instead of the project's `topos.toml`; a remote import also lands in the harness's global/user skills dir instead of the project (cwd) dir |
+| `-g, --global` |  |  | Record PERSON-scoped instead of in the project's `topos.toml`: a workspace reference edits your server-stored PROFILE for that workspace (every machine you log in gets it); a local path records in the personal manifest (`~/.topos/topos.toml`); a remote import lands in the harness's global/user skills dir instead of the project (cwd) dir |
 | `--yes` |  |  | Apply without the describe step. Parses today; the two-phase describe lands later |
 
 
@@ -113,6 +113,7 @@ Remove skills from this machine (or from specific agents). A followed skill beco
 |---|---|---|---|
 | `[SKILL]...` |  |  | The skill name(s) to remove |
 | `-a, --agent` | `<SLUG>` |  | Remove only from these agents (harness slugs; repeatable; `'*'` = all). On a followed skill this is the per-agent exclusion — applied immediately, undo on the receipt |
+| `-g, --global` |  |  | Edit your server-stored PROFILE for the workspace the reference resolves to instead of this folder's manifest — delivery stops on every machine you log in; when a channel or the baseline still provides it, an exclude line is recorded (the receipt says which) |
 | `--yes` |  |  | Apply a described removal (a draft's loss-guard, or a permanent local delete). Accepted as a no-op on a followed clean skill (which applies immediately) |
 
 

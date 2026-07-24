@@ -38,6 +38,7 @@ mod publish;
 mod pull;
 mod quiet_gate;
 mod reconcile;
+mod reference;
 mod remove;
 mod revert;
 mod review;
@@ -83,7 +84,9 @@ pub(crate) use init::init;
 pub(crate) use invite::{InviteConnectors, InviteOutcome, invite};
 pub(crate) use list::{DiscoveryRoots, ListFilter, ListOutcome, RemoteScope, list_with};
 pub(crate) use login::{LoginConnectors, login as session_login, logout as session_logout};
-pub(crate) use manifest_edit::{note_added_path, note_added_remote, remove_from_manifests};
+pub(crate) use manifest_edit::{
+    note_added_path, note_added_remote, profile_provided_names, remove_from_manifests,
+};
 // The `Option<&str>` shim is a test-only convenience (the inline suites + the feature-gated e2e rig);
 // production uses `list_with`, so its re-export is gated to stay warning-clean in a plain build.
 #[cfg(any(test, feature = "test-fixtures"))]
@@ -104,6 +107,7 @@ pub(crate) use pull::{
     quiet_hook_lines, quiet_soft_failure, reset, update_selective,
 };
 pub(crate) use reconcile::{ManifestUpdateOpts, SessionTransports, manifest_update};
+pub(crate) use reference::{add_reference, remove_reference_global};
 // The withdrawal/exclusion clean is driven through `remove`/the reconcile; the direct re-export
 // serves the placement-breadth suite's foreign-preservation regression.
 #[cfg(test)]

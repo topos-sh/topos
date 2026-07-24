@@ -303,11 +303,25 @@ impl DeliverySource for FakePlane {
     }
 }
 
-/// The per-session directory fake: the catalog + channel indexes; everything else unreachable.
+/// The per-session directory fake: the catalog + channel indexes + a recording profile lane;
+/// everything else unreachable.
 #[derive(Clone)]
 struct FakeDirectory {
     skills: Vec<WireSkillIndexEntry>,
     channels: Vec<WireChannelEntry>,
+    calls: CallLog,
+    removal: crate::plane::ProfileRemoval,
+}
+
+impl FakeDirectory {
+    fn new(skills: Vec<WireSkillIndexEntry>, channels: Vec<WireChannelEntry>) -> Self {
+        Self {
+            skills,
+            channels,
+            calls: Arc::new(Mutex::new(Vec::new())),
+            removal: crate::plane::ProfileRemoval::Removed,
+        }
+    }
 }
 fn catalog_entry(skill_id: &str, name: &str, v: &Version) -> WireSkillIndexEntry {
     WireSkillIndexEntry {
@@ -376,6 +390,47 @@ impl DirectorySource for FakeDirectory {
     fn ack_notices(&self, _ws: &str, _ids: &[String]) -> Result<(), ClientError> {
         unreachable!()
     }
+    fn profile_include_skill(
+        &self,
+        _ws: &str,
+        skill_id: &str,
+        pin: Option<&str>,
+    ) -> Result<(), ClientError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("include {skill_id} pin={}", pin.unwrap_or("*")));
+        Ok(())
+    }
+    fn profile_remove_skill(
+        &self,
+        _ws: &str,
+        skill_id: &str,
+    ) -> Result<crate::plane::ProfileRemoval, ClientError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("remove {skill_id}"));
+        Ok(self.removal)
+    }
+    fn profile_include_channel(&self, _ws: &str, channel: &str) -> Result<(), ClientError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("include-channel {channel}"));
+        Ok(())
+    }
+    fn profile_remove_channel(
+        &self,
+        _ws: &str,
+        channel: &str,
+    ) -> Result<crate::plane::ProfileRemoval, ClientError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("remove-channel {channel}"));
+        Ok(self.removal)
+    }
 }
 
 fn connect<'a>(
@@ -403,10 +458,7 @@ fn profile_items_install_silently_and_the_cache_records_the_session() {
         skills: vec![delivered("s_deploy", "deploy", &v)],
         ..empty_snapshot()
     });
-    let dir = FakeDirectory {
-        skills: vec![catalog_entry("s_deploy", "deploy", &v)],
-        channels: Vec::new(),
-    };
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = ops::manifest_update(
         &ctx,
@@ -452,10 +504,7 @@ fn a_project_manifest_lands_in_the_checkout_with_a_git_exclude() {
     let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
     let plane = FakePlane::new(log).with_version("s_deploy", &v);
     // The profile delivers NOTHING — the demand is the project manifest's.
-    let dir = FakeDirectory {
-        skills: vec![catalog_entry("s_deploy", "deploy", &v)],
-        channels: Vec::new(),
-    };
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let ctx = rig.ctx_at(Some(&proj.0));
     let out = ops::manifest_update(
         &ctx,
@@ -509,10 +558,7 @@ fn nearest_wins_routes_a_profile_name_into_the_project() {
         skills: vec![delivered("s_deploy", "deploy", &v)],
         ..empty_snapshot()
     });
-    let dir = FakeDirectory {
-        skills: vec![catalog_entry("s_deploy", "deploy", &v)],
-        channels: Vec::new(),
-    };
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let ctx = rig.ctx_at(Some(&proj.0));
     let out = ops::manifest_update(
         &ctx,
@@ -554,10 +600,7 @@ fn a_manifest_pin_overrides_the_served_version() {
     let plane = FakePlane::new(log)
         .with_version("s_deploy", &old)
         .with_version("s_deploy", &new);
-    let dir = FakeDirectory {
-        skills: vec![catalog_entry("s_deploy", "deploy", &new)],
-        channels: Vec::new(),
-    };
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &new)], Vec::new());
     let ctx = rig.ctx_at(Some(&proj.0));
     let out = ops::manifest_update(
         &ctx,
@@ -578,10 +621,7 @@ fn an_ended_session_freezes_and_prints_once() {
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
     plane.serve_not_found();
-    let dir = FakeDirectory {
-        skills: Vec::new(),
-        channels: Vec::new(),
-    };
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
     let ctx = rig.ctx_at(Some(&rig.work.0));
     let out = ops::manifest_update(
         &ctx,
@@ -620,10 +660,7 @@ fn a_profile_drop_cleans_the_home_placements_and_keeps_the_sidecar() {
         skills: vec![delivered("s_deploy", "deploy", &v)],
         ..empty_snapshot()
     });
-    let dir = FakeDirectory {
-        skills: vec![catalog_entry("s_deploy", "deploy", &v)],
-        channels: Vec::new(),
-    };
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let ctx = rig.ctx_at(Some(&rig.work.0));
     ops::manifest_update(
         &ctx,
@@ -696,9 +733,9 @@ fn a_channel_reference_expands_against_the_session() {
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
     let plane = FakePlane::new(log).with_version("s_deploy", &v);
-    let dir = FakeDirectory {
-        skills: vec![catalog_entry("s_deploy", "deploy", &v)],
-        channels: vec![WireChannelEntry {
+    let dir = FakeDirectory::new(
+        vec![catalog_entry("s_deploy", "deploy", &v)],
+        vec![WireChannelEntry {
             name: "backend".into(),
             mode: "open".into(),
             builtin: false,
@@ -709,7 +746,7 @@ fn a_channel_reference_expands_against_the_session() {
                 name: "deploy".into(),
             }],
         }],
-    };
+    );
     let ctx = rig.ctx_at(Some(&proj.0));
     let out = ops::manifest_update(
         &ctx,
@@ -735,10 +772,7 @@ fn a_workspace_ref_without_a_session_is_an_honest_local_line() {
     .unwrap();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let plane = FakePlane::new(log);
-    let dir = FakeDirectory {
-        skills: Vec::new(),
-        channels: Vec::new(),
-    };
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
     let ctx = rig.ctx_at(Some(&proj.0));
     let out = ops::manifest_update(
         &ctx,
@@ -754,4 +788,106 @@ fn a_workspace_ref_without_a_session_is_an_honest_local_line() {
         .expect("the honest line");
     assert!(w.contains("topos login elsewhere.dev/ops"), "{w}");
     assert!(w.contains("topos.toml"), "names the manifest: {w}");
+}
+
+#[test]
+fn add_reference_records_the_manifest_line_and_delivers_now() {
+    let rig = Rig::new("addref");
+    rig.seed_session();
+    let proj = Scratch::new("proj-add");
+    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let data =
+        ops::add_reference(&ctx, &connect(&plane, &dir), None, "@eng/deploy", false).unwrap();
+    // The receipt names the manifest FIRST, the canonical stored reference, and the inverse.
+    let manifest = proj.0.join("topos.toml");
+    assert_eq!(
+        data.manifest.as_deref(),
+        Some(&*manifest.display().to_string())
+    );
+    assert_eq!(data.reference.as_deref(), Some("acme.test/eng/deploy"));
+    assert_eq!(data.undo, vec!["topos", "remove", "acme.test/eng/deploy"]);
+    let m = crate::manifest::file::read_manifest(&rig.fs, &manifest)
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.skills[0].reference, "acme.test/eng/deploy");
+    // `add` chooses; the same sweep delivers — bytes are in the checkout NOW.
+    assert!(proj.0.join(".claude/skills/deploy/SKILL.md").exists());
+
+    // A name in NO connected catalog refuses without an existence claim.
+    let err =
+        ops::add_reference(&ctx, &connect(&plane, &dir), None, "@eng/nonesuch", false).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("not visible with your current access"),
+        "{err}"
+    );
+    // A workspace this installation is not logged into names the login, from local knowledge.
+    let err =
+        ops::add_reference(&ctx, &connect(&plane, &dir), None, "@ops/deploy", false).unwrap_err();
+    assert!(err.to_string().contains("topos login ops"), "{err}");
+}
+
+#[test]
+fn add_reference_global_edits_the_server_profile() {
+    let rig = Rig::new("addg");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serve(DeliverySnapshot {
+        skills: vec![delivered("s_deploy", "deploy", &v)],
+        ..empty_snapshot()
+    });
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    // A BARE catalog name resolves against the connected workspaces (unique match).
+    let data = ops::add_reference(&ctx, &connect(&plane, &dir), None, "deploy", true).unwrap();
+    assert_eq!(
+        data.manifest.as_deref(),
+        Some("your profile @ acme.test/eng")
+    );
+    assert_eq!(
+        data.undo,
+        vec!["topos", "remove", "-g", "acme.test/eng/deploy"]
+    );
+    assert!(
+        dir.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c == "include s_deploy pin=*"),
+        "{:?}",
+        dir.calls.lock().unwrap()
+    );
+}
+
+#[test]
+fn remove_reference_global_names_how_the_removal_settled() {
+    let rig = Rig::new("rmg");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    let mut dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    dir.removal = crate::plane::ProfileRemoval::Excluded;
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = ops::remove_reference_global(&ctx, &connect(&plane, &dir), "@eng/deploy").unwrap();
+    assert!(matches!(
+        out.items[0].kind,
+        topos_types::results::RemoveKind::ManifestExcluded
+    ));
+    assert!(
+        out.items[0]
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("exclude line")),
+        "{:?}",
+        out.items[0].note
+    );
+    assert_eq!(out.undo, vec!["topos", "add", "-g", "acme.test/eng/deploy"]);
 }

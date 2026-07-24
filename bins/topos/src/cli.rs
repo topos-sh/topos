@@ -215,9 +215,10 @@ pub(crate) enum Command {
         /// `'*'` = all). Default: the active harness. Ignored for a local path / name adopt.
         #[arg(long, short = 'a', value_name = "SLUG")]
         agent: Vec<String>,
-        /// Record in the PERSONAL manifest (`~/.topos/topos.toml`) instead of the project's
-        /// `topos.toml`; a remote import also lands in the harness's global/user skills dir
-        /// instead of the project (cwd) dir.
+        /// Record PERSON-scoped instead of in the project's `topos.toml`: a workspace reference
+        /// edits your server-stored PROFILE for that workspace (every machine you log in gets
+        /// it); a local path records in the personal manifest (`~/.topos/topos.toml`); a remote
+        /// import lands in the harness's global/user skills dir instead of the project (cwd) dir.
         #[arg(long, short = 'g')]
         global: bool,
         /// Apply without the describe step. Parses today; the two-phase describe lands later.
@@ -236,6 +237,11 @@ pub(crate) enum Command {
         /// skill this is the per-agent exclusion — applied immediately, undo on the receipt.
         #[arg(long, short = 'a', value_name = "SLUG")]
         agent: Vec<String>,
+        /// Edit your server-stored PROFILE for the workspace the reference resolves to instead of
+        /// this folder's manifest — delivery stops on every machine you log in; when a channel or
+        /// the baseline still provides it, an exclude line is recorded (the receipt says which).
+        #[arg(long, short = 'g')]
+        global: bool,
         /// Apply a described removal (a draft's loss-guard, or a permanent local delete).
         /// Accepted as a no-op on a followed clean skill (which applies immediately).
         #[arg(long)]

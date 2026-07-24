@@ -399,6 +399,31 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             }
             let single_skill = skill.into_iter().next();
             let single_agent = agent.into_iter().next();
+            // WORKSPACE references first (the shape-determined grammar): `@ws/name`, the
+            // canonical `host/ws/name`, `@ws/channels/x` — and a BARE name when this
+            // installation runs on sessions (the connected catalogs are its universe; with no
+            // session a bare name keeps the local untracked-discovery adopt below — an empty
+            // universe, not a fallback ladder).
+            let has_sessions = crate::sessions::read_sessions(&fs, &ctx.layout)
+                .map(|s| s.sessions.iter().any(|x| x.status != "ended"))
+                .unwrap_or(false);
+            if let Ok(parsed) = crate::manifest::refs::parse_ref(&source) {
+                use crate::manifest::refs::ParsedRef;
+                let workspace_shaped =
+                    matches!(parsed, ParsedRef::Skill { .. } | ParsedRef::Channel { .. })
+                        || (matches!(parsed, ParsedRef::Bare { .. }) && has_sessions);
+                if workspace_shaped {
+                    let git = crate::plane_http::UreqGitSource::new();
+                    let result = ops::add_reference(
+                        &ctx,
+                        &connect_session_transports,
+                        Some(&git),
+                        &source,
+                        global,
+                    );
+                    return finish(json, cmd_name, result, render::add_tty, &diag);
+                }
+            }
             // keep-as-yours: a bare NAME that resolves to a RETAINED withdrawn/detached copy re-forks it
             // into a new LOCAL skill, two-phase (bare describes the fork; `--yes` applies). A non-retained
             // name falls through to the ordinary adopt below.
@@ -1087,13 +1112,36 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 finish_pull(json, cmd_name, result, enrollment.is_some(), &diag)
             }
         }
-        Command::Remove { skill, agent, yes } => {
-            // The MANIFEST arm first: a target naming a manifest line edits the NEAREST manifest
-            // (delete the include, or record the one negative state — an exclude — when a broader
-            // layer still provides it). Immediate and reversible, so `--yes` is an accepted no-op;
-            // the classic tracked/untracked removal owns everything the manifests don't mention.
+        Command::Remove {
+            skill,
+            agent,
+            global,
+            yes,
+        } => {
+            // `remove -g <ref>` — the PROFILE-side inverse: the server removes the include line
+            // (or records the exclude when a broader layer still provides it), and the sweep
+            // cleans what the drop ended.
+            if global {
+                if skill.len() != 1 {
+                    let e = ClientError::InvalidArgument(
+                        "`remove -g` takes exactly one reference (`topos remove -g @<workspace>/<skill>`)"
+                            .into(),
+                    );
+                    return emit_err(json, cmd_name, &e, &diag);
+                }
+                let result =
+                    ops::remove_reference_global(&ctx, &connect_session_transports, &skill[0])
+                        .map(ops::RemoveOutcome::Applied);
+                return finish_remove(json, cmd_name, result, &diag);
+            }
+            // The MANIFEST arm first: a target naming a manifest line — or a name the person's
+            // PROFILE delivers (the broader layer) — edits the NEAREST manifest (delete the
+            // include, or record the one negative state — an exclude). Immediate and reversible,
+            // so `--yes` is an accepted no-op; the classic tracked/untracked removal owns
+            // everything the manifests don't mention.
             if agent.is_empty() {
-                match ops::remove_from_manifests(&ctx, &skill) {
+                let provided = ops::profile_provided_names(&ctx);
+                match ops::remove_from_manifests(&ctx, &skill, &provided) {
                     Ok(Some(data)) => {
                         let _ = yes;
                         return finish_remove(

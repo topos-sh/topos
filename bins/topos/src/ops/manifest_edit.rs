@@ -88,10 +88,23 @@ pub(crate) fn note_added(
     pin: Option<&str>,
     personal: bool,
 ) -> Result<(), ClientError> {
+    note_added_table(ctx, data, "skills", reference, pin, personal)
+}
+
+/// [`note_added`] with the include TABLE chosen (`skills` / `channels` — a channel reference
+/// records in its own table).
+pub(crate) fn note_added_table(
+    ctx: &Ctx<'_>,
+    data: &mut AddData,
+    table: &str,
+    reference: &str,
+    pin: Option<&str>,
+    personal: bool,
+) -> Result<(), ClientError> {
     let Some(target) = edit_target(ctx, personal)? else {
         return Ok(());
     };
-    note_added_at(ctx, data, &target, reference, pin)
+    note_added_at(ctx, data, table, &target, reference, pin)
 }
 
 /// [`note_added`] with the target already resolved (the path arm resolves it first to compute the
@@ -99,6 +112,7 @@ pub(crate) fn note_added(
 fn note_added_at(
     ctx: &Ctx<'_>,
     data: &mut AddData,
+    table: &str,
     target: &EditTarget,
     reference: &str,
     pin: Option<&str>,
@@ -123,7 +137,7 @@ fn note_added_at(
         .map(|p| p.item_name().to_owned())
         .unwrap_or_else(|_| reference.to_owned());
     ed.remove_exclude(&name);
-    ed.set_entry("skills", reference, pin);
+    ed.set_entry(table, reference, pin);
     ed.write(ctx.fs, &target.path)?;
     data.manifest = Some(target.path.display().to_string());
     data.reference = Some(reference.to_owned());
@@ -162,7 +176,7 @@ pub(crate) fn note_added_path(
         && source_abs.starts_with(&target.dir)
     {
         let reference = path_reference(&target.dir, &source_abs);
-        return note_added_at(ctx, data, &target, &reference, None);
+        return note_added_at(ctx, data, "skills", &target, &reference, None);
     }
     let reference = source_abs.display().to_string();
     note_added(ctx, data, &reference, None, true)
@@ -232,12 +246,14 @@ fn token_matches(token: &str, entry_ref: &str) -> bool {
 pub(crate) fn remove_from_manifests(
     ctx: &Ctx<'_>,
     tokens: &[String],
+    profile_provided: &[(String, String)],
 ) -> Result<Option<RemoveData>, ClientError> {
     let layers = local_layers(ctx)?;
-    if layers.is_empty() || tokens.is_empty() {
+    if tokens.is_empty() {
         return Ok(None);
     }
-    // Which tokens any local layer mentions (include lines only — excludes are already negative).
+    // Which tokens a local layer's include lines mention, and which the PROFILE delivers (the
+    // broader person layer — `(name, canonical)` pairs from the offline delivery cache).
     let mentioned = |token: &str| {
         layers.iter().any(|(_, m)| {
             m.skills
@@ -246,7 +262,15 @@ pub(crate) fn remove_from_manifests(
                 .any(|e| token_matches(token, &e.reference))
         })
     };
-    let hits: Vec<bool> = tokens.iter().map(|t| mentioned(t)).collect();
+    let provided = |token: &str| {
+        profile_provided
+            .iter()
+            .find(|(name, canonical)| name == token || canonical == token)
+    };
+    let hits: Vec<bool> = tokens
+        .iter()
+        .map(|t| mentioned(t) || provided(t).is_some())
+        .collect();
     if hits.iter().all(|h| !h) {
         return Ok(None);
     }
@@ -258,43 +282,68 @@ pub(crate) fn remove_from_manifests(
         ));
     }
 
-    // The NEAREST manifest is the one this remove edits (creating none: at least one layer exists).
-    let (nearest_path, _) = layers.first().expect("non-empty").clone();
+    // The NEAREST manifest takes the edit; with none in reach (a profile-provided name removed
+    // from a bare folder) one is created at the git root — the exclude needs a manifest to live in.
+    let (nearest_path, created) = match layers.first() {
+        Some((path, _)) => (path.clone(), false),
+        None => {
+            let Some(target) = edit_target(ctx, false)? else {
+                return Ok(None);
+            };
+            if target.created {
+                if let Some(parent) = target.path.parent() {
+                    ctx.fs.create_dir_all(parent)?;
+                }
+                crate::atomic::atomic_write(
+                    ctx.fs,
+                    &target.path,
+                    ManifestEditor::init_template().as_bytes(),
+                )?;
+            }
+            (target.path, true)
+        }
+    };
     let mut ed = ManifestEditor::open(ctx.fs, &nearest_path)?;
     let mut items = Vec::with_capacity(tokens.len());
     let mut undo = Vec::new();
     for token in tokens {
-        // The entry the token names, searched nearest-first (the nearest mention wins).
-        let (layer_idx, table, entry_ref) = layers
-            .iter()
-            .enumerate()
-            .find_map(|(i, (_, m))| {
-                m.skills
-                    .iter()
-                    .find(|e| token_matches(token, &e.reference))
-                    .map(|e| (i, "skills", e.reference.clone()))
-                    .or_else(|| {
-                        m.channels
-                            .iter()
-                            .find(|e| token_matches(token, &e.reference))
-                            .map(|e| (i, "channels", e.reference.clone()))
-                    })
-            })
-            .expect("every token matched above");
+        // The entry the token names, searched nearest-first (the nearest mention wins) — else the
+        // profile-provided pair.
+        let local = layers.iter().enumerate().find_map(|(i, (_, m))| {
+            m.skills
+                .iter()
+                .find(|e| token_matches(token, &e.reference))
+                .map(|e| (i, "skills", e.reference.clone()))
+                .or_else(|| {
+                    m.channels
+                        .iter()
+                        .find(|e| token_matches(token, &e.reference))
+                        .map(|e| (i, "channels", e.reference.clone()))
+                })
+        });
+        let (layer_idx, table, entry_ref, profile_only) = match local {
+            Some((i, table, entry_ref)) => (i, table, entry_ref, false),
+            None => {
+                let (_, canonical) = provided(token).expect("every token matched above");
+                (usize::MAX, "skills", canonical.clone(), true)
+            }
+        };
         let name = entry_ref
             .trim_end_matches('/')
             .rsplit('/')
             .next()
             .unwrap_or(entry_ref.as_str())
             .to_owned();
-        // Does any BROADER layer than the nearest still provide the name?
+        // Does any BROADER layer than the nearest still provide the name — a broader local
+        // manifest, or the person's profile itself?
         let broader_provides = layers.iter().skip(1).any(|(_, m)| {
             m.skills
                 .iter()
                 .chain(m.channels.iter())
                 .any(|e| token_matches(&name, &e.reference))
-        });
-        let removed_here = layer_idx == 0 && ed.remove_entry(table, &entry_ref);
+        }) || provided(&name).is_some();
+        let removed_here =
+            !profile_only && layer_idx == 0 && !created && ed.remove_entry(table, &entry_ref);
         let kind = if broader_provides || !removed_here {
             // A broader layer provides it (or the nearest never carried the line): the one
             // negative state — an exclude line in the nearest manifest.
@@ -311,7 +360,12 @@ pub(crate) fn remove_from_manifests(
             workspace_id: None,
             agent_dirs: Vec::new(),
             bytes_kept: true,
-            note: None,
+            note: profile_only.then(|| {
+                format!(
+                    "your profile still delivers it elsewhere — `topos remove -g {entry_ref}` \
+                     stops it everywhere"
+                )
+            }),
         });
     }
     ed.write(ctx.fs, &nearest_path)?;
@@ -320,6 +374,25 @@ pub(crate) fn remove_from_manifests(
         applied: true,
         undo,
     }))
+}
+
+/// The `(name, canonical)` pairs the person's profile currently delivers, from the OFFLINE
+/// delivery cache — the "broader person layer" `remove`'s exclude semantics consult.
+pub(crate) fn profile_provided_names(ctx: &Ctx<'_>) -> Vec<(String, String)> {
+    let status = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
+    let mut out = Vec::new();
+    for entry in status.workspaces.values() {
+        let (Some(host), Some(ws)) = (entry.host.as_deref(), entry.workspace_name.as_deref())
+        else {
+            continue;
+        };
+        for ds in entry.delivered.values() {
+            if !ds.withdrawn && !ds.name.is_empty() {
+                out.push((ds.name.clone(), format!("{host}/{ws}/{}", ds.name)));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -410,7 +483,7 @@ mod tests {
             assert_eq!(m.skills[0].reference, "./tools/my-skill");
 
             // Remove edits the SAME (nearest) manifest and deletes the line.
-            let out = remove_from_manifests(ctx, &["./tools/my-skill".to_owned()])
+            let out = remove_from_manifests(ctx, &["./tools/my-skill".to_owned()], &[])
                 .unwrap()
                 .expect("the manifest arm claims it");
             assert!(out.applied);
@@ -446,7 +519,7 @@ mod tests {
         with_ctx(&home, Some(&nested), |ctx| {
             // "noisy" is provided by the BROADER repo manifest; the nearest (api) manifest takes
             // the exclude line — the one negative state.
-            let out = remove_from_manifests(ctx, &["noisy".to_owned()])
+            let out = remove_from_manifests(ctx, &["noisy".to_owned()], &[])
                 .unwrap()
                 .expect("claimed");
             assert!(matches!(out.items[0].kind, RemoveKind::ManifestExcluded));
@@ -483,7 +556,7 @@ mod tests {
         with_ctx(&home, Some(&cwd), |ctx| {
             // No manifests at all → None (the classic removal path owns the token).
             assert!(
-                remove_from_manifests(ctx, &["docs".to_owned()])
+                remove_from_manifests(ctx, &["docs".to_owned()], &[])
                     .unwrap()
                     .is_none()
             );
@@ -491,12 +564,12 @@ mod tests {
         std::fs::write(cwd.join(MANIFEST_FILE), "[skills]\n\"./a\" = \"*\"\n").unwrap();
         with_ctx(&home, Some(&cwd), |ctx| {
             assert!(
-                remove_from_manifests(ctx, &["docs".to_owned()])
+                remove_from_manifests(ctx, &["docs".to_owned()], &[])
                     .unwrap()
                     .is_none()
             );
-            let err =
-                remove_from_manifests(ctx, &["./a".to_owned(), "docs".to_owned()]).unwrap_err();
+            let err = remove_from_manifests(ctx, &["./a".to_owned(), "docs".to_owned()], &[])
+                .unwrap_err();
             assert_eq!(err.code(), "INVALID_ARGUMENT");
         });
     }
