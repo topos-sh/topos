@@ -40,6 +40,8 @@ hex.workspace = true
 # base64: ENCODE-side for the contribute candidate's `content_base64` (STANDARD alphabet). Wire encoding
 # only — it does not cross the architectural line check-arch enforces (no plane-store/sqlx).
 base64.workspace = true
+# The manifest files (`topos.toml`): format-preserving TOML read/edit (comments survive `topos add`).
+toml_edit.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 # The self-update asset codec (`topos upgrade`): unpack the release tarball in memory. `flate2` keeps its

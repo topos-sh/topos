@@ -133,6 +133,13 @@ impl Layout {
         self.identity_dir().join("credentials.json")
     }
 
+    /// `identity/sessions.json` — this installation's SESSIONS (one per workspace, each with its
+    /// own workspace-scoped bearer credential). A `0600` secret, written whole under the identity
+    /// lock.
+    pub(crate) fn sessions_path(&self) -> PathBuf {
+        self.identity_dir().join("sessions.json")
+    }
+
     /// `identity/user.json` — the enrolled workspaces' NON-secret metadata (ids / names / enrolled-at).
     /// Ordinary perms — it carries no secret.
     pub(crate) fn user_path(&self) -> PathBuf {
