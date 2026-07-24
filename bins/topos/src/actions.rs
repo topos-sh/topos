@@ -198,6 +198,23 @@ fn has_flag(argv: &[String], flag: &str) -> bool {
     argv.iter().any(|a| a == flag)
 }
 
+/// `add`'s positional SOURCE token: the first non-flag token past the verb, skipping the VALUES
+/// of the value-taking selectors (`-s/--skill`, `-a/--agent`) so a flag's argument is never
+/// mistaken for the source.
+fn add_source_token(argv: &[String]) -> Option<&str> {
+    let mut it = argv.iter().skip(2);
+    while let Some(t) = it.next() {
+        match t.as_str() {
+            "-s" | "--skill" | "-a" | "--agent" => {
+                let _ = it.next();
+            }
+            t if t.starts_with('-') => {}
+            t => return Some(t),
+        }
+    }
+    None
+}
+
 /// Whether a `FETCH_FULL_DIFF` argv reaches the plane: a bare `topos diff <skill>` is the local
 /// draft↔current read; any `<ref>` endpoint (`current..<hash>` / `<hash>` / `<a>..<b>`) fetches +
 /// re-verifies plane bytes. The ref is the second positional after the verb — value-taking flags
@@ -275,7 +292,7 @@ fn apply_described(argv: &[String]) -> Safety {
         // name, a canonical host ref, an `owner/repo` import) is unknowable from the argv alone,
         // so its network story is honestly absent.
         Some("add") if has_flag(argv, "-g") || has_flag(argv, "--global") => (Some(true), None),
-        Some("add") => match argv.iter().skip(2).find(|t| !t.starts_with('-')) {
+        Some("add") => match add_source_token(argv) {
             Some(t) if t.starts_with('@') => (Some(true), None),
             Some(t)
                 if t.starts_with("./")
@@ -450,6 +467,22 @@ mod tests {
             argv(&["topos", "add", "deploy"]),
         );
         assert_eq!(bare.needs_network, None);
+        // A selector's VALUE is never mistaken for the source; `-g` is networked regardless.
+        let flagged = next_action(
+            ActionCode::from("UNDO".to_owned()),
+            argv(&["topos", "add", "--skill", "deploy", "@acme/foo"]),
+        );
+        assert_eq!(flagged.needs_network, Some(true));
+        let flagged_path = next_action(
+            ActionCode::from("UNDO".to_owned()),
+            argv(&["topos", "add", "-a", "cursor", "./deploy"]),
+        );
+        assert_eq!(flagged_path.needs_network, Some(false));
+        let global = next_action(
+            ActionCode::from("UNDO".to_owned()),
+            argv(&["topos", "add", "-g", "deploy"]),
+        );
+        assert_eq!(global.needs_network, Some(true));
     }
 
     #[test]
