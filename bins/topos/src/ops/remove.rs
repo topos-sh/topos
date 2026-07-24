@@ -24,17 +24,19 @@ use std::path::PathBuf;
 use topos_types::results::{RemoveData, RemoveItem, RemoveKind};
 
 use super::DiscoveryRoots;
-use super::follow::{DirectoryConnect, build_universe_via};
-use super::pull::{WithdrawReason, snapshot_and_clean};
+use super::connect::DirectoryConnect;
 use crate::ctx::Ctx;
+use crate::doc;
 use crate::error::ClientError;
 use crate::id::SkillId;
 use crate::resolve::{self, ParsedTarget, Resolution};
-use crate::{doc, enroll};
 
 /// The seams `remove` needs — the directory connector builds the resolution universe and writes the
 /// per-device exclusion row.
 pub(crate) struct RemoveConnectors<'a> {
+    /// The per-session transports (the resolver universe reads ride each session's credential).
+    pub session: &'a super::reconcile::SessionConnect<'a>,
+    #[allow(dead_code)]
     pub directory: &'a DirectoryConnect<'a>,
 }
 
@@ -47,17 +49,10 @@ pub(crate) enum RemoveOutcome {
         yes_argv: Vec<String>,
     },
     Applied(RemoveData),
-    AgentScope(super::agent_scope::AgentScopeOutcome),
 }
 
 /// One resolved removal, pre-apply.
 enum Removal {
-    /// A followed skill → a per-device exclusion.
-    Followed {
-        workspace_id: String,
-        skill_id: String,
-        name: String,
-    },
     /// A tracked, never-published local skill → a permanent delete (sidecar entry included).
     TrackedLocal {
         skill_id: String,
@@ -89,26 +84,6 @@ pub(crate) fn remove(
             "remove needs a skill name (or `<name>@<agent>` for an untracked local copy)".into(),
         ));
     }
-    // `remove <followed> --agent <slug>` is the PER-AGENT exclusion — one shared implementation with
-    // `unfollow --agent` (placement policy; the subscription and the whole-device exclusion row are
-    // untouched). It engages only when every bare target is a FOLLOWED tracked skill; the classic
-    // `-a` semantics for untracked/local copies (and `-a '*'`) stay exactly as they were.
-    if !agents.is_empty()
-        && !agents.iter().any(|a| a == "*")
-        && targets.iter().all(|t| {
-            !t.contains('@')
-                && !t.contains('/')
-                && (super::builtin::is_builtin(t)
-                    || super::resolve_skill(ctx, t).is_ok_and(|(sid, _)| {
-                        super::followed_workspace(ctx, sid.as_str()).is_some()
-                    }))
-        })
-    {
-        // Applies immediately (device-local placement policy; `--yes` is an accepted no-op).
-        return Ok(RemoveOutcome::AgentScope(
-            super::agent_scope::exclude_agents(ctx, "remove", targets, agents, None)?,
-        ));
-    }
     // A single `-a` value scopes untracked locals; more than one is accepted (a copy in several agents).
     let agent_filter: Option<&str> = match agents {
         [] => None,
@@ -118,31 +93,12 @@ pub(crate) fn remove(
         _ => None,
     };
 
-    let (base_url, universe) = build_universe_via(ctx, connectors.directory)?;
+    let universe = super::connect::build_universe_sessions(ctx, connectors.session)?;
 
     // Resolve ALL-OR-NONE.
     let mut removals = Vec::with_capacity(targets.len());
     for token in targets {
         removals.push(classify(ctx, &universe, roots, agent_filter, token)?);
-    }
-
-    // A NAMED `--agent` that did not engage the per-agent route above (a qualified
-    // `<ws>/skills/<name>` or `<name>@<agent>` spelling, or a mixed batch) must never fall
-    // through to the WHOLE-DEVICE exclusion of a followed skill — the caller asked for less than
-    // that, so widening silently would be a consent bypass. Refuse typed toward the supported
-    // spelling; the classic `-a` discovery scoping of untracked copies is untouched.
-    if !agents.is_empty()
-        && !agents.iter().any(|a| a == "*")
-        && removals
-            .iter()
-            .any(|r| matches!(r, Removal::Followed { .. }))
-    {
-        return Err(ClientError::InvalidArgument(
-            "`--agent` scopes a FOLLOWED skill by its bare name — `topos remove <skill> --agent \
-             <slug>` (one invocation per skill; qualified paths and `<name>@<agent>` spellings \
-             do not take the per-agent arm)"
-                .into(),
-        ));
     }
 
     let mut items: Vec<RemoveItem> = removals.iter().map(describe_item).collect();
@@ -161,35 +117,9 @@ pub(crate) fn remove(
     // bytes), an unscannable copy, or a FOREIGN recorded placement (the clean drops the
     // reservation but leaves the occupied dir — the inverse re-plans around it, never restoring
     // the prior record) — their receipts offer no undo.
-    let mut drafted: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for (removal, item) in removals.iter().zip(items.iter_mut()) {
+        let _ = item;
         match removal {
-            Removal::Followed { skill_id, name, .. } => match draft_state(ctx, skill_id) {
-                DraftState::Clean { foreign_left } => {
-                    if foreign_left {
-                        drafted.insert(skill_id.as_str());
-                    }
-                }
-                DraftState::Draft => {
-                    gated = true;
-                    drafted.insert(skill_id.as_str());
-                    item.note = Some(format!(
-                        "you have local edits ahead of the followed version — removing takes the \
-                         draft out of every agent dir on this device (a snapshot is kept in the \
-                         sidecar). Share it first with `topos publish {name}`, inspect it with \
-                         `topos diff {name}`, or apply with --yes"
-                    ));
-                }
-                DraftState::Indeterminate => {
-                    gated = true;
-                    drafted.insert(skill_id.as_str());
-                    item.note = Some(
-                        "this skill's local copy cannot be scanned, so a draft cannot be ruled \
-                         out — inspect the directory, or apply with --yes"
-                            .to_owned(),
-                    );
-                }
-            },
             Removal::TrackedLocal { .. } | Removal::Untracked { .. } | Removal::Builtin { .. } => {
                 gated = true;
             }
@@ -223,42 +153,6 @@ pub(crate) fn remove(
     // under the lock before a byte leaves a dir. Closing the window whole would need the gate
     // decision inside the shared lock (a `snapshot_and_clean` contract change shared with the
     // withdrawal sweep) — deliberately not taken for a consent-courtesy race with no byte loss.
-    if !yes {
-        for (removal, item) in removals.iter().zip(items.iter_mut()) {
-            if let Removal::Followed { skill_id, name, .. } = removal
-                && !matches!(draft_state(ctx, skill_id), DraftState::Clean { .. })
-            {
-                item.note = Some(format!(
-                    "local edits appeared while removing — removing takes the draft out of every \
-                     agent dir on this device (a snapshot is kept in the sidecar). Share it first \
-                     with `topos publish {name}`, inspect it with `topos diff {name}`, or apply \
-                     with --yes"
-                ));
-                let mut yes_argv = vec!["topos".to_owned(), "remove".to_owned()];
-                yes_argv.extend(targets.iter().cloned());
-                for a in agents {
-                    yes_argv.push("-a".to_owned());
-                    yes_argv.push(a.clone());
-                }
-                yes_argv.push("--yes".to_owned());
-                return Ok(RemoveOutcome::Described {
-                    data: RemoveData {
-                        items,
-                        applied: false,
-                        undo: Vec::new(),
-                    },
-                    yes_argv,
-                });
-            }
-        }
-    }
-    let needs_server = removals
-        .iter()
-        .any(|r| matches!(r, Removal::Followed { .. }));
-    let directory = match (&base_url, needs_server) {
-        (Some(b), true) => Some((connectors.directory)(b)),
-        _ => None,
-    };
     // The PRE-apply stances — the undo below is withheld from any skill whose LOCAL entry shows
     // a standing stance going in: a repeat remove of an already-excluded skill is a no-op whose
     // "undo" would change pre-existing state, and a remove of an UNFOLLOWED skill's frozen copy
@@ -267,39 +161,8 @@ pub(crate) fn remove(
     // received here) is likewise ineligible: after this exclusion the delivery reports it
     // excluded, not detached, so the advertised `follow` would answer a first-trust DESCRIBE
     // instead of the immediate re-attach only a local marker routes to.
-    let prior_active: std::collections::HashSet<String> =
-        enroll::read_follows(ctx.fs, &ctx.layout)?
-            .map(|f| {
-                f.follows
-                    .iter()
-                    .filter(|e| e.following && !e.excluded_here)
-                    .map(|e| e.skill_id.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
     for removal in &removals {
         match removal {
-            Removal::Followed {
-                workspace_id,
-                skill_id,
-                ..
-            } => {
-                let directory = directory.as_deref().ok_or_else(|| {
-                    ClientError::Enrollment("not enrolled; nothing to remove".into())
-                })?;
-                // 1) The server exclusion row — delivery stops on THIS device (the person keeps following).
-                directory.exclude_device(workspace_id, skill_id)?;
-                let sid = SkillId::parse(skill_id)?;
-                // 2) Snapshot any draft, then clean the agent dirs — KEEPING every sidecar byte —
-                //    and reset the sync state to the never-received baseline, so a later `follow`
-                //    that lifts the exclusion actually re-materializes the bytes (without the
-                //    reset, `applied == observed` and the absent placement would read as "already
-                //    current" forever).
-                let prior = snapshot_and_clean(ctx, &sid, WithdrawReason::RemoveExclusion)?;
-                super::pull::reset_to_never_received(ctx, &sid, prior.as_ref())?;
-                // 3) The local exclusion cause marker (for `list`, offline).
-                enroll::set_excluded(ctx.fs, &ctx.layout, skill_id, true)?;
-            }
             Removal::TrackedLocal { skill_id, dirs, .. } => {
                 for dir in dirs {
                     if ctx.fs.exists(dir) {
@@ -334,98 +197,13 @@ pub(crate) fn remove(
     // one per invocation). Targets ride QUALIFIED (`<ws>/skills/<name>`) when the address slug is
     // known offline — a name followed in a second workspace would make the bare spelling an
     // ambiguous refusal instead of the promised undo.
-    let followed: Vec<(&str, &str, &str)> = removals
-        .iter()
-        .filter_map(|r| match r {
-            Removal::Followed {
-                workspace_id,
-                skill_id,
-                name,
-            } => Some((workspace_id.as_str(), skill_id.as_str(), name.as_str())),
-            _ => None,
-        })
-        .collect();
-    let all_followed = followed.len() == removals.len();
-    let all_new = followed.iter().all(|(_, id, _)| prior_active.contains(*id));
-    let all_clean = followed.iter().all(|(_, id, _)| !drafted.contains(*id));
-    let one_workspace = followed
-        .first()
-        .is_some_and(|(ws, _, _)| followed.iter().all(|(w, _, _)| w == ws));
-    let undo: Vec<String> = if !(all_followed && all_new && all_clean && one_workspace) {
-        Vec::new()
-    } else {
-        let mut argv = vec!["topos".to_owned(), "follow".to_owned()];
-        for (ws, _, name) in &followed {
-            argv.push(match crate::placement::workspace_slug(ctx, Some(ws)) {
-                Some(slug) => format!("{slug}/skills/{name}"),
-                None => (*name).to_owned(),
-            });
-        }
-        argv
-    };
+    // A local delete is permanent — there is no one-command inverse to advertise.
+    let undo: Vec<String> = Vec::new();
     Ok(RemoveOutcome::Applied(RemoveData {
         items,
         applied: true,
         undo,
     }))
-}
-
-/// The loss-guard's draft classification for one FOLLOWED skill, from the same placement scan the
-/// sync engine trusts: any `Modified` placement = a DRAFT ahead; every placement `Clean` / `Absent`
-/// / `Foreign` = clean. `Unscannable` — or any failure to read the map or run the scan — is
-/// INDETERMINATE and fails toward the gate: a stale stat-cache or an unreadable dir must never
-/// cost a draft.
-enum DraftState {
-    /// No draft ahead — the removal applies immediately. `foreign_left` marks a FOREIGN recorded
-    /// placement: it holds no draft of ours (the gate stays open), but the clean drops the
-    /// reservation while leaving the occupied dir, so a re-follow would re-plan around it as a
-    /// namespaced sibling instead of restoring the prior record — the receipt's undo is withheld.
-    Clean {
-        foreign_left: bool,
-    },
-    Draft,
-    Indeterminate,
-}
-
-fn draft_state(ctx: &Ctx<'_>, skill_id: &str) -> DraftState {
-    let Ok(sid) = SkillId::parse(skill_id) else {
-        return DraftState::Indeterminate;
-    };
-    let sp = ctx.layout.published(&sid);
-    let map = match doc::read_map(ctx.fs, &sp.map) {
-        Ok(Some(map)) => map,
-        // No placement record: nothing materialized on this device — nothing to lose.
-        Ok(None) => {
-            return DraftState::Clean {
-                foreign_left: false,
-            };
-        }
-        Err(_) => return DraftState::Indeterminate,
-    };
-    match crate::placement::scan_placements(ctx, &map) {
-        Ok(scans) => {
-            let mut indeterminate = false;
-            let mut foreign_left = false;
-            for scan in &scans {
-                match scan.status {
-                    crate::placement::ScanStatus::Modified { .. } => return DraftState::Draft,
-                    crate::placement::ScanStatus::Unscannable => {
-                        indeterminate = true;
-                    }
-                    crate::placement::ScanStatus::Foreign => {
-                        foreign_left = true;
-                    }
-                    _ => {}
-                }
-            }
-            if indeterminate {
-                DraftState::Indeterminate
-            } else {
-                DraftState::Clean { foreign_left }
-            }
-        }
-        Err(_) => DraftState::Indeterminate,
-    }
 }
 
 /// Classify ONE target: a followed catalog skill (exclusion), a tracked-local (permanent), or an
@@ -456,24 +234,15 @@ fn classify(
     // Resolve against the plane universe (SKILLS scope). A channel / workspace match is refused toward
     // the verb that acts on it.
     match resolve::resolve_one(universe, &parsed, resolve::KindScope::SKILLS)? {
-        Some(Resolution::Resource {
-            workspace_id,
-            skill_id,
-            name,
-            ..
-        }) => {
-            let skill_id = skill_id
-                .ok_or_else(|| ClientError::WireInvalid("a resolved skill carried no id".into()))?;
-            Ok(Removal::Followed {
-                workspace_id,
-                skill_id,
-                name,
-            })
-        }
+        Some(Resolution::Resource { name, .. }) => Err(ClientError::InvalidArgument(format!(
+            "'{name}' is delivered from a workspace — remove the DEMAND, not the copy: `topos \
+             remove {name}` in a folder records an exclude in its manifest; `topos remove -g \
+             {name}` edits your profile (stops it on every machine you log in)"
+        ))),
         Some(Resolution::Workspace { workspace_name, .. }) => {
             Err(ClientError::InvalidArgument(format!(
                 "'{workspace_name}' is a workspace, not a skill — `remove` takes skills off this \
-                 device; to stop deliveries use `topos unfollow`"
+                 machine; leaving a workspace is `topos logout {workspace_name}`"
             )))
         }
         // Not a plane resource: the local paths — a tracked skill you `add`ed, or an untracked agent-dir
@@ -491,12 +260,12 @@ fn classify(
 /// never-followed one is a permanent local delete.
 fn tracked_or_followed(ctx: &Ctx<'_>, sid: SkillId, name: String) -> Result<Removal, ClientError> {
     let skill_id = sid.as_str().to_owned();
-    if let Some(ws) = super::followed_workspace(ctx, &skill_id) {
-        return Ok(Removal::Followed {
-            workspace_id: ws,
-            skill_id,
-            name,
-        });
+    if super::followed_workspace(ctx, &skill_id).is_some() {
+        return Err(ClientError::InvalidArgument(format!(
+            "'{name}' is delivered from a workspace — remove the DEMAND, not the copy: `topos \
+             remove {name}` in a folder records an exclude in its manifest; `topos remove -g \
+             {name}` edits your profile (stops it on every machine you log in)"
+        )));
     }
     // A purely-local skill — the placement dirs to delete come from its map.
     let sp = ctx.layout.published(&sid);
@@ -547,17 +316,6 @@ fn untracked(
 /// The describe/apply row for one removal (the boundary a followed removal keeps vs a permanent delete).
 fn describe_item(removal: &Removal) -> RemoveItem {
     match removal {
-        Removal::Followed {
-            workspace_id, name, ..
-        } => RemoveItem {
-            name: name.clone(),
-            kind: RemoveKind::FollowedExclusion,
-            manifest: None,
-            workspace_id: Some(workspace_id.clone()),
-            agent_dirs: Vec::new(),
-            bytes_kept: true,
-            note: None,
-        },
         Removal::TrackedLocal { name, dirs, .. } => RemoveItem {
             name: name.clone(),
             kind: RemoveKind::TrackedLocalPermanent,

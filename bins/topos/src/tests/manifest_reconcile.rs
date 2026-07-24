@@ -245,8 +245,6 @@ impl FakePlane {
 fn empty_snapshot() -> DeliverySnapshot {
     DeliverySnapshot {
         skills: Vec::new(),
-        detached: Vec::new(),
-        excluded: Vec::new(),
         proposals_awaiting: 0,
         notices: Vec::new(),
         staleness_window_ms: 604_800_000,
@@ -262,7 +260,6 @@ fn delivered(skill_id: &str, name: &str, v: &Version) -> DeliverySkill {
         generation: 1,
         bundle_digest: v.digest,
         via_channels: vec!["everyone".into()],
-        via_direct: false,
     }
 }
 impl PlaneSource for FakePlane {
@@ -285,9 +282,6 @@ impl PlaneSource for FakePlane {
     }
 }
 impl DeliverySource for FakePlane {
-    fn workspaces(&self) -> Vec<String> {
-        vec![WS.to_owned()]
-    }
     fn fetch_delivery(&self, _ws: &str) -> Result<DeliverySnapshot, PlaneError> {
         match &*self.delivery.lock().unwrap() {
             Ok(s) => Ok(s.clone()),
@@ -360,25 +354,10 @@ impl DirectorySource for FakeDirectory {
     fn reach(&self, _ws: &str, _s: &str) -> Result<WireReach, ClientError> {
         unreachable!()
     }
-    fn follow_skill(&self, _ws: &str, _s: &str) -> Result<(), ClientError> {
-        unreachable!()
-    }
-    fn unfollow_skill(&self, _ws: &str, _s: &str) -> Result<(), ClientError> {
-        unreachable!()
-    }
-    fn channel_join(&self, _ws: &str, _c: &str) -> Result<(), ClientError> {
-        unreachable!()
-    }
-    fn channel_leave(&self, _ws: &str, _c: &str) -> Result<(), ClientError> {
-        unreachable!()
-    }
     fn channel_place(&self, _ws: &str, _c: &str, _s: &str) -> Result<(), ClientError> {
         unreachable!()
     }
     fn channel_unplace(&self, _ws: &str, _c: &str, _s: &str) -> Result<(), ClientError> {
-        unreachable!()
-    }
-    fn exclude_device(&self, _ws: &str, _s: &str) -> Result<(), ClientError> {
         unreachable!()
     }
     fn protect_skill(&self, _ws: &str, _s: &str, _l: &str) -> Result<(), ClientError> {

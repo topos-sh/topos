@@ -1924,7 +1924,13 @@ fn a_wedged_skills_sweep_failure_surfaces_in_its_topos_log() {
     let dir = |_: &str| -> Box<dyn crate::plane::DirectorySource> {
         unreachable!("local log builds no directory transport")
     };
-    let connectors = ops::LogConnectors { directory: &dir };
+    let nosess = |_s: &crate::sessions::Session| -> ops::SessionTransports {
+        unreachable!("local log builds no session transports")
+    };
+    let connectors = ops::LogConnectors {
+        directory: &dir,
+        session: &nosess,
+    };
     let log = ops::log(
         &rig.ctx(&plane, &foll),
         &connectors,
@@ -2352,12 +2358,19 @@ fn tree_of(v: &Version) -> [u8; 32] {
 /// Write the enrolled `instance.json` `revert` reads (the follow-state comes from the [`FixtureFollow`]
 /// the caller hands `ctx`, not from disk).
 fn seed_instance(rig: &Rig) {
-    crate::enroll::write_instance(
+    crate::sessions::upsert_session(
         &rig.fs,
         &rig.layout(),
-        &crate::enroll::Instance {
-            schema_version: 1,
+        crate::sessions::Session {
+            host: "topos.example".to_owned(),
             base_url: "https://topos.example/api".to_owned(),
+            workspace_id: WS.to_owned(),
+            workspace_name: "acme".to_owned(),
+            display_name: "Acme".to_owned(),
+            session_id: "sn_1".to_owned(),
+            credential: "cred-1".to_owned(),
+            status: crate::sessions::SESSION_ACTIVE.to_owned(),
+            logged_in_at: 1,
         },
     )
     .unwrap();
@@ -2422,7 +2435,7 @@ fn revert_bare_describes_without_writing_then_yes_applies() {
     let receipt = ok_revert_receipt(served(WS, &id, forward, 6));
     let connect = {
         let posts = posts.clone();
-        move |_b: &str| -> Box<dyn crate::plane::ContributeSource> {
+        move |_b: &str, _c: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
             Box::new(RecordingContribute {
                 posts: posts.clone(),
                 receipt: receipt.clone(),
@@ -2528,7 +2541,7 @@ fn revert_over_identical_bytes_is_a_no_op_under_differing_commit_ids() {
     let receipt = ok_revert_receipt(served(WS, &id, current.id, 6));
     let connect = {
         let posts = posts.clone();
-        move |_b: &str| -> Box<dyn crate::plane::ContributeSource> {
+        move |_b: &str, _c: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
             Box::new(RecordingContribute {
                 posts: posts.clone(),
                 receipt: receipt.clone(),

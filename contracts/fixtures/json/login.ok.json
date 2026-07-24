@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "command": "login",
+  "ok": true,
+  "data": {
+    "delivered": 3,
+    "display_name": "Acme",
+    "name": "acme",
+    "server": "https://topos.sh/api",
+    "session_id": "sn_01hzy3",
+    "session_status": "active",
+    "workspace_id": "w_acme"
+  },
+  "warnings": [],
+  "next_actions": []
+}

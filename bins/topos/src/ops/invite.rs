@@ -22,9 +22,8 @@
 use topos_types::requests::{InvitationData, InvitationRequest};
 use topos_types::results::{InviteDescribeData, InviteReadData};
 
-use super::follow::DirectoryConnect;
+use super::connect::DirectoryConnect;
 use crate::ctx::Ctx;
-use crate::enroll;
 use crate::error::ClientError;
 use crate::plane::GovernanceSource;
 
@@ -36,8 +35,12 @@ pub(crate) type GovernanceConnect<'a> = dyn Fn(&str) -> Box<dyn GovernanceSource
 /// The seams `invite` needs — the governance connector (the roster POST) and the directory connector
 /// (the `/me` read the bare read + describe surface).
 pub(crate) struct InviteConnectors<'a> {
+    #[allow(dead_code)]
     pub governance: &'a GovernanceConnect<'a>,
+    #[allow(dead_code)]
     pub directory: &'a DirectoryConnect<'a>,
+    /// The per-session transports (the roster write rides the session's own credential).
+    pub session: &'a super::reconcile::SessionConnect<'a>,
 }
 
 /// The verb's outcome — a bare read (no emails), a describe (emails, no `--yes`), or an apply (`--yes`).
@@ -75,27 +78,20 @@ pub(crate) fn invite(
             "an invitation carries at most one first destination — `--skill` OR `--channel`".into(),
         ));
     }
-    // Require enrollment: the pinned plane's base URL comes from what `follow` wrote.
-    let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or(ClientError::NotEnrolled)?;
-    // Pick the workspace (the invitation's scope) from the enrolled `user.json` memberships:
-    // `--workspace` (name or id) when the install has joined several, else the sole one. `instance.json` carries
-    // the plane but no workspace, so a present-instance-but-no-user state is a partial enrollment we guide
-    // the user to complete rather than guess at.
-    let user = enroll::read_user(ctx.fs, &ctx.layout)?.ok_or_else(|| {
-        ClientError::Enrollment(
-            "could not determine your workspace; complete enrollment with `topos follow` first"
-                .into(),
-        )
-    })?;
-    let workspace_id = user
-        .resolve_write_workspace(workspace)?
-        .workspace_id
-        .clone();
+    // The SESSION lane: the one live session, or the `--workspace`-selected one.
+    let lane = super::resolve_session_lane(ctx, connectors.session, workspace, None)?.ok_or_else(
+        || {
+            ClientError::Enrollment(
+                "not connected to a workspace — run `topos login <workspace-address>` first".into(),
+            )
+        },
+    )?;
+    let workspace_id = lane.workspace_id.clone();
 
     // Bare `invite` (no emails) is the no-mutation read (the workspace address): a single `/me`
     // read, nothing sent, nothing changed.
     if emails.is_empty() {
-        let me = (connectors.directory)(&instance.base_url).me(&workspace_id)?;
+        let me = lane.transports.directory.me(&workspace_id)?;
         return Ok(InviteOutcome::Read(InviteReadData {
             address: me.address,
             changed: false,
@@ -107,12 +103,12 @@ pub(crate) fn invite(
     // human regardless of how the address was typed.
     let emails: Vec<String> = emails
         .iter()
-        .map(|e| enroll::canonical_principal(e))
+        .map(|e| crate::sessions::canonical_principal(e))
         .collect();
 
     // The describe reads `/me` for the address the two-phase surface discloses (nothing mutates).
     if !yes {
-        let me = (connectors.directory)(&instance.base_url).me(&workspace_id)?;
+        let me = lane.transports.directory.me(&workspace_id)?;
         let mut yes_argv = vec!["topos".to_owned(), "invite".to_owned()];
         yes_argv.extend(emails.iter().cloned());
         if let Some(s) = &skill {
@@ -145,7 +141,7 @@ pub(crate) fn invite(
         skill,
         channel,
     };
-    let transport = (connectors.governance)(&instance.base_url);
+    let transport = &*lane.transports.governance;
     Ok(InviteOutcome::Applied(
         transport.invite(&workspace_id, body)?,
     ))

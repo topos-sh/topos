@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LogoutData",
+  "description": "`logout [<workspace>|--all]` — end this installation's session(s). **INFERRED** (additive-only).",
+  "type": "object",
+  "properties": {
+    "ended": {
+      "description": "The sessions ended, by workspace ADDRESS name.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "server_revoked": {
+      "description": "Whether the server-side revoke landed for EVERY ended session (`false` = at least one was\nalready gone server-side, or unreachable — the local sign-out proceeded regardless).",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "ended",
+    "server_revoked"
+  ]
+}

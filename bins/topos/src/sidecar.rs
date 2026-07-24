@@ -263,12 +263,20 @@ pub(crate) fn recover(fs: &dyn FsOps, layout: &Layout, now_millis: i64) -> Resul
     crate::logfile::repair_torn_tail(fs, &layout.log_path())?;
     crate::enroll::sweep_expired_wal(fs, layout, now_millis)?;
 
-    // Sweep the retired device-keypair seed (`identity/device.key`) a pre-flip install left behind —
-    // nothing reads or mints it any more (a device authenticates with its ONE bearer credential), so a
-    // leftover secret file is deleted on sight.
-    let dead_key = layout.identity_dir().join("device.key");
-    if fs.exists(&dead_key) {
-        fs.remove_file(&dead_key)?;
+    // Sweep the retired device-era identity documents on sight: the keypair seed, the pinned
+    // instance, the device credential, the membership roster, and the subscription file — the
+    // SESSION model (`identity/sessions.json` + manifests + the delivery cache) replaced them
+    // all, and a leftover credential is a secret with no reader.
+    for dead in [
+        layout.identity_dir().join("device.key"),
+        layout.instance_path(),
+        layout.credentials_path(),
+        layout.user_path(),
+        layout.follows_path(),
+    ] {
+        if fs.exists(&dead) {
+            fs.remove_file(&dead)?;
+        }
     }
 
     // Sweep any orphaned op-WAL temp (`ops/<op_id>.json.tmp`) a faulted WAL write left — harmless litter

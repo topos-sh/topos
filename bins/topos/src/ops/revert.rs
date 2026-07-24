@@ -16,7 +16,6 @@ use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 use super::contribute::{self, ContributeConnect, REVERT_MESSAGE};
 use super::{VersionRef, resolve_followed_skill_in_workspace, resolve_version_ref, workspace_of};
 use crate::ctx::Ctx;
-use crate::enroll;
 use crate::error::ClientError;
 use crate::plane::WriteReceipt;
 use crate::{op_wal, sidecar};
@@ -63,8 +62,6 @@ pub(crate) fn revert(
         "`--to` must be a 64-char lowercase hex version id (or a unique prefix of at least 8 chars)",
     )?;
 
-    let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or(ClientError::NotEnrolled)?;
-
     // The `--workspace` filter disambiguates a name shared across workspaces; the SIGNED scope is the
     // skill's OWN follow-entry workspace (the forward-revert commit is built against that workspace's live
     // current). You only ever revert a skill you FOLLOW (the fresh-current read needs its read creds), so
@@ -92,7 +89,16 @@ pub(crate) fn revert(
     })?;
     let good_hex = to_hex(&good_commit);
 
-    let transport = connect(&instance.base_url);
+    // The SESSION lane: the skill's own workspace names the session whose credential signs.
+    let all = crate::sessions::read_sessions(ctx.fs, &ctx.layout)?;
+    let lane_session = all
+        .sessions
+        .iter()
+        .find(|s| s.workspace_id == workspace_id)
+        .ok_or_else(|| {
+            ClientError::Enrollment("no session for this workspace — `topos login` it first".into())
+        })?;
+    let transport = connect(&lane_session.base_url, Some(&lane_session.credential));
 
     let kinds = [OpKind::Revert];
     let rec = match op_wal::find_pending_for_skill(

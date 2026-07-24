@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "FollowData",
-  "description": "`follow` (enrollment + first-receive). Each offered skill is a TOFU offer, never auto-landed.\n**INFERRED** (additive-only). All disclosure fields are optional, so an old consumer ignores\nthem.",
+  "title": "LoginData",
+  "description": "`login <workspace-address>` — the SESSION mint + the acceptance disclosure (what connecting\ndelivers). A session = user × workspace × installation, carrying ONE workspace-scoped bearer\ncredential; further workspaces are further logins. Login IS the acceptance: from here delivery\nis silent, npm-style. **INFERRED** (additive-only).",
   "type": "object",
   "properties": {
     "currency": {
-      "description": "The auto-update-trigger outcome, present when completing the enrollment armed the session-start hook\n(a pure follower never runs `add`, so enrollment is where their auto-update gets armed — best-effort:\na degraded config edit is disclosed here, never a rolled-back enrollment).",
+      "description": "The active adapter's auto-update-trigger outcome, when the login armed it.",
       "anyOf": [
         {
           "$ref": "#/$defs/TriggerReport"
@@ -15,11 +15,27 @@
         }
       ]
     },
-    "enrolled": {
-      "type": "boolean"
+    "delivered": {
+      "description": "How many skills the person's profile delivers here right now (the acceptance disclosure;\nbest-effort — absent when the count could not be read).",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "display_name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "name": {
+      "description": "The workspace's ADDRESS name (the slug typed at `login`).",
+      "type": "string"
     },
     "pending": {
-      "description": "Present when `follow` returned a pending device-authorization that needs a human verification step\n(the client's two-call enrollment surface — visit the URL, then re-run `follow`).",
+      "description": "Present while the login awaits the browser approval (re-run `topos login` to resume).",
       "anyOf": [
         {
           "$ref": "#/$defs/EnrollmentPending"
@@ -29,41 +45,39 @@
         }
       ]
     },
-    "plane_base_url": {
-      "description": "The API base URL this machine enrolled against (disclosed from the protocol card — a share\naddress may ride another host; this is where the device actually dials).",
+    "server": {
+      "description": "The API base this installation dials (from the protocol card).",
       "type": [
         "string",
         "null"
       ]
     },
-    "skills": {
-      "description": "First-receive offers — empty when the link is membership-only.",
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/FollowOffer"
-      }
+    "session_id": {
+      "description": "The minted session's id (`sn_…`) — the handle the web sessions pages show.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_status": {
+      "description": "`\"active\"`, `\"pending\"` while the workspace's session-approval knob holds it (no data flows\nuntil an owner approves), or `\"awaiting-approval\"` while the browser approval is pending.",
+      "type": "string"
     },
     "triggers": {
-      "description": "The breadth arming sweep's outcomes — one row per OTHER detected agent whose auto-update\ntrigger was armed alongside the active adapter's (`currency` above). Honest per agent:\n`state`/`currency_kind` follow the same evidence rules every trigger report does, and\n`note` names the consent step still owed (or the docs-level evidence caveat). **Additive.**",
+      "description": "The breadth arming sweep's outcomes (one row per other detected agent).",
       "type": "array",
       "items": {
         "$ref": "#/$defs/BreadthTriggerReport"
       }
     },
-    "workspace_display_name": {
-      "description": "The workspace display name (disclosed at enrollment).",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
     "workspace_id": {
+      "description": "The logged-into workspace's id (empty while the login is still pending approval).",
       "type": "string"
     }
   },
   "required": [
-    "workspace_id",
-    "enrolled"
+    "name",
+    "session_status"
   ],
   "$defs": {
     "BreadthTriggerReport": {
@@ -159,50 +173,12 @@
         "user_code"
       ]
     },
-    "FollowOffer": {
-      "description": "A single skill offered at `follow` — disclosed, awaiting a direct human yes (TOFU). **INFERRED.**",
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string"
-        },
-        "offer": {
-          "$ref": "#/$defs/Offer"
-        },
-        "skill_id": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "skill_id",
-        "name",
-        "offer"
-      ]
-    },
     "HarnessId": {
       "type": "string",
       "enum": [
         "claude-code",
         "openclaw",
         "hermes"
-      ]
-    },
-    "Offer": {
-      "description": "The re-disclosed bytes a `pull` offers (confirm-each / first-receive). **INFERRED fields** — the\nspec pins that the offer re-discloses + re-binds the digest, not its exact shape.",
-      "type": "object",
-      "properties": {
-        "bundle_digest": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
-        },
-        "version_id": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
-        }
-      },
-      "required": [
-        "version_id",
-        "bundle_digest"
       ]
     },
     "TriggerReport": {

@@ -21,7 +21,7 @@ use crate::error::ClientError;
 use crate::plane::{DeliverySource, DeviceAuthPoll, LinkStatus};
 use crate::sessions::{self, SESSION_ACTIVE, SESSION_PENDING, Session};
 
-use super::follow::{EnrollConnect, machine_name, resolve_api_base};
+use super::connect::{EnrollConnect, machine_name, resolve_api_base};
 
 /// Builds a delivery transport for `(base_url, credential, workspace_id)` — the acceptance
 /// disclosure's best-effort delivered count rides it.
@@ -166,11 +166,10 @@ pub(crate) fn login(
     if let Some(wal) = enroll::read_wal(ctx.fs, &ctx.layout)? {
         return match wal.intent {
             enroll::EnrollIntentDoc::Session => resume(ctx, connectors, &wal),
-            enroll::EnrollIntentDoc::Login => Err(ClientError::Enrollment(
-                "a sign-in is in progress; re-run `topos auth login` to finish it first".into(),
-            )),
-            enroll::EnrollIntentDoc::Follow { .. } => Err(ClientError::Enrollment(
-                "an enrollment is in progress; re-run `topos follow` to finish it first".into(),
+            enroll::EnrollIntentDoc::Retired => Err(ClientError::Enrollment(
+                "a retired enrollment flow is on disk — it will be swept when it expires; start \
+                 fresh with `topos login <workspace-address>`"
+                    .into(),
             )),
         };
     }
@@ -223,7 +222,7 @@ fn pending_data(wal: &enroll::PendingEnrollment) -> LoginData {
         pending: Some(EnrollmentPending {
             verification_uri: wal.verification_uri.clone(),
             user_code: wal.user_code.clone(),
-            expires_at: Some(super::follow::fmt_rfc3339_millis(wal.expires_at_millis)),
+            expires_at: Some(super::connect::fmt_rfc3339_millis(wal.expires_at_millis)),
             interval_secs: Some(wal.interval_secs),
         }),
         currency: None,
@@ -562,14 +561,9 @@ mod tests {
 
     struct EmptyDelivery;
     impl DeliverySource for EmptyDelivery {
-        fn workspaces(&self) -> Vec<String> {
-            vec!["w_eng".to_owned()]
-        }
         fn fetch_delivery(&self, _ws: &str) -> Result<DeliverySnapshot, PlaneError> {
             Ok(DeliverySnapshot {
                 skills: Vec::new(),
-                detached: Vec::new(),
-                excluded: Vec::new(),
                 proposals_awaiting: 0,
                 notices: Vec::new(),
                 staleness_window_ms: 1000,

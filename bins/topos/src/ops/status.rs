@@ -17,7 +17,7 @@ use crate::manifest::file::MANIFEST_FILE;
 use crate::manifest::refs::ParsedRef;
 use crate::manifest::resolve::{Layer, LayerSource, ResolvedScope, resolve_layers};
 use crate::manifest::walk;
-use crate::{doc, enroll, sessions};
+use crate::{doc, sessions};
 
 /// The all-zero sentinel a first-receive baseline carries (`follow` lays it; accepting the offer
 /// replaces it) — a followed skill whose sync doc still holds it has a PENDING first-receive offer.
@@ -30,53 +30,44 @@ const ZERO_HEX: &str = "00000000000000000000000000000000000000000000000000000000
 /// An io/doc failure reading the local enrollment/follow documents (the probes this op refuses to
 /// run cannot fail it; a missing doc is a plain "not enrolled", never an error).
 pub(crate) fn status_snapshot(ctx: &Ctx<'_>) -> Result<StatusData, ClientError> {
-    let instance = enroll::read_instance(ctx.fs, &ctx.layout)?;
-    let user = enroll::read_user(ctx.fs, &ctx.layout)?;
-    let signed_in = enroll::read_credentials(ctx.fs, &ctx.layout)?.is_some();
-    let follows = enroll::read_follows(ctx.fs, &ctx.layout)?;
+    let all_sessions = sessions::read_sessions(ctx.fs, &ctx.layout)?;
+    let signed_in = all_sessions.live().count() > 0;
+    let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
 
-    let workspaces: Vec<StatusWorkspace> = user
-        .map(|u| {
-            u.workspaces
-                .into_iter()
-                .map(|m| {
-                    // A non-active link is a status fact (pending = awaiting owner approval;
-                    // ended = relink with `follow <address>`); active omits, keeping the pinned
-                    // shape byte-identical for the common case.
-                    let link_status =
-                        (m.link_status != enroll::LINK_ACTIVE).then(|| m.link_status.clone());
-                    StatusWorkspace {
-                        workspace_id: m.workspace_id,
-                        name: m.name,
-                        display_name: m.display_name,
-                        link_status,
-                    }
-                })
-                .collect()
+    // The connected workspaces ARE the sessions (one row each; a non-active status is the fact).
+    let workspaces: Vec<StatusWorkspace> = all_sessions
+        .sessions
+        .iter()
+        .map(|s| StatusWorkspace {
+            workspace_id: s.workspace_id.clone(),
+            name: s.workspace_name.clone(),
+            display_name: s.display_name.clone(),
+            link_status: (s.status != sessions::SESSION_ACTIVE).then(|| s.status.clone()),
         })
-        .unwrap_or_default();
+        .collect();
 
-    // The active follows (the delivery entitlement this device acts on): following, not excluded
-    // here. A pending FIRST-RECEIVE offer is one whose sync doc still holds the all-zero baseline
-    // (nothing ever materialized). Cheap: one sidecar doc per followed skill; any unreadable doc
-    // makes the count NOT cheaply knowable (absent), never a partial number presented as exact.
+    // The delivered set (the offline cache) — `followed_skills` counts what the profiles deliver;
+    // a NOT-YET-RECONCILED delivery (its sidecar sync doc still at the all-zero baseline) counts
+    // as pending. Any unreadable doc makes the count honestly absent, never a partial number.
     let mut followed = 0u64;
     let mut pending = Some(0u64);
-    for entry in follows.iter().flat_map(|f| f.follows.iter()) {
-        if !entry.following || entry.excluded_here {
-            continue;
-        }
-        followed += 1;
-        let Ok(sid) = crate::id::SkillId::parse(&entry.skill_id) else {
-            pending = None;
-            continue;
-        };
-        match doc::read_doc::<SyncState>(ctx.fs, &ctx.layout.published(&sid).sync) {
-            Ok(Some(sync)) if sync.base_commit == ZERO_HEX => {
-                pending = pending.map(|n| n + 1);
+    for entry in cache.workspaces.values() {
+        for (skill_id, d) in &entry.delivered {
+            if d.withdrawn {
+                continue;
             }
-            Ok(Some(_)) | Ok(None) => {}
-            Err(_) => pending = None,
+            followed += 1;
+            let Ok(sid) = crate::id::SkillId::parse(skill_id) else {
+                pending = None;
+                continue;
+            };
+            match doc::read_doc::<SyncState>(ctx.fs, &ctx.layout.published(&sid).sync) {
+                Ok(Some(sync)) if sync.base_commit == ZERO_HEX => {
+                    pending = pending.map(|n| n + 1);
+                }
+                Ok(Some(_)) | Ok(None) => {}
+                Err(_) => pending = None,
+            }
         }
     }
 
@@ -95,8 +86,8 @@ pub(crate) fn status_snapshot(ctx: &Ctx<'_>) -> Result<StatusData, ClientError> 
 
     Ok(StatusData {
         version: env!("CARGO_PKG_VERSION").to_owned(),
-        enrolled: instance.is_some(),
-        server: instance.map(|i| i.base_url),
+        enrolled: !all_sessions.sessions.is_empty(),
+        server: all_sessions.sessions.first().map(|s| s.base_url.clone()),
         signed_in,
         workspaces,
         followed_skills: followed,
@@ -205,6 +196,7 @@ mod tests {
 
     use super::*;
     use crate::ctx::Ctx;
+    use crate::enroll;
     use crate::fs_seam::RealFs;
     use crate::ids::{RealClock, RealIds};
     use crate::plane::{InertFollow, InertPlane};
@@ -364,10 +356,7 @@ mod tests {
                 host: String::new(),
                 base_url: "https://topos.sh/api".to_owned(),
                 workspace_name: "acme".to_owned(),
-                intent: enroll::EnrollIntentDoc::Follow {
-                    target: None,
-                    mode: enroll::FollowModeDoc::Auto,
-                },
+                intent: enroll::EnrollIntentDoc::Session,
                 device_code: "dc_expired".to_owned(),
                 user_code: "XXXX-YYYY".to_owned(),
                 verification_uri: "https://topos.sh/verify".to_owned(),
@@ -423,90 +412,5 @@ mod tests {
         assert_eq!(data.pending_offers, Some(0));
         assert_eq!(data.version, env!("CARGO_PKG_VERSION"));
         assert!(data.triggers.is_empty());
-    }
-
-    #[test]
-    fn an_enrolled_install_counts_follows_and_the_never_received_offer() {
-        let home = TempHome::new();
-        let fs = RealFs;
-        let layout = Layout::new(&home.0);
-        enroll::write_instance(
-            &fs,
-            &layout,
-            &enroll::Instance {
-                schema_version: PERSISTED_SCHEMA_VERSION,
-                base_url: "https://topos.sh/api".to_owned(),
-            },
-        )
-        .unwrap();
-        let mut user = enroll::UserDoc {
-            schema_version: PERSISTED_SCHEMA_VERSION,
-            ..Default::default()
-        };
-        enroll::upsert_membership(
-            &mut user,
-            enroll::Membership {
-                workspace_id: "w_acme".to_owned(),
-                name: "acme".to_owned(),
-                display_name: "Acme".to_owned(),
-                enrolled_at: 0,
-                link_status: enroll::LINK_ACTIVE.to_owned(),
-            },
-        );
-        enroll::write_user(&fs, &layout, &user).unwrap();
-        // Two follow rows: one live (its sync doc still holds the never-received baseline — a
-        // pending first-receive offer), one excluded on this device (not counted).
-        enroll::write_follows_merged(
-            &fs,
-            &layout,
-            &[
-                enroll::FollowEntry {
-                    skill_id: "s_deploy".to_owned(),
-                    workspace_id: "w_acme".to_owned(),
-                    mode: enroll::FollowModeDoc::Auto,
-                    review_required: false,
-                    following: true,
-                    excluded_here: false,
-                    agents: Vec::new(),
-                    excluded_agents: Vec::new(),
-                },
-                enroll::FollowEntry {
-                    skill_id: "s_laptop_only".to_owned(),
-                    workspace_id: "w_acme".to_owned(),
-                    mode: enroll::FollowModeDoc::Auto,
-                    review_required: false,
-                    following: true,
-                    excluded_here: true,
-                    agents: Vec::new(),
-                    excluded_agents: Vec::new(),
-                },
-            ],
-        )
-        .unwrap();
-        let sid = crate::id::SkillId::parse("s_deploy").unwrap();
-        let sync_path = layout.published(&sid).sync;
-        std::fs::create_dir_all(sync_path.parent().unwrap()).unwrap();
-        doc::write_doc(
-            &fs,
-            &sync_path,
-            &SyncState {
-                schema_version: PERSISTED_SCHEMA_VERSION,
-                observed: 0,
-                observed_version_id: ZERO_HEX.to_owned(),
-                applied: 0,
-                base_commit: ZERO_HEX.to_owned(),
-                work_hash: ZERO_HEX.to_owned(),
-                held: false,
-            },
-        )
-        .unwrap();
-
-        let data = snapshot(&home);
-        assert!(data.enrolled && !data.signed_in);
-        assert_eq!(data.server.as_deref(), Some("https://topos.sh/api"));
-        assert_eq!(data.workspaces.len(), 1);
-        assert_eq!(data.workspaces[0].name, "acme");
-        assert_eq!(data.followed_skills, 1, "the exclusion is not counted");
-        assert_eq!(data.pending_offers, Some(1), "the baseline is the offer");
     }
 }

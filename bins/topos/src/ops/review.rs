@@ -17,11 +17,11 @@ use topos_types::results::{
 };
 use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
+use super::connect::DirectoryConnect;
 use super::contribute::{self, ContributeConnect, ReviewSend};
-use super::follow::{DirectoryConnect, build_universe_via};
+use super::reconcile::SessionConnect;
 use super::{parse_hex32_arg, resolve_followed_skill_in_workspace, workspace_of};
 use crate::ctx::Ctx;
-use crate::enroll;
 use crate::error::ClientError;
 use crate::id::SkillId;
 use crate::plane::WriteReceipt;
@@ -34,8 +34,12 @@ const ZERO_HEX: &str = "00000000000000000000000000000000000000000000000000000000
 /// The seams `review` needs — the directory connector (the inbox / describe reads) and the contribute
 /// connector (the approve/reject/withdraw write).
 pub(crate) struct ReviewConnectors<'a> {
+    #[allow(dead_code)]
     pub directory: &'a DirectoryConnect<'a>,
+    #[allow(dead_code)]
     pub contribute: &'a ContributeConnect<'a>,
+    /// The per-session transports (each read/write rides its session's own credential).
+    pub session: &'a SessionConnect<'a>,
 }
 
 /// The verb's outcome — the inbox (bare), a target describe (target, no verdict), or an applied verdict.
@@ -86,16 +90,21 @@ fn review_inbox(
     connectors: &ReviewConnectors<'_>,
     workspace: Option<&str>,
 ) -> Result<ReviewIndexData, ClientError> {
-    let (base_url, universe) = build_universe_via(ctx, connectors.directory)?;
-    let base_url = base_url.ok_or(ClientError::NotEnrolled)?;
-    // Fold the caller's principal to the canonical form so the outbox match is address-shape-agnostic.
-    let me_principal = enroll::read_user(ctx.fs, &ctx.layout)?
-        .and_then(|u| u.principal)
-        .map(|p| enroll::canonical_principal(&p));
-    let directory = (connectors.directory)(&base_url);
+    let su = super::connect::session_universe(ctx, connectors.session)?;
+    if su.universe.is_empty() {
+        return Err(ClientError::Enrollment(
+            "not connected to a workspace — run `topos login <workspace-address>` first".into(),
+        ));
+    }
+    // The server-computed `yours` is the one authority on the session wire (identity is the
+    // session's user; no principal file exists client-side any more).
+    let me_principal: Option<String> = None;
     let mut inbox = Vec::new();
     let mut outbox = Vec::new();
-    for ws in &universe {
+    for ws in &su.universe {
+        let Some(directory) = su.directory_for(&ws.workspace_id) else {
+            continue;
+        };
         // `--workspace` narrows the inbox to one workspace when the install joined several.
         if workspace.is_some_and(|w| w != ws.workspace_id) {
             continue;
@@ -121,7 +130,7 @@ fn review_inbox(
             let mine = p.yours.unwrap_or_else(|| {
                 me_principal
                     .as_deref()
-                    .is_some_and(|me| me == enroll::canonical_principal(&p.proposer))
+                    .is_some_and(|me| me == crate::sessions::canonical_principal(&p.proposer))
             });
             if mine {
                 outbox.push(entry);
@@ -146,7 +155,6 @@ fn review_describe(
     workspace: Option<&str>,
     budget: super::DiffBudget,
 ) -> Result<ReviewOutcome, ClientError> {
-    let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or(ClientError::NotEnrolled)?;
     // A target is `<skill>` (its one open proposal) or `<skill>@<hash>` (a specific one).
     let (skill_name, wanted_hash) = match target.split_once('@') {
         Some((s, h)) if !s.is_empty() && !h.is_empty() => (s.to_owned(), Some(h.to_owned())),
@@ -157,9 +165,11 @@ fn review_describe(
         }
         None => (target.to_owned(), None),
     };
-    let (id, workspace_id) =
-        resolve_review_skill(ctx, connectors.directory, &skill_name, workspace)?;
-    let directory = (connectors.directory)(&instance.base_url);
+    let (id, workspace_id) = resolve_review_skill(ctx, connectors.session, &skill_name, workspace)?;
+    let su = super::connect::session_universe(ctx, connectors.session)?;
+    let directory = su.directory_for(&workspace_id).ok_or_else(|| {
+        ClientError::Enrollment("no session for this workspace — `topos login` it first".into())
+    })?;
     let index = directory.proposals_index(&workspace_id)?;
     // The proposal on this skill matching the wanted hash, or its SOLE open proposal for a bare skill.
     let mut candidates: Vec<_> = index
@@ -182,13 +192,11 @@ fn review_describe(
     // Whose proposal is this? The server-computed `yours` is authoritative in BOTH directions
     // (resolved user id, never email equality) — a served `false` is never overridden; the principal
     // comparison is the COMPAT fallback ONLY for a server predating the field.
-    let me_principal = enroll::read_user(ctx.fs, &ctx.layout)?
-        .and_then(|u| u.principal)
-        .map(|p| enroll::canonical_principal(&p));
+    let me_principal: Option<String> = None;
     let yours = proposal.yours.unwrap_or_else(|| {
         me_principal
             .as_deref()
-            .is_some_and(|me| me == enroll::canonical_principal(&proposal.proposer))
+            .is_some_and(|me| me == crate::sessions::canonical_principal(&proposal.proposer))
     });
 
     // The diff against current — the same plane-diff machinery `diff` runs (`current..<proposal>`),
@@ -253,7 +261,7 @@ pub(crate) fn review(
     verdict: ReviewVerdict,
     workspace: Option<&str>,
 ) -> Result<ReviewData, ClientError> {
-    let connect = connectors.contribute;
+    let _connect = connectors.contribute;
     // A reject must carry its reason (the plane requires it, and the author is owed one). Refused at the
     // argv boundary, before any resolution or network.
     if let ReviewVerdict::Reject { reason: None } = &verdict {
@@ -275,7 +283,6 @@ pub(crate) fn review(
          `publish --propose` output or `topos list <skill>`)",
     )?;
 
-    let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or(ClientError::NotEnrolled)?;
     // Resolve the proposal's skill (a `--workspace` filter disambiguates a name shared across
     // workspaces). Prefer the STRICT local resolve — a followed skill binds to its OWN follow-entry
     // workspace, and the fresh-current read + candidate fetch use its read creds. When the name matches no
@@ -284,8 +291,7 @@ pub(crate) fn review(
     // `update` sweep has NO follow entry for it, so the exact command `topos review` printed would
     // otherwise fail "no tracked skill" until that sweep. If the catalog read yields nothing (or fails) and
     // the skill is not local either, the "no tracked skill" error stands — the offline behavior is kept.
-    let (id, workspace_id) =
-        resolve_review_skill(ctx, connectors.directory, &skill_name, workspace)?;
+    let (id, workspace_id) = resolve_review_skill(ctx, connectors.session, &skill_name, workspace)?;
     // Teach the READ transport this skill's workspace credential before the downstream
     // `fresh_current` / candidate `fetch_version` reads. A locally FOLLOWED skill is already in the
     // `follows.json`-derived cred map (this is a no-op), but a CATALOG-resolved target (the genesis
@@ -295,7 +301,10 @@ pub(crate) fn review(
     let sp = ctx.layout.published(&id);
     let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, &id)?;
 
-    let transport = connect(&instance.base_url);
+    let su = super::connect::session_universe(ctx, connectors.session)?;
+    let transport = su.contribute_for(&workspace_id).ok_or_else(|| {
+        ClientError::Enrollment("no session for this workspace — `topos login` it first".into())
+    })?;
 
     // This command's WAL kind — the FULL 3-way verdict (approve / reject / withdraw), each a distinct
     // op kind, so a crashed op of a DIFFERENT verdict can never replay this one's stored receipt.
@@ -386,7 +395,7 @@ pub(crate) fn review(
             _ => None,
         },
     };
-    let receipt = contribute::run_write(ctx, &*transport, &sp, &rec, Some(&review_send))?;
+    let receipt = contribute::run_write(ctx, transport, &sp, &rec, Some(&review_send))?;
     map_outcome(ctx, &sp, &rec, &receipt, target, verdict.decision())
 }
 
@@ -509,7 +518,7 @@ fn review_not_open(target: &str) -> ClientError {
 /// [`ClientError::NoSuchSkill`] when it resolves nowhere; any other local-resolution error verbatim.
 fn resolve_review_skill(
     ctx: &Ctx<'_>,
-    directory_connect: &DirectoryConnect<'_>,
+    session: &SessionConnect<'_>,
     skill_name: &str,
     workspace: Option<&str>,
 ) -> Result<(SkillId, String), ClientError> {
@@ -519,7 +528,7 @@ fn resolve_review_skill(
             Ok((id, ws))
         }
         Err(ClientError::NoSuchSkill { name }) => {
-            match resolve_catalog_skill(ctx, directory_connect, &name, workspace)? {
+            match resolve_catalog_skill(ctx, session, &name, workspace)? {
                 Some(found) => Ok(found),
                 None => Err(ClientError::NoSuchSkill { name }),
             }
@@ -535,15 +544,16 @@ fn resolve_review_skill(
 /// also yields `Ok(None)` so the caller keeps the local "no tracked skill" error (the offline behavior).
 fn resolve_catalog_skill(
     ctx: &Ctx<'_>,
-    directory_connect: &DirectoryConnect<'_>,
+    session: &SessionConnect<'_>,
     skill_name: &str,
     workspace: Option<&str>,
 ) -> Result<Option<(SkillId, String)>, ClientError> {
-    // A transport fault or an un-enrolled install means we cannot resolve over the wire — fall back to the
-    // local not-found (a revoked/removed workspace is already skipped by `build_universe_via`).
-    let Ok((_base, universe)) = build_universe_via(ctx, directory_connect) else {
+    // A transport fault or a disconnected install means we cannot resolve over the wire — fall
+    // back to the local not-found (an ended session is already skipped by the universe build).
+    let Ok(su) = super::connect::session_universe(ctx, session) else {
         return Ok(None);
     };
+    let universe = su.universe;
     let mut matches: Vec<(SkillId, String)> = Vec::new();
     for ws in &universe {
         if workspace.is_some_and(|w| w != ws.workspace_id) {

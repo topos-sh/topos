@@ -36,7 +36,6 @@ use crate::placement::{self, AgentScope, ScanStatus};
 use crate::scan::{ScannedBundle, ScannedFile};
 use crate::{doc, sidecar};
 
-use super::agent_scope::{AgentScopeData, AgentScopeItem, AgentScopeOutcome};
 use super::sync_engine;
 
 /// The reserved name — the skill id AND the tracked name AND the placement dir name.
@@ -161,38 +160,6 @@ pub(crate) fn read_state(ctx: &Ctx<'_>) -> Result<BuiltinState, ClientError> {
 pub(crate) fn write_state(ctx: &Ctx<'_>, state: &BuiltinState) -> Result<(), ClientError> {
     ctx.fs.create_dir_all(&ctx.layout.state_dir())?;
     doc::write_doc(ctx.fs, &ctx.layout.builtin_state_path(), state)
-}
-
-/// The built-in's current agent scope, for the shared `--agent` verb implementation.
-pub(crate) fn current_scope(ctx: &Ctx<'_>) -> Result<(Vec<String>, Vec<String>), ClientError> {
-    let st = read_state(ctx)?;
-    Ok((st.agents, st.excluded_agents))
-}
-
-/// Persist a replaced include-list (the `follow --agent` fold — naming a slug also re-includes it;
-/// an EMPTY list is the `'*'` reset to the default placement, dropping the exclusions with it).
-pub(crate) fn set_agents(ctx: &Ctx<'_>, agents: &[String]) -> Result<(), ClientError> {
-    let mut st = read_state(ctx)?;
-    st.agents = agents.to_vec();
-    if agents.is_empty() {
-        st.excluded_agents.clear();
-    } else {
-        st.excluded_agents.retain(|e| !agents.contains(e));
-    }
-    write_state(ctx, &st)
-}
-
-/// Persist added per-agent exclusions (the `unfollow/remove --agent` fold).
-pub(crate) fn add_excluded(ctx: &Ctx<'_>, slugs: &[String]) -> Result<(), ClientError> {
-    let mut st = read_state(ctx)?;
-    for s in slugs {
-        if !st.excluded_agents.contains(s) {
-            st.excluded_agents.push(s.clone());
-        }
-    }
-    st.excluded_agents.sort();
-    st.agents.retain(|a| !slugs.contains(a));
-    write_state(ctx, &st)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -527,155 +494,6 @@ fn create_builtin(ctx: &Ctx<'_>, sid: &SkillId, bundle: &ScannedBundle) -> Resul
 // ---------------------------------------------------------------------------------------------
 // `follow topos` — re-place after a remove / repair in place (rides the agent-scope payload).
 // ---------------------------------------------------------------------------------------------
-
-/// `follow topos [--agent <slug>…]`. On a PRESENT built-in with `--agent` it is the ordinary
-/// scope update (the shared implementation — applies immediately, placement policy only).
-/// Everywhere else it is the two-phase RESTORE: an
-/// opted-out or never-placed built-in comes back (`--yes` lifts the opt-out), and any `--agent`
-/// slugs are recorded as the include-list in the same act — so a scoped follow works as the FIRST
-/// placement and straight after a `remove`, never a refusal pointing at a second command. The
-/// restore is also the ONE consented takeover path: a planned dir occupied by a MARKED downloaded
-/// copy (the public SKILL.md's provenance marker) is disclosed on the describe and adopted by
-/// `--yes` — snapshot-first, then force-synced and managed; an unmarked occupant stays the frozen
-/// Foreign reservation, exactly as under the sweep.
-pub(crate) fn follow_builtin(
-    ctx: &Ctx<'_>,
-    agents: &[String],
-    yes: bool,
-) -> Result<AgentScopeOutcome, ClientError> {
-    let state = read_state(ctx)?;
-    let sid = builtin_sid()?;
-    if !state.removed && ctx.fs.exists(&ctx.layout.skill_dir(&sid)) && !agents.is_empty() {
-        // The scope UPDATE applies immediately (placement policy; `--yes` is a no-op on it).
-        return super::agent_scope::set_scope(ctx, &[BUILTIN_NAME.to_owned()], agents, None);
-    }
-    // The restore path. `--agent '*'` clears; named slugs replace the include-list and re-include
-    // previously excluded ones (the same fold the scope update applies).
-    let clear = agents.iter().any(|a| a == "*");
-    let scope_agents: Vec<String> = if clear {
-        Vec::new()
-    } else if agents.is_empty() {
-        state.agents.clone()
-    } else {
-        agents.to_vec()
-    };
-    let undetected = placement::validate_agent_slugs(ctx, &scope_agents)?;
-    // The same fold the scope update applies: `'*'` is the reset to the DEFAULT placement, so it
-    // drops the per-agent exclusions with the include-list; a named list re-includes exactly the
-    // slugs it names.
-    let scope_excluded: Vec<String> = if clear {
-        Vec::new()
-    } else {
-        state
-            .excluded_agents
-            .iter()
-            .filter(|e| !scope_agents.contains(e))
-            .cloned()
-            .collect()
-    };
-    let sp = ctx.layout.published(&sid);
-    let prior = doc::read_map(ctx.fs, &sp.map)?;
-    let plan = placement::plan_targets(
-        ctx,
-        sid.as_str(),
-        topos_harness::PlacementNaming {
-            name: Some(BUILTIN_NAME),
-            workspace_slug: None,
-        },
-        AgentScope {
-            agents: &scope_agents,
-            excluded: &scope_excluded,
-        },
-        prior.as_ref(),
-        None,
-    );
-    // The planned dirs a consented `--yes` will ADOPT: occupied, never materialized by the
-    // built-in (the record's Foreign posture), and carrying the downloaded copy's marker.
-    let adoptable: Vec<String> = plan
-        .targets
-        .iter()
-        .filter(|t| {
-            let ours = prior.as_ref().is_some_and(|m| {
-                m.placements.iter().zip(&m.placement_state).any(|(d, st)| {
-                    t.dir == std::path::Path::new(d) && st.materialized_sha.is_some()
-                })
-            });
-            !ours && ctx.fs.exists(&t.dir) && is_downloaded_copy(&t.dir)
-        })
-        .map(|t| t.dir.display().to_string())
-        .collect();
-    let recorded: Vec<String> = prior.map(|m| m.placements).unwrap_or_default();
-    let (kept, added): (Vec<_>, Vec<_>) = plan
-        .targets
-        .iter()
-        .map(|t| t.dir.display().to_string())
-        .partition(|d| recorded.contains(d));
-    let mut notes = vec![if state.removed {
-        "the built-in topos skill was removed on this machine — this re-places it".to_owned()
-    } else {
-        "the built-in topos skill is already on this machine — this repairs anything missing"
-            .to_owned()
-    }];
-    for dir in &adoptable {
-        notes.push(format!(
-            "--yes adopts the downloaded copy at {dir}, snapshot-first: its current bytes are \
-             kept in the sidecar store, then the dir is managed and kept current"
-        ));
-    }
-    for slug in &undetected {
-        notes.push(format!(
-            "'{slug}' is not detected on this machine — placement engages when the agent is \
-             detected"
-        ));
-    }
-    let item = AgentScopeItem {
-        skill: BUILTIN_NAME.to_owned(),
-        workspace_id: None,
-        cleaned: Vec::new(),
-        added,
-        kept,
-        notes,
-    };
-    let data = AgentScopeData {
-        action: "restore".to_owned(),
-        agents: scope_agents.clone(),
-        items: vec![item],
-        subscription_note: "the built-in skill ships with the CLI — nothing is followed and the \
-                            plane is never told"
-            .to_owned(),
-        applied: yes,
-        // No undo on the restore: it is a GATED (`--yes`) act — the undo-led receipt belongs to
-        // the immediate arms — and `remove topos` is itself two-phase, so it would not be the
-        // one-command inverse the field promises (nor could it restore a pre-restore scope).
-        undo: Vec::new(),
-    };
-    if !yes {
-        let mut yes_argv = vec![
-            "topos".to_owned(),
-            "follow".to_owned(),
-            BUILTIN_NAME.to_owned(),
-        ];
-        for a in agents {
-            yes_argv.push("--agent".to_owned());
-            yes_argv.push(a.clone());
-        }
-        yes_argv.push("--yes".to_owned());
-        return Ok(AgentScopeOutcome::Described { data, yes_argv });
-    }
-    write_state(
-        ctx,
-        &BuiltinState {
-            removed: false,
-            agents: scope_agents,
-            excluded_agents: scope_excluded,
-            ..state
-        },
-    )?;
-    // The consented act: the same converge the sweep runs, plus the disclosed adoption of a
-    // MARKED downloaded copy (snapshot-first). Unmarked occupants stay frozen.
-    ensure_inner(ctx, &rendered_bundle()?, ForeignPosture::AdoptMarked)?;
-    Ok(AgentScopeOutcome::Applied(data))
-}
 
 /// The placement dirs the built-in actually MATERIALIZED (what `remove topos` and `uninstall`
 /// clean); empty when never placed. An occupied dir the built-in never wrote can sit in the

@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "command": "logout",
+  "ok": true,
+  "data": {
+    "ended": [
+      "acme"
+    ],
+    "server_revoked": true
+  },
+  "warnings": [],
+  "next_actions": []
+}

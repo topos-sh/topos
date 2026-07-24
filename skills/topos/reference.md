@@ -25,63 +25,43 @@ These work before or after any verb.
 topos status
 ```
 
-Show where this install stands — enrollment, sign-in, followed skills, pending first-receive offers, per-agent auto-update trigger state, and the binary version. Entirely offline (nothing is dialed) and read-only (nothing is armed or repaired). A bare `topos` on a TTY renders the same snapshot
+Show where this installation stands — the TRUST RAIL: the resolved table for "an agent here" (per bundle: the winning reference, ONE source manifest, the scope, an honest state), plus the sessions, the auto-update trigger state, and the binary version. Entirely offline (nothing is dialed) and read-only (nothing is armed or repaired). A bare `topos` on a TTY renders the same snapshot
 
 
-### `topos follow`
+### `topos login`
 
 ```
-topos follow [OPTIONS] [TARGETS]...
+topos login [OPTIONS] [ADDRESS]
 ```
 
-Follow a workspace, channel, or skill — enroll if needed, then subscribe. A FIRST-EVER follow is two-phase (a bare invocation DESCRIBES what would land — new bytes are first-trust; `--yes` INSTALLS exactly what its own describe disclosed for the NAMED targets — a workspace target lands the whole delivered set, a channel/skill target only its own; other waiting arrivals stay individually consentable, while already-followed skills still update as on any sweep). Re-following a skill that was ALREADY on your trust surface — removed on this device, or unfollowed — applies immediately and prints its undo. Targets: a workspace address (`https://topos.sh/acme`, or a bare workspace name), a bare SERVER address with no workspace slug (`https://topos.example.com`, or the schemeless `topos.example.com`) — "the workspace that origin addresses", the single-tenant install form, a qualified path (`acme/channels/eng`, `acme/skills/deploy`), or a bare channel/skill name. A first follow enrolls this device: open the printed approval URL in a browser, check the code matches, and approve — the device then holds ONE credential for everything your seats reach. `follow <skill>` on a KNOWN followed skill places its disclosed first-receive offer (or resumes a skill `unfollow` paused). While an enrollment is pending, re-invoking `follow` RESUMES it. On a machine not yet enrolled, a bare NAME (no slash) reads as a workspace on the default server and asks for confirmation before any enrollment starts — a TTY prompts; headless runs pass `--yes` or spell the full `<server>/<workspace>` address
+Log this installation into a workspace — the browser-approval flow mints ONE workspace-scoped SESSION (further workspaces are further logins). The address: a bare workspace name (the default server), a bare server origin ("the workspace that origin addresses" — self-hosted installs), `<server>/<workspace>`, or an invitation URL from the invite mail. Login is the acceptance: the receipt states what connecting delivers; from then on updates arrive silently. Re-invoking `login` RESUMES a pending approval
 
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
-| `[TARGETS]...` |  |  | The follow targets (addresses, qualified paths, or names). Omitted, it resumes a pending enrollment |
-| `--channel` | `<NAME>` |  | Follow a channel by name (repeatable; kind-forced) |
-| `--skill` | `<NAME>` |  | Follow a specific skill by name (repeatable; kind-forced) |
-| `--agent` | `<SLUG>` |  | Scope a followed skill's placement to these agents on THIS device (registry slugs; repeatable; `'*'` restores the default placement, clearing the include-list and any per-agent exclusions). Placement policy only — the subscription is untouched and the server is never told. Applies immediately; the receipt shows what landed/cleaned/stayed and the undo |
-| `--yes` |  |  | Apply a described subscription (the one-shot consent for a first-ever follow / enrollment). Accepted as a no-op on the arms that apply immediately |
-| `--manual` |  |  | Adopt followed skills in confirm-each mode (a one-tap accept per new version) instead of auto |
-| `--wait` | `<SECONDS>` |  | Block until the browser approval settles, finishing enrollment in ONE command. Bare `--wait` waits until the code expires; `--wait <seconds>` caps the wait. Put `--wait` AFTER any positional. A TTY blocks by default; a PIPED run without `--wait` prints the approval URL and returns immediately — re-invoke `follow` to poll, or pass `--wait` to block |
+| `[ADDRESS]` |  |  | The workspace address. Omitted, it resumes a pending login |
+| `--wait` | `<SECONDS>` |  | Block until the browser approval settles in ONE command. Bare `--wait` waits until the code expires; `--wait <seconds>` caps the wait. A TTY blocks by default; a PIPED run without `--wait` prints the approval URL and returns — re-invoke to poll |
 
 
-### `topos unfollow`
+### `topos logout`
 
 ```
-topos unfollow [OPTIONS] [TARGETS]...
+topos logout [OPTIONS]
 ```
 
-Stop following a skill or channel. A SKILL unfollow applies immediately and prints its undo (`topos follow <skill>` re-attaches); a CHANNEL unfollow is two-phase (bare describes which skills stop — the union math decides; `--yes` applies). Delivery ends on EVERY device of yours; local copies are KEPT as frozen copies (nothing is deleted). A workspace cannot be left here (that is a web action), and the structural `everyone` cannot be left at all
+End this installation's session(s): the server-side revoke per session, then the local sign-out (which proceeds regardless — the receipt reports the server outcome honestly). Skills, drafts, and manifests stay; `topos login <address>` starts a fresh session
 
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
-| `[TARGETS]...` |  |  | The channel/skill name(s) (or qualified paths) to stop following |
-| `--channel` | `<NAME>` |  | Unfollow a channel by name (repeatable; kind-forced) |
-| `--skill` | `<NAME>` |  | Unfollow a specific skill by name (repeatable; kind-forced) |
-| `--agent` | `<SLUG>` |  | Stop placing a followed skill into these agents on THIS device (registry slugs; repeatable). The subscription is untouched (no server call) — the agent's dir is cleaned (any edit snapshotted first) and a per-agent exclusion is recorded, immediately (the receipt carries the undo). Same behavior as `remove <skill> --agent <slug>` |
-| `--yes` |  |  | Apply a described channel detach (the one-shot consent). Accepted as a no-op on a skill unfollow (which applies immediately) |
+| `--all` |  |  | End EVERY session on this installation |
 
 
-### `topos update`
+### `topos init`
 
 ```
-topos update [OPTIONS] [TARGETS]...
+topos init
 ```
 
-Check for and apply updates to followed skills — the harness auto-update entry point. Bare = the sweep over every followed skill (the installed auto-update trigger runs `update --quiet`). `<skill>` accepts a pending update for one skill (or resumes a held one); `<skill>@<hash>` goes back to that version
-
-| Argument / flag | Value | Default | Description |
-|---|---|---|---|
-| `[TARGETS]...` |  |  | Optional target(s): `<name>` accepts a pending update / resumes a hold / resolves a divergence; `<name>@<hash>` goes back to that version's bytes. Omitted = sweep every followed skill |
-| `--channel` | `<NAME>` |  | Update only this channel's skills (repeatable). Lands with the full resolution grammar |
-| `--skill` | `<NAME>` |  | Update only this skill (repeatable). Lands with the full resolution grammar |
-| `--reset` |  |  | Reset a followed skill to `current`, dropping local edits. Lands with the loss-led describe |
-| `--yes` |  |  | Apply without the describe step. Parses today; the two-phase describe lands later |
-| `--onto-current` |  |  | Resolve a diverged draft the OTHER way: commit YOUR bytes straight onto `current`, DROPPING the pending three-way merge (the changes it would have merged are disclosed first). Requires exactly one `<skill>` target. Use when you want your version to win outright |
-| `--quiet` |  |  | Emit nothing on stdout (the session-start hook's stdout is injected into the session). Errors still go to stderr with a non-zero exit. Overrides `--json` |
-| `--ttl` | `<SECONDS>` |  | The quiet sweep's self-throttle window in seconds (`--quiet` only): a bare quiet sweep within this window of the last completed sweep is a silent no-op, so hooks may fire on every session event cheaply. `0` disables the throttle for this run. Default 300; `TOPOS_UPDATE_TTL` overrides the default. An explicit non-quiet `topos update` always runs the full sweep |
+Create this folder's `topos.toml` — the project MANIFEST `add`/`remove` edit and `update`/`status` resolve (committed with the repo, it travels: every teammate's agents get the same set here). Any folder, git or not; outside a shared repo the receipt notes the file stays local. An existing manifest is a clean no-op, never overwritten
 
 
 ### `topos add`
@@ -112,9 +92,26 @@ Remove skills from this machine (or from specific agents). A followed skill beco
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
 | `[SKILL]...` |  |  | The skill name(s) to remove |
-| `-a, --agent` | `<SLUG>` |  | Remove only from these agents (harness slugs; repeatable; `'*'` = all). On a followed skill this is the per-agent exclusion — applied immediately, undo on the receipt |
 | `-g, --global` |  |  | Edit your server-stored PROFILE for the workspace the reference resolves to instead of this folder's manifest — delivery stops on every machine you log in; when a channel or the baseline still provides it, an exclude line is recorded (the receipt says which) |
 | `--yes` |  |  | Apply a described removal (a draft's loss-guard, or a permanent local delete). Accepted as a no-op on a followed clean skill (which applies immediately) |
+
+
+### `topos update`
+
+```
+topos update [OPTIONS] [TARGETS]...
+```
+
+Reconcile this machine against the manifests covering the current directory and your per-workspace profiles — the harness auto-update entry point (the installed trigger runs `update --quiet`). Bare = the full sweep; `<name>` reconciles one resolved line; `<skill>@<hash>` goes back to that version's local bytes
+
+| Argument / flag | Value | Default | Description |
+|---|---|---|---|
+| `[TARGETS]...` |  |  | Optional target(s): a resolved manifest name to reconcile; `<name>@<hash>` goes back to that version's bytes. Omitted = the full sweep |
+| `--reset` |  |  | Reset a followed skill to `current`, dropping local edits. Lands with the loss-led describe |
+| `--yes` |  |  | Apply without the describe step. Parses today; the two-phase describe lands later |
+| `--onto-current` |  |  | Resolve a diverged draft the OTHER way: commit YOUR bytes straight onto `current`, DROPPING the pending three-way merge (the changes it would have merged are disclosed first). Requires exactly one `<skill>` target. Use when you want your version to win outright |
+| `--quiet` |  |  | Emit nothing on stdout (the session-start hook's stdout is injected into the session). Errors still go to stderr with a non-zero exit. Overrides `--json` |
+| `--ttl` | `<SECONDS>` |  | The quiet sweep's self-throttle window in seconds (`--quiet` only): a bare quiet sweep within this window of the last completed sweep is a silent no-op, so hooks may fire on every session event cheaply. `0` disables the throttle for this run. Default 300; `TOPOS_UPDATE_TTL` overrides the default. An explicit non-quiet `topos update` always runs the full sweep |
 
 
 ### `topos list`
@@ -174,7 +171,7 @@ Show a skill's local action log + embedded-git history
 topos publish [OPTIONS] <TARGET>
 ```
 
-Ship a draft to the team, ADDING the skill to topos first if it isn't tracked yet. `publish` moves `current` to your draft (or genesis-creates a never-published skill); `--propose` opens a PR without moving `current`. Pin the bytes with an optional `@<digest>` suffix. Needs enrollment — un-enrolled, it refuses with "run `topos follow <workspace-address>` first". Roster-gated
+Ship a draft to the team, ADDING the skill to topos first if it isn't tracked yet — and TRANSFERRING GOVERNANCE by default: a landed publish rewrites a manifest's local-path line to the governed workspace reference. `--propose` opens a PR without moving `current`; pin the bytes with an optional `@<digest>` suffix. Needs a session — run `topos login <workspace-address>` first. Roster-gated
 
 | Argument / flag | Value | Default | Description |
 |---|---|---|---|
@@ -217,20 +214,6 @@ Undo a release for the TEAM: move `current` to the older version named by `--to`
 | `<SKILL>` |  |  | The skill to revert |
 | `--to` | `<TO>` |  | The GOOD version id (64-char hex, or a unique ≥8-char prefix) to restore — the destination, NOT the bad version |
 | `--yes` |  |  | Apply the described revert; also acknowledges a no-op (good's bytes already are `current`). Bare = describe only |
-
-
-### `topos channel`
-
-```
-topos channel [OPTIONS] [ARGS]...
-```
-
-Group skills into channels. `channel add <channel> <skill>...` places a skill's reference into a channel (created on first placement); `channel remove <channel> <skill>...` removes it. Curated channels need reviewer+
-
-| Argument / flag | Value | Default | Description |
-|---|---|---|---|
-| `[ARGS]...` |  |  | The channel subcommand and its args: `add <channel> <skill>...` or `remove <channel> <skill>...` |
-| `--yes` |  |  | Apply without the describe step. Parses today; the two-phase describe lands later |
 
 
 ### `topos protect`
@@ -285,34 +268,7 @@ Update the `topos` binary itself to the latest release, verifying the download's
 topos auth <COMMAND>
 ```
 
-Manage this install's sign-in: `auth login [<server>]`, `auth logout`, `auth status`
-
-
-#### `topos auth login`
-
-```
-topos auth login [OPTIONS] [SERVER_URL]
-```
-
-Re-enroll this machine (the same browser-approval device flow `follow` runs, minus a follow target): approve in the browser and this device's ONE credential is re-minted — it covers every workspace your seats reach. On an already-enrolled install the new credential REPLACES the stored one. An optional `<server>` names the server (default https://topos.sh; TOPOS_PLANE_URL overrides). A never-enrolled install joins with `topos follow <workspace-address>` instead
-
-| Argument / flag | Value | Default | Description |
-|---|---|---|---|
-| `[SERVER_URL]` |  |  | The server URL to sign in to (optional; the enrolled plane, else the hosted default) |
-| `--wait` | `<SECONDS>` |  | Block until the browser approval settles in ONE command. Bare `--wait` waits until the code expires; `--wait <seconds>` caps the wait. A TTY blocks by default; a PIPED run without `--wait` prints the approval URL and returns — re-invoke to poll |
-
-
-#### `topos auth logout`
-
-```
-topos auth logout [OPTIONS]
-```
-
-Sign out of this install: ONE server-side revoke signs this device out everywhere (every linked workspace at once), then the stored credential is deleted — skills, follows, and drafts stay. Two-phase (bare describes; `--yes` applies)
-
-| Argument / flag | Value | Default | Description |
-|---|---|---|---|
-| `--yes` |  |  | Apply the described sign-out |
+Inspect this installation's sign-in state: `auth status`
 
 
 #### `topos auth status`
@@ -321,7 +277,7 @@ Sign out of this install: ONE server-side revoke signs this device out everywher
 topos auth status
 ```
 
-Show who you are, per-workspace access health, hook health, and reporting posture. Side-effect-free
+Show who you are, per-workspace session health, hook health, and reporting posture. Side-effect-free
 
 
 ### `topos uninstall`

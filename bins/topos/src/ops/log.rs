@@ -12,19 +12,23 @@ use std::collections::HashSet;
 use serde_json::{Value, json};
 use topos_gitstore::Store;
 
-use super::follow::{DirectoryConnect, build_universe_via};
+use super::connect::DirectoryConnect;
+use super::reconcile::SessionConnect;
 use super::{parse_hex32, resolve_skill};
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::resolve::{self, Resolution, ResourceKind};
-use crate::{enroll, identity, logfile, sidecar::Layout};
+use crate::{identity, logfile, sidecar::Layout};
 use topos_core::digest::to_hex;
 use topos_types::requests::{WireLogProposal, WireLogVersion};
 use topos_types::results::LogData;
 
 /// The seam `log` needs — the directory connector reads the plane-side history.
 pub(crate) struct LogConnectors<'a> {
+    #[allow(dead_code)]
     pub directory: &'a DirectoryConnect<'a>,
+    /// The per-session transports (each read rides its session's own credential).
+    pub session: &'a SessionConnect<'a>,
 }
 
 /// History for `skill`: the local action events + git versions, then (when followed + enrolled) the
@@ -42,15 +46,14 @@ pub(crate) fn log(
 ) -> Result<LogData, ClientError> {
     // A CHANNEL target (resolved through the grammar) is a web surface — refuse it toward the web before
     // the local skill resolution swallows it as a not-found.
-    if let Ok((base_url, universe)) = build_universe_via(ctx, connectors.directory)
+    if let Ok(su) = super::connect::session_universe(ctx, connectors.session)
         && let Ok(parsed) = resolve::parse_target(skill)
         && let Ok(Some(Resolution::Resource {
             kind: ResourceKind::Channel,
             name,
             ..
-        })) = resolve::resolve_one(&universe, &parsed, resolve::KindScope::CHANNELS)
+        })) = resolve::resolve_one(&su.universe, &parsed, resolve::KindScope::CHANNELS)
     {
-        let _ = base_url;
         return Err(ClientError::InvalidArgument(format!(
             "'{name}' is a channel — a channel's curation history lives on the web, not in `topos \
              log` (which shows a skill's version history)"
@@ -93,9 +96,9 @@ pub(crate) fn log(
     let mut plane_proposals: Vec<Value> = Vec::new();
     let mut plane_version_ids: HashSet<String> = HashSet::new();
     if let Some(workspace_id) = super::followed_workspace(ctx, id.as_str())
-        && let Some(instance) = enroll::read_instance(ctx.fs, &ctx.layout)?
+        && let Ok(su) = super::connect::session_universe(ctx, connectors.session)
+        && let Some(directory) = su.directory_for(&workspace_id)
     {
-        let directory = (connectors.directory)(&instance.base_url);
         // Best-effort: a transport fault or a not-found leaves the local log intact.
         if let Ok(plane) = directory.skill_log(&workspace_id, id.as_str()) {
             // The archived-successor hint when the skill was resolved by its FREED base name.

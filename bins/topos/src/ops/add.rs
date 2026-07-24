@@ -18,7 +18,6 @@ use topos_types::persisted::{Lock, LockedFile, PlacementMap, SwapCapability, Syn
 use topos_types::results::{AddData, KeepAsYoursData, KeepReason, SkillOrigin, UntrackedEntry};
 
 use crate::ctx::Ctx;
-use crate::enroll;
 use crate::error::ClientError;
 use crate::git_source::{GitTarballSource, RepoFile, extract_tree};
 use crate::id::SkillId;
@@ -453,11 +452,14 @@ pub(crate) fn keep_as_yours(
         }
         Err(e) => return Err(e),
     };
-    // Only a FOLLOWED skill can be withdrawn/detached — a purely-local (genesis) skill is not a fork case.
-    let follows = enroll::read_follows(ctx.fs, &ctx.layout)?
-        .map(|f| f.follows)
-        .unwrap_or_default();
-    let Some(entry) = follows.iter().find(|f| f.skill_id == sid.as_str()) else {
+    // Only a DELIVERED skill can be withdrawn/detached — the offline delivery cache is the
+    // session-model record; a purely-local (genesis) skill is not a fork case.
+    let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
+    let Some((entry_ws, entry)) = cache.workspaces.iter().find_map(|(ws, e)| {
+        e.delivered
+            .get(sid.as_str())
+            .map(|d| (ws.clone(), d.clone()))
+    }) else {
         return Ok(None);
     };
     // Placement state: a withdrawal / exclusion CLEANED the agent dirs; a detach (unfollow) LEFT them.
@@ -467,13 +469,9 @@ pub(crate) fn keep_as_yours(
         .unwrap_or_default();
     let present = placements.iter().any(|p| ctx.fs.exists(Path::new(p)));
 
-    // The retained reason — or NOT a fork case (a live followed skill stays the ordinary already-tracked
-    // answer; `!following` outranks the rest, then the per-device exclusion, then an upstream withdrawal).
-    let reason = if !entry.following {
-        KeepReason::Detached
-    } else if entry.excluded_here {
-        KeepReason::RemovedHere
-    } else if !present {
+    // The retained reason — or NOT a fork case (a live delivered skill stays the ordinary
+    // already-tracked answer; a WITHDRAWN cache row or a cleaned placement is the retained state).
+    let reason = if entry.withdrawn || !present {
         KeepReason::WithdrawnUpstream
     } else {
         return Ok(None);
@@ -491,7 +489,7 @@ pub(crate) fn keep_as_yours(
         return Ok(Some(KeepAsYoursOutcome::Described {
             data: KeepAsYoursData {
                 name: name.to_owned(),
-                workspace_id: Some(entry.workspace_id.clone()),
+                workspace_id: Some(entry_ws.clone()),
                 reason,
                 has_draft,
             },
@@ -647,7 +645,6 @@ fn retained_head(store: &Store, base: [u8; 32]) -> Result<RetainedTree, ClientEr
 /// bytes as a new local skill, so the old (ghost) entry must go before the re-adopt (else the
 /// already-tracked guard refuses the path) and so `list` stops showing a detached ghost afterward.
 fn retire_tracked(ctx: &Ctx<'_>, sid: &SkillId) -> Result<(), ClientError> {
-    enroll::remove_follow(ctx.fs, &ctx.layout, sid.as_str())?;
     let skill_dir = ctx.layout.skill_dir(sid);
     if ctx.fs.exists(&skill_dir) {
         ctx.fs.remove_dir_all(&skill_dir)?;

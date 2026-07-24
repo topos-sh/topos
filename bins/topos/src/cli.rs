@@ -1,17 +1,14 @@
 //! The `clap` surface. Thin: it only parses argv; every verb's logic lives in the lib over the seams.
 //!
-//! The behavior verbs are grouped by SCOPE — self-scoped (affect only your machine), team-scoped (change
-//! shared state), and maintenance. The reshaped verbs run the FULL resolution grammar
-//! (`crate::resolve`); the two-phase describe/`--yes` flow gates only acts with REACH (touch other
-//! people), LOSS (destroy unrecoverable local work), or FIRST-TRUST (bytes/credentials land
-//! somewhere new) — a first-ever `follow`, a channel `unfollow`, a permanent/draft-guarded
-//! `remove`, `channel add/remove`, `protect`, the review describe, `invite`, `update --reset`,
-//! `publish`'s describe, `auth logout`, `uninstall`. Self-scoped reversible arms (the `--agent`
-//! scope verbs, a skill `unfollow`, a followed clean `remove`, a re-follow of a previously-followed
-//! skill) apply immediately and print an undo-led receipt; `--yes` stays an accepted no-op there.
-//! A few tails still parse here and refuse with a marked seam at dispatch (see `ops::not_yet`): the
-//! `update`/`list` `--channel`/`--skill` selectors + multi-target, `add`'s `'*'`
-//! (all-skills/all-agents) selector, and the keep-as-yours re-adopt.
+//! The MANIFEST-MODEL verb surface: `login`/`logout` manage this installation's workspace
+//! sessions; `init` creates a folder's `topos.toml`; `add`/`remove` edit the nearest manifest
+//! (`-g` = the server-stored profile of the workspace the reference resolves to); `update` is the
+//! reconcile (targeted forms + the `--quiet` sweep); `status` is the offline trust rail;
+//! `publish`/`review`/`revert`/`protect`/`invite` are the workspace governance verbs; the utility
+//! verbs (`list`, `diff`, `log`, `self-update`, `uninstall`, `auth status`) persist. Two-phase
+//! describe/`--yes` gates the acts with REACH or LOSS (`publish`'s describe, `review`'s verdicts,
+//! `revert`, `protect`, `invite`, `update --reset`, a permanent `remove`, `uninstall`); manifest
+//! edits apply immediately with an undo-led receipt (`--yes` an accepted no-op).
 
 use clap::{Parser, Subcommand};
 
@@ -49,101 +46,21 @@ pub(crate) struct Cli {
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
     // ---- Self-scoped (affect only you) ----
-    /// Show where this install stands — enrollment, sign-in, followed skills, pending
-    /// first-receive offers, per-agent auto-update trigger state, and the binary version.
+    /// Show where this installation stands — the TRUST RAIL: the resolved table for "an agent
+    /// here" (per bundle: the winning reference, ONE source manifest, the scope, an honest
+    /// state), plus the sessions, the auto-update trigger state, and the binary version.
     /// Entirely offline (nothing is dialed) and read-only (nothing is armed or repaired).
     /// A bare `topos` on a TTY renders the same snapshot.
     Status,
-    /// Follow a workspace, channel, or skill — enroll if needed, then subscribe. A FIRST-EVER
-    /// follow is two-phase (a bare invocation DESCRIBES what would land — new bytes are
-    /// first-trust; `--yes` INSTALLS exactly what its own describe disclosed for the NAMED
-    /// targets — a workspace target lands the whole delivered set, a channel/skill target only
-    /// its own; other waiting arrivals stay individually consentable, while already-followed
-    /// skills still update as on any sweep). Re-following a skill that was ALREADY on your trust
-    /// surface — removed on this device, or unfollowed — applies immediately and prints its undo.
-    /// Targets: a workspace address
-    /// (`https://topos.sh/acme`, or a bare workspace name), a bare SERVER address with no workspace
-    /// slug (`https://topos.example.com`, or the schemeless `topos.example.com`) — "the workspace
-    /// that origin addresses", the single-tenant install form, a qualified path
-    /// (`acme/channels/eng`, `acme/skills/deploy`), or a bare channel/skill name. A first follow
-    /// enrolls this device: open the printed approval URL in a browser, check the code matches, and
-    /// approve — the device then holds ONE credential for everything your seats reach. `follow
-    /// <skill>` on a KNOWN followed skill places its disclosed first-receive offer (or resumes a
-    /// skill `unfollow` paused). While an enrollment is pending, re-invoking `follow` RESUMES it.
-    /// On a machine not yet enrolled, a bare NAME (no slash) reads as a workspace on the default
-    /// server and asks for confirmation before any enrollment starts — a TTY prompts; headless
-    /// runs pass `--yes` or spell the full `<server>/<workspace>` address.
-    Follow {
-        /// The follow targets (addresses, qualified paths, or names). Omitted, it resumes a
-        /// pending enrollment.
-        targets: Vec<String>,
-        /// Follow a channel by name (repeatable; kind-forced).
-        #[arg(long, value_name = "NAME")]
-        channel: Vec<String>,
-        /// Follow a specific skill by name (repeatable; kind-forced).
-        #[arg(long, value_name = "NAME")]
-        skill: Vec<String>,
-        /// Scope a followed skill's placement to these agents on THIS device (registry slugs;
-        /// repeatable; `'*'` restores the default placement, clearing the include-list and any
-        /// per-agent exclusions). Placement policy only — the
-        /// subscription is untouched and the server is never told. Applies immediately; the
-        /// receipt shows what landed/cleaned/stayed and the undo.
-        #[arg(long, value_name = "SLUG")]
-        agent: Vec<String>,
-        /// Apply a described subscription (the one-shot consent for a first-ever follow /
-        /// enrollment). Accepted as a no-op on the arms that apply immediately.
-        #[arg(long)]
-        yes: bool,
-        /// Adopt followed skills in confirm-each mode (a one-tap accept per new version) instead of auto.
-        #[arg(long)]
-        manual: bool,
-        /// Block until the browser approval settles, finishing enrollment in ONE command. Bare `--wait`
-        /// waits until the code expires; `--wait <seconds>` caps the wait. Put `--wait` AFTER any positional.
-        /// A TTY blocks by default; a PIPED run without `--wait` prints the approval URL and returns
-        /// immediately — re-invoke `follow` to poll, or pass `--wait` to block.
-        #[arg(long, value_name = "SECONDS", num_args = 0..=1)]
-        wait: Option<Option<u64>>,
-    },
-    /// Stop following a skill or channel. A SKILL unfollow applies immediately and prints its
-    /// undo (`topos follow <skill>` re-attaches); a CHANNEL unfollow is two-phase (bare describes
-    /// which skills stop — the union math decides; `--yes` applies). Delivery ends on EVERY
-    /// device of yours; local copies are KEPT as frozen copies (nothing is deleted). A workspace
-    /// cannot be left here (that is a web action), and the structural `everyone` cannot be left
-    /// at all.
-    Unfollow {
-        /// The channel/skill name(s) (or qualified paths) to stop following.
-        targets: Vec<String>,
-        /// Unfollow a channel by name (repeatable; kind-forced).
-        #[arg(long, value_name = "NAME")]
-        channel: Vec<String>,
-        /// Unfollow a specific skill by name (repeatable; kind-forced).
-        #[arg(long, value_name = "NAME")]
-        skill: Vec<String>,
-        /// Stop placing a followed skill into these agents on THIS device (registry slugs;
-        /// repeatable). The subscription is untouched (no server call) — the agent's dir is cleaned
-        /// (any edit snapshotted first) and a per-agent exclusion is recorded, immediately (the
-        /// receipt carries the undo). Same behavior as `remove <skill> --agent <slug>`.
-        #[arg(long, value_name = "SLUG")]
-        agent: Vec<String>,
-        /// Apply a described channel detach (the one-shot consent). Accepted as a no-op on a
-        /// skill unfollow (which applies immediately).
-        #[arg(long)]
-        yes: bool,
-    },
-    /// Check for and apply updates to followed skills — the harness auto-update entry point. Bare = the sweep
-    /// over every followed skill (the installed auto-update trigger runs `update --quiet`). `<skill>` accepts a
-    /// pending update for one skill (or resumes a held one); `<skill>@<hash>` goes back to that version.
+    /// Reconcile this machine against the manifests covering the current directory and your
+    /// per-workspace profiles — the harness auto-update entry point (the installed trigger runs
+    /// `update --quiet`). Bare = the full sweep; `<name>` reconciles one resolved line;
+    /// `<skill>@<hash>` goes back to that version's local bytes.
     #[command(alias = "pull")]
     Update {
-        /// Optional target(s): `<name>` accepts a pending update / resumes a hold / resolves a divergence;
-        /// `<name>@<hash>` goes back to that version's bytes. Omitted = sweep every followed skill.
+        /// Optional target(s): a resolved manifest name to reconcile; `<name>@<hash>` goes back
+        /// to that version's bytes. Omitted = the full sweep.
         targets: Vec<String>,
-        /// Update only this channel's skills (repeatable). Lands with the full resolution grammar.
-        #[arg(long, value_name = "NAME")]
-        channel: Vec<String>,
-        /// Update only this skill (repeatable). Lands with the full resolution grammar.
-        #[arg(long, value_name = "NAME")]
-        skill: Vec<String>,
         /// Reset a followed skill to `current`, dropping local edits. Lands with the loss-led describe.
         #[arg(long)]
         reset: bool,
@@ -233,10 +150,6 @@ pub(crate) enum Command {
     Remove {
         /// The skill name(s) to remove.
         skill: Vec<String>,
-        /// Remove only from these agents (harness slugs; repeatable; `'*'` = all). On a followed
-        /// skill this is the per-agent exclusion — applied immediately, undo on the receipt.
-        #[arg(long, short = 'a', value_name = "SLUG")]
-        agent: Vec<String>,
         /// Edit your server-stored PROFILE for the workspace the reference resolves to instead of
         /// this folder's manifest — delivery stops on every machine you log in; when a channel or
         /// the baseline still provides it, an exclude line is recorded (the receipt says which).
@@ -305,10 +218,11 @@ pub(crate) enum Command {
     },
 
     // ---- Team-scoped ----
-    /// Ship a draft to the team, ADDING the skill to topos first if it isn't tracked yet. `publish` moves
-    /// `current` to your draft (or genesis-creates a never-published skill); `--propose` opens a PR without
-    /// moving `current`. Pin the bytes with an optional `@<digest>` suffix. Needs enrollment — un-enrolled,
-    /// it refuses with "run `topos follow <workspace-address>` first". Roster-gated.
+    /// Ship a draft to the team, ADDING the skill to topos first if it isn't tracked yet — and
+    /// TRANSFERRING GOVERNANCE by default: a landed publish rewrites a manifest's local-path line
+    /// to the governed workspace reference. `--propose` opens a PR without moving `current`; pin
+    /// the bytes with an optional `@<digest>` suffix. Needs a session — run `topos login
+    /// <workspace-address>` first. Roster-gated.
     Publish {
         /// The skill to publish: a tracked NAME, an untracked `<skill>` / `<skill>@<harness>` to adopt from
         /// discovery, or a `<dir>` to adopt in place — optionally pinned as `<source>@<digest>`.
@@ -372,17 +286,6 @@ pub(crate) enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Group skills into channels. `channel add <channel> <skill>...` places a skill's reference into a
-    /// channel (created on first placement); `channel remove <channel> <skill>...` removes it. Curated
-    /// channels need reviewer+.
-    Channel {
-        /// The channel subcommand and its args: `add <channel> <skill>...` or `remove <channel> <skill>...`.
-        #[arg(value_name = "ARGS")]
-        args: Vec<String>,
-        /// Apply without the describe step. Parses today; the two-phase describe lands later.
-        #[arg(long)]
-        yes: bool,
-    },
     /// Set a skill's (or channel's) protection level. Bare tightens to `reviewed` (skill) / `curated`
     /// (channel) — reviewer+; `open` loosens it back — owner.
     Protect {
@@ -426,7 +329,7 @@ pub(crate) enum Command {
         #[arg(long, value_name = "TAG")]
         version: Option<String>,
     },
-    /// Manage this install's sign-in: `auth login [<server>]`, `auth logout`, `auth status`.
+    /// Inspect this installation's sign-in state: `auth status`.
     Auth {
         #[command(subcommand)]
         cmd: AuthCmd,
@@ -449,34 +352,11 @@ pub(crate) enum Command {
     Upgrade,
 }
 
-/// The `auth` sign-in subcommands.
+/// The `auth` subcommands — `status` is the one that remains (sessions are managed by the
+/// top-level `login`/`logout`).
 #[derive(Debug, Subcommand)]
 pub(crate) enum AuthCmd {
-    /// Re-enroll this machine (the same browser-approval device flow `follow` runs, minus a follow
-    /// target): approve in the browser and this device's ONE credential is re-minted — it covers
-    /// every workspace your seats reach. On an already-enrolled install the new credential REPLACES
-    /// the stored one. An optional `<server>` names the server (default https://topos.sh;
-    /// TOPOS_PLANE_URL overrides). A never-enrolled install joins with `topos follow
-    /// <workspace-address>` instead.
-    Login {
-        /// The server URL to sign in to (optional; the enrolled plane, else the hosted default).
-        #[arg(value_name = "SERVER_URL")]
-        server_url: Option<String>,
-        /// Block until the browser approval settles in ONE command. Bare `--wait` waits until the
-        /// code expires; `--wait <seconds>` caps the wait. A TTY blocks by default; a PIPED run
-        /// without `--wait` prints the approval URL and returns — re-invoke to poll.
-        #[arg(long, value_name = "SECONDS", num_args = 0..=1)]
-        wait: Option<Option<u64>>,
-    },
-    /// Sign out of this install: ONE server-side revoke signs this device out everywhere (every
-    /// linked workspace at once), then the stored credential is deleted — skills, follows, and
-    /// drafts stay. Two-phase (bare describes; `--yes` applies).
-    Logout {
-        /// Apply the described sign-out.
-        #[arg(long)]
-        yes: bool,
-    },
-    /// Show who you are, per-workspace access health, hook health, and reporting posture.
+    /// Show who you are, per-workspace session health, hook health, and reporting posture.
     /// Side-effect-free.
     Status,
 }
@@ -489,8 +369,6 @@ impl Command {
             Command::Login { .. } => "login",
             Command::Logout { .. } => "logout",
             Command::Init => "init",
-            Command::Follow { .. } => "follow",
-            Command::Unfollow { .. } => "unfollow",
             // `pull` is a hidden alias of `update` — the envelope always reads "update".
             Command::Update { .. } => "update",
             Command::Add { .. } => "add",
@@ -501,7 +379,6 @@ impl Command {
             Command::Publish { .. } => "publish",
             Command::Review { .. } => "review",
             Command::Revert { .. } => "revert",
-            Command::Channel { .. } => "channel",
             Command::Protect { .. } => "protect",
             Command::Invite { .. } => "invite",
             Command::SelfUpdate { .. } => "self-update",
@@ -652,12 +529,28 @@ mod tests {
     }
 
     #[test]
-    fn channel_and_auth_and_protect_parse() {
-        assert!(Cli::try_parse_from(["topos", "channel", "add", "eng", "deploy"]).is_ok());
-        assert!(Cli::try_parse_from(["topos", "channel"]).is_ok());
+    fn the_retired_verbs_are_gone_and_auth_keeps_status_only() {
+        // `follow`/`unfollow` folded into `add`/`remove -g`; the `channel` verb left with
+        // channel-membership; sessions are managed by the top-level `login`/`logout`.
+        for retired in [
+            &["topos", "follow", "acme"][..],
+            &["topos", "unfollow", "docs"][..],
+            &["topos", "channel", "add", "eng", "deploy"][..],
+            &["topos", "auth", "login"][..],
+            &["topos", "auth", "logout"][..],
+        ] {
+            assert!(
+                Cli::try_parse_from(retired.iter().copied()).is_err(),
+                "{retired:?}"
+            );
+        }
         assert!(Cli::try_parse_from(["topos", "protect", "docs", "reviewed"]).is_ok());
-        assert!(Cli::try_parse_from(["topos", "auth", "login"]).is_ok());
         assert!(Cli::try_parse_from(["topos", "auth", "status"]).is_ok());
+        // The device-local `--agent` scope flags died with the machine-level content state.
+        let removed = Cli::try_parse_from(["topos", "remove", "docs", "-a", "cursor"]).unwrap_err();
+        assert_eq!(removed.kind(), ErrorKind::UnknownArgument);
+        // `remove -g` edits the server-stored profile.
+        assert!(Cli::try_parse_from(["topos", "remove", "-g", "@acme/docs"]).is_ok());
     }
 
     #[test]
@@ -665,67 +558,5 @@ mod tests {
         let out = Cli::try_parse_from(["topos", "upgrade"]).unwrap();
         assert!(matches!(out.command, Some(Command::Upgrade)));
         assert_eq!(out.command.unwrap().name(), "upgrade");
-    }
-
-    #[test]
-    fn wait_flag_is_an_optional_valued_flag_on_follow_and_gone_from_publish() {
-        let follow_bare = Cli::try_parse_from(["topos", "follow", "--wait"]).unwrap();
-        assert!(matches!(
-            follow_bare.command,
-            Some(Command::Follow {
-                wait: Some(None),
-                ..
-            })
-        ));
-        let follow_valued =
-            Cli::try_parse_from(["topos", "follow", "acme", "--wait", "300"]).unwrap();
-        assert!(matches!(
-            follow_valued.command,
-            Some(Command::Follow {
-                wait: Some(Some(300)),
-                ..
-            })
-        ));
-        // `publish` has no pending flow any more (an un-enrolled publish refuses typed), so no --wait.
-        let removed = Cli::try_parse_from(["topos", "publish", "docs", "--wait"]).unwrap_err();
-        assert_eq!(removed.kind(), ErrorKind::UnknownArgument);
-    }
-
-    #[test]
-    fn follow_takes_the_two_phase_flag_and_the_collision_flag_is_retired() {
-        let out = Cli::try_parse_from(["topos", "follow", "acme/channels/eng", "--yes"]).unwrap();
-        assert!(matches!(
-            out.command,
-            Some(Command::Follow { yes: true, .. })
-        ));
-        // Colliding dirnames auto-namespace now — the old opt-in flag is gone.
-        let removed = Cli::try_parse_from(["topos", "follow", "acme", "--prefix-dirname", "--yes"])
-            .unwrap_err();
-        assert_eq!(removed.kind(), ErrorKind::UnknownArgument);
-    }
-
-    #[test]
-    fn auth_login_takes_wait_and_logout_takes_yes() {
-        let login = Cli::try_parse_from(["topos", "auth", "login", "--wait", "60"]).unwrap();
-        assert!(matches!(
-            login.command,
-            Some(Command::Auth {
-                cmd: super::AuthCmd::Login {
-                    wait: Some(Some(60)),
-                    ..
-                }
-            })
-        ));
-        // The account-switch `--yes` died with the per-account credential set (the identity is
-        // whoever approves in the browser; the one credential is replaced wholesale).
-        let removed = Cli::try_parse_from(["topos", "auth", "login", "--yes"]).unwrap_err();
-        assert_eq!(removed.kind(), ErrorKind::UnknownArgument);
-        let logout = Cli::try_parse_from(["topos", "auth", "logout", "--yes"]).unwrap();
-        assert!(matches!(
-            logout.command,
-            Some(Command::Auth {
-                cmd: super::AuthCmd::Logout { yes: true }
-            })
-        ));
     }
 }

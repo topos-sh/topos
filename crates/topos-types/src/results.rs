@@ -547,41 +547,6 @@ pub enum KeepReason {
     RemovedHere,
 }
 
-/// `follow` (enrollment + first-receive). Each offered skill is a TOFU offer, never auto-landed.
-/// **INFERRED** (additive-only). All disclosure fields are optional, so an old consumer ignores
-/// them.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct FollowData {
-    pub workspace_id: String,
-    pub enrolled: bool,
-    /// First-receive offers — empty when the link is membership-only.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skills: Vec<FollowOffer>,
-    /// The workspace display name (disclosed at enrollment).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_display_name: Option<String>,
-    /// The API base URL this machine enrolled against (disclosed from the protocol card — a share
-    /// address may ride another host; this is where the device actually dials).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plane_base_url: Option<String>,
-    /// Present when `follow` returned a pending device-authorization that needs a human verification step
-    /// (the client's two-call enrollment surface — visit the URL, then re-run `follow`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending: Option<EnrollmentPending>,
-    /// The auto-update-trigger outcome, present when completing the enrollment armed the session-start hook
-    /// (a pure follower never runs `add`, so enrollment is where their auto-update gets armed — best-effort:
-    /// a degraded config edit is disclosed here, never a rolled-back enrollment).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub currency: Option<crate::TriggerReport>,
-    /// The breadth arming sweep's outcomes — one row per OTHER detected agent whose auto-update
-    /// trigger was armed alongside the active adapter's (`currency` above). Honest per agent:
-    /// `state`/`currency_kind` follow the same evidence rules every trigger report does, and
-    /// `note` names the consent step still owed (or the docs-level evidence caveat). **Additive.**
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub triggers: Vec<BreadthTriggerReport>,
-}
-
 /// One breadth-sweep trigger outcome for a DETECTED registry agent (beyond the active adapter's
 /// own [`crate::TriggerReport`]). `agent` is the registry slug; the state/kind pair follows the
 /// same honesty rule everywhere: only `active` carries a live kind, everything else advertises
@@ -670,44 +635,6 @@ pub struct LogoutData {
     /// Whether the server-side revoke landed for EVERY ended session (`false` = at least one was
     /// already gone server-side, or unreachable — the local sign-out proceeded regardless).
     pub server_revoked: bool,
-}
-
-/// A single skill offered at `follow` — disclosed, awaiting a direct human yes (TOFU). **INFERRED.**
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct FollowOffer {
-    pub skill_id: String,
-    pub name: String,
-    pub offer: Offer,
-}
-
-/// The typed receipt a PENDING device↔workspace link answers — a `follow` whose link (born at the
-/// device link lane, the enrollment grant, or an invitation accept) awaits an OWNER's approval.
-/// Nothing is subscribed and no bytes land while it is pending; delivery starts automatically
-/// after approval (the quiet sweep stays silent meanwhile), and `topos status` shows the waiting
-/// link. **INFERRED** (additive-only).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct LinkPendingData {
-    pub workspace_id: String,
-    /// The workspace's ADDRESS name.
-    pub workspace_name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_display_name: Option<String>,
-    /// Always `"pending"` — the machine-branchable link fact.
-    pub link_status: String,
-    /// Whether THIS invocation also enrolled the device (the first browser ceremony).
-    pub enrolled_now: bool,
-}
-
-/// `unfollow` (local — stop following `current`, keep the bytes as a frozen copy). **INFERRED.**
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct UnfollowData {
-    pub skill_id: String,
-    pub following: bool,
-    /// The local bytes are retained, not deleted.
-    pub bytes_kept: bool,
 }
 
 /// `log` — local action events (and, with `--team`, partial plane records). The individual event
@@ -968,58 +895,6 @@ pub enum RemoveKind {
     UntrackedLocal,
     /// A tracked, never-published local skill → permanent delete (the sidecar entry drops too).
     TrackedLocalPermanent,
-}
-
-/// `channel add|remove <channel> <skill>...` — place / remove skill references in a channel. **INFERRED.**
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct ChannelData {
-    pub channel: String,
-    pub workspace_id: String,
-    /// `add` or `remove`.
-    pub action: ChannelAction,
-    /// The channel's mode (`open` / `curated`) — the gate a placement passes.
-    pub mode: String,
-    /// `true` when this `add` would CREATE the channel (it does not exist yet).
-    pub creates: bool,
-    /// The per-skill placement/removal outcomes.
-    pub items: Vec<ChannelItem>,
-    /// `true` on the `--yes` apply, `false` on the describe.
-    pub applied: bool,
-}
-
-/// `add` vs `remove` for a [`ChannelData`]. **INFERRED value set.**
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum ChannelAction {
-    Add,
-    Remove,
-}
-
-/// One skill's placement/removal in a [`ChannelData`]. **INFERRED.**
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-pub struct ChannelItem {
-    pub skill: String,
-    pub skill_id: String,
-    /// `pending` (describe), `placed` / `removed` (applied ok), or `failed` (a mid-flight refusal after
-    /// an earlier one landed — reported honestly, per skill).
-    pub outcome: ChannelItemOutcome,
-    /// The refusal detail when `failed` (e.g. a curated-channel role refusal).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
-/// One skill's channel-op outcome. **INFERRED value set.**
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum ChannelItemOutcome {
-    Pending,
-    Placed,
-    Removed,
-    Failed,
 }
 
 /// `protect <target> [<level>]` — set a skill's or channel's protection level. **INFERRED.**

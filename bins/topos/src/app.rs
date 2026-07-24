@@ -19,9 +19,9 @@ use crate::ids::{Clock, RealClock, RealIds};
 use crate::plane::{
     ContributeSource, DirectorySource, EnrollSource, GovernanceSource, ReconcileTransport,
 };
-use crate::plane_http::{FileFollow, UreqDeviceClient, UreqPlane};
+use crate::plane_http::{UreqDeviceClient, UreqPlane};
 use crate::sidecar::{Layout, recover};
-use crate::{enroll, identity, logfile, ops, render};
+use crate::{identity, logfile, ops, render};
 
 /// Run the CLI; returns the process exit code. A thin wrapper over the dispatch: AFTER a successful
 /// eligible command it runs the passive version check (stderr-only, self-throttled to at most one
@@ -102,7 +102,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
     let layout = Layout::new(&resolve_home());
     // `--workspace` accepts the ADDRESS name as well as the opaque id — canonicalized ONCE here
     // (name → joined id, best-effort), so every downstream consumer keeps id semantics.
-    let workspace = enroll::canonicalize_workspace_flag(&fs, &layout, workspace);
+    let workspace = crate::sessions::canonicalize_workspace_flag(&fs, &layout, workspace);
     // The error-side diagnostics channel: every failure that reaches a finisher below lands its full
     // detail in the append-only log the redacted user surfaces point at.
     let diag = Diag {
@@ -193,24 +193,40 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
         return emit_err(json, cmd_name, &e, &diag);
     }
 
-    // The plane + follow-state sources. When enrollment has been written (`instance.json` present —
-    // `follow` writes it), wire the REAL `ureq` transport + the on-disk follow state; otherwise keep the
-    // INERT pair (a never-enrolled install stays a truthful no-op). The inert ZSTs and the loaded
-    // enrollment are both stack locals so the `&dyn` trait objects below borrow correctly for the rest of
-    // `run`.
-    let inert_plane = crate::plane::InertPlane;
-    let inert_follow = crate::plane::InertFollow;
-    let enrollment = match load_enrollment(&fs, &layout) {
-        Ok(e) => e,
-        Err(e) => return emit_err(json, cmd_name, &e, &diag),
+    // The plane + follow-state sources — SESSIONS are the identity: the routed plane sends each
+    // per-skill read down the session lane its workspace names (the delivery cache supplies the
+    // map), and the cache-backed follow seam answers workspace provenance. With no session both
+    // stay truthful no-ops (nothing delivered, nothing served).
+    let connect_for_wiring = |s: &crate::sessions::Session| -> ops::SessionTransports {
+        ops::SessionTransports {
+            plane: Box::new(
+                UreqPlane::new(
+                    s.base_url.clone(),
+                    Some(s.credential.clone()),
+                    Default::default(),
+                )
+                .with_workspaces(vec![s.workspace_id.clone()]),
+            ),
+            directory: Box::new(UreqDeviceClient::new(
+                s.base_url.clone(),
+                Some(s.credential.clone()),
+            )),
+            contribute: Box::new(UreqDeviceClient::new(
+                s.base_url.clone(),
+                Some(s.credential.clone()),
+            )),
+            governance: Box::new(UreqDeviceClient::new(
+                s.base_url.clone(),
+                Some(s.credential.clone()),
+            )),
+        }
     };
+    let routed_plane = ops::SessionRoutedPlane::load(&fs, &layout, &connect_for_wiring);
+    let cache_follow = ops::CacheFollow::load(&fs, &layout);
     let (plane, follow): (
         &dyn crate::plane::PlaneSource,
         &dyn crate::plane::FollowSource,
-    ) = match &enrollment {
-        Some(e) => (&e.plane, &e.follow),
-        None => (&inert_plane, &inert_follow),
-    };
+    ) = (&routed_plane, &cache_follow);
 
     // `add` and `pull` author commits (adoption / a draft snapshot before a divergence), so both load
     // (and on first use, mint) the device identity — `uninstall` must never create or require it before
@@ -221,7 +237,6 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
         // the forward-revert commit, so both load (and on first use mint) the device id.
         Command::Add { .. }
         | Command::Update { .. }
-        | Command::Follow { .. }
         | Command::Publish { .. }
         | Command::Revert { .. } => match identity::load_or_create_device_id(&fs, &layout) {
             Ok(d) => d,
@@ -257,12 +272,13 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             load_device_credential(ctx.fs, &ctx.layout),
         ))
     };
-    let connect_contribute = |base_url: &str| -> Box<dyn ContributeSource> {
-        Box::new(UreqDeviceClient::new(
-            base_url.to_owned(),
-            load_device_credential(ctx.fs, &ctx.layout),
-        ))
-    };
+    let connect_contribute =
+        |base_url: &str, credential: Option<&str>| -> Box<dyn ContributeSource> {
+            Box::new(UreqDeviceClient::new(
+                base_url.to_owned(),
+                credential.map(str::to_owned),
+            ))
+        };
     // The DIRECTORY connector (describe reads + subscription/curation/notice row ops) and the
     // RECONCILE connector (delivery + fleet report + the per-skill read lane on one object) — both
     // re-read the on-disk credential fresh per build, for the same mid-invocation reason as above.
@@ -272,29 +288,14 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             load_device_credential(ctx.fs, &ctx.layout),
         ))
     };
+    // LEGACY connector shape kept for the mid-migration op signatures — creds-less (the session
+    // lanes carry the real credentials).
     let connect_delivery = |base_url: &str| -> Box<dyn ReconcileTransport> {
-        let follows = enroll::read_follows(ctx.fs, &ctx.layout)
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| enroll::Follows {
-                schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
-                follows: Vec::new(),
-            });
-        // The fan-out excludes locally-ENDED links (their deliveries answer the uniform 404 —
-        // the once-typed line already printed; `follow <address>` relinks).
-        let workspaces: Vec<String> = enroll::read_user(ctx.fs, &ctx.layout)
-            .ok()
-            .flatten()
-            .map(|u| u.fanout_workspace_ids())
-            .unwrap_or_default();
-        Box::new(
-            UreqPlane::new(
-                base_url.to_owned(),
-                load_device_credential(ctx.fs, &ctx.layout),
-                enroll::skill_workspaces(&follows),
-            )
-            .with_workspaces(workspaces),
-        )
+        Box::new(UreqPlane::new(
+            base_url.to_owned(),
+            None,
+            Default::default(),
+        ))
     };
     // The per-SESSION transports (the manifest model): one byte/delivery lane + one directory
     // lane per logged-in workspace, each under that session's OWN workspace-scoped credential.
@@ -353,12 +354,37 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 std::io::stdout().is_terminal()
             };
             let policy = WaitPolicy::resolve(json, wait, stdout_tty, &clock);
+            // The zero-typing loopback (interactive blocking waits with a plausible local
+            // browser): auto-open the approval page with state-bound return coordinates; the
+            // page's single-use redirect wakes the next poll. The poll stays the source of
+            // truth — a failed open degrades to the typed wait.
+            let loopback_plan = if policy.block && !json {
+                let interactive = {
+                    use std::io::IsTerminal;
+                    std::io::stderr().is_terminal()
+                };
+                ops::loopback::choose_browser(&ops::loopback::BrowserEnv::detect(
+                    interactive,
+                    stdout_tty,
+                    wait.is_some(),
+                ))
+                .and_then(|opener| {
+                    let wal = crate::enroll::read_wal(&fs, &ctx.layout).ok().flatten()?;
+                    Some(LoopbackPlan {
+                        opener,
+                        runner: &fs,
+                        challenge: ops::device_challenge(&wal.device_code),
+                    })
+                })
+            } else {
+                None
+            };
             let result = block_on_pending(
                 &clock,
                 &policy,
                 first,
                 session_login_pending_disclosure,
-                None,
+                loopback_plan,
                 || ops::session_login(&ctx, &connectors, address.as_deref()),
             );
             // The breadth arming sweep + the built-in skill ride the completed login (the
@@ -516,161 +542,6 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             });
             finish(json, cmd_name, result, render::add_tty, &diag)
         }
-        Command::Follow {
-            targets,
-            channel,
-            skill,
-            agent,
-            yes,
-            manual,
-            wait,
-        } => {
-            // The transports are built per-base-URL (known only after the op parses the target /
-            // the card / the WAL): the shared creds-free `ureq` enroll connector, the directory
-            // (describe + rows) and the reconcile transport.
-            // The bareword-enroll consent prompt: only a real TTY (stdin AND stderr) may ask;
-            // `--json` and piped runs answer Headless, which the op turns into the typed refusal
-            // naming `--yes` and the full address form. The prompt rides stderr (stdout stays the
-            // clean render).
-            let confirm_bareword = |name: &str, server: &str| -> ops::BarewordDecision {
-                use std::io::{IsTerminal, Write};
-                if json || !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
-                    return ops::BarewordDecision::Headless;
-                }
-                eprint!(
-                    "'{name}' looks like a workspace on {server} — enroll this device with it? [y/N] "
-                );
-                let _ = std::io::stderr().flush();
-                let mut line = String::new();
-                if std::io::stdin().read_line(&mut line).is_err() {
-                    return ops::BarewordDecision::Headless;
-                }
-                match line.trim() {
-                    "y" | "Y" | "yes" | "Yes" | "YES" => ops::BarewordDecision::Proceed,
-                    _ => ops::BarewordDecision::Declined,
-                }
-            };
-            let connectors = ops::FollowConnectors {
-                enroll: &connect_enroll,
-                directory: &connect_directory,
-                delivery: &connect_delivery,
-                web_origin: web_origin.clone(),
-                confirm_bareword: &confirm_bareword,
-            };
-            let mk_opts = || ops::FollowOpts {
-                manual,
-                // The global `--workspace` disambiguates a positional skill name shared across the
-                // workspaces this install follows on one plane (the enrollment motions ignore it).
-                workspace: workspace.clone(),
-                yes,
-                channels: channel.clone(),
-                skills: skill.clone(),
-                agents: agent.clone(),
-            };
-            let first = ops::follow(&ctx, &connectors, targets, mk_opts());
-            // Block on a pending device-authorization until the human approves (so a person never re-invokes
-            // `follow` by hand), unless this is a headless `--json` run without `--wait` (which must not
-            // hang). The interactive block only ever RESUMES (no targets + the pending WAL drives it) —
-            // and the resumed invocation keeps THIS invocation's flags, so a `--yes` carries through
-            // the wait into the apply. A PIPED stdout without an explicit `--wait` never blocks:
-            // the instructions print, the single poll answers, and the exit-0 pending document
-            // carries the resume next-action — an agent harness would otherwise stare at a silent
-            // long poll it cannot see into.
-            let stdout_tty = {
-                use std::io::IsTerminal;
-                std::io::stdout().is_terminal()
-            };
-            let policy = WaitPolicy::resolve(json, wait, stdout_tty, &clock);
-            // The zero-typing loopback: only for an interactive blocking wait (the listener must
-            // outlive the human's click — a TTY, or an explicit `--wait` on a pipe), only when a
-            // local browser is plausible (never over SSH / headless / `TOPOS_NO_BROWSER`), and
-            // only when a pending WAL exists to derive the flow's challenge from. Everything else
-            // keeps the typed-code fallback untouched.
-            let loopback_plan = if policy.block && !json {
-                let interactive = {
-                    use std::io::IsTerminal;
-                    std::io::stderr().is_terminal()
-                };
-                ops::loopback::choose_browser(&ops::loopback::BrowserEnv::detect(
-                    interactive,
-                    stdout_tty,
-                    wait.is_some(),
-                ))
-                .and_then(|opener| {
-                    let wal = crate::enroll::read_wal(&fs, &ctx.layout).ok().flatten()?;
-                    Some(LoopbackPlan {
-                        opener,
-                        runner: &fs,
-                        challenge: ops::device_challenge(&wal.device_code),
-                    })
-                })
-            } else {
-                None
-            };
-            let result = block_on_pending(
-                &clock,
-                &policy,
-                first,
-                follow_pending_disclosure,
-                loopback_plan,
-                || ops::follow(&ctx, &connectors, Vec::new(), mk_opts()),
-            );
-            // The breadth arming sweep rides the enrollment receipt: the promote armed the active
-            // adapter (`currency`); every OTHER detected agent's trigger is armed here at the
-            // composition root, and the per-agent outcomes ride the same payload honestly.
-            let result = result.map(|outcome| match outcome {
-                ops::FollowOutcome::Data { mut data, resumed } => {
-                    if data.currency.is_some() {
-                        data.triggers = breadth_arm(&ctx.roots, harness.as_ref(), &fs);
-                        // The built-in `topos` skill lands with the enrollment (best-effort).
-                        if let Err(e) = ops::ensure_builtin(&ctx) {
-                            let _ = diag.note(cmd_name, &e);
-                        }
-                    }
-                    ops::FollowOutcome::Data { data, resumed }
-                }
-                other => other,
-            });
-            finish_follow(json, cmd_name, result, &diag)
-        }
-        Command::Unfollow {
-            targets,
-            channel,
-            skill,
-            agent,
-            yes,
-        } => {
-            // `unfollow --agent <slug>` is the per-agent exclusion — the SAME implementation
-            // `remove --agent` runs on a followed skill: offline placement policy (the subscription
-            // is untouched, no server call), so it dispatches before the networked detach path.
-            if !agent.is_empty() {
-                if !channel.is_empty() {
-                    let e = ClientError::InvalidArgument(
-                        "`--agent` scopes where a SKILL's bytes land — it cannot combine with \
-                         `--channel`"
-                            .into(),
-                    );
-                    return emit_err(json, cmd_name, &e, &diag);
-                }
-                let mut all_targets = targets.clone();
-                all_targets.extend(skill.iter().cloned());
-                // Applies immediately (placement policy; `--yes` is an accepted no-op).
-                let result = ops::exclude_agents(
-                    &ctx,
-                    "unfollow",
-                    &all_targets,
-                    &agent,
-                    workspace.as_deref(),
-                );
-                return finish_agent_scope(json, cmd_name, result, &diag);
-            }
-            let connectors = ops::UnfollowConnectors {
-                directory: &connect_directory,
-                delivery: &connect_delivery,
-            };
-            let result = ops::unfollow(&ctx, &connectors, &targets, &channel, &skill, yes);
-            finish_unfollow(json, cmd_name, result, &diag)
-        }
         Command::Invite {
             email,
             skill,
@@ -680,6 +551,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             let connectors = ops::InviteConnectors {
                 governance: &connect_governance,
                 directory: &connect_directory,
+                session: &connect_session_transports,
             };
             let result = ops::invite(
                 &ctx,
@@ -723,22 +595,33 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 channels: channel,
                 skills: skill,
             };
-            // Under `--remote`, resolve the enrolled plane + memberships (a typed "run follow first" when
-            // there is no enrollment), then build the credentialed catalog transport as a local so the
-            // scope borrows it across the `list()` call. The transport holds the per-workspace credential
-            // map (each catalog read presents its workspace's Bearer credential).
-            let remote_inputs = if remote {
-                match list_remote_inputs(&fs, &ctx.layout) {
-                    Ok(inputs) => Some(inputs),
-                    Err(e) => return emit_err(json, cmd_name, &e, &diag),
-                }
-            } else {
-                None
-            };
+            // Under `--remote`, the catalog targets are the LIVE SESSIONS — one credentialed
+            // read per session (a typed "run login first" when there is none). The routing
+            // catalog holds one client per session, keyed by workspace id.
             let catalog_client;
-            let scope = if let Some((base_url, memberships)) = remote_inputs {
-                catalog_client =
-                    UreqDeviceClient::new(base_url, load_device_credential(&fs, &ctx.layout));
+            let scope = if remote {
+                let live: Vec<crate::sessions::Session> =
+                    match crate::sessions::read_sessions(&fs, &ctx.layout) {
+                        Ok(all) => all
+                            .sessions
+                            .into_iter()
+                            .filter(|s| s.status != "ended")
+                            .collect(),
+                        Err(e) => return emit_err(json, cmd_name, &e, &diag),
+                    };
+                if live.is_empty() {
+                    let e = ClientError::Enrollment(
+                        "not connected to a workspace — run `topos login <workspace-address>` \
+                         first"
+                            .into(),
+                    );
+                    return emit_err(json, cmd_name, &e, &diag);
+                }
+                let memberships: Vec<(String, String)> = live
+                    .iter()
+                    .map(|s| (s.workspace_id.clone(), s.display_name.clone()))
+                    .collect();
+                catalog_client = SessionCatalog::new(&live);
                 Some(ops::RemoteScope {
                     catalog: &catalog_client,
                     memberships,
@@ -802,7 +685,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             let publish_sessions = crate::sessions::read_sessions(&fs, &ctx.layout)
                 .map(|s| !s.sessions.is_empty())
                 .unwrap_or(false);
-            if !yes && (enrollment.is_some() || publish_sessions) {
+            if !yes && publish_sessions {
                 let connectors = ops::PublishDescribeConnectors {
                     directory: &connect_directory,
                     delivery: &connect_delivery,
@@ -873,6 +756,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             let connectors = ops::ReviewConnectors {
                 directory: &connect_directory,
                 contribute: &connect_contribute,
+                session: &connect_session_transports,
             };
             let result = ops::review_dispatch(
                 &ctx,
@@ -906,6 +790,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
         } => {
             let connectors = ops::LogConnectors {
                 directory: &connect_directory,
+                session: &connect_session_transports,
             };
             let page = ops::RowPage::resolve(limit, offset, json, ops::DEFAULT_JSON_LOG_LIMIT);
             finish_log(
@@ -919,64 +804,34 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
         }
         Command::Update {
             targets,
-            channel,
-            skill,
             reset,
             yes,
             onto_current,
             quiet,
             ttl,
         } => {
-            // The bare sweep prefers the delivery-driven reconcile when enrolled (one delivery
-            // call per workspace answers "what should this device have"); every targeted form and
-            // the un-enrolled state keep the classic engine. `--reset` is a two-phase discard (below);
-            // the `--channel`/`--skill` selectors + multi-target resolution land later.
-            let delivery = enrollment
-                .as_ref()
-                .map(|e| &e.plane as &dyn crate::plane::DeliverySource);
-            // The notices posture: an interactive or `--json` update ACKS what it returns (the
-            // narration/data carries them); the quiet hook fetches WITHOUT acking — nothing is
-            // marked read that no one saw.
-            let reconcile_opts = ops::ReconcileOpts {
-                ack_notices: !quiet,
-                ..ops::ReconcileOpts::default()
-            };
-            // `--reset` is its own two-phase discard verb (loss-led describe / `--yes` apply); it does not
-            // flow through the update engine and is never a `--quiet` hook shape.
+            // `--reset` is its own two-phase discard verb (loss-led describe / `--yes` apply); it
+            // does not flow through the reconcile and is never a `--quiet` hook shape.
             if reset {
-                let mut reset_targets = targets.clone();
-                reset_targets.extend(skill.iter().cloned());
-                let _ = &channel;
-                return finish_reset(json, cmd_name, ops::reset(&ctx, &reset_targets, yes), &diag);
+                return finish_reset(json, cmd_name, ops::reset(&ctx, &targets, yes), &diag);
             }
-            // A `--channel`/`--skill` selector or more than one positional is the SELECTOR / MULTI-TARGET
-            // update: resolve every name through the grammar all-or-none, then the targeted path per skill
-            // and the channel-filtered sync per channel. A single bare target (or none) keeps the classic
-            // engine — the go-back `<skill>@<hash>` and the `--onto-current` escape live only there.
-            let has_selectors = !channel.is_empty() || !skill.is_empty() || targets.len() > 1;
             // The BARE sweep is the hook shape (the auto-update triggers all run `update --quiet`).
-            // Hooks now fire on every session-start-shaped event, so the quiet path passes a
-            // self-throttle gate BEFORE any engine or network work: single-flight (another sweep
-            // in flight → silent no-op) + TTL (a completed sweep within the window → silent
-            // no-op; `--ttl`/`TOPOS_UPDATE_TTL`/default 300 s, `0` disables). An explicit
-            // non-quiet sweep always runs but takes the same lock (never two concurrent sweeps)
-            // and refreshes the stamp.
-            let bare_sweep = !has_selectors && targets.is_empty();
+            // Hooks fire on every session-start-shaped event, so the quiet path passes a
+            // self-throttle gate BEFORE any engine or network work: single-flight + TTL
+            // (`--ttl`/`TOPOS_UPDATE_TTL`/default 300 s, `0` disables). An explicit non-quiet
+            // sweep always runs but takes the same lock and refreshes the stamp.
+            let bare_sweep = targets.is_empty();
             let now_ms = i64::try_from(clock.now_unix_millis()).unwrap_or(i64::MAX);
             let mut _sweep_guard = None;
             if bare_sweep {
                 if quiet {
                     match ops::quiet_gate(&fs, &ctx.layout, now_ms, ops::resolve_ttl_ms(ttl)) {
                         Ok(ops::QuietGate::Run(guard)) => _sweep_guard = Some(guard),
-                        // Skipped (fresh, or another sweep in flight): byte-silent success — the
-                        // whole point is that redundant hook fires cost nothing. The reason stays
-                        // a typed value (tests pin it) but is deliberately not narrated anywhere.
+                        // Skipped (fresh, or another sweep in flight): byte-silent success.
                         Ok(ops::QuietGate::Skip(reason)) => {
                             let _ = reason;
                             return ExitCode::SUCCESS;
                         }
-                        // A gate I/O failure is a LOCAL failure — surface it (nonzero), exactly
-                        // like any other local quiet failure.
                         Err(e) => return emit_err(false, cmd_name, &e, &diag),
                     }
                 } else {
@@ -986,10 +841,9 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                     }
                 }
             }
-            // The bare sweep also re-syncs the BUILT-IN `topos` skill (create/refresh/converge —
-            // force-synced to this binary; the durable opt-out is honored inside). Best-effort: a
-            // built-in hiccup must never block the team sweep. Its byte changes count toward the
-            // quiet hook's `reloadSkills` below.
+            // The bare sweep also re-syncs the BUILT-IN `topos` skill (force-synced to this
+            // binary; the durable opt-out honored inside). Best-effort: a built-in hiccup must
+            // never block the team sweep; its byte changes ride the quiet hook's `reloadSkills`.
             let builtin_changed = if bare_sweep {
                 match ops::ensure_builtin(&ctx) {
                     Ok(r) => r.changed,
@@ -1001,59 +855,21 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             } else {
                 false
             };
-            // The MANIFEST model owns `update` whenever this installation runs on sessions (or has
-            // no legacy enrollment at all — the solo/manifest-only shape): resolve the manifest
-            // layers from cwd + the logged-in profiles and reconcile. The classic delivery sweep
-            // stays only for a pre-session enrolled install. Model-independent forms: the go-back
-            // (`<skill>@<hash>`), `--reset`, `--onto-current`, and the `--channel`/`--skill`
-            // selectors keep their classic paths.
-            let has_sessions = crate::sessions::read_sessions(&fs, &ctx.layout)
-                .map(|s| !s.sessions.is_empty())
-                .unwrap_or(false);
-            let manifest_model = has_sessions || enrollment.is_none();
+            // The go-back (`<skill>@<hash>`) and the `--onto-current` escape act on LOCAL bytes
+            // through the classic per-skill engine; everything else is the MANIFEST reconcile —
+            // resolve the manifest layers covering cwd + the logged-in profiles and converge.
             let goback_target = targets
                 .len()
                 .eq(&1)
                 .then(|| targets[0].clone())
                 .filter(|t| t.split_once('@').is_some_and(|(_, r)| !r.is_empty()));
-            let result = if has_selectors {
-                if onto_current {
+            let result = if onto_current || goback_target.is_some() {
+                if targets.len() > 1 {
                     Err(ClientError::InvalidArgument(
-                        "--onto-current takes a single <skill> target, not selectors or several targets"
-                            .into(),
+                        "the go-back and --onto-current take a single <skill> target".into(),
                     ))
-                } else if manifest_model {
-                    let mut all_targets = targets.clone();
-                    all_targets.extend(skill.iter().cloned());
-                    all_targets.extend(channel.iter().cloned());
-                    let git = crate::plane_http::UreqGitSource::new();
-                    ops::manifest_update(
-                        &ctx,
-                        &connect_session_transports,
-                        Some(&git),
-                        &ops::ManifestUpdateOpts {
-                            targets: all_targets,
-                            ack_notices: !quiet,
-                        },
-                    )
-                } else {
-                    ops::update_selective(
-                        &ctx,
-                        &connect_directory,
-                        delivery,
-                        &targets,
-                        &channel,
-                        &skill,
-                        workspace.as_deref(),
-                    )
-                }
-            } else {
-                let target = targets.into_iter().next();
-                // A TARGETED update of the built-in skill has no served pointer to sync against —
-                // refuse toward the verbs that do move it (the name is reserved, so this can never
-                // shadow a followed skill).
-                if target
-                    .as_deref()
+                } else if targets
+                    .first()
                     .is_some_and(|t| ops::is_builtin(t.split('@').next().unwrap_or(t)))
                 {
                     Err(ClientError::InvalidArgument(
@@ -1061,25 +877,36 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                          this binary; `topos self-update` updates the binary itself"
                             .into(),
                     ))
-                } else if manifest_model && !onto_current && goback_target.is_none() {
-                    let git = crate::plane_http::UreqGitSource::new();
-                    ops::manifest_update(
-                        &ctx,
-                        &connect_session_transports,
-                        Some(&git),
-                        &ops::ManifestUpdateOpts {
-                            targets: target.into_iter().collect(),
-                            ack_notices: !quiet,
-                        },
-                    )
                 } else {
-                    pull_with_name_fallback(&ctx, target, onto_current, delivery, &reconcile_opts)
+                    pull_with_name_fallback(
+                        &ctx,
+                        targets.into_iter().next(),
+                        onto_current,
+                        None,
+                        &ops::ReconcileOpts::default(),
+                    )
                 }
+            } else if targets.first().is_some_and(|t| ops::is_builtin(t.as_str())) {
+                Err(ClientError::InvalidArgument(
+                    "`topos` is the built-in skill — the bare `topos update` re-syncs it to \
+                     this binary; `topos self-update` updates the binary itself"
+                        .into(),
+                ))
+            } else {
+                let git = crate::plane_http::UreqGitSource::new();
+                ops::manifest_update(
+                    &ctx,
+                    &connect_session_transports,
+                    Some(&git),
+                    &ops::ManifestUpdateOpts {
+                        targets,
+                        ack_notices: !quiet,
+                    },
+                )
             };
             // A COMPLETED bare sweep stamps the TTL clock (best-effort) — success, or the quiet
             // path's soft failure (an unreachable plane must not be re-dialed on every session
-            // event; the staleness warning still fires once the window blows). A hard local
-            // failure leaves the old stamp so the next session retries.
+            // event). A hard local failure leaves the old stamp so the next session retries.
             if bare_sweep
                 && (result.is_ok()
                     || (quiet && result.as_ref().is_err_and(ops::quiet_soft_failure)))
@@ -1091,15 +918,13 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 );
             }
             if quiet {
-                // NEAR-byte-silent stdout (a session-start hook's stdout reaches the session):
-                // a clean no-change sweep emits nothing; a sweep that CHANGED skill bytes emits the
-                // ONE SessionStart hook-output JSON (`reloadSkills`, so Claude Code re-scans its
-                // skill dirs same-session — other harnesses ignore hook stdout by construction),
-                // with the two facts a person must not miss — an access-gone freeze, and
-                // unreachable-AND-stale — riding its context injection; without changes those
-                // facts stay ONE plain line each. An auth/transport failure warns and exits 0
-                // (the hook must never fail a session start for a network blip); a genuinely
-                // local failure still surfaces on stderr with a non-zero exit.
+                // NEAR-byte-silent stdout (a session-start hook's stdout reaches the session): a
+                // clean no-change sweep emits nothing; a sweep that CHANGED skill bytes emits the
+                // ONE SessionStart hook-output JSON (`reloadSkills`), with the two facts a person
+                // must not miss — an ended-session freeze, and unreachable-AND-stale — riding its
+                // context injection; without changes those facts stay ONE plain line each. An
+                // auth/transport failure warns and exits 0; a genuinely local failure still
+                // surfaces on stderr with a non-zero exit.
                 let now = i64::try_from(clock.now_unix_millis()).unwrap_or(i64::MAX);
                 match result {
                     Ok(out) => {
@@ -1114,7 +939,6 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                         ExitCode::SUCCESS
                     }
                     Err(e) if ops::quiet_soft_failure(&e) => {
-                        // The detail still lands in the diagnostics log; stdout gets one honest line.
                         let _ = diag.note(cmd_name, &e);
                         println!("topos: update skipped — {}", render::safe_message(&e));
                         ExitCode::SUCCESS
@@ -1122,15 +946,13 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                     Err(e) => emit_err(false, cmd_name, &e, &diag),
                 }
             } else {
-                finish_pull(json, cmd_name, result, enrollment.is_some(), &diag)
+                let connected = crate::sessions::read_sessions(&fs, &ctx.layout)
+                    .map(|s| !s.sessions.is_empty())
+                    .unwrap_or(false);
+                finish_pull(json, cmd_name, result, connected, &diag)
             }
         }
-        Command::Remove {
-            skill,
-            agent,
-            global,
-            yes,
-        } => {
+        Command::Remove { skill, global, yes } => {
             // `remove -g <ref>` — the PROFILE-side inverse: the server removes the include line
             // (or records the exclude when a broader layer still provides it), and the sweep
             // cleans what the drop ended.
@@ -1152,7 +974,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             // include, or record the one negative state — an exclude). Immediate and reversible,
             // so `--yes` is an accepted no-op; the classic tracked/untracked removal owns
             // everything the manifests don't mention.
-            if agent.is_empty() {
+            {
                 let provided = ops::profile_provided_names(&ctx);
                 match ops::remove_from_manifests(&ctx, &skill, &provided) {
                     Ok(Some(data)) => {
@@ -1170,26 +992,18 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             }
             let connectors = ops::RemoveConnectors {
                 directory: &connect_directory,
+                session: &connect_session_transports,
             };
             let roots = list_discovery(false);
-            let result = ops::remove(&ctx, &connectors, &skill, &agent, roots.as_ref(), yes);
+            let result = ops::remove(&ctx, &connectors, &skill, &[], roots.as_ref(), yes);
             finish_remove(json, cmd_name, result, &diag)
         }
         // `channel add|remove <channel> <skill>...` dispatches to the two-phase op; a bare `channel` (or an
         // unrecognized subword / `create`) teaches usage without touching the network.
-        Command::Channel { args, yes } => match args.first().map(String::as_str) {
-            Some("add") | Some("remove") => {
-                let connectors = ops::ChannelConnectors {
-                    directory: &connect_directory,
-                };
-                let result = ops::channel(&ctx, &connectors, &args, workspace.as_deref(), yes);
-                finish_channel(json, cmd_name, result, &diag)
-            }
-            _ => emit_err(json, cmd_name, &channel_seam(&args), &diag),
-        },
         Command::Protect { target, level, yes } => {
             let connectors = ops::ProtectConnectors {
                 directory: &connect_directory,
+                session: &connect_session_transports,
             };
             let result = ops::protect(
                 &ctx,
@@ -1223,54 +1037,11 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             finish(json, cmd_name, result, render::self_update_tty, &diag)
         }
         Command::Auth { cmd } => {
-            let connect_auth_governance = |base_url: &str| -> Box<dyn GovernanceSource> {
-                Box::new(UreqDeviceClient::new(
-                    base_url.to_owned(),
-                    load_device_credential(ctx.fs, &ctx.layout),
-                ))
-            };
             let connectors = ops::AuthConnectors {
-                enroll: &connect_enroll,
                 directory: &connect_directory,
-                governance: &connect_auth_governance,
-                web_origin: web_origin.clone(),
+                session: &connect_session_transports,
             };
             match cmd {
-                AuthCmd::Login { server_url, wait } => {
-                    let first = ops::login(
-                        &ctx,
-                        &connectors,
-                        server_url.as_deref(),
-                        workspace.as_deref(),
-                    );
-                    // The same blocking idiom as `follow`: a TTY (or `--wait`) run re-polls
-                    // until the browser approval settles; a `--json` or PIPED run without
-                    // `--wait` returns the pending state and never hangs.
-                    let stdout_tty = {
-                        use std::io::IsTerminal;
-                        std::io::stdout().is_terminal()
-                    };
-                    let policy = WaitPolicy::resolve(json, wait, stdout_tty, &clock);
-                    let result = block_on_pending(
-                        &clock,
-                        &policy,
-                        first,
-                        login_pending_disclosure,
-                        None,
-                        || {
-                            ops::login(
-                                &ctx,
-                                &connectors,
-                                server_url.as_deref(),
-                                workspace.as_deref(),
-                            )
-                        },
-                    );
-                    finish_login(json, cmd_name, result, &diag)
-                }
-                AuthCmd::Logout { yes } => {
-                    finish_logout(json, cmd_name, ops::logout(&ctx, &connectors, yes), &diag)
-                }
                 AuthCmd::Status => {
                     finish_auth_status(json, cmd_name, ops::status(&ctx, &connectors), &diag)
                 }
@@ -1286,23 +1057,6 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
 }
 
 /// Map a NON-`add`/`remove` `topos channel …` invocation to its typed refusal: a bare `channel` (or an
-/// unrecognized subword) teaches channel-first usage; `create` is recognized as a hint keyword — channels
-/// are created on first placement, never as a standalone verb. (`add`/`remove` dispatch to the op above.)
-fn channel_seam(args: &[String]) -> ClientError {
-    match args.first().map(String::as_str) {
-        Some("create") => ClientError::InvalidArgument(
-            "channels are created on first placement — run `topos channel add <channel> <skill>` (a \
-             new channel is created automatically); there is no separate `channel create`"
-                .into(),
-        ),
-        _ => ClientError::InvalidArgument(
-            "usage: `topos channel add <channel> <skill>...` or `topos channel remove <channel> \
-             <skill>...` (a channel is created on first placement)"
-                .into(),
-        ),
-    }
-}
-
 /// The ENROLLMENT connector: `UreqDeviceClient` with NO credential — the device-flow routes are
 /// unauthenticated (they mint the credential the other connectors then present). The credentialed
 /// connectors are closures in [`run`] (they must re-read `credentials.json` fresh so an enrollment
@@ -1315,10 +1069,8 @@ fn connect_enroll(base_url: &str) -> Box<dyn EnrollSource> {
 /// `None`): a corrupt doc already failed the startup [`load_enrollment`] closed, and a missing
 /// credential surfaces downstream as a clear "not enrolled" at request time.
 fn load_device_credential(fs: &dyn FsOps, layout: &Layout) -> Option<String> {
-    enroll::read_credentials(fs, layout)
-        .ok()
-        .flatten()
-        .map(|c| c.credential)
+    let _ = (fs, layout);
+    None
 }
 
 /// The real release source for `topos upgrade` — the `ureq` GitHub transport. No base URL / creds: the
@@ -1407,10 +1159,10 @@ fn finish_status(
                     Vec::new()
                 } else {
                     vec![crate::actions::next_action(
-                        topos_types::ActionCode::from("FOLLOW_WORKSPACE".to_owned()),
+                        topos_types::ActionCode::from("LOGIN_WORKSPACE".to_owned()),
                         vec![
                             "topos".to_owned(),
-                            "follow".to_owned(),
+                            "login".to_owned(),
                             "<workspace-address>".to_owned(),
                             "--json".to_owned(),
                         ],
@@ -1462,10 +1214,10 @@ fn finish_pull(
                 let mut next_actions = render::withdrawn_next_actions(&out.data);
                 if unenrolled_dead_end {
                     next_actions.push(crate::actions::next_action(
-                        topos_types::ActionCode::from("FOLLOW_WORKSPACE".to_owned()),
+                        topos_types::ActionCode::from("LOGIN_WORKSPACE".to_owned()),
                         vec![
                             "topos".to_owned(),
-                            "follow".to_owned(),
+                            "login".to_owned(),
                             "<workspace-address>".to_owned(),
                             "--json".to_owned(),
                         ],
@@ -1685,197 +1437,6 @@ fn finish_log(
 }
 
 /// Resolve the `list --remote` inputs from the on-disk enrollment: the pinned plane base URL
-/// (`instance.json`) + every joined workspace as `(workspace_id, display_label)` (`user.json`). Not
-/// enrolled (no `instance.json` / no membership) ⇒ a typed, friendly "run `topos follow` first" (the same
-/// not-enrolled shape the write verbs use), never a panic.
-///
-/// # Errors
-/// [`ClientError::Enrollment`] when there is no plane or no membership to read a catalog from.
-fn list_remote_inputs(
-    fs: &dyn FsOps,
-    layout: &Layout,
-) -> Result<(String, Vec<(String, String)>), ClientError> {
-    let instance = enroll::read_instance(fs, layout)?.ok_or(ClientError::NotEnrolled)?;
-    let memberships: Vec<(String, String)> = enroll::read_user(fs, layout)?
-        .map(|u| {
-            u.workspaces
-                .into_iter()
-                .map(|m| {
-                    let label = m.display_name;
-                    (m.workspace_id, label)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    if memberships.is_empty() {
-        return Err(ClientError::NotEnrolled);
-    }
-    Ok((instance.base_url, memberships))
-}
-
-/// `follow`'s finisher — the three surfaces: the classic wire payload (with the success-path
-/// `next_actions` — re-invoke `follow` while pending; `update` once offers are disclosed), the
-/// two-phase DESCRIBE (`data.describe` + the paste-ready `--yes` argvs), and the apply report
-/// (its reconcile warnings ride the envelope's `warnings`).
-fn finish_follow(
-    json: bool,
-    command: &str,
-    result: Result<ops::FollowOutcome, ClientError>,
-    diag: &Diag<'_>,
-) -> ExitCode {
-    match result {
-        Ok(ops::FollowOutcome::Data { data, resumed }) => {
-            if json {
-                let value = serde_json::to_value(&data).unwrap_or_default();
-                let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions = render::follow_next_actions(&data);
-                println!("{}", render::to_json(&envelope));
-            } else {
-                println!("{}", render::follow_tty(&data, &resumed));
-            }
-            ExitCode::SUCCESS
-        }
-        Ok(ops::FollowOutcome::Described {
-            describe,
-            next_argvs,
-        }) => {
-            if json {
-                let value = serde_json::json!({ "describe": describe });
-                let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions = render::describe_next_actions(next_argvs);
-                println!("{}", render::to_json(&envelope));
-            } else {
-                println!("{}", render::follow_describe_tty(&describe, &next_argvs));
-            }
-            ExitCode::SUCCESS
-        }
-        Ok(ops::FollowOutcome::Applied(applied)) => {
-            if json {
-                let warnings = applied.warnings.clone();
-                let undo = render::undo_next_actions(&applied.undo);
-                let value = serde_json::to_value(&applied).unwrap_or_default();
-                let mut envelope = render::ok_envelope(command, value);
-                envelope.warnings = warnings;
-                envelope.next_actions = undo;
-                println!("{}", render::to_json(&envelope));
-            } else {
-                println!("{}", render::follow_applied_tty(&applied));
-            }
-            ExitCode::SUCCESS
-        }
-        Ok(ops::FollowOutcome::Scope(outcome)) => {
-            finish_agent_scope(json, command, Ok(outcome), diag)
-        }
-        Ok(ops::FollowOutcome::ReattachApplied(reattach)) => {
-            if json {
-                let warnings = reattach.warnings.clone();
-                let undo = render::undo_next_actions(&reattach.undo);
-                let value = serde_json::json!({ "reattach": reattach });
-                let mut envelope = render::ok_envelope(command, value);
-                envelope.warnings = warnings;
-                envelope.next_actions = undo;
-                println!("{}", render::to_json(&envelope));
-            } else {
-                println!("{}", render::reattach_applied_tty(&reattach));
-            }
-            ExitCode::SUCCESS
-        }
-        Ok(ops::FollowOutcome::LinkDescribed { describe, yes_argv }) => {
-            if json {
-                let value = serde_json::json!({ "link": describe });
-                let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions = render::describe_next_actions(vec![yes_argv]);
-                println!("{}", render::to_json(&envelope));
-            } else {
-                println!("{}", render::link_describe_tty(&describe, &yes_argv));
-            }
-            ExitCode::SUCCESS
-        }
-        Ok(ops::FollowOutcome::LinkPending(pending)) => {
-            if json {
-                let value = serde_json::to_value(&*pending).unwrap_or_default();
-                let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions = render::link_pending_next_actions();
-                println!("{}", render::to_json(&envelope));
-            } else {
-                println!("{}", render::link_pending_tty(&pending));
-            }
-            ExitCode::SUCCESS
-        }
-        Err(e) => emit_err(json, command, &e, diag),
-    }
-}
-
-/// `unfollow`'s finisher — the two-phase pair (describe / applied).
-/// The `--agent` scope verbs' finisher (shared by `follow --agent`, `unfollow --agent`, and
-/// `remove --agent` on a followed skill) — the same describe/apply envelope shape as every other
-/// two-phase verb.
-fn finish_agent_scope(
-    json: bool,
-    command: &str,
-    result: Result<ops::AgentScopeOutcome, ClientError>,
-    diag: &Diag<'_>,
-) -> ExitCode {
-    match result {
-        Ok(ops::AgentScopeOutcome::Described { data, yes_argv }) => {
-            if json {
-                let value = serde_json::to_value(&data).unwrap_or_default();
-                let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions = render::describe_next_actions(vec![yes_argv]);
-                println!("{}", render::to_json(&envelope));
-            } else {
-                println!("{}", render::agent_scope_tty(&data, Some(&yes_argv)));
-            }
-            ExitCode::SUCCESS
-        }
-        Ok(ops::AgentScopeOutcome::Applied(data)) => {
-            if json {
-                let value = serde_json::to_value(&data).unwrap_or_default();
-                let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions = render::undo_next_actions(&data.undo);
-                println!("{}", render::to_json(&envelope));
-            } else {
-                println!("{}", render::agent_scope_tty(&data, None));
-            }
-            ExitCode::SUCCESS
-        }
-        Err(e) => emit_err(json, command, &e, diag),
-    }
-}
-
-fn finish_unfollow(
-    json: bool,
-    command: &str,
-    result: Result<ops::UnfollowOutcome, ClientError>,
-    diag: &Diag<'_>,
-) -> ExitCode {
-    match result {
-        Ok(ops::UnfollowOutcome::Described { describe, yes_argv }) => {
-            if json {
-                let value = serde_json::json!({ "describe": describe });
-                let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions = render::describe_next_actions(vec![yes_argv]);
-                println!("{}", render::to_json(&envelope));
-            } else {
-                println!("{}", render::unfollow_describe_tty(&describe, &yes_argv));
-            }
-            ExitCode::SUCCESS
-        }
-        Ok(ops::UnfollowOutcome::Applied(applied)) => {
-            if json {
-                let value = serde_json::to_value(&applied).unwrap_or_default();
-                let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions = render::undo_next_actions(&applied.undo);
-                println!("{}", render::to_json(&envelope));
-            } else {
-                println!("{}", render::unfollow_applied_tty(&applied));
-            }
-            ExitCode::SUCCESS
-        }
-        Err(e) => emit_err(json, command, &e, diag),
-    }
-}
-
 /// Import a REMOTE source into several skills and/or several harness dirs — the `-s a -s b` / `-a x -a y`
 /// loop over the single-select [`ops::add_remote`] path (disclosing each landing). Multi selectors apply
 /// to a remote import only (a local path/name adopts exactly one skill). A `*` selector fans out:
@@ -2072,41 +1633,6 @@ fn finish_remove(
                 println!("{}", render::to_json(&envelope));
             } else {
                 println!("{}", render::remove_applied_tty(&data));
-            }
-            ExitCode::SUCCESS
-        }
-        Ok(ops::RemoveOutcome::AgentScope(outcome)) => {
-            finish_agent_scope(json, command, Ok(outcome), diag)
-        }
-        Err(e) => emit_err(json, command, &e, diag),
-    }
-}
-
-/// `channel add|remove`'s finisher — the two-phase pair.
-fn finish_channel(
-    json: bool,
-    command: &str,
-    result: Result<ops::ChannelOutcome, ClientError>,
-    diag: &Diag<'_>,
-) -> ExitCode {
-    match result {
-        Ok(ops::ChannelOutcome::Described { data, yes_argv }) => {
-            if json {
-                let value = serde_json::json!({ "describe": data });
-                let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
-                println!("{}", render::to_json(&envelope));
-            } else {
-                println!("{}", render::channel_describe_tty(&data, &yes_argv));
-            }
-            ExitCode::SUCCESS
-        }
-        Ok(ops::ChannelOutcome::Applied(data)) => {
-            if json {
-                let value = serde_json::to_value(&data).unwrap_or_default();
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
-            } else {
-                println!("{}", render::channel_applied_tty(&data));
             }
             ExitCode::SUCCESS
         }
@@ -2367,70 +1893,6 @@ fn finish_revert(
     }
 }
 
-/// `auth login`'s finisher — pending (the device-flow wait) or done (the per-workspace report).
-fn finish_login(
-    json: bool,
-    command: &str,
-    result: Result<ops::AuthLoginOutcome, ClientError>,
-    diag: &Diag<'_>,
-) -> ExitCode {
-    match result {
-        Ok(ops::AuthLoginOutcome::Pending(p)) => {
-            if json {
-                let value = serde_json::json!({ "pending": p });
-                let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions = render::login_pending_next_actions();
-                println!("{}", render::to_json(&envelope));
-            } else {
-                println!("{}", render::login_pending_tty(&p));
-            }
-            ExitCode::SUCCESS
-        }
-        Ok(ops::AuthLoginOutcome::Done(data)) => {
-            if json {
-                let value = serde_json::to_value(&data).unwrap_or_default();
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
-            } else {
-                println!("{}", render::login_done_tty(&data));
-            }
-            ExitCode::SUCCESS
-        }
-        Err(e) => emit_err(json, command, &e, diag),
-    }
-}
-
-/// `auth logout`'s finisher — the two-phase pair.
-fn finish_logout(
-    json: bool,
-    command: &str,
-    result: Result<ops::AuthLogoutOutcome, ClientError>,
-    diag: &Diag<'_>,
-) -> ExitCode {
-    match result {
-        Ok(ops::AuthLogoutOutcome::Described { describe, yes_argv }) => {
-            if json {
-                let value = serde_json::json!({ "describe": describe });
-                let mut envelope = render::ok_envelope(command, value);
-                envelope.next_actions = render::describe_next_actions(vec![yes_argv]);
-                println!("{}", render::to_json(&envelope));
-            } else {
-                println!("{}", render::logout_describe_tty(&describe, &yes_argv));
-            }
-            ExitCode::SUCCESS
-        }
-        Ok(ops::AuthLogoutOutcome::Applied(data)) => {
-            if json {
-                let value = serde_json::to_value(&data).unwrap_or_default();
-                println!("{}", render::to_json(&render::ok_envelope(command, value)));
-            } else {
-                println!("{}", render::logout_applied_tty(&data));
-            }
-            ExitCode::SUCCESS
-        }
-        Err(e) => emit_err(json, command, &e, diag),
-    }
-}
-
 /// The FALLBACK poll cadence while a human opens the browser and approves — used when a pending
 /// disclosure carries no server interval. There is no separate client timeout by default — the device
 /// code's own expiry makes the server return a terminal Expired/Denied that surfaces as `Err`, ending
@@ -2461,18 +1923,6 @@ impl PendingDisclosure {
 }
 
 /// The pending disclosure for a `follow` outcome (None ⇒ not a pending device-auth).
-fn follow_pending_disclosure(out: &ops::FollowOutcome) -> Option<PendingDisclosure> {
-    match out {
-        ops::FollowOutcome::Data { data, .. } => data.pending.as_ref().map(|p| PendingDisclosure {
-            verification_uri: p.verification_uri.clone(),
-            user_code: p.user_code.clone(),
-            interval_secs: p.interval_secs,
-            expires_at_millis: p.expires_at.as_deref().and_then(parse_rfc3339_utc_millis),
-        }),
-        _ => None,
-    }
-}
-
 /// The pending disclosure for a `login` (session) outcome (None ⇒ the login settled).
 fn session_login_pending_disclosure(
     out: &topos_types::results::LoginData,
@@ -2542,18 +1992,6 @@ fn finish_session_logout(
 }
 
 /// The pending disclosure for an `auth login` outcome (None ⇒ the sign-in settled).
-fn login_pending_disclosure(out: &ops::AuthLoginOutcome) -> Option<PendingDisclosure> {
-    match out {
-        ops::AuthLoginOutcome::Pending(p) => Some(PendingDisclosure {
-            verification_uri: p.verification_uri.clone(),
-            user_code: p.user_code.clone(),
-            interval_secs: Some(p.interval_secs),
-            expires_at_millis: p.expires_at.as_deref().and_then(parse_rfc3339_utc_millis),
-        }),
-        ops::AuthLoginOutcome::Done(_) => None,
-    }
-}
-
 /// Parse the client's own RFC 3339 UTC spelling (`YYYY-MM-DDTHH:MM:SSZ` — what the pending
 /// disclosures carry) back to epoch millis. Anything else answers `None` (the waiting line then
 /// shows elapsed time only).
@@ -2966,10 +2404,8 @@ pub(crate) fn pull_with_name_fallback(
     reconcile: &ops::ReconcileOpts,
 ) -> Result<ops::PullOutcome, ClientError> {
     let arg = skill.clone();
-    let first = build_pull_scope(skill, onto_current).and_then(|scope| match (&scope, delivery) {
-        (ops::PullScope::AllFollowed, Some(d)) => ops::pull_reconcile_with(ctx, d, reconcile),
-        _ => ops::pull(ctx, scope),
-    });
+    let _ = (delivery, reconcile);
+    let first = build_pull_scope(skill, onto_current).and_then(|scope| ops::pull(ctx, scope));
     match first {
         Err(ClientError::NoSuchSkill { .. })
             if arg.as_ref().is_some_and(|a| {
@@ -2992,48 +2428,6 @@ pub(crate) fn pull_with_name_fallback(
     }
 }
 
-/// The real plane wiring, present only when enrollment has been written. Owns the transport + the on-disk
-/// follow source so [`run`] can borrow them as `&dyn` trait objects for the lifetime of the command.
-struct Enrollment {
-    plane: UreqPlane,
-    follow: FileFollow,
-}
-
-/// Load the enrollment docs read-only. Returns `Some` whenever `instance.json` is present — enrollment is
-/// what writes it, so its presence IS the enrolled state; `follows.json` is optional (an empty membership
-/// door, or every follow since flipped off by `unfollow`). The read transport carries the ONE device
-/// credential (`credentials.json`) plus the follow-state's skill → workspace map — a signed-out install
-/// (no credential) reads nothing (never a request without a credential). The transport stays wired even
-/// with zero active follows: the write verbs (publish/revert/review) still need the plane base, and an
-/// enrolled author with nothing followed is a normal state. The bare `pull` stays an honest no-op either
-/// way (the sweep skips a `following == false` entry, and renders "No followed skills." over an empty
-/// set). A corrupt / newer-schema doc (incl. a permissive `credentials.json`) fails closed (propagated),
-/// never silently degraded to inert.
-fn load_enrollment(fs: &dyn FsOps, layout: &Layout) -> Result<Option<Enrollment>, ClientError> {
-    let Some(instance) = enroll::read_instance(fs, layout)? else {
-        return Ok(None);
-    };
-    let follows = enroll::read_follows(fs, layout)?.unwrap_or_else(|| enroll::Follows {
-        schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
-        follows: Vec::new(),
-    });
-    let credential = enroll::read_credentials(fs, layout)?.map(|c| c.credential);
-    // The SAME ended-link filter the reconcile connector applies: a severed link's membership is
-    // marked ended locally, and no transport — the bare `update` included — keeps dialing it
-    // (its delivery answers the uniform 404; `follow <address>` relinks).
-    let workspaces: Vec<String> = enroll::read_user(fs, layout)?
-        .map(|u| u.fanout_workspace_ids())
-        .unwrap_or_default();
-    let plane = UreqPlane::new(
-        instance.base_url,
-        credential,
-        enroll::skill_workspaces(&follows),
-    )
-    .with_workspaces(workspaces);
-    let follow = FileFollow::new(enroll::follow_contexts(&follows));
-    Ok(Some(Enrollment { plane, follow }))
-}
-
 /// The breadth arming sweep, run at the composition root — the one layer holding the real ports
 /// (`RealFs` is both the `ConfigStore` and the `CommandRunner`) and the resolved machine roots.
 /// `None` roots (no `$HOME`) arms nothing: detection needs a home, and the active adapter's own
@@ -3046,6 +2440,42 @@ fn breadth_arm(
     match roots {
         Some(r) => ops::arm_detected(&r.home, r.cwd.as_deref(), active.id().slug(), fs, fs),
         None => Vec::new(),
+    }
+}
+
+/// The session-routed CATALOG reader (`list --remote`): one credentialed client per live
+/// session, routed by workspace id.
+struct SessionCatalog {
+    lanes: Vec<(String, UreqDeviceClient)>,
+}
+
+impl SessionCatalog {
+    fn new(sessions: &[crate::sessions::Session]) -> Self {
+        Self {
+            lanes: sessions
+                .iter()
+                .map(|s| {
+                    (
+                        s.workspace_id.clone(),
+                        UreqDeviceClient::new(s.base_url.clone(), Some(s.credential.clone())),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+impl crate::plane::CatalogSource for SessionCatalog {
+    fn fetch_catalog(
+        &self,
+        workspace_id: &str,
+    ) -> Result<topos_types::requests::WireSkillIndex, crate::plane::PlaneError> {
+        match self.lanes.iter().find(|(w, _)| w == workspace_id) {
+            Some((_, client)) => client.fetch_catalog(workspace_id),
+            None => Err(crate::plane::PlaneError::Unavailable(
+                "no session for this workspace".into(),
+            )),
+        }
     }
 }
 

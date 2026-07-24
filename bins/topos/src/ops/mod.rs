@@ -17,14 +17,12 @@
 //! short-version-prefix resolver.
 
 mod add;
-mod agent_scope;
 mod arm;
 mod auth;
 mod builtin;
-mod channel;
+mod connect;
 mod contribute;
 mod diff;
-mod follow;
 mod init;
 mod invite;
 mod list;
@@ -45,7 +43,6 @@ mod review;
 mod self_update;
 mod status;
 pub(crate) mod sync_engine;
-mod unfollow;
 mod uninstall;
 mod version_check;
 
@@ -53,45 +50,28 @@ pub(crate) use add::{
     AddRemoteOpts, KeepAsYoursOutcome, add, add_remote, add_with_name, keep_as_yours,
     resolve_add_target, split_target, tracked_skill_at,
 };
-pub(crate) use agent_scope::{AgentScopeData, AgentScopeOutcome, exclude_agents};
 pub(crate) use arm::{arm_detected, probe_detected, scrub_all};
 pub(crate) use builtin::{ensure_builtin, is_builtin};
-// The built-in suite drives the refresh seam + the restore verb fn + the provenance matcher
-// directly.
+pub(crate) use connect::device_challenge;
+// The RFC-3339 emitter round-trips against the render parser's test.
+#[cfg(test)]
+pub(crate) use connect::fmt_rfc3339_millis;
+// The built-in suite drives the refresh seam + the provenance matcher directly.
+pub(crate) use auth::{AuthConnectors, AuthStatusData, status};
 #[cfg(test)]
 pub(crate) use builtin::{
-    ensure_with as builtin_ensure_with, follow_builtin as builtin_follow,
-    marker_in_frontmatter as builtin_marker_in_frontmatter,
+    ensure_with as builtin_ensure_with, marker_in_frontmatter as builtin_marker_in_frontmatter,
 };
-// The scope-update fn is driven through `follow --agent`; the direct re-exports serve the
-// placement-breadth suite (which exercises the shared fn without the verb dispatch).
-#[cfg(test)]
-pub(crate) use agent_scope::{apply_scope_change, set_scope};
-pub(crate) use auth::{
-    AuthConnectors, AuthLoginData, AuthLoginOutcome, AuthLoginPending, AuthLogoutData,
-    AuthLogoutDescribe, AuthLogoutOutcome, AuthStatusData, login, logout, status,
-};
-pub(crate) use channel::{ChannelConnectors, ChannelOutcome, channel};
 pub(crate) use diff::{DiffBudget, diff};
-pub(crate) use follow::{
-    BarewordDecision, FollowApplied, FollowConnectors, FollowDescribe, FollowOpts, FollowOutcome,
-    LinkDescribe, Reattach, device_challenge, follow,
-};
-// Test-only re-export: the waiting-line parser round-trips against the disclosures' emitter.
-#[cfg(test)]
-pub(crate) use follow::fmt_rfc3339_millis;
 pub(crate) use init::init;
 pub(crate) use invite::{InviteConnectors, InviteOutcome, invite};
+#[cfg(test)]
+pub(crate) use list::list;
 pub(crate) use list::{DiscoveryRoots, ListFilter, ListOutcome, RemoteScope, list_with};
 pub(crate) use login::{LoginConnectors, login as session_login, logout as session_logout};
 pub(crate) use manifest_edit::{
     note_added_path, note_added_remote, profile_provided_names, remove_from_manifests,
 };
-// The `Option<&str>` shim is a test-only convenience (the inline suites + the feature-gated e2e rig);
-// production uses `list_with`, so its re-export is gated to stay warning-clean in a plain build.
-#[cfg(any(test, feature = "test-fixtures"))]
-pub(crate) use list::list;
-pub(crate) use unfollow::{UnfollowApplied, UnfollowDescribe};
 // The TTY-only enrollment row types are constructed in `list` and rendered by field access; the named
 // re-export exists for the renderer's tests, which build them by hand.
 #[cfg(test)]
@@ -103,17 +83,17 @@ pub(crate) use protect::{ProtectConnectors, ProtectOutcome, protect};
 #[cfg(test)]
 pub(crate) use publish::ensure_tracked;
 pub(crate) use pull::{
-    PullOutcome, PullScope, ReconcileOpts, ResetOutcome, TargetMode, pull, pull_reconcile_with,
-    quiet_hook_lines, quiet_soft_failure, reset, update_selective,
+    PullOutcome, PullScope, ReconcileOpts, ResetOutcome, TargetMode, pull, quiet_hook_lines,
+    quiet_soft_failure, reset,
 };
-pub(crate) use reconcile::{ManifestUpdateOpts, SessionTransports, manifest_update};
+pub(crate) use reconcile::{
+    CacheFollow, ManifestUpdateOpts, SessionRoutedPlane, SessionTransports, manifest_update,
+};
 pub(crate) use reference::{
     WriteLane, add_reference, remove_reference_global, resolve_session_lane, rewrite_to_governed,
 };
 // The withdrawal/exclusion clean is driven through `remove`/the reconcile; the direct re-export
 // serves the placement-breadth suite's foreign-preservation regression.
-#[cfg(test)]
-pub(crate) use pull::{WithdrawReason, snapshot_and_clean};
 pub(crate) use quiet_gate::{
     QuietGate, quiet_gate, reload_skills_json, resolve_ttl_ms, stamp_sweep, sweep_changed_bytes,
     sweep_lock,
@@ -123,7 +103,6 @@ pub(crate) use revert::{RevertOutcome, revert};
 pub(crate) use review::{ReviewConnectors, ReviewOutcome, ReviewVerdict, review_dispatch};
 pub(crate) use self_update::{SelfUpdateAction, SelfUpdateOpts, SelfUpdateOutcome, self_update};
 pub(crate) use status::status_snapshot;
-pub(crate) use unfollow::{UnfollowConnectors, UnfollowOutcome, unfollow};
 pub(crate) use uninstall::{UninstallApplied, UninstallDescribe, UninstallOutcome, uninstall};
 pub(crate) use version_check::{version_check_env_allows, version_nag};
 
@@ -132,17 +111,16 @@ use topos_gitstore::Store;
 use topos_types::persisted::Lock;
 
 use crate::ctx::Ctx;
+use crate::doc;
 use crate::error::ClientError;
 use crate::id::SkillId;
 use crate::sidecar::SkillPaths;
-use crate::{doc, enroll};
 
 /// The default row page a `--json` enumeration is capped at when no explicit `--limit` was given —
 /// one per verb (the TTY stays uncapped by default; `--limit 0` lifts the cap everywhere).
 pub(crate) const DEFAULT_JSON_LIST_LIMIT: usize = 50;
 pub(crate) const DEFAULT_JSON_LOG_LIMIT: usize = 20;
 
-/// One page of a row-capped enumeration (`list` / `log`): skip `offset` rows, emit up to `limit`.
 /// The page applies PER BUCKET on `list` (each bucket skips/caps independently — one grammar for
 /// every bucket, so the next-page argv stays a single `--offset`).
 #[derive(Debug, Clone, Copy)]
@@ -172,8 +150,9 @@ impl RowPage {
         Self { offset, limit }
     }
 
-    /// The no-op page — the test-only `list` shim's default (production always resolves a page).
-    #[cfg(any(test, feature = "test-fixtures"))]
+    /// Whether this page can ever drop a row (a real offset or a finite limit).
+    /// An uncapped page (the test rigs' shape).
+    #[cfg(test)]
     pub(crate) fn unlimited() -> Self {
         Self {
             offset: 0,
@@ -181,7 +160,6 @@ impl RowPage {
         }
     }
 
-    /// Whether this page can ever drop a row (a real offset or a finite limit).
     pub(crate) fn is_active(&self) -> bool {
         self.offset > 0 || self.limit.is_some()
     }
@@ -328,32 +306,6 @@ pub(crate) fn workspace_of(ctx: &Ctx<'_>, skill_id: &str) -> Result<String, Clie
             "'{skill_id}' is not a followed skill; a plane op needs its workspace"
         ))
     })
-}
-
-/// The workspace a `publish` / `review` / `revert` signs its op in for an already-resolved skill:
-/// - a FOLLOWED skill signs in its own follow-entry workspace (the pointer scope — it MUST be the skill's
-///   own workspace, not an ambient guess);
-/// - a skill with NO follow entry (a genesis publish of a locally-`add`ed skill) is AMBIENT: the single
-///   membership, or the `--workspace`-selected one.
-///
-/// # Errors
-/// [`ClientError::Enrollment`] if not enrolled; [`ClientError::WorkspaceSelection`] if the install has
-/// joined several workspaces and `explicit` neither names one nor is the sole choice.
-pub(crate) fn write_workspace_for_skill(
-    ctx: &Ctx<'_>,
-    skill_id: &str,
-    explicit: Option<&str>,
-) -> Result<String, ClientError> {
-    if let Some(ws) = followed_workspace(ctx, skill_id) {
-        return Ok(ws);
-    }
-    let user = enroll::read_user(ctx.fs, &ctx.layout)?.ok_or_else(|| {
-        ClientError::Enrollment(
-            "could not determine your workspace; complete enrollment with `topos follow` first"
-                .into(),
-        )
-    })?;
-    Ok(user.resolve_write_workspace(explicit)?.workspace_id.clone())
 }
 
 /// Parse 64 lowercase-hex chars into a 32-byte id (a sidecar doc field) via the shared `hex` codec.

@@ -175,30 +175,13 @@ pub(crate) enum ClientError {
     Enrollment(String),
     /// The ONE not-enrolled refusal every credentialed verb shares: this install has no plane (or
     /// no membership) to act against. The fix is stated in prose AND mirrored structurally — the
-    /// envelope carries a `FOLLOW_WORKSPACE` next action whose argv template `needs` the
+    /// envelope carries a `LOGIN_WORKSPACE` next action whose argv template `needs` the
     /// workspace address. Same wire code as the enrollment family (agents branch the same).
     #[error(
-        "not enrolled — run `topos follow <workspace-address>` first (ask a teammate for your \
+        "not connected — run `topos login <workspace-address>` first (ask a teammate for your \
          workspace address, or create a workspace at https://topos.sh)"
     )]
     NotEnrolled,
-    /// A bareword `follow <name>` on an UNENROLLED install (no slash, no scheme — it reads as a
-    /// workspace on the DEFAULT server) refused to start a device flow without consent: the run
-    /// was headless (or the TTY prompt could not be asked), and no `--yes` rode the argv. The two
-    /// deliberate spellings are named in prose and mirrored in `next_actions`.
-    #[error(
-        "'{name}' looks like a workspace on {server} — enrolling this device needs explicit \
-         consent here: re-run with `--yes`, or spell the full address (`topos follow \
-         {server}/{name}`)"
-    )]
-    BarewordEnrollUnconfirmed { name: String, server: String },
-    /// The TTY half of the same guard: the human answered no at the confirm prompt. Nothing was
-    /// dialed, nothing changed.
-    #[error(
-        "not confirmed — nothing changed; to enroll this device with '{name}' on {server}, run \
-         `topos follow {server}/{name}` (or re-run and answer y)"
-    )]
-    BarewordEnrollDeclined { name: String, server: String },
     /// The optional `@<digest>` consent pin did not match the digest recomputed over the bytes being
     /// shipped — refused BEFORE signing or sending (the disclosure/integrity gate; never a silent
     /// mode-flip). The agent re-discloses (via `diff`) and re-pins the exact digest.
@@ -226,26 +209,6 @@ pub(crate) enum ClientError {
     /// transport-fault-shaped "the plane returned PERMANENT_FAILURE". The message is self-authored guidance.
     #[error("{0}")]
     ReviewNotOpen(String),
-    /// A device-flow enrollment was DENIED at the approval page — on a hosted plane this is the
-    /// authenticated-but-uninvited case (a signed-in identity that is not on the workspace roster), so
-    /// the guidance is ask-an-owner: the message tells the human exactly what to request, and the
-    /// envelope carries `REQUEST_ACCESS`. (The server's denial is deliberately uniform — no existence
-    /// oracle; the guidance comes from the door that was knocked on.)
-    #[error(
-        "the workspace did not admit this enrollment — ask a workspace owner to run \
-         `topos invite <your-email>`, then re-run `topos follow`"
-    )]
-    EnrollDenied,
-    /// The device-link lane refused: the signed-in person holds NO seat in the named workspace — or
-    /// no workspace of that name exists (byte-identical server-side; no existence oracle). The way
-    /// in is an invitation: an owner invites the person's email, and the mailed invitation link
-    /// redeems on this device (`topos follow <invite-url>`).
-    #[error(
-        "you're not a member of '{workspace}' (or it doesn't exist) — ask a workspace owner to run \
-         `topos invite <your-email>`; the mailed invitation link redeems on this device: \
-         `topos follow <invite-url>`"
-    )]
-    NotAMember { workspace: String },
     /// A `publish` is blocked because an unresolved author-merge conflict (`conflict.json`) is present —
     /// the draft must be resolved first. Refused before any build / WAL / send (the publish guard).
     #[error("publish is blocked: resolve the merge conflict in this skill first")]
@@ -420,18 +383,9 @@ impl ClientError {
             ClientError::Enrollment(_) => "ENROLLMENT_FAILED",
             // The shared not-enrolled refusal keeps the enrollment family's code.
             ClientError::NotEnrolled => "ENROLLMENT_FAILED",
-            // The bareword-enroll guard: one code for both faces (headless refusal / TTY decline)
-            // — the agent branches the same and the argv fixes are identical.
-            ClientError::BarewordEnrollUnconfirmed { .. }
-            | ClientError::BarewordEnrollDeclined { .. } => "ENROLL_CONFIRM_REQUIRED",
             ClientError::ApprovalMismatch { .. } => "CONSENT_MISMATCH",
             ClientError::Conflict { .. } => "CONFLICT",
             ClientError::Denied(_) => "DENIED",
-            // The same closed DENIED code — only the guidance message differs (enrollment ask-an-owner).
-            ClientError::EnrollDenied => "DENIED",
-            // The device-link refusal mirrors the WIRE code 1:1 (the server's seatless/unknown
-            // non-answer), so an agent branches on the same fact on either surface.
-            ClientError::NotAMember { .. } => "NOT_A_MEMBER",
             // A review verdict on a no-longer-open proposal — an open code, its own domain refusal.
             ClientError::ReviewNotOpen(_) => "REVIEW_NOT_OPEN",
             ClientError::PublishBlocked { .. } => "PUBLISH_BLOCKED",
@@ -496,9 +450,7 @@ impl ClientError {
             // The contribute typed outcomes carry their own terminal classification (the plane's verdict,
             // surfaced 1:1 so the agent branches on the same outcome it would on the wire).
             ClientError::Conflict { .. } => TerminalOutcome::Conflict,
-            ClientError::Denied(_) | ClientError::EnrollDenied | ClientError::NotAMember { .. } => {
-                TerminalOutcome::Denied
-            }
+            ClientError::Denied(_) => TerminalOutcome::Denied,
             ClientError::PublishBlocked { .. } => TerminalOutcome::Diverged,
             // Divergent per-placement edits are the same class as a diverged draft: local
             // reconciliation (or the disclosed reset) resolves it, never a blind retry.

@@ -25,7 +25,9 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use topos_core::digest::to_hex;
-use topos_types::persisted::{Lock, PlacementMap, SyncState};
+use topos_gitstore::Store;
+use topos_types::PERSISTED_SCHEMA_VERSION;
+use topos_types::persisted::{Lock, PlacementMap, SwapCapability, SyncState};
 use topos_types::requests::{WireChannelIndex, WireSkillIndex, WireSkillIndexEntry};
 use topos_types::results::{PullAction, PullData, PullSkill, WorkspaceSyncReport};
 use topos_types::{CurrentRecord, PointerScope, WIRE_SCHEMA_VERSION, WireCurrentRecord};
@@ -45,7 +47,7 @@ use crate::plane::{
 };
 use crate::sessions::{self, SESSION_ACTIVE, SESSION_ENDED, SESSION_PENDING, Session};
 use crate::sync_status::{self, DeliveredSkill, WorkspaceSync};
-use crate::{doc, placement};
+use crate::{doc, placement, sidecar};
 
 use super::pull::PullOutcome;
 use super::sync_engine::{self, Invocation};
@@ -179,6 +181,100 @@ impl CacheFollow {
 impl FollowSource for CacheFollow {
     fn followed(&self) -> Vec<(String, FollowContext)> {
         self.entries.clone()
+    }
+}
+
+/// The SESSION-ROUTED plane — the app ctx's `PlaneSource` when the installation runs on
+/// sessions: each per-skill read routes to the session lane of the workspace the skill belongs to
+/// (the offline delivery cache supplies the map; `bind_skill` teaches new pairs mid-run). A skill
+/// no session covers answers "not served", exactly like the retired inert source.
+pub(crate) struct SessionRoutedPlane {
+    lanes: Vec<(String, Box<dyn ReconcileTransport>)>,
+    skill_ws: std::cell::RefCell<std::collections::HashMap<String, String>>,
+}
+
+impl SessionRoutedPlane {
+    /// Build from the live sessions + the offline delivery cache.
+    pub(crate) fn load(
+        fs: &dyn crate::fs_seam::FsOps,
+        layout: &crate::sidecar::Layout,
+        connect: &SessionConnect<'_>,
+    ) -> Self {
+        let mut lanes = Vec::new();
+        if let Ok(all) = sessions::read_sessions(fs, layout) {
+            for s in &all.sessions {
+                if s.status == SESSION_ENDED {
+                    continue;
+                }
+                lanes.push((s.workspace_id.clone(), connect(s).plane));
+            }
+        }
+        let mut skill_ws = std::collections::HashMap::new();
+        if let Ok(status) = sync_status::read(fs, layout) {
+            for (ws, entry) in &status.workspaces {
+                for skill_id in entry.delivered.keys() {
+                    skill_ws.insert(skill_id.clone(), ws.clone());
+                }
+            }
+        }
+        Self {
+            lanes,
+            skill_ws: std::cell::RefCell::new(skill_ws),
+        }
+    }
+
+    fn lane_of(&self, skill_id: &str) -> Option<&dyn PlaneSource> {
+        let ws = self.skill_ws.borrow().get(skill_id).cloned()?;
+        self.lanes.iter().find(|(w, _)| *w == ws).map(|(_, t)| {
+            let p: &dyn PlaneSource = &**t;
+            p
+        })
+    }
+}
+
+impl PlaneSource for SessionRoutedPlane {
+    fn get_current(
+        &self,
+        skill_id: &str,
+        known: Option<crate::plane::KnownCurrent>,
+    ) -> Result<crate::plane::PointerFetch, PlaneError> {
+        match self.lane_of(skill_id) {
+            Some(lane) => {
+                lane.bind_skill(&self.skill_ws.borrow()[skill_id], skill_id);
+                lane.get_current(skill_id, known)
+            }
+            None => Err(PlaneError::NotFound),
+        }
+    }
+    fn fetch_version(
+        &self,
+        skill_id: &str,
+        version_id: [u8; 32],
+    ) -> Result<crate::plane::FetchedVersion, PlaneError> {
+        match self.lane_of(skill_id) {
+            Some(lane) => {
+                lane.bind_skill(&self.skill_ws.borrow()[skill_id], skill_id);
+                lane.fetch_version(skill_id, version_id)
+            }
+            None => Err(PlaneError::NotFound),
+        }
+    }
+    fn list_open_proposals(&self, skill_id: &str) -> Result<Vec<[u8; 32]>, PlaneError> {
+        match self.lane_of(skill_id) {
+            Some(lane) => {
+                lane.bind_skill(&self.skill_ws.borrow()[skill_id], skill_id);
+                lane.list_open_proposals(skill_id)
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+    fn bind_skill(&self, workspace_id: &str, skill_id: &str) {
+        self.skill_ws
+            .borrow_mut()
+            .insert(skill_id.to_owned(), workspace_id.to_owned());
+        if let Some((_, lane)) = self.lanes.iter().find(|(w, _)| w == workspace_id) {
+            PlaneSource::bind_skill(&**lane, workspace_id, skill_id);
+        }
     }
 }
 
@@ -927,7 +1023,7 @@ fn sync_workspace_skill(
             harness_slug: None,
         };
         let plan = plan_fn(ctx, &target.skill_id, &baseline_lock, &empty);
-        if let Err(e) = super::follow::lay_baseline_with_plan(
+        if let Err(e) = lay_baseline_with_plan(
             ctx,
             &sid,
             target.name.clone(),
@@ -1609,4 +1705,108 @@ impl TransportViews for Box<dyn ReconcileTransport> {
     fn as_delivery(&self) -> &dyn crate::plane::DeliverySource {
         &**self
     }
+}
+
+// =================================================================================================
+// The never-received baseline (moved here from the retired follow verb — the reconcile's scaffold
+// for a brand-new arrival's first receive).
+// =================================================================================================
+
+/// The all-zero sentinel a first-receive baseline carries.
+const ZERO_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+/// The genesis generation sentinel.
+const GENESIS: u64 = 0;
+
+// =================================================================================================
+// The never-received baseline — the sidecar scaffold a brand-new arrival's first receive lands into.
+// =================================================================================================
+
+/// [`lay_first_receive_baseline`] with the placement plan already computed — the manifest
+/// reconcile's entry for PROJECT-scope arrivals (their targets root at the demanding checkout,
+/// not the home harness dirs).
+pub(crate) fn lay_baseline_with_plan(
+    ctx: &Ctx<'_>,
+    skill_id: &crate::id::SkillId,
+    name: String,
+    plan: &crate::placement::PlacementPlan,
+    incoming_digest: Option<&[u8; 32]>,
+) -> Result<(), ClientError> {
+    let _guard = sidecar::lock_skill(ctx.fs, &ctx.layout, skill_id)?;
+    if ctx.fs.exists(&ctx.layout.skill_dir(skill_id)) {
+        return Ok(());
+    }
+
+    let (staging_base, sp) = ctx.layout.staging(skill_id);
+    if ctx.fs.exists(&staging_base) {
+        ctx.fs.remove_dir_all(&staging_base)?;
+    }
+    ctx.fs.create_dir_all(&sp.store)?;
+    // An empty embedded-git store the first received version is later written into. The full-tree
+    // durability set is exactly right HERE (and only here + `add`'s staging import): the store is a
+    // fresh `init_bare`, so the whole tree IS this op's writes (the repo scaffolding — HEAD / config /
+    // objects/ / refs/) and never carries history.
+    let store = Store::init(&sp.store)?;
+    sync_engine::fsync_batch(ctx, &store.durability_set()?)?;
+    doc::write_doc(
+        ctx.fs,
+        &sp.sync,
+        &SyncState {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            observed: GENESIS,
+            observed_version_id: ZERO_HEX.to_owned(),
+            applied: GENESIS,
+            base_commit: ZERO_HEX.to_owned(),
+            work_hash: ZERO_HEX.to_owned(),
+            held: false,
+        },
+    )?;
+    let baseline = PlacementMap {
+        schema_version: topos_types::PLACEMENT_MAP_SCHEMA_VERSION,
+        placements: Vec::new(),
+        applied_commit: ZERO_HEX.to_owned(),
+        materialized_sha: ZERO_HEX.to_owned(),
+        pre_existing_sha: None,
+        swap_capability: SwapCapability::Unsupported,
+        placement_state: Vec::new(),
+        harness: Some(ctx.harness.id()),
+        harness_layer: None,
+        harness_slug: Some(ctx.harness.id().slug().to_owned()),
+    };
+    let mut map = crate::placement::reconcile_map(&baseline, plan);
+    // Record the ADOPTIONS durably: a planned dir that already exists under the display name with
+    // byte-identical content gets its digest into `pre_existing_sha` — the reservation later plans
+    // reuse (and the sticky prior-bytes record uninstall restores). `materialized_sha` stays None:
+    // no bytes move at baseline time; the consented accept heals the dir in place.
+    if let Some(digest) = incoming_digest {
+        crate::placement::record_adoptions(ctx, &mut map, skill_id.as_str(), &name, digest);
+    }
+    doc::write_map(ctx.fs, &sp.map, &map)?;
+    // lock LAST — the commit marker (recovery keeps a dir only when lock.json is present).
+    doc::write_doc(
+        ctx.fs,
+        &sp.lock,
+        &Lock {
+            schema_version: PERSISTED_SCHEMA_VERSION,
+            skill_id: skill_id.to_string(),
+            name,
+            base_commit: ZERO_HEX.to_owned(),
+            bundle_digest: ZERO_HEX.to_owned(),
+            files: Vec::new(),
+        },
+    )?;
+
+    match ctx
+        .fs
+        .rename_dir_noreplace(&staging_base, &ctx.layout.skill_dir(skill_id))
+    {
+        Ok(()) => {}
+        // Raced a concurrent baseline/receive — keep theirs, clean our staging.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            ctx.fs.remove_dir_all(&staging_base)?;
+            return Ok(());
+        }
+        Err(e) => return Err(ClientError::Io(format!("publish baseline {skill_id}: {e}"))),
+    }
+    ctx.fs.fsync_dir(&ctx.layout.skills_dir())?;
+    Ok(())
 }

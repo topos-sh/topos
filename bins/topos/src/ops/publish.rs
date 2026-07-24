@@ -8,7 +8,7 @@
 //! It persists an op-WAL before the first send (so an uncertain retry replays the same
 //! `op_id`), and maps the plane's typed outcome.
 //!
-//! An UN-ENROLLED publish is refused typed — enrollment is `topos follow <workspace-address>` (the
+//! An UN-ENROLLED publish is refused typed — enrollment is `topos login <workspace-address>` (the
 //! device-authorization flow), and workspaces are born server-side, never from a publish.
 
 use topos_core::digest::to_hex;
@@ -20,15 +20,14 @@ use topos_types::{PERSISTED_SCHEMA_VERSION, TerminalOutcome};
 
 use topos_types::results::{PublishDescribeData, PublishGate};
 
+use super::connect::{DeliveryConnect, DirectoryConnect};
 use super::contribute::{self, ContributeConnect, PUBLISH_MESSAGE};
-use super::follow::{DeliveryConnect, DirectoryConnect};
 use super::sync_engine;
 use super::{
     DiscoveryRoots, add, add_with_name, parse_hex32, resolve_add_target, resolve_skill,
-    resolve_skill_in_workspace, split_target, tracked_skill_at, write_workspace_for_skill,
+    resolve_skill_in_workspace, split_target, tracked_skill_at,
 };
 use crate::ctx::Ctx;
-use crate::enroll;
 use crate::error::ClientError;
 use crate::plane::WriteReceipt;
 use crate::source::{self, SourceSpec};
@@ -74,7 +73,7 @@ const GENESIS: u64 = 0;
 /// refused BEFORE any local adoption, so it never mutates local state.
 ///
 /// # Errors
-/// [`ClientError::Enrollment`] if not enrolled (run `topos follow <workspace-address>` first);
+/// [`ClientError::Enrollment`] if not enrolled (run `topos login <workspace-address>` first);
 /// [`ClientError::InvalidArgument`] if the source is remote/unsupported (add it first);
 /// [`ClientError::HarnessMismatch`] if a `@<harness>` names a different harness than the tracked skill;
 /// the `add`-family errors ([`ClientError::AmbiguousHarness`] / [`ClientError::NoUntrackedSkill`] / …) when
@@ -104,7 +103,7 @@ pub(crate) fn publish(
     let has_sessions = !crate::sessions::read_sessions(ctx.fs, &ctx.layout)?
         .sessions
         .is_empty();
-    if !has_sessions && enroll::read_instance(ctx.fs, &ctx.layout)?.is_none() {
+    if !has_sessions {
         return Err(ClientError::Enrollment(
             "not connected to a workspace — run `topos login <workspace-address>` first, then \
              re-run this publish"
@@ -222,14 +221,7 @@ pub(crate) fn publish_describe(
     let channel = channel.as_deref();
     let (base_url, workspace_id) = match &lane {
         Some(l) => (l.base_url.clone(), l.workspace_id.clone()),
-        None => {
-            let instance =
-                enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or(ClientError::NotEnrolled)?;
-            (
-                instance.base_url,
-                write_workspace_for_skill(ctx, id.as_str(), workspace)?,
-            )
-        }
+        None => return Err(ClientError::NotEnrolled),
     };
     // Under a session lane the delivered set IS the follow-state (the cache-backed seam).
     let cache_follow = lane
@@ -634,15 +626,9 @@ fn enrolled_publish(
     let (base_url, workspace_id) = match &lane {
         Some(l) => (l.base_url.clone(), l.workspace_id.clone()),
         None => {
-            let instance = enroll::read_instance(ctx.fs, &ctx.layout)?.ok_or_else(|| {
-                ClientError::Enrollment(
-                    "not connected — run `topos login <workspace-address>` first".into(),
-                )
-            })?;
-            (
-                instance.base_url,
-                write_workspace_for_skill(ctx, id.as_str(), workspace)?,
-            )
+            return Err(ClientError::Enrollment(
+                "not connected — run `topos login <workspace-address>` first".into(),
+            ));
         }
     };
     // Under a session lane, the delivered set IS the follow-state (the cache-backed seam) — the
@@ -673,7 +659,7 @@ fn enrolled_publish(
     let transport: &dyn crate::plane::ContributeSource = match &lane {
         Some(l) => &*l.transports.contribute,
         None => {
-            legacy_transport = connect(&base_url);
+            legacy_transport = connect(&base_url, None);
             &*legacy_transport
         }
     };

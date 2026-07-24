@@ -126,6 +126,30 @@ impl Sessions {
     }
 }
 
+/// Canonicalize the global `--workspace` flag: the ADDRESS name → the session's workspace id
+/// (best-effort — an unknown name passes through for the downstream selection error to name).
+pub(crate) fn canonicalize_workspace_flag(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    flag: Option<String>,
+) -> Option<String> {
+    let flag = flag?;
+    let all = read_sessions(fs, layout).unwrap_or_default();
+    Some(
+        all.sessions
+            .iter()
+            .find(|s| s.workspace_name == flag)
+            .map(|s| s.workspace_id.clone())
+            .unwrap_or(flag),
+    )
+}
+
+/// Fold an email/principal to its canonical ASCII-lowercase form (the invite wire's one identity
+/// per human).
+pub(crate) fn canonical_principal(s: &str) -> String {
+    s.trim().to_ascii_lowercase()
+}
+
 /// Read `identity/sessions.json` (a `0600` secret). Absent = signed into nothing.
 pub(crate) fn read_sessions(fs: &dyn FsOps, layout: &Layout) -> Result<Sessions, ClientError> {
     Ok(doc::read_doc_private(fs, &layout.sessions_path())?.unwrap_or_default())

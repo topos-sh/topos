@@ -123,24 +123,6 @@ fn schemas() -> Vec<(&'static str, String)> {
                 topos_types::requests::DeviceAuthPollResponse
             )),
         ),
-        // The browser-free device-link lane (describe + create) — an enrolled device joins a
-        // further workspace without a second device flow.
-        (
-            "device-link-request",
-            emit(schemars::schema_for!(
-                topos_types::requests::DeviceLinkRequest
-            )),
-        ),
-        (
-            "device-link-describe",
-            emit(schemars::schema_for!(
-                topos_types::requests::DeviceLinkDescribe
-            )),
-        ),
-        (
-            "device-link-data",
-            emit(schemars::schema_for!(topos_types::requests::DeviceLinkData)),
-        ),
         (
             "notice-ack-request",
             emit(schemars::schema_for!(
@@ -175,14 +157,6 @@ fn schemas() -> Vec<(&'static str, String)> {
             emit(schemars::schema_for!(topos_types::results::InitData)),
         ),
         (
-            "follow-data",
-            emit(schemars::schema_for!(topos_types::results::FollowData)),
-        ),
-        (
-            "unfollow-data",
-            emit(schemars::schema_for!(topos_types::results::UnfollowData)),
-        ),
-        (
             "log-data",
             emit(schemars::schema_for!(topos_types::results::LogData)),
         ),
@@ -212,27 +186,11 @@ fn schemas() -> Vec<(&'static str, String)> {
             "invitation-data",
             emit(schemars::schema_for!(topos_types::requests::InvitationData)),
         ),
-        (
-            "invite-accept-request",
-            emit(schemars::schema_for!(
-                topos_types::requests::InviteAcceptRequest
-            )),
-        ),
-        (
-            "invite-accept-data",
-            emit(schemars::schema_for!(
-                topos_types::requests::InviteAcceptData
-            )),
-        ),
         // The adopted verb describe/apply `data` payloads (the two-phase surface: a bare mutating verb
         // returns the describe, `--yes` returns it applied).
         (
             "remove-data",
             emit(schemars::schema_for!(topos_types::results::RemoveData)),
-        ),
-        (
-            "channel-data",
-            emit(schemars::schema_for!(topos_types::results::ChannelData)),
         ),
         (
             "protect-data",
@@ -259,6 +217,14 @@ fn schemas() -> Vec<(&'static str, String)> {
             )),
         ),
         (
+            "login-data",
+            emit(schemars::schema_for!(topos_types::results::LoginData)),
+        ),
+        (
+            "logout-data",
+            emit(schemars::schema_for!(topos_types::results::LogoutData)),
+        ),
+        (
             "reset-data",
             emit(schemars::schema_for!(topos_types::results::ResetData)),
         ),
@@ -275,10 +241,6 @@ fn schemas() -> Vec<(&'static str, String)> {
         (
             "status-data",
             emit(schemars::schema_for!(topos_types::results::StatusData)),
-        ),
-        (
-            "link-pending-data",
-            emit(schemars::schema_for!(topos_types::results::LinkPendingData)),
         ),
         // On-disk persisted client documents.
         (
@@ -439,13 +401,12 @@ fn fixtures() -> Vec<(&'static str, String)> {
     use topos_types::persisted::ConflictPathKind;
     use topos_types::requests::{WireDelivery, WireDeliverySkill, WireNotice, WireVia};
     use topos_types::results::{
-        AddData, ChannelAction, ChannelData, ChannelItem, ChannelItemOutcome, Conflict,
-        ConflictPathReport, DiffData, DiffPatchInfo, DiffSource, EnrollmentPending, FollowData,
-        FollowOffer, InviteReadData, LinkPendingData, ListData, LogData, MergePreview,
-        MergePreviewVerdict, MergeReport, Offer, ProtectData, PublishData, PublishDescribeData,
+        AddData, Conflict, ConflictPathReport, DiffData, DiffPatchInfo, DiffSource,
+        EnrollmentPending, InviteReadData, ListData, LogData, LoginData, LogoutData, MergePreview,
+        MergePreviewVerdict, MergeReport, ProtectData, PublishData, PublishDescribeData,
         PublishGate, PullAction, PullData, PullSkill, RemoveData, RemoveItem, RemoveKind,
         ReviewIndexData, ReviewIndexEntry, SkillEntry, StatusData, StatusTrigger, StatusWorkspace,
-        UnfollowData, WorkspaceSyncReport,
+        WorkspaceSyncReport,
     };
     use topos_types::{ActionCode, Affected, JsonEnvelope, Receipt, TerminalOutcome, WireError};
 
@@ -484,23 +445,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
             undo: Vec::new(),
         })
         .expect("AddData serializes"),
-        warnings: vec![],
-        next_actions: vec![],
-        receipt: None,
-        error: None,
-    };
-
-    // `unfollow` of the fixture skill (local-only; the bytes are kept, so the flip is the whole story).
-    let unfollow_ok = JsonEnvelope {
-        schema_version: 1,
-        command: "unfollow".to_owned(),
-        ok: true,
-        data: serde_json::to_value(UnfollowData {
-            skill_id: "topos_t00".to_owned(),
-            following: false,
-            bytes_kept: true,
-        })
-        .expect("UnfollowData serializes"),
         warnings: vec![],
         next_actions: vec![],
         receipt: None,
@@ -772,40 +716,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
         }),
     };
 
-    // A PENDING `follow <workspace-address>` — the gh-style device flow awaits the browser approval:
-    // still `ok = true` (nothing failed, a human approval is simply required); the `ENROLL_RESUME`
-    // next-action re-invokes `follow` (re-invoking IS the resume, at the disclosed interval).
-    let follow_pending = JsonEnvelope {
-        schema_version: 1,
-        command: "follow".to_owned(),
-        ok: true,
-        data: serde_json::to_value(FollowData {
-            // No workspace ID exists before approval — the requested ADDRESS name rides the slot.
-            workspace_id: "acme".to_owned(),
-            enrolled: false,
-            skills: vec![],
-            workspace_display_name: None,
-            plane_base_url: Some("https://topos.sh/api".to_owned()),
-            pending: Some(EnrollmentPending {
-                // The bare approval page + the code on its own field — the code never rides a URL.
-                verification_uri: "https://topos.sh/verify".to_owned(),
-                user_code: "WXYZ-1234".to_owned(),
-                expires_at: Some("2026-06-25T00:15:00Z".to_owned()),
-                interval_secs: Some(5),
-            }),
-            currency: None,
-            triggers: Vec::new(),
-        })
-        .expect("FollowData serializes"),
-        warnings: vec![],
-        next_actions: vec![topos::actions::next_action(
-            ActionCode::from("ENROLL_RESUME".to_owned()),
-            argv(&["topos", "follow", "--json"]),
-        )],
-        receipt: None,
-        error: None,
-    };
-
     // The per-device delivery answer (`GET /v1/workspaces/{ws}/delivery`): two entitled skills — one via
     // `everyone` only (indirect), one via `ops` + `everyone` WITH a direct follow and `reviewed`
     // protection — one detached skill frozen in place, one `verdict` notice carrying its reason, and one
@@ -886,39 +796,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
     // the describe with `applied: false`; `--yes` returns it applied) + the reshaped reads.
     // =============================================================================================
 
-    // `follow <workspace>` (bare) — the DESCRIBE after the enrollment settled: who you are, the
-    // workspace's posture, and the ONE first-receive offer awaiting a `--yes` (nothing landed yet).
-    let follow_describe = JsonEnvelope {
-        schema_version: 1,
-        command: "follow".to_owned(),
-        ok: true,
-        data: serde_json::to_value(FollowData {
-            workspace_id: "w_acme".to_owned(),
-            enrolled: true,
-            skills: vec![FollowOffer {
-                skill_id: "s_deploy".to_owned(),
-                name: "deploy".to_owned(),
-                offer: Offer {
-                    version_id: "a".repeat(64),
-                    bundle_digest: "b".repeat(64),
-                },
-            }],
-            workspace_display_name: Some("Acme".to_owned()),
-            plane_base_url: Some("https://topos.sh".to_owned()),
-            pending: None,
-            currency: None,
-            triggers: Vec::new(),
-        })
-        .expect("FollowData serializes"),
-        warnings: vec![],
-        next_actions: vec![topos::actions::next_action(
-            ActionCode::from("APPLY_DESCRIBED".to_owned()),
-            argv(&["topos", "follow", "acme", "--yes"]),
-        )],
-        receipt: None,
-        error: None,
-    };
-
     // `remove <skill>` (bare, LOSS-GUARDED) — the DESCRIBE a draft holds: the followed skill has
     // local edits ahead, so the exclusion waits for `--yes` (a followed CLEAN skill applies
     // immediately instead — see `remove.ok`). `applied: false` — nothing has changed.
@@ -980,33 +857,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
             ActionCode::from("UNDO".to_owned()),
             argv(&["topos", "follow", "acme/skills/deploy"]),
         )],
-        receipt: None,
-        error: None,
-    };
-
-    // `channel add eng deploy --yes` — a placement APPLIED: the skill reference lands in the `open`
-    // channel `eng`.
-    let channel_ok = JsonEnvelope {
-        schema_version: 1,
-        command: "channel".to_owned(),
-        ok: true,
-        data: serde_json::to_value(ChannelData {
-            channel: "eng".to_owned(),
-            workspace_id: "w_acme".to_owned(),
-            action: ChannelAction::Add,
-            mode: "open".to_owned(),
-            creates: false,
-            items: vec![ChannelItem {
-                skill: "deploy".to_owned(),
-                skill_id: "s_deploy".to_owned(),
-                outcome: ChannelItemOutcome::Placed,
-                detail: None,
-            }],
-            applied: true,
-        })
-        .expect("ChannelData serializes"),
-        warnings: vec![],
-        next_actions: vec![],
         receipt: None,
         error: None,
     };
@@ -1386,6 +1236,84 @@ fn fixtures() -> Vec<(&'static str, String)> {
         error: None,
     };
 
+    // A PENDING `login <workspace-address>` — the RFC-8628-shaped flow awaits the browser
+    // approval: still `ok = true` (nothing failed, a human approval is simply required); the
+    // `ENROLL_RESUME` next-action re-invokes `login` (re-invoking IS the resume, at the disclosed
+    // interval). The code rides its own field — it never rides a URL.
+    let login_pending = JsonEnvelope {
+        schema_version: 1,
+        command: "login".to_owned(),
+        ok: true,
+        data: serde_json::to_value(LoginData {
+            workspace_id: String::new(),
+            name: "acme".to_owned(),
+            display_name: None,
+            server: Some("https://topos.sh/api".to_owned()),
+            session_id: None,
+            session_status: "awaiting-approval".to_owned(),
+            delivered: None,
+            pending: Some(EnrollmentPending {
+                verification_uri: "https://topos.sh/verify".to_owned(),
+                user_code: "WXYZ-1234".to_owned(),
+                expires_at: Some("2026-06-25T00:15:00Z".to_owned()),
+                interval_secs: Some(5),
+            }),
+            currency: None,
+            triggers: Vec::new(),
+        })
+        .expect("LoginData serializes"),
+        warnings: vec![],
+        next_actions: vec![topos::actions::next_action(
+            ActionCode::from("ENROLL_RESUME".to_owned()),
+            argv(&["topos", "login", "--json"]),
+        )],
+        receipt: None,
+        error: None,
+    };
+
+    // The GRANTED login — the session row persisted (workspace-scoped credential), the acceptance
+    // disclosure (`delivered` = what the profile delivers here right now; from here delivery is
+    // silent).
+    let login_ok = JsonEnvelope {
+        schema_version: 1,
+        command: "login".to_owned(),
+        ok: true,
+        data: serde_json::to_value(LoginData {
+            workspace_id: "w_acme".to_owned(),
+            name: "acme".to_owned(),
+            display_name: Some("Acme".to_owned()),
+            server: Some("https://topos.sh/api".to_owned()),
+            session_id: Some("sn_01hzy3".to_owned()),
+            session_status: "active".to_owned(),
+            delivered: Some(3),
+            pending: None,
+            currency: None,
+            triggers: Vec::new(),
+        })
+        .expect("LoginData serializes"),
+        warnings: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
+    // `logout` — the session ended: the server-side revoke landed, the local row deleted. Skills,
+    // drafts, and manifests stay; `topos login <address>` starts a fresh session.
+    let logout_ok = JsonEnvelope {
+        schema_version: 1,
+        command: "logout".to_owned(),
+        ok: true,
+        data: serde_json::to_value(LogoutData {
+            ended: vec!["acme".to_owned()],
+            server_revoked: true,
+        })
+        .expect("LogoutData serializes"),
+        warnings: vec![],
+        next_actions: vec![],
+        receipt: None,
+        error: None,
+    };
+
     // The UNENROLLED bare `update` — an honest empty sweep that is really a dead-end: nothing is
     // followed because nothing CAN be. The join fix rides `next_actions` as an argv TEMPLATE whose
     // `needs` names the placeholder the caller must fill (`<workspace-address>`).
@@ -1402,58 +1330,11 @@ fn fixtures() -> Vec<(&'static str, String)> {
         .expect("PullData serializes"),
         warnings: vec![],
         next_actions: vec![topos::actions::next_action(
-            ActionCode::from("FOLLOW_WORKSPACE".to_owned()),
-            argv(&["topos", "follow", "<workspace-address>", "--json"]),
+            ActionCode::from("LOGIN_WORKSPACE".to_owned()),
+            argv(&["topos", "login", "<workspace-address>", "--json"]),
         )],
         receipt: None,
         error: None,
-    };
-
-    // A PENDING device↔workspace link's typed receipt — `follow acme/skills/deploy --yes` on an
-    // enrolled install where the workspace's device-approval knob gates new devices: the link row
-    // landed, nothing subscribed, no bytes; delivery starts automatically after an owner approves.
-    let follow_link_pending = JsonEnvelope {
-        schema_version: 1,
-        command: "follow".to_owned(),
-        ok: true,
-        data: serde_json::to_value(LinkPendingData {
-            workspace_id: "w_beta".to_owned(),
-            workspace_name: "beta".to_owned(),
-            workspace_display_name: Some("Beta Corp".to_owned()),
-            link_status: "pending".to_owned(),
-            enrolled_now: false,
-        })
-        .expect("LinkPendingData serializes"),
-        warnings: vec![],
-        next_actions: vec![topos::actions::next_action(
-            ActionCode::from("CHECK_STATUS".to_owned()),
-            argv(&["topos", "status", "--json"]),
-        )],
-        receipt: None,
-        error: None,
-    };
-
-    // The link lane's typed refusal: the signed-in person holds NO seat in the named workspace —
-    // or no workspace of that name exists (byte-identical; no existence oracle). The way in is an
-    // invitation; the mailed invitation link redeems on this device.
-    let follow_not_a_member = JsonEnvelope {
-        schema_version: 1,
-        command: "follow".to_owned(),
-        ok: false,
-        data: serde_json::json!({}),
-        warnings: vec![],
-        next_actions: vec![],
-        receipt: None,
-        error: Some(WireError {
-            code: "NOT_A_MEMBER".to_owned(),
-            outcome: TerminalOutcome::Denied,
-            retryable: false,
-            affected: Affected::default(),
-            expected_generation: None,
-            current_generation: None,
-            context: serde_json::json!({}),
-            next_actions: vec![],
-        }),
     };
 
     vec![
@@ -1463,21 +1344,18 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ("json/pull.merged", emit_json(&pull_merged)),
         ("json/pull.conflicted", emit_json(&pull_conflicted)),
         ("json/add.ok", emit_json(&add_ok)),
-        ("json/unfollow.ok", emit_json(&unfollow_ok)),
         ("json/list.ok", emit_json(&list_ok)),
         ("json/diff.ok", emit_json(&diff_ok)),
         ("json/log.ok", emit_json(&log_ok)),
         ("json/publish.downgraded", emit_json(&publish_downgraded)),
         ("json/publish.conflict", emit_json(&publish_conflict)),
-        ("json/follow.pending", emit_json(&follow_pending)),
-        ("json/follow.describe", emit_json(&follow_describe)),
-        ("json/follow.link-pending", emit_json(&follow_link_pending)),
-        ("json/follow.not-a-member", emit_json(&follow_not_a_member)),
+        ("json/login.pending", emit_json(&login_pending)),
+        ("json/login.ok", emit_json(&login_ok)),
+        ("json/logout.ok", emit_json(&logout_ok)),
         ("json/delivery.ok", emit_json(&delivery_ok)),
         ("json/delivery.pending", emit_json(&delivery_pending)),
         ("json/remove.describe", emit_json(&remove_describe)),
         ("json/remove.ok", emit_json(&remove_ok)),
-        ("json/channel.ok", emit_json(&channel_ok)),
         ("json/protect.describe", emit_json(&protect_describe)),
         ("json/review.inbox", emit_json(&review_inbox)),
         ("json/invite.read", emit_json(&invite_read)),

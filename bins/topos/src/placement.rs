@@ -56,7 +56,9 @@ pub(crate) struct PlannedTarget {
 /// copy reaches, and whether that claim is vendor-docs-level rather than live-probed).
 #[derive(Debug, Clone)]
 pub(crate) struct CoveredAgent {
+    #[allow(dead_code)]
     pub slug: String,
+    #[allow(dead_code)]
     pub docs_level: bool,
 }
 
@@ -940,10 +942,15 @@ pub(crate) fn placements_diverged(skill_name: &str, scans: &[PlacementScan]) -> 
 /// suffixes with), from the enrolled memberships — best-effort (`None` offline / unenrolled).
 pub(crate) fn workspace_slug(ctx: &Ctx<'_>, workspace_id: Option<&str>) -> Option<String> {
     let ws = workspace_id?;
-    crate::enroll::read_user(ctx.fs, &ctx.layout)
+    // The sessions file first (the live identity), then the offline delivery cache's record.
+    if let Ok(all) = crate::sessions::read_sessions(ctx.fs, &ctx.layout)
+        && let Some(s) = all.sessions.iter().find(|s| s.workspace_id == ws)
+    {
+        return Some(s.workspace_name.clone());
+    }
+    crate::sync_status::read(ctx.fs, &ctx.layout)
         .ok()
-        .flatten()
-        .and_then(|u| u.membership(ws).map(|m| m.name.clone()))
+        .and_then(|st| st.workspaces.get(ws).and_then(|e| e.workspace_name.clone()))
 }
 
 /// The plan for an ALREADY-TRACKED skill: naming from its lock, scope + workspace slug from the
@@ -988,39 +995,6 @@ pub(crate) fn plan_for_skill(
         Some(prior),
         None,
     )
-}
-
-/// Validate `--agent` slugs against the baked registry: unknown slugs refuse, naming the valid ones.
-/// `'*'` is the caller's sentinel (handled before validation). Returns the DETECTED subset's
-/// complement as notes fodder — the caller discloses "known but not detected here".
-///
-/// # Errors
-/// [`ClientError::InvalidArgument`] naming every valid slug on an unknown one.
-pub(crate) fn validate_agent_slugs(
-    ctx: &Ctx<'_>,
-    slugs: &[String],
-) -> Result<Vec<String>, ClientError> {
-    let known = registry::known_harnesses();
-    for s in slugs {
-        if !known.iter().any(|h| h.slug == s.as_str()) {
-            return Err(ClientError::InvalidArgument(format!(
-                "'{s}' is not a known agent — valid agents: {}",
-                known.iter().map(|h| h.slug).collect::<Vec<_>>().join(", ")
-            )));
-        }
-    }
-    let detected: Vec<&str> = match &ctx.roots {
-        Some(roots) => registry::detected_harnesses(&roots.home, roots.cwd.as_deref())
-            .into_iter()
-            .map(|h| h.slug)
-            .collect(),
-        None => Vec::new(),
-    };
-    Ok(slugs
-        .iter()
-        .filter(|s| !detected.contains(&s.as_str()))
-        .cloned()
-        .collect())
 }
 
 #[cfg(test)]

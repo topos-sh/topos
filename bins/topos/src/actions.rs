@@ -127,10 +127,10 @@ fn safety(code: &ActionCode, argv: &[String]) -> Safety {
         // argv (it IS a follow/unfollow/remove invocation) — the same per-verb refinement decides
         // the network story and any caution.
         "UNDO" => apply_described(argv),
-        // The unenrolled dead-ends' join pointer (`topos follow <workspace-address>` — usually a
+        // The unenrolled dead-ends' join pointer (`topos login <workspace-address>` — usually a
         // template whose `needs` names the address): following dials, and a fresh install's
         // follow ENROLLS this device (a credential is stored once the browser approval lands).
-        "FOLLOW_WORKSPACE" => Safety::new(
+        "LOGIN_WORKSPACE" => Safety::new(
             Some(true),
             Some(true),
             Some(
@@ -309,8 +309,8 @@ mod tests {
         // A template argv declares its holes — whole-token and embedded placeholders alike,
         // deduped in first-appearance order.
         let template = next_action(
-            ActionCode::from("FOLLOW_WORKSPACE".to_owned()),
-            argv(&["topos", "follow", "<workspace-address>", "--json"]),
+            ActionCode::from("LOGIN_WORKSPACE".to_owned()),
+            argv(&["topos", "login", "<workspace-address>", "--json"]),
         );
         assert_eq!(template.needs, vec!["workspace-address"]);
         let embedded = next_action(
@@ -334,8 +334,8 @@ mod tests {
     #[test]
     fn the_join_and_sign_in_codes_carry_their_classification() {
         let follow = next_action(
-            ActionCode::from("FOLLOW_WORKSPACE".to_owned()),
-            argv(&["topos", "follow", "<workspace-address>", "--json"]),
+            ActionCode::from("LOGIN_WORKSPACE".to_owned()),
+            argv(&["topos", "login", "<workspace-address>", "--json"]),
         );
         assert_eq!(
             (follow.mutates, follow.needs_network),
