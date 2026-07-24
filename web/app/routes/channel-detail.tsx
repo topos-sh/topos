@@ -29,7 +29,7 @@ import { skillIndexOf } from "@/lib/db/queries.server";
 import { useWsPath } from "@/lib/ws-path";
 
 export function meta({ params }: { params: { channel?: string } }) {
-  return [{ title: `#${params.channel ?? "channel"}` }];
+  return [{ title: `${params.channel ?? "channel"} · channel` }];
 }
 
 /** One catalog entry the add picker can place — slimmed to what the option needs. */

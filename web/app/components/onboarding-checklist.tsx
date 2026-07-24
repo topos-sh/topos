@@ -156,11 +156,13 @@ export function OnboardingChecklist({ state }: { state: OnboardingState }) {
           <Step
             done={deviceCount >= 1}
             index={1}
-            title="Enroll a device"
-            doneNote={deviceCount === 1 ? "1 device enrolled" : `${deviceCount} devices enrolled`}
+            title="Log in a machine"
+            doneNote={
+              deviceCount === 1 ? "1 machine logged in" : `${deviceCount} machines logged in`
+            }
             agentPrompt={`Set up Topos for us: fetch ${origin}/agent and follow it. Our workspace: ${shareAddress}`}
             manual={{
-              intro: "Install the CLI, then follow this workspace and approve in the browser:",
+              intro: "Install the CLI, then log into this workspace and approve in the browser:",
               commands: [`curl -fsSL ${origin}/install | sh`, `topos login ${shareAddress}`],
             }}
           />

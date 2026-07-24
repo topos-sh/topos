@@ -37,7 +37,7 @@ test("the dashboard shows the workspace as the current root crumb, inside the ma
   ).toBeVisible();
 });
 
-test("a channel sub-page shows workspace → Channels → #everyone → History, Channels linking home", async ({
+test("a channel sub-page shows workspace → Channels → everyone → History, Channels linking home", async ({
   page,
 }) => {
   const ws = await theWorkspace();
@@ -47,7 +47,7 @@ test("a channel sub-page shows workspace → Channels → #everyone → History,
   // The full trail: the workspace root, the Channels index, the channel face, then the current tab.
   await expect(bc.getByText(ws.displayName)).toBeVisible();
   await expect(bc.getByRole("link", { name: "Channels" })).toBeVisible();
-  await expect(bc.getByRole("link", { name: "#everyone" })).toBeVisible();
+  await expect(bc.getByRole("link", { name: "everyone", exact: true })).toBeVisible();
   await expect(bc.locator('[aria-current="page"]')).toHaveText("History");
 
   // The Channels crumb is a live link back to the index.

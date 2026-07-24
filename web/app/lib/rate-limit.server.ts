@@ -66,6 +66,23 @@ export const allowCommentWrite = bucketLimiter({ burst: 5, refillPerSec: 0.1, ma
 export const allowRevertWrite = bucketLimiter({ burst: 5, refillPerSec: 0.1, maxKeys: 10_000 });
 
 /**
+ * The member-triggered UPSTREAM-FETCH belt, keyed per acting user id: every server-side fetch
+ * of GitHub bytes a member can trigger from a page (import preview/publish, the skill-settings
+ * check-now) rides it — codeload is a shared external dependency, and the /api/v1 belt does not
+ * cover these route actions. Burst 3, one token back every ~20 s — a human pasting a URL and
+ * publishing never notices; a loop does.
+ */
+export const allowUpstreamFetch = bucketLimiter({ burst: 3, refillPerSec: 0.05, maxKeys: 10_000 });
+
+/**
+ * The `/verify` code-LOOKUP belt, keyed per acting user id: the lookup resolves a typed code
+ * into pending-login metadata, so an enumeration loop must hit a wall long before the ~2^40
+ * code space matters. Burst 10, one token back every ~5 s — mistyping a code twice never
+ * notices; a scanner does.
+ */
+export const allowVerifyLookup = bucketLimiter({ burst: 10, refillPerSec: 0.2, maxKeys: 10_000 });
+
+/**
  * The per-client limiter key from an `x-forwarded-for` value: the LAST hop — the one address the
  * trusted edge itself appended from the socket peer. Earlier hops are client-supplied bytes (an
  * attacker rotating forged prefixes must not mint fresh buckets or poison a victim's). No header

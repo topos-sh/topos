@@ -14,9 +14,9 @@ export function AddressBlock({ address }: { address: string }) {
   return (
     <div className="space-y-2">
       <p className="text-sm text-dim">
-        Paste this workspace address to your agent and ask it to follow — it walks the agent through
-        installing topos and joining. Joining still requires an invited email, so only people on the
-        roster can complete it.
+        Paste this workspace address to your agent and ask it to log in — it walks the agent through
+        installing topos and logging into the workspace. Logging in still requires an invited email,
+        so only people on the roster can complete it.
       </p>
       <CommandBlock command={command} copyLabel="Copy the workspace address" />
       <p className="text-sm text-dim">

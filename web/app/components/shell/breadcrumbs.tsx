@@ -57,7 +57,7 @@ function channelTab(params: Params, tab: string): Crumb[] | null {
   }
   return [
     { label: "Channels", sub: "channels" },
-    { label: `#${ch}`, sub: `channels/${ch}` },
+    { label: ch, sub: `channels/${ch}` },
     { label: tab },
   ];
 }
@@ -104,7 +104,7 @@ const REGISTRY: Record<string, CrumbBuilder> = {
   "routes/channel-new": () => [{ label: "Channels", sub: "channels" }, { label: "New channel" }],
   "routes/channel-detail": ({ params }) => {
     const ch = params.channel;
-    return ch === undefined ? null : [{ label: "Channels", sub: "channels" }, { label: `#${ch}` }];
+    return ch === undefined ? null : [{ label: "Channels", sub: "channels" }, { label: ch }];
   },
   "routes/channel-history": ({ params }) => channelTab(params, "History"),
   "routes/channel-settings": ({ params }) => channelTab(params, "Settings"),

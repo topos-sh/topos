@@ -22,14 +22,15 @@ import {
 import { workspacePolicyOf } from "@/lib/db/queries.policy.server";
 import { bundleById, skillIndexRow } from "@/lib/db/queries.server";
 import { resolveSkillName } from "@/lib/db/resolve.server";
-import { checkBundleUpstream, upstreamOf } from "@/lib/db/upstream.server";
+import { checkBundleUpstream, claimManualCheck, upstreamOf } from "@/lib/db/upstream.server";
 import { isValidSkillName, renameDeniedCopy, SKILL_NAME_MAX } from "@/lib/plane/lifecycle-copy";
+import { allowUpstreamFetch } from "@/lib/rate-limit.server";
 import { useWsPath } from "@/lib/ws-path";
 import { wsPathServer } from "@/lib/ws-url.server";
 
 /** The verbatim boundary the archive ceremony must state — what archiving costs and what it keeps. */
 const ARCHIVE_BOUNDARY =
-  "Archiving retires it for the whole team — devices keep their sidecar copies.";
+  "Archiving retires it for the whole team — machines keep their local copies.";
 
 export function meta({ params }: { params: { skill?: string } }) {
   return [{ title: `Settings · ${params.skill ?? "skill"}` }];
@@ -252,9 +253,18 @@ async function protectionIntent(request: Request, ws: string, skill: string, for
 }
 
 /** The on-demand upstream check — reviewer-grade is unnecessary (it can only OPEN a proposal,
- * never move current); the member floor already ran. Answers the checker's typed outcome. */
+ * never move current); the member floor already ran. Answers the checker's typed outcome.
+ * BELTED per acting user (route actions bypass the /api belt) and CLAIMED through the SAME
+ * cooldown the poller's sweep uses — repeated clicks (or racing members) cost one upstream
+ * fetch per window, never N. */
 async function checkUpstreamIntent(request: Request, ws: string, skillId: string) {
-  await requireMember(request, ws);
+  const actor = await requireMember(request, ws);
+  if (!allowUpstreamFetch(actor.userId)) {
+    throw data(null, { status: 429 });
+  }
+  if (!(await claimManualCheck(ws, skillId))) {
+    return data({ form: "upstream" as const, outcome: { outcome: "recently_checked" as const } });
+  }
   // Workspace-bound: the member's authorization covers THIS workspace alone.
   const outcome = await checkBundleUpstream(ws, skillId);
   return data({ form: "upstream" as const, outcome });
@@ -322,7 +332,9 @@ function UpstreamPanel() {
         ? "Upstream moved — a proposal is now waiting in the review queue."
         : checked.outcome === "unchanged" || checked.outcome === "already_current"
           ? "Up to date with upstream."
-          : `Check failed: ${checked.message ?? "unknown"}`;
+          : checked.outcome === "recently_checked"
+            ? "Checked within the last few minutes — the stamp below is the fresh answer."
+            : `Check failed: ${checked.message ?? "unknown"}`;
   return (
     <section aria-labelledby="upstream-heading" className="space-y-3">
       <SectionHeading>
@@ -521,7 +533,7 @@ function ArchiveCeremony({ skill }: { skill: string }) {
       <Card className="space-y-4 px-4 py-4">
         <p className="text-dim text-sm">{ARCHIVE_BOUNDARY}</p>
         <p className="text-faint text-sm">
-          The base name is freed for reuse and the skill drops off every device&apos;s next update;
+          The base name is freed for reuse and the skill drops off every machine at its next update;
           you can unarchive it from the archive page.
         </p>
         <fetcher.Form method="post" className="space-y-3">

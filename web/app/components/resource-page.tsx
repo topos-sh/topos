@@ -21,10 +21,10 @@ export function ResourcePage() {
       </div>
       <Card className="space-y-3 px-4 py-4">
         <p className="text-ink text-sm">
-          <strong>Have an agent?</strong> Paste this page&apos;s URL to it and ask it to follow — it
-          runs <code className="font-mono">topos add &lt;this page&apos;s URL&gt;</code> and walks
-          you through the rest. Nothing installs silently: every skill lands only after its content
-          digest is disclosed and you say yes.
+          <strong>Have an agent?</strong> Paste this page&apos;s URL to it and ask it to add the
+          skill — it runs <code className="font-mono">topos add &lt;this page&apos;s URL&gt;</code>{" "}
+          and walks you through the rest. Adding records the demand in the folder&apos;s manifest
+          (or your profile); updates then arrive silently, and the history stays inspectable.
         </p>
       </Card>
       <Card className="space-y-3 px-4 py-4">

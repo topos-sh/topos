@@ -547,13 +547,27 @@ fn prior_dir(
         .map(|(dir, _)| PathBuf::from(dir))
 }
 
-/// Resolve a lexically-safe override to its root, PROVING resolved containment: the deepest
-/// EXISTING ancestor of the joined path must canonicalize inside the canonicalized project dir —
-/// a committed symlink (`tools -> /outside`) on the way would otherwise carry the placement out
-/// of the checkout. `None` (override ignored) when containment cannot be proven.
+/// Resolve a lexically-safe override to its root, PROVING resolved containment two ways:
+/// (a) NO component of the override path below the project dir may be a symlink (lstat-walked —
+/// a committed `tools -> /outside` link is rejected outright, not merely resolved), and
+/// (b) the deepest EXISTING ancestor of the joined path must canonicalize inside the
+/// canonicalized project dir (the belt under the braces — covers a link above a not-yet-existing
+/// tail). `None` (override ignored) when containment cannot be proven.
 fn override_root_within(project_dir: &Path, rel: &str) -> Option<PathBuf> {
     let root = project_dir.join(rel.trim_start_matches("./"));
     let proj_real = project_dir.canonicalize().ok()?;
+    // (a) Reject symlink components: every existing prefix of the override path (below the
+    // project dir) must be a plain directory entry.
+    let mut prefix = project_dir.to_path_buf();
+    for comp in Path::new(rel.trim_start_matches("./")).components() {
+        prefix = prefix.join(comp);
+        match std::fs::symlink_metadata(&prefix) {
+            Ok(meta) if meta.file_type().is_symlink() => return None,
+            Ok(_) => {}
+            Err(_) => break, // the rest does not exist yet — nothing left to lstat
+        }
+    }
+    // (b) The canonicalized containment proof over the deepest existing ancestor.
     let mut probe = root.clone();
     let real_prefix = loop {
         match probe.canonicalize() {

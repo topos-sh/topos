@@ -27,7 +27,7 @@ export function LastSetNote({
   return (
     <p className="text-faint text-xs">
       {lastSet === null
-        ? "Not set from this dashboard yet."
+        ? "Using the default — never changed from this dashboard."
         : `Last set: ${describe(lastSet.value)}, by ${lastSet.by}, ${relativeTime(new Date(lastSet.at))}`}
     </p>
   );

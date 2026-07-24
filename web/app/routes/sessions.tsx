@@ -474,10 +474,15 @@ function SessionCard({
               <code className="font-mono">topos login</code> on that machine resumes delivery.
             </>
           ) : session.lastSeenAtMs === null ? (
-            <>Has never reported — nothing has synced on it since it logged in.</>
+            <>
+              logged in {relativeTime(new Date(session.createdAtMs))} · has never reported — nothing
+              has synced on it since it logged in. A same-named older row here is a previous login
+              of the same machine; removing it costs nothing.
+            </>
           ) : (
             <>
-              last seen {relativeTime(new Date(session.lastSeenAtMs))}
+              logged in {relativeTime(new Date(session.createdAtMs))} · last seen{" "}
+              {relativeTime(new Date(session.lastSeenAtMs))}
               {session.freshness === "stale" && (
                 <> · past the {formatWindow(stalenessWindowMs)} window — chase by hand</>
               )}

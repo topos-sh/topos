@@ -14,6 +14,7 @@ import { mintBundleId } from "@/lib/db/identity.server";
 import { inFinalTx, registerGenesisBundleInTx } from "@/lib/db/queries.custody.server";
 import { fetchUpstreamTree, governedCopiesOf, resolveTreeSource } from "@/lib/db/upstream.server";
 import { publishVersion } from "@/lib/plane/custody.server";
+import { allowUpstreamFetch } from "@/lib/rate-limit.server";
 import { useWsPath } from "@/lib/ws-path";
 import { workspaceAddress, wsPathServer } from "@/lib/ws-url.server";
 
@@ -106,6 +107,11 @@ export async function action({ request, params }: ActionFunctionArgs) {
   const { workspace, actor } = await requireMemberInScope(request, params);
   const formData = await request.formData();
   const intent = String(formData.get("intent") ?? "");
+  // Both intents fetch GitHub bytes server-side — belted per acting user (route actions
+  // bypass the /api/v1 belt; the fetcher itself also wears a process-wide concurrency cap).
+  if ((intent === "preview" || intent === "publish") && !allowUpstreamFetch(actor.userId)) {
+    throw data(null, { status: 429 });
+  }
 
   if (intent === "preview") {
     const source = parseSource(String(formData.get("source") ?? ""));

@@ -32,6 +32,7 @@ import {
   workspaceByName,
 } from "@/lib/db/identity.server";
 import { membershipsFor } from "@/lib/db/queries.server";
+import { allowVerifyLookup } from "@/lib/rate-limit.server";
 
 export const meta: MetaFunction = () => [{ title: "Approve a login · Topos" }];
 
@@ -199,6 +200,11 @@ export async function action({ request }: ActionFunctionArgs) {
   if (intent === "lookup") {
     // The two-state page's first state: resolve the typed code into the request card. A POST,
     // deliberately — the code never rides a URL (history, logs, referers all stay clean).
+    // BELTED per signed-in person: the lookup resolves a code into pending-login metadata, so
+    // an enumeration loop hits this wall long before the code space matters.
+    if (!allowVerifyLookup(actor.userId)) {
+      throw data(null, { status: 429 });
+    }
     const userCode = String(form.get("code") ?? "")
       .trim()
       .toUpperCase();

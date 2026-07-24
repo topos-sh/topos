@@ -41,7 +41,7 @@ Make sure \`~/.local/bin\` is on PATH before the next step.
 
     topos login <workspace-address>
 
-This starts a browser approval and waits: it prints an approval URL and a short code. Show
+This starts a browser approval: it prints an approval URL and a short code. Show
 that URL to your human — they open it, sign in, check the code matches, and approve the
 login. You cannot complete the approval yourself. The code expires after 15 minutes;
 re-running the command resumes or restarts the ceremony, and \`--wait\` blocks in one command

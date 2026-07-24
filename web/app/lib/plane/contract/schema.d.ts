@@ -701,8 +701,22 @@ export interface components {
             added?: null | components["schemas"]["AddedNote"];
             base_version_id: string;
             body?: string | null;
+            /**
+             * @description The local-path spelling the manifest carried BEFORE the transfer. **INFERRED**
+             *     (additive-only).
+             */
+            converted_from?: string | null;
+            /**
+             * @description The GOVERNANCE-TRANSFER receipt half on the PROPOSAL arm: the manifest whose local-path
+             *     line this publish rewrote to the governed workspace reference (delivery follows once the
+             *     proposal is approved). Absent when no manifest referenced the bundle by path. **INFERRED**
+             *     (additive-only).
+             */
+            manifest?: string | null;
             /** @description `<skill>@<version_id>` of the candidate. */
             proposal: string;
+            /** @description The canonical workspace reference the manifest now stores. **INFERRED** (additive-only). */
+            reference?: string | null;
             title: string;
         };
         /**
@@ -789,6 +803,13 @@ export interface components {
              *     (`Published <name>@…`); the opaque `skill_id` above stays the machine key.
              */
             name: string;
+            /**
+             * @description An honesty note about the bundle's GitHub origin, when one is recorded: publishing does
+             *     NOT rewrite a manifest's origin-pin line (`github.com/…`), so when one still references
+             *     the origin this says the project keeps tracking the pin until the line is swapped for the
+             *     governed reference. **INFERRED** (additive-only).
+             */
+            origin_note?: string | null;
             /**
              * @description The channel whose placement was WITHHELD by its curated mode (the receipt's
              *     `details.placement = curated_role_required`): the publish itself landed — catalog + moved

@@ -80,6 +80,12 @@ export function untar(tar: Buffer): { files: TarFile[]; comment: string | null }
     const body = tar.subarray(offset + 512, offset + 512 + size);
     offset += 512 + Math.ceil(size / 512) * 512;
 
+    // GNU long-name/long-link entries ('L'/'K') smuggle a REPLACEMENT path outside the pax
+    // framing this reader trusts — a crafted archive could alias two entries or dodge the
+    // traversal checks. codeload emits pax, never GNU extensions: refuse the whole archive.
+    if (typeflag === "L" || typeflag === "K") {
+      throw new Error("malformed archive: GNU long-name entries are not accepted");
+    }
     if (typeflag === "g" || typeflag === "x") {
       // pax bodies are LENGTH-FRAMED records: `<len> <key>=<value>\n` where <len> counts the
       // WHOLE record (digits, space, newline). Walk the frames from BYTES — anything
@@ -174,13 +180,34 @@ const MAX_TARBALL_BYTES = 32 * 1024 * 1024;
  * bound (`gunzipSync` enforces it via `maxOutputLength`, throwing past it). */
 const MAX_UNPACKED_BYTES = 128 * 1024 * 1024;
 
+/** A process-wide cap on concurrent upstream fetches: codeload is one shared external
+ * dependency, and member-triggered checks/previews must not fan a burst of 30-second
+ * downloads out unbounded. Over-cap callers get a typed retry, never a queue. */
+const MAX_CONCURRENT_UPSTREAM_FETCHES = 2;
+let inflightUpstreamFetches = 0;
+
 async function fetchCodeload(repo: string, ref: string): Promise<Buffer> {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
     throw new Error("malformed repo");
   }
+  if (inflightUpstreamFetches >= MAX_CONCURRENT_UPSTREAM_FETCHES) {
+    throw new Error("upstream fetch busy: the server is already fetching from GitHub — retry");
+  }
+  inflightUpstreamFetches += 1;
+  try {
+    return await fetchCodeloadInner(repo, ref);
+  } finally {
+    inflightUpstreamFetches -= 1;
+  }
+}
+
+async function fetchCodeloadInner(repo: string, ref: string): Promise<Buffer> {
+  // `redirect: "manual"` — codeload serves the tarball directly; ANY 3xx is off-script (an
+  // open redirect must never steer this server-side fetch), so it fails like any other
+  // non-OK answer.
   const response = await fetch(
     `https://codeload.github.com/${repo}/tar.gz/${encodeURIComponent(ref)}`,
-    { redirect: "follow", signal: AbortSignal.timeout(30_000) },
+    { redirect: "manual", signal: AbortSignal.timeout(30_000) },
   );
   if (!response.ok) {
     throw new Error(`upstream fetch failed: ${response.status}`);
@@ -281,6 +308,42 @@ function licenseOf(files: { path: string; bytes: Buffer }[]): string | null {
   if (hit === undefined) {
     return null;
   }
+  // Name the LICENSE, not the file: a small signature match over the well-known headers
+  // (never a legal judgment); unrecognized text falls back to its first line.
+  const head = hit.bytes.subarray(0, 2048).toString("utf8").toLowerCase().split(/\s+/).join(" ");
+  if (
+    head.includes("mit license") ||
+    head.includes("permission is hereby granted, free of charge")
+  ) {
+    return "MIT";
+  }
+  if (head.includes("apache license") && head.includes("version 2.0")) {
+    return "Apache-2.0";
+  }
+  if (head.includes("gnu affero general public license")) {
+    return "AGPL-3.0";
+  }
+  if (head.includes("gnu lesser general public license")) {
+    return "LGPL-3.0";
+  }
+  if (head.includes("gnu general public license")) {
+    return head.includes("version 2") && !head.includes("version 3") ? "GPL-2.0" : "GPL-3.0";
+  }
+  if (head.includes("mozilla public license") && head.includes("2.0")) {
+    return "MPL-2.0";
+  }
+  if (head.includes("redistribution and use in source and binary forms")) {
+    return head.includes("neither the name") ? "BSD-3-Clause" : "BSD-2-Clause";
+  }
+  if (head.includes("isc license")) {
+    return "ISC";
+  }
+  if (head.includes("this is free and unencumbered software")) {
+    return "Unlicense";
+  }
+  if (head.includes("cc0 1.0") || head.includes("creative commons zero")) {
+    return "CC0-1.0";
+  }
   const first = hit.bytes.toString("utf8").split("\n", 1)[0]?.trim() ?? "";
   return first.length > 0 ? first.slice(0, 120) : "present";
 }
@@ -292,7 +355,24 @@ export type UpstreamCheckOutcome =
   | { outcome: "unchanged"; commit: string | null }
   | { outcome: "already_current"; commit: string | null }
   | { outcome: "proposed"; commit: string | null; versionId: string }
+  | { outcome: "recently_checked" }
   | { outcome: "error"; message: string };
+
+/**
+ * The MANUAL check's claim — the SAME atomic stamp + 5-minute cooldown the poller's sweep
+ * claims rows with, so a member clicking "check now" (or two members racing) costs ONE
+ * upstream fetch per window, never N. `true` = claimed, run the check; `false` = a check ran
+ * within the window (the panel's last-checked stamp is the fresh answer).
+ */
+export async function claimManualCheck(workspaceId: string, bundleId: string): Promise<boolean> {
+  const rows = await getDb().execute(sql`
+    UPDATE web.bundle_upstream SET last_checked_at = now()
+    WHERE bundle_id = ${bundleId} AND workspace_id = ${workspaceId}
+      AND (last_checked_at IS NULL OR last_checked_at < now() - interval '5 minutes')
+    RETURNING bundle_id
+  `);
+  return rows.rows.length > 0;
+}
 
 /**
  * Check ONE bundle's upstream and open a proposal when it moved. External changes ALWAYS

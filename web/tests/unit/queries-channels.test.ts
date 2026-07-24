@@ -62,7 +62,7 @@ afterAll(async () => {
 });
 
 describe("channelsOf (the index read)", () => {
-  it("lists the default first, then name order, counting implicit membership minus opt-outs", async () => {
+  it("lists the default first, then name order, counting the implicit audience minus profile excludes", async () => {
     const queries = await q();
     const rows = await queries.channelsOf(asMember(wsId, "u_ana"));
     expect(rows.map((r) => [r.name, r.isDefault, r.skillCount, r.audienceCount])).toEqual([

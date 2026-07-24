@@ -178,8 +178,8 @@ describe("fetchUpstreamTree", () => {
     const tree = await fetchUpstreamTree("owner/repo", "skills/deploy", "HEAD", async () => gz);
     expect(tree.commit).toBe(commit);
     expect(tree.files.map((f) => f.path).sort()).toEqual(["SKILL.md", "run.sh"]);
-    // The license falls back to the repo root when the subdir carries none.
-    expect(tree.license).toBe("MIT License");
+    // The license (the classified NAME) falls back to the repo root when the subdir carries none.
+    expect(tree.license).toBe("MIT");
   });
 
   it("resolveTreeSource probes shortest-prefix-first, so slashed branch names resolve", async () => {

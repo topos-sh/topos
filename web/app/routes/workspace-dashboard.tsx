@@ -195,11 +195,11 @@ function DashboardPage({
 
       <section aria-labelledby="address-heading" className="space-y-2">
         <SectionHeading>
-          <span id="address-heading">Add my device</span>
+          <span id="address-heading">Add a machine</span>
         </SectionHeading>
         <Card className="space-y-2 px-4 py-3">
           <p className="text-dim text-sm">
-            Enroll another of your own devices — or hand an invited teammate the workspace address.
+            Log in another of your own machines — or hand an invited teammate the workspace address.
           </p>
           <AddressBlock address={shareAddress} />
         </Card>

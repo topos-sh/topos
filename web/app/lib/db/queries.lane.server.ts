@@ -53,9 +53,15 @@ const CHANNEL_NAME_MAX = 64;
 
 type Tx = Parameters<Parameters<ReturnType<typeof getDb>["transaction"]>[0]>[0];
 
-/** A `{a,b,c}` Postgres array literal (values validated upstream as opaque ids). */
-function pgTextArray(values: string[]): string {
-  return `{${values.map((v) => `"${v.replaceAll('"', "")}"`).join(",")}}`;
+/** A REAL `text[]` value — an `ARRAY[...]::text[]` constructor with every element its own bind
+ * parameter, so no hand-rolled literal ever has to escape a value. */
+function pgTextArray(values: string[]) {
+  return values.length === 0
+    ? sql`ARRAY[]::text[]`
+    : sql`ARRAY[${sql.join(
+        values.map((v) => sql`${v}`),
+        sql`, `,
+      )}]::text[]`;
 }
 
 // ── Delivery ─────────────────────────────────────────────────────────────────────────────────
@@ -299,7 +305,7 @@ export async function reportApplied(
     await tx.execute(sql`
       INSERT INTO web.session_bundle_state (session_id, bundle_id, applied_version_id, reported_at)
       SELECT ${actor.sessionId}, r.skill_id, r.version_id, now()
-      FROM UNNEST(${skillIds}::text[], ${versionIds}::text[]) AS r(skill_id, version_id)
+      FROM UNNEST(${skillIds}, ${versionIds}) AS r(skill_id, version_id)
       JOIN web.bundle b ON b.id = r.skill_id AND b.workspace_id = ${ws}
       ON CONFLICT (session_id, bundle_id) DO UPDATE
         SET applied_version_id = excluded.applied_version_id, reported_at = excluded.reported_at
@@ -307,7 +313,7 @@ export async function reportApplied(
     await tx.execute(sql`
       DELETE FROM web.session_bundle_state st
       WHERE st.session_id = ${actor.sessionId}
-        AND NOT (st.bundle_id = ANY(${skillIds}::text[]))
+        AND NOT (st.bundle_id = ANY(${skillIds}))
     `);
     return "ok";
   });
