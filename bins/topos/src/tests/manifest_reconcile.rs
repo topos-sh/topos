@@ -864,13 +864,19 @@ fn add_reference_records_the_manifest_line_and_delivers_now() {
     // `add` chooses; the same sweep delivers — bytes are in the checkout NOW.
     assert!(proj.0.join(".claude/skills/deploy/SKILL.md").exists());
 
-    // A name in NO connected catalog refuses without an existence claim.
+    // A name in NO connected catalog refuses without an existence claim — ONE template, never
+    // the context sentence nested inside the fixed uniform-miss wrapper.
     let err =
         ops::add_reference(&ctx, &connect(&plane, &dir), None, "@eng/nonesuch", false).unwrap_err();
+    assert_eq!(err.code(), "NOT_FOUND");
     assert!(
         err.to_string()
             .contains("not visible with your current access"),
         "{err}"
+    );
+    assert!(
+        !err.to_string().contains("was not found, or is not visible"),
+        "the two miss templates must never nest: {err}"
     );
     // A workspace this installation is not logged into names the login, from local knowledge.
     let err =
@@ -1323,6 +1329,33 @@ fn an_ended_session_freezes_channel_delivered_project_skills() {
     )
     .unwrap();
     assert!(placed.exists());
+}
+
+#[test]
+fn an_unreadable_catalog_answers_retryable_never_a_false_miss() {
+    // A transient catalog-read failure must NOT race into "not in any connected workspace's
+    // catalog" — the deterministic answer is a retryable transport error naming the unread
+    // catalogs, for `add` and `remove -g` alike.
+    let rig = Rig::new("flaky-read");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    dir.set_unavailable(true);
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let err = ops::add_reference(&ctx, &connect(&plane, &dir), None, "deploy", false).unwrap_err();
+    assert_eq!(err.code(), "PLANE_ERROR", "{err}");
+    assert_eq!(
+        err.outcome(),
+        topos_types::TerminalOutcome::RetryableFailure
+    );
+    assert!(err.to_string().contains("could not be read"), "{err}");
+    let err = ops::remove_reference_global(&ctx, &connect(&plane, &dir), "deploy").unwrap_err();
+    assert_eq!(err.code(), "PLANE_ERROR", "{err}");
+    // Reachable again: the genuine miss keeps the single-template NOT_FOUND.
+    dir.set_unavailable(false);
+    let err = ops::add_reference(&ctx, &connect(&plane, &dir), None, "deploy", false).unwrap_err();
+    assert_eq!(err.code(), "NOT_FOUND", "{err}");
 }
 
 #[test]

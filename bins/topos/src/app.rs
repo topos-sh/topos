@@ -466,22 +466,37 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             let has_sessions = crate::sessions::read_sessions(&fs, &ctx.layout)
                 .map(|s| s.sessions.iter().any(|x| x.status != "ended"))
                 .unwrap_or(false);
-            if let Ok(parsed) = crate::manifest::refs::parse_ref(&source) {
-                use crate::manifest::refs::ParsedRef;
-                let workspace_shaped =
-                    matches!(parsed, ParsedRef::Skill { .. } | ParsedRef::Channel { .. })
-                        || (matches!(parsed, ParsedRef::Bare { .. }) && has_sessions);
-                if workspace_shaped {
-                    let git = crate::plane_http::UreqGitSource::new();
-                    let result = ops::add_reference(
-                        &ctx,
-                        &connect_session_transports,
-                        Some(&git),
-                        &source,
-                        global,
-                    );
-                    return finish(json, cmd_name, result, render::add_tty, &diag);
+            match crate::manifest::refs::parse_ref(&source) {
+                Ok(parsed) => {
+                    use crate::manifest::refs::ParsedRef;
+                    let workspace_shaped =
+                        matches!(parsed, ParsedRef::Skill { .. } | ParsedRef::Channel { .. })
+                            || (matches!(parsed, ParsedRef::Bare { .. }) && has_sessions);
+                    if workspace_shaped {
+                        let git = crate::plane_http::UreqGitSource::new();
+                        let result = ops::add_reference(
+                            &ctx,
+                            &connect_session_transports,
+                            Some(&git),
+                            &source,
+                            global,
+                        );
+                        return finish(json, cmd_name, result, render::add_tty, &diag);
+                    }
                 }
+                // A REFERENCE-SHAPED token the grammar refused (`@x`, `#chan`, a malformed pin,
+                // a host-led near-miss) surfaces its typed refusal — it is never retried as a
+                // filesystem path or a discovered name, whose answers would name the wrong fix.
+                Err(e) if crate::manifest::refs::reference_shaped(&source) => {
+                    return finish(
+                        json,
+                        cmd_name,
+                        Err(ClientError::InvalidArgument(e.message)),
+                        render::add_tty,
+                        &diag,
+                    );
+                }
+                Err(_) => {}
             }
             // keep-as-yours: a bare NAME that resolves to a RETAINED withdrawn/detached copy re-forks it
             // into a new LOCAL skill, two-phase (bare describes the fork; `--yes` applies). A non-retained
@@ -1006,6 +1021,20 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                     ops::remove_reference_global(&ctx, &connect_session_transports, &skill[0])
                         .map(ops::RemoveOutcome::Applied);
                 return finish_remove(json, cmd_name, result, &diag);
+            }
+            // A REFERENCE-SHAPED token the grammar refuses surfaces its typed refusal here too —
+            // never retried through the tracked/untracked ladder (whose answers name the wrong fix).
+            for t in &skill {
+                if let Err(e) = crate::manifest::refs::parse_ref(t)
+                    && crate::manifest::refs::reference_shaped(t)
+                {
+                    return emit_err(
+                        json,
+                        cmd_name,
+                        &ClientError::InvalidArgument(e.message),
+                        &diag,
+                    );
+                }
             }
             // The MANIFEST arm first: a target naming a manifest line — or a name the person's
             // PROFILE delivers (the broader layer) — edits the NEAREST manifest (delete the

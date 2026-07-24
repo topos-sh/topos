@@ -252,6 +252,36 @@ fn github_ref(
     })
 }
 
+/// Whether a spelling is unambiguously REFERENCE territory — never a filesystem path, a
+/// discovered local name, or the `owner/repo[#ref]` import shorthand: the `@` workspace sigil,
+/// the banned `#` sigil outside a slashed import spelling, or a host-led canonical form
+/// (`topos.sh/…`, scheme-stripped). The `add`/`remove` dispatch consults this when [`parse_ref`]
+/// REFUSES a token: a reference-shaped refusal surfaces typed (teaching the correct shape)
+/// instead of falling through to a path/discovery arm whose answer would name the wrong fix.
+pub(crate) fn reference_shaped(raw: &str) -> bool {
+    let s = raw.trim();
+    if s.starts_with('@') || s.starts_with('#') {
+        return true;
+    }
+    // A slashless token carrying `#` can only be a mistyped channel (the import shorthand that
+    // legitimately carries `#` is `owner/repo#ref`).
+    if s.contains('#') && !s.contains('/') {
+        return true;
+    }
+    // Path shapes are never reference territory (the grammar itself parses them as paths).
+    if s.starts_with("./") || s.starts_with("../") || s.starts_with('/') || s.starts_with("~/") {
+        return false;
+    }
+    let s = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+        .unwrap_or(s);
+    match s.split_once('/') {
+        Some((first, _)) => !first.is_empty() && first != "." && first != ".." && is_host(first),
+        None => false,
+    }
+}
+
 /// Parse ONE reference by shape. See the module table; every arm is total — a spelling either
 /// parses to exactly one meaning or refuses typed.
 pub(crate) fn parse_ref(raw: &str) -> Result<ParsedRef, RefError> {
@@ -475,6 +505,46 @@ mod tests {
             parse_ref("topos.sh/acme/code-review").unwrap(),
             skill(Some("topos.sh"), "acme", "code-review", None)
         );
+        // The PINNED rows: `@ws/name@<digest>` and the canonical spelling — both are references
+        // (a pinned `@`-ref must NEVER fall through to a filesystem-path arm).
+        let digest = "0123456789abcdef".repeat(4);
+        assert_eq!(
+            parse_ref(&format!("@acme/code-review@{digest}")).unwrap(),
+            skill(None, "acme", "code-review", Some(&digest))
+        );
+        assert_eq!(
+            parse_ref(&format!("topos.sh/acme/code-review@{digest}")).unwrap(),
+            skill(Some("topos.sh"), "acme", "code-review", Some(&digest))
+        );
+    }
+
+    #[test]
+    fn reference_shaped_tokens_never_fall_to_other_arms() {
+        // The shapes whose grammar refusal must SURFACE (never be retried as a path/name):
+        // `@`-led (with or without a malformed pin), `#`-led, slashless-`#`, host-led.
+        for t in [
+            "@acme",
+            "@acme/deploy@abc1234", // a short pin — the refusal teaches the 64-char digest
+            "#backend",
+            "acme#backend",
+            "topos.sh/acme/deploy@abc1234",
+            "https://topos.sh/acme",
+            "github.com/owner",
+        ] {
+            assert!(reference_shaped(t), "{t}");
+        }
+        // The shapes other arms legitimately own: paths, discovered names, import shorthands.
+        for t in [
+            "./my-skill",
+            "../x",
+            "deploy",
+            "deploy@claude-code",
+            "vercel-labs/skills",
+            "vercel-labs/skills#v2",
+            "a/b/c",
+        ] {
+            assert!(!reference_shaped(t), "{t}");
+        }
     }
 
     #[test]

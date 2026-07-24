@@ -97,12 +97,12 @@ fn resolve_ref(
                 .iter()
                 .find(|e| &e.name == name)
                 .cloned()
-                .ok_or_else(|| ClientError::TargetNotFound {
-                    target: format!(
-                        "'{name}' — not in {}'s catalog, or not visible with your current \
-                             access",
+                .ok_or_else(|| {
+                    ClientError::NotAvailable(format!(
+                        "'{name}' is not in {}'s catalog, or is not visible with your current \
+                         access — check the name; a teammate can confirm it",
                         session.workspace_name
-                    ),
+                    ))
                 })?;
             Ok(ResolvedRef {
                 canonical: format!("{}/{}/{name}", session.host, session.workspace_name),
@@ -124,12 +124,11 @@ fn resolve_ref(
                 .channels_index(&session.workspace_id)
                 .map_err(|e| not_available(&session, name, &e))?;
             if !channels.channels.iter().any(|c| &c.name == name) {
-                return Err(ClientError::TargetNotFound {
-                    target: format!(
-                        "'{name}' — no such channel in {}, or not visible with your current access",
-                        session.workspace_name
-                    ),
-                });
+                return Err(ClientError::NotAvailable(format!(
+                    "there is no channel '{name}' in {}, or it is not visible with your current \
+                     access — check the name; a teammate can confirm it",
+                    session.workspace_name
+                )));
             }
             Ok(ResolvedRef {
                 canonical: format!(
@@ -143,18 +142,29 @@ fn resolve_ref(
             })
         }
         ParsedRef::Bare { name, pin } => {
-            // Unique across the connected catalogs, or an error listing every candidate.
+            // Unique across the connected catalogs, or an error listing every candidate. A
+            // catalog READ failure is never folded into "no hit" — a transient fault must answer
+            // retryable, not a false (and racy) "not in any catalog".
             let mut hits: Vec<(
                 Session,
                 SessionTransports,
                 topos_types::requests::WireSkillIndexEntry,
             )> = Vec::new();
+            let mut unread: Vec<String> = Vec::new();
             for s in &live {
                 let transports = connect(s);
-                if let Ok(catalog) = transports.directory.skills_index(&s.workspace_id)
-                    && let Some(e) = catalog.skills.iter().find(|e| &e.name == name)
-                {
-                    hits.push((s.clone(), transports, e.clone()));
+                match transports.directory.skills_index(&s.workspace_id) {
+                    Ok(catalog) => {
+                        if let Some(e) = catalog.skills.iter().find(|e| &e.name == name) {
+                            hits.push((s.clone(), transports, e.clone()));
+                        }
+                    }
+                    Err(e) => unread.push(format!(
+                        "{}/{} ({})",
+                        s.host,
+                        s.workspace_name,
+                        crate::render::safe_message(&e)
+                    )),
                 }
             }
             match hits.len() {
@@ -164,13 +174,18 @@ fn resolve_ref(
                             "'{name}' is a catalog reference, but this installation is not \
                              logged into any workspace — `topos login <workspace-address>` first"
                         )))
+                    } else if !unread.is_empty() {
+                        Err(ClientError::Plane(format!(
+                            "could not read every connected catalog — '{name}' was not found in \
+                             the reachable ones, but these could not be read: {}; retry",
+                            unread.join(", ")
+                        )))
                     } else {
-                        Err(ClientError::TargetNotFound {
-                            target: format!(
-                                "'{name}' — not in any connected workspace's catalog, or not \
-                                 visible with your current access"
-                            ),
-                        })
+                        Err(ClientError::NotAvailable(format!(
+                            "'{name}' is not in any connected workspace's catalog, or is not \
+                             visible with your current access — check the name; a teammate can \
+                             confirm it"
+                        )))
                     }
                 }
                 1 => {

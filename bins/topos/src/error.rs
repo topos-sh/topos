@@ -325,12 +325,20 @@ pub(crate) enum ClientError {
     /// The ONE uniform not-found: a workspace / channel / skill address that resolved to nothing — locally
     /// AND on the plane, whose 404 deliberately does not distinguish "does not exist" from "not yours".
     /// The client mirrors that non-answer (no enumeration oracle on either side); the guidance is the
-    /// fixed dual reading. `target` is the user's own argv token, shown verbatim.
+    /// fixed dual reading. `target` is the user's own argv token, shown verbatim — a bare token ONLY,
+    /// never a phrase (a context-phrased miss uses [`ClientError::NotAvailable`] instead, so the two
+    /// templates never nest).
     #[error(
         "'{target}' was not found, or is not visible to you — check the address; if you were invited, \
          confirm with your inviter"
     )]
     TargetNotFound { target: String },
+    /// A CONTEXT-PHRASED miss with the same non-oracle discipline and the same `NOT_FOUND` code: the
+    /// message is ONE complete self-authored sentence (which catalog was consulted, the dual
+    /// existence/visibility reading) shown verbatim — never nested inside the fixed
+    /// [`ClientError::TargetNotFound`] template.
+    #[error("{0}")]
+    NotAvailable(String),
     /// A name resolved to MORE than one workspace resource (across workspaces, or across the channel/skill
     /// kinds). Carries the paste-ready qualified paths (`<workspace>/channels/<name>` /
     /// `<workspace>/skills/<name>`) — the human list rides the message, and the envelope surfaces them
@@ -411,6 +419,8 @@ impl ClientError {
             ClientError::PlaneTerminal { .. } => "PLANE_TERMINAL",
             ClientError::UpgradeAmbiguous => "UPGRADE_AMBIGUOUS",
             ClientError::TargetNotFound { .. } => "NOT_FOUND",
+            // The context-phrased miss shares the uniform code (agents branch the same).
+            ClientError::NotAvailable(_) => "NOT_FOUND",
             // The address-grammar ambiguity shares the tracked-name ambiguity's code (agents branch the
             // same); the candidates additionally ride the envelope's `data.candidates`.
             ClientError::AmbiguousTarget { .. } => "AMBIGUOUS_NAME",
