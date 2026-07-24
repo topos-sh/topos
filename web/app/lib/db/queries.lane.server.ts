@@ -637,11 +637,16 @@ export async function profileRemoveChannel(
 // ── Curation (place / unplace, create-on-first-use) ─────────────────────────────────────────
 
 async function channelByNameInTx(tx: Tx, ws: string, name: string) {
+  // FOR UPDATE — the same pin every mode-gated channel read takes: a concurrent open→curated
+  // flip (or delete) conflicts with this transaction instead of letting a member's edit slip
+  // past a gate that changed after the read. (The insert arm's create-race re-read rides this
+  // same lock.)
   const rows = await tx
     .select({ id: channel.id, isDefault: channel.isDefault, mode: channel.mode })
     .from(channel)
     .where(and(eq(channel.workspaceId, ws), eq(channel.name, name)))
-    .limit(1);
+    .limit(1)
+    .for("update");
   return rows[0];
 }
 
