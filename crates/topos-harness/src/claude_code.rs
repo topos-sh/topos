@@ -1121,39 +1121,39 @@ mod tests {
                 .join("deploy-helper-robert-s-workspace"),
         );
 
-        // Now the namespaced form is taken too → the globally-unique id is the ultimate safe fallback.
+        // Now the namespaced form is taken too → the COUNTED named form; the opaque id never
+        // materializes as a directory name a human has to read.
         home.skill("deploy-helper-robert-s-workspace");
         assert_eq!(
             a.placement_for("topos_abc", naming, None).dir,
-            home.0.join("skills").join("topos_abc"),
-            "when every named candidate is taken, the unique id never collides",
+            home.0
+                .join("skills")
+                .join("deploy-helper-robert-s-workspace-2"),
+            "every collision stays name-led",
         );
     }
 
     #[test]
-    fn an_occupied_id_dir_namespaces_by_workspace_before_the_bare_id_residual() {
+    fn deep_collisions_count_up_and_never_surface_the_opaque_id() {
         let home = TempHome::new();
         home.skill("deploy-helper"); // the plain name is taken…
         home.skill("deploy-helper-acme"); // …and its workspace form…
-        home.skill("topos_abc"); // …and even the id dir.
+        home.skill("deploy-helper-acme-2"); // …and the first counted form.
         let cfg = MemConfig::default();
         let a = adapter(&home.0, &cfg);
         let naming = PlacementNaming {
             name: Some("deploy-helper"),
             workspace_slug: Some("acme"),
         };
+        let dir = a.placement_for("topos_abc", naming, None).dir;
         assert_eq!(
-            a.placement_for("topos_abc", naming, None).dir,
-            home.0.join("skills").join("topos_abc-acme"),
-            "an occupied id dir disambiguates by the workspace before giving up"
+            dir,
+            home.0.join("skills").join("deploy-helper-acme-3"),
+            "the counted ladder stays name-led however deep the collision"
         );
-
-        // Every rung occupied → the bare id is returned; the CLI's materializer refuses to
-        // overwrite an occupied dir it never placed, so this names but never clobbers.
-        home.skill("topos_abc-acme");
-        assert_eq!(
-            a.placement_for("topos_abc", naming, None).dir,
-            home.0.join("skills").join("topos_abc"),
+        assert!(
+            !dir.to_string_lossy().contains("topos_abc"),
+            "the opaque id never becomes a directory name"
         );
     }
 

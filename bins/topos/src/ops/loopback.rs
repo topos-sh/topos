@@ -329,22 +329,53 @@ mod tests {
         let port = listener.port();
         assert_eq!(listener.try_receive(), None, "nothing arrived yet");
 
-        // A wrong-state probe answers 404 and spends nothing. The single test thread writes
-        // FIRST, lets try_receive accept+answer, then reads the buffered response.
+        // DETERMINISTIC handshake: the nonblocking accept can race the OS delivering the
+        // connection, so each phase POLLS `try_receive` (which drives the accept) until the
+        // written request has provably been answered — never a single racy call.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
+        // A wrong-state probe answers 404 and spends nothing.
         let mut probe = TcpStream::connect(("127.0.0.1", port)).expect("connect");
         probe
             .write_all(b"GET /cb?state=wrong&outcome=approved HTTP/1.1\r\nhost: x\r\n\r\n")
             .expect("write");
-        assert_eq!(listener.try_receive(), None);
+        probe
+            .set_read_timeout(Some(std::time::Duration::from_millis(25)))
+            .expect("timeout");
         let mut answer = String::new();
-        let _ = probe.read_to_string(&mut answer);
+        loop {
+            assert_eq!(
+                listener.try_receive(),
+                None,
+                "a wrong state must spend nothing"
+            );
+            // The 404 answer closes the connection; read_to_string returns Ok once it lands.
+            if probe.read_to_string(&mut answer).is_ok() && !answer.is_empty() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the probe was never answered"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert!(answer.starts_with("HTTP/1.1 404"), "{answer}");
 
         // The ceremony's own redirect lands.
         let mut real = TcpStream::connect(("127.0.0.1", port)).expect("connect");
         real.write_all(b"GET /cb?state=st-abcdef&outcome=approved HTTP/1.1\r\nhost: x\r\n\r\n")
             .expect("write");
-        assert_eq!(listener.try_receive(), Some(LoopbackOutcome::Approved));
+        let outcome = loop {
+            if let Some(o) = listener.try_receive() {
+                break o;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the redirect was never received"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(outcome, LoopbackOutcome::Approved);
         let mut answer = String::new();
         let _ = real.read_to_string(&mut answer);
         assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");

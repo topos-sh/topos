@@ -420,6 +420,16 @@ pub(crate) fn add_tty(data: &AddData) -> String {
             }
         ));
     }
+    // A CHANNEL reference has no bytes of its own (no skill id — the members deliver): the
+    // "Adopted @ <version>" line would be a fabrication, so the receipt states the expansion.
+    if data.skill_id.is_empty() {
+        out.push_str(&format!(
+            "Added the '{}' channel — its skills deliver with `topos update` (and just did, \
+             where reachable).",
+            data.name
+        ));
+        return out.trim_end().to_owned();
+    }
     out.push_str(&format!(
         "Adopted '{}' @ {}",
         data.name,
@@ -1535,7 +1545,8 @@ pub(crate) fn invite_describe_tty(
     }
     s.push_str(
         "\nEach address gets a mailed single-use invite link (browser, agent paste-block, or \
-         `topos login <invite-url>`).",
+         `topos login <invite-url>`). Sending needs the server's outgoing mail — without SMTP \
+         the send refuses and nothing is recorded.",
     );
     s.push_str(&format!(
         "\nNothing has changed yet — apply with:\n  {}",

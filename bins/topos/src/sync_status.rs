@@ -120,6 +120,36 @@ pub(crate) fn record(
     doc::write_doc(fs, &layout.sync_status_path(), &status)
 }
 
+/// Merge ONE delivered-skill row into a workspace's cache entry (creating the entry when absent,
+/// preserving everything else) — the landed-publish seed: the publisher's own machine knows the
+/// workspace now governs the bundle without waiting for the next sweep.
+pub(crate) fn merge_delivered(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    workspace_id: &str,
+    host: &str,
+    workspace_name: &str,
+    skill_id: &str,
+    row: DeliveredSkill,
+) -> Result<(), ClientError> {
+    let mut status = read(fs, layout)?;
+    status.schema_version = PERSISTED_SCHEMA_VERSION;
+    let entry = status
+        .workspaces
+        .entry(workspace_id.to_owned())
+        .or_default();
+    if entry.host.is_none() {
+        entry.host = Some(host.to_owned());
+    }
+    if entry.workspace_name.is_none() {
+        entry.workspace_name = Some(workspace_name.to_owned());
+    }
+    // A standing row keeps its richer facts (the sweep is the authority); only absent rows seed.
+    entry.delivered.entry(skill_id.to_owned()).or_insert(row);
+    fs.create_dir_all(&layout.state_dir())?;
+    doc::write_doc(fs, &layout.sync_status_path(), &status)
+}
+
 /// Whether a workspace's last delivery is STALE against its recorded window: `true` only when a
 /// last-delivery time exists, the window is non-zero, and `now` is past `last + window`. A
 /// workspace never yet delivered (no record) is NOT stale — there is nothing to be stale FROM, and

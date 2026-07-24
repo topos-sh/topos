@@ -164,6 +164,23 @@ pub(crate) fn login(
 ) -> Result<LoginData, ClientError> {
     // A pending WAL first — re-invoking IS the resume; a foreign-owned flow refuses typed.
     if let Some(wal) = enroll::read_wal(ctx.fs, &ctx.layout)? {
+        // `login <B>` while a flow for A is pending must NOT silently resume A — refuse typed
+        // (finish or let it expire), so the receipt can never claim a workspace the person did
+        // not just name. A matching address (or a bare `login`) resumes as before.
+        if let Some(raw) = address
+            && matches!(wal.intent, enroll::EnrollIntentDoc::Session)
+        {
+            let target = parse_login_address(raw, &connectors.web_origin)?;
+            let same = target.host == wal.host
+                && (target.workspace == wal.workspace_name || target.workspace.is_empty());
+            if !same {
+                return Err(ClientError::Enrollment(format!(
+                    "a login for {}/{} is already pending — finish it (`topos login`) or let it \
+                     expire before starting one for {}/{}",
+                    wal.host, wal.workspace_name, target.host, target.workspace
+                )));
+            }
+        }
         return match wal.intent {
             enroll::EnrollIntentDoc::Session => resume(ctx, connectors, &wal),
             enroll::EnrollIntentDoc::Retired => Err(ClientError::Enrollment(
@@ -358,7 +375,7 @@ pub(crate) fn logout(
     } else if let Some(ws) = workspace {
         vec![
             all_sessions
-                .find(ws)
+                .find(ws)?
                 .ok_or_else(|| {
                     ClientError::WorkspaceSelection(format!(
                         "not logged into workspace '{ws}'; logged-in workspaces: {}",
@@ -384,12 +401,14 @@ pub(crate) fn logout(
     let mut server_revoked = true;
     for s in &targets {
         // The server-side end, BEFORE the local delete (the revoke authenticates with the
-        // session's own credential). Best-effort: unreachable / already-gone never blocks the
-        // local sign-out — `server_revoked` discloses it.
-        let ok = matches!(
-            (revoke)(&s.base_url, &s.credential).revoke_session(),
-            Ok(())
-        );
+        // session's own credential). Best-effort: unreachable never blocks the local sign-out —
+        // `server_revoked` discloses it. The uniform 404 = the session is ALREADY gone
+        // server-side (owner-ended, seat removed) — revoked-equivalent, never "failed".
+        let ok = match (revoke)(&s.base_url, &s.credential).revoke_session() {
+            Ok(()) => true,
+            Err(ClientError::TargetNotFound { .. }) => true,
+            Err(_) => false,
+        };
         if !ok {
             server_revoked = false;
         }
@@ -703,9 +722,8 @@ mod tests {
         fn revoke_session(&self) -> Result<(), ClientError> {
             self.calls.borrow_mut().push("revoke".to_owned());
             if self.fail {
-                Err(ClientError::TargetNotFound {
-                    target: "session".to_owned(),
-                })
+                // A TRANSPORT fault (the uniform 404 is revoked-equivalent, tested below).
+                Err(ClientError::Plane("unreachable".to_owned()))
             } else {
                 Ok(())
             }
@@ -775,6 +793,33 @@ mod tests {
             let out = logout(ctx, &revoke2, None, true).unwrap();
             assert_eq!(out.ended, vec!["beta"]);
             assert!(!out.server_revoked);
+
+            // The uniform 404 is REVOKED-EQUIVALENT (already ended server-side) — never a
+            // "could not revoke" scare on the receipt.
+            seed_session(ctx, "w_c", "gamma");
+            struct GoneRevoke;
+            impl GovernanceSource for GoneRevoke {
+                fn invite(
+                    &self,
+                    _w: &str,
+                    _b: topos_types::requests::InvitationRequest,
+                ) -> Result<topos_types::requests::InvitationData, ClientError> {
+                    unreachable!()
+                }
+                fn revoke_session(&self) -> Result<(), ClientError> {
+                    Err(ClientError::TargetNotFound {
+                        target: "session".to_owned(),
+                    })
+                }
+            }
+            let revoke3 =
+                move |_b: &str, _c: &str| -> Box<dyn GovernanceSource> { Box::new(GoneRevoke) };
+            let out = logout(ctx, &revoke3, Some("gamma"), false).unwrap();
+            assert_eq!(out.ended, vec!["gamma"]);
+            assert!(
+                out.server_revoked,
+                "the uniform 404 = already gone = revoked"
+            );
             assert!(
                 sessions::read_sessions(ctx.fs, &ctx.layout)
                     .unwrap()

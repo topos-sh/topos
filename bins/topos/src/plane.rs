@@ -3,12 +3,13 @@
 //!
 //! Each mirrors the [`crate::fs_seam::FsOps`] / `ConfigStore` precedent: a narrow trait the engine
 //! consumes, a real production impl, and a fixture test double. The production impls live in
-//! [`crate::plane_http`] — the blocking `ureq` transports (`UreqPlane` for the read side, `UreqDeviceClient`
-//! for the creds-free writes) — and are wired by the composition root whenever enrollment exists on disk
-//! (`instance.json`; the follow-state comes from `follows.json`, written by `follow`). Before enrollment
-//! the inert impls at the bottom of this file keep every verb honest (nothing followed, nothing served).
-//! The engine tests drive the same traits over in-process fixtures with no HTTP. There is deliberately
-//! **no `Transport` trait** — that abstraction would be premature.
+//! [`crate::plane_http`] — the blocking `ureq` transports (`UreqPlane` for the read side,
+//! `UreqDeviceClient` for the directory/governance lanes) — wired by the composition root ONE SET
+//! PER SESSION (each under that session's workspace-scoped credential, from
+//! `identity/sessions.json`). With no session the inert impls at the bottom of this file keep
+//! every verb honest (nothing delivered, nothing served). The engine tests drive the same traits
+//! over in-process fixtures with no HTTP. There is deliberately **no `Transport` trait** — that
+//! abstraction would be premature.
 
 use topos_core::digest::FileMode;
 use topos_types::requests::{
@@ -134,13 +135,14 @@ pub(crate) trait PlaneSource {
         Ok(Vec::new())
     }
 
-    /// Bind a skill to its workspace credential on THIS read transport — the read-side twin of
-    /// [`DeliverySource::bind_skill`]. The per-skill credential map is derived from `follows.json`, so a
-    /// skill this device has never followed (a genesis publisher's own skill, pre-`update`; a catalog-only
-    /// review target) is absent from it — and every read (`get_current` / `fetch_version`) would answer
-    /// the indistinguishable "not served" until it is bound. The workspace credential already authenticates
-    /// every skill in its workspace (membership IS the authorization), so binding is a lookup, never a new
-    /// secret. Default: a no-op (the inert source and the test fakes carry their creds up front).
+    /// Bind a skill to its workspace scope on THIS read transport — the read-side twin of
+    /// [`DeliverySource::bind_skill`]. The per-skill workspace map is seeded from the offline
+    /// delivery cache, which cannot yet name a brand-new arrival (a genesis publisher's own
+    /// skill, pre-`update`; a catalog-only review target) — every read (`get_current` /
+    /// `fetch_version`) would answer the indistinguishable "not served" until it is bound. The
+    /// session credential already authenticates every skill in its workspace (the seat IS the
+    /// authorization), so binding is a lookup, never a new secret. Default: a no-op (the inert
+    /// source and the test fakes carry their scopes up front).
     fn bind_skill(&self, _workspace_id: &str, _skill_id: &str) {}
 }
 
@@ -249,13 +251,13 @@ pub(crate) trait DeliverySource {
         applied: &[(String, [u8; 32])],
     ) -> Result<(), PlaneError>;
 
-    /// Bind a DELIVERED skill to its workspace credential on the READ transport. The per-skill
-    /// credential map is derived from `follows.json`, which by definition does not yet name a
-    /// brand-new arrival — so without this, the arrival's very first version fetch would answer
-    /// "not served" and cost a spurious error plus a session's delay. The workspace credential
-    /// already authenticates every skill in its workspace (membership IS the authorization), so
+    /// Bind a DELIVERED skill to its workspace scope on the READ transport. The per-skill
+    /// workspace map is seeded from the offline delivery cache, which by definition does not yet
+    /// name a brand-new arrival — so without this, the arrival's very first version fetch would
+    /// answer "not served" and cost a spurious error plus a sweep's delay. The session credential
+    /// already authenticates every skill in its workspace (the seat IS the authorization), so
     /// binding is a lookup, never a new secret. Default: a no-op (the fixture transports carry
-    /// their creds up front).
+    /// their scopes up front).
     fn bind_skill(&self, _workspace_id: &str, _skill_id: &str) {}
 
     /// `POST /v1/workspaces/{ws}/notices/ack` — acknowledge notices by id (person-scoped
@@ -479,13 +481,13 @@ pub(crate) enum ProfileRemoval {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The enrollment seam — the gh-style device-flow client, behind a port so the `follow`/`auth login`
-// tests run against a fake WITHOUT HTTP. The device code (and, once granted, the device credential)
-// are the only secrets it carries; both are redacted from every `Debug`. The real impl is
-// `crate::plane_http::UreqDeviceClient`; the fakes live in the in-crate tests.
+// The LOGIN seam — the RFC-8628-shaped browser-approval client, behind a port so the `login`
+// tests run against a fake WITHOUT HTTP. The flow code (and, once granted, the session
+// credential) are the only secrets it carries; both are redacted from every `Debug`. The real
+// impl is `crate::plane_http::UreqDeviceClient`; the fakes live in the in-crate tests.
 // ---------------------------------------------------------------------------------------------
 
-/// The device-authorization grant from `POST /v1/device/authorize` (RFC-8628-shaped names).
+/// The flow grant from `POST /v1/login/authorize` (RFC-8628-shaped field names).
 #[derive(Clone)]
 pub(crate) struct DeviceAuthStart {
     /// **SECRET** — the device code the client polls with (promoted server-side to the device's ONE
@@ -569,7 +571,7 @@ impl std::fmt::Debug for EnrolledGrant {
     }
 }
 
-/// The outcome of a `POST /v1/device/token` poll. NOT an error — every variant is a legitimate poll
+/// The outcome of a `POST /v1/login/token` poll. NOT an error — every variant is a legitimate poll
 /// state; only a transport/parse fault is an `Err`. A re-poll of an approved flow returns the same
 /// granted answer, so a crash between the grant and the sidecar writes recovers by re-polling.
 #[derive(Debug, Clone)]
@@ -580,14 +582,14 @@ pub(crate) enum DeviceAuthPoll {
     Denied,
     /// The flow expired before approval.
     Expired,
-    /// Approved — the credential, device id, and workspace are present.
+    /// Approved — the session credential and workspace are present.
     Granted(EnrolledGrant),
 }
 
-/// The enrollment transport (the gh-style device flow the app serves). `follow <address>` and
-/// `auth login` drive it: read the constant protocol card, start a device authorization toward a
-/// workspace ADDRESS, and poll for the outcome — the granted poll carries the device's ONE bearer
-/// credential (no separate redeem round-trip exists). The real impl is
+/// The login transport (the RFC-8628-shaped flow the app serves at `/v1/login/*`). `topos login`
+/// drives it: read the constant protocol card, start an authorization toward a workspace
+/// ADDRESS, and poll for the outcome — the granted poll carries the SESSION's workspace-scoped
+/// bearer credential (no separate redeem round-trip exists). The real impl is
 /// [`crate::plane_http::UreqDeviceClient`]; the fakes live in the in-crate tests.
 pub(crate) trait EnrollSource {
     /// `GET <url>` with `Accept: application/json` — the unauthenticated CARD read of any resource
@@ -599,12 +601,12 @@ pub(crate) trait EnrollSource {
     /// that is not a protocol card.
     fn fetch_card(&self, url: &str) -> Result<WireProtocolCard, ClientError>;
 
-    /// `POST /v1/device/authorize` — begin a device-authorization toward the workspace named by its
-    /// ADDRESS slug (whether the name exists is never disclosed here — an unknown name runs the same
-    /// flow to the same uniform denial). `requested_name` is the human-readable device name shown on
+    /// `POST /v1/login/authorize` — begin a login flow toward the workspace named by its ADDRESS
+    /// slug (whether the name exists is never disclosed here — an unknown name runs the same flow
+    /// to the same uniform denial). `requested_name` is the human-readable machine name shown on
     /// the approval page (a confused-deputy aid, not authority). `invite_token` is the invitation
-    /// link's token when this enrollment came from `follow <invite-url>` — recorded on the flow so
-    /// the approval weaves the accept in; never validated at this unauthenticated start.
+    /// link's token when this login came from `login <invite-url>` — recorded on the flow so the
+    /// approval weaves the accept in; never validated at this unauthenticated start.
     ///
     /// # Errors
     /// [`ClientError::Plane`] on a transport fault / non-OK status; [`ClientError::WireInvalid`] on a
@@ -616,7 +618,7 @@ pub(crate) trait EnrollSource {
         invite_token: Option<&str>,
     ) -> Result<DeviceAuthStart, ClientError>;
 
-    /// `POST /v1/device/token` — one poll of the flow. The poll STATE (pending / denied / expired /
+    /// `POST /v1/login/token` — one poll of the flow. The poll STATE (pending / denied / expired /
     /// granted) is the `Ok` value; only a transport/parse fault is an `Err`.
     ///
     /// # Errors

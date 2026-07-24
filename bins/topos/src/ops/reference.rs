@@ -458,14 +458,20 @@ pub(crate) fn add_reference(
             false,
         )?;
     }
-    // Deliver NOW — the same reconcile the sweep runs, targeted at this name. Best-effort: the
-    // demand is durably recorded above; a delivery hiccup surfaces on the next sweep too.
+    // Deliver NOW — the same reconcile the sweep runs. A skill (or a local channel line) is
+    // targeted by its resolved name; a `-g` CHANNEL rides the FULL sweep instead — the server
+    // expands the profile's channel into member names the targeted filter could never match.
+    // Best-effort: the demand is durably recorded above; a hiccup surfaces on the next sweep too.
+    let targets = match (&resolved.kind, global) {
+        (ResolvedKind::Channel(_), true) => Vec::new(),
+        _ => vec![name],
+    };
     let _ = super::reconcile::manifest_update(
         ctx,
         connect,
         git,
         &super::reconcile::ManifestUpdateOpts {
-            targets: vec![name],
+            targets,
             ack_notices: false,
         },
     );

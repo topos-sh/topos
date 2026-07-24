@@ -836,6 +836,26 @@ fn enrolled_publish(
             .iter()
             .map(std::path::PathBuf::from)
             .collect();
+        // Seed the offline cache with the governed fact (list/remove/the write lane answer
+        // correctly BEFORE the next sweep) — best-effort, never a failed publish.
+        if let PublishOutcome::Published(_) = &outcome {
+            let _ = crate::sync_status::merge_delivered(
+                outer_ctx.fs,
+                &outer_ctx.layout,
+                &l.workspace_id,
+                &l.host,
+                &l.workspace_name,
+                id.as_str(),
+                crate::sync_status::DeliveredSkill {
+                    name: lock.name.clone(),
+                    review_required: false,
+                    served_version: rec.candidate_commit.clone(),
+                    withdrawn: false,
+                    via_channels: Vec::new(),
+                    via_manifest: true,
+                },
+            );
+        }
         match &mut outcome {
             PublishOutcome::Published(data) => {
                 if let Some(rw) = super::rewrite_to_governed(

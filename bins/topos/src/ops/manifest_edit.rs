@@ -59,6 +59,18 @@ pub(crate) fn edit_target(
         }));
     }
     let dir = walk::init_dir(ctx.fs, cwd);
+    // The resolution walk STOPS below `$HOME` (a manifest there would shadow the personal
+    // layer), so a project edit must never land AT (or above) the home directory — the file
+    // would be dead on arrival, read by nothing. Route it to the personal manifest instead
+    // (the receipt names that file, so the routing is disclosed).
+    if dir == roots.home || roots.home.starts_with(&dir) {
+        let path = ctx.layout.home().join(MANIFEST_FILE);
+        return Ok(Some(EditTarget {
+            created: !ctx.fs.exists(&path),
+            dir: ctx.layout.home().to_path_buf(),
+            path,
+        }));
+    }
     Ok(Some(EditTarget {
         path: dir.join(MANIFEST_FILE),
         dir,
@@ -618,6 +630,36 @@ mod tests {
             let err = remove_from_manifests(ctx, &["./a".to_owned(), "docs".to_owned()], &[])
                 .unwrap_err();
             assert_eq!(err.code(), "INVALID_ARGUMENT");
+        });
+    }
+
+    #[test]
+    fn an_edit_at_the_home_directory_routes_to_the_personal_manifest() {
+        // The resolution walk stops BELOW $HOME, so a manifest written there would be dead on
+        // arrival — the edit routes to the personal manifest instead (disclosed by its path).
+        let home = scratch("home-route");
+        with_ctx(&home, Some(&home.clone()), |ctx| {
+            let target = edit_target(ctx, false).unwrap().expect("a target");
+            assert_eq!(target.path, ctx.layout.home().join(MANIFEST_FILE));
+            let mut data = add_data();
+            note_added(ctx, &mut data, "topos.sh/acme/deploy", None, false).unwrap();
+            assert!(
+                !home.join(MANIFEST_FILE).exists(),
+                "no dead $HOME/topos.toml is ever written"
+            );
+            let m = read_manifest(ctx.fs, &ctx.layout.home().join(MANIFEST_FILE))
+                .unwrap()
+                .unwrap();
+            assert_eq!(m.skills[0].reference, "topos.sh/acme/deploy");
+        });
+        // A git root AT $HOME (a dotfiles repo) routes the same way.
+        let home2 = scratch("home-git");
+        std::fs::create_dir_all(home2.join(".git")).unwrap();
+        let inside = home2.join("notes");
+        std::fs::create_dir_all(&inside).unwrap();
+        with_ctx(&home2, Some(&inside), |ctx| {
+            let target = edit_target(ctx, false).unwrap().expect("a target");
+            assert_eq!(target.path, ctx.layout.home().join(MANIFEST_FILE));
         });
     }
 

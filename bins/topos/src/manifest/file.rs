@@ -182,6 +182,18 @@ impl ManifestEditor {
         if self.doc.get(name).is_none() {
             let mut t = Table::new();
             t.set_implicit(false);
+            // A comment-only document (the fresh init template) parks its header in the
+            // document's TRAILING decor, which would serialize BELOW an inserted table — move
+            // it onto the first table's prefix so the header stays at the top of the file.
+            let trailing = self.doc.trailing().as_str().unwrap_or("").to_owned();
+            if !trailing.trim().is_empty() && self.doc.as_table().is_empty() {
+                self.doc.set_trailing("");
+                let mut prefix = trailing;
+                if !prefix.ends_with('\n') {
+                    prefix.push('\n');
+                }
+                t.decor_mut().set_prefix(prefix);
+            }
             self.doc.insert(name, Item::Table(t));
         }
         self.doc[name].as_table_mut().expect("just ensured")
@@ -388,6 +400,27 @@ skill = ".agents/skills"
         ed.write(&fs, &path).unwrap();
         let m = read_manifest(&fs, &path).unwrap().unwrap();
         assert_eq!(m.exclude, vec!["topos.sh/acme/louder".to_string()]);
+    }
+
+    #[test]
+    fn the_init_header_stays_at_the_top_after_the_first_add() {
+        let dir = scratch("header");
+        let path = dir.join(MANIFEST_FILE);
+        std::fs::write(&path, ManifestEditor::init_template()).unwrap();
+        let mut ed = ManifestEditor::open(&RealFs, &path).unwrap();
+        ed.set_entry("skills", "topos.sh/acme/deploy", None);
+        ed.write(&RealFs, &path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.starts_with("# topos.toml"),
+            "the header comment leads the file: {text}"
+        );
+        let header_at = text.find("# topos.toml").unwrap();
+        let table_at = text.find("[skills]").unwrap();
+        assert!(header_at < table_at, "header above the table: {text}");
+        // And the round trip still parses.
+        let m = read_manifest(&RealFs, &path).unwrap().unwrap();
+        assert_eq!(m.skills[0].reference, "topos.sh/acme/deploy");
     }
 
     #[test]

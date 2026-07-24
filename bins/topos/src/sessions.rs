@@ -76,12 +76,40 @@ impl Sessions {
         self.sessions.iter().filter(|s| s.status != SESSION_ENDED)
     }
 
-    /// Find by workspace NAME or opaque id (the `--workspace` selector's grammar).
-    pub(crate) fn find(&self, workspace: &str) -> Option<&Session> {
-        self.sessions
+    /// Find by opaque id, the composite `host/name` spelling, or a bare workspace NAME (the
+    /// `--workspace` selector's grammar). A bare name held on SEVERAL servers refuses toward the
+    /// composite — never a silent first-match.
+    ///
+    /// # Errors
+    /// [`ClientError::WorkspaceSelection`] naming the `host/name` spellings on an ambiguous name.
+    pub(crate) fn find(&self, workspace: &str) -> Result<Option<&Session>, ClientError> {
+        if let Some(s) = self.sessions.iter().find(|s| s.workspace_id == workspace) {
+            return Ok(Some(s));
+        }
+        if let Some((host, name)) = workspace.split_once('/') {
+            return Ok(self
+                .sessions
+                .iter()
+                .find(|s| s.host == host && s.workspace_name == name));
+        }
+        let hits: Vec<&Session> = self
+            .sessions
             .iter()
-            .find(|s| s.workspace_id == workspace)
-            .or_else(|| self.sessions.iter().find(|s| s.workspace_name == workspace))
+            .filter(|s| s.workspace_name == workspace)
+            .collect();
+        match hits.as_slice() {
+            [] => Ok(None),
+            [one] => Ok(Some(one)),
+            several => Err(ClientError::WorkspaceSelection(format!(
+                "'{workspace}' names workspaces on several servers ({}); spell \
+                 `<server>/<workspace>`",
+                several
+                    .iter()
+                    .map(|s| format!("{}/{}", s.host, s.workspace_name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
+        }
     }
 
     /// The session a HOST + workspace-name pair names (the canonical-ref lookup).
@@ -98,7 +126,7 @@ impl Sessions {
     /// [`ClientError::WorkspaceSelection`] naming the joined workspaces when there are several.
     pub(crate) fn resolve_target(&self, explicit: Option<&str>) -> Result<&Session, ClientError> {
         if let Some(ws) = explicit {
-            let found = self.find(ws).ok_or_else(|| {
+            let found = self.find(ws)?.ok_or_else(|| {
                 ClientError::WorkspaceSelection(format!(
                     "not logged into workspace '{ws}'; logged-in workspaces: {}",
                     self.names().join(", ")
@@ -151,13 +179,13 @@ pub(crate) fn canonicalize_workspace_flag(
 ) -> Option<String> {
     let flag = flag?;
     let all = read_sessions(fs, layout).unwrap_or_default();
-    Some(
-        all.sessions
-            .iter()
-            .find(|s| s.workspace_name == flag)
-            .map(|s| s.workspace_id.clone())
-            .unwrap_or(flag),
-    )
+    // The composite `host/name` and the unique bare name canonicalize to the id; an AMBIGUOUS
+    // bare name passes through unchanged, so the downstream selection refuses typed (naming the
+    // composite spellings) instead of this best-effort read guessing a server.
+    match all.find(&flag) {
+        Ok(Some(s)) => Some(s.workspace_id.clone()),
+        Ok(None) | Err(_) => Some(flag),
+    }
 }
 
 /// Fold an email/principal to its canonical ASCII-lowercase form (the invite wire's one identity
@@ -285,8 +313,8 @@ mod tests {
         upsert_session(&fs, &layout, relogin).unwrap();
         let all = read_sessions(&fs, &layout).unwrap();
         assert_eq!(all.sessions.len(), 2);
-        assert_eq!(all.find("acme").unwrap().credential, "cred-fresh");
-        assert_eq!(all.find("w_b").unwrap().status, SESSION_PENDING);
+        assert_eq!(all.find("acme").unwrap().unwrap().credential, "cred-fresh");
+        assert_eq!(all.find("w_b").unwrap().unwrap().status, SESSION_PENDING);
         assert_eq!(
             all.find_on_host("topos.sh", "beta").unwrap().workspace_id,
             "w_b"
@@ -330,6 +358,7 @@ mod tests {
                 .unwrap()
                 .find("w_a")
                 .unwrap()
+                .unwrap()
                 .status,
             SESSION_ACTIVE
         );
@@ -339,6 +368,7 @@ mod tests {
             read_sessions(&fs, &layout)
                 .unwrap()
                 .find("w_a")
+                .unwrap()
                 .unwrap()
                 .status,
             SESSION_ACTIVE

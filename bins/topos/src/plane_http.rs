@@ -60,8 +60,8 @@ pub(crate) struct UreqPlane {
     credential: Option<String>,
     /// skill_id → workspace_id (the URL-path scope; NO secret). Interior-mutable because the
     /// delivery-driven reconcile LEARNS a brand-new arrival's skill mid-sweep (`bind_skill`): the
-    /// map is seeded from `follows.json`, which cannot name a skill this device has never held.
-    /// Single-threaded by construction (a blocking CLI transport).
+    /// map is seeded from the offline delivery cache, which cannot name a skill this
+    /// installation has never held. Single-threaded by construction (a blocking CLI transport).
     skill_workspaces: RefCell<HashMap<String, String>>,
     /// The enrolled workspace ids (from `user.json`) — the delivery/report lane's fan-out set.
     workspaces: Vec<String>,
@@ -259,8 +259,8 @@ impl PlaneSource for UreqPlane {
 
 impl crate::plane::DeliverySource for UreqPlane {
     fn bind_skill(&self, workspace_id: &str, skill_id: &str) {
-        // A brand-new arrival is absent from the `follows.json`-derived per-skill map; the device
-        // credential already authenticates it (membership IS the authorization), so teach the read
+        // A brand-new arrival is absent from the cache-seeded per-skill map; the session
+        // credential already authenticates it (the seat IS the authorization), so teach the read
         // transport the workspace scope before its first version fetch.
         self.bind(workspace_id, skill_id);
     }
@@ -806,6 +806,16 @@ fn map_invite_envelope(status: u16, bytes: &[u8]) -> Result<InvitationData, Clie
             .error
             .map(|e| e.code)
             .unwrap_or_else(|| "DENIED".to_owned());
+        // The one describable dead end: the server holds no outgoing mail, and invitations
+        // travel BY mail — a typed answer with the way out, never a bare transport-shaped line.
+        if code == "MAIL_NOT_CONFIGURED" {
+            return Err(ClientError::Denied(
+                "MAIL_NOT_CONFIGURED: the server has no outgoing mail configured, and \
+                 invitations travel by mail — ask an admin to configure SMTP on the server, or \
+                 manage invitations from the workspace's People page on the web"
+                    .to_owned(),
+            ));
+        }
         return Err(ClientError::Plane(format!("invite refused ({code})")));
     }
     serde_json::from_value(env.data)

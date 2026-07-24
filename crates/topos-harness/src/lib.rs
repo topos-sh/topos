@@ -131,19 +131,31 @@ pub fn choose_skill_dir(
         if !reserved && (!is_taken(&by_name) || is_owned(&by_name)) {
             return by_name;
         }
-        // Collision: a different skill (or the user's own dir) already holds this name. Namespace by
-        // the workspace so the two coexist (both parts are already sanitized single components).
+        // Collision: a different skill (or the user's own dir) already holds this name. Namespace
+        // by the workspace so the two coexist (both parts are already sanitized single
+        // components); further collisions count up (`name-ws-2`, `-3`, …). A WORKSPACE-delivered
+        // skill's dir is therefore always name-led — the opaque skill id never materializes as a
+        // directory a human (or an agent's directory listing) has to read.
         if let Some(ws) = naming.workspace_slug.and_then(sanitize_skill_dir) {
-            let namespaced = skills_root.join(format!("{name}-{ws}"));
+            let base = format!("{name}-{ws}");
+            let namespaced = skills_root.join(&base);
             if !is_taken(&namespaced) || is_owned(&namespaced) {
                 return namespaced;
             }
+            let mut n: u32 = 2;
+            loop {
+                let candidate = skills_root.join(format!("{base}-{n}"));
+                if !is_taken(&candidate) || is_owned(&candidate) {
+                    return candidate;
+                }
+                n += 1;
+            }
         }
     }
-    // Unnamed / unsafe name / every named candidate taken → the unique id (a validated single
+    // Unnamed / unsafe name / a workspace-less taken name → the unique id (a validated single
     // component that can never collide with another SKILL — but the dir itself may still be
-    // taken by something the record does not own, so it gets the same taken-or-owned check and
-    // one more workspace disambiguation before the bare-id residual above applies).
+    // taken by something the record does not own, so it gets the same taken-or-owned check; a
+    // taken same-named dir downstream freezes rather than writes, e.g. the built-in's sweep).
     let by_id = skills_root.join(skill_id);
     if !is_taken(&by_id) || is_owned(&by_id) {
         return by_id;
@@ -253,3 +265,55 @@ pub trait HarnessAdapter {
 // ClaudeCode (this crate's `claude_code` module) is the reference; OpenClaw (the `openclaw` module)
 // ships build-first behind the pilot readiness probe; Hermes (the `hermes` module) is built against a
 // probed real local build.
+
+#[cfg(test)]
+mod ladder_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn taken<'a>(paths: &'a [&'a str]) -> impl Fn(&Path) -> bool + 'a {
+        move |p: &Path| paths.iter().any(|t| p == Path::new(t))
+    }
+
+    #[test]
+    fn a_workspace_delivered_name_collision_never_materializes_the_opaque_id() {
+        let root = PathBuf::from("/skills");
+        let naming = PlacementNaming {
+            name: Some("deploy"),
+            workspace_slug: Some("acme"),
+        };
+        // Free name → the display name.
+        let d = choose_skill_dir(&root, "topos_aabbccdd", naming, &taken(&[]), &|_| false);
+        assert_eq!(d, root.join("deploy"));
+        // Name taken → the workspace-namespaced form.
+        let d = choose_skill_dir(
+            &root,
+            "topos_aabbccdd",
+            naming,
+            &taken(&["/skills/deploy"]),
+            &|_| false,
+        );
+        assert_eq!(d, root.join("deploy-acme"));
+        // Both taken → the counted form; the opaque id NEVER becomes a directory name.
+        let d = choose_skill_dir(
+            &root,
+            "topos_aabbccdd",
+            naming,
+            &taken(&["/skills/deploy", "/skills/deploy-acme"]),
+            &|_| false,
+        );
+        assert_eq!(d, root.join("deploy-acme-2"));
+        let d = choose_skill_dir(
+            &root,
+            "topos_aabbccdd",
+            naming,
+            &taken(&[
+                "/skills/deploy",
+                "/skills/deploy-acme",
+                "/skills/deploy-acme-2",
+            ]),
+            &|_| false,
+        );
+        assert_eq!(d, root.join("deploy-acme-3"));
+    }
+}

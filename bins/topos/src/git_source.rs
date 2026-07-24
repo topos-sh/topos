@@ -297,28 +297,78 @@ impl ExtractedRepo {
             .collect()
     }
 
-    /// A LICENSE filename at the skill root, else at the repo root — recorded as provenance only.
+    /// The LICENSE at the skill root, else at the repo root — recorded as provenance only. The
+    /// recorded value is the license's NAME classified from the file's text ("MIT", "Apache-2.0"),
+    /// falling back to the filename when the text matches nothing known — a receipt that says
+    /// "LICENSE.txt" answers no question anyone asked.
     fn find_license(&self, root: &str) -> Option<String> {
         let root_prefix = if root.is_empty() {
             String::new()
         } else {
             format!("{root}/")
         };
+        let hit = |name: &str, path: &str| -> Option<String> {
+            self.files
+                .get(path)
+                .map(|(_, bytes)| classify_license(bytes).unwrap_or_else(|| name.to_owned()))
+        };
         for name in LICENSE_NAMES {
-            let at_skill = format!("{root_prefix}{name}");
-            if self.files.contains_key(&at_skill) {
-                return Some((*name).to_owned());
+            if let Some(found) = hit(name, &format!("{root_prefix}{name}")) {
+                return Some(found);
             }
         }
         if !root.is_empty() {
             for name in LICENSE_NAMES {
-                if self.files.contains_key(*name) {
-                    return Some((*name).to_owned());
+                if let Some(found) = hit(name, name) {
+                    return Some(found);
                 }
             }
         }
         None
     }
+}
+
+/// Classify a license's TEXT into its common name (SPDX-ish spelling) — a small
+/// signature match over the well-known headers, never a legal judgment. `None` = unrecognized
+/// (the caller falls back to the filename).
+fn classify_license(bytes: &[u8]) -> Option<String> {
+    let head: String = String::from_utf8_lossy(&bytes[..bytes.len().min(2048)])
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let name = if head.contains("mit license")
+        || head.contains("permission is hereby granted, free of charge")
+    {
+        "MIT"
+    } else if head.contains("apache license") && head.contains("version 2.0") {
+        "Apache-2.0"
+    } else if head.contains("gnu affero general public license") {
+        "AGPL-3.0"
+    } else if head.contains("gnu lesser general public license") {
+        "LGPL-3.0"
+    } else if head.contains("gnu general public license") && head.contains("version 3") {
+        "GPL-3.0"
+    } else if head.contains("gnu general public license") && head.contains("version 2") {
+        "GPL-2.0"
+    } else if head.contains("mozilla public license") && head.contains("2.0") {
+        "MPL-2.0"
+    } else if head.contains("redistribution and use in source and binary forms") {
+        if head.contains("neither the name") {
+            "BSD-3-Clause"
+        } else {
+            "BSD-2-Clause"
+        }
+    } else if head.contains("isc license") {
+        "ISC"
+    } else if head.contains("this is free and unencumbered software") {
+        "Unlicense"
+    } else if head.contains("cc0 1.0") || head.contains("creative commons zero") {
+        "CC0-1.0"
+    } else {
+        return None;
+    };
+    Some(name.to_owned())
 }
 
 /// Whether a discovered dir (relative to the search root) is an allowed skill location — the search root's
@@ -412,7 +462,11 @@ mod tests {
             &[
                 ("SKILL.md", b"body", 0o644),
                 ("scripts/run.sh", b"#!/bin/sh\n", 0o755),
-                ("LICENSE", b"MIT", 0o644),
+                (
+                    "LICENSE",
+                    b"MIT License\n\nPermission is hereby granted, free of charge" as &[u8],
+                    0o644,
+                ),
             ],
         );
         let repo = extract_tree(&targz).unwrap();
@@ -421,7 +475,8 @@ mod tests {
             .unwrap();
         assert_eq!(sel.name, "agent-skills"); // repo-root skill takes the repo name
         assert_eq!(sel.subdir, None);
-        assert_eq!(sel.license.as_deref(), Some("LICENSE"));
+        // The license NAME (classified from the text), never the filename, when recognizable.
+        assert_eq!(sel.license.as_deref(), Some("MIT"));
         // The executable bit is preserved so the digest matches upstream.
         let run = sel
             .files

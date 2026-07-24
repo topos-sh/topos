@@ -85,13 +85,14 @@ struct SessionRun {
     /// the engine converges from the local store).
     snapshot: Option<DeliverySnapshot>,
     /// Lazily fetched catalog (project-ref resolution). `Some(None)` = fetch failed this run.
-    skills_index: std::cell::RefCell<Option<Option<WireSkillIndex>>>,
-    channels_index: std::cell::RefCell<Option<Option<WireChannelIndex>>>,
+    /// `Rc`, so the per-item reads share ONE fetch instead of deep-cloning the index each time.
+    skills_index: std::cell::RefCell<Option<Option<std::rc::Rc<WireSkillIndex>>>>,
+    channels_index: std::cell::RefCell<Option<Option<std::rc::Rc<WireChannelIndex>>>>,
 }
 
 impl SessionRun {
     /// The catalog, fetched once per run (a failure caches as `None` — one warning, not N).
-    fn catalog(&self, warnings: &mut Vec<String>) -> Option<WireSkillIndex> {
+    fn catalog(&self, warnings: &mut Vec<String>) -> Option<std::rc::Rc<WireSkillIndex>> {
         let mut slot = self.skills_index.borrow_mut();
         if slot.is_none() {
             let fetched = match self
@@ -99,7 +100,7 @@ impl SessionRun {
                 .directory
                 .skills_index(&self.session.workspace_id)
             {
-                Ok(ix) => Some(ix),
+                Ok(ix) => Some(std::rc::Rc::new(ix)),
                 Err(e) => {
                     warnings.push(format!(
                         "CATALOG_UNAVAILABLE {}: {}",
@@ -114,7 +115,7 @@ impl SessionRun {
         slot.as_ref().and_then(Clone::clone)
     }
 
-    fn channels(&self, warnings: &mut Vec<String>) -> Option<WireChannelIndex> {
+    fn channels(&self, warnings: &mut Vec<String>) -> Option<std::rc::Rc<WireChannelIndex>> {
         let mut slot = self.channels_index.borrow_mut();
         if slot.is_none() {
             let fetched = match self
@@ -122,7 +123,7 @@ impl SessionRun {
                 .directory
                 .channels_index(&self.session.workspace_id)
             {
-                Ok(ix) => Some(ix),
+                Ok(ix) => Some(std::rc::Rc::new(ix)),
                 Err(e) => {
                     warnings.push(format!(
                         "CHANNELS_UNAVAILABLE {}: {}",
@@ -374,7 +375,18 @@ pub(crate) fn manifest_update(
                 });
             }
             Err(PlaneError::Malformed(m)) => {
+                // A malformed answer degrades EXACTLY like an unreachable one: the cached
+                // profile layer stands in and the local converge keeps working — dropping the
+                // layer would let the cleaner treat its items as undemanded.
                 warnings.push(format!("WIRE_INVALID {}: {m}", s.workspace_name));
+                unreachable.push(s.workspace_name.clone());
+                runs.push(SessionRun {
+                    session: s.clone(),
+                    transports,
+                    snapshot: None,
+                    skills_index: std::cell::RefCell::new(None),
+                    channels_index: std::cell::RefCell::new(None),
+                });
             }
         }
     }
@@ -825,6 +837,21 @@ fn reconcile_item(
                 ));
                 return;
             };
+            // A manifest-line delivery records its provenance in the cache too (marked
+            // `via_manifest`) — the offline surfaces (`list`'s workspace grouping, `remove`'s
+            // exclude arm, the publish lane) know which workspace governs the name.
+            channels.delivered.push((
+                run.session.workspace_id.clone(),
+                entry.skill_id.clone(),
+                DeliveredSkill {
+                    name: entry.name.clone(),
+                    review_required: false,
+                    served_version: entry.version_id.clone(),
+                    withdrawn: false,
+                    via_channels: Vec::new(),
+                    via_manifest: true,
+                },
+            ));
             sync_workspace_skill(
                 ctx,
                 run,
@@ -923,18 +950,32 @@ fn reconcile_item(
                      not visible with your current access",
                     item.source.label()
                 )),
-                [(run, entry)] => sync_workspace_skill(
-                    ctx,
-                    run,
-                    follow,
-                    &CatalogTarget::from_entry(entry),
-                    item.pin.as_deref(),
-                    &item.scope,
-                    placement_override(project_manifests, item, warnings),
-                    rows,
-                    warnings,
-                    synced_ids,
-                ),
+                [(run, entry)] => {
+                    channels.delivered.push((
+                        run.session.workspace_id.clone(),
+                        entry.skill_id.clone(),
+                        DeliveredSkill {
+                            name: entry.name.clone(),
+                            review_required: false,
+                            served_version: entry.version_id.clone(),
+                            withdrawn: false,
+                            via_channels: Vec::new(),
+                            via_manifest: true,
+                        },
+                    ));
+                    sync_workspace_skill(
+                        ctx,
+                        run,
+                        follow,
+                        &CatalogTarget::from_entry(entry),
+                        item.pin.as_deref(),
+                        &item.scope,
+                        placement_override(project_manifests, item, warnings),
+                        rows,
+                        warnings,
+                        synced_ids,
+                    );
+                }
                 several => {
                     let candidates: Vec<String> = several
                         .iter()
@@ -1331,7 +1372,7 @@ fn refresh_github(
             n += 1;
             if n > 64 {
                 return Err(ClientError::Io(format!(
-                    "stash {}: too many stale refresh backups beside it — clean the                      `.topos-refresh-old-*` siblings first",
+                    "stash {}: too many stale refresh backups beside it — clean the `.topos-refresh-old-*` siblings first",
                     from.display()
                 )));
             }
@@ -1485,7 +1526,7 @@ fn placement_override(
         Some(raw)
     } else {
         warnings.push(format!(
-            "PLACEMENT_OVERRIDE_IGNORED {}: the [placement] value {raw:?} must be a relative              path inside the project (no `..`, not absolute) — using the default placement",
+            "PLACEMENT_OVERRIDE_IGNORED {}: the [placement] value {raw:?} must be a relative path inside the project (no `..`, not absolute) — using the default placement",
             item.name
         ));
         None
