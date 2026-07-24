@@ -142,9 +142,14 @@ consent step, and no device-link lane; `follow`/`unfollow`/`channel` are gone.
   through the session lane — and a LANDED publish of a path-ref item runs the **governance transfer by
   default**: catalog entry (or proposal, per the target's protection), the local copy becomes a managed
   placement, and `rewrite_to_governed` flips the manifest's path line to the canonical workspace
-  reference (`PublishData.manifest`/`reference`/`converted_from` disclose it). `--to` accepts channel
-  references (workspace-checked); a curated `everyone` withholds a member's default placement,
-  disclosed. A logged-out publish refuses typed toward `topos login`. **`review`** (inbox across
+  reference (`PublishData.manifest`/`reference`/`converted_from` disclose it; the PROPOSAL arm
+  transfers too — delivery follows approval — and an imported bundle's receipt discloses that the
+  GitHub origin-pin line is NOT rewritten). `--to` accepts channel references (workspace-checked)
+  and must name an EXISTING channel — verified on the describe and the apply alike, never a silent
+  server-side mint (a nonexistent channel refuses toward web curation; the workspace slug gets the
+  pointed near-miss); a curated `everyone` withholds a member's default placement, disclosed. A
+  logged-out publish refuses typed toward `topos login` — every session-required refusal also
+  carries the concrete `topos login <address>` as an executable next action. **`review`** (inbox across
   sessions; describe; approve/reject-with-reason/withdraw — the outbox split by the server-computed
   `yours`) and **`revert --to <good>`** (the forward commit) ride the same lanes.
 - **`protect`, `invite`** — `protect <target> [<level>]` two-phase over the session universe (skill →
@@ -156,11 +161,13 @@ consent step, and no device-link lane; `follow`/`unfollow`/`channel` are gone.
   top-level `login`/`logout`): per-SESSION access health via a `me` probe under that session's own
   credential ("pending — awaiting owner approval" via the served `session_status`; the uniform 404 reads
   "no access — ended, removed, or gone"), hook health, and the reporting posture.
-- **The `status` verb + the bare `topos` orientation** (`ops/status`) — the offline trust rail: the
-  server + each session (host/workspace/status — pending and ended annotated), THIS directory's
-  manifest chain with each item's source manifest + scope (a connected workspace ref reads "not yet
-  reconciled" — offline honesty, currency is the reconcile's answer), followed-skill counts, per-agent
-  trigger state probed read-only, and the binary version. No network, no writes; it dispatches ahead of
+- **The `status` verb + the bare `topos` orientation** (`ops/status`) — the offline trust rail,
+  resolved over THIS directory's manifest chain PLUS the person's profile layers (materialized from
+  the offline delivery cache) and the personal manifest: per bundle, the winning reference, ONE
+  source label, the scope, the channel attribution, and an HONEST state — `applied as of <last
+  sync>` with the version (the cache's stamp, never a live claim), local-edits, behind,
+  not-available/pending from the local session file, and recorded EXCLUDES as their own rows;
+  per-agent trigger state probed read-only, and the binary version. No network, no writes; it dispatches ahead of
   the recovery sweep and leaves a pending-recovery sidecar byte-identical. A bare `topos` on a TTY
   renders the same snapshot (a fresh machine gets the welcome); piped bare invocations keep the usage
   error.

@@ -5,6 +5,7 @@ import {
   createScratchDb,
   type ScratchDb,
   seatUser,
+  seedChannel,
   seedSession,
   seedUser,
 } from "./helpers/scratch-db";
@@ -49,6 +50,8 @@ beforeAll(async () => {
   await seedUser(db, "u_auth", "Author", "author@example.com");
   await seatUser(db, wsId, "u_auth", "member");
   await seedSession(db, "dk_auth", wsId, "u_auth"); // the audit row's actor session
+  // `--to` takes an EXISTING channel — publish never mints one — so the target is seeded.
+  await seedChannel(db, wsId, "ch_ops", "ops");
 }, 60000);
 
 afterAll(async () => {
@@ -70,6 +73,28 @@ describe("registerGenesisBundleInTx — exclusive placement", () => {
     expect(await genesisPlacementChannels("s_g_everyone", "Gadget Everyone", "everyone")).toEqual([
       "everyone",
     ]);
+  });
+
+  it("a `--to` naming NO existing channel refuses in-transaction — nothing is minted", async () => {
+    // The deletion-race half of the never-mint rule: the CLI checks first, and the custody
+    // transaction refuses an absent channel rather than creating one.
+    const { getDb } = await import("@/lib/db/index.server");
+    const custody = await import("@/lib/db/queries.custody.server");
+    const actor = asSession(wsId, "u_auth", "dk_auth", "member");
+    const reg = await getDb().transaction((tx) =>
+      custody.registerGenesisBundleInTx(tx, actor, "s_g_ghost", "Gadget Ghost", "ghost"),
+    );
+    expect(reg.placement).toBe("channel_not_found");
+    const minted = await db.q<{ n: string }>(
+      `SELECT count(*)::int AS n FROM web.channel WHERE workspace_id = $1 AND name = 'ghost'`,
+      [wsId],
+    );
+    expect(Number(minted[0]?.n ?? 0)).toBe(0);
+    const placed = await db.q<{ n: string }>(
+      `SELECT count(*)::int AS n FROM web.channel_bundle WHERE bundle_id = $1`,
+      ["s_g_ghost"],
+    );
+    expect(Number(placed[0]?.n ?? 0)).toBe(0);
   });
 
   it("the catalog name `topos` is reserved (the CLI's built-in skill) — minted past like a taken name", async () => {

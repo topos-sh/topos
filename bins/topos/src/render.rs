@@ -237,6 +237,8 @@ const STATIC_PROSE_COMMANDS: &[(&str, &str, &[&str])] = &[
         "LOGIN_WORKSPACE",
         &["topos", "login", "<workspace-address>", "--json"],
     ),
+    // The bare resume (a pending flow's way forward — `login` with no address re-polls).
+    ("topos login", "RESUME_LOGIN", &["topos", "login", "--json"]),
     (
         "topos login <server>/<workspace>",
         "RUN_COMMAND",
@@ -1679,6 +1681,14 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
             data.name,
         ));
     }
+    // The deletion race's honest line: the verified channel vanished before the write — the
+    // publish landed catalog-only; nothing was minted.
+    if let Some(ch) = &data.placement_missing {
+        out.push_str(&format!(
+            "\nchannel '{ch}' no longer exists — it was deleted before this publish landed, so \
+             the reference was NOT placed (nothing was created); the skill is in the catalog."
+        ));
+    }
     // The governance transfer, stated on the receipt with its inverse (a manifest edit — there
     // is no one-command undo, so the inverse is named as the edit it is).
     if let (Some(manifest), Some(reference), Some(from)) =
@@ -2185,6 +2195,7 @@ mod tests {
             current_generation: 3,
             added: None,
             placement_withheld: None,
+            placement_missing: None,
             invite_line: None,
             origin_note: None,
         });
@@ -2208,6 +2219,7 @@ mod tests {
             current_generation: 1,
             added: None,
             placement_withheld: Some("everyone".to_owned()),
+            placement_missing: None,
             invite_line: None,
             origin_note: None,
         });
@@ -2239,6 +2251,7 @@ mod tests {
             current_generation: 3,
             added: None,
             placement_withheld: None,
+            placement_missing: None,
             invite_line: Some(invite.to_owned()),
             origin_note: None,
         });

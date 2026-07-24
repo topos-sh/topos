@@ -53,9 +53,11 @@ pub(crate) fn protect(
     let _ = workspace; // the grammar's qualified path / a unique bare name already scopes the target
     let su = super::connect::session_universe(ctx, connectors.session)?;
     if su.universe.is_empty() {
-        return Err(ClientError::Enrollment(
-            "not connected to a workspace — run `topos login <workspace-address>` first".into(),
-        ));
+        return Err(ClientError::SessionRequired {
+            address: "<workspace-address>".to_owned(),
+            message: "not connected to a workspace — run `topos login <workspace-address>` first"
+                .into(),
+        });
     }
     let universe = &su.universe;
 
@@ -84,9 +86,14 @@ pub(crate) fn protect(
     let level = resolve_level(kind, level)?;
     let loosening = level == "open";
 
-    let directory = su.directory_for(&workspace_id).ok_or_else(|| {
-        ClientError::Enrollment("no session for this workspace — `topos login` it first".into())
-    })?;
+    let directory =
+        su.directory_for(&workspace_id)
+            .ok_or_else(|| ClientError::SessionRequired {
+                address: "<workspace-address>".to_owned(),
+                message:
+                    "no session for this workspace — run `topos login <workspace-address>` first"
+                        .into(),
+            })?;
     // The audience the protection governs (best-effort — a read fault degrades the describe, never the op).
     let audience = read_audience(directory, &workspace_id, kind, &name, skill_id.as_deref());
 

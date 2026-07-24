@@ -725,6 +725,12 @@ pub struct PublishData {
     /// (`topos channel add <channel> <skill>`). **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement_withheld: Option<String>,
+    /// The channel named by `--to` that no longer EXISTED at the write (deleted between the
+    /// client's existence check and the transaction — the in-transaction refusal, never a silent
+    /// mint): the publish landed catalog-only; re-run `--to` once the channel exists. **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_missing: Option<String>,
     /// The GOVERNANCE-TRANSFER receipt half: the manifest whose local-path line this publish
     /// rewrote to the governed workspace reference. Absent when no manifest referenced the bundle
     /// by path (an already-governed republish). **INFERRED** (additive-only).
@@ -1322,6 +1328,7 @@ mod tests {
             current_generation: 1,
             added: None,
             placement_withheld: None,
+            placement_missing: None,
             invite_line: None,
             origin_note: None,
         };

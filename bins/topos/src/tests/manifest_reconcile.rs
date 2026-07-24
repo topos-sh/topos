@@ -1443,3 +1443,98 @@ fn a_transient_channel_index_failure_never_deletes() {
         out.warnings
     );
 }
+
+#[test]
+fn a_broader_exclude_never_suppresses_a_nearer_channel_member() {
+    // Nearest wins per NAME: a PERSONAL-manifest exclude (the broadest local layer) must not
+    // withhold a member a NEARER project channel delivers — the project's demand wins whole.
+    let (rig, proj, plane, dir, _v) = channel_project("chnear");
+    std::fs::create_dir_all(rig.layout().home()).unwrap();
+    std::fs::write(
+        rig.layout().home().join("topos.toml"),
+        "exclude = [\"deploy\"]\n",
+    )
+    .unwrap();
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert!(
+        proj.0.join(".claude/skills/deploy/SKILL.md").exists(),
+        "the nearer project channel's member is delivered; the broader exclude is shadowed"
+    );
+}
+
+#[test]
+fn a_dropped_personal_line_cleans_the_written_home_placement() {
+    // A DIRECT personal-manifest reference delivers to the home scope; removing the line must
+    // retire the placement topos WROTE (snapshot-first, sidecar kept) — not leave it forever.
+    let rig = Rig::new("perso-drop");
+    rig.seed_session();
+    std::fs::create_dir_all(rig.layout().home()).unwrap();
+    std::fs::write(
+        rig.layout().home().join("topos.toml"),
+        format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+    )
+    .unwrap();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    let placed = rig.work.0.join("skills/deploy");
+    assert!(placed.exists(), "the personal line delivered to home scope");
+
+    // Drop the line; the next sweep cleans the WRITTEN placement and keeps the sidecar.
+    std::fs::write(rig.layout().home().join("topos.toml"), "").unwrap();
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(
+        out.data
+            .skills
+            .iter()
+            .any(|s| s.skill == "deploy" && s.action == PullAction::Withdrawn),
+        "{:?}",
+        out.data.skills
+    );
+    assert!(!placed.exists(), "the written home placement is retired");
+    let sid = crate::id::SkillId::parse("s_deploy").unwrap();
+    assert!(
+        rig.layout().skill_dir(&sid).exists(),
+        "every sidecar byte stays"
+    );
+    // The row lapsed with the clean — the sweep after is quiet.
+    let out2 = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(
+        !out2
+            .data
+            .skills
+            .iter()
+            .any(|s| s.action == PullAction::Withdrawn),
+        "{:?}",
+        out2.data.skills
+    );
+}

@@ -95,8 +95,11 @@ pub(crate) fn revert(
         .sessions
         .iter()
         .find(|s| s.workspace_id == workspace_id)
-        .ok_or_else(|| {
-            ClientError::Enrollment("no session for this workspace — `topos login` it first".into())
+        .ok_or_else(|| ClientError::SessionRequired {
+            address: "<workspace-address>".to_owned(),
+            message: "no session for this workspace — run `topos login <workspace-address>` \
+                          first"
+                .into(),
         })?;
     let transport = connect(&lane_session.base_url, Some(&lane_session.credential));
 

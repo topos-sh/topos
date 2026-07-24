@@ -1,6 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
 import type { MemberActor, SessionActor } from "@/lib/auth/guards.server";
-import { auditInTx, mintChannelId, mintProposalId } from "@/lib/db/identity.server";
+import { auditInTx, mintProposalId } from "@/lib/db/identity.server";
 import { getDb } from "@/lib/db/index.server";
 import {
   bundle,
@@ -145,7 +145,7 @@ export interface GenesisRegistration {
   name: string;
   /** The placement's outcome, when a channel was named — or when the DEFAULT `everyone`
    * placement was withheld by its curated mode (`curated_role_required`). */
-  placement?: "placed" | "created" | "curated_role_required";
+  placement?: "placed" | "curated_role_required" | "channel_not_found";
 }
 
 /**
@@ -252,28 +252,26 @@ export async function registerGenesisBundleInTx(
   return { bundleId, name, ...(placement === undefined ? {} : { placement }) };
 }
 
-/** The `--to` placement inside a publish transaction (create-on-first-use, mode-gated). */
+/** The `--to` placement inside a publish transaction — mode-gated, EXISTING channels only:
+ * publish never mints a channel (channel creation is a deliberate curation act, done on the
+ * web). The CLI verifies existence before sending; this in-transaction refusal closes the
+ * race where the channel is deleted between that check and the write — the publish itself
+ * (custody) still lands, and `channel_not_found` rides the receipt details. */
 export async function placeIntoChannelInTx(
   tx: Tx,
   actor: PublishActor,
   bundleId: string,
   channelName: string,
-): Promise<"placed" | "created" | "curated_role_required"> {
+): Promise<"placed" | "curated_role_required" | "channel_not_found"> {
   const ws = actor.workspaceId;
   const rows = await tx
     .select({ id: channel.id, mode: channel.mode })
     .from(channel)
     .where(and(eq(channel.workspaceId, ws), eq(channel.name, channelName)))
     .limit(1);
-  let row = rows[0];
-  let created = false;
+  const row = rows[0];
   if (row === undefined) {
-    const id = mintChannelId();
-    await tx
-      .insert(channel)
-      .values({ id, workspaceId: ws, name: channelName, createdBy: actor.userId });
-    row = { id, mode: "open" };
-    created = true;
+    return "channel_not_found";
   }
   if (row.mode === "curated" && actor.role === "member") {
     return "curated_role_required";
@@ -282,7 +280,7 @@ export async function placeIntoChannelInTx(
     .insert(channelBundle)
     .values({ channelId: row.id, workspaceId: ws, bundleId, addedBy: actor.userId })
     .onConflictDoNothing();
-  return created ? "created" : "placed";
+  return "placed";
 }
 
 // ── Proposal rows + verdict notices ─────────────────────────────────────────────────────────

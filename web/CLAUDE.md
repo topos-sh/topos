@@ -7,7 +7,9 @@
 > `/api/v1/workspaces/{ws}/profile*` + the `/profile` editor page) replaced
 > subscriptions/channel-membership/opt-outs/exclusions; channels are pure curated bundle sets;
 > UPSTREAM provenance (bundle_upstream + version_upstream, the `skills/import` add-from-GitHub
-> flow, the skill-settings Upstream panel, and the always-propose upstream checker) is live.
+> flow, the skill-settings Upstream panel, and the always-propose upstream checker) is live —
+> member-triggered fetches wear a per-user belt + a process-wide concurrency cap, and manual
+> checks claim the poller's own 5-minute cooldown.
 
 **THE ONE PUBLIC SURFACE.** This app is everything the world reaches: the signed-in pages below, the
 shareable resource addresses, AND the device API — `/api/v1/…` is served here. Since the identity

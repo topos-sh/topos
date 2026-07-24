@@ -2973,6 +2973,13 @@
             ],
             "description": "An honesty note about the bundle's GitHub origin, when one is recorded: publishing does\nNOT rewrite a manifest's origin-pin line (`github.com/…`), so when one still references\nthe origin this says the project keeps tracking the pin until the line is swapped for the\ngoverned reference. **INFERRED** (additive-only)."
           },
+          "placement_missing": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The channel named by `--to` that no longer EXISTED at the write (deleted between the\nclient's existence check and the transaction — the in-transaction refusal, never a silent\nmint): the publish landed catalog-only; re-run `--to` once the channel exists. **INFERRED**\n(additive-only)."
+          },
           "placement_withheld": {
             "type": [
               "string",

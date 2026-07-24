@@ -147,12 +147,11 @@ fn trust_rail(
     }
     let resolution = resolve_layers(&layers);
     let mut items = Vec::with_capacity(resolution.items.len() + resolution.excluded.len());
-    let mut claimed: std::collections::HashSet<String> = resolution
-        .items
-        .iter()
-        .map(|i| i.name.clone())
-        .chain(resolution.excluded.iter().map(|e| e.name.clone()))
-        .collect();
+    // Direct items claim their names; EXCLUDES are checked per channel member with the
+    // layer-ordered rule (`exclude_wins`) — a broader exclude never hides a nearer channel's
+    // member from the rail.
+    let mut claimed: std::collections::HashSet<String> =
+        resolution.items.iter().map(|i| i.name.clone()).collect();
     for item in resolution.items {
         let mut via = None;
         let (state, version, applied_as_of) = match &item.parsed {
@@ -215,6 +214,13 @@ fn trust_rail(
                         if ds.withdrawn
                             || !ds.via_manifest
                             || !ds.via_channels.iter().any(|c| c == name)
+                            || resolution.excluded.iter().any(|ex| {
+                                ex.name == ds.name
+                                    && crate::manifest::resolve::exclude_wins(
+                                        ex.layer_index,
+                                        item.layer_index,
+                                    )
+                            })
                             || !claimed.insert(ds.name.clone())
                         {
                             continue;

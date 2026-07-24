@@ -142,14 +142,17 @@ pub fn choose_skill_dir(
             if !is_taken(&namespaced) || is_owned(&namespaced) {
                 return namespaced;
             }
-            let mut n: u32 = 2;
-            loop {
+            // BOUNDED: a pathological occupancy source must not hang placement selection.
+            // Past the cap the last candidate is returned as-is — still name-led; the
+            // materializer refuses to overwrite an occupied dir it never placed, so this
+            // names (and freezes), never clobbers.
+            for n in 2u32..=999 {
                 let candidate = skills_root.join(format!("{base}-{n}"));
                 if !is_taken(&candidate) || is_owned(&candidate) {
                     return candidate;
                 }
-                n += 1;
             }
+            return skills_root.join(format!("{base}-999"));
         }
     }
     // Unnamed / unsafe name / a workspace-less taken name → the unique id (a validated single

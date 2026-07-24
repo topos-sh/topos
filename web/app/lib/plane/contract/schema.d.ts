@@ -811,6 +811,13 @@ export interface components {
              */
             origin_note?: string | null;
             /**
+             * @description The channel named by `--to` that no longer EXISTED at the write (deleted between the
+             *     client's existence check and the transaction — the in-transaction refusal, never a silent
+             *     mint): the publish landed catalog-only; re-run `--to` once the channel exists. **INFERRED**
+             *     (additive-only).
+             */
+            placement_missing?: string | null;
+            /**
              * @description The channel whose placement was WITHHELD by its curated mode (the receipt's
              *     `details.placement = curated_role_required`): the publish itself landed — catalog + moved
              *     pointer — but the skill's reference was NOT placed into this channel (the `--to` target, or

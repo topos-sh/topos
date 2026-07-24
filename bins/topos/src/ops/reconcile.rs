@@ -38,7 +38,7 @@ use crate::id::SkillId;
 use crate::manifest::file::MANIFEST_FILE;
 use crate::manifest::refs::ParsedRef;
 use crate::manifest::resolve::{
-    Layer, LayerSource, Resolution, ResolvedItem, ResolvedScope, resolve_layers,
+    Layer, LayerSource, Resolution, ResolvedItem, ResolvedScope, exclude_wins, resolve_layers,
 };
 use crate::manifest::walk;
 use crate::plane::{
@@ -488,17 +488,13 @@ pub(crate) fn manifest_update(
     // ---- 3. Reconcile each resolved item. ----
     let mut synced_ids: HashSet<String> = HashSet::new();
     let mut synced_names: HashSet<String> = HashSet::new();
-    // EXCLUDED names claim the set FIRST: an exclude line must withhold a name however it would
-    // arrive — including via a channel's member expansion, which checks this same set. (A name is
-    // either resolved or excluded, never both, so no direct item is shadowed by this seed; the
-    // cleaner below then retires any placements the exclusion ends.)
-    for ex in &resolution.excluded {
-        synced_names.insert(ex.name.clone());
-    }
-    // Channel-expansion bookkeeping: which (workspace-name, channel) pairs FAILED to expand this
+    // Channel-expansion bookkeeping: which (workspace-id, channel) pairs FAILED to expand this
     // run (their members are unknowable — nothing of theirs may be cleaned), which project dirs
     // own such a failed item, and which member deliveries DID land (recorded into the delivery
     // cache marked `via_manifest`, so offline surfaces know a manifest channel provides them).
+    // EXCLUDES are enforced per member at expansion time (`exclude_wins` — nearer-or-equal
+    // wins), never as a global pre-seed: a broader personal exclude must not suppress a nearer
+    // project channel's member.
     let mut failed_channels: HashSet<(String, String)> = HashSet::new();
     let mut unexpanded_channel_dirs: Vec<PathBuf> = Vec::new();
     let mut channel_delivered: Vec<(String, String, DeliveredSkill)> = Vec::new();
@@ -534,6 +530,7 @@ pub(crate) fn manifest_update(
                 failed: &mut failed_channels,
                 unexpanded_dirs: &mut unexpanded_channel_dirs,
                 delivered: &mut channel_delivered,
+                excluded: &resolution.excluded,
             },
         );
     }
@@ -558,6 +555,7 @@ pub(crate) fn manifest_update(
             &project_dirs,
             &synced_ids,
             &unexpanded_channel_dirs,
+            &failed_channels,
             &mut rows,
             &mut warnings,
         );
@@ -628,7 +626,7 @@ pub(crate) fn manifest_update(
                     && !ds.withdrawn
                     && !delivered_cache.contains_key(skill_id)
                     && ds.via_channels.iter().any(|c| {
-                        failed_channels.contains(&(run.session.workspace_name.clone(), c.clone()))
+                        failed_channels.contains(&(run.session.workspace_id.clone(), c.clone()))
                     })
                 {
                     delivered_cache.insert(skill_id.clone(), ds.clone());
@@ -702,20 +700,26 @@ pub(crate) fn manifest_update(
 
 /// The channel-expansion bookkeeping one sweep accumulates (see `manifest_update`).
 struct ChannelBook<'a> {
-    /// `(workspace-name, channel)` pairs that FAILED to expand this run.
+    /// `(workspace-id, channel)` pairs that FAILED to expand this run.
     failed: &'a mut HashSet<(String, String)>,
     /// Project dirs owning a failed channel item — the cleaner freezes under them.
     unexpanded_dirs: &'a mut Vec<PathBuf>,
     /// `(workspace-id, skill-id, cache-row)` per member a channel expansion claimed.
     delivered: &'a mut Vec<(String, String, DeliveredSkill)>,
+    /// The resolution's exclude rows — the per-member `exclude_wins` check reads them.
+    excluded: &'a [crate::manifest::resolve::ExcludedItem],
 }
 
 impl ChannelBook<'_> {
     /// Record one failed expansion: its members are unknowable this run, so nothing under the
-    /// owning project dir may be treated as undemanded.
-    fn note_failure(&mut self, workspace: &str, channel: &str, scope: &ResolvedScope) {
-        self.failed
-            .insert((workspace.to_owned(), channel.to_owned()));
+    /// owning project dir may be treated as undemanded. `workspace_id` is the SESSION's opaque
+    /// id (two servers may both hold an `acme` — the name alone would freeze the wrong one);
+    /// `None` when no session resolves the reference at all (nothing dials for it, so no cache
+    /// entry is written either — only the dir freeze matters there).
+    fn note_failure(&mut self, workspace_id: Option<&str>, channel: &str, scope: &ResolvedScope) {
+        if let Some(ws) = workspace_id {
+            self.failed.insert((ws.to_owned(), channel.to_owned()));
+        }
         if let ResolvedScope::Project { dir } = scope {
             self.unexpanded_dirs.push(dir.clone());
         }
@@ -876,16 +880,16 @@ fn reconcile_item(
             },
         ) => {
             let Some(run) = find_run(runs, host.as_deref(), workspace) else {
-                channels.note_failure(workspace, name, &item.scope);
+                channels.note_failure(None, name, &item.scope);
                 warnings.push(not_connected_line(item, host.as_deref(), workspace));
                 return;
             };
             let Some(index) = run.channels(warnings) else {
-                channels.note_failure(&run.session.workspace_name, name, &item.scope);
+                channels.note_failure(Some(&run.session.workspace_id), name, &item.scope);
                 return;
             };
             let Some(ch) = index.channels.iter().find(|c| &c.name == name) else {
-                channels.note_failure(&run.session.workspace_name, name, &item.scope);
+                channels.note_failure(Some(&run.session.workspace_id), name, &item.scope);
                 warnings.push(format!(
                     "NOT_AVAILABLE {}: \"{}\" — no such channel in {}, or not visible with your \
                      current access",
@@ -896,12 +900,23 @@ fn reconcile_item(
                 return;
             };
             let Some(catalog) = run.catalog(warnings) else {
-                channels.note_failure(&run.session.workspace_name, name, &item.scope);
+                channels.note_failure(Some(&run.session.workspace_id), name, &item.scope);
                 return;
             };
             for cs in &ch.skills {
+                // An exclude withholds a member only from a NEARER-OR-EQUAL layer (the same
+                // per-name rule the direct entries resolve by) — a broader personal exclude
+                // never suppresses a nearer project channel's member. A withheld member is not
+                // claimed either, so the cleaner retires its placements.
+                if channels
+                    .excluded
+                    .iter()
+                    .any(|ex| ex.name == cs.name && exclude_wins(ex.layer_index, item.layer_index))
+                {
+                    continue;
+                }
                 if !synced_names.insert(cs.name.clone()) {
-                    continue; // a nearer line (or an exclude) already claimed this name
+                    continue; // a nearer line already claimed this name
                 }
                 let Some(entry) = catalog.skills.iter().find(|e| e.skill_id == cs.skill_id) else {
                     continue; // archived / no current — skipped per the resolution rule
@@ -1659,11 +1674,57 @@ fn clean_undemanded(
     project_dirs: &[PathBuf],
     synced_ids: &HashSet<String>,
     unexpanded: &[PathBuf],
+    failed_channels: &HashSet<(String, String)>,
     rows: &mut Vec<PullSkill>,
     warnings: &mut Vec<String>,
 ) {
-    // Profile-dropped: prior cache vs today's delivery. Manifest-channel rows are not the
-    // profile's — their lifecycle belongs to the manifest arms below.
+    // MANIFEST-dropped (a `via_manifest` cache row nothing re-recorded this run — its line or
+    // channel membership ended): clean the HOME-scope placements topos itself WROTE
+    // (materialized; an adopted-in-place source dir is never deleted), snapshot-first, no
+    // never-received reset (project placements clean through the project arm; the row lapses at
+    // this sweep's cache write). A member of a channel that FAILED to expand stays frozen.
+    for run in runs {
+        if run.snapshot.is_none() {
+            continue; // offline: everything freezes
+        }
+        let Some(prior) = prior_sync.workspaces.get(&run.session.workspace_id) else {
+            continue;
+        };
+        for (skill_id, cached) in &prior.delivered {
+            if !cached.via_manifest
+                || cached.withdrawn
+                || synced_ids.contains(skill_id)
+                || cached.via_channels.iter().any(|c| {
+                    failed_channels.contains(&(run.session.workspace_id.clone(), c.clone()))
+                })
+            {
+                continue;
+            }
+            let Ok(sid) = SkillId::parse(skill_id) else {
+                continue;
+            };
+            if !ctx.fs.exists(&ctx.layout.skill_dir(&sid)) {
+                continue;
+            }
+            match clean_written_home_placements(ctx, &sid) {
+                Ok(Some(name)) => rows.push(PullSkill {
+                    skill: name,
+                    workspace_id: Some(run.session.workspace_id.clone()),
+                    observed: 0,
+                    applied: 0,
+                    action: PullAction::Withdrawn,
+                    offer: None,
+                    conflict: None,
+                    merge: None,
+                    merge_preview: None,
+                }),
+                Ok(None) => {}
+                Err(e) => note_item_failure(ctx, warnings, skill_id, &e),
+            }
+        }
+    }
+
+    // Profile-dropped: prior cache vs today's delivery. Manifest rows were handled above.
     for run in runs {
         let Some(snap) = &run.snapshot else { continue };
         let now: HashSet<&str> = snap.skills.iter().map(|s| s.skill_id.as_str()).collect();
@@ -1761,6 +1822,39 @@ fn clean_undemanded(
             note_item_failure(ctx, warnings, &lock.name, &e);
         }
     }
+}
+
+/// A MANIFEST-dropped skill's home-side clean: exactly the NON-project placements topos itself
+/// WROTE (`materialized_sha` present — an adopted-in-place source dir, which topos never wrote,
+/// is never deleted), snapshot-first; the sync doc is NOT reset (a project manifest may still
+/// demand the bundle — that checkout reconciles lazily when visited). `Ok(Some(name))` when
+/// something was actually cleaned.
+fn clean_written_home_placements(
+    ctx: &Ctx<'_>,
+    sid: &SkillId,
+) -> Result<Option<String>, ClientError> {
+    let sp = ctx.layout.published(sid);
+    let _guard = crate::sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
+    let lock: Option<Lock> = doc::read_doc(ctx.fs, &sp.lock)?;
+    let map: Option<PlacementMap> = doc::read_map(ctx.fs, &sp.map)?;
+    let (Some(lock), Some(map)) = (lock, map) else {
+        return Ok(None);
+    };
+    let targets: Vec<usize> = map
+        .placements
+        .iter()
+        .zip(&map.placement_state)
+        .enumerate()
+        .filter(|(_, (p, st))| {
+            st.materialized_sha.is_some() && !is_project_placement(ctx, Path::new(p))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    clean_placements(ctx, sid, &lock, &map, &targets)?;
+    Ok(Some(lock.name))
 }
 
 /// A profile-dropped skill leaves the PERSON scope: snapshot every edited copy, clean the

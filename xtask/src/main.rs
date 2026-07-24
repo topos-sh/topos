@@ -992,6 +992,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             current_generation: 43,
             added: None,
             placement_withheld: None,
+            placement_missing: None,
             invite_line: Some(
                 "Ask your agent: \"Set up Topos for us: fetch https://topos.sh/agent and follow \
                  it. Our workspace: https://topos.sh/acme\""

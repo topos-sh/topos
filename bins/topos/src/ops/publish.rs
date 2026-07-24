@@ -836,26 +836,6 @@ fn enrolled_publish(
             .iter()
             .map(std::path::PathBuf::from)
             .collect();
-        // Seed the offline cache with the governed fact (list/remove/the write lane answer
-        // correctly BEFORE the next sweep) — best-effort, never a failed publish.
-        if let PublishOutcome::Published(_) = &outcome {
-            let _ = crate::sync_status::merge_delivered(
-                outer_ctx.fs,
-                &outer_ctx.layout,
-                &l.workspace_id,
-                &l.host,
-                &l.workspace_name,
-                id.as_str(),
-                crate::sync_status::DeliveredSkill {
-                    name: lock.name.clone(),
-                    review_required: false,
-                    served_version: rec.candidate_commit.clone(),
-                    withdrawn: false,
-                    via_channels: Vec::new(),
-                    via_manifest: true,
-                },
-            );
-        }
         match &mut outcome {
             PublishOutcome::Published(data) => {
                 if let Some(rw) = super::rewrite_to_governed(
@@ -868,6 +848,26 @@ fn enrolled_publish(
                     data.manifest = Some(rw.manifest);
                     data.reference = Some(rw.canonical);
                     data.converted_from = Some(rw.from);
+                    // Seed the offline cache with the governed fact (list/remove/the write lane
+                    // answer correctly BEFORE the next sweep) — ONLY when a manifest line now
+                    // actually references the bundle (`via_manifest` must never claim a line
+                    // that does not exist); best-effort, never a failed publish.
+                    let _ = crate::sync_status::merge_delivered(
+                        outer_ctx.fs,
+                        &outer_ctx.layout,
+                        &l.workspace_id,
+                        &l.host,
+                        &l.workspace_name,
+                        id.as_str(),
+                        crate::sync_status::DeliveredSkill {
+                            name: lock.name.clone(),
+                            review_required: false,
+                            served_version: rec.candidate_commit.clone(),
+                            withdrawn: false,
+                            via_channels: Vec::new(),
+                            via_manifest: true,
+                        },
+                    );
                 }
                 data.origin_note = origin_asymmetry_note(outer_ctx, &sp, &lock.name, l)?;
             }
@@ -1159,15 +1159,21 @@ fn map_outcome(
             // (the op's `--to` target, or the default `everyone` on a genesis) was WITHHELD by a
             // curated channel's role gate — the publish landed, the reference did not. Surfaced so
             // the receipt never implies a reach the placement did not gain.
-            let withheld = receipt
+            let placement_outcome = receipt
                 .receipt
                 .as_ref()
                 .and_then(|r| r.details.as_ref())
                 .and_then(|d| d.get("placement"))
                 .and_then(|p| p.as_str())
-                == Some("curated_role_required");
-            let placement_withheld =
-                withheld.then(|| rec.channel.clone().unwrap_or_else(|| "everyone".to_owned()));
+                .map(str::to_owned);
+            let target_channel = || rec.channel.clone().unwrap_or_else(|| "everyone".to_owned());
+            let placement_withheld = (placement_outcome.as_deref()
+                == Some("curated_role_required"))
+            .then(target_channel);
+            // The deletion race's in-transaction refusal: the channel the client verified was
+            // deleted before the write — the publish landed catalog-only, never a silent mint.
+            let placement_missing =
+                (placement_outcome.as_deref() == Some("channel_not_found")).then(target_channel);
             // The teammate handoff line on the landed receipt — the same `me.address` source the
             // describe's share line reads, fetched best-effort AFTER the publish settled (a failed
             // read just leaves the line off; it never fails a landed publish).
@@ -1184,6 +1190,7 @@ fn map_outcome(
                 current_generation: new_gen,
                 added: None,
                 placement_withheld,
+                placement_missing,
                 manifest: None,
                 reference: None,
                 converted_from: None,

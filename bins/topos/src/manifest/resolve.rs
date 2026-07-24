@@ -105,6 +105,9 @@ pub(crate) enum ItemKind {
 /// One resolved line: the name, the winning reference, and its provenance.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedItem {
+    /// The winning layer's ordinal in the chain (0 = nearest) — what a POST-resolution
+    /// expansion (a channel's member list) compares exclude nearness against.
+    pub layer_index: usize,
     /// The dedupe key (the reference's last segment).
     pub name: String,
     /// The winning canonical reference.
@@ -122,6 +125,8 @@ pub(crate) struct ResolvedItem {
 /// A name a manifest EXCLUDED (with which layer said so) — `status` renders these.
 #[derive(Debug, Clone)]
 pub(crate) struct ExcludedItem {
+    /// The excluding layer's ordinal (0 = nearest) — see [`ResolvedItem::layer_index`].
+    pub layer_index: usize,
     pub name: String,
     pub by: LayerSource,
     /// Broader mentions the exclude shadowed (what WOULD have been delivered).
@@ -153,6 +158,15 @@ fn exclude_name(reference: &str) -> &str {
         .unwrap_or(reference)
 }
 
+/// Whether an exclude recorded at layer `ex_index` withholds a name a CHANNEL EXPANSION at
+/// layer `item_index` would deliver: the exclude wins when its layer is NEARER-OR-EQUAL
+/// (nearest wins per name; the same-layer collision resolves toward the exclude, exactly as
+/// [`resolve_layers`]'s direct-entry rule does). A BROADER exclude never suppresses a nearer
+/// channel's member — the nearer demand wins whole.
+pub(crate) fn exclude_wins(ex_index: usize, item_index: usize) -> bool {
+    ex_index <= item_index
+}
+
 /// Resolve the layer chain (already ordered nearest-first) into the delivered set. Pure:
 /// no I/O, no network — profile layers were materialized by the caller.
 pub(crate) fn resolve_layers(layers: &[Layer]) -> Resolution {
@@ -165,7 +179,7 @@ pub(crate) fn resolve_layers(layers: &[Layer]) -> Resolution {
         Excluded(usize),
     }
 
-    for layer in layers {
+    for (layer_index, layer) in layers.iter().enumerate() {
         let scope = match &layer.source {
             LayerSource::Project { dir } => ResolvedScope::Project { dir: dir.clone() },
             LayerSource::Profile { .. } | LayerSource::Personal => ResolvedScope::Person,
@@ -185,6 +199,7 @@ pub(crate) fn resolve_layers(layers: &[Layer]) -> Resolution {
                 }
                 None => {
                     out.excluded.push(ExcludedItem {
+                        layer_index,
                         name: name.clone(),
                         by: layer.source.clone(),
                         shadowed_from: Vec::new(),
@@ -239,6 +254,7 @@ pub(crate) fn resolve_layers(layers: &[Layer]) -> Resolution {
                     }
                     None => {
                         out.items.push(ResolvedItem {
+                            layer_index,
                             name: name.clone(),
                             reference: entry.reference.clone(),
                             pin: entry.pin.clone().or_else(|| parsed.pin().map(String::from)),

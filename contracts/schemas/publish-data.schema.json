@@ -58,6 +58,13 @@
         "null"
       ]
     },
+    "placement_missing": {
+      "description": "The channel named by `--to` that no longer EXISTED at the write (deleted between the\nclient's existence check and the transaction — the in-transaction refusal, never a silent\nmint): the publish landed catalog-only; re-run `--to` once the channel exists. **INFERRED**\n(additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "placement_withheld": {
       "description": "The channel whose placement was WITHHELD by its curated mode (the receipt's\n`details.placement = curated_role_required`): the publish itself landed — catalog + moved\npointer — but the skill's reference was NOT placed into this channel (the `--to` target, or\nthe default `everyone` for a brand-new skill). A reviewer or owner places it\n(`topos channel add <channel> <skill>`). **INFERRED** (additive-only).",
       "type": [
