@@ -149,6 +149,36 @@ test("renders every session with the right freshness and per-copy status chips",
   await expect(stale.getByText("stale", { exact: true })).toBeVisible();
 });
 
+test("an over-age session reads expired — the same predicate the guard enforces", async ({
+  page,
+}) => {
+  await theWorkspace();
+  // Arm a 1-hour expiry and backdate the stale session's mint past it. The guard already
+  // refuses its credential; the page must agree instead of showing a live machine.
+  await adminQuery(`update web.workspace set session_max_age_ms = 3600000`);
+  await adminQuery(
+    `update web.cli_session set created_at = now() - interval '2 hours' where id = $1`,
+    [SESS_STALE],
+  );
+  try {
+    await gotoSettled(page, `/settings/sessions`);
+    const expired = page.getByTestId(`sessions-session-${SESS_STALE}`);
+    await expect(expired.getByText("expired", { exact: true })).toBeVisible();
+    await expect(expired.getByText(/Past the session expiry/)).toBeVisible();
+    // The meta counts expired sessions out of the active tally and names them (the shared e2e
+    // database carries sessions from other specs, so the exact count is not pinned here).
+    await expect(page.getByText(/\d+ expired/)).toBeVisible();
+    // The policy note states the owner-set expiry where sessions are read.
+    await expect(page.getByTestId("sessions-expiry-policy")).toContainText(
+      "Sessions here expire after 1 hour",
+    );
+  } finally {
+    // Restore for the rest of this serial file (and later specs).
+    await adminQuery(`update web.workspace set session_max_age_ms = null`);
+    await adminQuery(`update web.cli_session set created_at = now() where id = $1`, [SESS_STALE]);
+  }
+});
+
 test("the pending queue: an owner approves a waiting session in place (two-step confirm)", async ({
   page,
 }) => {

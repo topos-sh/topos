@@ -534,11 +534,15 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                             // The DEDUP courtesy: when a connected workspace already governs this
                             // source (its catalog's upstream provenance matches), the receipt
                             // SUGGESTS the governed reference — visible, never blocking (the
-                            // import above landed exactly as asked).
+                            // import above landed exactly as asked). Path-exactness is judged
+                            // against the subdir the import actually SELECTED (the recorded
+                            // origin), not the spec's spelling.
+                            let imported_subdir = d.origin.as_ref().and_then(|o| o.subdir.clone());
                             d.governed_copy = ops::governed_copy_suggestion(
                                 &ctx,
                                 &connect_session_transports,
                                 &spec,
+                                imported_subdir.as_deref(),
                             );
                             Ok(d)
                         })

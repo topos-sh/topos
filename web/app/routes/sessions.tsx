@@ -153,10 +153,13 @@ function ActionReceipt({ status }: { status: string }) {
 }
 
 function SessionsMeta({ view }: { view: WorkspaceSessions }) {
-  const count = view.sessions.filter((s) => s.status === "active").length;
-  const pending = view.sessions.length - count;
+  // An EXPIRED session's credential no longer resolves — it is not a live machine, so it never
+  // counts as active (the guard already refuses it; the page must agree).
+  const count = view.sessions.filter((s) => s.status === "active" && !s.expired).length;
+  const expired = view.sessions.filter((s) => s.status === "active" && s.expired).length;
+  const pending = view.sessions.filter((s) => s.status === "pending").length;
   const stale = view.sessions.filter(
-    (s) => s.status === "active" && s.freshness === "stale",
+    (s) => s.status === "active" && !s.expired && s.freshness === "stale",
   ).length;
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -171,6 +174,12 @@ function SessionsMeta({ view }: { view: WorkspaceSessions }) {
         <>
           <span aria-hidden="true">·</span>
           <span>{stale === 1 ? "1 stale" : `${stale} stale`}</span>
+        </>
+      )}
+      {expired > 0 && (
+        <>
+          <span aria-hidden="true">·</span>
+          <span>{expired === 1 ? "1 expired" : `${expired} expired`}</span>
         </>
       )}
     </div>
@@ -440,7 +449,7 @@ function SessionCard({
           <span className="text-ink text-sm">{session.displayName}</span>
           <span className="font-mono text-faint text-xs">{shortDevice(session.sessionId)}</span>
           <span className="ml-auto flex flex-wrap items-center gap-1.5">
-            <FreshnessChip freshness={session.freshness} />
+            {session.expired ? <ExpiredChip /> : <FreshnessChip freshness={session.freshness} />}
             {isOwner && (
               <SessionArm
                 intent="remove-session"
@@ -452,7 +461,12 @@ function SessionCard({
           </span>
         </div>
         <div className="text-faint text-xs">
-          {session.lastSeenAtMs === null ? (
+          {session.expired ? (
+            <>
+              Past the session expiry — its credential no longer works; running{" "}
+              <code className="font-mono">topos login</code> on that machine resumes delivery.
+            </>
+          ) : session.lastSeenAtMs === null ? (
             <>Has never reported — nothing has synced on it since it logged in.</>
           ) : (
             <>
@@ -524,6 +538,17 @@ function StatusChip({
       </TooltipTrigger>
       <TooltipContent>{tip}</TooltipContent>
     </Tooltip>
+  );
+}
+
+/** The expired chip — the guard already refuses this session; the page says so plainly. */
+function ExpiredChip() {
+  return (
+    <StatusChip
+      tone="pending"
+      text="expired"
+      tip="Past the workspace's session expiry — the credential no longer resolves. The machine logs in again to resume delivery and reporting."
+    />
   );
 }
 

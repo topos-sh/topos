@@ -1013,6 +1013,7 @@ fn a_remote_add_gets_the_governed_copy_suggestion_from_the_catalog_upstream_fiel
         &ctx,
         &connect(&plane, &dir),
         &spec(Some("skills/deploy"), "dedup"),
+        None,
     )
     .expect("a governed copy is suggested");
     assert_eq!(got.workspace, WS_NAME);
@@ -1021,14 +1022,27 @@ fn a_remote_add_gets_the_governed_copy_suggestion_from_the_catalog_upstream_fiel
     assert!(got.same_path);
 
     // The same repository at another path still gets named — honestly, as a sibling.
-    let sibling = ops::governed_copy_suggestion(&ctx, &connect(&plane, &dir), &spec(None, "dedup"))
-        .expect("the same-repo sibling is suggested");
+    let sibling =
+        ops::governed_copy_suggestion(&ctx, &connect(&plane, &dir), &spec(None, "dedup"), None)
+            .expect("the same-repo sibling is suggested");
     assert!(!sibling.same_path);
     assert_eq!(sibling.reference, "@eng/deploy");
 
+    // A bare `add owner/repo` whose import RESOLVED to the governed subdir (a --skill pick or a
+    // multi-skill repo) is path-exact by the recorded origin, not the spec's spelling.
+    let resolved = ops::governed_copy_suggestion(
+        &ctx,
+        &connect(&plane, &dir),
+        &spec(None, "dedup"),
+        Some("skills/deploy"),
+    )
+    .expect("the resolved-subdir import matches path-exactly");
+    assert!(resolved.same_path);
+
     // A repo nobody governs answers nothing (the import proceeds with no notice).
     assert!(
-        ops::governed_copy_suggestion(&ctx, &connect(&plane, &dir), &spec(None, "other")).is_none()
+        ops::governed_copy_suggestion(&ctx, &connect(&plane, &dir), &spec(None, "other"), None)
+            .is_none()
     );
 
     // An ENDED session's catalog is never consulted — with the one session ended, no suggestion.
@@ -1037,7 +1051,8 @@ fn a_remote_add_gets_the_governed_copy_suggestion_from_the_catalog_upstream_fiel
         ops::governed_copy_suggestion(
             &ctx,
             &connect(&plane, &dir),
-            &spec(Some("skills/deploy"), "dedup")
+            &spec(Some("skills/deploy"), "dedup"),
+            None
         )
         .is_none()
     );

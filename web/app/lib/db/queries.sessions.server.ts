@@ -98,6 +98,10 @@ export interface WorkspaceSession {
   createdAtMs: number;
   /** The session's last-seen time (epoch-ms), or null when it has never phoned home. */
   lastSeenAtMs: number | null;
+  /** Whether the session is past the workspace's owner-set expiry (the SAME age predicate the
+   * session guard enforces): its credential no longer resolves, so the machine must log in
+   * again. Always false when the policy is unset. */
+  expired: boolean;
   freshness: SessionFreshness;
   /** The bundles this session last reported, catalog-name order. */
   skills: SessionSkillState[];
@@ -228,6 +232,9 @@ export async function workspaceSessions(actor: MemberActor): Promise<WorkspaceSe
       status: s.status,
       createdAtMs: Number(s.created_ms),
       lastSeenAtMs: s.last_seen_ms === null ? null : Number(s.last_seen_ms),
+      // The guard's own age predicate, mirrored: an over-age session's credential resolves to
+      // nothing lane-side, so the page must never read it as a live machine.
+      expired: sessionMaxAgeMs !== null && now - Number(s.created_ms) > sessionMaxAgeMs,
       freshness: freshnessOf(
         s.last_seen_ms === null ? null : Number(s.last_seen_ms),
         stalenessWindowMs,

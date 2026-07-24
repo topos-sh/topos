@@ -991,18 +991,24 @@ fn registry_attribution(source_abs: &Path) -> Option<topos_harness::registry::Ha
 /// Consult each ACTIVE session's catalog for a GOVERNED copy of `spec`'s source — the dedup
 /// suggestion a remote import's receipt carries ("acme already has this as `@acme/deploy`").
 /// Matching is by upstream host + `owner/repo` over the catalog's additive upstream fields; a
-/// path-exact match wins over a same-repo sibling. Best-effort by design: no sessions, a
-/// transport fault, or an upstream-less catalog all answer `None` — the suggestion is a
-/// courtesy, never a gate on the import (npm shape: warn beside the act, never block it).
+/// path-exact match wins over a same-repo sibling. `imported_subdir` is the skill path the
+/// import actually SELECTED inside the repo (the recorded origin — a `--skill` pick or a
+/// multi-skill repo resolves deeper than the spec's own subdir), so path-exactness is judged
+/// against what landed, not what was typed. Best-effort by design: no sessions, a transport
+/// fault, or an upstream-less catalog all answer `None` — the suggestion is a courtesy, never
+/// a gate on the import (npm shape: warn beside the act, never block it).
 pub(crate) fn governed_copy_suggestion(
     ctx: &Ctx<'_>,
     connect: &super::reconcile::SessionConnect<'_>,
     spec: &RemoteSpec,
+    imported_subdir: Option<&str>,
 ) -> Option<topos_types::results::GovernedCopy> {
     let sessions = crate::sessions::read_sessions(ctx.fs, &ctx.layout).ok()?;
     let want_host = spec.host.domain();
     let want_repo = format!("{}/{}", spec.owner, spec.repo);
-    let want_path = spec.subdir.as_deref().unwrap_or("");
+    let want_path = imported_subdir
+        .or(spec.subdir.as_deref())
+        .unwrap_or_default();
     let mut sibling: Option<topos_types::results::GovernedCopy> = None;
     for s in &sessions.sessions {
         // Only an ACTIVE session's catalog is this person's universe (pending delivers nothing).

@@ -1455,6 +1455,19 @@ export interface components {
              * @description When `current` last moved (epoch milliseconds).
              */
             updated_at: number;
+            /**
+             * @description The recorded upstream origin's host (`github.com` today) — present when the bundle was
+             *     imported from an external source (the fork-that-remembers-its-parent provenance). Lets a
+             *     client suggest the governed copy when the same source is added again. **Additive.**
+             */
+            upstream_host?: string | null;
+            /**
+             * @description The subdirectory inside the upstream repo (`""` = the repo root). Present exactly when
+             *     `upstream_host` is. **Additive.**
+             */
+            upstream_path?: string | null;
+            /** @description The upstream `owner/repo`. Present exactly when `upstream_host` is. **Additive.** */
+            upstream_repo?: string | null;
             /** @description The `current` version's commit id (64-char lowercase hex). */
             version_id: string;
         };
