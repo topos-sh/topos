@@ -561,6 +561,16 @@ pub(crate) fn manifest_update(
         );
     }
 
+    // Names the CURRENT resolution still MENTIONS (an item line — synced or not — or an
+    // exclude): their `via_manifest` cache rows must SURVIVE a sweep that did not re-record
+    // them, or a later drop of the line would find no row to clean by.
+    let mentioned_names: HashSet<String> = resolution
+        .items
+        .iter()
+        .map(|i| i.name.clone())
+        .chain(resolution.excluded.iter().map(|e| e.name.clone()))
+        .collect();
+
     // ---- 5. Report applied state + refresh the delivery cache, per session. ----
     let now_millis = i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX);
     let mut sync_updates: Vec<(String, WorkspaceSync)> = Vec::new();
@@ -617,17 +627,21 @@ pub(crate) fn manifest_update(
                     .or_insert_with(|| ds.clone());
             }
         }
-        // A channel that FAILED to expand this run froze its members' placements; keep their
-        // prior cache rows too — the provenance must survive the same outage the bytes do. (A
-        // channel line REMOVED from every manifest is never "failed" — its rows lapse here.)
+        // A channel that FAILED to expand this run froze its members' placements, and a name
+        // the resolution still MENTIONS (an excluded-here line, an item that failed to sync)
+        // was not re-recorded either: keep both kinds' prior cache rows — the provenance must
+        // survive the same sweep the bytes do, or a LATER drop of the line would find no row
+        // for the cleaner to discover. (A line removed from every covering manifest is neither
+        // — its row lapses here, right after its clean.)
         if let Some(prior) = prior_sync.workspaces.get(&run.session.workspace_id) {
             for (skill_id, ds) in &prior.delivered {
                 if ds.via_manifest
                     && !ds.withdrawn
                     && !delivered_cache.contains_key(skill_id)
-                    && ds.via_channels.iter().any(|c| {
-                        failed_channels.contains(&(run.session.workspace_id.clone(), c.clone()))
-                    })
+                    && (mentioned_names.contains(&ds.name)
+                        || ds.via_channels.iter().any(|c| {
+                            failed_channels.contains(&(run.session.workspace_id.clone(), c.clone()))
+                        }))
                 {
                     delivered_cache.insert(skill_id.clone(), ds.clone());
                 }

@@ -1592,4 +1592,27 @@ fn a_project_exclude_freezes_the_home_placement_it_shadows() {
         placed.exists(),
         "a scope-local exclude never deletes the home placement"
     );
+
+    // The provenance row SURVIVED the excluded sweep (mentioned names carry forward), so a
+    // LATER drop of the personal line still finds it — and cleans the placement.
+    std::fs::write(rig.layout().home().join("topos.toml"), "").unwrap();
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(
+        out.data
+            .skills
+            .iter()
+            .any(|s| s.skill == "deploy" && s.action == PullAction::Withdrawn),
+        "{:?}",
+        out.data.skills
+    );
+    assert!(
+        !placed.exists(),
+        "the later line drop still retires the placement"
+    );
 }
