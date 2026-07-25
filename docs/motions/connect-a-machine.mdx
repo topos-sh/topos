@@ -35,10 +35,21 @@ Approve this login in your browser:
 Then re-run `topos login` to finish.
 ```
 
-Where a browser is plausible, Topos opens the approval page for you on an ephemeral loopback
-listener, so there is nothing to type at all. The short code never rides a URL, and the poll — not
-the browser redirect — stays the source of truth, so a lost redirect changes only how quickly you
-find out.
+Where a browser is plausible, Topos takes a different route entirely: it binds an ephemeral
+`127.0.0.1` listener *before* starting the flow and opens the approval page itself, so there is
+nothing to type.
+
+<Note>
+  In that codeless mode the approval redirect **carries the authorization code** — the second of the
+  two secrets the exchange needs. So the hand-off is not an advisory wake-up: only a browser on
+  **this** machine can deliver it, which is what makes a forwarded approve-link useless to whoever
+  sent it. Approving mints nothing on its own; the session is created at the exchange, once both
+  secrets are present.
+
+  The practical consequence: if that hand-off is lost, the login cannot complete. Re-running
+  `topos login` tells you so and clears the pending flow, rather than polling something that can
+  never answer.
+</Note>
 
 A successful login prints what connecting delivers:
 

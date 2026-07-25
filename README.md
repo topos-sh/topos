@@ -17,6 +17,9 @@ Three programs in one Apache-2.0 repository:
 The two Rust programs share one trust kernel, `topos-core`: the single, auditable implementation of the
 byte-exact digest, consent, content-addressed identity, and sync algorithm.
 
+📚 **Documentation: [topos.sh/docs](https://topos.sh/docs)** — quickstart, the concept model, guides for
+each motion, self-hosting, and the generated CLI reference. Source in [`docs/`](docs/).
+
 ## Quickstart
 
 Install the CLI:

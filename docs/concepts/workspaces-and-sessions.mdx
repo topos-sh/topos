@@ -106,9 +106,13 @@ The address is parsed by shape alone — no network call is needed to understand
     it. An `https` address may never hand the flow to a plain-`http` base — the downgrade is refused.
   </Step>
   <Step title="Approve in a browser">
-    A URL and a short code are printed. Where a browser is plausible, Topos opens the approval page
-    for you on an ephemeral loopback listener so there is nothing to type. The short code itself
-    never rides a URL, and the poll — not the redirect — remains the source of truth.
+    Where a browser is plausible, Topos binds an ephemeral `127.0.0.1` listener and opens the
+    approval page itself — nothing to type. That redirect carries the authorization code, so only a
+    browser on **this** machine can complete the login, and a forwarded approve-link is useless to
+    whoever sent it.
+
+    Otherwise you get the typed-code fallback: a URL and a short code, which the page shows back to
+    you so you can confirm they match. The code never rides a URL.
   </Step>
   <Step title="The session is minted">
     Approving mints the workspace-scoped credential. Re-running `topos login` resumes the same
