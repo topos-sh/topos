@@ -5,8 +5,8 @@
 // authority for every flag. This script re-wraps those exact bytes as an MDX page so the site can
 // never describe a flag the binary does not have.
 //
-//   node docs-site/scripts/sync-cli-reference.mjs           # write the page
-//   node docs-site/scripts/sync-cli-reference.mjs --check    # fail if it is stale (CI gate)
+//   node docs/scripts/sync-cli-reference.mjs           # write the page
+//   node docs/scripts/sync-cli-reference.mjs --check    # fail if it is stale (CI gate)
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..");
 const source = join(repoRoot, "docs", "cli.md");
-const target = join(repoRoot, "docs-site", "cli", "reference.mdx");
+const target = join(repoRoot, "docs", "reference", "cli.mdx");
 
 const FRONTMATTER = `---
 title: "CLI reference"
@@ -61,12 +61,12 @@ if (process.argv.includes("--check")) {
   }
   if (current !== rendered) {
     console.error(
-      "docs-site/cli/reference.mdx is stale.\n" +
-        "Run: node docs-site/scripts/sync-cli-reference.mjs",
+      "docs/reference/cli.mdx is stale.\n" +
+        "Run: node docs/scripts/sync-cli-reference.mjs",
     );
     process.exit(1);
   }
-  console.log("docs-site/cli/reference.mdx is in sync with docs/cli.md");
+  console.log("docs/reference/cli.mdx is in sync with docs/cli.md");
 } else {
   writeFileSync(target, rendered);
   console.log(`wrote ${target}`);

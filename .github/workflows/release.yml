@@ -236,7 +236,7 @@ jobs:
     # protection (a tag push alone then cannot reach the key — the release waits for an approval).
     # Until the environment is configured (it is auto-created unprotected on first run), behavior
     # is unchanged; the protection rules + the v* tag ruleset live in repo settings (see
-    # docs/RELEASE.md and the ceremony script's printed steps).
+    # RELEASING.md and the ceremony script's printed steps).
     environment: release-signing
     env:
       # Release signing is ARMED by the MINISIGN_SECRET_KEY secret (minted by the key ceremony,
@@ -294,7 +294,7 @@ jobs:
         run: |
           cargo run -p xtask --locked -- dist sums --dir dist
           cargo run -p xtask --locked -- dist sums --dir dist --check
-      # Minisign release signing (see docs/RELEASE.md). Runs AFTER the checksums so SHA256SUMS is
+      # Minisign release signing (see RELEASING.md). Runs AFTER the checksums so SHA256SUMS is
       # itself signable; the `.minisig` files ride the same `dist/*` upload as every other asset.
       # No `continue-on-error`: with the secret armed, a signing failure fails the release.
       - name: install minisign (pinned)

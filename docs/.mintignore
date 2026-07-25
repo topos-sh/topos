@@ -1,0 +1,14 @@
+# Files that live in docs/ but are not pages of the documentation site.
+# .gitignore syntax. Excluded files are not published and are not reachable by URL.
+
+# The generated CLI reference. It is the authority for every flag (rendered from the real
+# clap tree by `cargo xtask gen-cli-ref`) and is linked from the README, but the site
+# publishes it through reference/cli.mdx, which adds a title and an intro.
+# Publishing both would put a duplicate in the sitemap and in llms.txt.
+cli.md
+
+# Contributor docs for this folder, not a page.
+README.md
+
+# Tooling.
+scripts/

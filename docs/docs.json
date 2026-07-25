@@ -116,7 +116,7 @@
           {
             "group": "Reference",
             "pages": [
-              "cli/reference",
+              "reference/cli",
               "reference/topos-toml",
               "reference/json-envelope",
               "reference/security",
