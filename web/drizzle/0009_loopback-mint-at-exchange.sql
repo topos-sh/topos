@@ -1,0 +1,2 @@
+ALTER TABLE "web"."login_flow" DROP CONSTRAINT "login_flow_approved_check";--> statement-breakpoint
+ALTER TABLE "web"."login_flow" ADD CONSTRAINT "login_flow_approved_check" CHECK ("web"."login_flow"."status" <> 'approved' or "web"."login_flow"."session_id" is not null or "web"."login_flow"."binding" = 'loopback');

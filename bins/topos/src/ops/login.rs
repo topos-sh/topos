@@ -293,9 +293,25 @@ fn resume(
     let enroll_src = (connectors.enroll)(&wal.base_url);
     match enroll_src.device_auth_poll(&wal.device_code, wal.auth_code.as_deref())? {
         DeviceAuthPoll::Pending => Ok(pending_data(wal)),
-        // Approved, but we have not delivered the local hand-off's code yet — the caller re-opens
-        // it. Reported as pending so the wait loop keeps its shape.
-        DeviceAuthPoll::AwaitingRedirect => Ok(pending_data(wal)),
+        DeviceAuthPoll::AwaitingRedirect if handoff.loopback => {
+            // A live listener is still open — the human has approved and the redirect is on its
+            // way. Reported as pending so the wait loop keeps its shape.
+            Ok(pending_data(wal))
+        }
+        DeviceAuthPoll::AwaitingRedirect => {
+            // No listener this time: the flow was approved, but the hand-off it needed went to a
+            // listener that is gone (the process was interrupted, or the approval happened
+            // somewhere that could not return it). The authorization code exists only in that
+            // lost redirect, so this flow can never complete — and nothing was minted for it, so
+            // there is nothing to clean up but the WAL. Clear it and say plainly to start again,
+            // rather than re-polling a flow that will only ever answer this.
+            enroll::delete_wal(ctx.fs, &ctx.layout)?;
+            Err(ClientError::Enrollment(
+                "that login was approved, but its approval could not be handed back to this \
+                 machine — nothing was connected. Run `topos login <workspace-address>` again."
+                    .into(),
+            ))
+        }
         DeviceAuthPoll::Denied => {
             enroll::delete_wal(ctx.fs, &ctx.layout)?;
             Err(ClientError::Enrollment(

@@ -592,6 +592,100 @@ export type LoginPollResult =
  * rows are reaped by [`sweepExpiredLoginFlows`], not on read, so the grant survives its whole
  * TTL. A missing row (already swept, or never existed) reads as expired.
  */
+/**
+ * Mint a LOOPBACK flow's session at its exchange — the moment both secrets are present.
+ *
+ * The born status is recomputed here rather than carried from the approval: the seat's role and
+ * the workspace's approval knob are re-read, so a demotion or a knob flip between consent and
+ * collection lands on the side the rows say now. Fenced on the flow row, and idempotent — a
+ * concurrent exchange finds the session already there and reads it back.
+ */
+async function mintLoopbackSession(flowCode: string): Promise<LoginPollResult | null> {
+  return await getDb().transaction(async (tx) => {
+    const rows = await tx.execute(
+      sql`SELECT id, requested_name, approved_by, approved_workspace_id, session_id,
+                 flow_code_sha256, invite_token_sha256
+          FROM ${loginFlow}
+          WHERE flow_code_sha256 = ${sha256OfText(flowCode)} AND status = 'approved'
+            AND binding = 'loopback' AND expires_at > now()
+          FOR UPDATE`,
+    );
+    const row = rows.rows[0] as
+      | {
+          id: string;
+          requested_name: string;
+          approved_by: string | null;
+          approved_workspace_id: string | null;
+          session_id: string | null;
+          flow_code_sha256: Buffer;
+          invite_token_sha256: Buffer | null;
+        }
+      | undefined;
+    if (!row || row.approved_by === null || row.approved_workspace_id === null) {
+      return null;
+    }
+    if (row.session_id !== null) {
+      // A concurrent exchange won the race; read its outcome rather than minting a second.
+      const live = await tx.execute(
+        sql`SELECT status FROM web.cli_session WHERE id = ${row.session_id}`,
+      );
+      const status = (live.rows[0] as { status: SessionStatus } | undefined)?.status;
+      return status === undefined
+        ? null
+        : {
+            status: "granted" as const,
+            sessionId: row.session_id,
+            sessionStatus: status,
+            approvedWorkspaceId: row.approved_workspace_id,
+            hint:
+              row.invite_token_sha256 === null
+                ? null
+                : await inviteHintByHash(row.invite_token_sha256),
+          };
+    }
+    const seatRows = await tx.execute(
+      sql`SELECT role FROM ${seat}
+          WHERE workspace_id = ${row.approved_workspace_id} AND user_id = ${row.approved_by}`,
+    );
+    const role = (seatRows.rows[0] as { role: string } | undefined)?.role;
+    if (role === undefined) {
+      // The seat went away between consent and collection — revocation is a row delete and it
+      // is effective immediately, so there is nothing to mint.
+      return null;
+    }
+    const born = sessionBornStatus(
+      role as Parameters<typeof sessionBornStatus>[0],
+      await sessionApprovalKnobTx(tx, row.approved_workspace_id),
+    );
+    const sessionId = mintSessionId();
+    await tx.insert(cliSession).values({
+      id: sessionId,
+      workspaceId: row.approved_workspace_id,
+      userId: row.approved_by,
+      displayName: row.requested_name,
+      credentialSha256: row.flow_code_sha256 as never,
+      status: born,
+    });
+    await tx.execute(sql`UPDATE ${loginFlow} SET session_id = ${sessionId} WHERE id = ${row.id}`);
+    await auditInTx(tx, {
+      workspaceId: row.approved_workspace_id,
+      actor: { userId: row.approved_by, display: row.requested_name },
+      kind: "session_created",
+      subject: sessionId,
+      outcome: "ok",
+      details: { requestedName: row.requested_name, status: born },
+    });
+    return {
+      status: "granted" as const,
+      sessionId,
+      sessionStatus: born,
+      approvedWorkspaceId: row.approved_workspace_id,
+      hint:
+        row.invite_token_sha256 === null ? null : await inviteHintByHash(row.invite_token_sha256),
+    };
+  });
+}
+
 export async function pollLoginFlow(
   flowCode: string,
   /** The redirect-borne authorization code, when the caller has one. A loopback flow will not
@@ -630,14 +724,25 @@ export async function pollLoginFlow(
   if (row.status === "denied") {
     return { status: "denied" };
   }
-  // THE ENFORCEMENT POINT. A loopback flow's device code is not, by itself, a claim on the
-  // credential: the authorization code that completes it left the server only by redirecting
-  // the approver's browser to their own 127.0.0.1 listener. Someone who started a flow and got
-  // a stranger to approve it holds the device code and nothing else, so they land here — an
-  // honest "approved, still waiting for the local hand-off", never a grant. Matching is a
+  // THE ENFORCEMENT POINT. A loopback flow's device code is not, by itself, a claim on anything:
+  // no session exists until the authorization code comes back, and that code left the server
+  // only by redirecting the approver's browser to their own 127.0.0.1 listener. Someone who
+  // started a flow and got a stranger to approve it holds the device code and nothing else, so
+  // they land here — an honest "approved, still waiting for the local hand-off". Matching is a
   // digest comparison in Postgres, like every other secret in this system.
   if (row.status === "approved" && row.binding === "loopback" && row.auth_code_ok !== true) {
     return { status: "awaiting_redirect" };
+  }
+  // The EXCHANGE mints. Both secrets are in hand, so the caller has proved it is the machine
+  // that asked; only now does a credential come into existence. Idempotent — a session already
+  // minted falls through to the ordinary granted read, so a crash between exchange and persist
+  // re-exchanges instead of stranding the login.
+  if (row.status === "approved" && row.binding === "loopback" && row.session_id === null) {
+    const minted = await mintLoopbackSession(flowCode);
+    if (minted === null) {
+      return { status: "expired" };
+    }
+    return minted;
   }
   if (row.status === "approved") {
     // A granted flow stays granted while its SESSION lives (the approve minted it). A session
@@ -757,10 +862,16 @@ const APPROVE_ABORT = Symbol("login-approve-abort");
 export async function approveLoginFlow(
   userCode: string,
   approver: { userId: string; display: string },
+  /** Whether THIS request carries the local return coordinates. A loopback flow's authorization
+   * code has exactly one way out — the redirect to the asking machine's listener — so approving
+   * one from a page that cannot redirect would mint a code with nowhere to go and leave the
+   * waiting CLI stuck. Refused instead, with copy that says where to finish. */
+  hasLocalReturn = true,
 ): Promise<{
-  sessionId: string;
+  /** `null` for a LOOPBACK flow — nothing is minted until the exchange. */
+  sessionId: string | null;
   requestedName: string;
-  sessionStatus: SessionStatus;
+  sessionStatus: SessionStatus | null;
   /** The one-time authorization code — loopback flows only, `null` for a device flow. The
    * caller's ONLY job with it is to put it on the redirect to the approver's own listener. */
   authCode: string | null;
@@ -822,6 +933,44 @@ export async function approveLoginFlow(
       if (acceptedWorkspaceId !== null && acceptedWorkspaceId !== resolved.workspaceId) {
         throw APPROVE_ABORT;
       }
+      // A LOOPBACK flow mints NOTHING here. Its authorization code leaves the server only by
+      // redirecting this approver's browser to their own 127.0.0.1 listener, and the session is
+      // minted when that code comes back — so a stranger who talked someone into approving their
+      // flow ends up with a recorded consent and no credential. Minting at approval would defeat
+      // the whole mechanism: the bearer IS the device code, which the starter of the flow always
+      // holds, so the session would be usable the instant the victim clicked.
+      if (row.binding === "loopback" && !hasLocalReturn) {
+        // Refused BEFORE anything is written: no consent recorded, no code minted, the flow
+        // stays pending so finishing it on the right machine still works.
+        // Nothing written: the flow stays pending and is still finishable on the machine that
+        // started it. The page pre-checks this and says so; reaching here means a race, which
+        // gets the same uniform refusal every other dead-end does.
+        throw APPROVE_ABORT;
+      }
+      if (row.binding === "loopback") {
+        const authCode = mintSecret();
+        await tx.execute(
+          sql`UPDATE ${loginFlow}
+              SET status = 'approved', approved_by = ${approver.userId},
+                  approved_workspace_id = ${resolved.workspaceId},
+                  auth_code_sha256 = ${sha256OfText(authCode)}
+              WHERE id = ${row.id}`,
+        );
+        await auditInTx(tx, {
+          workspaceId: resolved.workspaceId,
+          actor: { userId: approver.userId, display: approver.display },
+          kind: "login_approved",
+          subject: row.id,
+          outcome: "ok",
+          details: { requestedName: row.requested_name },
+        });
+        return {
+          sessionId: null,
+          requestedName: row.requested_name,
+          sessionStatus: null,
+          authCode,
+        };
+      }
       const sessionId = mintSessionId();
       const born = sessionBornStatus(
         resolved.role,
@@ -835,15 +984,10 @@ export async function approveLoginFlow(
         credentialSha256: row.flow_code_sha256,
         status: born,
       });
-      // A loopback flow's credential is NOT collectable by polling — the caller must also
-      // present this authorization code, which leaves the server only by redirecting the
-      // approver's browser to their own 127.0.0.1 listener.
-      const authCode = row.binding === "loopback" ? mintSecret() : null;
       await tx.execute(
         sql`UPDATE ${loginFlow}
             SET status = 'approved', approved_by = ${approver.userId}, session_id = ${sessionId},
-                approved_workspace_id = ${resolved.workspaceId},
-                auth_code_sha256 = ${authCode === null ? null : sha256OfText(authCode)}
+                approved_workspace_id = ${resolved.workspaceId}
             WHERE id = ${row.id}`,
       );
       await auditInTx(tx, {
@@ -858,7 +1002,7 @@ export async function approveLoginFlow(
         sessionId,
         requestedName: row.requested_name,
         sessionStatus: born,
-        authCode,
+        authCode: null,
       };
     });
   } catch (error) {
@@ -918,6 +1062,9 @@ export interface PendingLoginFlowView {
   requestedWorkspace: string;
   userCode: string;
   inviteWorkspace: { name: string; displayName: string; role: string } | null;
+  /** How this flow hands its credential back — the page refuses to approve a `loopback` one
+   * from a browser that carries no return coordinates, since the code would go nowhere. */
+  binding: LoginBinding;
 }
 
 /** The verify page's lookup: the pending request a typed user_code names (display only). */
@@ -954,7 +1101,7 @@ async function pendingLoginFlowWhere(
   cond: ReturnType<typeof sql>,
 ): Promise<PendingLoginFlowView | null> {
   const rows = await getDb().execute(
-    sql`SELECT f.requested_name, f.requested_workspace, f.user_code,
+    sql`SELECT f.requested_name, f.requested_workspace, f.user_code, f.binding,
                w.name AS invite_ws_name, w.display_name AS invite_ws_display,
                i.role AS invite_role
         FROM ${loginFlow} f
@@ -968,6 +1115,7 @@ async function pendingLoginFlowWhere(
         requested_name: string;
         requested_workspace: string;
         user_code: string;
+        binding: LoginBinding;
         invite_ws_name: string | null;
         invite_ws_display: string | null;
         invite_role: string | null;
@@ -980,6 +1128,7 @@ async function pendingLoginFlowWhere(
     requestedName: row.requested_name,
     requestedWorkspace: row.requested_workspace,
     userCode: row.user_code,
+    binding: row.binding,
     inviteWorkspace:
       row.invite_ws_name === null
         ? null

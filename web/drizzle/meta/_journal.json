@@ -64,6 +64,13 @@
       "when": 1784980534392,
       "tag": "0008_loopback-login",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1784983153718,
+      "tag": "0009_loopback-mint-at-exchange",
+      "breakpoints": true
     }
   ]
 }

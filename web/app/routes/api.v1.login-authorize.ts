@@ -89,8 +89,13 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   // has just bound a 127.0.0.1 listener and can open a browser on this machine. WRITE-ONCE
   // from here: nothing downstream re-reads it from a request, so there is no lever to downgrade
   // a loopback flow onto the pollable path. Absent ⇒ `device`, which is exactly today's flow,
-  // so a client that predates this field is unaffected. Declaring `loopback` is not a privilege
-  // — it only makes the flow HARDER to redeem (see the token route).
+  // so a client that predates this field is unaffected.
+  //
+  // Declaring `loopback` buys the caller a pre-armed approve card — real leverage, since it
+  // removes the typing a device flow demands. What pays for it is that the flow then mints
+  // NOTHING at approval: the session comes into existence only when the authorization code
+  // returns from the approver's own machine. So a caller who declares it and phishes an approval
+  // has traded a credential they could have polled for one they can never collect.
   if (body.redirect !== undefined && body.redirect !== "loopback" && body.redirect !== "device") {
     return badRequest("malformed login authorize body: redirect");
   }

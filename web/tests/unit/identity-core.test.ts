@@ -150,23 +150,35 @@ describe("the login flow", () => {
     const identity = await import("@/lib/db/identity.server");
     const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
       ?.user_id as string;
+    const sessionsBefore = (await q(`SELECT count(*)::int AS n FROM web.cli_session`))[0]
+      ?.n as number;
     const flow = await identity.startLoginFlow("attacker-cli", "", undefined, "loopback");
     const approved = await identity.approveLoginFlow(flow.userCode, {
       userId: owner,
       display: "Owner",
     });
-    // The approval really happened and really minted a session — this is not a refusal.
-    expect(approved?.sessionStatus).toBe("active");
+    // The approval really happened — this is consent recorded, not a refusal.
+    expect(approved).not.toBeNull();
+    expect(approved?.sessionId).toBeNull();
     const authCode = approved?.authCode ?? undefined;
     expect(typeof authCode).toBe("string");
+
+    // THE PROPERTY THAT MATTERS, and the one an earlier draft of this change got wrong: the
+    // bearer credential IS the device code, so if the approval minted a session, the phisher —
+    // who holds that code — could skip the poll entirely and just call the API with it. Nothing
+    // is minted until the exchange, so there is no credential to hold.
+    expect(await identity.sessionActor(wsId, flow.flowCode)).toBeNull();
+    const before = await q(`SELECT count(*)::int AS n FROM web.cli_session`);
+    expect(before[0]?.n).toBe(sessionsBefore);
 
     // The device code ALONE — everything a phisher holds — buys nothing but an honest "the
     // human is done, the hand-off is not".
     expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("awaiting_redirect");
-    // A guessed code is no better.
+    // A guessed code is no better, and still mints nothing.
     expect((await identity.pollLoginFlow(flow.flowCode, "not-the-code")).status).toBe(
       "awaiting_redirect",
     );
+    expect(await identity.sessionActor(wsId, flow.flowCode)).toBeNull();
     // Both halves together redeem — and the credential is still the device code, which never
     // rode a URL.
     const granted = await identity.pollLoginFlow(flow.flowCode, authCode);
@@ -214,6 +226,9 @@ describe("the login flow", () => {
       requestedWorkspace: "",
       userCode: flow.userCode,
       inviteWorkspace: null,
+      // The card carries its binding: the page refuses to approve a loopback flow from a
+      // browser that has no way to hand the code back.
+      binding: "device",
     });
     const approved = await identity.approveLoginFlow(flow.userCode, {
       userId: owner,

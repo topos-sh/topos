@@ -102,13 +102,18 @@ transaction, FOR UPDATE-fenced or single-statement-atomic, audit row inside):
   rung): the human types the short code and whoever holds the device code polls — the typing is
   the only thing binding the approver to the asker, so the card NEVER pre-arms for these.
   **`loopback`** (RFC 8252, declared when the CLI has already bound a 127.0.0.1 listener and can
-  open a browser here): the card DOES pre-arm from the URL's `device` challenge, because approval
-  mints a one-time authorization code that leaves the server only by redirecting the approver's
-  browser to that listener — so a stranger who mails the link watches their victim complete a
-  login on the victim's own machine, and their poll reads `awaiting_redirect` forever. Redemption
-  then demands `device_code` + `auth_code`: two secrets, two channels, and the device code has
-  never been in a URL. The code is non-consuming until the flow lapses, so a crash between
-  exchange and persist re-exchanges cleanly. The signed-out loader bounce carries the page (validated params only) as `next`.
+  open a browser here): the card DOES pre-arm from the URL's `device` challenge. What makes that
+  safe is that approval **mints nothing** — it records consent and a one-time authorization code
+  that leaves the server only by redirecting the approver's browser to that listener. THE SESSION
+  IS MINTED AT THE EXCHANGE, which demands `device_code` + `auth_code`. That ordering is
+  load-bearing: the bearer credential IS the device code, so a session minted at approval would
+  be usable immediately by whoever started the flow — the phisher. With nothing minted, a mailed
+  approve-link leaves its sender holding a device code that resolves to no session at all, and a
+  poll that reads `awaiting_redirect`. Approving a loopback flow from a page with no return
+  coordinates is refused outright (nothing consumed, still finishable where it started), and the
+  code is non-consuming until the flow lapses so a crash between exchange and persist re-exchanges
+  cleanly. The DEVICE path remains phishable by construction (RFC 8628 says it must be) — the
+  typed code is its only control. The signed-out loader bounce carries the page (validated params only) as `next`.
   Ending a session is immediate on either side (the client's `DELETE /api/v1/session`, the
   Sessions tab's owner arms) — the row is deleted, the lane 404s from the next request.
 - **The tokened invitation** (`invite-redeem.tsx` at `/invite/<token>` — `/<ws>/invite/<token>` in

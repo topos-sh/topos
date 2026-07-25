@@ -261,10 +261,32 @@ export async function action({ request }: ActionFunctionArgs) {
     // ceremony itself resolves the flow's workspace and requires the approver's seat in it —
     // accepting a carried invitation first when the approver is its addressee — and a refusal
     // is indistinguishable from an expired code.
-    const approved = await approveLoginFlow(userCode, {
-      userId: actor.userId,
-      display: actor.display,
-    });
+    // A LOOPBACK flow's authorization code has exactly ONE way out: the redirect to the asking
+    // machine's listener. Approving one from a page that carries no return coordinates — a
+    // second browser, a phone, the bare /verify address the terminal also prints — would record
+    // consent and mint a code with nowhere to go, leaving that terminal waiting out the whole
+    // TTL. Refuse BEFORE the ceremony: nothing is consumed, the flow stays pending, and it is
+    // still finishable where it started. (The ceremony re-checks under its own lock; reaching
+    // that path means a race and gets the uniform refusal.)
+    if (loopback === null) {
+      const card = await pendingLoginFlow(userCode);
+      if (card?.binding === "loopback") {
+        return data(
+          {
+            kind: "refused" as const,
+            error:
+              "Finish this login on the machine that started it — the approval goes straight " +
+              "back to that terminal. Use the page it opened, or run `topos login` there again.",
+          },
+          { status: 400 },
+        );
+      }
+    }
+    const approved = await approveLoginFlow(
+      userCode,
+      { userId: actor.userId, display: actor.display },
+      loopback !== null,
+    );
     if (approved === null) {
       return data({ kind: "refused" as const, error: REQUEST_GONE }, { status: 400 });
     }
@@ -321,8 +343,7 @@ export default function VerifyPage() {
     return (
       <Shell>
         <PlainState heading="Logged in">
-          {actionData.name} is logged in — you can close this tab; the machine picks the approval up
-          on its next poll.
+          {actionData.name} is logged in — you can close this tab.
         </PlainState>
       </Shell>
     );

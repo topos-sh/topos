@@ -385,12 +385,13 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                     "note: could not open a local listener — falling back to the typed-code login."
                 );
             }
+            let listening = bound.is_some();
             let first = ops::session_login(
                 &ctx,
                 &connectors,
                 address.as_deref(),
                 ops::Handoff {
-                    loopback: bound.is_some(),
+                    loopback: listening,
                     auth_code: None,
                 },
             );
@@ -418,7 +419,10 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                         &connectors,
                         address.as_deref(),
                         ops::Handoff {
-                            loopback: true,
+                            // Honest: whether THIS invocation is holding a listener open. resume()
+                            // uses it to tell a live wait (keep waiting) from a bare re-invocation
+                            // of an already-approved flow (whose hand-off is gone for good).
+                            loopback: listening,
                             auth_code,
                         },
                     )
@@ -2222,8 +2226,10 @@ struct LoopbackPlan<'a> {
 ///
 /// With a `loopback` plan, the wait ALSO binds an ephemeral 127.0.0.1 listener and auto-opens the
 /// approval page carrying the state-bound return coordinates — the browser's redirect wakes the
-/// next poll immediately (zero typing); the poll stays the source of truth, so a failed open or a
-/// lost redirect degrades to the typed-code wait already printed above it.
+/// next poll immediately (zero typing). For a LOOPBACK-bound flow the redirect carries the
+/// authorization code the exchange needs, so the listener is kept even when the auto-open fails
+/// (the URL is printed to paste instead) — falling back to the bare typed-code page there would
+/// strand the login, because approving it hands the code to a listener that no longer exists.
 fn block_on_pending<T>(
     clock: &dyn Clock,
     policy: &WaitPolicy,
@@ -2246,10 +2252,15 @@ fn block_on_pending<T>(
     // The waiting disclosure on STDERR (stdout stays the clean final envelope/TTY): the URL and
     // the short code on separate lines (the code never rides a URL), and the one line that makes
     // the wait unscary — interrupting loses nothing.
-    eprintln!(
-        "Open: {}\nCode: {} (the page shows the same code — confirm it matches)",
-        disc.verification_uri, disc.user_code,
-    );
+    // A LOOPBACK flow deliberately does NOT print the bare page + code: approving there cannot
+    // hand the authorization code back to this terminal, so the page refuses it. Its own URL is
+    // printed by the listener arm below (auto-opened, or to paste when the open fails).
+    if loopback.is_none() {
+        eprintln!(
+            "Open: {}\nCode: {} (the page shows the same code — confirm it matches)",
+            disc.verification_uri, disc.user_code,
+        );
+    }
     eprintln!(
         "Ctrl-C is safe — the same command resumes this enrollment; `--wait <seconds>` caps the \
          wait."
@@ -2259,7 +2270,7 @@ fn block_on_pending<T>(
     // The authorization code the local hand-off delivered, once it has. Held here rather than
     // re-derived: it exists exactly once, in exactly one place.
     let mut captured: Option<String> = None;
-    let mut listener = loopback.and_then(|plan| {
+    let mut listener = loopback.map(|plan| {
         let bound = plan.listener;
         let url = ops::loopback::approval_url(
             &disc.verification_uri,
@@ -2273,9 +2284,22 @@ fn block_on_pending<T>(
             .map(|out| out.success)
             .unwrap_or(false);
         if opened {
-            eprintln!("Opening your browser to approve — or use the URL and code above.");
+            eprintln!("Opening your browser to approve.");
+        } else {
+            // The open failed, but the FLOW IS ALREADY LOOPBACK-BOUND — its credential can only
+            // be redeemed with the code this listener receives. Falling back to the bare
+            // typed-code page would strand the login: approving there mints a code with nowhere
+            // to go, and the CLI would wait out the whole TTL for a redirect that can never
+            // come. So keep listening and hand the person the URL that carries the return
+            // coordinates; pasting it completes the ceremony exactly as the auto-open would.
+            eprintln!(
+                "Could not open a browser. Open this URL to approve:\n  {url}\n\
+                 (it returns the approval to this terminal — the code above is only for a \
+                 different machine's browser, which cannot complete this login)"
+            );
         }
-        opened.then_some(bound)
+        // Kept either way: the listener is the only door for a loopback-bound flow.
+        bound
     });
     let interval = disc.poll_interval();
     // The live waiting line: honest time (elapsed + the code's expiry countdown), rewritten in

@@ -267,9 +267,14 @@ export const loginFlow = webSchema.table(
       "login_flow_auth_code_binding_check",
       sql`${table.authCodeSha256} is null or ${table.binding} = 'loopback'`,
     ),
+    // A DEVICE flow mints its session at approval, so an approved row must name one. A LOOPBACK
+    // flow deliberately does NOT: its session is minted at the exchange, once the authorization
+    // code proves the redeemer is the machine that asked. Until then an approved row is consent
+    // recorded and nothing more — which is the point, because a credential that exists before
+    // that proof is a credential the approval's phisher already holds.
     check(
       "login_flow_approved_check",
-      sql`${table.status} <> 'approved' or ${table.sessionId} is not null`,
+      sql`${table.status} <> 'approved' or ${table.sessionId} is not null or ${table.binding} = 'loopback'`,
     ),
   ],
 );

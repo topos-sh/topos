@@ -1,16 +1,12 @@
-//! The LOOPBACK approval listener — zero-typing browser enrollment.
+//! The loopback hand-off — the local half of an RFC 8252 login.
 //!
-//! When a local browser is available, the enrollment wait binds an ephemeral `127.0.0.1`
-//! listener, auto-opens the approval page (carrying the flow's device-code CHALLENGE — the hex
-//! of its SHA-256, the same value the server keys the flow row by, so the page resolves the
-//! request with zero typing; the short code itself never rides a URL), and receives the outcome
-//! as ONE state-bound single-use localhost redirect. The redirect carries NOTHING sensitive —
-//! `state` (minted per ceremony, matched exactly, spent on first receipt) and the outcome word —
-//! and the CLI's ordinary `device/token` POLL stays the source of truth: a lost or spoofed
-//! redirect changes nothing but the wake-up latency. The typed-code flow stays the SSH/headless
-//! fallback, chosen automatically ([`choose_browser`]).
-//!
-//! `std::net::TcpListener` only — no server crate enters the client graph.
+//! An ephemeral `127.0.0.1` listener, bound BEFORE the flow starts (its existence is what lets
+//! the start declare the flow loopback-bound), receives the approval redirect. For a
+//! loopback-bound flow that redirect CARRIES THE AUTHORIZATION CODE — the second of the two
+//! secrets the token exchange needs — so this is no longer an advisory wake-up: losing it means
+//! the login cannot complete, and receiving it is what proves this machine is the one that
+//! asked. The `state` parameter binds the redirect to this ceremony; a stray or mismatched
+//! request is 404'd and kept listening for.
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -58,7 +54,10 @@ impl LoopbackListener {
     /// FIRST request whose `state` matches (spending it — the caller stops listening). Anything
     /// else (a stray probe, a wrong state, a favicon fetch) gets a plain 404 and keeps nothing.
     pub(crate) fn try_receive(&self) -> Option<LoopbackOutcome> {
-        loop {
+        // Bounded per tick: each accepted connection costs up to a second of wall clock, and this
+        // runs on the CLI's own thread between polls. A local flood must not stall the wait loop;
+        // anything not drained now is still queued for the next tick.
+        for _ in 0..8 {
             match self.listener.accept() {
                 Ok((stream, _)) => {
                     if let Some(outcome) = answer_connection(stream, &self.state) {
@@ -69,6 +68,7 @@ impl LoopbackListener {
                 Err(_) => return None,
             }
         }
+        None
     }
 }
 
@@ -83,7 +83,11 @@ fn answer_connection(mut stream: TcpStream, state: &str) -> Option<LoopbackOutco
     // short query values, so anything past the cap is not our redirect.
     let mut raw = Vec::new();
     let mut buf = [0u8; 1024];
-    while !raw.contains(&b'\n') && raw.len() < 8192 {
+    // WALL-CLOCK bounded, not just per-read: the 500 ms timeout above resets on every byte, so a
+    // local process trickling one byte at a time could otherwise hold this call — and with it the
+    // CLI's main thread — indefinitely. One second is far more than a loopback redirect needs.
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while !raw.contains(&b'\n') && raw.len() < 8192 && std::time::Instant::now() < deadline {
         match stream.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => raw.extend_from_slice(&buf[..n]),
