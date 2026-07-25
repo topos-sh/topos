@@ -56,4 +56,12 @@ export const ossNav: NavEntry[] = [
     icon: "laptop",
     section: "account",
   },
+  {
+    // The documentation site, served at a subpath of this same origin.
+    id: "docs",
+    label: "Docs",
+    href: () => "/docs",
+    icon: "book-open",
+    section: "account",
+  },
 ];

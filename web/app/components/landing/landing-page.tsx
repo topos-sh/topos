@@ -24,6 +24,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 const INSTALL = "curl -fsSL https://topos.sh/install | sh";
 const AGENT_SETUP_PROMPT = "Set up Topos for us: fetch https://topos.sh/agent and follow it.";
 const GITHUB = "https://github.com/topos-sh/topos";
+/** The documentation site — a subpath of this origin, so it rides the deployment's own domain. */
+const DOCS = "/docs";
 const WRAP = "mx-auto max-w-[1080px] px-6";
 
 /** The GitHub mark (octicon path), sized by className, inked by currentColor. */
@@ -242,6 +244,9 @@ export function LandingPage({
             <a href="#vs" className="transition-colors hover:text-ink max-sm:hidden">
               Why Topos
             </a>
+            <a href={DOCS} className="transition-colors hover:text-ink max-sm:hidden">
+              Docs
+            </a>
             <a
               href={GITHUB}
               target="_blank"
@@ -409,14 +414,8 @@ export function LandingPage({
                 Security model
                 <span className="sr-only"> (opens in a new tab)</span>
               </a>
-              <a
-                href={`${GITHUB}#readme`}
-                target="_blank"
-                rel="noreferrer"
-                className="transition-colors hover:text-ink"
-              >
+              <a href={DOCS} className="transition-colors hover:text-ink">
                 Docs
-                <span className="sr-only"> (opens in a new tab)</span>
               </a>
               <Link to="/app" className="transition-colors hover:text-ink">
                 Sign in

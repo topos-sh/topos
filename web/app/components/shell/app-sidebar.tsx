@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import {
+  BookOpen,
   Check,
   ChevronsUpDown,
   Hash,
@@ -68,6 +69,7 @@ const NAV_ICONS: Record<string, ElementType> = {
   users: Users,
   monitor: MonitorSmartphone,
   laptop: Laptop,
+  "book-open": BookOpen,
 };
 
 /**
