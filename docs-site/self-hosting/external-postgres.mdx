@@ -1,0 +1,136 @@
+---
+title: "Bring your own Postgres"
+description: "Point Topos at a managed or external database — roles, schemas, and the grant boundary."
+icon: "database"
+---
+
+The bundled `db` service is a convenience. To use a managed or external PostgreSQL instead, you
+provision the same roles, schemas, and grants once, then point each service at it.
+
+## What Topos needs in the database
+
+One database, **two roles, two schemas — one per application**:
+
+| Role | Owns | Also gets |
+|---|---|---|
+| `topos_plane` | schema `plane` — the version index, `current` pointers, upload bookkeeping | — |
+| `topos_web` | schema `web` — identity, seats, catalog, channels, profiles, invitations, proposals, audit | `SELECT` on `plane` |
+
+The boundary is enforced by **grants, not convention**: the app cannot write, alter, or create in
+`plane`; the vault cannot read `web`.
+
+Each role's `search_path` is set at the role level (`web, plane` for the app; `plane` for the vault),
+which matters — `SET ROLE` does not adopt a role-level search path, so the applications must **log
+in** as their own role.
+
+`ALTER DEFAULT PRIVILEGES` is applied so tables created by *future* vault migrations arrive already
+`SELECT`-granted to the app. There is no "re-run the grants after an upgrade" step.
+
+## Provision it
+
+The repository ships the exact recipe — the same script the bundled database runs on first boot. It
+is idempotent and safe to run by hand.
+
+```bash
+export PGHOST=db.example.com PGPORT=5432 PGUSER=<superuser> PGPASSWORD=<secret>
+
+POSTGRES_USER=<superuser> POSTGRES_DB=topos \
+TOPOS_PLANE_DB_PASSWORD=<secret> \
+TOPOS_WEB_DB_PASSWORD=<secret> \
+  sh scripts/compose-init-db.sh
+```
+
+It requires `psql` on your machine. What it does:
+
+<Steps>
+  <Step title="Creates the two login roles">
+    Guarded so a re-run is a no-op.
+  </Step>
+  <Step title="Locks the database down">
+    `REVOKE ALL ON DATABASE … FROM PUBLIC`, then grants `CONNECT` to both roles and `CREATE` to
+    `topos_web` only.
+  </Step>
+  <Step title="Creates the two schemas">
+    Each owned by its own role.
+  </Step>
+  <Step title="Sets role-level search paths">
+    `web, plane` for the app; `plane` for the vault.
+  </Step>
+  <Step title="Grants the cross-lane read">
+    `USAGE` on `plane` to `topos_web`, plus default privileges so future vault tables are covered.
+  </Step>
+</Steps>
+
+## Point the services at it
+
+Override both `DATABASE_URL`s and keep the bundled database down:
+
+```yaml
+# docker-compose.override.yml
+services:
+  plane:
+    environment:
+      DATABASE_URL: postgres://topos_plane:<secret>@db.example.com:5432/topos?sslmode=require
+  web:
+    environment:
+      DATABASE_URL: postgres://topos_web:<secret>@db.example.com:5432/topos?sslmode=require
+```
+
+```bash
+docker compose up -d --no-deps plane web
+```
+
+<Note>
+  Append `?sslmode=require` for any networked database. The vault speaks TLS to Postgres over rustls.
+</Note>
+
+Each application migrates its own schema at startup, before it binds a port — nothing to run by hand.
+
+## Verify the boundary
+
+The repository ships the check its own CI runs. It **logs in as each role** on a scratch database it
+creates and drops, and proves the grants really hold:
+
+```bash
+PGHOST=db.example.com PGPORT=5432 PGUSER=<superuser> PGPASSWORD=<secret> \
+  sh scripts/check-db-grants.sh
+```
+
+Add `--self-test` to also run a deliberately-broken variant, so you can see the check fail and know
+it is actually testing something.
+
+## Version and compatibility
+
+- The bundled image is **PostgreSQL 18**, digest-pinned. Match that major version.
+- The vault's migrations use compile-time-checked queries against committed metadata, so building
+  needs no database — only running does.
+- The app's migration ledger lives in `web.__drizzle_migrations`, deliberately inside the `web`
+  schema rather than a separate one, so a single dump carries both the tables and the ledger.
+
+<Warning>
+  **Upgrading the bundled Postgres major version is not an in-place tag bump.** The volume is mounted
+  at `/var/lib/postgresql` because PostgreSQL 18 moved its declared volume and data directory. An
+  existing pre-18 volume needs a dump and restore into the new layout. See
+  [Upgrades](/self-hosting/upgrades).
+</Warning>
+
+## Managed-database checklist
+
+<AccordionGroup>
+  <Accordion title="You need a superuser once">
+    Only to run the provisioning script. Afterwards the applications connect as their own
+    least-privileged roles.
+  </Accordion>
+  <Accordion title="Connection limits">
+    The vault's pool defaults to 10 connections; tune with `TOPOS_PLANE_DB_MAX_CONNECTIONS`. Budget
+    for both applications plus your own tooling.
+  </Accordion>
+  <Accordion title="Backups become your provider's job for metadata">
+    But **not** for bytes. The vault's `plane-data` volume still lives on your host and must be backed
+    up separately — see [Backups](/self-hosting/backups).
+  </Accordion>
+  <Accordion title="Statement timeouts">
+    `TOPOS_PLANE_DB_STATEMENT_TIMEOUT_SECS` and `TOPOS_PLANE_DB_LOCK_TIMEOUT_SECS` are off by default;
+    an idle-in-transaction timeout of 30 seconds is on. Set the others if your provider expects them.
+  </Accordion>
+</AccordionGroup>

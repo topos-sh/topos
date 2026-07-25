@@ -1,0 +1,116 @@
+---
+title: "Roll back a change"
+description: "Undo a release for the team, or go back on one machine — two different verbs."
+icon: "clock-rotate-left"
+---
+
+Something landed and it was wrong. Topos gives you two rollbacks with deliberately different scopes.
+
+<Columns cols={2}>
+  <Card title="For the team" icon="users">
+    ```bash
+    topos revert deploy --to <good> --yes
+    ```
+    Moves the workspace's `current`. Everyone picks it up at their next update.
+  </Card>
+  <Card title="For this machine" icon="laptop">
+    ```bash
+    topos update deploy@<hash>
+    ```
+    Local go-back only. The team is untouched.
+  </Card>
+</Columns>
+
+## Find the version you want
+
+```bash
+topos log deploy                    # version history with ids and messages
+topos diff deploy <a>..<b>          # compare two versions
+topos diff deploy @<hash>           # that version against current
+```
+
+In the browser, a skill's **History** tab walks the same history with the author, the first line of
+each message, and the file count.
+
+## Revert for the team
+
+```bash
+topos revert deploy --to 9f2c1a8b3d4e...        # describe
+topos revert deploy --to 9f2c1a8b3d4e... --yes  # apply
+```
+
+<Warning>
+  **`--to` names the version you are going back *to*** — the good one, the destination. Not the bad
+  one you are undoing. This trips people up exactly once.
+</Warning>
+
+It accepts a full 64-hex id or a unique prefix of at least 8 characters, and it is required.
+
+### It is a forward move
+
+A revert does not delete anything. The workspace records a **new** version whose bytes are the good
+version's, with the current one as its parent. So:
+
+- History stays complete and readable.
+- The revert is itself invertible — you can roll forward again.
+- A purged version cannot be a target, and that is refused explicitly.
+
+### It takes the same gate as publish
+
+| Skill protection | Your revert |
+|---|---|
+| `open` | Lands directly |
+| `reviewed` | Downgrades to a proposal; a reviewer approves it |
+
+`--yes` on `revert` also acknowledges a **no-op** — if the good version's bytes are already `current`,
+it tells you so instead of minting an empty change.
+
+### In the browser
+
+On a skill's History tab, non-head rows carry a **Roll back** control for owners and reviewers, with
+an in-place two-step confirm:
+
+> Roll back moves the team's current pointer to this version's bytes — a forward move, nothing is
+> deleted; you can roll forward again.
+
+It is bound to the generation the page was rendered against. If the pointer moved while you were
+looking, nothing is rolled back and the page refreshes against today's `current`.
+
+## Go back on one machine
+
+```bash
+topos update deploy@9f2c1a8b
+```
+
+This reconciles your machine to those bytes and leaves the team alone. Useful when you need to keep
+working against a known-good version while the team decides.
+
+It takes exactly one target. A hex suffix is recognized from 8 characters up; anything shorter is
+treated as part of the name, so a skill genuinely called `docs@abc123` still resolves.
+
+To come back to whatever the team is on:
+
+```bash
+topos update deploy
+```
+
+## When your own edits are in the way
+
+```bash
+topos diff deploy                        # what you changed
+topos update deploy --reset --yes        # discard your edits, take current
+topos update deploy --onto-current       # keep your bytes, drop the pending merge
+```
+
+`--reset` is loss-led: the describe opens with exactly what will be lost, and it refuses to run
+without a named skill — it will never reset everything at once.
+
+`--onto-current` is the other exit: your bytes win outright, and the changes the merge would have
+brought in are disclosed first. It requires exactly one target and works offline.
+
+## Recovering a leaked secret
+
+Reverting is not the tool — reverting moves a pointer, and the bad bytes remain fetchable in history.
+See the [secret-leak playbook](/concepts/versions-and-governance#the-secret-leak-playbook): publish a
+scrubbed version, watch the sessions page until every non-stale session is clean, **rotate the
+credential regardless**, then purge the poisoned versions.

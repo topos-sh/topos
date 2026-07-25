@@ -1,0 +1,164 @@
+---
+title: "Deploy"
+description: "From zero to a running deployment behind your own domain."
+icon: "rocket"
+---
+
+## Try it locally first
+
+```bash
+git clone https://github.com/topos-sh/topos && cd topos
+docker compose up --build
+```
+
+The app is on `http://localhost:3000`; the vault stays internal. This works out of the box with loud
+`change-me` defaults — fine for a laptop, **not** for anything real.
+
+## A real deployment
+
+### 1. Set the five values that must change
+
+Create a `.env` beside `docker-compose.yml`:
+
+```bash
+# The public origin, behind your reverse proxy. Required.
+TOPOS_PUBLIC_URL=https://topos.example.com
+
+# The app's session-signing secret — MUST be at least 32 characters.
+TOPOS_WEB_AUTH_SECRET=<openssl rand -hex 32>
+
+# The app↔vault internal bearer. Both services read it; they must match.
+TOPOS_INTERNAL_TOKEN=<openssl rand -hex 32>
+
+# The two database roles' passwords.
+TOPOS_PLANE_DB_PASSWORD=<openssl rand -hex 16>
+TOPOS_WEB_DB_PASSWORD=<openssl rand -hex 16>
+
+# Optional: the first workspace's address slug. Default: team
+TOPOS_WORKSPACE_NAME=acme
+```
+
+<Warning>
+  Compose does **not** expand `$(…)` in a `.env` file. Generate the values first and paste the
+  literals in.
+
+  ```bash
+  openssl rand -hex 32
+  ```
+</Warning>
+
+<Note>
+  `TOPOS_PUBLIC_URL` is deliberately **not** defaulted. Left empty, the app falls back to the
+  request's own origin — which is what makes a bare `docker compose up` reachable from another
+  machine on your LAN. Behind a proxy you must set it. See
+  [TLS and reverse proxy](/self-hosting/tls-and-proxy).
+</Note>
+
+### 2. Bring it up
+
+```bash
+docker compose up -d --build
+```
+
+Both images build from source; the database provisions its roles, schemas, and grants on the first
+boot of a fresh volume; and each application migrates its own schema at startup, before it serves
+anything.
+
+### 3. Claim the workspace
+
+```bash
+docker compose logs -f web | grep 'Finish setup:'
+```
+
+```
+→ Finish setup: https://topos.example.com/claim?code=…
+```
+
+Open it and create the first account. That seats you as **owner**. The link is single-use, and only
+the code's hash is ever stored. Full walkthrough: [First run](/self-hosting/first-run).
+
+### 4. Point your proxy at it
+
+Terminate TLS at your proxy and forward to `http://web:3000`. Caddy, for example:
+
+```caddy
+topos.example.com {
+    reverse_proxy web:3000
+}
+```
+
+The vault needs no route at all. Details and the `x-forwarded-for` caveat:
+[TLS and reverse proxy](/self-hosting/tls-and-proxy).
+
+### 5. Connect a machine
+
+```bash
+topos login https://topos.example.com
+```
+
+Approve at `<origin>/verify`, and you are publishing.
+
+## Verify the deployment
+
+The repository ships the same smoke test its CI runs — the best single answer to *"is my build
+actually working?"*:
+
+```bash
+sh scripts/compose-smoke.sh
+```
+
+It asserts, end to end, that the vault publishes no host port, `/healthz` answers, the first document
+renders, the setup line is printed, the protocol card is byte-identical across paths and declares the
+right API base, an unknown bearer gets the uniform 404, the claim ceremony works and its code dies on
+use, and a signed-in dashboard renders — which proves the cross-schema grant.
+
+Quick manual checks:
+
+```bash
+curl -fsS https://topos.example.com/healthz
+curl -fsS -H 'Accept: application/json' https://topos.example.com
+# → {"schema_version":1,"card":"topos-protocol-card","api_base_url":"https://topos.example.com/api"}
+```
+
+<Warning>
+  If `api_base_url` comes back as `http://…` or `localhost`, `TOPOS_PUBLIC_URL` is wrong. The CLI
+  **refuses** to connect when an `https` address hands it a plain-`http` API base — that refusal is
+  the symptom.
+</Warning>
+
+## Deploying without the bundled Postgres
+
+See [External Postgres](/self-hosting/external-postgres). In short: run
+`scripts/compose-init-db.sh` once against your server, override each service's `DATABASE_URL`, and
+start with `--no-deps` so the bundled `db` stays down.
+
+## Known rough edges
+
+Stated plainly so you are not surprised:
+
+<AccordionGroup>
+  <Accordion title="No published web image">
+    Only the vault is published as `ghcr.io/topos-sh/topos-plane`. The app is built from source by
+    the compose file. Budget for a build on each upgrade, or build and push it yourself in CI.
+  </Accordion>
+  <Accordion title="No compose healthchecks on web or plane">
+    Only the database has one. `web` waits for `plane` to *start*, not to become healthy — so on a
+    very first boot the app can render before the vault has finished migrating. It settles on its
+    own; the smoke test retries for exactly this reason.
+  </Accordion>
+  <Accordion title="The agent-skills discovery routes need the skill directory">
+    `/.well-known/agent-skills/…` reads the built-in skill's source from `BUILTIN_SKILL_DIR`
+    (default `../skills/topos`), and the runtime web image does not currently carry that directory.
+    Those routes will fail in the composed deployment. Everything else — including `/agent`, the
+    installer, the protocol card, and the whole API — is unaffected.
+  </Accordion>
+  <Accordion title="The password-recovery script is not in the image">
+    `web/scripts/mint-recovery-code.mjs` is not copied into the runtime image, so the mail-less
+    recovery path must be run from a checkout against the same `DATABASE_URL`, or the file copied in
+    with `docker compose cp`. See [Mail](/self-hosting/mail#no-smtp-and-a-forgotten-password).
+  </Accordion>
+  <Accordion title="Turn the API rate belt off without a proxy">
+    The `/api/v1` belt keys on the last `x-forwarded-for` hop. With no proxy in front, every caller
+    shares one bucket. Set `TOPOS_WEB_RATELIMIT=off` and rely on your ingress instead.
+  </Accordion>
+</AccordionGroup>

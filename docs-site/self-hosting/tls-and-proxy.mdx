@@ -1,0 +1,147 @@
+---
+title: "TLS and reverse proxy"
+description: "Terminate TLS at your proxy, pin the public URL, and forward the right headers."
+icon: "lock"
+---
+
+Topos serves plain HTTP and is designed to sit behind a TLS-terminating reverse proxy — Caddy, nginx,
+Traefik, or your platform's load balancer. Nothing in the repository terminates TLS or manages
+certificates; that is your proxy's job, and it does it better.
+
+**The app is the only public service.** Forward to `http://web:3000`. The vault never needs a route.
+
+## Examples
+
+<Tabs>
+  <Tab title="Caddy">
+    ```caddy
+    topos.example.com {
+        reverse_proxy web:3000
+    }
+    ```
+
+    Caddy sets `X-Forwarded-For` and obtains certificates automatically.
+  </Tab>
+  <Tab title="nginx">
+    ```nginx
+    server {
+        listen 443 ssl http2;
+        server_name topos.example.com;
+
+        ssl_certificate     /etc/letsencrypt/live/topos.example.com/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/topos.example.com/privkey.pem;
+
+        client_max_body_size 200m;
+
+        location / {
+            proxy_pass http://web:3000;
+            proxy_set_header Host              $host;
+            proxy_set_header X-Real-IP         $remote_addr;
+            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+    ```
+  </Tab>
+  <Tab title="Traefik (compose labels)">
+    ```yaml
+    web:
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.topos.rule=Host(`topos.example.com`)
+        - traefik.http.routers.topos.tls=true
+        - traefik.http.routers.topos.tls.certresolver=le
+        - traefik.http.services.topos.loadbalancer.server.port=3000
+    ```
+  </Tab>
+</Tabs>
+
+## Pin the public URL
+
+```bash
+TOPOS_PUBLIC_URL=https://topos.example.com
+```
+
+<Warning>
+  **This is mandatory behind a proxy.** The container speaks plain HTTP, so a request-derived origin
+  would be `http://…` — and the CLI **refuses the downgrade**:
+
+  ```
+  refusing to connect: the address is https but the card declares a plain-http API base
+  ```
+
+  That refusal is the symptom of a missing or wrong `TOPOS_PUBLIC_URL`.
+</Warning>
+
+It drives everything outward-facing: workspace addresses, the API base in the protocol card,
+invitation and verification links, the printed setup link, and the canonical-host redirect.
+
+It is deliberately **not** defaulted in compose. Left empty, the app falls back to the request's own
+origin, which is what makes a bare `docker compose up` reachable from another machine on your LAN. A
+`localhost` default would make localhost canonical and redirect every remote browser home.
+
+### The canonical redirect
+
+With `TOPOS_PUBLIC_URL` set, a **browser** request arriving on a different host gets a constant `301`
+to the same path on the canonical origin.
+
+Machine traffic passes untouched — protocol-card fetches, `/api` calls, and claim reads are never
+redirected. So an alias hostname is safe for clients and tidy for humans.
+
+## Forwarded headers
+
+The `/api/v1` rate belt and the public-read and sign-in belts key on the **last**
+`x-forwarded-for` hop.
+
+<Warning>
+  With **no** proxy in front, every caller shares one bucket. Set `TOPOS_WEB_RATELIMIT=off` and rely
+  on your ingress for rate limiting.
+</Warning>
+
+Make sure your proxy appends to `X-Forwarded-For` rather than replacing it, and does not let a client
+spoof the last hop.
+
+## Body size
+
+A publish carries bundle bytes. The vault accepts roughly 160 MiB on its ingest routes, so give your
+proxy comparable headroom (`client_max_body_size` in nginx; Caddy and Traefik do not cap by default).
+
+## What must never be exposed
+
+<Warning>
+  **The vault must not be publicly reachable.** It publishes no port in the bundled compose file.
+  Do not add one, do not proxy it, and do not put it on a public network.
+
+  Its internal lane is bearer-gated, and with the token unset the entire lane answers a uniform 404 —
+  but the correct posture is that it has no route from outside at all.
+</Warning>
+
+The database likewise publishes no port.
+
+## Verifying
+
+```bash
+curl -fsS https://topos.example.com/healthz
+# {"ok":true}
+
+curl -fsS -H 'Accept: application/json' https://topos.example.com
+# {"schema_version":1,"card":"topos-protocol-card","api_base_url":"https://topos.example.com/api"}
+```
+
+If `api_base_url` says `http://…` or `localhost`, fix `TOPOS_PUBLIC_URL` before anyone tries to log
+in.
+
+<Note>
+  **Probing gotcha.** The card is served on *every* path to any non-browser fetch, so a bare `curl`
+  of a page returns the card, not HTML. To see the browser surface, ask for it:
+
+  ```bash
+  curl -fsS -H 'Accept: text/html' https://topos.example.com
+  ```
+</Note>
+
+Then the real test:
+
+```bash
+topos login https://topos.example.com
+```

@@ -1,0 +1,131 @@
+---
+title: "Upgrades"
+description: "Upgrading the server, keeping clients in step, and the one caveat that bites."
+icon: "arrow-up-right-dots"
+---
+
+## Upgrading the server
+
+```bash
+git pull                        # or: git checkout v0.1.7
+docker compose up -d --build
+docker compose logs -f web      # confirm the boot migration ran
+```
+
+Both applications migrate their own schema **at boot, before binding a port** — the vault's on
+connect, the app's as the first thing it does. There is no migration command to run by hand, and a
+broken migration crashes the boot loudly rather than serving an unmigrated database.
+
+<Warning>
+  **Back up first.** Migrations are applied automatically, and there is no automated downgrade path.
+  See [Backups](/self-hosting/backups) — bytes first, then the database.
+</Warning>
+
+Because only the vault has a published image, `--build` rebuilds the web app from source. On a small
+box that is the slow part of the upgrade; building and pushing your own image in CI is a reasonable
+optimization.
+
+There is no documented zero-downtime procedure. For a team-sized deployment, a brief restart is the
+expected shape.
+
+## Verify afterwards
+
+```bash
+curl -fsS https://topos.example.com/healthz
+curl -fsS -H 'Accept: application/json' https://topos.example.com
+sh scripts/compose-smoke.sh          # the full packaging smoke, if you want certainty
+```
+
+## The Postgres major-version caveat
+
+<Warning>
+  **An in-place tag bump across a Postgres major version will not start.**
+
+  The volume is mounted at `/var/lib/postgresql` — not `…/data` — because PostgreSQL 18 moved its
+  declared volume and data directory. An existing pre-18 volume needs a `pg_dump` and restore into
+  the new layout.
+</Warning>
+
+The bundled image is digest-pinned at PostgreSQL 18, so this only bites if you are coming from an
+older deployment or you change the pin yourself.
+
+## Upgrading the CLI
+
+Each machine updates its own binary:
+
+```bash
+topos self-update            # replace the running binary
+topos self-update --check    # only report whether a newer release exists
+topos self-update --version v0.1.7   # pin, including a downgrade
+```
+
+Signature verification is **mandatory and fail-closed**, checked before the checksum. A verified
+upgrade reports `"signed": true`.
+
+`self-update` touches no skills, no workspace, and no account — skills are updated by `topos update`.
+
+## Client ↔ server compatibility
+
+<Note>
+  **There is no negotiated compatibility mechanism** — no minimum-client header, no server-declared
+  version, no user-agent gate. Being straight about this rather than implying a guarantee.
+</Note>
+
+What *is* stable:
+
+- The wire envelope's `schema_version: 1`.
+- The protocol card's constant discriminant and shape.
+- The client's on-disk document version.
+
+Practical guidance: **keep the CLI and the server on the same `0.x` line.** Upgrade the server, then
+tell people to run `topos self-update`. The only refusal a client makes on its own is against a
+response that is not a valid protocol card.
+
+## Versioning
+
+Topos is pre-1.0 and versioned with SemVer, with one local rule:
+
+- **Pre-1.0 releases bump the patch** — features and fixes alike.
+- `0.MINOR` is reserved for milestone or compatibility-breaking shifts.
+- Release candidates are `vX.Y.Z-rc.N`.
+
+```bash
+topos --version
+```
+
+## Rolling back
+
+There is no automated database downgrade. To go back:
+
+<Steps>
+  <Step title="Stop the stack">
+    ```bash
+    docker compose down
+    ```
+  </Step>
+  <Step title="Restore the backup you took before upgrading">
+    Bytes, then database — see [Backups](/self-hosting/backups#restoring).
+  </Step>
+  <Step title="Check out the previous tag and rebuild">
+    ```bash
+    git checkout v0.1.6
+    docker compose up -d --build
+    ```
+  </Step>
+  <Step title="Pin clients to match">
+    ```bash
+    topos self-update --version v0.1.6
+    ```
+  </Step>
+</Steps>
+
+This is the honest reason to take the backup: rolling forward is automatic, rolling back is not.
+
+## Watching for releases
+
+Releases are published on
+[GitHub](https://github.com/topos-sh/topos/releases), signed with minisign and carrying Sigstore
+build-provenance attestations. Each signature's trusted comment is bound to its release, so a
+signature cannot be replayed under a different tag.
+
+Verification commands: [Install](/install#verifying-a-release-yourself).

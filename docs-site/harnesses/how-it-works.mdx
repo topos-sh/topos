@@ -1,0 +1,155 @@
+---
+title: "How harness integration works"
+description: "A harness is which directories to read and write, plus when an update check fires."
+icon: "plug-circle-bolt"
+---
+
+Topos does not translate between agent formats. It places the **same bytes** in the directories each
+harness reads, and arranges for an update to run at the right moment.
+
+> A harness is **which directories to read and write** plus **when an update check fires.**
+
+That is the whole abstraction. There is no dialect translation, no frontmatter rewriting, and no
+second permission system — how much a human sits in the loop belongs to your harness, not to Topos.
+
+## Three tiers of support
+
+<AccordionGroup>
+  <Accordion title="auto-update — Topos installs a trigger" icon="bolt">
+    Topos installs an update trigger inside the harness itself — a session-start hook, or a scheduled
+    job where that is what the harness offers. Managed skills refresh silently and are current before
+    the agent uses them.
+
+    Some harnesses require **their own one-time approval** before they will run an installed trigger.
+    Until you grant it, Topos reports the trigger honestly as *not yet active* and that harness
+    behaves like the delivery tier.
+  </Accordion>
+  <Accordion title="delivery — placed and refreshed, no trigger" icon="truck">
+    Topos installs no trigger inside that harness, but every managed skill is still placed into its
+    skills directory whenever the harness is detected, and refreshed by **every** update sweep on the
+    machine — whether that sweep came from another harness's hook, a scheduled job, or a manual
+    `topos update`.
+
+    Most harnesses rescan their skills directory at session start, so they pick changes up on their
+    own.
+  </Accordion>
+  <Accordion title="discover + add — project-scoped conventions only" icon="magnifying-glass">
+    Harnesses with no user-level skills directory. Topos can find and adopt skills sitting there, but
+    has no machine-wide place to deliver into.
+  </Accordion>
+</AccordionGroup>
+
+See [Supported harnesses](/harnesses/supported) for the full table.
+
+## The trigger
+
+Every trigger runs the same, byte-stable line:
+
+```sh
+command -v topos >/dev/null 2>&1 && topos update --quiet || true  # topos:currency
+```
+
+Each part earns its place:
+
+- `command -v topos` guards a machine where the binary was removed.
+- `--quiet` keeps stdout near-silent so hook output never pollutes a session.
+- `|| true` keeps the hook's exit status zero.
+- `# topos:currency` is the ownership sentinel — it is how Topos recognizes its own line and never
+  touches yours.
+
+Triggers are installed at the moments Topos wires into a harness (a completed login, an adopt) and
+scrubbed by `topos uninstall --yes`.
+
+Every adapter is **idempotent**, sentinel-keyed, and **fails closed**: if the config's shape cannot
+be proven, it reports degraded and writes nothing. And Topos **never writes another program's trust
+or consent state** — where a harness gates hooks behind its own allowlist, Topos reads that as
+evidence and leaves it alone.
+
+## What a quiet sweep does
+
+```bash
+topos update --quiet
+```
+
+- **Self-throttles.** A single-flight lock plus a TTL (default 300 seconds; set with `--ttl` or
+  `TOPOS_UPDATE_TTL`, `0` disables). So a hook may fire on every session event cheaply.
+- **Emits nothing** when nothing changed.
+- **Never fails a session start.** An auth or transport blip warns and exits `0`. Only a genuinely
+  local failure exits non-zero.
+- **Overrides `--json`.**
+- Where the harness supports it, a sweep that changed bytes answers with the harness's own
+  hook-output JSON so pulled skills go live in the **same** session rather than the next one.
+
+An explicit, non-quiet `topos update` always runs the full sweep, ignoring the throttle.
+
+## Where bytes land
+
+**Person scope**, under `$HOME` — shared-directory-first:
+
+- one copy in `~/.agents/skills/<name>` when at least one detected harness reads that shared
+  convention, **plus**
+- one native copy per detected harness that does not.
+
+**Project scope**, rooted at your checkout:
+
+- `<project>/.agents/skills/<name>` for harnesses covered by the shared convention,
+- the harness's own project directory otherwise (`.claude/skills`, `.factory/skills`, …),
+- `<project>/.claude/skills` as the default shape when nothing is detected.
+
+A `[placement]` entry in `topos.toml` overrides all of this with one project-relative directory —
+harness-independent, one location every agent reads.
+
+<Warning>
+  A committed manifest may never place files outside its own checkout. Absolute values, `..` climbs,
+  and symlink escapes are ignored.
+</Warning>
+
+### Never clobbered
+
+A directory is chosen only when it is free, or when Topos's own record already owns it. A byte-identical
+occupant is **adopted in place** rather than duplicated. If a harness stops being detected, its
+placement is **frozen**, never deleted. Name collisions across workspaces get a workspace suffix
+(`deploy-acme`), then a counter.
+
+### Kept out of commits
+
+Every landed project placement appends one line to `.git/info/exclude`, under a one-time header:
+
+```
+# topos-managed skills (placed by `topos update`; not committed)
+/.claude/skills/code-review/
+```
+
+Idempotent, and it resolves the real git directory correctly through a `.git` file or a linked
+worktree. **Committed ignore files are never touched.** A failure here is a warning, not a failed
+update.
+
+## Discovering what is already there
+
+```bash
+topos list             # includes untracked skills sitting in any known harness's dir
+topos list --tracked   # only what topos manages
+topos status           # per-skill: the winning reference, its source, its state
+```
+
+That is how you adopt what a teammate hand-copied into a skills folder months ago:
+
+```bash
+topos add ./path/to/that-skill      # adopt in place — offline, no account
+topos publish that-skill            # then share it, if it deserves it
+```
+
+## Current implementation status
+
+Being straight about the shape of support today:
+
+- **Placement** reaches every detected harness in the registry — that is the delivery tier, and it is
+  broad.
+- **Full adapters** (placement plus trigger management plus discovery) exist for Claude Code,
+  OpenClaw, and Hermes Agent, and the active adapter selected today is **Claude Code**.
+- **Breadth triggers** are additionally installed for nine more harnesses: Amp, Cline, Codex, Cursor,
+  Droid, Gemini CLI, GitHub Copilot, Goose, and OpenCode.
+- Some trigger shapes are confirmed against a live build; others follow vendor documentation. Codex
+  and Gemini CLI never report *active* until you grant their own hook approval.
+
+`topos status` tells you the truth for your machine — per agent, `armed`, `not armed`, or `unknown`.

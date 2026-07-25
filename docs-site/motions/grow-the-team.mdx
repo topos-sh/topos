@@ -1,0 +1,153 @@
+---
+title: "Grow the team"
+description: "Invite people, set roles, manage sessions, and remove access."
+icon: "user-plus"
+---
+
+<Note>
+  **Agents distribute behaviors; they do not manage people.** `invite` is the one roster verb in the
+  CLI. Reading the roster, changing roles, removing members, and leaving a workspace are browser
+  acts, deliberately.
+</Note>
+
+## Invite
+
+Inviting is **owner-only** and **requires mail to be configured** — the mailbox round-trip *is* the
+identity proof.
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    topos invite dev@acme.com ops@acme.com             # describe
+    topos invite dev@acme.com --channel backend --yes  # apply, with a first destination
+    topos invite deploy@acme.com --skill deploy --yes
+    topos invite                                       # read-only: the address and the policy
+    ```
+
+    At most one of `--skill` / `--channel`. The hint prefills the newcomer's profile when they accept,
+    so they land already carrying the set.
+
+    A bare `invite` with no addresses mutates nothing and says so — it prints the workspace address
+    and the invite policy.
+  </Tab>
+  <Tab title="Browser">
+    On the **Members** page: **Invite by email** takes several addresses separated by spaces or
+    commas.
+
+    > Invitations lapse after 7 days. Inviting an address again re-sends the mail and re-arms the
+    > clock.
+  </Tab>
+</Tabs>
+
+**Every invitee starts as a member.** There is no role picker on the invite form — roles are raised
+afterwards on the roster.
+
+The invitation token travels only in the mail. The inviter never sees the link.
+
+## What the invitee does
+
+The mail carries three routes, in order: a browser link, a paste-block for their agent, and
+`topos login <invite-url>`.
+
+Opening the link shows who invited them, which workspace, the first skill or channel if one was
+hinted, and that joining seats them and delivers the team's skills to their agents.
+
+The accept is **email-bound**:
+
+| Their situation | What they see |
+|---|---|
+| Signed in as the invited address | One **Accept invitation** click |
+| Signed in as someone else | Both addresses named, and **Sign out and continue as \<email\>** — it never accepts as the wrong account |
+| Not signed in, account exists | **Sign in as \<email\> to accept** |
+| Not signed in, no account | An account mint, born verified — the token arrived in that mailbox, which is the proof |
+| Mailbox not yet verified | A prompt to send the verification mail first |
+
+They can also **decline**, which is recorded and visible to the inviter, and re-invitable.
+
+Every dead token — invalid, expired, revoked, already used — renders one constant page naming neither
+the workspace nor the email.
+
+Accepting applies the hint as a profile line. **Nothing lands on any machine from a browser accept** —
+bytes arrive when they run `topos login` on a machine.
+
+## Roles
+
+On the **Members** page, owner-only, behind a **Change role** control with a two-step confirm.
+
+| Role | Adds |
+|---|---|
+| **member** | Self-scoped verbs; publish to open skills; create channels; curate open channels |
+| **reviewer** | Approve/reject proposals, roll back, curate curated channels, see everyone's sessions |
+| **owner** | Invitations, roles, removal, loosening protection, archive/delete, workspace settings |
+
+**Ownership transfers by promotion:** make someone else an owner first. The workspace must always
+keep an owner, so the last owner can be neither demoted nor removed nor allowed to leave.
+
+## Pending invitations
+
+Visible to every member on the Members page; revoking is owner-only.
+
+Each row shows the address, a `pending` or `declined` chip, who invited them, and when it lapses
+(`lapses in 6 hours`, `lapses in 3 days`, `lapsed`).
+
+There is no separate resend control — **re-inviting is resending**, and it mints a fresh link that
+kills the old one.
+
+## Remove access
+
+<AccordionGroup>
+  <Accordion title="Remove a member — owner, Members page">
+    Removing the seat also **ends that person's sessions in this workspace**, in the same
+    transaction. Two-step confirm; the last owner cannot be removed.
+
+    Their local copies stay theirs. Removal stops future delivery; it does not reach onto a machine
+    and delete files.
+  </Accordion>
+  <Accordion title="Remove one session — owner, Settings → Sessions">
+    Ends delivery and reporting for exactly that machine-and-workspace pair.
+
+    > The copies already on the machine stay put and must be chased by hand where it matters.
+  </Accordion>
+  <Accordion title="Leave — anyone, on their own seat">
+    > Leaving removes your seat and cuts off every one of your machines from this workspace. The
+    > local copies you already hold stay yours.
+
+    A sole owner is refused until they promote someone else.
+  </Accordion>
+</AccordionGroup>
+
+## Watch the fleet
+
+**Settings → Sessions** is where a lead answers *"is everyone current? did the revert land?"*
+
+Owners and reviewers see the whole workspace grouped by person; a member sees only their own.
+
+Each session shows its machine name, a status chip with an explaining tooltip, when it logged in and
+was last seen, and its **per-skill applied state** — `current` or `behind`, with the applied version
+id.
+
+| Chip | Means |
+|---|---|
+| **fresh** | Reported within the staleness window |
+| **stale** | No report within the window. Sessions report when an agent runs, so an idle machine reads stale — unconfirmed, not wrong |
+| **never reported** | Logged in, but nothing has synced on it yet |
+| **expired** | Past the workspace's session expiry — the machine logs in again |
+
+Owners can **Approve**, **Reject**, and **Remove** sessions, each with a two-step confirm. People end
+their own from `/account/sessions` or with `topos logout`.
+
+## Workspace policy
+
+Owners, on **Settings → General**:
+
+| Setting | Default | What it does |
+|---|---|---|
+| **Review gate** | off | Require review for every change — the default unpinned skills inherit |
+| **Staleness window** | 7 days | When a session reads *stale* on the sessions page (1 hour – 366 days) |
+| **Session approval** | off | New member logins wait for an owner's approval. An owner's own session is always born active |
+| **Session expiry** | none | How long a login lasts before the machine logs in again (1 hour – 366 days) |
+| **Registration** | invite-only | *Self-hosted single-workspace installs only.* Whether sign-up needs an invitation |
+| **Export skills** | — | Downloads every skill at its current version plus a manifest, as one zip |
+
+Each knob shows its own history line — *"Last set: 14 days, by Priya, 3 weeks ago"* — read from the
+audit ledger. Refused attempts are recorded but never pollute it.

@@ -1,0 +1,247 @@
+---
+title: "Troubleshooting"
+description: "Common refusals and what they actually mean."
+icon: "circle-question"
+---
+
+Start here, always — it is offline, read-only, and it names the manifest behind every row:
+
+```bash
+topos status
+topos auth status     # per-session access health, hook health, reporting posture
+```
+
+For detail on any failure:
+
+```bash
+TOPOS_DEBUG=1 topos <command>     # full source chain to stderr
+cat ~/.topos/log.jsonl            # it always lands here regardless
+```
+
+## Logging in
+
+<AccordionGroup>
+  <Accordion title="The login just exits without waiting">
+    That is correct behavior for a piped or `--json` run — it prints the approval URL, polls once,
+    and exits `0`. Re-run `topos login` to poll again, or pass `--wait <seconds>` to block.
+  </Accordion>
+  <Accordion title="refusing to connect: the address is https but the card declares a plain-http API base">
+    The server's `TOPOS_PUBLIC_URL` is unset or wrong, so it is advertising an `http://` (often
+    `localhost`) API base behind your `https://` proxy. Fix it on the server:
+
+    ```bash
+    curl -fsS -H 'Accept: application/json' https://topos.example.com
+    ```
+
+    See [TLS and reverse proxy](/self-hosting/tls-and-proxy#pin-the-public-url).
+  </Accordion>
+  <Accordion title="the address did not answer the topos protocol card — is it a topos server?">
+    Whatever is at that origin is not a Topos server, or a proxy is intercepting the request. Check
+    the same `curl` above.
+  </Accordion>
+  <Accordion title="No browser opens">
+    Deliberate when `SSH_CONNECTION`/`SSH_TTY` is set, when `TOPOS_NO_BROWSER` is set, under `--json`,
+    or when stdout is not a terminal and you did not pass `--wait`. Use the printed URL and code.
+  </Accordion>
+  <Accordion title="The session says it is awaiting approval">
+    The workspace has **session approval** turned on. An owner approves it on **Settings → Sessions**.
+    Nothing is delivered while it is pending.
+  </Accordion>
+  <Accordion title="A session suddenly reads ended">
+    The server answered its uniform 404 — the session was revoked, your seat was removed, or the
+    workspace is gone. These are deliberately indistinguishable. That workspace's items freeze in
+    place; nothing is deleted. `topos login <address>` reconnects.
+  </Accordion>
+  <Accordion title="topos logout --workspace acme is a usage error">
+    `logout` takes the workspace **positionally**: `topos logout acme`. The global `--workspace` flag
+    does not apply there. (This argument is currently missing from the generated reference;
+    `topos logout --help` shows it.)
+  </Accordion>
+</AccordionGroup>
+
+## Nothing arrives
+
+<AccordionGroup>
+  <Accordion title="A skill I added is not on disk">
+    ```bash
+    topos status
+    ```
+
+    Read the row. Common causes, in order: no manifest line actually asks for it here (the `add` may
+    have landed in a different manifest — the receipt named the file); an `excluded by …` sub-line in
+    a nearer layer; a `shadows …` line meaning a nearer layer won with different bytes; the skill has
+    no `current` pointer yet (published catalog-only); or your seats do not entitle you to it.
+  </Accordion>
+  <Accordion title="referenced by this project — not available with your current access">
+    The manifest asks for something your seats do not allow. Either you are not logged into that
+    workspace, or you have no seat there. The client says this from **local** knowledge only — it is
+    not confirming the thing exists.
+  </Accordion>
+  <Accordion title="Updates are not arriving automatically">
+    ```bash
+    topos status     # look at the auto-update triggers section
+    ```
+
+    A trigger can read *not armed* (nothing installed — re-run `topos login`, or `topos add` a skill)
+    or *unknown*. Some harnesses require **their own one-time approval** before they will run an
+    installed hook — Codex, Gemini CLI, and Goose — and Topos reports that honestly rather than
+    claiming success.
+
+    A manual `topos update` always works.
+  </Accordion>
+  <Accordion title="The sweep seems to do nothing">
+    A quiet sweep self-throttles (default 300 seconds). Bypass it:
+
+    ```bash
+    topos update            # an explicit non-quiet update always runs in full
+    topos update --quiet --ttl 0
+    ```
+  </Accordion>
+  <Accordion title="A skill landed in an unexpected directory">
+    Placement follows detected harnesses. `topos list --footprint` shows every path Topos owns. Pin it
+    explicitly with a `[placement]` entry in `topos.toml`.
+  </Accordion>
+</AccordionGroup>
+
+## Publishing
+
+<AccordionGroup>
+  <Accordion title="Your copy is behind the team's current">
+    ```bash
+    topos update <skill>     # rebase onto current, preserving your draft
+    topos publish <skill> --yes
+    ```
+
+    The publish describe predicts this before you try, with a merge preview.
+  </Accordion>
+  <Accordion title="Unchanged bytes are refused">
+    A no-op publish is refused. Nothing to ship.
+  </Accordion>
+  <Accordion title="--to acme names the workspace, not a channel">
+    Your publish already lands in `acme`. `--to` takes a **channel**: `--to everyone`, or
+    `--to @acme/channels/backend`.
+  </Accordion>
+  <Accordion title="There is no channel 'x' in acme">
+    `publish --to` never creates a channel. Create it in the browser (Channels → New channel) first,
+    or use an existing one.
+  </Accordion>
+  <Accordion title="It became a proposal instead of landing">
+    The skill's protection is `reviewed` — intended behavior, not a failure. A reviewer approves it,
+    or you loosen protection (`topos protect <skill> open --yes`, owner-only).
+  </Accordion>
+  <Accordion title="The describe refuses to adopt an untracked source">
+    Deliberate: adopting mints local state and arms a hook, which the describe will not do behind your
+    back. Run `topos add <source>` first, or `publish … --yes`.
+  </Accordion>
+  <Accordion title="A digest-pinned publish is refused">
+    The bytes changed since you pinned. Re-read the digest (`topos list --json`) and re-pin.
+  </Accordion>
+</AccordionGroup>
+
+## Reviewing
+
+<AccordionGroup>
+  <Accordion title="Approval refused — current moved">
+    Someone landed a change while you were reading. This is the point: approval is bound to the diff
+    you saw. Look again and re-approve.
+  </Accordion>
+  <Accordion title="--reject needs a reason">
+    `-m <reason>` is required, and it goes back to the author.
+  </Accordion>
+  <Accordion title="I proposed it and cannot approve it">
+    Four-eyes on a `reviewed` skill: a different owner or reviewer must approve. Your leg is
+    `--withdraw`.
+  </Accordion>
+  <Accordion title="The diff is truncated">
+    Under `--json` it is capped at 64 KiB by default, with a `FETCH_FULL_DIFF` next action carrying
+    the exact command. Or pass `--max-bytes 0`.
+  </Accordion>
+</AccordionGroup>
+
+## Drafts and conflicts
+
+<AccordionGroup>
+  <Accordion title="A skill is frozen with conflict markers">
+    The merge could not be resolved automatically. Two named exits:
+
+    ```bash
+    topos diff <skill>
+    topos update <skill> --reset --yes       # discard yours, take current
+    topos update <skill> --onto-current      # keep yours, drop the pending merge
+    ```
+
+    `--reset` describes exactly what will be lost first.
+  </Accordion>
+  <Accordion title="update --reset refuses to run">
+    It requires a named skill. It will never reset everything at once:
+
+    ```bash
+    topos update <skill> --reset --yes
+    ```
+  </Accordion>
+  <Accordion title="I edited a team skill by accident">
+    You made a draft, not a fork. `topos diff <skill>` shows it; `--reset` discards it; `publish`
+    offers it to the team. Nothing was lost either way.
+  </Accordion>
+</AccordionGroup>
+
+## Names
+
+<AccordionGroup>
+  <Accordion title="An ambiguous name">
+    It matches bundles in more than one connected workspace. The refusal lists every candidate as a
+    paste-ready qualified reference. Use one, or `--workspace <name>`.
+  </Accordion>
+  <Accordion title="`@name` alone names nothing">
+    A bare `@name` is invalid. Write `@<workspace>/<skill>` or `@<workspace>/channels/<name>`.
+  </Accordion>
+  <Accordion title="The '#' sigil is not part of topos references">
+    A channel is `@<workspace>/channels/<name>`. (`owner/repo#<ref>` for GitHub is a different thing
+    and still works.)
+  </Accordion>
+</AccordionGroup>
+
+## Self-hosting
+
+<AccordionGroup>
+  <Accordion title="The invite form says to configure mail">
+    All five `TOPOS_MAIL_SMTP_*` variables or none. Without mail, invitations admit nothing — see
+    [Mail](/self-hosting/mail).
+  </Accordion>
+  <Accordion title="curl returns JSON instead of the page">
+    Expected. The protocol card is served to any non-browser fetch. Ask for HTML:
+
+    ```bash
+    curl -fsS -H 'Accept: text/html' https://topos.example.com
+    ```
+  </Accordion>
+  <Accordion title="I lost the setup link">
+    While the workspace is **unclaimed**, every boot re-mints and re-prints it. Restart the app and
+    grep the logs. Once claimed, nothing further is printed.
+  </Accordion>
+  <Accordion title="/.well-known/agent-skills/... errors">
+    A known gap: the runtime web image does not carry the built-in skill's source directory
+    (`BUILTIN_SKILL_DIR`). Everything else, including `/agent`, is unaffected. See
+    [known rough edges](/self-hosting/deploy#known-rough-edges).
+  </Accordion>
+  <Accordion title="Rate limiting is hitting everyone at once">
+    The belt keys on the last `x-forwarded-for` hop. With no reverse proxy, every caller shares one
+    bucket — set `TOPOS_WEB_RATELIMIT=off`.
+  </Accordion>
+</AccordionGroup>
+
+## Still stuck
+
+```bash
+topos status --json
+topos auth status --json
+topos list --footprint
+TOPOS_DEBUG=1 topos <the failing command>
+```
+
+Then open an issue at [github.com/topos-sh/topos](https://github.com/topos-sh/topos/issues) with the
+envelope and the version from `topos --version`.
+
+<Warning>
+  `~/.topos/log.jsonl` can contain workspace and skill names. Skim it before pasting it anywhere.
+</Warning>

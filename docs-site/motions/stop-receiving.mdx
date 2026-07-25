@@ -1,0 +1,135 @@
+---
+title: "Stop receiving a skill"
+description: "Remove, exclude, and what happens to bytes you already have."
+icon: "circle-minus"
+---
+
+`topos remove` is the exact inverse of `topos add`. It edits the same manifest and prints the same
+kind of receipt, naming the file it touched and the command that puts it back.
+
+```bash
+topos remove code-review        # from this folder's reach
+topos remove code-review -g     # from your profile — every machine you log in
+```
+
+## Two outcomes, and the receipt says which
+
+<Columns cols={2}>
+  <Card title="The line is dropped" icon="minus">
+    Nothing broader was asking for it. The manifest simply loses the line.
+  </Card>
+  <Card title="An exclude is recorded" icon="ban">
+    A broader layer — your profile, a channel, the baseline — still provides it. Your layer records an
+    `exclude` line to subtract it.
+  </Card>
+</Columns>
+
+**An exclude is the only form of negative state in Topos.** There is no device exclusion table, no
+opt-out registry, no detachment record. If something is missing, one line in one readable file
+explains it, and `topos status` names that line.
+
+```bash
+topos status     # shows "excluded by <manifest>" sub-lines
+```
+
+Nearest wins, so a project exclude beats a profile entry inside that project.
+
+## Subtracting from the baseline
+
+The default `everyone` channel is implicitly in every member's profile. You cannot drop the baseline
+itself — it mirrors the roster — but you can subtract individual items from it:
+
+```bash
+topos remove noisy-skill -g     # records an exclude in your profile
+```
+
+<Note>
+  `remove -g` takes **exactly one** reference. Passing several is refused with the correct form. You
+  also cannot mix kinds in one batch — if some targets are manifest entries and some are not, the CLI
+  asks you to run separate invocations rather than guessing.
+</Note>
+
+## When it asks first
+
+Most removes apply immediately with an undo-led receipt, because they are reversible by their
+inverse. Two cases are two-phase, because loss is real:
+
+| Case | Behavior |
+|---|---|
+| The copy has **local edits ahead** | Describes what would be lost; `--yes` applies |
+| The copy is **local-only and never published** | The delete is permanent. Describes first; `--yes` applies |
+
+```bash
+topos remove my-local-skill          # describe — states that this is permanent
+topos remove my-local-skill --yes    # apply
+```
+
+The loss guard fails **toward** the gate: if the scan cannot determine whether there are local edits,
+it asks rather than assumes.
+
+## What happens to bytes you already have
+
+This is the part worth being precise about, because it differs by who acted.
+
+| Event | Who acted | Future updates | Your agent dirs | Your local copy |
+|---|---|---|---|---|
+| `topos remove` | you | stop for that scope | removed | dropped if permanent, else the managed copy goes |
+| Skill archived | the workspace | stop | cleaned at next update | **retained**, with your draft delta |
+| Skill dropped from the last channel delivering it | the workspace | stop | cleaned at next update | **retained** |
+| Channel deleted | the workspace | stop (if it was the last deliverer) | cleaned at next update | **retained** |
+| Your seat removed | an owner | stop | bytes stay, frozen | **kept — the copies are yours** |
+| Session ended or revoked | you or an owner | stop for that workspace | untouched, frozen in place | kept |
+| Skill deleted from the workspace | an owner | stop | cleaned | **retained — deletion cannot recall bytes** |
+
+The rule underneath: **upstream acts clean the agent directories** (managed distribution doing its
+job, with your bytes and your draft delta retained locally so you can keep it as your own), while
+**your own acts are yours to reverse**.
+
+Nothing reaches onto your machine to destroy work you did.
+
+## Ending a session instead
+
+If you want a whole workspace to stop delivering to this machine, that is a session act, not a
+removal:
+
+```bash
+topos logout acme
+```
+
+Skills, drafts, and manifests stay. That workspace's items freeze in place. `topos login` resumes.
+
+## Leaving a workspace
+
+Leaving is a browser act, on the Members page:
+
+> Leaving removes your seat and cuts off every one of your machines from this workspace. The local
+> copies you already hold stay yours.
+
+A sole owner is refused until they promote someone else.
+
+## Opting out of the built-in skill
+
+```bash
+topos remove topos --yes    # durable opt-out for this machine
+topos add topos             # bring it back
+```
+
+This is recorded on the machine, so the update sweep stops re-placing it.
+
+## Removing Topos entirely
+
+```bash
+topos uninstall          # describe: hook paths, sidecar paths, the binary's path
+topos uninstall --yes    # apply
+```
+
+It scrubs the auto-update triggers from your harness configs and deletes `~/.topos/`.
+
+**It never deletes a skill byte.** Everything in your agent directories stays exactly where it is —
+they just stop being managed. The binary is not self-deleted; its path is printed.
+
+Curious what that would touch, before running it?
+
+```bash
+topos list --footprint
+```

@@ -1,0 +1,143 @@
+---
+title: "Manifests and scopes"
+description: "topos.toml, your profile, and the layer that wins — the demand side of the model."
+icon: "file-code"
+---
+
+A **scope is a manifest**. What an agent working in a directory should have is decided by the
+manifests that cover that directory, plus the profile that follows you around. Nothing else.
+
+## The four layers
+
+Resolved **nearest first**, deduped by item *name*:
+
+<Steps>
+  <Step title="This folder's topos.toml">
+    Committed, travels with the repo. Every teammate's agents get the same set here. Created by
+    `topos init`, or automatically by `topos add` when none is in reach.
+  </Step>
+  <Step title="Ancestor folders' topos.toml">
+    Monorepo nesting — the walk goes up like git's. **The walk stops below `$HOME`**, so a manifest
+    in your home directory would never be read.
+  </Step>
+  <Step title="Your per-workspace profile">
+    One per (you × workspace), **stored on the server**. It roams to every machine you log in and is
+    editable in the browser — this is the whole story for people who never open a terminal. Every
+    member's profile implicitly includes the workspace's default channel.
+  </Step>
+  <Step title="Your personal manifest">
+    `~/.topos/topos.toml`. Unshared personal entries only — local folders attached to no workspace.
+    Machine-local by nature. This is what gives Topos a solo mode with no workspace at all.
+  </Step>
+</Steps>
+
+**The nearest layer that names an item wins whole.** A nearer mention — include *or* exclude —
+shadows every broader one. So a project can subtract a skill your profile provides, and you can read
+the line that did it.
+
+## The file
+
+`topos.toml` is edited by `topos add` / `topos remove`, and hand-editing is fine — comments and
+layout survive, because the writer edits the document rather than rewriting it.
+
+```toml
+exclude = ["topos.sh/acme/noisy-skill"]   # top-level, above the tables
+
+[skills]
+"topos.sh/acme/code-review" = "*"                        # track current
+"topos.sh/acme/deploy" = "9f2c…"                         # pinned to a 64-hex version digest
+"github.com/vercel-labs/skills/find-skills" = "3aa01e2"  # external: pinned to a commit
+"./tools/my-skill" = "*"                                 # a local folder in this repo
+
+[channels]
+"topos.sh/acme/channels/backend" = "*"
+
+[placement]                       # optional — one location every agent reads
+"topos.sh/acme/code-review" = ".claude/skills"
+[placement.kind]
+skill = ".agents/skills"
+```
+
+Keys are canonical [references](/concepts/references); values are pins, where `"*"` means *track
+`current` silently*. A hand-written pin is validated exactly like one the CLI wrote — a handwritten
+manifest is no back door.
+
+<Note>
+  **Workspace references track `current`; external git references are pinned by default.** There is
+  no governance rail behind a third-party repo, so it behaves like a lockfile entry.
+</Note>
+
+Full key-by-key detail: [`topos.toml` reference](/reference/topos-toml).
+
+## Where an edit lands
+
+```bash
+topos add code-review        # the nearest topos.toml
+topos add code-review -g     # your server-stored profile for that workspace
+topos add ./tools/x -g       # ~/.topos/topos.toml (a path can't live on the server)
+```
+
+Without `-g`, the edit goes to the nearest manifest covering your current directory. If none is in
+reach, a fresh one is created at the **enclosing git root** (the `npm init` precedent), or in the
+current directory if there is no repo.
+
+<Warning>
+  **The `$HOME` guard.** If your current directory is at or under `$HOME` and the computed edit
+  location would be at or above `$HOME`, the edit is routed to your personal manifest instead — a
+  manifest at `$HOME` would never be read, because the ancestor walk stops below it. The receipt
+  always names the file it edited, so the routing is disclosed, never silent.
+</Warning>
+
+Every receipt names the manifest it touched on the first line, with the inverse command.
+
+## Excludes — the only negative state
+
+Removing something a broader layer still provides does not delete anything upstream. It records an
+`exclude` line in *your* layer:
+
+```bash
+topos remove noisy-skill
+# → the nearest manifest records an exclude, because your profile still provides it
+```
+
+Project excludes beat profile excludes inside the project — nearest wins, same rule. There is no
+other negative state anywhere in Topos: no device exclusions, no opt-out tables, no detachment
+records.
+
+## Resolution in practice
+
+`topos update` and `topos status` resolve **from your current directory**:
+
+1. Walk up to build the project layer chain.
+2. Combine with every logged-in session's profile layer.
+3. Add the personal manifest.
+4. Intersect with entitlement, dedupe by name, nearest manifest wins.
+5. Skip anything with no `current` pointer.
+
+A project manifest may reference bundles from **several workspaces** — each resolves through its own
+session. A teammate lacking a seat for one of them gets everything else plus one honest status line.
+The file is the recipe; each person's access decides how much of it cooks.
+
+Run outside any project, `update` refreshes your person layers only. **There is no machine registry
+of projects** — projects refresh lazily when an agent next works in them, the way an unfetched git
+repo does. Staleness where nobody is looking is fine.
+
+## Placement
+
+Where the bytes actually land is declarative, at two levels:
+
+- **Logical (the default).** A bundle's kind implies its destination, and the client maps it per
+  detected harness. One manifest serves teammates running different agents.
+- **Explicit.** `[placement]` pins one project-relative directory per bundle, or per kind — a
+  harness-independent location every agent reads.
+
+There is deliberately **no personal or machine-local placement config**; that would reintroduce
+invisible machine state. Per-harness narrowing, if you want it, is declared in the manifest.
+
+<Warning>
+  A committed manifest may never place files outside its own checkout. Absolute values, `..` climbs,
+  and symlink escapes in `[placement]` are ignored.
+</Warning>
+
+Project placements are kept out of commits by an appended line in `.git/info/exclude`. Committed
+ignore files are never touched. See [Receiving skills](/motions/receive-skills#where-bytes-land).

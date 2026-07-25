@@ -1,0 +1,105 @@
+---
+title: "Topos"
+sidebarTitle: "Introduction"
+description: "The layer AI agents use to share behaviors across a team — publish once, and every teammate's agent stays current."
+icon: "house"
+mode: "wide"
+---
+
+Your company tells everyone to use AI agents. Then every agent does the job its own way: one knows
+the deploy checklist, one has a stale copy of it, one has never seen it. Processes drift, quality
+varies, and nobody tells an agent when a process changes.
+
+**Topos is the layer agents use to share their behaviors within a team.** A behavior — a *skill* —
+is a bundle of files (`SKILL.md`, scripts, reference docs) that an agent reads and acts on. Topos
+gives that bundle one identity, one version history, and one place the whole team agrees is
+current.
+
+<CardGroup cols={2}>
+  <Card title="Distribute" icon="arrow-down-to-line">
+    Publish a change once. Every teammate's agent picks it up at the start of its next session —
+    silently, byte-exact, without overwriting local edits.
+  </Card>
+  <Card title="Contribute" icon="arrow-up-from-line">
+    Anyone who improves a shared skill can offer it back. Improvements land as reviewable proposals,
+    so the team compounds instead of diverging.
+  </Card>
+</CardGroup>
+
+## Start here
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Share your first skill with a teammate in about five minutes.
+  </Card>
+  <Card title="Install the CLI" icon="download" href="/install">
+    One command on macOS or Linux. No sudo, no runtime dependencies.
+  </Card>
+  <Card title="Set up an agent" icon="robot" href="/for-agents">
+    Written for the agent itself — hand it this page and it can do the rest.
+  </Card>
+  <Card title="Self-host" icon="server" href="/self-hosting/overview">
+    Run the whole product yourself. Apache-2.0, one compose file.
+  </Card>
+</CardGroup>
+
+## The model in one paragraph
+
+An agent gets **what your project asks for, filtered by what your seats allow**. The asking side is a
+[manifest](/concepts/manifests) — a `topos.toml` committed in your repo, plus your own
+server-stored profile that follows you between machines. The allowing side is a
+[seat](/concepts/workspaces-and-sessions) in a workspace. Nothing else decides. Every "why does this
+agent have this skill?" has a two-part answer: *which manifest line asked for it, and which seat
+allowed it* — and `topos status` prints exactly that table.
+
+```bash
+topos login https://topos.sh/acme     # a seat allows
+topos add code-review                 # a manifest line asks
+topos status                          # the two-part answer, offline
+```
+
+## What it looks like in practice
+
+<Steps>
+  <Step title="Someone publishes">
+    A teammate has a good `pr-describe` skill sitting in their agent's skills folder.
+    `topos publish pr-describe` hands it to the workspace: it gets a name, a version that **is** the
+    hash of its bytes, and a movable `current` pointer.
+  </Step>
+  <Step title="The team asks for it">
+    Anyone runs `topos add pr-describe` — in a project (writing that repo's `topos.toml`, so the
+    whole team's agents get it there) or with `-g` (writing their own profile, so it follows them to
+    every machine).
+  </Step>
+  <Step title="It stays current by itself">
+    Logging in arms a session-start trigger that runs `topos update`. When the skill changes, the new
+    bytes are on every machine at the start of the next agent session — verified byte-for-byte
+    against the workspace's `current`, and never written over local edits.
+  </Step>
+  <Step title="Improvements come back">
+    Someone sharpens the skill while working. `topos publish` offers it back to the team — landing
+    directly on an open skill, or opening a reviewable proposal on a protected one.
+  </Step>
+</Steps>
+
+## Two ways to run it
+
+<CardGroup cols={2}>
+  <Card title="Topos Cloud" icon="cloud" href="https://topos.sh">
+    Hosted at `topos.sh`. Sign up, create a workspace, and hand out its address. Workspaces live at
+    `topos.sh/<name>`.
+  </Card>
+  <Card title="Self-hosted" icon="server" href="/self-hosting/overview">
+    The whole product is Apache-2.0 and ships as one compose file. A self-hosted install *is* one
+    workspace, rooted at your own origin.
+  </Card>
+</CardGroup>
+
+Both run the same code and speak the same protocol. The CLI is identical; only the address differs.
+
+<Note>
+  These docs are built to be read by agents as well as people. Every page is available as plain
+  markdown by appending `.md` to its URL, and the whole site is published as
+  [`llms.txt`](https://docs.topos.sh/llms.txt) and
+  [`llms-full.txt`](https://docs.topos.sh/llms-full.txt).
+</Note>

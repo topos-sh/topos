@@ -1,0 +1,127 @@
+---
+title: "Curate channels"
+description: "Say 'this group needs this set' — create a channel, place skills in it, and control who may edit it."
+icon: "hashtag"
+---
+
+A [channel](/concepts/channels) is a named, curated set of skills. Curating one is how a lead says
+*this team needs this set* without administering people.
+
+## Create one
+
+Creating a channel is member-level and takes no confirmation — an empty named group destroys nothing.
+
+<Steps>
+  <Step title="Channels → New channel">
+    Names are lowercase letters, digits, and hyphens, up to 64 characters. `topos` is reserved.
+  </Step>
+  <Step title="Add skills to it">
+    On the channel's **Skills** tab, use the **Add a skill** picker (it stages your choice, then a
+    separate **Add** button commits it), or place one on publish.
+  </Step>
+  <Step title="Tell people to carry it">
+    ```bash
+    topos add @acme/channels/backend -g    # a person carries it everywhere
+    topos add @acme/channels/backend       # this project carries it
+    ```
+    Or prefill it for a newcomer: `topos invite dev@acme.com --channel backend --yes`.
+  </Step>
+</Steps>
+
+<Warning>
+  `topos publish --to <channel>` places a skill into an **existing** channel — it never creates one.
+  Creating a channel is a browser act, deliberately.
+</Warning>
+
+## Place skills
+
+<Tabs>
+  <Tab title="On publish">
+    ```bash
+    topos publish deploy --to backend --yes
+    topos publish deploy --to @acme/channels/backend --yes
+    ```
+    The placement gate is the channel's mode, evaluated independently of the version's protection
+    gate. A placement applies immediately and delivers as soon as a `current` exists.
+  </Tab>
+  <Tab title="In the browser">
+    The channel's **Skills** tab lists its references. Curators get a per-row **Remove** and an **Add
+    a skill** picker. Non-curators see a note that reviewers and owners manage this channel's skills.
+  </Tab>
+</Tabs>
+
+Removing a skill from a channel removes only the *reference*. The channel and the skill both keep
+existing.
+
+## Who may curate
+
+| Channel mode | Who can add/remove skills |
+|---|---|
+| `open` | Any member — this is the default |
+| `curated` | Reviewer or owner |
+
+```bash
+topos protect @acme/channels/backend         # describe: tighten to curated
+topos protect @acme/channels/backend --yes   # apply — reviewer or owner
+topos protect @acme/channels/backend open --yes   # loosen — owner only
+```
+
+<Note>
+  Channel mode has **no browser control** today. The channel page shows the mode chip and enforces
+  its consequences, but flipping it is `topos protect`.
+</Note>
+
+## The default channel
+
+Every workspace is born with `everyone`, and it is the **baseline**: implicitly part of every
+member's profile. Skills placed there reach the whole roster.
+
+- A brand-new skill published with no `--to` lands in `everyone`.
+- Under a **curated** `everyone`, a member's genesis publish lands catalog-only and a curator places
+  it. The receipt discloses the withheld placement.
+- Individuals can subtract single items from the baseline with an ordinary exclude
+  (`topos remove <skill> -g`). The baseline itself cannot be dropped — it mirrors the roster.
+- `everyone` is structural: it cannot be renamed or deleted.
+
+## Rename and delete
+
+Owner-only, on the channel's **Settings** tab.
+
+**Rename** keeps the skills and the history — only the name changes. Both ceremonies key on the
+channel's immutable id, so a rename between page load and submit is refused honestly rather than
+retargeting something else.
+
+**Delete** is a type-the-name confirmation, and the copy is explicit about the consequence:
+
+> Deleting `backend` stops delivery through it. Skills another channel, a member's profile, or a
+> project manifest still delivers keep flowing; what only this channel delivered leaves machines at
+> their next update (local edits are snapshotted first). This can't be undone from here.
+
+## History
+
+The channel's **History** tab shows its audit trail — created, renamed, mode changed, skill added,
+skill removed — newest first, capped at the 100 most recent with an honest note when older events
+exist. Refused attempts appear too, with an outcome chip.
+
+History survives renames. Once a channel is deleted, its page 404s.
+
+## Designing a channel set
+
+<AccordionGroup>
+  <Accordion title="Start with everyone, split when sets diverge">
+    Most teams need exactly one channel for a long time. Create a second when one group's set
+    genuinely differs from another's — not in anticipation.
+  </Accordion>
+  <Accordion title="Channels reference; they do not own">
+    A skill in three channels is one skill, delivered once. Placing it widely costs nothing and
+    creates no duplicates.
+  </Accordion>
+  <Accordion title="Channels are not access control">
+    A seat already grants read access to the whole catalog. Do not model confidentiality with
+    channels — private channels are deliberately not built.
+  </Accordion>
+  <Accordion title="Curate as the audience grows">
+    Audience size is the right trigger for tightening. `topos protect` tells you how many people a
+    channel or skill reaches before you decide.
+  </Accordion>
+</AccordionGroup>

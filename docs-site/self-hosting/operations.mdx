@@ -1,0 +1,179 @@
+---
+title: "Operations"
+description: "Health checks, logs, audit, and the endpoints your deployment serves."
+icon: "heart-pulse"
+---
+
+## Health
+
+| Endpoint | Service | Answers |
+|---|---|---|
+| `GET /healthz` | web | `{"ok":true}` / 503. **Own-database liveness only** — it never calls the vault |
+| `GET /healthz` | plane | `"ok"`, unauthenticated, touches no state. Internal network only |
+
+The app's health check deliberately does not probe the vault, so your orchestrator cannot mistake a
+vault outage for a web outage.
+
+<Note>
+  **The bundled compose file defines no health check for `web` or `plane`** — only for the database.
+  If your platform wants one, `/healthz` is what to point it at.
+
+  The vault's runtime image has no shell tooling (no `curl`, no `wget`), so a health check must be
+  one the image can actually run — or probe it from the app's container.
+</Note>
+
+## Logs
+
+<Tabs>
+  <Tab title="Vault">
+    **JSON to stderr**, filtered by `RUST_LOG` (default `info`). Stdout is never touched.
+
+    One span per request carrying the method and the **matched route template** — never the raw path.
+    A completion event carries the status and latency. Maintenance passes log when they do something,
+    and every fault logs its full source chain.
+
+    ```bash
+    docker compose logs -f plane
+    RUST_LOG=debug docker compose up -d plane
+    ```
+  </Tab>
+  <Tab title="App">
+    Console output. The setup line — `→ Finish setup: …` — is the one deliberate product surface on
+    stdout. A boot-migration failure is a loud crash.
+
+    ```bash
+    docker compose logs -f web
+    docker compose logs web | grep 'Finish setup:'
+    ```
+  </Tab>
+</Tabs>
+
+Optional error reporting: set `SENTRY_DSN`. It is **server-side only**, with no tracing, no cookies,
+no headers, no PII, and token-bearing paths scrubbed.
+
+<Note>
+  There is no metrics endpoint, no `/readyz`, and no structured JSON logging on the web tier. Stated
+  rather than implied.
+</Note>
+
+## Audit
+
+Every mutation of shared state, and every administrative ceremony attempt — **including refused
+ones** — writes an attributed audit row. Refusals are recorded with a denied outcome so they never
+pollute a setting's "last set by" line.
+
+Readable in the browser:
+
+| Where | Shows |
+|---|---|
+| Channel → **History** | Created, renamed, mode changes, skills added/removed. The 100 most recent, with an honest note when older events exist |
+| Skill → **History** | The version walk, with authors and messages |
+| Skill → **Proposals** | Open queue, then the resolved record with who decided and why |
+| **Settings → General** | A "last set" line under each knob |
+
+Mail sends write **metadata-only** rows: kind, recipient, outcome, coarse code — never a subject,
+never a body. No reader UI ships for that table; query it directly if you need it.
+
+## The endpoints your deployment serves
+
+| Path | Purpose |
+|---|---|
+| `/` and every other path | The constant **protocol card** to any non-browser fetch; the app's pages to a browser |
+| `/healthz` | Liveness |
+| `/agent` | The plain-text agent setup walkthrough |
+| `/install`, `/install.sh` | The CLI installer, byte-identical aliases |
+| `/llms.txt` | The site guide for LLM tooling |
+| `/.well-known/agent-skills/index.json` | The agent-skills discovery index |
+| `/.well-known/agent-skills/topos/<file>` | The built-in skill's files |
+| `/.well-known/skills/index.json` | An alias of the index |
+| `/api/v1/…` | The bearer-authenticated session lane the CLI dials |
+| `/verify` | Login approval |
+| `/claim` | First-run claim (single-workspace installs) |
+
+<Note>
+  The `/.well-known/agent-skills/…` routes read from `BUILTIN_SKILL_DIR`, which the runtime web image
+  does not currently carry — see [known rough edges](/self-hosting/deploy#known-rough-edges).
+</Note>
+
+### The protocol card
+
+Served byte-identically on **every** path, with no path echo and no existence signal. Content
+negotiation decides the face:
+
+| `Accept` contains | You get |
+|---|---|
+| `application/json`, `application/*`, or `+json` | The JSON card — **this is API base discovery** |
+| `text/html` | The app's own page |
+| Anything else (a bare `curl`, an agent fetch) | A short markdown card |
+
+```bash
+curl -fsS -H 'Accept: application/json' https://topos.example.com
+# {"schema_version":1,"card":"topos-protocol-card","api_base_url":"https://topos.example.com/api"}
+```
+
+Headers: `cache-control: no-store`, `vary: accept`, `x-robots-tag: noindex`.
+
+<Warning>
+  **Monitoring gotcha.** A plain `curl` of any page returns the card, not HTML. Uptime checks and
+  scrapers that expect a page must send `Accept: text/html`.
+</Warning>
+
+## Rate limiting
+
+The `/api/v1` belt and the public-read and sign-in belts key on the **last** `x-forwarded-for` hop.
+
+```bash
+TOPOS_WEB_RATELIMIT=off    # correct with no reverse proxy in front
+```
+
+Without a proxy every caller shares one bucket, which is worse than useless — turn it off and let
+your ingress do it.
+
+## Storage maintenance
+
+The vault runs a maintenance pass on an interval (`TOPOS_PLANE_GC_INTERVAL_SECS`, default 300
+seconds, first pass at startup): a recovery sweep, a quarantine janitor, and per-workspace garbage
+collection. `0` disables it, with a warning.
+
+Content is deduplicated **within** a workspace; each workspace's object store is a separate directory
+and there is deliberately no cross-workspace dedup. Rejected proposal candidates are reclaimed
+best-effort after the verdict — the server retains current versions and open proposals.
+
+## Sizing
+
+There is no published sizing guidance, so here is the shape of the workload rather than invented
+numbers: skill bundles are small (text and scripts), reads dominate, and traffic is bursty at
+session-start times when many machines sweep at once. The sweep self-throttles per machine (default
+300 seconds), which flattens that considerably.
+
+Watch the `plane-data` volume as the version history grows — every version's bytes are retained until
+archived, deleted, or purged.
+
+## An operator's checklist
+
+<Steps>
+  <Step title="Confirm the vault has no published port">
+    ```bash
+    docker compose ps
+    ```
+    Anything mapped to a host port other than the app is a mistake.
+  </Step>
+  <Step title="Confirm the card declares the right API base">
+    ```bash
+    curl -fsS -H 'Accept: application/json' https://topos.example.com
+    ```
+  </Step>
+  <Step title="Run the packaging smoke">
+    ```bash
+    sh scripts/compose-smoke.sh
+    ```
+  </Step>
+  <Step title="Verify the database grant boundary">
+    ```bash
+    sh scripts/check-db-grants.sh
+    ```
+  </Step>
+  <Step title="Take a backup, and test the restore">
+    An untested restore is not a backup. See [Backups](/self-hosting/backups).
+  </Step>
+</Steps>

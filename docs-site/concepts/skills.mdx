@@ -1,0 +1,132 @@
+---
+title: "Skills and bundles"
+description: "What a skill is on disk, what makes two skills the same, and what the scanner refuses."
+icon: "cube"
+---
+
+A **skill** is a bundle of files an agent reads and acts on: a `SKILL.md` at the root, plus whatever
+scripts and reference documents it needs. On disk it is an ordinary directory — nothing about it is
+Topos-specific, and a skill works exactly the same without Topos installed.
+
+```
+pr-describe/
+├── SKILL.md          # required, at the root
+├── reference.md
+└── scripts/
+    └── collect.sh
+```
+
+`SKILL.md` carries YAML frontmatter. Topos reads two keys and **never rewrites your frontmatter**:
+
+```yaml
+---
+name: pr-describe
+description: Write a PR description from the diff. Use when opening or updating a pull request.
+---
+```
+
+| Key | How Topos uses it |
+|---|---|
+| `name` | The tracked name when a plain directory is adopted. Inside a recognized harness skills dir, the *directory* name wins — that is the name the harness invokes. |
+| `description` | Surfaced in the discovery index. This is how agents find the skill, so put the when-to-use here, concretely. |
+
+<Tip>
+  A good `description` is the highest-leverage thing in a bundle. It is what an agent reads to decide
+  whether the skill applies — write it assertively and name the situations.
+</Tip>
+
+## A version *is* its bytes
+
+A version id is a **byte-exact sha-256** over every file in the bundle — each file's path, its mode,
+and the sha-256 of its content, in a canonical order. Nothing is normalized: not line endings, not
+whitespace, not encoding, not frontmatter.
+
+Two consequences worth internalizing:
+
+- **Different bytes are never "the same version."** A stray trailing newline is a different version.
+- **What you pin is exactly what you get.** `<skill>@<hash>` names those bytes and no others. The
+  digest is placement-independent — the same bundle hashes identically wherever it lives.
+
+```bash
+topos list --json          # every tracked skill with its digest
+topos log pr-describe      # the version history
+topos diff pr-describe     # your local edits against current
+```
+
+Only two file modes exist, matching git: regular (`100644`) and executable (`100755`).
+
+## What the scanner refuses
+
+Bundles are scanned before anything is hashed or shipped. These are hard refusals, not warnings:
+
+<AccordionGroup>
+  <Accordion title="File-system shapes">
+    Symlinks are **never followed** (the scan uses `symlink_metadata`), and devices, FIFOs, sockets,
+    and any other non-regular file are refused. Filenames must be valid UTF-8. `.git` and `.DS_Store`
+    are dropped silently. An empty bundle is refused.
+  </Accordion>
+  <Accordion title="Path shapes">
+    Empty paths, absolute paths, `..` traversal, and `.` components are refused, as are control
+    characters (C0, DEL, C1) anywhere in a path.
+  </Accordion>
+  <Accordion title="Collisions">
+    Two files that differ only by Unicode NFC normalization, or only by ASCII case, are refused as a
+    collision — they would be the same file on a case-insensitive filesystem.
+
+    *Known limit, stated honestly:* full Unicode case-folding (for example the Kelvin sign) needs a
+    pinned Unicode version and is not implemented.
+  </Accordion>
+</AccordionGroup>
+
+## Names
+
+Skill names are **lowercase letters, digits, and hyphens**, starting alphanumeric. That is both the
+agent-skills convention and a requirement of being a directory name on every platform — which
+structurally excludes `/`, `@`, `*`, `.` and the reference grammar's reserved shapes.
+
+- Client-side ids are capped at 128 bytes.
+- The workspace's catalog mints a name by lowercasing, folding non-alphanumeric runs to `-`, and
+  capping at 64 characters. A collision appends `-2`, `-3`, and so on.
+- **`topos` is reserved end-to-end** — as a skill name, as a channel name, and as a placement
+  directory — because the built-in `topos` skill owns it. A genesis publish named `topos` is
+  suffixed past it, exactly as a taken name would be.
+
+## Size limits
+
+| Limit | Value | Where |
+|---|---|---|
+| Single file offloaded to the large-object store | above ~1 MiB | server byte custody |
+| Single file hard reject | ~100 MiB | server byte custody |
+| GitHub import (CLI) | 64 MiB per file, 20 000 files | `topos add owner/repo` |
+| GitHub import (web) | 32 MiB tarball, 128 MiB unpacked, 2 000 files | Add-from-GitHub page |
+
+A file too large to merge during an update is not silently dropped: it is reported as an oversize
+conflict and your copy is kept in a sidecar.
+
+## Bundle kinds
+
+Every mechanism here — entitlement, manifests, channels, versions, review — is kind-agnostic. The
+catalog records a `kind` tag, and a kind declares how it reconciles and where it is placed.
+
+**`skill` is the only kind built today.** The seams are generic so other kinds can be added without
+redesign, but nothing else exists yet.
+
+## The built-in `topos` skill
+
+The `topos` binary ships a skill named `topos` inside itself — `SKILL.md`, `INSTALL.md`, and the
+generated command reference. It lands in your agent's skills directories the moment Topos wires into
+a harness, so a fresh agent learns what Topos is and how to drive it from inside its own context.
+
+- It is **not a subscription**: no manifest line, and the server never hears about it.
+- It is **re-synced to the binary on every update sweep** — hand edits to *this* skill are
+  overwritten. Your other skills' drafts are never touched.
+- `topos remove topos --yes` opts this machine out durably; `topos add topos` brings it back.
+- A pre-existing `topos` directory that Topos did not write is never overwritten by a sweep. Only an
+  explicit `topos add topos` adopts one, and only when its frontmatter carries the provenance marker
+  that identifies it as a downloaded copy of this same skill.
+
+The same three files are also downloadable with no Topos installed:
+
+```bash
+npx skills add topos-sh/topos
+```

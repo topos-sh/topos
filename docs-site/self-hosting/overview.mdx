@@ -1,0 +1,130 @@
+---
+title: "Self-hosting Topos"
+sidebarTitle: "Overview"
+description: "The whole product is Apache-2.0 and runs from one compose file. Here is what you are running."
+icon: "server"
+---
+
+Topos is complete for a self-hosted team. There is no reduced open-source edition: the CLI, the
+sharing server, and the entire product web app — sign-in, dashboard, review UI, admin surfaces, and
+the API the CLI dials — are all in the [public repository](https://github.com/topos-sh/topos) under
+Apache-2.0.
+
+```bash
+git clone https://github.com/topos-sh/topos && cd topos
+docker compose up --build
+```
+
+The app comes up on `http://localhost:3000`.
+
+<Card title="Deploy it properly" icon="rocket" href="/self-hosting/deploy">
+  The above is a local try-out. For a real deployment there are five values you must set — start here.
+</Card>
+
+## What runs
+
+Three services, **one published port**.
+
+```
+                    ┌──────────────────────────────────────┐
+   the internet ──▶ │  web  (:3000)  ← the ONE public face │
+                    │  sign-in · dashboard · review UI     │
+                    │  /api/v1 · protocol card · /install  │
+                    └───────┬──────────────────┬───────────┘
+                            │ internal lane    │
+                    ┌───────▼──────┐   ┌───────▼───────────┐
+                    │ plane        │   │ db (Postgres 18)  │
+                    │ byte custody │   │ schema web        │
+                    │ NO public    │   │ schema plane      │
+                    │ port         │   │                   │
+                    └──────┬───────┘   └───────────────────┘
+                           │
+                      plane-data volume
+                    (git object store +
+                     large object store)
+```
+
+| Service | What it is | Published port |
+|---|---|---|
+| **web** | The whole product app. The only thing that needs to be reachable | `3000` |
+| **plane** | The vault: pure byte custody, identity-free. One caller — the app, over an internal lane | **none, deliberately** |
+| **db** | PostgreSQL 18, digest-pinned | **none** |
+
+### The split, and why it matters
+
+- **The app owns identity, the directory, and policy** — accounts, seats, roles, the catalog,
+  channels, profiles, invitations, proposals, and audit — in its own database schema (`web`),
+  governed by application code.
+- **The vault owns bytes** — the content-addressed version store and the `current` pointers — in
+  its own schema (`plane`) and its own volume. It holds no identity, no membership, and no policy
+  row. Authorization happens once, in the app, before anything reaches it.
+- The two speak over an **internal bearer-gated lane** on the compose network. If that token is
+  unset, the vault's entire lane answers a uniform 404.
+
+<Warning>
+  **The vault must never be externally reachable.** It publishes no port by design. Do not add one,
+  and do not proxy it.
+</Warning>
+
+Each application owns exactly one database role and one schema — the app cannot write or alter
+`plane`, and the vault cannot read `web`. That boundary is enforced by grants, not convention, and
+the repo's CI proves it by logging in as each role.
+
+## One install is one workspace
+
+A self-hosted deployment is **single-tenant**: the install *is* one workspace, and every URL is
+rooted at your origin.
+
+| | Self-hosted | Topos Cloud |
+|---|---|---|
+| Workspace address | `https://topos.example.com` | `https://topos.sh/acme` |
+| Dashboard | `/` | `/acme` |
+| A skill's page | `/skills/deploy` | `/acme/skills/deploy` |
+| Members | `/members` | `/acme/members` |
+| Creating more workspaces | Not applicable — run another install | Self-serve at `/new` |
+
+Both run the same code and speak the same protocol. The CLI is identical.
+
+```bash
+topos login https://topos.example.com
+```
+
+## What you get, and what is genuinely cloud-only
+
+Everything in these docs — publishing, versions, `current`, proposals and review, channels,
+protection, drafts and merges, sessions, invitations, roles, audit, the sessions dashboard, revert,
+archive, purge, export, and the whole agent surface — works self-hosted.
+
+The hosted product adds operational depth on top of the same app: billing, org-level administration,
+SSO/SCIM provisioning, and multi-tenancy. Those are hosting concerns, not the basics.
+
+## What you need
+
+| Requirement | Notes |
+|---|---|
+| Docker + Docker Compose | The bundled file builds both images from source |
+| A TLS-terminating reverse proxy | Caddy, nginx, Traefik, or your platform's load balancer. Topos does not terminate TLS |
+| A DNS name | It becomes `TOPOS_PUBLIC_URL` |
+| An SMTP relay | **Optional but needed to invite anyone.** See [Mail](/self-hosting/mail) |
+
+<Note>
+  **Only the vault has a published image** (`ghcr.io/topos-sh/topos-plane`). The web app is built
+  from source by the bundled compose file — `docker compose up --build`.
+</Note>
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Deploy" icon="rocket" href="/self-hosting/deploy">
+    The five values you must set, and a from-zero bootstrap.
+  </Card>
+  <Card title="First run" icon="key" href="/self-hosting/first-run">
+    Claim the workspace and seat yourself as owner.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/self-hosting/configuration">
+    Every environment variable, with defaults.
+  </Card>
+  <Card title="Backups" icon="database" href="/self-hosting/backups">
+    Two volumes, and the order that matters.
+  </Card>
+</CardGroup>

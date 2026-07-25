@@ -1,0 +1,127 @@
+---
+title: "Import from GitHub"
+description: "Bring an outside skill in, keep its provenance, and receive upstream changes as proposals."
+icon: "github"
+---
+
+Topos can adopt a skill from a public GitHub repository, record where it came from, and — once it is
+governed by your workspace — turn later upstream changes into ordinary proposals.
+
+The mental model: **a fork that remembers its parent.**
+
+## Import with the CLI
+
+```bash
+topos add vercel-labs/skills                  # a slash without @ is GitHub, always
+topos add vercel-labs/skills -s find-skills   # pick one skill from a repo with several
+topos add vercel-labs/skills -s '*'           # all of them
+topos add owner/repo#v1.2.0                   # a tag, branch, or commit
+topos add https://github.com/owner/repo/tree/main/skills/deploy
+```
+
+The bundle is fetched, **pinned to a commit**, and its provenance is recorded: repo, path, resolved
+commit, and license.
+
+<Note>
+  **External references are pinned by default.** There is no governance rail behind a third-party
+  repo, so the entry behaves like a lockfile line. Workspace references track `current`; GitHub
+  references do not move until you move them.
+</Note>
+
+`-g` lands the import in your harness's global skills directory instead of the project's. Re-running
+`add` with a bumped pin re-imports; an import **refuses over local edits** rather than clobbering
+them.
+
+<Warning>
+  A public repo needs no account, and Topos verifies nothing about the code you are importing. **The
+  source's trustworthiness is yours to verify.** A skill is prose and scripts that run inside your
+  agent.
+</Warning>
+
+Limits: 64 MiB per file and 20 000 files for a CLI import.
+
+## Import in the browser
+
+Go to **Add from GitHub** (`/skills/import`). Paste `owner/repo`, a repo URL, or a `/tree/…` subfolder
+URL, and press **Preview**.
+
+The preview — *"What would land"* — shows the repo at its resolved commit, the file count, the
+license, the lead of the `SKILL.md` (or an honest warning that there is none at the root, so agents
+may not pick it up), and every file with its size.
+
+Then name it under **Publish as** and press **Publish to the workspace**. The publish re-fetches **at
+the previewed commit**, so what lands is exactly what you reviewed.
+
+<Note>
+  This page is not currently linked from the app's navigation — reach it directly at
+  `<origin>/skills/import`.
+</Note>
+
+Limits: 32 MiB tarball, 128 MiB unpacked, 2 000 files.
+
+## Publishing an import
+
+Publishing an imported bundle carries its provenance to the workspace: an upstream link on the skill
+(host, repo, path) plus the upstream commit on that version.
+
+```bash
+topos add vercel-labs/skills -s find-skills
+topos publish find-skills --yes
+```
+
+Unlike a plain local folder, an imported bundle's **origin-pin manifest line is not rewritten** by
+the publish, and the receipt says so — the provenance is the point.
+
+If a workspace you are connected to already governs the same source, the receipt **suggests** the
+governed reference (`acme already has this as @acme/find-skills`). It is a visible hint, never a
+block.
+
+## Upstream changes arrive as proposals
+
+Once a skill carries upstream provenance, the workspace watches it. When the source repository moves,
+the new bytes are imported as a candidate version and a **proposal is opened**, attributed to a
+system principal, with the diff.
+
+<Warning>
+  **External changes always propose — even on an unprotected skill.** Members publish directly; the
+  outside world never moves your `current`. This is deliberate and not configurable.
+</Warning>
+
+If your workspace has edited the skill since the import, the merge happens inside the proposal, and
+genuine conflicts are surfaced for a human.
+
+### The Upstream panel
+
+A skill's **Settings** tab (owner-only) grows an **Upstream** section for imported skills:
+
+- *Imported from `owner/repo/path` · license: X*
+- Either *"The shipped current matches upstream `<commit>`"* or *"Edited here since the last import —
+  the workspace's copy has diverged upstream"*
+- *last checked `<timestamp>`*
+- A **Check for updates** button, rate-limited per user with a short server-side cooldown
+
+Outcomes are stated plainly: *upstream moved — a proposal is now waiting in the review queue*, *up to
+date with upstream*, or *checked within the last few minutes*.
+
+The server also polls on its own schedule.
+
+## What is not built
+
+- **PR back upstream.** Topos records provenance so this door stays open, but it does not open pull
+  requests against the source repository.
+- **Private repositories.** Imports are public-repo only.
+
+## Working alongside `npx skills`
+
+The `owner/repo` grammar is deliberately compatible with the `npx skills add` convention, so a
+repository that publishes skills for that ecosystem imports here unchanged.
+
+Topos itself is downloadable that way:
+
+```bash
+npx skills add topos-sh/topos
+```
+
+That installs the `topos` skill's documentation with no binary. If you later install the CLI, one
+explicit `topos add topos` hands the downloaded copy over — recognized by its provenance marker, its
+bytes snapshotted first. Nothing takes over a pre-existing directory silently.
