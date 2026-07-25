@@ -625,6 +625,14 @@ pub struct DeviceAuthStartRequest {
     /// ceremony resolves it and weaves the invitation accept into its own fence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invite_token: Option<String>,
+    /// How this flow's credential may be collected — `"loopback"` when the client has bound a
+    /// 127.0.0.1 listener and can open a browser on THIS machine, otherwise absent (the classic
+    /// device grant). WRITE-ONCE on the flow: declaring `loopback` only makes the flow harder to
+    /// redeem — the approval's authorization code, delivered by redirecting the approver's own
+    /// browser to that listener, becomes required alongside this device code. Absent keeps the
+    /// pre-existing behaviour exactly, so an older client is unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect: Option<String>,
 }
 
 /// `POST /v1/login/authorize` response — the login-flow grant (RFC-8628-shaped names).
@@ -659,6 +667,11 @@ pub struct DeviceAuthStartResponse {
 pub struct DeviceAuthPollRequest {
     /// The SECRET flow code from `login/authorize`.
     pub device_code: String,
+    /// The one-time AUTHORIZATION CODE a loopback flow's approval delivered to this client's
+    /// 127.0.0.1 listener. Required to redeem a `loopback`-bound flow and absent otherwise: the
+    /// two secrets travel different channels, and the device code has never been in a URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_code: Option<String>,
 }
 
 /// A login-flow poll status (snake_case). `granted` carries the credential + the joined
@@ -678,6 +691,11 @@ pub enum DeviceAuthPollStatus {
     Expired,
     /// Approved — `credential`, `session_id`, and `workspace` are present.
     Granted,
+    /// A LOOPBACK flow a human already approved, polled WITHOUT its authorization code. The
+    /// ceremony is done and the credential exists; this caller simply has not proved it is the
+    /// machine that asked. The client's answer is to re-open the local hand-off, never to keep
+    /// waiting on an approval that already happened.
+    AwaitingRedirect,
 }
 
 /// The first-destination HINT an accepted invitation named — decorated onto a `granted` poll (and

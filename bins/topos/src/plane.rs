@@ -584,6 +584,10 @@ pub(crate) enum DeviceAuthPoll {
     Expired,
     /// Approved — the session credential and workspace are present.
     Granted(EnrolledGrant),
+    /// A LOOPBACK flow already approved by a human, polled without its authorization code. The
+    /// credential exists but this caller has not proved it is the machine that asked; the answer
+    /// is to re-open the local hand-off, not to keep waiting.
+    AwaitingRedirect,
 }
 
 /// The login transport (the RFC-8628-shaped flow the app serves at `/v1/login/*`). `topos login`
@@ -609,6 +613,12 @@ pub(crate) trait EnrollSource {
     /// approval weaves the accept in; never validated at this unauthenticated start.
     ///
     /// # Errors
+    /// `loopback` is `true` when this client has a 127.0.0.1 listener bound and a browser it can
+    /// open on THIS machine. The flow is then LOOPBACK-bound: its credential can only be redeemed
+    /// with the authorization code the approval redirect delivers to that listener, so a stranger
+    /// who gets the flow approved by mailing someone a link never collects it.
+    ///
+    /// # Errors
     /// [`ClientError::Plane`] on a transport fault / non-OK status; [`ClientError::WireInvalid`] on a
     /// malformed body.
     fn device_auth_start(
@@ -616,6 +626,7 @@ pub(crate) trait EnrollSource {
         workspace: &str,
         requested_name: &str,
         invite_token: Option<&str>,
+        loopback: bool,
     ) -> Result<DeviceAuthStart, ClientError>;
 
     /// `POST /v1/login/token` — one poll of the flow. The poll STATE (pending / denied / expired /
@@ -624,7 +635,14 @@ pub(crate) trait EnrollSource {
     /// # Errors
     /// [`ClientError::Plane`] on a transport fault; [`ClientError::WireInvalid`] on a malformed body
     /// (including a `granted` poll missing its credential / device / workspace).
-    fn device_auth_poll(&self, device_code: &str) -> Result<DeviceAuthPoll, ClientError>;
+    ///
+    /// `auth_code` is the loopback hand-off's authorization code. A loopback-bound flow polled
+    /// without it answers `AwaitingRedirect`, never `Granted`.
+    fn device_auth_poll(
+        &self,
+        device_code: &str,
+        auth_code: Option<&str>,
+    ) -> Result<DeviceAuthPoll, ClientError>;
 }
 
 // ---------------------------------------------------------------------------------------------

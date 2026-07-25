@@ -50,10 +50,16 @@ consent step, and no device-link lane; `follow`/`unfollow`/`channel` are gone.
   manifest an `add`/`remove` edits: the nearest covering the cwd, else a fresh one at the enclosing git
   root (npm-init precedent), else the cwd; `-g` (path refs) targets the personal manifest; `init` creates
   the folder's manifest from the commented template.
-- **SESSIONS** (`sessions`, `ops/login`, `enroll`) — `topos login <address>` runs the RFC-8628-shaped
-  flow against `/v1/login/authorize|token` (the constant protocol card re-roots onto the declared API
-  base, same-security only; the `0600` WAL holds the flow; re-invoking IS the resume; the loopback
-  listener auto-opens the approval page where a browser is plausible). The granted poll mints ONE
+- **SESSIONS** (`sessions`, `ops/login`, `enroll`) — `topos login <address>` runs against
+  `/v1/login/authorize|token` (the constant protocol card re-roots onto the declared API base,
+  same-security only; the `0600` WAL holds the flow; re-invoking IS the resume). TWO SHAPES,
+  chosen BEFORE the flow starts because the choice IS what the flow is started as: with a browser
+  here and a 127.0.0.1 listener bound, the login is **RFC-8252 loopback** — the approval page
+  auto-opens, and its redirect hands this listener a one-time authorization code that the
+  exchange must present alongside the device code, so a mailed approve-link is worthless to
+  whoever sent it and NO code is typed; otherwise it is the **RFC-8628 device grant** — the human
+  types the short code, which is what binds the approver to the asker when no local hand-off
+  exists. A failed bind says so rather than degrading silently. The granted poll mints ONE
   **workspace-scoped bearer credential** persisted as a session row in `identity/sessions.json` (`0600`;
   statuses `active`/`pending`/`ended`) — login IS the acceptance event (the receipt discloses what the
   profile delivers; no offer step follows). Further workspaces are further logins; `logout

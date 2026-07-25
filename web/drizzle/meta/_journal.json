@@ -57,6 +57,13 @@
       "when": 1784862449934,
       "tag": "0007_manifest-architecture",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1784980534392,
+      "tag": "0008_loopback-login",
+      "breakpoints": true
     }
   ]
 }

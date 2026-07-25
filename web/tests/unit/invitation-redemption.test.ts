@@ -338,7 +338,9 @@ describe("the device-flow weave", () => {
     const token = await invite("weave@x.test", { bundleId: "s_deploy" });
     await verifiedUser("u_weave", "weave@x.test");
     const identity = await import("@/lib/db/identity.server");
-    const flow = await identity.startLoginFlow("weave laptop", "", token);
+    // LOOPBACK-bound, the shape a `topos login <invite-url>` takes on a machine with a browser:
+    // the CLI opens the page itself, so the card may pre-arm and the challenge lookup applies.
+    const flow = await identity.startLoginFlow("weave laptop", "", token, "loopback");
     // The pending views disclose the invitation's workspace to the code/challenge holder.
     const pending = await identity.pendingLoginFlow(flow.userCode);
     expect(pending?.inviteWorkspace?.name).toBeDefined();
@@ -362,8 +364,11 @@ describe("the device-flow weave", () => {
       [ws],
     );
     expect(seat.length).toBe(1);
-    // The granted poll decorates the hint the invitation named.
-    const poll = await identity.pollLoginFlow(flow.flowCode);
+    // The granted poll decorates the hint the invitation named — and, this flow being
+    // loopback-bound, only once the redirect's authorization code is presented alongside the
+    // device code. Without it the honest answer is that the hand-off has not happened yet.
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("awaiting_redirect");
+    const poll = await identity.pollLoginFlow(flow.flowCode, approved?.authCode ?? undefined);
     expect(poll.status).toBe("granted");
     if (poll.status === "granted") {
       expect(poll.hint).toEqual({ kind: "skill", name: "deploy" });

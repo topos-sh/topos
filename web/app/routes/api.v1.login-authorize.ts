@@ -4,6 +4,7 @@ import { checkBelt } from "@/lib/api/belt.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
 import {
   LOGIN_FLOW_POLL_INTERVAL_SECS,
+  type LoginBinding,
   startLoginFlow,
   theWorkspace,
 } from "@/lib/db/identity.server";
@@ -57,7 +58,12 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   } catch {
     return badRequest("malformed JSON body");
   }
-  const body = parsed as { requested_name?: unknown; workspace?: unknown; invite_token?: unknown };
+  const body = parsed as {
+    requested_name?: unknown;
+    workspace?: unknown;
+    invite_token?: unknown;
+    redirect?: unknown;
+  };
   if (
     typeof parsed !== "object" ||
     parsed === null ||
@@ -79,6 +85,16 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   ) {
     return badRequest("malformed login authorize body: invite_token");
   }
+  // How this flow's credential may be collected — the CLI's own declaration, made because it
+  // has just bound a 127.0.0.1 listener and can open a browser on this machine. WRITE-ONCE
+  // from here: nothing downstream re-reads it from a request, so there is no lever to downgrade
+  // a loopback flow onto the pollable path. Absent ⇒ `device`, which is exactly today's flow,
+  // so a client that predates this field is unaffected. Declaring `loopback` is not a privilege
+  // — it only makes the flow HARDER to redeem (see the token route).
+  if (body.redirect !== undefined && body.redirect !== "loopback" && body.redirect !== "device") {
+    return badRequest("malformed login authorize body: redirect");
+  }
+  const binding: LoginBinding = body.redirect === "loopback" ? "loopback" : "device";
 
   let requestedWorkspace: string;
   if (composition.tenancy === "multi") {
@@ -104,6 +120,7 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     body.requested_name.trim(),
     requestedWorkspace,
     body.invite_token as string | undefined,
+    binding,
   );
   const origin = followBase(request);
   // The code never enters ANY URL: the CLI prints the bare /verify address and the short code

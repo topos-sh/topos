@@ -217,6 +217,30 @@ export const loginFlow = webSchema.table(
      * under its own fence and weaves accept-the-invitation into the same transaction.
      */
     inviteTokenSha256: bytea("invite_token_sha256"),
+    /**
+     * HOW the credential may be collected — decided by the CLI at the unauthenticated start and
+     * WRITE-ONCE thereafter, because it is the flow's whole trust posture:
+     *
+     *  - `device` (RFC 8628): the classic device grant. The short code is typed at /verify, and
+     *    whoever holds the device code polls for the credential. The typing IS the control — it
+     *    is what binds the approving human to the machine that asked, and without it a stranger
+     *    can have their own flow approved by someone they mailed a link to.
+     *  - `loopback` (RFC 8252): the CLI has a browser on THIS machine and a listener on
+     *    127.0.0.1. Approval mints a one-time authorization code delivered ONLY by redirecting
+     *    the approver's browser to that listener, and the credential exchange demands it. A
+     *    phished approver redirects to their OWN loopback, so the sender never receives it.
+     *
+     * Never re-read from a later request: a binding that could change after the start would be
+     * a downgrade lever back onto the pollable path.
+     */
+    binding: text("binding").default("device").notNull(),
+    /**
+     * The one-time authorization code's digest — loopback flows only, minted at approval. Rides
+     * the redirect to the CLI's listener and is required (WITH the device code, which has never
+     * been in a URL) to redeem. Deliberately NOT consumed on presentation: the same pair may be
+     * re-exchanged until the flow lapses, so a crash between exchange and persist still resumes.
+     */
+    authCodeSha256: bytea("auth_code_sha256"),
     status: text("status").default("pending").notNull(),
     approvedBy: text("approved_by").references(() => user.id, { onDelete: "set null" }),
     sessionId: text("session_id").references(() => cliSession.id, { onDelete: "cascade" }),
@@ -232,6 +256,17 @@ export const loginFlow = webSchema.table(
       sql`${table.inviteTokenSha256} is null or octet_length(${table.inviteTokenSha256}) = 32`,
     ),
     check("login_flow_status_check", sql`${table.status} in ('pending', 'approved', 'denied')`),
+    check("login_flow_binding_check", sql`${table.binding} in ('device', 'loopback')`),
+    check(
+      "login_flow_auth_code_sha256_check",
+      sql`${table.authCodeSha256} is null or octet_length(${table.authCodeSha256}) = 32`,
+    ),
+    // A device-bound flow never carries an authorization code: the pollable path and the
+    // redirect-delivered path are mutually exclusive by construction, not by convention.
+    check(
+      "login_flow_auth_code_binding_check",
+      sql`${table.authCodeSha256} is null or ${table.binding} = 'loopback'`,
+    ),
     check(
       "login_flow_approved_check",
       sql`${table.status} <> 'approved' or ${table.sessionId} is not null`,

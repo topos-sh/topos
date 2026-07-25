@@ -97,14 +97,18 @@ transaction, FOR UPDATE-fenced or single-statement-atomic, audit row inside):
   with zero seats
   anywhere is first woven through workspace creation (`/verify` redirects to `/new` carrying itself
   as `next` + the flow's slug as a `name` prefill) — unless the flow carries an invitation, whose
-  accept will seat them right there. The LOOPBACK arrival (the CLI auto-opened the page): the URL
-  carries `device` — hex of the flow's device-code HASH — plus `port`/`state` naming the CLI's
-  ephemeral 127.0.0.1 listener; the approve/deny outcome returns as ONE state-bound localhost
-  redirect (nothing sensitive rides it — the CLI's poll stays the source of truth). `device` does
-  NOT pre-arm the card: it is derivable by whoever STARTED the flow, and starting one takes no
-  credential, so a pre-resolved approve button would hand a stranger who mailed the link a
-  credential acting as the person who clicked. The code is typed on every arrival — read off the
-  operator's own terminal, it is the out-of-band proof that the approver is the asker. The signed-out loader bounce carries the page (validated params only) as `next`.
+  accept will seat them right there. A flow is BOUND at its
+  start, write-once, to how its credential may be collected. **`device`** (RFC 8628, the headless
+  rung): the human types the short code and whoever holds the device code polls — the typing is
+  the only thing binding the approver to the asker, so the card NEVER pre-arms for these.
+  **`loopback`** (RFC 8252, declared when the CLI has already bound a 127.0.0.1 listener and can
+  open a browser here): the card DOES pre-arm from the URL's `device` challenge, because approval
+  mints a one-time authorization code that leaves the server only by redirecting the approver's
+  browser to that listener — so a stranger who mails the link watches their victim complete a
+  login on the victim's own machine, and their poll reads `awaiting_redirect` forever. Redemption
+  then demands `device_code` + `auth_code`: two secrets, two channels, and the device code has
+  never been in a URL. The code is non-consuming until the flow lapses, so a crash between
+  exchange and persist re-exchanges cleanly. The signed-out loader bounce carries the page (validated params only) as `next`.
   Ending a session is immediate on either side (the client's `DELETE /api/v1/session`, the
   Sessions tab's owner arms) — the row is deleted, the lane 404s from the next request.
 - **The tokened invitation** (`invite-redeem.tsx` at `/invite/<token>` — `/<ws>/invite/<token>` in

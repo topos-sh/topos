@@ -54,6 +54,16 @@ pub(crate) struct PendingEnrollment {
     pub interval_secs: u64,
     /// The flow expiry as epoch-millis — the recovery sweep abandons a WAL past this.
     pub expires_at_millis: i64,
+    /// This flow is LOOPBACK-bound: the server will not release its credential to a poll that
+    /// cannot present the authorization code the approval redirect hands to our listener.
+    /// ADDITIVE with a serde default — a pre-field WAL reads `false`, i.e. the classic flow.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub loopback: bool,
+    /// **SECRET** — the authorization code the local hand-off delivered, once it has. Persisted
+    /// so an interrupt AFTER the browser approval still resumes: the code is not re-derivable and
+    /// the human is already done. Redacted in `Debug`, like the device code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_code: Option<String>,
 }
 
 // Redact the WAL's secret (the device code — the credential-to-be) so the whole document, held
@@ -67,6 +77,8 @@ impl std::fmt::Debug for PendingEnrollment {
             .field("workspace_name", &self.workspace_name)
             .field("intent", &self.intent)
             .field("device_code", &"<redacted>")
+            .field("loopback", &self.loopback)
+            .field("auth_code", &self.auth_code.as_ref().map(|_| "<redacted>"))
             .field("user_code", &self.user_code)
             .field("verification_uri", &self.verification_uri)
             .field("interval_secs", &self.interval_secs)

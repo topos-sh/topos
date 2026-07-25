@@ -142,6 +142,66 @@ describe("the claim consume", () => {
 });
 
 describe("the login flow", () => {
+  it("a LOOPBACK flow will not grant to a poll that lacks the redirect-borne code", async () => {
+    // THE PHISHING FIX, at the layer that enforces it. A stranger can start a flow and get a
+    // signed-in member to approve it — that is the device grant's unfixable weakness. What they
+    // cannot do is COLLECT: a loopback flow's authorization code leaves the server only by
+    // redirecting the approver's browser to 127.0.0.1, which is the approver's own machine.
+    const identity = await import("@/lib/db/identity.server");
+    const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
+      ?.user_id as string;
+    const flow = await identity.startLoginFlow("attacker-cli", "", undefined, "loopback");
+    const approved = await identity.approveLoginFlow(flow.userCode, {
+      userId: owner,
+      display: "Owner",
+    });
+    // The approval really happened and really minted a session — this is not a refusal.
+    expect(approved?.sessionStatus).toBe("active");
+    const authCode = approved?.authCode ?? undefined;
+    expect(typeof authCode).toBe("string");
+
+    // The device code ALONE — everything a phisher holds — buys nothing but an honest "the
+    // human is done, the hand-off is not".
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("awaiting_redirect");
+    // A guessed code is no better.
+    expect((await identity.pollLoginFlow(flow.flowCode, "not-the-code")).status).toBe(
+      "awaiting_redirect",
+    );
+    // Both halves together redeem — and the credential is still the device code, which never
+    // rode a URL.
+    const granted = await identity.pollLoginFlow(flow.flowCode, authCode);
+    expect(granted.status).toBe("granted");
+    // NON-CONSUMING: presenting the pair again re-grants, so a crash between exchange and
+    // persist resumes instead of stranding a minted session.
+    expect((await identity.pollLoginFlow(flow.flowCode, authCode)).status).toBe("granted");
+    expect(await identity.sessionActor(wsId, flow.flowCode)).not.toBeNull();
+  });
+
+  it("a DEVICE flow is unchanged: no code minted, the poll alone grants", async () => {
+    const identity = await import("@/lib/db/identity.server");
+    const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
+      ?.user_id as string;
+    const flow = await identity.startLoginFlow("headless-box", "");
+    const approved = await identity.approveLoginFlow(flow.userCode, {
+      userId: owner,
+      display: "Owner",
+    });
+    expect(approved?.authCode).toBeNull();
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("granted");
+  });
+
+  it("the challenge lookup resolves a LOOPBACK flow and refuses a DEVICE one", async () => {
+    // The /verify pre-arm gate, in SQL. The challenge is derivable by whoever started the flow,
+    // so only the binding can make pre-resolution safe.
+    const identity = await import("@/lib/db/identity.server");
+    const { createHash } = await import("node:crypto");
+    const hex = (code: string) => createHash("sha256").update(code, "utf8").digest("hex");
+    const device = await identity.startLoginFlow("box", "");
+    const loop = await identity.startLoginFlow("laptop", "", undefined, "loopback");
+    expect(await identity.pendingLoginFlowByChallenge(hex(device.flowCode))).toBeNull();
+    expect(await identity.pendingLoginFlowByChallenge(hex(loop.flowCode))).not.toBeNull();
+  });
+
   it("start → approve → poll grants IDEMPOTENTLY (re-poll after a crash still gets the grant)", async () => {
     const identity = await import("@/lib/db/identity.server");
     const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]

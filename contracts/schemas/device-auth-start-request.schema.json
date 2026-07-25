@@ -11,6 +11,13 @@
         "null"
       ]
     },
+    "redirect": {
+      "description": "How this flow's credential may be collected — `\"loopback\"` when the client has bound a\n127.0.0.1 listener and can open a browser on THIS machine, otherwise absent (the classic\ndevice grant). WRITE-ONCE on the flow: declaring `loopback` only makes the flow harder to\nredeem — the approval's authorization code, delivered by redirecting the approver's own\nbrowser to that listener, becomes required alongside this device code. Absent keeps the\npre-existing behaviour exactly, so an older client is unaffected.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "requested_name": {
       "description": "A human-readable machine name shown on the approval page (a confused-deputy guard, not\nauthority) and kept as the session's display name once approved.",
       "type": "string"

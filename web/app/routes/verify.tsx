@@ -84,6 +84,20 @@ function loopbackFrom(source: { get(name: string): string | null | FormDataEntry
   };
 }
 
+/**
+ * The localhost hand-off URL. `outcome` wakes the waiting CLI; `code`, present only on an
+ * approved LOOPBACK flow, is the authorization code it must present (alongside the device code
+ * it already holds) to redeem. The host is a LITERAL — never `localhost`, whose resolution can
+ * be hijacked, and never a client-supplied URL.
+ */
+function loopbackReturn(loopback: Loopback, outcome: string, authCode: string | null): string {
+  const qs = new URLSearchParams({ state: loopback.state, outcome });
+  if (authCode !== null) {
+    qs.set("code", authCode);
+  }
+  return `http://127.0.0.1:${loopback.port}/cb?${qs.toString()}`;
+}
+
 /** This page's own address, re-carrying only the validated pass-through params. */
 function selfPath(device: string | null, loopback: Loopback | null): string {
   const qs = new URLSearchParams();
@@ -175,15 +189,23 @@ export async function loader({ request }: LoaderFunctionArgs) {
         : "";
     throw redirect(`/new?next=${encodeURIComponent(self)}${prefill}`);
   }
-  // The card is NEVER pre-resolved from the URL. `device` identifies a flow, but it is derived
-  // from the device code (its hex hash), so whoever STARTED a flow can compute it — and the
-  // start is deliberately unauthenticated. A pre-armed approve card would therefore let a
-  // stranger who began their own flow mail a signed-in member a one-click link and collect a
-  // credential acting as that member (the device-authorization phishing RFC 8628 warns of).
-  // The short code the CLI prints to the operator's OWN terminal is the out-of-band proof that
-  // the person approving is the person who asked, so it is always typed — the resolution above
-  // decides only the seatless-approver weave, and never reaches the browser.
-  return { multi, device, loopback, resolved: null };
+  // The card resolves with ZERO TYPING — but only ever for a LOOPBACK-bound flow, and that
+  // restriction IS the safety argument. `device` is the device code's own hash, so anyone who
+  // started a flow can compute it, and starting one needs no credential. What a stranger cannot
+  // do is receive the answer: a loopback approval hands its authorization code to the approver's
+  // own 127.0.0.1 listener, so a phished click completes a login on the VICTIM's machine while
+  // the sender's poll keeps reading `awaiting_redirect`. `pendingLoginFlowByChallenge` enforces
+  // the binding in SQL — a DEVICE-bound flow resolves to nothing here and falls through to the
+  // typed-code form, which stays its only door.
+  return {
+    multi,
+    device,
+    loopback,
+    resolved:
+      resolved === null
+        ? null
+        : { ...resolved, linked: await linkTargetOf(actor, resolved, multi) },
+  };
 }
 
 const REQUEST_GONE =
@@ -247,11 +269,11 @@ export async function action({ request }: ActionFunctionArgs) {
       return data({ kind: "refused" as const, error: REQUEST_GONE }, { status: 400 });
     }
     if (loopback !== null) {
-      // The state-bound single-use localhost return: outcome only, no secret — the CLI's poll
-      // delivers the credential as always.
-      throw redirect(
-        `http://127.0.0.1:${loopback.port}/cb?state=${encodeURIComponent(loopback.state)}&outcome=approved`,
-      );
+      // The state-bound localhost hand-off. For a LOOPBACK flow this carries the AUTHORIZATION
+      // CODE — the second of the two secrets the exchange needs, and the one only this browser
+      // can deliver, because the redirect resolves on the approver's OWN machine. A phisher who
+      // mailed this link watches their victim complete a login they can never collect.
+      throw redirect(loopbackReturn(loopback, "approved", approved.authCode));
     }
     return { kind: "approved" as const, name: approved.requestedName };
   }
@@ -264,9 +286,7 @@ export async function action({ request }: ActionFunctionArgs) {
     return data({ kind: "refused" as const, error: REQUEST_GONE }, { status: 400 });
   }
   if (loopback !== null) {
-    throw redirect(
-      `http://127.0.0.1:${loopback.port}/cb?state=${encodeURIComponent(loopback.state)}&outcome=denied`,
-    );
+    throw redirect(loopbackReturn(loopback, "denied", null));
   }
   return { kind: "denied" as const };
 }

@@ -487,6 +487,9 @@ export async function revokeSessionByCredential(credential: string): Promise<boo
 
 // ── The gh-style login flow ──────────────────────────────────────────────────────────────────
 
+/** How a flow's credential may be collected — see `login_flow.binding`. */
+export type LoginBinding = "device" | "loopback";
+
 const LOGIN_FLOW_TTL_MS = 15 * 60 * 1000;
 export const LOGIN_FLOW_POLL_INTERVAL_SECS = 5;
 export const LOGIN_FLOW_EXPIRES_IN_SECS = LOGIN_FLOW_TTL_MS / 1000;
@@ -511,6 +514,11 @@ export async function startLoginFlow(
    * validated here (the unauthenticated start must not be a token oracle); the approval
    * resolves it under its own fence. */
   inviteToken?: string,
+  /** How the credential may be collected. WRITE-ONCE: the CLI declares it here, having just
+   * bound its own 127.0.0.1 listener, and nothing downstream may change it — a mutable binding
+   * would be a downgrade lever back onto the pollable path. Absent ⇒ `device`, so a client
+   * that predates this field keeps the classic flow byte-for-byte. */
+  binding: LoginBinding = "device",
 ): Promise<{ flowCode: string; userCode: string; expiresInSecs: number }> {
   const db = getDb();
   // Opportunistic reap: every new login first clears expired ceremony rows (there is no
@@ -528,6 +536,7 @@ export async function startLoginFlow(
         flowCodeSha256: sql`${sha256OfText(flowCode)}` as never,
         requestedName,
         requestedWorkspace,
+        binding,
         ...(inviteToken === undefined
           ? {}
           : { inviteTokenSha256: sql`${sha256OfText(inviteToken)}` as never }),
@@ -555,6 +564,12 @@ export type LoginPollResult =
   | { status: "pending" }
   | { status: "denied" }
   | { status: "expired" }
+  /** A LOOPBACK flow that a human approved, polled by a caller that has not presented the
+   * authorization code. Distinct from `pending` on purpose: the human is done, so the CLI
+   * should re-open the hand-off rather than keep waiting on an approval that already happened
+   * — and distinct from `granted` because this caller has proved nothing about being the
+   * machine that asked. */
+  | { status: "awaiting_redirect" }
   | {
       status: "granted";
       sessionId: string;
@@ -577,10 +592,22 @@ export type LoginPollResult =
  * rows are reaped by [`sweepExpiredLoginFlows`], not on read, so the grant survives its whole
  * TTL. A missing row (already swept, or never existed) reads as expired.
  */
-export async function pollLoginFlow(flowCode: string): Promise<LoginPollResult> {
+export async function pollLoginFlow(
+  flowCode: string,
+  /** The redirect-borne authorization code, when the caller has one. A loopback flow will not
+   * grant without it — see the binding check below. */
+  authCode?: string,
+): Promise<LoginPollResult> {
+  // Built conditionally rather than inline: with no code presented there is nothing to compare,
+  // and a bare NULL parameter beside a bytea column has no type Postgres can infer.
+  const authCodeOk =
+    authCode === undefined
+      ? sql`false`
+      : sql`f.auth_code_sha256 IS NOT NULL AND f.auth_code_sha256 = ${sha256OfText(authCode)}`;
   const rows = await getDb().execute(
     sql`SELECT f.status, f.session_id, f.approved_workspace_id, f.invite_token_sha256,
-               f.expires_at < now() AS expired, s.status AS session_status
+               f.expires_at < now() AS expired, s.status AS session_status, f.binding,
+               (${authCodeOk}) AS auth_code_ok
         FROM ${loginFlow} f
         LEFT JOIN web.cli_session s ON s.id = f.session_id
         WHERE f.flow_code_sha256 = ${sha256OfText(flowCode)}`,
@@ -593,6 +620,8 @@ export async function pollLoginFlow(flowCode: string): Promise<LoginPollResult> 
         invite_token_sha256: Buffer | null;
         expired: boolean;
         session_status: SessionStatus | null;
+        binding: LoginBinding;
+        auth_code_ok: boolean | null;
       }
     | undefined;
   if (!row) {
@@ -600,6 +629,15 @@ export async function pollLoginFlow(flowCode: string): Promise<LoginPollResult> 
   }
   if (row.status === "denied") {
     return { status: "denied" };
+  }
+  // THE ENFORCEMENT POINT. A loopback flow's device code is not, by itself, a claim on the
+  // credential: the authorization code that completes it left the server only by redirecting
+  // the approver's browser to their own 127.0.0.1 listener. Someone who started a flow and got
+  // a stranger to approve it holds the device code and nothing else, so they land here — an
+  // honest "approved, still waiting for the local hand-off", never a grant. Matching is a
+  // digest comparison in Postgres, like every other secret in this system.
+  if (row.status === "approved" && row.binding === "loopback" && row.auth_code_ok !== true) {
+    return { status: "awaiting_redirect" };
   }
   if (row.status === "approved") {
     // A granted flow stays granted while its SESSION lives (the approve minted it). A session
@@ -719,12 +757,19 @@ const APPROVE_ABORT = Symbol("login-approve-abort");
 export async function approveLoginFlow(
   userCode: string,
   approver: { userId: string; display: string },
-): Promise<{ sessionId: string; requestedName: string; sessionStatus: SessionStatus } | null> {
+): Promise<{
+  sessionId: string;
+  requestedName: string;
+  sessionStatus: SessionStatus;
+  /** The one-time authorization code — loopback flows only, `null` for a device flow. The
+   * caller's ONLY job with it is to put it on the redirect to the approver's own listener. */
+  authCode: string | null;
+} | null> {
   try {
     return await getDb().transaction(async (tx) => {
       const rows = await tx.execute(
         sql`SELECT id, requested_name, requested_workspace, flow_code_sha256,
-                   invite_token_sha256
+                   invite_token_sha256, binding
             FROM ${loginFlow}
             WHERE user_code = ${userCode} AND status = 'pending' AND expires_at > now()
             FOR UPDATE`,
@@ -736,6 +781,7 @@ export async function approveLoginFlow(
             requested_workspace: string;
             flow_code_sha256: Buffer;
             invite_token_sha256: Buffer | null;
+            binding: LoginBinding;
           }
         | undefined;
       if (!row) {
@@ -789,10 +835,15 @@ export async function approveLoginFlow(
         credentialSha256: row.flow_code_sha256,
         status: born,
       });
+      // A loopback flow's credential is NOT collectable by polling — the caller must also
+      // present this authorization code, which leaves the server only by redirecting the
+      // approver's browser to their own 127.0.0.1 listener.
+      const authCode = row.binding === "loopback" ? mintSecret() : null;
       await tx.execute(
         sql`UPDATE ${loginFlow}
             SET status = 'approved', approved_by = ${approver.userId}, session_id = ${sessionId},
-                approved_workspace_id = ${resolved.workspaceId}
+                approved_workspace_id = ${resolved.workspaceId},
+                auth_code_sha256 = ${authCode === null ? null : sha256OfText(authCode)}
             WHERE id = ${row.id}`,
       );
       await auditInTx(tx, {
@@ -803,7 +854,12 @@ export async function approveLoginFlow(
         outcome: "ok",
         details: { requestedName: row.requested_name, status: born },
       });
-      return { sessionId, requestedName: row.requested_name, sessionStatus: born };
+      return {
+        sessionId,
+        requestedName: row.requested_name,
+        sessionStatus: born,
+        authCode,
+      };
     });
   } catch (error) {
     // The clean-refusal rollback surfaces as the uniform null (the same answer an expired code
@@ -881,7 +937,17 @@ export async function pendingLoginFlowByChallenge(
   if (!/^[0-9a-f]{64}$/.test(challengeHex)) {
     return null;
   }
-  return pendingLoginFlowWhere(sql`flow_code_sha256 = decode(${challengeHex}, 'hex')`);
+  // LOOPBACK FLOWS ONLY — this is the line that keeps a URL-resolved card safe.
+  //
+  // The challenge is the device code's own hash, so whoever STARTED a flow can compute it, and
+  // starting one takes no credential. Resolving a DEVICE-bound flow from it would hand a
+  // stranger a one-click approve card for a credential they then collect by polling. A
+  // loopback-bound flow has no such collection path: approval delivers its authorization code
+  // by redirecting the approver's browser to 127.0.0.1, which reaches the approver's OWN
+  // machine and nobody else's.
+  return pendingLoginFlowWhere(
+    sql`flow_code_sha256 = decode(${challengeHex}, 'hex') AND binding = 'loopback'`,
+  );
 }
 
 async function pendingLoginFlowWhere(

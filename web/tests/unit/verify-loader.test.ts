@@ -130,8 +130,8 @@ describe("the signed-out bounce", () => {
   });
 });
 
-describe("the URL challenge never pre-arms the approve card", () => {
-  it("a valid device challenge still yields NO resolved card — the code must be typed", async () => {
+describe("the URL challenge pre-arms the card ONLY for a loopback flow", () => {
+  it("a LOOPBACK flow resolves with zero typing, naming THE ONE workspace", async () => {
     theWorkspace.mockResolvedValue({
       id: "w_1",
       name: "acme",
@@ -141,19 +141,22 @@ describe("the URL challenge never pre-arms the approve card", () => {
     seatOf.mockResolvedValue({ role: "member" });
     pendingLoginFlowByChallenge.mockResolvedValue(FLOW);
     const result = (await call(`http://x/verify?device=${CHALLENGE}`)) as {
-      device: string | null;
-      resolved: unknown;
+      resolved: {
+        userCode: string;
+        linked: { displayName: string; joining: boolean; awaitsApproval: boolean };
+      } | null;
     };
-    // `device` is the hex of the flow's device-code hash, so ANYONE who started a flow can
-    // compute it — and starting one takes no credential. Handing back a resolved card would let
-    // a stranger mail a signed-in member a one-click link and collect a credential acting as
-    // that member. The challenge still rides through (the loopback outcome needs it); the card
-    // does not.
-    expect(result.resolved).toBeNull();
-    expect(result.device).toBe(CHALLENGE);
+    expect(pendingLoginFlowByChallenge).toHaveBeenCalledWith(CHALLENGE);
+    expect(result.resolved?.userCode).toBe("AB12-CD34");
+    expect(result.resolved?.linked).toEqual({
+      name: "acme",
+      displayName: "Acme",
+      joining: false,
+      awaitsApproval: false,
+    });
   });
 
-  it("an unknown challenge is indistinguishable from a known one", async () => {
+  it("a DEVICE-bound flow resolves to nothing — the typed code stays its only door", async () => {
     theWorkspace.mockResolvedValue({
       id: "w_1",
       name: "acme",
@@ -161,12 +164,37 @@ describe("the URL challenge never pre-arms the approve card", () => {
       sessionApproval: "off",
     });
     seatOf.mockResolvedValue({ role: "member" });
+    // The binding is enforced in SQL, so a device-bound flow simply does not resolve by
+    // challenge. Anyone can compute this hex for a flow they started; without the loopback
+    // hand-off there is nothing stopping them collecting the credential by polling, so the
+    // out-of-band typed code has to stay the gate.
     pendingLoginFlowByChallenge.mockResolvedValue(null);
-    const miss = (await call(`http://x/verify?device=${CHALLENGE}`)) as { resolved: unknown };
+    const result = (await call(`http://x/verify?device=${CHALLENGE}`)) as {
+      device: string | null;
+      resolved: unknown;
+    };
+    expect(result.resolved).toBeNull();
+    expect(result.device).toBe(CHALLENGE);
+  });
+
+  it("the device-approval knob + a non-owner approver forewarn the pending session", async () => {
+    theWorkspace.mockResolvedValue({
+      id: "w_1",
+      name: "acme",
+      displayName: "Acme",
+      sessionApproval: "on",
+    });
+    seatOf.mockResolvedValue({ role: "member" });
     pendingLoginFlowByChallenge.mockResolvedValue(FLOW);
-    const hit = (await call(`http://x/verify?device=${CHALLENGE}`)) as { resolved: unknown };
-    expect(miss.resolved).toBeNull();
-    expect(hit.resolved).toBeNull();
+    const result = (await call(`http://x/verify?device=${CHALLENGE}`)) as {
+      resolved: { linked: { awaitsApproval: boolean } } | null;
+    };
+    expect(result.resolved?.linked.awaitsApproval).toBe(true);
+    seatOf.mockResolvedValue({ role: "owner" });
+    const asOwner = (await call(`http://x/verify?device=${CHALLENGE}`)) as {
+      resolved: { linked: { awaitsApproval: boolean } } | null;
+    };
+    expect(asOwner.resolved?.linked.awaitsApproval).toBe(false);
   });
 });
 

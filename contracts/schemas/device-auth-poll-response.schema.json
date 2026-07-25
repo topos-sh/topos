@@ -110,6 +110,11 @@
           "description": "Approved — `credential`, `session_id`, and `workspace` are present.",
           "type": "string",
           "const": "granted"
+        },
+        {
+          "description": "A LOOPBACK flow a human already approved, polled WITHOUT its authorization code. The\nceremony is done and the credential exists; this caller simply has not proved it is the\nmachine that asked. The client's answer is to re-open the local hand-off, never to keep\nwaiting on an approval that already happened.",
+          "type": "string",
+          "const": "awaiting_redirect"
         }
       ]
     },

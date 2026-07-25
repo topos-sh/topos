@@ -157,10 +157,24 @@ pub(crate) fn parse_login_address(
 /// [`ClientError::InvalidArgument`] on a malformed address (or none, with no flow to resume);
 /// [`ClientError::Enrollment`] on a denied/expired flow or another verb's in-flight enrollment;
 /// transport / io failures otherwise.
+/// What the caller can do locally to complete this login.
+///
+/// The pair travels together because they are two halves of one posture: `loopback` declares at
+/// the START that this machine has a browser and a bound 127.0.0.1 listener — which makes the
+/// flow's credential unredeemable without the code that redirect delivers — and `auth_code`
+/// carries that code back in once the listener has it. A client with neither is the classic
+/// device grant: the human types the short code and the poll alone redeems.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Handoff<'a> {
+    pub loopback: bool,
+    pub auth_code: Option<&'a str>,
+}
+
 pub(crate) fn login(
     ctx: &Ctx<'_>,
     connectors: &LoginConnectors<'_>,
     address: Option<&str>,
+    handoff: Handoff<'_>,
 ) -> Result<LoginData, ClientError> {
     // A pending WAL first — re-invoking IS the resume; a foreign-owned flow refuses typed.
     if let Some(wal) = enroll::read_wal(ctx.fs, &ctx.layout)? {
@@ -182,7 +196,7 @@ pub(crate) fn login(
             }
         }
         return match wal.intent {
-            enroll::EnrollIntentDoc::Session => resume(ctx, connectors, &wal),
+            enroll::EnrollIntentDoc::Session => resume(ctx, connectors, &wal, handoff),
             enroll::EnrollIntentDoc::Retired => Err(ClientError::Enrollment(
                 "a retired enrollment flow is on disk — it will be swept when it expires; start \
                  fresh with `topos login <workspace-address>`"
@@ -205,6 +219,7 @@ pub(crate) fn login(
         &target.workspace,
         &machine_name(),
         target.invite_token.as_deref(),
+        handoff.loopback,
     )?;
     let now = i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX);
     let expires_at = now.saturating_add(
@@ -221,6 +236,8 @@ pub(crate) fn login(
         verification_uri: start.verification_uri,
         interval_secs: start.interval_secs,
         expires_at_millis: expires_at,
+        loopback: handoff.loopback,
+        auth_code: None,
     };
     enroll::write_wal(ctx.fs, &ctx.layout, &wal)?;
     Ok(pending_data(&wal))
@@ -255,10 +272,30 @@ fn resume(
     ctx: &Ctx<'_>,
     connectors: &LoginConnectors<'_>,
     wal: &enroll::PendingEnrollment,
+    handoff: Handoff<'_>,
 ) -> Result<LoginData, ClientError> {
+    // A freshly-arrived authorization code is PERSISTED before it is spent: the human has
+    // finished approving and the code is not re-derivable, so an interrupt between here and the
+    // grant must not strand the login. Presenting it does not consume it server-side, so the
+    // re-poll after a crash exchanges the same pair again.
+    let wal = match handoff.auth_code {
+        Some(code) if wal.auth_code.as_deref() != Some(code) => {
+            let updated = enroll::PendingEnrollment {
+                auth_code: Some(code.to_owned()),
+                ..wal.clone()
+            };
+            enroll::write_wal(ctx.fs, &ctx.layout, &updated)?;
+            updated
+        }
+        _ => wal.clone(),
+    };
+    let wal = &wal;
     let enroll_src = (connectors.enroll)(&wal.base_url);
-    match enroll_src.device_auth_poll(&wal.device_code)? {
+    match enroll_src.device_auth_poll(&wal.device_code, wal.auth_code.as_deref())? {
         DeviceAuthPoll::Pending => Ok(pending_data(wal)),
+        // Approved, but we have not delivered the local hand-off's code yet — the caller re-opens
+        // it. Reported as pending so the wait loop keeps its shape.
+        DeviceAuthPoll::AwaitingRedirect => Ok(pending_data(wal)),
         DeviceAuthPoll::Denied => {
             enroll::delete_wal(ctx.fs, &ctx.layout)?;
             Err(ClientError::Enrollment(
@@ -569,6 +606,7 @@ mod tests {
             workspace: &str,
             _requested_name: &str,
             _invite_token: Option<&str>,
+            _loopback: bool,
         ) -> Result<DeviceAuthStart, ClientError> {
             assert_eq!(workspace, "eng");
             Ok(DeviceAuthStart {
@@ -579,7 +617,11 @@ mod tests {
                 interval_secs: 5,
             })
         }
-        fn device_auth_poll(&self, device_code: &str) -> Result<DeviceAuthPoll, ClientError> {
+        fn device_auth_poll(
+            &self,
+            device_code: &str,
+            _auth_code: Option<&str>,
+        ) -> Result<DeviceAuthPoll, ClientError> {
             assert_eq!(device_code, "flow-secret");
             Ok(self.polls.borrow_mut().remove(0))
         }
@@ -644,17 +686,23 @@ mod tests {
                 web_origin: "https://topos.sh".to_owned(),
             };
             // START: writes the WAL, answers the pending disclosure.
-            let start = login(ctx, &connectors, Some("topos.example.com/eng")).unwrap();
+            let start = login(
+                ctx,
+                &connectors,
+                Some("topos.example.com/eng"),
+                Handoff::default(),
+            )
+            .unwrap();
             assert!(start.pending.is_some());
             assert_eq!(start.session_status, "awaiting-approval");
             let wal = enroll::read_wal(ctx.fs, &ctx.layout).unwrap().unwrap();
             assert_eq!(wal.host, "topos.example.com");
             assert!(matches!(wal.intent, enroll::EnrollIntentDoc::Session));
             // RESUME 1: still pending (the fake's first scripted poll).
-            let mid = login(ctx, &connectors, None).unwrap();
+            let mid = login(ctx, &connectors, None, Handoff::default()).unwrap();
             assert!(mid.pending.is_some());
             // RESUME 2: granted — the session persists, the WAL dies, the receipt discloses.
-            let done = login(ctx, &connectors, None).unwrap();
+            let done = login(ctx, &connectors, None, Handoff::default()).unwrap();
             assert!(done.pending.is_none());
             assert_eq!(done.session_status, "active");
             assert_eq!(done.workspace_id, "w_eng");
@@ -696,8 +744,14 @@ mod tests {
                 delivery: &delivery,
                 web_origin: "https://topos.sh".to_owned(),
             };
-            login(ctx, &connectors, Some("topos.example.com/eng")).unwrap();
-            let done = login(ctx, &connectors, None).unwrap();
+            login(
+                ctx,
+                &connectors,
+                Some("topos.example.com/eng"),
+                Handoff::default(),
+            )
+            .unwrap();
+            let done = login(ctx, &connectors, None, Handoff::default()).unwrap();
             assert_eq!(done.session_status, "pending");
             assert!(done.delivered.is_none());
             let all = sessions::read_sessions(ctx.fs, &ctx.layout).unwrap();

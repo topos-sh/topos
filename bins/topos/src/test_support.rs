@@ -240,7 +240,7 @@ impl SessionInstall {
                 delivery: &delivery_connect,
                 web_origin: "https://topos.sh".to_owned(),
             };
-            ops::session_login(ctx, &connectors, address).map_err(err_str)
+            ops::session_login(ctx, &connectors, address, ops::Handoff::default()).map_err(err_str)
         })
     }
 

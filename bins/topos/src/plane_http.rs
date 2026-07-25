@@ -668,11 +668,13 @@ impl EnrollSource for UreqDeviceClient {
         workspace: &str,
         requested_name: &str,
         invite_token: Option<&str>,
+        loopback: bool,
     ) -> Result<DeviceAuthStart, ClientError> {
         let body = serde_json::to_value(DeviceAuthStartRequest {
             requested_name: requested_name.to_owned(),
             workspace: workspace.to_owned(),
             invite_token: invite_token.map(str::to_owned),
+            redirect: loopback.then(|| "loopback".to_owned()),
         })
         .map_err(|e| ClientError::Corrupt(format!("authorize body: {e}")))?;
         let url = format!("{}/v1/login/authorize", self.base_url);
@@ -694,11 +696,16 @@ impl EnrollSource for UreqDeviceClient {
         })
     }
 
-    fn device_auth_poll(&self, device_code: &str) -> Result<DeviceAuthPoll, ClientError> {
+    fn device_auth_poll(
+        &self,
+        device_code: &str,
+        auth_code: Option<&str>,
+    ) -> Result<DeviceAuthPoll, ClientError> {
         // The body carries the SECRET device code — a serialize failure never echoes it, and the
         // response mapping is the pure `map_poll_response` (unit-tested without a socket).
         let body = serde_json::to_value(DeviceAuthPollRequest {
             device_code: device_code.to_owned(),
+            auth_code: auth_code.map(str::to_owned),
         })
         .map_err(|_| ClientError::Corrupt("poll body: could not serialize".to_owned()))?;
         let url = format!("{}/v1/login/token", self.base_url);
@@ -722,6 +729,9 @@ fn map_poll_response(status: u16, bytes: &[u8]) -> Result<DeviceAuthPoll, Client
         .map_err(|e| ClientError::WireInvalid(format!("poll response is malformed: {e}")))?;
     Ok(match resp.status {
         DeviceAuthPollStatus::Pending => DeviceAuthPoll::Pending,
+        // The human approved, but this caller has not presented the loopback hand-off's code —
+        // re-open the hand-off rather than wait on an approval that already happened.
+        DeviceAuthPollStatus::AwaitingRedirect => DeviceAuthPoll::AwaitingRedirect,
         DeviceAuthPollStatus::Denied => DeviceAuthPoll::Denied,
         DeviceAuthPollStatus::Expired => DeviceAuthPoll::Expired,
         DeviceAuthPollStatus::Granted => {

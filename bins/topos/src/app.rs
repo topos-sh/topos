@@ -348,17 +348,19 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 delivery: &connect_session_delivery,
                 web_origin: web_origin.clone(),
             };
-            let first = ops::session_login(&ctx, &connectors, address.as_deref());
             let stdout_tty = {
                 use std::io::IsTerminal;
                 std::io::stdout().is_terminal()
             };
             let policy = WaitPolicy::resolve(json, wait, stdout_tty, &clock);
-            // The zero-typing loopback (interactive blocking waits with a plausible local
-            // browser): auto-open the approval page with state-bound return coordinates; the
-            // page's single-use redirect wakes the next poll. The poll stays the source of
-            // truth — a failed open degrades to the typed wait.
-            let loopback_plan = if policy.block && !json {
+            // THE BINDING IS DECIDED BEFORE THE FLOW IS STARTED, because it is what the flow is
+            // started AS. A loopback-bound flow's credential can only be redeemed with the
+            // authorization code the approval redirect hands to this listener, so the listener
+            // must already exist when we declare it — and the server records the binding
+            // write-once, so there is no way to change our mind afterwards. Bind first, declare
+            // second: if the bind fails we say so and run the classic typed-code flow, rather
+            // than promising a hand-off we cannot receive.
+            let opener = if policy.block && !json {
                 let interactive = {
                     use std::io::IsTerminal;
                     std::io::stderr().is_terminal()
@@ -368,24 +370,59 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                     stdout_tty,
                     wait.is_some(),
                 ))
-                .and_then(|opener| {
-                    let wal = crate::enroll::read_wal(&fs, &ctx.layout).ok().flatten()?;
-                    Some(LoopbackPlan {
-                        opener,
-                        runner: &fs,
-                        challenge: ops::device_challenge(&wal.device_code),
-                    })
-                })
             } else {
                 None
             };
+            let bound = opener.and_then(|opener| {
+                let state = uuid::Uuid::new_v4().simple().to_string();
+                let listener = ops::loopback::LoopbackListener::bind(state.clone()).ok()?;
+                Some((opener, listener, state))
+            });
+            if opener.is_some() && bound.is_none() {
+                // Never a silent downgrade to the phishable path: a person who expected the
+                // browser hand-off should know they are now typing a code for a reason.
+                eprintln!(
+                    "note: could not open a local listener — falling back to the typed-code login."
+                );
+            }
+            let first = ops::session_login(
+                &ctx,
+                &connectors,
+                address.as_deref(),
+                ops::Handoff {
+                    loopback: bound.is_some(),
+                    auth_code: None,
+                },
+            );
+            // The auto-open plan: the page URL needs the flow's challenge, which only exists once
+            // the start above has written the WAL.
+            let loopback_plan = bound.and_then(|(opener, listener, state)| {
+                let wal = crate::enroll::read_wal(&fs, &ctx.layout).ok().flatten()?;
+                Some(LoopbackPlan {
+                    opener,
+                    runner: &fs,
+                    challenge: ops::device_challenge(&wal.device_code),
+                    listener,
+                    state,
+                })
+            });
             let result = block_on_pending(
                 &clock,
                 &policy,
                 first,
                 session_login_pending_disclosure,
                 loopback_plan,
-                || ops::session_login(&ctx, &connectors, address.as_deref()),
+                |auth_code| {
+                    ops::session_login(
+                        &ctx,
+                        &connectors,
+                        address.as_deref(),
+                        ops::Handoff {
+                            loopback: true,
+                            auth_code,
+                        },
+                    )
+                },
             );
             // The breadth arming sweep + the built-in skill ride the completed login (the
             // acceptance event is the trigger-arming moment), exactly as on `follow`'s receipt.
@@ -2170,6 +2207,10 @@ struct LoopbackPlan<'a> {
     opener: &'static str,
     runner: &'a dyn topos_harness::CommandRunner,
     challenge: String,
+    /// Bound BEFORE the flow was started — its existence is what let the start declare the flow
+    /// loopback-bound, and it is the only place the authorization code can arrive.
+    listener: ops::loopback::LoopbackListener,
+    state: String,
 }
 
 /// Block on a pending device-authorization until it settles, an optional deadline passes, or the device
@@ -2189,7 +2230,7 @@ fn block_on_pending<T>(
     first: Result<T, ClientError>,
     pending_of: impl Fn(&T) -> Option<PendingDisclosure>,
     loopback: Option<LoopbackPlan<'_>>,
-    mut repoll: impl FnMut() -> Result<T, ClientError>,
+    mut repoll: impl FnMut(Option<&str>) -> Result<T, ClientError>,
 ) -> Result<T, ClientError> {
     if !policy.block {
         return first;
@@ -2215,14 +2256,16 @@ fn block_on_pending<T>(
     );
     // The loopback arm: bind, auto-open, and let the redirect wake the poll. Every fault here is
     // silent — the typed-code lines above already carry the whole ceremony.
+    // The authorization code the local hand-off delivered, once it has. Held here rather than
+    // re-derived: it exists exactly once, in exactly one place.
+    let mut captured: Option<String> = None;
     let mut listener = loopback.and_then(|plan| {
-        let state = uuid::Uuid::new_v4().simple().to_string();
-        let bound = ops::loopback::LoopbackListener::bind(state.clone()).ok()?;
+        let bound = plan.listener;
         let url = ops::loopback::approval_url(
             &disc.verification_uri,
             &plan.challenge,
             bound.port(),
-            &state,
+            &plan.state,
         );
         let opened = plan
             .runner
@@ -2289,9 +2332,14 @@ fn block_on_pending<T>(
                     break;
                 }
                 if let Some(bound) = &listener
-                    && bound.try_receive().is_some()
+                    && let Some(outcome) = bound.try_receive()
                 {
-                    // The redirect landed (single-use — stop listening) → poll NOW.
+                    // The redirect landed (single-use — stop listening) → exchange NOW, carrying
+                    // the authorization code it brought. That code is the half of the exchange
+                    // only a browser on THIS machine could have delivered.
+                    if let ops::loopback::LoopbackOutcome::Approved { auth_code } = outcome {
+                        captured = auth_code;
+                    }
                     listener = None;
                     break;
                 }
@@ -2303,7 +2351,7 @@ fn block_on_pending<T>(
         } else {
             std::thread::sleep(nap);
         }
-        let next = repoll();
+        let next = repoll(captured.as_deref());
         if matches!(&next, Ok(o) if pending_of(o).is_some()) {
             // Still waiting on the human — keep polling (the deadline is re-checked at the loop top).
             last = next;
@@ -2671,7 +2719,7 @@ mod tests {
                 })
             },
             None,
-            || panic!("a non-blocking wait must never re-poll"),
+            |_auth_code| panic!("a non-blocking wait must never re-poll"),
         );
         assert_eq!(out.unwrap(), "pending-marker");
     }
@@ -2697,7 +2745,7 @@ mod tests {
                 })
             },
             None,
-            || panic!("the elapsed deadline never re-polls"),
+            |_auth_code| panic!("the elapsed deadline never re-polls"),
         );
         assert_eq!(out.unwrap(), "still-pending");
     }

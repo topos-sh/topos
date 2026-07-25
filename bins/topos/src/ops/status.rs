@@ -707,6 +707,8 @@ mod tests {
                 verification_uri: "https://topos.sh/verify".to_owned(),
                 interval_secs: 5,
                 // Long expired — recovery would reap this WAL on any ordinary command.
+                loopback: false,
+                auth_code: None,
                 expires_at_millis: 1_000,
             },
         )

@@ -483,6 +483,12 @@ export interface components {
         };
         /** @description `POST /v1/login/token` body — poll a login flow for its outcome. */
         DeviceAuthPollRequest: {
+            /**
+             * @description The one-time AUTHORIZATION CODE a loopback flow's approval delivered to this client's
+             *     127.0.0.1 listener. Required to redeem a `loopback`-bound flow and absent otherwise: the
+             *     two secrets travel different channels, and the device code has never been in a URL.
+             */
+            auth_code?: string | null;
             /** @description The SECRET flow code from `login/authorize`. */
             device_code: string;
         };
@@ -529,7 +535,7 @@ export interface components {
          *     workspace; every other status carries only itself.
          * @enum {string}
          */
-        DeviceAuthPollStatus: "pending" | "denied" | "expired" | "granted";
+        DeviceAuthPollStatus: "pending" | "denied" | "expired" | "granted" | "awaiting_redirect";
         /**
          * @description `POST /v1/login/authorize` body — begin a login flow toward a workspace named by its address
          *     slug. Whether the name exists is never disclosed on this route: an unknown name runs the same
@@ -542,6 +548,15 @@ export interface components {
              *     ceremony resolves it and weaves the invitation accept into its own fence.
              */
             invite_token?: string | null;
+            /**
+             * @description How this flow's credential may be collected — `"loopback"` when the client has bound a
+             *     127.0.0.1 listener and can open a browser on THIS machine, otherwise absent (the classic
+             *     device grant). WRITE-ONCE on the flow: declaring `loopback` only makes the flow harder to
+             *     redeem — the approval's authorization code, delivered by redirecting the approver's own
+             *     browser to that listener, becomes required alongside this device code. Absent keeps the
+             *     pre-existing behaviour exactly, so an older client is unaffected.
+             */
+            redirect?: string | null;
             /**
              * @description A human-readable machine name shown on the approval page (a confused-deputy guard, not
              *     authority) and kept as the session's display name once approved.

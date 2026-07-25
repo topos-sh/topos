@@ -4,12 +4,18 @@ import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.serv
 import { pollLoginFlow, workspaceRowById } from "@/lib/db/identity.server";
 
 /**
- * `POST /api/v1/login/token` — poll the login flow (`LoginPollRequest` →
- * `LoginPollResponse`). IDEMPOTENT: a terminal answer repeats on every poll until the row is
- * swept (the client's crash recovery is to re-poll); a `granted` poll echoes the PRESENTED
- * device_code back as `credential` — the approval promoted that same secret to the session's
- * one bearer credential, which is how a hash-only store still "delivers" it: the poller
- * already holds it.
+ * `POST /api/v1/login/token` — poll (device flow) or EXCHANGE (loopback flow) the login flow
+ * (`LoginPollRequest` → `LoginPollResponse`). IDEMPOTENT: a terminal answer repeats on every
+ * poll until the row is swept (the client's crash recovery is to re-poll); a `granted` poll
+ * echoes the PRESENTED device_code back as `credential` — the approval promoted that same
+ * secret to the session's one bearer credential, which is how a hash-only store still
+ * "delivers" it: the poller already holds it.
+ *
+ * A LOOPBACK-bound flow additionally demands `auth_code`, the one-time value the approval
+ * delivered by redirecting the approver's browser to their own 127.0.0.1 listener. Two secrets
+ * over two channels: the device code has never been in a URL, and the authorization code — which
+ * has, so it may sit in browser history — is useless without it. Presenting it does NOT consume
+ * it, so a crash between exchange and persist re-exchanges cleanly for the life of the flow.
  *
  * The `workspace` decoration on a granted poll is THE FLOW'S workspace — the CLI records what
  * it logged into from this one field. It reads the workspace id the APPROVAL persisted
@@ -38,11 +44,18 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   } catch {
     return badRequest("malformed JSON body");
   }
-  const flowCode = (parsed as { device_code?: unknown }).device_code;
+  const body = parsed as { device_code?: unknown; auth_code?: unknown };
+  const flowCode = body.device_code;
   if (typeof parsed !== "object" || parsed === null || typeof flowCode !== "string") {
     return badRequest("malformed login token body");
   }
-  const result = await pollLoginFlow(flowCode);
+  // The redirect-borne half of a LOOPBACK exchange. Optional on the wire: a device flow never
+  // has one, and a loopback flow polled without it gets `awaiting_redirect`, never a grant.
+  const authCode = body.auth_code;
+  if (authCode !== undefined && (typeof authCode !== "string" || authCode.length === 0)) {
+    return badRequest("malformed login token body: auth_code");
+  }
+  const result = await pollLoginFlow(flowCode, authCode);
   if (result.status !== "granted") {
     return Response.json({ status: result.status });
   }
