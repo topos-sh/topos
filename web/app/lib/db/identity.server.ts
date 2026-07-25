@@ -324,6 +324,32 @@ async function endSessionsTx(
 }
 
 /**
+ * End EVERY CLI session a person holds, in every workspace — the credential half of a password
+ * change. A bearer is not reachable from the auth tier's own session store: it is a
+ * `web.cli_session` row, workspace-scoped, with no default expiry, so a reset that ended only
+ * browser cookies would leave the more durable credential alive on a machine the person may
+ * have lost. Person-scoped by design: the act is "this account's password changed", so it is
+ * not any one workspace's ceremony and carries no role gate.
+ */
+export async function endAllSessionsOfUser(
+  userId: string,
+  cause: "self",
+): Promise<{ sessionId: string; workspaceId: string }[]> {
+  return await getDb().transaction(async (tx) => {
+    const who = await tx.execute(
+      sql`SELECT COALESCE(NULLIF(btrim(u.name), ''), u.email) AS display
+          FROM web."user" u WHERE u.id = ${userId}`,
+    );
+    const display = (who.rows[0] as { display: string } | undefined)?.display ?? userId;
+    return await endSessionsTx(tx, {
+      where: sql`user_id = ${userId}`,
+      actor: { userId, display },
+      cause,
+    });
+  });
+}
+
+/**
  * OWNER remove — a workspace owner ends any session in THEIR workspace (sessions page; the
  * route's owner guard is the gate). Kills exactly that workspace's access and nothing else
  * (the credential is workspace-scoped by construction). Bytes stay — the page copy says so.
@@ -1423,9 +1449,19 @@ export async function declineInvitationByToken(token: string): Promise<"declined
 export async function mintInvitationSignIn(email: string): Promise<string> {
   const token = mintSecret();
   const expiresAt = new Date(Date.now() + 2 * 60 * 1000);
+  // Stored HASHED, never as the live token: this row is a two-minute sign-in capability for the
+  // invited address, and a plaintext one would let anything that can read `web.verification` — a
+  // backup, a replica, the cloud role's mirror of the web lane — sign in as its addressee.
+  //
+  // The digest is computed IN Postgres (this tier computes none) and must match the magic-link
+  // plugin's stored form BYTE FOR BYTE, because the plugin is what looks it up on verify:
+  // unpadded base64URL of the SHA-256. `encode(…, 'base64')` gives padded standard base64, so the
+  // padding comes off and the two alphabet characters are translated.
   await getDb().execute(
     sql`INSERT INTO web.verification (id, identifier, value, expires_at)
-        VALUES (${`iv_${randomBytes(16).toString("hex")}`}, ${token},
+        VALUES (${`iv_${randomBytes(16).toString("hex")}`},
+                translate(rtrim(encode(sha256(convert_to(${token}, 'UTF8')), 'base64'), '='),
+                          '+/', '-_'),
                 ${JSON.stringify({ email })}, ${expiresAt})`,
   );
   return token;

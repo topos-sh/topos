@@ -12,3 +12,7 @@ node_modules
 **/node_modules
 web/build
 web/.react-router
+
+# Local env — never into a build context.
+.env
+.env.*

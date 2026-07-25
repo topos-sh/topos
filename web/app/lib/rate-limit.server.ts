@@ -9,7 +9,7 @@ interface Bucket {
   updatedAt: number;
 }
 
-function bucketLimiter({
+export function bucketLimiter({
   burst,
   refillPerSec,
   maxKeys,

@@ -3,6 +3,7 @@ import { composition } from "@/composition.server";
 import { bearerToken, uniformNotFound } from "@/lib/api/wire.server";
 import { seatOf, sessionActor, theWorkspace, workspaceByName } from "@/lib/db/identity.server";
 import { personDisplay } from "@/lib/person-display";
+import { followBase } from "@/lib/plane/follow-base.server";
 import { getAuth } from "./server";
 
 /** The workspace row a scoped page resolves — the non-null result of the tenancy lookup. */
@@ -172,11 +173,54 @@ export async function requireOwnerInScope(
 
 /** The signed-out bounce for loaders/actions. */
 export async function requireSession(request: Request): Promise<SessionData> {
+  assertSameOrigin(request);
   const session = await getAuth().api.getSession({ headers: request.headers });
   if (!session) {
     throw redirect("/login");
   }
   return session;
+}
+
+/**
+ * A cookie-authorized WRITE must come from this app's own origin.
+ *
+ * The session cookie is `SameSite=Lax`, which blocks a cross-SITE form post — but "site" is the
+ * registrable domain, so a sibling host (`wiki.corp.example` beside a self-hosted
+ * `topos.corp.example`, or any subdomain an attacker gets a foothold on) is same-site and its
+ * POST arrives with the cookie attached. Every people-affecting ceremony in the product is a
+ * form post authorized by that cookie, and the two-step confirms are client-side UI — a forged
+ * submit skips the button entirely, and type-the-name compares a field the forging page can
+ * fill with a name it already knows. So provenance is checked here, once, for the whole
+ * cookie-authorized surface.
+ *
+ * GET/HEAD are exempt: they are not writes, and no loader in this app mutates. The bearer lane
+ * is unaffected — it never reads a cookie, so it has nothing to forge with, and it does not
+ * pass through this guard. A missing `Origin` on a write fails closed: every browser has sent
+ * it on cross-origin-capable requests for years, and a non-browser caller belongs on the
+ * bearer lane.
+ */
+export function assertSameOrigin(request: Request): void {
+  if (request.method === "GET" || request.method === "HEAD") {
+    return;
+  }
+  const origin = request.headers.get("origin");
+  if (origin === null) {
+    throw uniformNotFound();
+  }
+  let presented: string;
+  try {
+    presented = new URL(origin).host;
+  } catch {
+    throw uniformNotFound();
+  }
+  // Both spellings of "this app" count. Behind a TLS-terminating proxy the container sees its
+  // own internal host on `request.url` while the browser sends the PUBLIC one, so comparing
+  // against either alone would refuse every real write on one topology or the other.
+  const requestHost = new URL(request.url).host;
+  const publicHost = new URL(followBase(request)).host;
+  if (presented !== requestHost && presented !== publicHost) {
+    throw uniformNotFound();
+  }
 }
 
 /**

@@ -14,6 +14,7 @@ import { getDb } from "@/lib/db/index.server";
 import { personDisplayLeftSql } from "@/lib/db/person-display.server";
 import {
   bundleStatusInTx,
+  CHANNEL_RESERVED,
   placeBundleRefInTx,
   unplaceBundleRefInTx,
 } from "@/lib/db/queries.channels.server";
@@ -677,7 +678,15 @@ export async function lanePlaceBundle(
     let row = await channelByNameInTx(tx, ws, channelName);
     let created = false;
     if (row === undefined) {
-      if (!CHANNEL_NAME.test(channelName) || channelName.length > CHANNEL_NAME_MAX) {
+      // The SAME name predicate the web door runs — reserved names included. A reserved name
+      // minted here would carry real reach while its page is unreachable (a top-level static
+      // route outranks the `:channel` face), i.e. an unlisted broadcast set with no curation or
+      // history surface.
+      if (
+        !CHANNEL_NAME.test(channelName) ||
+        channelName.length > CHANNEL_NAME_MAX ||
+        CHANNEL_RESERVED.has(channelName)
+      ) {
         return "bad_name";
       }
       // ON CONFLICT (never try/catch): a unique violation would ABORT this whole transaction —

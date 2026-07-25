@@ -46,10 +46,13 @@ export const meta: MetaFunction = () => [{ title: "Approve a login · Topos" }];
  * ceremony. Denying destroys a pending request and mints nothing.
  *
  * The LOOPBACK arrival (the CLI auto-opened this page): the URL carries `device` — the hex of
- * the flow's device-code HASH (the same value the store keys the row by; identifying, never
- * secret) — so the card resolves with zero typing, plus `port`/`state` naming the CLI's
- * ephemeral 127.0.0.1 listener. The outcome then returns to the terminal via ONE state-bound
- * localhost redirect; the CLI's poll stays the source of truth.
+ * the flow's device-code HASH — plus `port`/`state` naming the CLI's ephemeral 127.0.0.1
+ * listener, so the outcome returns to the terminal via ONE state-bound localhost redirect
+ * (the CLI's poll stays the source of truth). `device` does NOT pre-arm the card: it is
+ * derivable by whoever started the flow, and starting one needs no credential, so a
+ * pre-resolved approve button would be a one-click credential handover to a stranger who
+ * mailed the link. The typed code — read off the operator's own terminal — is the out-of-band
+ * proof that the approver is the asker, and it is required on every arrival.
  *
  * A flow carrying an INVITATION token discloses the join on the card; the approval ceremony
  * itself weaves accept-the-invitation → approve-the-device into one transaction (identity
@@ -172,15 +175,15 @@ export async function loader({ request }: LoaderFunctionArgs) {
         : "";
     throw redirect(`/new?next=${encodeURIComponent(self)}${prefill}`);
   }
-  return {
-    multi,
-    device,
-    loopback,
-    resolved:
-      resolved === null
-        ? null
-        : { ...resolved, linked: await linkTargetOf(actor, resolved, multi) },
-  };
+  // The card is NEVER pre-resolved from the URL. `device` identifies a flow, but it is derived
+  // from the device code (its hex hash), so whoever STARTED a flow can compute it — and the
+  // start is deliberately unauthenticated. A pre-armed approve card would therefore let a
+  // stranger who began their own flow mail a signed-in member a one-click link and collect a
+  // credential acting as that member (the device-authorization phishing RFC 8628 warns of).
+  // The short code the CLI prints to the operator's OWN terminal is the out-of-band proof that
+  // the person approving is the person who asked, so it is always typed — the resolution above
+  // decides only the seatless-approver weave, and never reaches the browser.
+  return { multi, device, loopback, resolved: null };
 }
 
 const REQUEST_GONE =
@@ -197,14 +200,16 @@ export async function action({ request }: ActionFunctionArgs) {
   const intent = String(form.get("intent") ?? "");
   const { loopback } = loopbackFrom(form);
 
+  // ONE belt over all three arms: `approve` and `deny` resolve a flow by the same typed code
+  // `lookup` does, so leaving them unbelted would just move an enumeration loop one intent to
+  // the left. Page actions never reach the /api/v1 door belt, so the action wears it.
+  if (!allowVerifyLookup(actor.userId)) {
+    throw data(null, { status: 429 });
+  }
+
   if (intent === "lookup") {
     // The two-state page's first state: resolve the typed code into the request card. A POST,
     // deliberately — the code never rides a URL (history, logs, referers all stay clean).
-    // BELTED per signed-in person: the lookup resolves a code into pending-login metadata, so
-    // an enumeration loop hits this wall long before the code space matters.
-    if (!allowVerifyLookup(actor.userId)) {
-      throw data(null, { status: 429 });
-    }
     const userCode = String(form.get("code") ?? "")
       .trim()
       .toUpperCase();

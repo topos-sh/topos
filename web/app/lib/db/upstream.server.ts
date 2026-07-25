@@ -27,8 +27,20 @@ interface TarFile {
   bytes: Buffer;
 }
 
-/** The archive ceilings — a public repo is UNTRUSTED input, so every dimension is bounded. */
+/** The archive ceilings — a public repo is UNTRUSTED input, so every dimension is bounded.
+ *
+ * The COUNT alone is not a bound: the download cap is on the compressed stream, so a highly
+ * compressible tarball of a few hundred KB can unpack to hundreds of MB in one file. Those bytes
+ * are then held whole, copied per entry, base64'd, and JSON-serialized — several multiples of
+ * the unpacked size, live in the one process that serves the entire product. A skill is
+ * `SKILL.md` plus scripts and docs, so these ceilings are generous for the real thing and far
+ * below what it takes to hurt the server. (The CLI's own importer has carried the same three
+ * dimensions all along — `git_source.rs`; this is the server growing the matching discipline.) */
 const MAX_ARCHIVE_FILES = 2000;
+/** One file's unpacked size. */
+const MAX_ARCHIVE_FILE_BYTES = 16 * 1024 * 1024;
+/** Every unpacked file added up — the ceiling that actually bounds the process's memory. */
+const MAX_ARCHIVE_TOTAL_BYTES = 32 * 1024 * 1024;
 
 /** Read a POSIX/pax tarball's REGULAR files + the pax global `comment` (codeload stamps the
  * commit sha there). STRICT on structure — an invalid header checksum, a malformed size, or a
@@ -37,6 +49,7 @@ const MAX_ARCHIVE_FILES = 2000;
  * plain files, never a filesystem side effect. */
 export function untar(tar: Buffer): { files: TarFile[]; comment: string | null } {
   const files: TarFile[] = [];
+  let unpacked = 0;
   let comment: string | null = null;
   let offset = 0;
   let paxPath: string | null = null;
@@ -130,6 +143,13 @@ export function untar(tar: Buffer): { files: TarFile[]; comment: string | null }
     ) {
       continue; // unsafe or degenerate — skipped, never trusted
     }
+    if (body.length > MAX_ARCHIVE_FILE_BYTES) {
+      throw new Error("archive holds a file that is too large");
+    }
+    unpacked += body.length;
+    if (unpacked > MAX_ARCHIVE_TOTAL_BYTES) {
+      throw new Error("archive unpacks to too many bytes");
+    }
     files.push({ path: clean, mode, bytes: Buffer.from(body) });
     if (files.length > MAX_ARCHIVE_FILES) {
       throw new Error("archive holds too many files");
@@ -178,7 +198,7 @@ export type TarballFetcher = (repo: string, ref: string) => Promise<Buffer>;
 const MAX_TARBALL_BYTES = 32 * 1024 * 1024;
 /** The DECOMPRESSED ceiling — a small, highly-compressible archive must not inflate without
  * bound (`gunzipSync` enforces it via `maxOutputLength`, throwing past it). */
-const MAX_UNPACKED_BYTES = 128 * 1024 * 1024;
+const MAX_UNPACKED_BYTES = 64 * 1024 * 1024;
 
 /** A process-wide cap on concurrent upstream fetches: codeload is one shared external
  * dependency, and member-triggered checks/previews must not fan a burst of 30-second

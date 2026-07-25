@@ -111,6 +111,33 @@ export async function publishTargetOf(
     : { ...row, protection: row.protection as PublishTarget["protection"] };
 }
 
+/**
+ * Whether a bundle id is already registered to a DIFFERENT workspace.
+ *
+ * A genesis publish keeps the CLIENT-SUPPLIED id, and `bundle.id` is unique across the whole
+ * catalog — so a caller who names another workspace's id reaches the genesis arm (their own
+ * workspace has no such row) while every id-keyed write below still addresses the foreign row.
+ * The upstream row is the sharp one: its arbiter is the bundle id ALONE, so its upsert would
+ * rewrite the other workspace's provenance in place. Refusing here — before the vault ingest,
+ * so no orphan bytes land either — closes that at the root.
+ *
+ * A same-workspace id is NOT this: `publishTargetOf` is workspace-scoped and status-agnostic,
+ * so an id already in the caller's own catalog never reaches the genesis arm at all, and a
+ * retried genesis still converges on its own row.
+ */
+export async function bundleIdHeldElsewhere(
+  actor: MemberActor,
+  bundleId: string,
+): Promise<boolean> {
+  const rows = await getDb()
+    .select({ workspaceId: bundle.workspaceId })
+    .from(bundle)
+    .where(eq(bundle.id, bundleId))
+    .limit(1);
+  const row = rows[0];
+  return row !== undefined && row.workspaceId !== actor.workspaceId;
+}
+
 // ── Genesis registration ─────────────────────────────────────────────────────────────────────
 
 /**

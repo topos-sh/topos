@@ -94,6 +94,36 @@ function ensureSetupOnce(request: Request): Promise<void> {
 
 export const streamTimeout = 5_000;
 
+/**
+ * The response headers every HTML document carries. Set HERE, on the one place documents are
+ * built, so no page can forget them and a superset build inherits them by re-exporting this
+ * entry.
+ *
+ * `frame-ancestors 'none'` (with its pre-CSP spelling beside it) is the load-bearing one: the
+ * signed-in surface holds ceremonies whose whole authorization is a deliberate click — a login
+ * approval, a member removal, a role change — and framing is how a click is stolen. Cookie
+ * policy happens to block the cross-site case today, which makes framing a browser default
+ * rather than a decision of ours; this makes it ours. `nosniff` keeps a bundle's bytes from
+ * being re-interpreted as script, and the referrer policy stops the capability links that ride a
+ * URL path (an invitation, a claim code) from leaking to anything a page loads.
+ *
+ * That last one is `strict-origin-when-cross-origin`, NOT `no-referrer`, and the difference is
+ * load-bearing: under `no-referrer` a browser also sends `Origin: null` on same-origin form
+ * POSTs, which trips both React Router's own action origin check and ours, breaking every
+ * ceremony in the product. `strict-origin-when-cross-origin` sends only scheme+host off-origin —
+ * so the token in an invite path never leaves — while leaving `Origin` intact.
+ *
+ * A full `script-src` CSP is deliberately NOT here: it needs a nonce threaded through the
+ * router's hydration script and the optional analytics snippet, which is a change with its own
+ * failure modes and belongs in its own increment.
+ */
+function setDocumentSecurityHeaders(headers: Headers): void {
+  headers.set("Content-Security-Policy", "frame-ancestors 'none'; base-uri 'none'");
+  headers.set("X-Frame-Options", "DENY");
+  headers.set("X-Content-Type-Options", "nosniff");
+  headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+}
+
 export default async function handleRequest(
   request: Request,
   responseStatusCode: number,
@@ -147,6 +177,7 @@ export default async function handleRequest(
           const body = new PassThrough();
           const stream = createReadableStreamFromReadable(body);
           responseHeaders.set("Content-Type", "text/html");
+          setDocumentSecurityHeaders(responseHeaders);
           resolve(new Response(stream, { headers: responseHeaders, status: responseStatusCode }));
           pipe(body);
         },

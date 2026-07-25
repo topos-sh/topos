@@ -80,10 +80,30 @@ export async function consumeRecoveryCode(
                     ${passwordHash}, now(), now())`,
       );
     }
+    // Every credential the old password could have opened dies with it — browser sessions and
+    // the CLI bearers alike. The mailed reset gets this from the auth tier's own hooks; this
+    // hatch writes the password itself, so it owns the teardown too.
+    await tx.execute(sql`DELETE FROM web.session WHERE user_id = ${userId}`);
+    const endedSessions = await tx.execute(
+      sql`DELETE FROM web.cli_session WHERE user_id = ${userId} RETURNING id, workspace_id`,
+    );
+    // The recovery is a PERSON-scoped act, so its trail lands in each workspace the person is
+    // seated in — never on an arbitrary `LIMIT 1` workspace, which on a multi-tenant install
+    // would file one tenant's ceremony in an unrelated tenant's history (and on a virgin
+    // database recorded nothing at all).
     await tx.execute(
       sql`INSERT INTO web.audit_event (workspace_id, actor_user_id, actor_display, kind, outcome)
-          SELECT w.id, ${userId}, 'recovery', 'password_recovered', 'ok' FROM web.workspace w LIMIT 1`,
+          SELECT s.workspace_id, ${userId}, 'recovery', 'password_recovered', 'ok'
+          FROM web.seat s WHERE s.user_id = ${userId}`,
     );
+    for (const row of endedSessions.rows as { id: string; workspace_id: string }[]) {
+      await tx.execute(
+        sql`INSERT INTO web.audit_event
+              (workspace_id, actor_user_id, actor_display, kind, subject, outcome, details)
+            VALUES (${row.workspace_id}, ${userId}, 'recovery', 'session_ended', ${row.id}, 'ok',
+                    ${JSON.stringify({ cause: "self" })}::jsonb)`,
+      );
+    }
     return { userId };
   });
 }

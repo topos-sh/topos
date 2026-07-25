@@ -18,6 +18,12 @@ PROJECT="topos-smoke-$$"
 # Preset the setup code (the CI/IaC hatch) so the smoke can drive the claim page itself.
 export TOPOS_SETUP_CODE="smoke-setup-code-$$-0123456789abcdef"
 export TOPOS_WORKSPACE_NAME="smoke-team"
+# Real secrets, like a real deployment. The compose file's `change-me-…` defaults exist so a first
+# `up` works on a laptop, and the app REFUSES to boot on them when APP_ENV=production (they are
+# published values in a public repo — a session-signing key anyone can look up). The smoke runs the
+# production path, so it overrides them exactly as the compose header tells an operator to.
+export TOPOS_WEB_AUTH_SECRET="smoke-auth-secret-$$-0123456789abcdef0123456789abcdef"
+export TOPOS_INTERNAL_TOKEN="smoke-internal-token-$$-0123456789abcdef"
 compose() { docker compose -p "$PROJECT" "$@"; }
 cleanup() { compose down -v --remove-orphans >/dev/null 2>&1 || true; rm -f "$COOKIES"; }
 COOKIES="$(mktemp)"

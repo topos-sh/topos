@@ -26,8 +26,12 @@ RUN bun install --frozen-lockfile
 #     (scripts/gen-plane-types.mjs resolves it as <web>/../contracts/openapi/openapi.json).
 #   ../scripts/install.sh — the bytes `GET /install` serves (env.server.ts INSTALL_SH_PATH default
 #     `../scripts/install.sh`, resolved against the process cwd = this WORKDIR).
+#   ../skills/topos — the built-in skill's three files, which the `.well-known/agent-skills`
+#     discovery lane reads at request time (env.server.ts BUILTIN_SKILL_DIR default
+#     `../skills/topos`). Without it that lane throws on every unauthenticated request.
 COPY contracts/openapi/openapi.json /app/contracts/openapi/openapi.json
 COPY scripts/install.sh /app/scripts/install.sh
+COPY skills/ /app/skills/
 
 # The app source (web/node_modules + web/build are excluded by .dockerignore, so the host tree never
 # clobbers the freshly-installed deps or leaks a stale build).
@@ -73,6 +77,7 @@ COPY --from=builder --chown=10001:10001 /app/web/node_modules ./node_modules
 COPY --from=builder --chown=10001:10001 /app/web/package.json ./package.json
 COPY --from=builder --chown=10001:10001 /app/web/drizzle ./drizzle
 COPY --from=builder --chown=10001:10001 /app/scripts/install.sh /app/scripts/install.sh
+COPY --from=builder --chown=10001:10001 /app/skills /app/skills
 
 USER topos
 EXPOSE 3000

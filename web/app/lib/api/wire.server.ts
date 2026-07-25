@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 /**
  * The device-lane wire envelopes — the transport-fault family every `/api/v1` route answers with,
  * matching the vault's frozen shapes field-for-field (`JsonEnvelope` + flat `WireError`; the
@@ -117,10 +118,10 @@ export const NO_STORE = { "cache-control": "no-store" } as const;
  * Read a request body under a hard byte cap. A declared `Content-Length` over the cap is refused UP
  * FRONT — before the body is read — so the common oversize case never buffers (the memory
  * amplification an unauthenticated caller could otherwise trip before the credential resolve). A
- * chunked body declares no length, so it is still read and then length-checked: nothing over the
- * cap is ever ACCEPTED, though a chunked oversize body is buffered before rejection (bounded by the
- * runtime's own request ceiling). The vault enforces its equivalent 64 KiB enroll-lane cap at the
- * streaming extractor; this is the closest the served routes get without a streaming reader.
+ * chunked body declares no length, so the cap is ALSO enforced while the stream is consumed —
+ * the read stops and cancels at the first byte past the cap, so an undeclared body can never
+ * buffer past it either. The vault enforces its equivalent 64 KiB enroll-lane cap at the
+ * streaming extractor; this is the served routes' matching discipline.
  * Returns the body text, or a 400 `Response` to answer directly.
  */
 export async function readCappedBody(
@@ -135,11 +136,31 @@ export async function readCappedBody(
       return badRequest(`${what} too large`);
     }
   }
-  const text = await request.text();
-  if (text.length > cap) {
-    return badRequest(`${what} too large`);
+  // The declared length is only a HINT — a caller may omit it entirely (chunked transfer), and
+  // then a plain `request.text()` would buffer the whole stream before anything could object.
+  // So the cap is enforced AS the body arrives: the read is abandoned the moment it is exceeded,
+  // and the connection is cancelled rather than drained. This matters most on the publish-family
+  // routes, whose cap is large by necessity and whose credential check comes after the body.
+  const body = request.body;
+  if (body === null) {
+    return "";
   }
-  return text;
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    total += value.byteLength;
+    if (total > cap) {
+      await reader.cancel();
+      return badRequest(`${what} too large`);
+    }
+    chunks.push(value);
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
 }
 
 /**

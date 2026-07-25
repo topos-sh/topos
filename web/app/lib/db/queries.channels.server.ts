@@ -28,7 +28,7 @@ const CHANNEL_NAME = /^[a-z0-9][a-z0-9-]*$/;
  * create form's own route (`channels/new`), which React Router ranks above the dynamic
  * `channels/:channel` face — a channel named `new` would be creatable but its page unreachable.
  */
-const CHANNEL_RESERVED = new Set([
+export const CHANNEL_RESERVED = new Set([
   "new",
   // The CLI's built-in skill owns the bare `topos` token in every client-side resolution — a
   // channel under that name would be unreachable from the CLI.

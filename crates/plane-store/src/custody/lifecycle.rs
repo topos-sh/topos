@@ -26,6 +26,12 @@ use crate::error::{AuthorityError, Result};
 use crate::id::{BundleId, CommitId, ObjectId, OpId, WorkspaceId};
 use crate::upload::CandidateUpload;
 
+/// The most files one candidate may carry. The per-blob reject cap bounds each file's SIZE; this
+/// bounds their NUMBER, which is what actually bounds ingest cost — every file costs a denylist
+/// probe, a staged object, an install CAS and several fsyncs, all serialized under the promotion
+/// lease. The client's own importer carries the same dimension (`git_source.rs`).
+pub(crate) const MAX_CANDIDATE_FILES: usize = 20_000;
+
 /// How long an in-flight staging quarantine lives before the janitor may sweep it (epoch-ms; one hour).
 /// Generous: in-process ingest→commit is sub-second.
 pub(crate) const QUARANTINE_TTL_MS: i64 = 3600 * 1000;
@@ -71,6 +77,16 @@ pub(crate) async fn ingest(
     if candidate.files.is_empty() {
         return Err(AuthorityError::RejectedUpload(
             "a bundle must contain at least one file".to_owned(),
+        ));
+    }
+    // Bound the file COUNT, not just each blob's size. Ingest cost is per-file and large — a
+    // denylist probe, a staged loose object, a quarantine open, an install CAS and several
+    // fsyncs — so a body well under the byte cap can still buy hundreds of thousands of
+    // round trips, serialized under the promotion lease. The ceiling is far above any real
+    // bundle and far below what it takes to stall the vault.
+    if candidate.files.len() > MAX_CANDIDATE_FILES {
+        return Err(AuthorityError::RejectedUpload(
+            "a bundle exceeds the maximum allowed file count".to_owned(),
         ));
     }
     // Per-blob guards BEFORE staging, so an oversize or purged blob is never persisted to the quarantine

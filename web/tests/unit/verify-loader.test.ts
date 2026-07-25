@@ -130,8 +130,8 @@ describe("the signed-out bounce", () => {
   });
 });
 
-describe("the challenge resolution (zero typing)", () => {
-  it("a valid device challenge resolves the card with THE ONE workspace being linked", async () => {
+describe("the URL challenge never pre-arms the approve card", () => {
+  it("a valid device challenge still yields NO resolved card — the code must be typed", async () => {
     theWorkspace.mockResolvedValue({
       id: "w_1",
       name: "acme",
@@ -141,64 +141,32 @@ describe("the challenge resolution (zero typing)", () => {
     seatOf.mockResolvedValue({ role: "member" });
     pendingLoginFlowByChallenge.mockResolvedValue(FLOW);
     const result = (await call(`http://x/verify?device=${CHALLENGE}`)) as {
-      resolved: {
-        userCode: string;
-        linked: { displayName: string; joining: boolean; awaitsApproval: boolean };
-      } | null;
+      device: string | null;
+      resolved: unknown;
     };
-    expect(pendingLoginFlowByChallenge).toHaveBeenCalledWith(CHALLENGE);
-    expect(result.resolved?.userCode).toBe("AB12-CD34");
-    expect(result.resolved?.linked).toEqual({
-      name: "acme",
-      displayName: "Acme",
-      joining: false,
-      awaitsApproval: false,
-    });
+    // `device` is the hex of the flow's device-code hash, so ANYONE who started a flow can
+    // compute it — and starting one takes no credential. Handing back a resolved card would let
+    // a stranger mail a signed-in member a one-click link and collect a credential acting as
+    // that member. The challenge still rides through (the loopback outcome needs it); the card
+    // does not.
+    expect(result.resolved).toBeNull();
+    expect(result.device).toBe(CHALLENGE);
   });
 
-  it("the device-approval knob + a non-owner approver forewarn the pending link", async () => {
+  it("an unknown challenge is indistinguishable from a known one", async () => {
     theWorkspace.mockResolvedValue({
       id: "w_1",
       name: "acme",
       displayName: "Acme",
-      sessionApproval: "on",
-    });
-    seatOf.mockResolvedValue({ role: "member" });
-    pendingLoginFlowByChallenge.mockResolvedValue(FLOW);
-    const result = (await call(`http://x/verify?device=${CHALLENGE}`)) as {
-      resolved: { linked: { awaitsApproval: boolean } } | null;
-    };
-    expect(result.resolved?.linked.awaitsApproval).toBe(true);
-    // An OWNER approver's link never waits — the actor is the approval.
-    seatOf.mockResolvedValue({ role: "owner" });
-    const asOwner = (await call(`http://x/verify?device=${CHALLENGE}`)) as {
-      resolved: { linked: { awaitsApproval: boolean } } | null;
-    };
-    expect(asOwner.resolved?.linked.awaitsApproval).toBe(false);
-  });
-
-  it("an invite-carrying flow links the INVITATION's workspace, joining on approve", async () => {
-    membershipsFor.mockResolvedValue([{ displayName: "Home", address: "home" }]);
-    workspaceByName.mockResolvedValue({
-      id: "w_acme",
-      name: "acme",
-      displayName: "Acme Platform",
       sessionApproval: "off",
     });
-    pendingLoginFlowByChallenge.mockResolvedValue({
-      ...FLOW,
-      inviteWorkspace: { name: "acme", displayName: "Acme Platform", role: "member" },
-    });
-    const result = (await call(`http://x/verify?device=${CHALLENGE}`)) as {
-      resolved: { linked: { displayName: string; joining: boolean } } | null;
-    };
-    expect(workspaceByName).toHaveBeenCalledWith("acme");
-    expect(result.resolved?.linked).toEqual({
-      name: "acme",
-      displayName: "Acme Platform",
-      joining: true,
-      awaitsApproval: false,
-    });
+    seatOf.mockResolvedValue({ role: "member" });
+    pendingLoginFlowByChallenge.mockResolvedValue(null);
+    const miss = (await call(`http://x/verify?device=${CHALLENGE}`)) as { resolved: unknown };
+    pendingLoginFlowByChallenge.mockResolvedValue(FLOW);
+    const hit = (await call(`http://x/verify?device=${CHALLENGE}`)) as { resolved: unknown };
+    expect(miss.resolved).toBeNull();
+    expect(hit.resolved).toBeNull();
   });
 });
 

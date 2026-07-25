@@ -390,6 +390,37 @@ fn ensure_url_safe_ids(skill_id: &str, workspace_id: &str) -> Result<(), PlaneEr
     }
 }
 
+/// Accept a server-declared URL only when it names the SAME origin the client is already talking
+/// to (scheme + authority), and only when that scheme is http(s).
+///
+/// The login flow's `verification_uri` is the one server-supplied string that reaches the desktop
+/// URL opener, which hands whatever it is given to the platform's scheme handlers. Unvalidated,
+/// a hostile or compromised server could answer `some-app://…` and have the client invoke an
+/// arbitrary handler on the operator's machine with no prompt. The sibling value from the very
+/// same handshake — `api_base_url` — has always been gated this way; this closes the asymmetry.
+fn same_origin_uri(base: &str, declared: &str) -> Result<String, ClientError> {
+    let bad = || {
+        ClientError::WireInvalid(
+            "the authorize response's verification URI is not on this server's origin".to_owned(),
+        )
+    };
+    let declared_trimmed = declared.trim();
+    let d = declared_trimmed
+        .parse::<ureq::http::Uri>()
+        .map_err(|_| bad())?;
+    let b = base.parse::<ureq::http::Uri>().map_err(|_| bad())?;
+    let same_scheme =
+        matches!(d.scheme_str(), Some("http" | "https")) && d.scheme_str() == b.scheme_str();
+    if same_scheme
+        && d.authority().map(ureq::http::uri::Authority::as_str)
+            == b.authority().map(ureq::http::uri::Authority::as_str)
+    {
+        Ok(declared_trimmed.to_owned())
+    } else {
+        Err(bad())
+    }
+}
+
 /// The transport-level classification of a response status — before any body read. Factored out so the
 /// 304 / 404 / 5xx / 2xx mapping is unit-tested without a socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -657,7 +688,7 @@ impl EnrollSource for UreqDeviceClient {
         Ok(DeviceAuthStart {
             device_code: resp.device_code,
             user_code: resp.user_code,
-            verification_uri: resp.verification_uri,
+            verification_uri: same_origin_uri(&self.base_url, &resp.verification_uri)?,
             expires_in_secs: resp.expires_in_secs,
             interval_secs: resp.interval_secs,
         })

@@ -98,10 +98,13 @@ transaction, FOR UPDATE-fenced or single-statement-atomic, audit row inside):
   anywhere is first woven through workspace creation (`/verify` redirects to `/new` carrying itself
   as `next` + the flow's slug as a `name` prefill) — unless the flow carries an invitation, whose
   accept will seat them right there. The LOOPBACK arrival (the CLI auto-opened the page): the URL
-  carries `device` — hex of the flow's device-code HASH, resolving the card with zero typing — plus
-  `port`/`state` naming the CLI's ephemeral 127.0.0.1 listener; the approve/deny outcome returns as
-  ONE state-bound localhost redirect (nothing sensitive rides it — the CLI's poll stays the source
-  of truth). The signed-out loader bounce carries the page (validated params only) as `next`.
+  carries `device` — hex of the flow's device-code HASH — plus `port`/`state` naming the CLI's
+  ephemeral 127.0.0.1 listener; the approve/deny outcome returns as ONE state-bound localhost
+  redirect (nothing sensitive rides it — the CLI's poll stays the source of truth). `device` does
+  NOT pre-arm the card: it is derivable by whoever STARTED the flow, and starting one takes no
+  credential, so a pre-resolved approve button would hand a stranger who mailed the link a
+  credential acting as the person who clicked. The code is typed on every arrival — read off the
+  operator's own terminal, it is the out-of-band proof that the approver is the asker. The signed-out loader bounce carries the page (validated params only) as `next`.
   Ending a session is immediate on either side (the client's `DELETE /api/v1/session`, the
   Sessions tab's owner arms) — the row is deleted, the lane 404s from the next request.
 - **The tokened invitation** (`invite-redeem.tsx` at `/invite/<token>` — `/<ws>/invite/<token>` in

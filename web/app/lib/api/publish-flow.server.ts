@@ -11,6 +11,7 @@ import {
 import { badRequest, internalError, uniformNotFound } from "@/lib/api/wire.server";
 import type { SessionActor } from "@/lib/auth/guards.server";
 import {
+  bundleIdHeldElsewhere,
   inFinalTx,
   insertReceiptInTx,
   openProposalInTx,
@@ -62,7 +63,14 @@ export interface UpstreamInput {
 
 /** Record a publish's upstream provenance inside the final transaction: the bundle's ONE
  * upstream row (upserted — the latest publish's word wins) and, when a commit is named, the
- * per-version record divergence is read from. */
+ * per-version record divergence is read from.
+ *
+ * The upsert's arbiter is the bundle id ALONE (the row's primary key), so its conflict target
+ * spans the whole catalog rather than this workspace's slice: the `DO UPDATE` therefore carries
+ * a workspace guard, or a caller naming a foreign bundle id would rewrite that workspace's
+ * upstream pointer in place — the composite FK stays satisfied, because the update never
+ * touches `workspace_id`. The genesis arm refuses a foreign id outright (see
+ * `bundleIdHeldElsewhere`); this guard is the belt below that brace. */
 async function recordUpstreamInTx(
   tx: Parameters<Parameters<typeof inFinalTx>[0]>[0],
   ws: string,
@@ -78,6 +86,7 @@ async function recordUpstreamInTx(
     ON CONFLICT (bundle_id) DO UPDATE
       SET host = excluded.host, repo = excluded.repo, path = excluded.path,
           license = COALESCE(excluded.license, web.bundle_upstream.license)
+      WHERE web.bundle_upstream.workspace_id = excluded.workspace_id
   `);
   if (upstream.commit !== null) {
     await tx.execute(sql`
@@ -98,6 +107,13 @@ export async function publishFlow(args: PublishFlowArgs): Promise<Response> {
   const target = await publishTargetOf(actor, skillId);
   const isGenesis = target === undefined;
   const skillName = target?.name;
+
+  // A genesis publish keeps the client-supplied id, and bundle ids are unique catalog-wide — so
+  // an id already held by ANOTHER workspace is refused before anything is written or ingested.
+  // The uniform 404 is byte-identical to an unknown workspace, so this is no existence oracle.
+  if (isGenesis && (await bundleIdHeldElsewhere(actor, skillId))) {
+    return uniformNotFound();
+  }
 
   if (target !== undefined && target.status !== "active") {
     const receipt = buildReceipt({
