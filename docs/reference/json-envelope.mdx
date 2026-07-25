@@ -7,6 +7,18 @@ icon: "brackets-curly"
 `--json` works on **every** verb, prints **exactly one envelope object on stdout**, and **never
 prompts**. This is the surface an agent should drive.
 
+Four rules cover almost everything an agent needs:
+
+1. **Use `--json` on every verb**, and read the envelope rather than parsing prose.
+2. **Follow `next_actions`** — each carries a complete `argv`.
+3. **Describe once, then act.** Repeating a describe is never progress.
+4. **Never route around a refusal** by hand-editing files or internal state. Read the error, run the
+   named fix, retry once.
+
+New to Topos entirely? Start at [Quickstart](/quickstart) — the agent path is woven through it — or
+fetch [`topos.sh/agent`](https://topos.sh/agent), the plain-text setup walkthrough every Topos server
+serves at `<origin>/agent`.
+
 ## The envelope
 
 ```json

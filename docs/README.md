@@ -9,7 +9,7 @@ docs/
 ├── docs.json              # site config: theme, colors, fonts, navigation
 ├── .mintignore            # files in this folder that are NOT site pages
 ├── index.mdx              # the landing page
-├── quickstart.mdx  install.mdx  for-agents.mdx
+├── quickstart.mdx  install.mdx
 ├── concepts/              # the model: skills, manifests, references, sessions, channels, governance
 ├── motions/               # task-oriented: connect, receive, publish, review, curate, import, roll back…
 ├── harnesses/             # how harness integration works + the supported table

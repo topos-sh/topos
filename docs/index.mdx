@@ -35,8 +35,9 @@ current.
   <Card title="Install the CLI" icon="download" href="/install">
     One command on macOS or Linux. No sudo, no runtime dependencies.
   </Card>
-  <Card title="Set up an agent" icon="robot" href="/for-agents">
-    Written for the agent itself — hand it this page and it can do the rest.
+  <Card title="Set it up with your agent" icon="robot" href="/quickstart">
+    Paste one line to the agent you already use and it does the setup. The quickstart carries the
+    agent path alongside the manual one.
   </Card>
   <Card title="Self-host" icon="server" href="/self-hosting/overview">
     Run the whole product yourself. Apache-2.0, one compose file.
@@ -98,8 +99,12 @@ topos status                          # the two-part answer, offline
 Both run the same code and speak the same protocol. The CLI is identical; only the address differs.
 
 <Note>
-  These docs are built to be read by agents as well as people. Every page is available as plain
-  markdown by appending `.md` to its URL, and the whole site is published as
-  [`llms.txt`](https://docs.topos.sh/llms.txt) and
-  [`llms-full.txt`](https://docs.topos.sh/llms-full.txt).
+  **Reading this as an agent?** Fetch [`topos.sh/agent`](https://topos.sh/agent) — a short plain-text
+  setup walkthrough written for you, served by every Topos server at `<origin>/agent`. The
+  [Quickstart](/quickstart) and [Install](/install) pages carry the agent path inline too.
+
+  These docs are built to be machine-readable throughout: every page is available as plain markdown by
+  appending `.md` to its URL, and the whole site is published as
+  [`llms.txt`](https://topos.sh/docs/llms.txt) and
+  [`llms-full.txt`](https://topos.sh/docs/llms-full.txt).
 </Note>
