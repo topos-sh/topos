@@ -107,10 +107,14 @@ describe("approval resolves the slug and requires a seat", () => {
   it("a member of the flow's workspace approves — session + audit land in THAT workspace", async () => {
     const identity = await import("@/lib/db/identity.server");
     const flow = await identity.startLoginFlow("member-box", "acme");
-    const approved = await identity.approveLoginFlow(flow.userCode, {
-      userId: "u_in",
-      display: "Insider",
-    });
+    const approved = await identity.approveLoginFlow(
+      flow.userCode,
+      {
+        userId: "u_in",
+        display: "Insider",
+      },
+      true,
+    );
     expect(approved).not.toBeNull();
     const granted = await identity.pollLoginFlow(flow.flowCode);
     expect(granted.status).toBe("granted");
@@ -134,7 +138,11 @@ describe("approval resolves the slug and requires a seat", () => {
     const identity = await import("@/lib/db/identity.server");
     const flow = await identity.startLoginFlow("coveted-box", "acme");
     expect(
-      await identity.approveLoginFlow(flow.userCode, { userId: "u_out", display: "Outsider" }),
+      await identity.approveLoginFlow(
+        flow.userCode,
+        { userId: "u_out", display: "Outsider" },
+        true,
+      ),
     ).toBeNull();
     expect(
       await identity.denyLoginFlow(flow.userCode, { userId: "u_out", display: "Outsider" }),
@@ -151,7 +159,11 @@ describe("approval resolves the slug and requires a seat", () => {
     const flow = await identity.startLoginFlow("first-box", "ghost-team");
     // Nobody can approve a flow whose workspace does not exist — whoever they are.
     expect(
-      await identity.approveLoginFlow(flow.userCode, { userId: "u_out", display: "Outsider" }),
+      await identity.approveLoginFlow(
+        flow.userCode,
+        { userId: "u_out", display: "Outsider" },
+        true,
+      ),
     ).toBeNull();
     expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("pending");
 
@@ -159,10 +171,14 @@ describe("approval resolves the slug and requires a seat", () => {
     // enrollment started; the SAME flow then approves into it.
     await seedWorkspace("w_ghost", "ghost-team");
     await seatUser(db, "w_ghost", "u_out", "owner");
-    const approved = await identity.approveLoginFlow(flow.userCode, {
-      userId: "u_out",
-      display: "Outsider",
-    });
+    const approved = await identity.approveLoginFlow(
+      flow.userCode,
+      {
+        userId: "u_out",
+        display: "Outsider",
+      },
+      true,
+    );
     expect(approved).not.toBeNull();
     const audits = await db.q<{ workspace_id: string }>(
       `SELECT workspace_id FROM web.audit_event WHERE kind = 'session_created' AND subject = $1`,
@@ -184,10 +200,14 @@ describe("the granted poll's workspace decoration", () => {
     await seedWorkspace("w_beta", "beta-team");
     await seatUser(db, "w_beta", "u_in", "member");
     const flow = await identity.startLoginFlow("beta-box", "beta-team");
-    const approved = await identity.approveLoginFlow(flow.userCode, {
-      userId: "u_in",
-      display: "Insider",
-    });
+    const approved = await identity.approveLoginFlow(
+      flow.userCode,
+      {
+        userId: "u_in",
+        display: "Insider",
+      },
+      true,
+    );
     expect(approved).not.toBeNull();
 
     const res = await (action as RouteAction)({
@@ -217,10 +237,14 @@ describe("the granted poll's workspace decoration", () => {
     await seedWorkspace("w_gamma", "gamma-team");
     await seatUser(db, "w_gamma", "u_in", "member");
     const flow = await identity.startLoginFlow("gamma-box", "gamma-team");
-    const approved = await identity.approveLoginFlow(flow.userCode, {
-      userId: "u_in",
-      display: "Insider",
-    });
+    const approved = await identity.approveLoginFlow(
+      flow.userCode,
+      {
+        userId: "u_in",
+        display: "Insider",
+      },
+      true,
+    );
     expect(approved).not.toBeNull();
 
     // Rename the workspace, then squat the OLD slug with a brand-new workspace.

@@ -156,26 +156,16 @@ describe("the URL challenge pre-arms the card ONLY for a loopback flow", () => {
     });
   });
 
-  it("a DEVICE-bound flow resolves to nothing — the typed code stays its only door", async () => {
-    theWorkspace.mockResolvedValue({
-      id: "w_1",
-      name: "acme",
-      displayName: "Acme",
-      sessionApproval: "off",
-    });
-    seatOf.mockResolvedValue({ role: "member" });
-    // The binding is enforced in SQL, so a device-bound flow simply does not resolve by
-    // challenge. Anyone can compute this hex for a flow they started; without the loopback
-    // hand-off there is nothing stopping them collecting the credential by polling, so the
-    // out-of-band typed code has to stay the gate.
-    pendingLoginFlowByChallenge.mockResolvedValue(null);
-    const result = (await call(`http://x/verify?device=${CHALLENGE}`)) as {
-      device: string | null;
-      resolved: unknown;
-    };
-    expect(result.resolved).toBeNull();
-    expect(result.device).toBe(CHALLENGE);
-  });
+  // The real binding gate is SQL (`pendingLoginFlowByChallenge` filters on `binding='loopback'`)
+  // and is covered against a live database in identity-core.test.ts. A version of that assertion
+  // lived here and was deleted: it mocked the very function it claimed to test, so it could not
+  // fail for the reason it named while making the suite look like it covered the gate.
+  //
+  // Recorded loss: the challenge USED to disclose nothing about any flow. It is now deliberately
+  // an existence oracle for LOOPBACK flows — a signed-in person who guesses one learns a login is
+  // pending. That is the price of the pre-armed card, and it is bounded: a device-bound flow
+  // still discloses nothing (identity-core.test.ts pins that), and approving a loopback flow
+  // hands the credential to the asking machine, not to whoever resolved the card.
 
   it("the device-approval knob + a non-owner approver forewarn the pending session", async () => {
     theWorkspace.mockResolvedValue({

@@ -386,12 +386,16 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 );
             }
             let listening = bound.is_some();
+            // `loopback: false` on the FIRST poll, deliberately. An `awaiting_redirect` here means
+            // the approval happened before this process existed, so the code it minted went to a
+            // listener that is gone — terminal, and the resume path says so. Only the polls AFTER
+            // this invocation opened its own browser may tolerate the wait (the closure below).
             let first = ops::session_login(
                 &ctx,
                 &connectors,
                 address.as_deref(),
                 ops::Handoff {
-                    loopback: listening,
+                    loopback: false,
                     auth_code: None,
                 },
             );
@@ -419,9 +423,8 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                         &connectors,
                         address.as_deref(),
                         ops::Handoff {
-                            // Honest: whether THIS invocation is holding a listener open. resume()
-                            // uses it to tell a live wait (keep waiting) from a bare re-invocation
-                            // of an already-approved flow (whose hand-off is gone for good).
+                            // Whether THIS invocation holds a listener open. Polls from here on
+                            // are waiting on a redirect this process is genuinely able to receive.
                             loopback: listening,
                             auth_code,
                         },
@@ -2328,6 +2331,16 @@ fn block_on_pending<T>(
         if policy
             .deadline_millis
             .is_some_and(|d| clock.now_unix_millis() >= d)
+        {
+            finish_line(live);
+            return last;
+        }
+        // The FLOW's own expiry is a hard stop too. The server is the usual source of the
+        // terminal answer, but its expired rows are only swept when the next login starts — on a
+        // quiet install that sweep may never run, and this loop would poll forever.
+        if disc
+            .expires_at_millis
+            .is_some_and(|e| e >= 0 && clock.now_unix_millis() >= e.unsigned_abs())
         {
             finish_line(live);
             return last;

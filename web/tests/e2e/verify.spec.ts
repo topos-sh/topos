@@ -150,3 +150,78 @@ test("deny destroys the pending request and mints nothing", async ({ page }) => 
   );
   expect(rows[0]?.n).toBe("0");
 });
+
+test("the LOOPBACK login: the card pre-arms, the code goes to the local listener, and only the exchange mints", async ({
+  page,
+}) => {
+  // The whole RFC 8252 chain against a REAL 127.0.0.1 listener — bind, declare, pre-armed
+  // approve, redirect, exchange, mint. Every other login in this suite is device-bound, so
+  // without this the default interactive path has no integration coverage at all.
+  const { createServer } = await import("node:http");
+  const { createHash, randomUUID } = await import("node:crypto");
+
+  let delivered: URL | undefined;
+  const server = createServer((req, res) => {
+    delivered = new URL(req.url ?? "/", "http://127.0.0.1");
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end("ok");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  const state = randomUUID().replace(/-/g, "");
+
+  try {
+    // The CLI declares `loopback` because its listener is already bound.
+    const response = await page.request.post("/api/v1/login/authorize", {
+      data: {
+        requested_name: "e2e-loopback",
+        workspace: WORKSPACE_ADDRESS,
+        redirect: "loopback",
+      },
+    });
+    expect(response.ok()).toBe(true);
+    const raw = (await response.json()) as Record<string, unknown>;
+    const deviceCode = String(raw.device_code);
+    const challenge = createHash("sha256").update(deviceCode, "utf8").digest("hex");
+
+    // The card PRE-ARMS from the challenge — no typing. Safe only because the credential is
+    // unreachable without the redirect this listener is about to receive.
+    await page.goto(`/verify?device=${challenge}&port=${port}&state=${state}`);
+    await expect(page.getByText("“e2e-loopback”", { exact: true })).toBeVisible();
+
+    // Before the hand-off, the device code alone — everything a phisher would hold — buys
+    // nothing, and no session exists to be used behind the poll's back.
+    expect((await pollLoginFlow(page, deviceCode)).status).toBe("pending");
+
+    await page.getByRole("button", { name: /Approve/ }).click();
+    await expect.poll(() => delivered !== undefined, { timeout: 10_000 }).toBe(true);
+
+    // The redirect landed on OUR listener, state-bound, carrying the authorization code.
+    expect(delivered?.pathname).toBe("/cb");
+    expect(delivered?.searchParams.get("state")).toBe(state);
+    expect(delivered?.searchParams.get("outcome")).toBe("approved");
+    const authCode = delivered?.searchParams.get("code") ?? "";
+    expect(authCode.length).toBeGreaterThan(20);
+
+    // The device code STILL buys nothing on its own — the approval minted no session.
+    const withoutCode = await pollLoginFlow(page, deviceCode);
+    expect(withoutCode.status).toBe("awaiting_redirect");
+    expect(withoutCode.credential).toBeUndefined();
+
+    // Both halves: the exchange mints, and only now is there a credential.
+    const exchanged = await page.request.post("/api/v1/login/token", {
+      data: { device_code: deviceCode, auth_code: authCode },
+    });
+    const granted = (await exchanged.json()) as { status: string; credential?: string };
+    expect(granted.status).toBe("granted");
+    expect(granted.credential).toBe(deviceCode);
+
+    // Non-consuming: the same pair re-exchanges, so a crash mid-persist resumes.
+    const again = await page.request.post("/api/v1/login/token", {
+      data: { device_code: deviceCode, auth_code: authCode },
+    });
+    expect(((await again.json()) as { status: string }).status).toBe("granted");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});

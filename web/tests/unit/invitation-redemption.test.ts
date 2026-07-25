@@ -354,10 +354,14 @@ describe("the device-flow weave", () => {
     expect(byChallenge?.userCode).toBe(flow.userCode);
     // The SEATLESS invited person approves: the weave accepts the invitation first, so the
     // seat requirement passes in the same transaction.
-    const approved = await identity.approveLoginFlow(flow.userCode, {
-      userId: "u_weave",
-      display: "W",
-    });
+    const approved = await identity.approveLoginFlow(
+      flow.userCode,
+      {
+        userId: "u_weave",
+        display: "W",
+      },
+      true,
+    );
     expect(approved).not.toBeNull();
     const seat = await db.q(
       `SELECT 1 FROM web.seat WHERE workspace_id = $1 AND user_id = 'u_weave'`,
@@ -382,10 +386,14 @@ describe("the device-flow weave", () => {
     const flow = await identity.startLoginFlow("laptop", "", token);
     // Seatless AND not the addressee: the weave refuses the accept, the seat check refuses the
     // approval — the same uniform null an expired code gets. The invitation stays live.
-    const approved = await identity.approveLoginFlow(flow.userCode, {
-      userId: "u_notmine",
-      display: "N",
-    });
+    const approved = await identity.approveLoginFlow(
+      flow.userCode,
+      {
+        userId: "u_notmine",
+        display: "N",
+      },
+      true,
+    );
     expect(approved).toBeNull();
     expect(await identity.invitationByToken(token)).not.toBeNull();
   });
@@ -405,10 +413,14 @@ describe("the device-flow weave", () => {
        WHERE user_code = $1`,
       [flow.userCode],
     );
-    const approved = await identity.approveLoginFlow(flow.userCode, {
-      userId: "u_rollback",
-      display: "R",
-    });
+    const approved = await identity.approveLoginFlow(
+      flow.userCode,
+      {
+        userId: "u_rollback",
+        display: "R",
+      },
+      true,
+    );
     expect(approved).toBeNull();
     // The invitation is STILL pending (never consumed) and no seat was written.
     expect(await identity.invitationByToken(token)).not.toBeNull();

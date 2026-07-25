@@ -113,7 +113,10 @@ transaction, FOR UPDATE-fenced or single-statement-atomic, audit row inside):
   coordinates is refused outright (nothing consumed, still finishable where it started), and the
   code is non-consuming until the flow lapses so a crash between exchange and persist re-exchanges
   cleanly. The DEVICE path remains phishable by construction (RFC 8628 says it must be) — the
-  typed code is its only control. The signed-out loader bounce carries the page (validated params only) as `next`.
+  typed code is its only control. And the loopback guarantee rests on one assumption worth
+  stating: that `127.0.0.1` reaches the approver's own machine. On a SHARED multi-user host (a
+  jump box, a shared dev VM) it does not — another user there can bind the port and receive the
+  code — so on such a host the typed-code flow is the safer one. The signed-out loader bounce carries the page (validated params only) as `next`.
   Ending a session is immediate on either side (the client's `DELETE /api/v1/session`, the
   Sessions tab's owner arms) — the row is deleted, the lane 404s from the next request.
 - **The tokened invitation** (`invite-redeem.tsx` at `/invite/<token>` — `/<ws>/invite/<token>` in

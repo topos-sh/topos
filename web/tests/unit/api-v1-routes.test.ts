@@ -216,7 +216,7 @@ async function mintCredential(
 ): Promise<{ credential: string; sessionId: string }> {
   const identity = await import("@/lib/db/identity.server");
   const flow = await identity.startLoginFlow(requestedName, "team");
-  await identity.approveLoginFlow(flow.userCode, { userId, display });
+  await identity.approveLoginFlow(flow.userCode, { userId, display }, true);
   const granted = await identity.pollLoginFlow(flow.flowCode);
   if (granted.status !== "granted") {
     throw new Error(`device mint failed: ${granted.status}`);
@@ -1235,10 +1235,14 @@ describe("login authorize + token", () => {
 
     // The human approves at /verify (the ceremony's data layer stands in for the page).
     const identity = await import("@/lib/db/identity.server");
-    const approved = await identity.approveLoginFlow(flow.user_code as string, {
-      userId: "u_owner",
-      display: "Owner",
-    });
+    const approved = await identity.approveLoginFlow(
+      flow.user_code as string,
+      {
+        userId: "u_owner",
+        display: "Owner",
+      },
+      true,
+    );
     expect(approved).not.toBeNull();
 
     const granted = await drive(

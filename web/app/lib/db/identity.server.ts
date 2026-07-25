@@ -600,14 +600,23 @@ export type LoginPollResult =
  * collection lands on the side the rows say now. Fenced on the flow row, and idempotent — a
  * concurrent exchange finds the session already there and reads it back.
  */
-async function mintLoopbackSession(flowCode: string): Promise<LoginPollResult | null> {
+async function mintLoopbackSession(
+  flowCode: string,
+  authCode: string,
+): Promise<LoginPollResult | null> {
   return await getDb().transaction(async (tx) => {
+    // BOTH secrets are re-verified HERE, inside the fence that does the writing — not merely by
+    // the caller. The whole defect this design corrects was an authorization decision sitting one
+    // layer above the write it protected; a function that mints a credential has to be safe on
+    // its own terms, so that a future second call site cannot reopen the hole silently.
     const rows = await tx.execute(
       sql`SELECT id, requested_name, approved_by, approved_workspace_id, session_id,
                  flow_code_sha256, invite_token_sha256
           FROM ${loginFlow}
           WHERE flow_code_sha256 = ${sha256OfText(flowCode)} AND status = 'approved'
             AND binding = 'loopback' AND expires_at > now()
+            AND auth_code_sha256 IS NOT NULL
+            AND auth_code_sha256 = ${sha256OfText(authCode)}
           FOR UPDATE`,
     );
     const row = rows.rows[0] as
@@ -667,9 +676,17 @@ async function mintLoopbackSession(flowCode: string): Promise<LoginPollResult | 
       status: born,
     });
     await tx.execute(sql`UPDATE ${loginFlow} SET session_id = ${sessionId} WHERE id = ${row.id}`);
+    // The actor is the PERSON who approved, resolved by the one display rule — never the machine
+    // name. This is the row an incident is reconstructed from; "MacBook Pro" is not an actor.
+    const who = await tx.execute(
+      sql`SELECT COALESCE(NULLIF(btrim(u.name), ''), u.email) AS display
+          FROM web."user" u WHERE u.id = ${row.approved_by}`,
+    );
+    const approverDisplay =
+      (who.rows[0] as { display: string } | undefined)?.display ?? row.approved_by;
     await auditInTx(tx, {
       workspaceId: row.approved_workspace_id,
-      actor: { userId: row.approved_by, display: row.requested_name },
+      actor: { userId: row.approved_by, display: approverDisplay },
       kind: "session_created",
       subject: sessionId,
       outcome: "ok",
@@ -730,6 +747,18 @@ export async function pollLoginFlow(
   // started a flow and got a stranger to approve it holds the device code and nothing else, so
   // they land here — an honest "approved, still waiting for the local hand-off". Matching is a
   // digest comparison in Postgres, like every other secret in this system.
+  // A lapsed loopback flow that was never exchanged minted nothing and never will: its code is
+  // gone with the redirect that carried it. Say `expired` — the honest terminal answer — rather
+  // than `awaiting_redirect`, which would keep a client waiting on a hand-off that cannot come.
+  // (An approved DEVICE flow past its TTL still grants: its session exists and outlives the row.)
+  if (
+    row.status === "approved" &&
+    row.binding === "loopback" &&
+    row.session_id === null &&
+    row.expired
+  ) {
+    return { status: "expired" };
+  }
   if (row.status === "approved" && row.binding === "loopback" && row.auth_code_ok !== true) {
     return { status: "awaiting_redirect" };
   }
@@ -738,7 +767,7 @@ export async function pollLoginFlow(
   // minted falls through to the ordinary granted read, so a crash between exchange and persist
   // re-exchanges instead of stranding the login.
   if (row.status === "approved" && row.binding === "loopback" && row.session_id === null) {
-    const minted = await mintLoopbackSession(flowCode);
+    const minted = await mintLoopbackSession(flowCode, authCode as string);
     if (minted === null) {
       return { status: "expired" };
     }
@@ -865,8 +894,9 @@ export async function approveLoginFlow(
   /** Whether THIS request carries the local return coordinates. A loopback flow's authorization
    * code has exactly one way out — the redirect to the asking machine's listener — so approving
    * one from a page that cannot redirect would mint a code with nowhere to go and leave the
-   * waiting CLI stuck. Refused instead, with copy that says where to finish. */
-  hasLocalReturn = true,
+   * waiting CLI stuck. Refused instead, with copy that says where to finish. REQUIRED: a default
+   * here would be the permissive value, handed silently to every future caller that forgets it. */
+  hasLocalReturn: boolean,
 ): Promise<{
   /** `null` for a LOOPBACK flow — nothing is minted until the exchange. */
   sessionId: string | null;
@@ -940,11 +970,10 @@ export async function approveLoginFlow(
       // the whole mechanism: the bearer IS the device code, which the starter of the flow always
       // holds, so the session would be usable the instant the victim clicked.
       if (row.binding === "loopback" && !hasLocalReturn) {
-        // Refused BEFORE anything is written: no consent recorded, no code minted, the flow
-        // stays pending so finishing it on the right machine still works.
-        // Nothing written: the flow stays pending and is still finishable on the machine that
-        // started it. The page pre-checks this and says so; reaching here means a race, which
-        // gets the same uniform refusal every other dead-end does.
+        // The transaction rolls back, so nothing is consumed — including an invitation this
+        // ceremony may already have accepted above — and the flow stays pending, still finishable
+        // on the machine that started it. The page pre-checks this and says exactly that;
+        // reaching here means a race, which gets the uniform refusal every dead-end gets.
         throw APPROVE_ABORT;
       }
       if (row.binding === "loopback") {
@@ -960,7 +989,7 @@ export async function approveLoginFlow(
           workspaceId: resolved.workspaceId,
           actor: { userId: approver.userId, display: approver.display },
           kind: "login_approved",
-          subject: row.id,
+          subject: row.requested_name,
           outcome: "ok",
           details: { requestedName: row.requested_name },
         });
