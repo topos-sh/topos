@@ -1,199 +1,100 @@
 ---
 title: Quickstart
-description: Share a skill with your team and see it arrive on a teammate's machine — about five minutes.
+description: Create a workspace, share a skill, and watch it reach your whole team — about five minutes.
 sidebar_label: Quickstart
 ---
 
-By the end of this page, one skill you already have will be governed by a workspace, and every
-teammate's agent will receive it — and its future updates — automatically.
+Five steps. At the end, your team has a shared workspace, one skill in it, and machines that
+keep themselves current — no one runs anything to receive updates.
 
-Every command here is non-interactive, so you can run it yourself or hand it to the agent you
-already use. In a hurry? Paste this to your agent and it does the whole setup:
+<Steps>
+  <Step title="Create a workspace">
+    A workspace is your team's shared home for skills: one address, one member list, one
+    catalog.
 
-```text title="Paste to your agent"
-Set up Topos for us: fetch https://topos.sh/agent and follow it. Our workspace: https://topos.sh/acme
-```
+    <Cta title="Create a workspace on Topos Cloud" href="https://topos.sh" />
 
-## Before you start
+    Sign up, pick a name, and your team's address is `https://topos.sh/<name>`. You can also
+    [self-host](/docs/self-host) the whole product on your own server — then the address is
+    your own domain. Already invited by a teammate? The address is in the invitation mail —
+    go straight to step 2.
+  </Step>
+  <Step title="Install the CLI">
+    <Columns>
+      <Column title="In a terminal">
+        ```bash
+        curl -fsSL https://topos.sh/install | sh
+        ```
+      </Column>
+      <Column title="Or paste to your agent">
+        ```text
+        Set up Topos for us: fetch https://topos.sh/agent and follow it. Our workspace: https://topos.sh/acme
+        ```
+      </Column>
+    </Columns>
 
-You need the CLI and a workspace address.
+    macOS and Linux, WSL2 on Windows; no sudo. The agent route also handles the next step for
+    you — only the browser approval stays yours to click. Details and verification:
+    [Install](/docs/install).
+  </Step>
+  <Step title="Log in">
+    ```bash
+    topos login https://topos.sh/acme
+    ```
 
-```bash
-curl -fsSL https://topos.sh/install | sh
-```
+    Your browser opens — click **Approve**. That one click is the whole setup: the
+    workspace's skills land on this machine, and from now on updates apply silently at the
+    start of each agent session.
+  </Step>
+  <Step title="Share a skill">
+    Point `publish` at any skill folder you already have — for example one in your agent's
+    skills directory:
 
-macOS and Linux; WSL2 on Windows. No sudo — details and verification in [Install](/docs/install).
+    ```bash
+    topos publish ~/.claude/skills/pr-describe
+    ```
 
-A **workspace** is your team: one roster, one address, one catalog of skills. Create one at
-[topos.sh](https://topos.sh) (its address becomes `https://topos.sh/<name>`), or
-[self-host](/docs/self-host) and your address is your own origin. Already invited? The address is
-in the invitation mail.
+    A bare `publish` is a preview: it prints exactly what would happen and changes nothing.
+    Read it, then apply:
 
-## 1. Log this machine in
+    ```bash
+    topos publish pr-describe --yes
+    ```
 
-```bash
-topos login https://topos.sh/acme
-```
+    The workspace now owns the skill — one version history, one current version for the whole
+    team, and a page at `https://topos.sh/acme/skills/pr-describe`.
+  </Step>
+  <Step title="It reaches your team — automatically">
+    Nothing for teammates to run: every machine logged into the workspace receives the skill
+    at its next agent session (or right away with `topos update`). Bring someone new in:
 
-On a desktop this opens your browser to approve — one click while signed in, no typing. On
-SSH or headless machines it prints the URL and a short code instead:
+    ```bash
+    topos invite dana@acme.com --yes
+    ```
 
-```text
-Logging into 'acme'.
-Approve this login in your browser:
-  Open: https://topos.sh/verify
-  Code: 4JP4-V6TE (the page shows the same code — confirm it matches)
-Then re-run `topos login` to finish.
-```
+    The invitation mail carries everything they need, including a line to paste to their
+    agent.
+  </Step>
+</Steps>
 
-Approve, re-run `topos login`, and the receipt states exactly what connecting means:
+## From here
 
-```text
-Logged into Acme (acme) — your profile delivers 3 skills here (code-review, deploy, release-notes); updates arrive silently (`topos update` any time).
-Undo: topos logout acme
-```
-
-Login is the acceptance: it mints a **session** (this machine, logged into this one workspace)
-and arms a session-start trigger in your agent harness that runs `topos update --quiet` — so from
-now on, updates arrive by themselves.
-
-<Note>
-  **For agents —** show the human the approval URL; **you cannot approve on their behalf**, by
-  design. A piped or `--json` login never blocks: it prints the URL, polls once, and exits `0` —
-  that is success. Re-run `topos login --json` to poll, or `--wait <seconds>` to block, capped.
-</Note>
-
-## 2. Share a skill you already have
-
-A skill is just a folder with a `SKILL.md` in it. Point `add` at one — say, a `pr-describe`
-skill sitting in your agent's skills directory — and Topos adopts it in place, where it already
-lives:
-
-```text title="topos add ~/.claude/skills/pr-describe"
-/Users/you/.topos/topos.toml: added "/Users/you/.claude/skills/pr-describe" (undo: topos remove /Users/you/.claude/skills/pr-describe)
-Adopted 'pr-describe' @ 7896e7df2497
-Installed the session-start auto-update hook (runs `topos update` at session start).
-```
-
-Adopting is local and free. Sharing is the next command, and its bare run **describes** and
-changes nothing:
-
-```text title="topos publish pr-describe"
-Publish 'pr-describe' to Acme:
-  digest bbb2e05c446a
-  gate: open — this moves current directly
-  places into channel: everyone
-  share: https://topos.sh/acme/skills/pr-describe
-  bring a teammate: Ask your agent: "Set up Topos for us: fetch https://topos.sh/agent and follow it. Our workspace: https://topos.sh/acme"
-  governance transfer: /Users/you/.topos/topos.toml — the "/Users/you/.claude/skills/pr-describe" line becomes "topos.sh/acme/pr-describe" (the local copy becomes a managed placement of the governed bundle)
-Nothing has landed yet — apply with:
-  topos publish pr-describe --yes
-```
-
-Read it — gate, channel, the manifest line that changes — then apply:
-
-```bash
-topos publish pr-describe --yes
-```
-
-```text
-Published pr-describe@50319fd632d4 (digest bbb2e05c446a) — current is now generation 1.
-governance transfer: /Users/you/.topos/topos.toml — "/Users/you/.claude/skills/pr-describe" is now "topos.sh/acme/pr-describe" (the local copy is a managed placement of the governed bundle; to undo, edit that manifest and restore the "/Users/you/.claude/skills/pr-describe" line)
-bring a teammate: Ask your agent: "Set up Topos for us: fetch https://topos.sh/agent and follow it. Our workspace: https://topos.sh/acme"
-```
-
-The workspace now owns the skill's identity: one version history, and one movable `current`
-pointer that says what the team is on. Your local copy became a managed placement of it —
-kept current automatically, with your future edits treated as drafts you can share back.
-
-<Note>
-  **For agents —** publishing **reaches other people**, so it needs the human's explicit yes from
-  this session. Run the bare describe, show them the gate and channel lines, and only then add
-  `--yes`. A bare `publish` aimed at something Topos does not track yet is refused rather than
-  described — `topos add` it first, exactly as above. Before any org-bound act, re-read the bundle
-  for tokens, credentials, and internal hostnames — strip them or stop.
-</Note>
-
-## 3. It arrives on your teammates' machines
-
-Nothing for them to run — the skill landed in the `everyone` channel, which every member's
-profile carries. At each machine's next agent session (or `topos update` right now), it is there:
-
-```text title="topos update — on a teammate's machine"
-pr-describe  fast-forwarded — now at generation 1
-Checked 4 managed skill(s): 3 up to date.
-```
-
-The bytes are verified against the workspace's `current` digest before anything lands, placed
-into that machine's detected agent directories, and kept out of git commits automatically.
-
-A teammate who is not in the workspace yet? Send the "bring a teammate" line from your receipt —
-their agent does the rest — or invite them by mail:
-
-```bash
-topos invite dana@acme.com --yes
-```
-
-Want the skill pinned to a specific repo rather than following people around? In that checkout:
-
-```bash
-topos add pr-describe
-```
-
-That writes the repo's `topos.toml` — commit it, and everyone working in that project gets the
-same set. [Get skills](/docs/add) covers scopes, pins, and imports.
-
-## 4. Improve it and send it back
-
-Edit the skill where it lives — Topos treats your edits as a **draft**: updates merge around
-them and never overwrite them. When the change is worth sharing:
-
-```bash
-topos diff pr-describe                                  # what you changed
-topos publish pr-describe -m "Cover stacked PRs" --yes  # ship it
-```
-
-On a `reviewed` skill the same command opens a **proposal** instead, and a teammate resolves it:
-
-```bash
-topos review pr-describe@<hash> --approve
-```
-
-That is the whole loop — [Review, protect, roll back](/docs/review) has verdicts, protection,
-and the team-wide revert.
-
-## 5. Everyone stays current
-
-There is no step five. The session-start trigger keeps every logged-in machine converged;
-`topos status` — offline, read-only — shows where this one stands:
-
-```text title="topos status"
-topos 0.1.9
-server: https://topos.sh/api — signed in
-sessions:
-  topos.sh/acme (Acme)
-resolved here (manifests + your profile):
-  code-review @ c3bb23822264 — applied as of 2026-07-26T00:04:05Z · your profile @ topos.sh/acme · via channel 'everyone' (person)
-  deploy @ 500965c7ce72 — applied as of 2026-07-26T00:04:05Z · your profile @ topos.sh/acme · via channel 'everyone' (person)
-  pr-describe @ 50319fd632d4 — applied as of 2026-07-26T00:04:05Z · your profile @ topos.sh/acme · via channel 'everyone' (person)
-    shadows ~/.topos/topos.toml
-  release-notes @ ee876a7a3dc9 — applied as of 2026-07-26T00:04:05Z · your profile @ topos.sh/acme · via channel 'everyone' (person)
-your profile delivers: 4 skills
-auto-update triggers:
-  claude-code: armed
-```
-
-## Where next
+- **Edit freely.** Updates never overwrite your local edits. Share an improvement back with
+  `topos publish pr-describe -m "Cover stacked PRs" --yes`.
+- **Pin skills to a repo.** `topos add pr-describe` inside a checkout writes `topos.toml`;
+  commit it and everyone working in that repo gets the same set.
+- **Check any time.** `topos status` — offline — lists every skill on this machine, its
+  version, and where it comes from.
 
 <CardGrid>
   <Card title="Get skills" href="/docs/add">
-    The reference grammar, project vs person scope, GitHub imports, excludes.
+    Add from your workspace, a folder, or GitHub — per project or per person.
   </Card>
   <Card title="Run it as a team" href="/docs/team">
-    Invitations, roles, channels, and the fleet page.
+    Invitations, roles, channels, and seeing that updates landed.
   </Card>
-  <Card title="Driving Topos from an agent" href="/docs/agents">
-    The JSON envelope, exit codes, and the consent rules.
+  <Card title="For agents" href="/docs/agents">
+    The JSON surface and the consent rules, written for agents.
   </Card>
   <Card title="Self-host" href="/docs/self-host">
     The whole product from one compose file.

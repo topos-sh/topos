@@ -1,179 +1,84 @@
 ---
 title: Share a skill
-description: Publish a skill to your workspace — what the describe shows, what governance transfer means, and how channels place it.
+description: Publish to your workspace — preview first, apply with --yes, place into channels.
 sidebar_label: Share a skill
 ---
 
-`topos publish` is the supply side: it ships a version to your workspace, adopting the skill first
-if Topos was not tracking it yet. It is a two-phase verb — a bare run **describes** and changes
-nothing; `--yes` applies.
+`topos publish` puts a skill in your workspace — a new one, or a new version of one already
+shared. It always previews first:
 
 ```bash
-topos publish pr-describe          # describe — nothing is written
-topos publish pr-describe --yes    # apply
+topos publish pr-describe        # preview — changes nothing
+topos publish pr-describe --yes  # apply
 ```
 
-The target can be any of:
+The preview names the channel the skill lands in, whether review is required, and the exact
+apply command. The target can be:
 
 | Target | Meaning |
 |---|---|
-| `pr-describe` | A skill Topos already tracks |
-| `./tools/pr-describe` | A directory — adopted in place, then published |
-| `pr-describe@claude-code` | An untracked skill sitting in a harness's skills dir, adopted from discovery |
-| `pr-describe@<64-hex-digest>` | Any of the above, **pinned** — the publish refuses if the bytes changed since you pinned |
+| `pr-describe` | A skill Topos already manages |
+| `./tools/pr-describe` | Any folder with a `SKILL.md` — adopted, then published |
+| `pr-describe@<version>` | Pinned — refuses if the files changed since you looked |
 
-## Read the describe
-
-A bare `publish` prints exactly what would happen — the gate, where it lands, the manifest line
-it would rewrite, and the paste-ready apply command:
-
-```text title="topos publish pr-describe"
-Publish 'pr-describe' to Acme:
-  digest bbb2e05c446a
-  gate: open — this moves current directly
-  places into channel: everyone
-  share: https://topos.sh/acme/skills/pr-describe
-  bring a teammate: Ask your agent: "Set up Topos for us: fetch https://topos.sh/agent and follow it. Our workspace: https://topos.sh/acme"
-  governance transfer: /Users/you/.topos/topos.toml — the "/Users/you/.claude/skills/pr-describe" line becomes "topos.sh/acme/pr-describe" (the local copy becomes a managed placement of the governed bundle)
-Nothing has landed yet — apply with:
-  topos publish pr-describe --yes
-```
-
-On a skill Topos already delivers, the describe swaps those last two lines for the undo the apply
-would leave you — `undo: topos revert pr-describe --to <the current 64-hex version>` — and drops
-the `places into channel` line, because a republish moves `current` and alters no placement.
-
-If this machine has already seen that your copy is behind the team's `current` — a sweep fetched
-the newer version but has not applied it — the describe adds a note that the publish will be
-refused and previews how the rebase would merge, so you `topos update` first instead of finding
-out after. (Learning it for the first time from the apply is the other path: the refusal names
-`topos update <skill>` as the fix.) If the skill was imported from GitHub, the describe notes that
-publishing makes the team copy the source of truth.
-
-<Note>
-  The describe deliberately does **not** adopt an untracked source — adopting mints local state
-  and arms a session-start hook, a durable change you have not confirmed yet. Adoption happens on
-  `--yes` (or via `topos add` first).
-</Note>
-
-Apply it and the receipt states what moved, with dynamic values filled in:
-
-```text title="topos publish pr-describe --yes"
-Published pr-describe@50319fd632d4 (digest bbb2e05c446a) — current is now generation 1.
-governance transfer: /Users/you/.topos/topos.toml — "/Users/you/.claude/skills/pr-describe" is now "topos.sh/acme/pr-describe" (the local copy is a managed placement of the governed bundle; to undo, edit that manifest and restore the "/Users/you/.claude/skills/pr-describe" line)
-bring a teammate: Ask your agent: "Set up Topos for us: fetch https://topos.sh/agent and follow it. Our workspace: https://topos.sh/acme"
-```
-
-That "bring a teammate" line is ready to forward — it is the whole onboarding for the next
-person's agent.
-
-## Governance transfer
-
-When you publish a skill your manifest referenced by local path, the landed publish **rewrites
-that manifest line to the governed workspace reference**, and the receipt discloses it:
-
-```text
-governance transfer: /Users/you/proj/topos.toml — "./tools/pr-describe" is now "topos.sh/acme/pr-describe" (the local copy is a managed placement of the governed bundle; to undo, edit that manifest and restore the "./tools/pr-describe" line)
-```
-
-You published it because you want it governed — so from that moment the workspace's `current`
-pointer decides what everyone gets, **including you**. Your local copy becomes a managed placement
-that stays current automatically, and further edits to it are drafts you can publish again.
-
-One exception: a bundle imported from GitHub keeps its origin-pin manifest line — the provenance
-is the point, and the receipt says so.
-
-## Where it lands: channels
-
-A brand-new skill published with no `--to` is placed into the **`everyone`** channel, which every
-member's profile implicitly carries — so it reaches the whole roster's machines automatically.
-Place it somewhere narrower instead with `--to`:
+## Your first publish
 
 ```bash
-topos publish pr-describe --to backend -m "tidy up" --yes
-topos publish pr-describe --to @acme/channels/backend --yes
+topos publish ~/.claude/skills/pr-describe --yes
 ```
 
-`--to` must name an **existing** channel — publish never creates one (that is a browser act), and
-`--to acme` naming the workspace itself is refused with the correction. Under a **curated**
-channel, a member's publish lands catalog-only and the receipt says a curator places it:
+That is all a brand-new workspace needs. The skill gets one identity, one version history,
+and a page at `https://topos.sh/acme/skills/pr-describe`; teammates' machines receive it
+through the `everyone` channel automatically.
 
-```text
-channel 'everyone' is curated — the reference was NOT placed (placement takes reviewer or owner). The 'pr-describe' skill is in the catalog; a curator places it on the web (the channel's page).
-```
+Publishing also flips who leads: the workspace's current version now decides what everyone
+gets — including you. Your local copy stays where it is and updates with the team; your
+future edits are drafts you can publish again. (One exception: a skill imported from GitHub
+keeps following its pinned source — the receipt says so.)
 
-## The protection gate
-
-What your publish does depends on the skill's protection:
-
-| Protection | A member's publish |
-|---|---|
-| `open` (default) | Moves `current` directly |
-| `reviewed` | Is rerouted into a **proposal** — `current` does not move until someone approves |
-
-You are never refused for publishing to a `reviewed` skill — a member's publish opens a proposal
-and the receipt says so. Reviewers and owners land directly even on a `reviewed` skill; use
-`--propose` when you want review anyway. One edge: the very first publish of a new skill always
-lands directly, even with `--propose` — there is no base version to review against yet.
-
-```bash
-topos publish deploy --propose -m "Link the dashboard in the release note" --yes
-```
-
-```text
-Opened proposal deploy@500965c7ce72616e86e0e662d16076875c9006f80fb386f03169edd037992605 on base 8c7204de0fd8. Awaiting review — a reviewer runs `topos review deploy@500965c7ce72616e86e0e662d16076875c9006f80fb386f03169edd037992605 --approve`.
-```
-
-The proposal is named by its **full 64-hex version id** — that is the handle `topos review` takes,
-and it is what the receipt hands you to paste.
-
-See [Review, protect, roll back](/docs/review) for the other half of that loop.
-
-## Write a message
+## Say what changed
 
 ```bash
 topos publish pr-describe -m "Cover stacked PRs" --yes
 ```
 
-`-m` has commit-message semantics: it is the history line, what a teammate's agent narrates when
-the change arrives, and the proposal description when a publish downgrades. A diff without intent
-is not reviewable. The message is threaded into the version's identity, which is why the
-describe's suggested apply command preserves it verbatim.
+`-m` becomes the version's history line — what a reviewer reads first, and what a teammate's
+agent can narrate when the update arrives. A diff without intent is hard to review; write
+one.
 
-<Tip>
-  When an agent distilled the skill from a working session, the convention is one honest
-  provenance line: `-m "Distilled by <agent> while <what was solved>"`.
-</Tip>
-
-## Starting from nothing
-
-The first publish into an empty workspace is the genesis — it creates the catalog entry and
-prints the address to hand out:
+## Pick a channel
 
 ```bash
-topos add ./my-new-skill         # tracked, local, unshared — free and reversible
-topos publish my-new-skill       # describe
-topos publish my-new-skill --yes # governed; teammates get it automatically via everyone
+topos publish deploy --to backend --yes
 ```
 
-Publishing requires a session — logged out, it refuses with `topos login <workspace-address>` as
-the executable next step.
+A new skill with no `--to` lands in **`everyone`** and reaches the whole team. `--to` places
+it into a narrower channel instead — the channel must already exist (create channels in the
+browser). Under a **curated** channel your publish lands in the catalog and a curator places
+it; the receipt says so.
 
-<Note>
-  **Agents:** publishing reaches other people, so it needs the human's explicit yes from this
-  session, a secrets scan first, and at most one share-back offer per session. The full rules are
-  in [Driving Topos from an agent](/docs/agents#offering-to-share-back).
-</Note>
+## When review is on
 
-## Refusals worth recognizing
-
-| Refusal | What to do |
+| The skill is | A member's publish |
 |---|---|
-| Unchanged bytes | A no-op is refused — nothing to ship |
-| Your copy is behind `current` | `topos update <skill>` to rebase, then publish |
-| `--to acme` names the workspace | `--to` takes a **channel** — `--to everyone`, or `--to @acme/channels/backend` |
-| No such channel | Use an existing one, or create it in the browser first |
-| Digest mismatch on a pinned publish | The bytes changed since you pinned — re-read and re-pin |
+| `open` (default) | Ships immediately |
+| `reviewed` | Opens a **proposal** — nothing changes until a reviewer approves |
 
-Every write rides an operation log, so the same operation replays byte-identically after a crash
-or a retry.
+You are never blocked for publishing to a `reviewed` skill — it becomes a proposal, and the
+receipt hands you the review command to pass along. Reviewers and owners ship directly even
+there; add `--propose` to ask for review anyway. The very first version of a new skill
+always ships directly — there is nothing to compare it against yet.
+
+The other half of the loop: [Review, protect, roll back](/docs/review).
+
+## If it refuses
+
+| Refusal | Fix |
+|---|---|
+| Nothing changed | There is no new version to ship |
+| Your copy is behind the team | `topos update <skill>`, then publish again |
+| `--to` names the workspace | `--to` takes a **channel**: `--to backend` |
+| No such channel | Create it in the browser first |
+| Not logged in | `topos login <workspace-address>` |
+
+Every publish is safe to retry — an interrupted one resumes exactly, never doubles.

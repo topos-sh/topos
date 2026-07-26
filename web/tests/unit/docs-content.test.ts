@@ -234,10 +234,26 @@ describe("the fixture content set compiles", () => {
   it("highlights fenced code at BUILD time, and frames a fence that carries a title", async () => {
     const { pages } = await compileDocs({ contentRoot: FIXTURE_ROOT });
     const quickstart = pages.find((page) => page.id === "quickstart");
-    expect(quickstart?.html).toContain('<pre class="shiki github-light"');
+    // Both themes render at build time: the light colours inline, the dark set as variables the
+    // command frame switches to. Shiki's own inline <pre> page colours are stripped — the docs
+    // stylesheet owns the frames.
+    expect(quickstart?.html).toContain('<pre class="shiki shiki-themes github-light github-dark"');
+    expect(quickstart?.html).not.toMatch(/<pre[^>]*style=/);
     expect(quickstart?.html).toContain(
       '<figure class="docs-code"><figcaption class="docs-code__title">Log in</figcaption>',
     );
+  });
+
+  it("frames every fence with a copy button, and sets command fences on the glass", async () => {
+    const { pages } = await compileDocs({ contentRoot: FIXTURE_ROOT });
+    const html = pages.find((page) => page.id === "quickstart")?.html ?? "";
+    // The fixture's fences are `sh` — command language — so the frame carries the glass class.
+    expect(html).toContain('<div class="docs-codeblock docs-codeblock--command">');
+    expect(html).toContain(
+      '<button type="button" class="docs-copy" data-copy="" aria-label="Copy to clipboard">',
+    );
+    // Command tokens were recoloured to the dark set at generate time — no !important needed.
+    expect(html).toMatch(/docs-codeblock--command[\s\S]*?color:var\(--shiki-dark\)/);
   });
 
   it("switches tabs without JavaScript: one radio group, the first tab checked", async () => {
@@ -260,14 +276,18 @@ describe("the fixture content set compiles", () => {
     expect(publish?.html).toContain('<a class="docs-anchor" href="#publish"');
   });
 
-  it("expands the generated CLI reference in place, demoted under the page title", async () => {
+  it("expands the generated CLI reference in place, headed by the page title alone", async () => {
     const { pages } = await compileDocs({ contentRoot: FIXTURE_ROOT });
     const cli = pages.find((page) => page.id === "reference/cli");
     expect(cli?.html).not.toContain("GENERATED-CLI-REFERENCE");
-    // The reference's own h1 becomes an h2, so the page keeps exactly one h1 (its title).
-    expect(cli?.html).toContain('<h2 id="topos-command-reference">');
+    // The reference's own H1 and its "GENERATED" provenance quote are stripped on splice — the
+    // page provides both — and the reference's headings keep their levels, so each command (h3)
+    // lands in the page TOC.
+    expect(cli?.html).not.toContain("topos-command-reference");
+    expect(cli?.html).not.toContain("GENERATED from");
     expect(cli?.html).toContain("topos status");
     expect(cli?.headings.some((heading) => heading.text === "Global options")).toBe(true);
+    expect(cli?.headings.some((heading) => heading.text === "topos status")).toBe(true);
   });
 });
 

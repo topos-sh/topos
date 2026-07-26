@@ -2,6 +2,11 @@
 //! so the reference can never drift from what the binary parses. TWO consumers, one implementation:
 //! `cargo xtask gen-cli-ref` writes/checks the committed `docs/cli.md`, and the built-in `topos` skill
 //! places the same bytes as its `reference.md` — which is why this lives in the client lib, not xtask.
+//!
+//! The rendering rules serve a first-time reader: each command appears ONCE as its heading (the
+//! usage line is added only when it says more than the heading — arguments or options exist), the
+//! per-command table is two columns (the flag with its value placeholder, then the plain-language
+//! help), and the preamble states the one behavior rule in ordinary words.
 
 /// The behavior verbs grouped by SCOPE — the KNOWN verb lists drive the grouping (not clap metadata),
 /// so the reference reads the way the tool is taught: self-scoped, then team-scoped, then maintenance.
@@ -86,12 +91,33 @@ fn option_spellings(arg: &clap::Arg) -> String {
     spellings.join(", ")
 }
 
+/// The table's first cell: an option with its value placeholder (`-m, --message <MSG>`), or the
+/// positional's usage token (`<SOURCE>`).
+fn arg_label(arg: &clap::Arg) -> String {
+    if arg.is_positional() {
+        return positional_token(arg);
+    }
+    let spellings = option_spellings(arg);
+    if takes_value(arg) {
+        format!("{spellings} <{}>", value_name(arg))
+    } else {
+        spellings
+    }
+}
+
 /// Render one command (recursing into any subcommands) into `out` at the given heading level.
 fn render_command(out: &mut String, path: &str, cmd: &clap::Command, level: usize) {
     let hashes = "#".repeat(level);
     out.push_str(&format!("\n{hashes} `{path}`\n\n"));
 
-    // The usage line.
+    // The about text — the long form when present (the full description), collapsed to one paragraph.
+    if let Some(about) = cmd.get_long_about().or_else(|| cmd.get_about()) {
+        out.push_str(&format!("{}\n\n", cell(&about.to_string())));
+    }
+
+    // The usage line — rendered only when it says more than the heading already does (the command
+    // takes arguments, options, or a subcommand). A bare `topos status` block under a `topos
+    // status` heading would state the command twice.
     let mut usage = vec![path.to_owned()];
     let has_flags = cmd
         .get_arguments()
@@ -107,51 +133,30 @@ fn render_command(out: &mut String, path: &str, cmd: &clap::Command, level: usiz
             usage.push(positional_token(arg));
         }
     }
-    out.push_str(&format!("```\n{}\n```\n\n", usage.join(" ")));
-
-    // The about text — the long form when present (the full description), collapsed to one paragraph.
-    if let Some(about) = cmd.get_long_about().or_else(|| cmd.get_about()) {
-        out.push_str(&format!("{}\n\n", cell(&about.to_string())));
+    if usage.len() > 1 {
+        out.push_str(&format!("```\n{}\n```\n\n", usage.join(" ")));
     }
 
-    // The args/flags table (visible, non-boilerplate args only).
+    // The args/flags table (visible, non-boilerplate args only), two columns.
     let rows: Vec<&clap::Arg> = cmd
         .get_arguments()
         .filter(|a| !a.is_hide_set() && !is_boilerplate(a))
         .collect();
     if !rows.is_empty() {
-        out.push_str("| Argument / flag | Value | Default | Description |\n");
-        out.push_str("|---|---|---|---|\n");
+        out.push_str("| Argument / flag | What it does |\n");
+        out.push_str("|---|---|\n");
         for arg in rows {
-            let name = if arg.is_positional() {
-                positional_token(arg)
-            } else {
-                option_spellings(arg)
-            };
-            let value = if takes_value(arg) && !arg.is_positional() {
-                format!("`<{}>`", value_name(arg))
-            } else {
-                String::new()
-            };
-            let default = arg
-                .get_default_values()
-                .iter()
-                .map(|v| v.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join(", ");
             let help = arg.get_help().map(|h| h.to_string()).unwrap_or_default();
             out.push_str(&format!(
-                "| `{}` | {} | {} | {} |\n",
-                cell(&name),
-                value,
-                cell(&default),
-                cell(&help),
+                "| `{}` | {} |\n",
+                cell(&arg_label(arg)),
+                cell(&help)
             ));
         }
         out.push('\n');
     }
 
-    // Recurse into visible subcommands (e.g. `auth login|logout|status`).
+    // Recurse into visible subcommands (e.g. `auth status`).
     for sub in cmd.get_subcommands() {
         if sub.is_hide_set() {
             continue;
@@ -172,37 +177,31 @@ pub fn cli_ref_md() -> String {
          gate.\n\n",
     );
     out.push_str(
-        "`topos` is the client an agent drives non-interactively. topos asks first when an act \
-         REACHES your team, LOSES local work, or TRUSTS something new — those verbs are TWO-PHASE: a \
-         bare invocation DESCRIBES what would change (nothing is written), and `--yes` applies it in \
-         one shot (`revert` is the exception — `--yes` there also acknowledges a no-op). Everything \
-         else — self-scoped acts reversible by their inverse command — applies immediately and prints \
-         an undo-led receipt (`--yes` is an accepted no-op there). `--json` works \
-         on every verb and prints exactly one envelope on stdout (never a prompt). The exit status is \
-         one of three classes: `0` on success, `1` on a domain refusal or a failed operation (the \
-         envelope's `ok` + `error.outcome` distinguish a refusal from a transport fault), and `2` on a \
-         usage error (an unknown flag or a missing argument). The session-start auto-update hook runs \
-         `topos update --quiet`, which stays silent except a freshness one-liner and exits `0` on a \
-         network blip so a session never fails to start.\n\n",
+        "Every command prints human-readable text on a terminal, or exactly one JSON object with \
+         `--json` (for agents and scripts — it never prompts).\n\n\
+         One rule covers all of them: **a command that reaches other people, discards local work, \
+         or trusts a new source shows a preview first.** Run it bare to see exactly what would \
+         happen, then add `--yes` to apply. Everything else applies immediately and prints what \
+         changed, along with the command that undoes it.\n\n\
+         Exit codes: `0` — success. `1` — the operation was refused or failed (with `--json`, the \
+         `error` object says which and how to fix it). `2` — the command line itself was invalid.\n\n",
     );
 
-    // The JSON contract — the envelope's shape, the next-action grammar (incl. the `needs`
-    // placeholder list), and where the full schemas live. Rendered here so `docs/cli.md` and the
-    // built-in skill's `reference.md` describe the same contract the binary emits.
+    // The JSON contract — the envelope's shape and where the full schemas live. Rendered here so
+    // `docs/cli.md` and the built-in skill's `reference.md` describe the same contract the binary
+    // emits; the worked examples live in the agents guide (topos.sh/docs/agents).
     out.push_str(
         "## The `--json` envelope\n\n\
-         Every `--json` run prints exactly one envelope object on stdout: `schema_version` (1), \
-         `command`, `ok`, the per-verb `data` payload, `warnings` (strings), `next_actions`, and — \
-         on `ok: false` — `error` (`code`, `outcome`, `retryable`, and its own `next_actions` \
-         mirror). Each entry in `next_actions` is a machine-actionable step: `code` (an open \
-         vocabulary — execute an unknown code via its argv, never reject it), `argv` (a complete \
-         argv array), optional safety metadata (`mutates`, `needs_network`, `risk_note`; absent = \
-         unknown), and `needs` — the placeholder names the argv template still requires before it \
-         can execute (e.g. `\"workspace-address\"` for an argv token `<workspace-address>`; \
-         substitute your value for each named `<placeholder>`, then run it). An action without \
-         `needs` is executable as-is. Errors whose prose names a concrete `topos` command carry \
-         the same command structurally in `next_actions`. The full JSON-Schemas live under \
-         `contracts/schemas/` with golden examples under `contracts/fixtures/json/`.\n\n",
+         Every `--json` run prints one object on stdout: `schema_version` (1), `command`, `ok`, a \
+         per-command `data` payload, `warnings`, `next_actions`, and — on `ok: false` — an `error` \
+         (`code`, `outcome`, `retryable`, plus its own `next_actions`). Each `next_actions` entry \
+         is a ready-to-run step: `argv` is a complete command; `needs` lists any `<placeholder>` \
+         tokens you must substitute first; `mutates`, `needs_network`, and `risk_note` are safety \
+         metadata (absent means unknown). Treat `code` as an open vocabulary — run an unfamiliar \
+         action by its `argv` rather than rejecting it. The full JSON-Schemas live under \
+         `contracts/schemas/` in the repository, with golden examples under \
+         `contracts/fixtures/json/`; the agents guide (topos.sh/docs/agents) shows worked \
+         examples.\n\n",
     );
 
     // Global options — rendered from the root command's own args (the `--json` + `--workspace` flags).
@@ -211,32 +210,38 @@ pub fn cli_ref_md() -> String {
         .filter(|a| !a.is_hide_set() && !is_auto_help(a))
         .collect();
     if !globals.is_empty() {
-        out.push_str("## Global options\n\nThese work before or after any verb.\n\n");
-        out.push_str("| Flag | Value | Description |\n|---|---|---|\n");
+        out.push_str("## Global options\n\nThese work before or after any command.\n\n");
+        out.push_str("| Flag | What it does |\n|---|---|\n");
         for arg in globals {
-            let value = if takes_value(arg) {
-                format!("`<{}>`", value_name(arg))
-            } else {
-                String::new()
-            };
             let help = arg.get_help().map(|h| h.to_string()).unwrap_or_default();
             out.push_str(&format!(
-                "| `{}` | {} | {} |\n",
-                cell(&option_spellings(arg)),
-                value,
-                cell(&help),
+                "| `{}` | {} |\n",
+                cell(&arg_label(arg)),
+                cell(&help)
             ));
         }
         out.push('\n');
     }
 
     // The verbs, grouped by scope (the known verb lists, not clap metadata).
-    for (title, names) in [
-        ("Self-scoped verbs", SELF_SCOPED.as_slice()),
-        ("Team-scoped verbs", TEAM_SCOPED.as_slice()),
-        ("Maintenance", MAINTENANCE.as_slice()),
+    for (title, blurb, names) in [
+        (
+            "Everyday commands",
+            "These act on this machine only.",
+            SELF_SCOPED.as_slice(),
+        ),
+        (
+            "Team commands",
+            "These reach your workspace, so each one previews first or confirms via its flag.",
+            TEAM_SCOPED.as_slice(),
+        ),
+        (
+            "Maintenance",
+            "The binary and the installation itself.",
+            MAINTENANCE.as_slice(),
+        ),
     ] {
-        out.push_str(&format!("## {title}\n"));
+        out.push_str(&format!("## {title}\n\n{blurb}\n"));
         for name in names {
             let cmd = root
                 .get_subcommands()
@@ -248,11 +253,10 @@ pub fn cli_ref_md() -> String {
 
     // The hidden / renamed verbs note (the reference omits hidden subcommands themselves).
     out.push_str(
-        "\n## Renamed verbs\n\n\
-         - `topos pull` is a hidden alias of `topos update` (armed session-start hooks in the field \
-         still invoke `pull`); the `--json` envelope always reads `update`.\n\
-         - `topos upgrade` is intentionally ambiguous and refuses with a disambiguation: `topos \
-         update` refreshes followed skills, while `topos self-update` replaces the `topos` binary.\n",
+        "\n## Aliases\n\n\
+         - `topos pull` — an alias of `topos update`, kept for hooks installed by older versions.\n\
+         - `topos upgrade` — deliberately refused with a pointer to both meanings: `topos update` \
+         refreshes your skills, `topos self-update` replaces the `topos` binary itself.\n",
     );
 
     out

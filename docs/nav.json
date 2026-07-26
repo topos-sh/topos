@@ -1,7 +1,7 @@
 [
   { "group": "Start here", "pages": ["index", "quickstart", "install"] },
-  { "group": "Everyday work", "pages": ["add", "publish", "review", "team"] },
+  { "group": "Guides", "pages": ["add", "publish", "review", "team"] },
   { "group": "Agents", "pages": ["agents", "harnesses"] },
-  { "group": "Run the server", "pages": ["self-host"] },
+  { "group": "Self-hosting", "pages": ["self-host"] },
   { "group": "Reference", "pages": ["cli"] }
 ]

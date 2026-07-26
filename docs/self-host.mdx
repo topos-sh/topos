@@ -20,9 +20,8 @@ Then open `http://localhost:3000` **in a browser** — the first browser request
 workspace and prints the setup link to the logs.
 
 <Note>
-  The two secrets are required even for a laptop try-out: the app refuses to start while
-  `TOPOS_WEB_AUTH_SECRET` or `TOPOS_INTERNAL_TOKEN` still hold the published compose defaults —
-  they are public values, so booting on them would be a footgun, not a convenience.
+  The two secrets are required even for a laptop try-out — the app refuses to start on the
+  published compose defaults, because they are public values.
 </Note>
 
 ## What runs

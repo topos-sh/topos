@@ -1,92 +1,86 @@
 ---
-title: Which agents it works with
-description: Topos places the same bytes into each harness's skills directories and arranges for updates to fire — 70+ harnesses known.
-sidebar_label: Harnesses
+title: Supported agents
+description: Topos places the same files into each agent's skills directories and arranges for updates to fire — 70+ agents known.
+sidebar_label: Supported agents
 ---
 
-Topos does not translate between agent formats. A skill is a plain directory, and a harness is
-**which directories to read and write, plus when an update check fires**. Topos places the same
-bytes where each detected harness looks, and arranges for `topos update --quiet` to run at the
-right moment. There is no dialect translation and no second permission system — how much a human
-sits in the loop belongs to your harness, not to Topos.
+Topos puts the same files wherever each agent on your machine looks for skills, and
+refreshes them at the right moment — so Claude Code, Cursor, and everything else you run
+work from the same shared set, with no per-agent setup.
+
+Nothing is translated between agent formats: a skill is a plain directory, and supporting
+an agent means knowing **which directories it reads and when to refresh them**. There is
+also no second permission system — how much a human sits in the loop belongs to your agent,
+not to Topos.
 
 ## Three tiers of support
 
-- **auto-update** — Topos installs an update trigger inside the harness (a session-start hook, or a
-  scheduled job where that is what the harness offers). Managed skills refresh silently and are
-  current before the agent uses them.
-- **delivery** — no trigger is installed in that harness, but every managed skill is still placed
-  into its skills directory and refreshed by *every* update sweep on the machine — whether the
-  sweep came from another harness's hook or a manual `topos update`. Most harnesses rescan their
-  skills directory at session start anyway.
-- **discover + add** — project-scoped conventions only. Topos can find and adopt skills sitting
-  there, but has no machine-wide place to deliver into.
+- **auto-update** — Topos installs an update trigger inside the agent (a session-start hook,
+  or a scheduled job where that's what the agent offers). Managed skills refresh silently
+  and are current before the agent uses them.
+- **delivery** — no trigger in that agent, but every managed skill is still placed into its
+  skills directory and refreshed by *every* update on the machine — another agent's trigger,
+  or a manual `topos update`.
+- **discover + add** — project-scoped conventions only: Topos can find and adopt skills
+  sitting there, but has no machine-wide place to deliver into.
 
 <Note>
-  Some harnesses require **their own one-time approval** before they will run an installed trigger
-  (Codex trusts hooks in-app via `/hooks`; Gemini CLI confirms new hooks; Goose enables plugins
-  itself). Until you grant it, `topos status` reports that trigger honestly as *not yet active* and
-  the harness behaves like the delivery tier.
+  Some agents require **their own one-time approval** before they run an installed trigger
+  (Codex trusts hooks in-app via `/hooks`; Gemini CLI confirms new hooks; Goose enables
+  plugins itself). Until you grant it, `topos status` reports that trigger honestly as *not
+  yet active*, and the agent behaves like the delivery tier.
 </Note>
 
 ## The trigger
 
-Every trigger runs the same byte-stable line:
+Every trigger runs the same line:
 
 ```sh
 command -v topos >/dev/null 2>&1 && topos update --quiet || true  # topos:currency
 ```
 
-`command -v` guards a machine where the binary was removed; `--quiet` keeps hook output out of the
-session; `|| true` keeps the exit status zero; the trailing sentinel is how Topos recognizes its
-own line and never touches yours. Triggers are installed when Topos wires into a harness (a
-completed login, an adopt) and scrubbed by `topos uninstall --yes`. Every adapter is idempotent and
-fails closed: if a config file's shape cannot be proven, Topos reports degraded and writes nothing.
+It exits `0` no matter what, prints nothing into the session, self-throttles (default 300
+seconds), and the trailing marker is how Topos recognizes its own line and never touches
+yours. Triggers are installed when Topos wires into an agent (a completed login, an adopt)
+and removed by `topos uninstall --yes`. Every adapter is idempotent and fails closed: if a
+config file's shape can't be proven, Topos reports it honestly and writes nothing.
 
-The quiet sweep self-throttles (default 300 seconds; `--ttl` or `TOPOS_UPDATE_TTL` tune it, `0`
-disables), emits nothing when nothing changed, and exits `0` on an auth or network blip so a
-session start never fails. An explicit non-quiet `topos update` always runs in full.
+## Where the files land
 
-## Where bytes land
+**For you** (skills from your profile), under `$HOME`:
 
-**Person scope** (skills from your profile), under `$HOME` — shared-directory-first:
+- one copy in `~/.agents/skills/<name>` where a detected agent reads that shared convention,
+- plus one native copy per detected agent that doesn't.
 
-- one copy in `~/.agents/skills/<name>` when at least one detected harness reads that shared
-  convention, plus
-- one native copy per detected harness that does not.
+**Per project** (skills from a repo's `topos.toml`), rooted at the checkout:
 
-**Project scope** (skills from a repo's `topos.toml`), rooted at your checkout:
+- `<project>/.agents/skills/<name>` for agents covered by the shared convention,
+- the agent's own project directory otherwise (`.claude/skills`, `.factory/skills`, …),
+- `<project>/.claude/skills` as the default when nothing is detected.
 
-- `<project>/.agents/skills/<name>` for harnesses covered by the shared convention,
-- the harness's own project directory otherwise (`.claude/skills`, `.factory/skills`, …),
-- `<project>/.claude/skills` as the default shape when nothing is detected.
+A `[placement]` entry in `topos.toml` overrides all of this with one project-relative
+directory. Project placements are kept out of commits by an appended `.git/info/exclude`
+line; committed ignore files are never touched. A directory is only chosen when it's free or
+already Topos-managed — a byte-identical occupant is adopted in place, never duplicated.
 
-A `[placement]` entry in `topos.toml` overrides this with one project-relative directory every
-agent reads. Project placements are kept out of commits by an appended `.git/info/exclude` line;
-committed ignore files are never touched.
+## The current state, honestly
 
-A directory is only chosen when it is free or already owned by Topos's own record — a
-byte-identical occupant is adopted in place, never duplicated. If a harness stops being detected,
-its placements are frozen, never deleted.
-
-## The current state of support, honestly
-
-- **Placement** reaches every detected harness in the table below — that tier is broad.
-- **Full adapters** (placement + trigger management + discovery) exist for Claude Code, OpenClaw,
-  and Hermes Agent; the active adapter constructed today is **Claude Code**.
-- **Breadth triggers** are additionally installed for Amp, Cline, Codex, Cursor, Droid, Gemini CLI,
+- **Placement** reaches every detected agent in the table below — that tier is broad.
+- **Full adapters** (placement + trigger management + discovery) exist for Claude Code,
+  OpenClaw, and Hermes Agent; the active adapter constructed today is **Claude Code**.
+- **Triggers** are additionally installed for Amp, Cline, Codex, Cursor, Droid, Gemini CLI,
   GitHub Copilot, Goose, and OpenCode.
-- Some trigger shapes are confirmed against a live build; others follow vendor documentation.
-  `topos status` tells you the truth for your machine — per agent, `armed`, `not armed`, or
-  `unknown`.
+- Some trigger shapes are confirmed against a live build; others follow vendor
+  documentation. `topos status` tells you the truth for your machine — per agent: `armed`,
+  `not armed`, or `unknown`.
 
-## The harness table
+## The agent table
 
-Directory conventions are sourced from [`vercel-labs/skills`](https://github.com/vercel-labs/skills)
-(MIT). User-scope directories resolve under `$HOME`; project-scope directories are relative to the
-directory you run in.
+Directory conventions are sourced from
+[`vercel-labs/skills`](https://github.com/vercel-labs/skills) (MIT). User-scope directories
+resolve under `$HOME`; project-scope directories are relative to the directory you run in.
 
-| Harness | Slug | User-scope dir | Project-scope dir | Support |
+| Agent | Slug | User-scope dir | Project-scope dir | Support |
 |---|---|---|---|---|
 | Claude Code | `claude-code` | `~/.claude/skills` † | `.claude/skills` | auto-update |
 | OpenClaw | `openclaw` | `~/.openclaw/skills` ‡ | `skills` | auto-update |
@@ -162,24 +156,24 @@ directory you run in.
 | Eve | `eve` | — (project-only) | `agent/skills` | discover + add |
 | PromptScript | `promptscript` | — (project-only) | `.agents/skills` | discover + add |
 
-† The directory's root is overridable by environment variable (the default shown applies when it
-is unset): `$CLAUDE_CONFIG_DIR` (Claude Code), `$HERMES_HOME` (Hermes Agent), `$CODEX_HOME`
-(Codex), `$VIBE_HOME` (Mistral Vibe), `$AUTOHAND_HOME` (Autohand Code CLI), and `$XDG_CONFIG_HOME`
-for the `~/.config`-based harnesses.
+† The directory's root is overridable by environment variable (the default shown applies
+when it is unset): `$CLAUDE_CONFIG_DIR` (Claude Code), `$HERMES_HOME` (Hermes Agent),
+`$CODEX_HOME` (Codex), `$VIBE_HOME` (Mistral Vibe), `$AUTOHAND_HOME` (Autohand Code CLI),
+and `$XDG_CONFIG_HOME` for the `~/.config`-based agents.
 
 ‡ OpenClaw also probes `~/.clawdbot/skills` and `~/.moltbot/skills`.
 
-\* Trigger installed, but the harness requires its own one-time approval before running it.
+\* Trigger installed, but the agent requires its own one-time approval before running it.
 
 <Note>
-  Don't see yours? Skills are plain directories, so a harness that reads a skills folder picks up
-  delivered bundles whether or not it is listed. `topos list` also discovers untracked skills
-  already sitting in any of these directories, ready to `topos add`.
+  Don't see yours? Skills are plain directories, so any agent that reads a skills folder
+  picks up delivered bundles whether or not it's listed. `topos list` also discovers
+  untracked skills already sitting in any of these directories, ready to `topos add`.
 </Note>
 
 ## The shared directory
 
-`~/.agents/skills` is a cross-harness convention. Where a detected harness is known to read it,
-Topos places **one** copy there instead of a native copy per harness — several agents on one
-machine share the same bytes. Coverage is tracked with provenance and fails closed: a harness whose
-support is unknown gets its own native copy.
+`~/.agents/skills` is a cross-agent convention. Where a detected agent is known to read it,
+Topos places **one** copy there instead of a native copy per agent — several agents on one
+machine share the same files. Coverage is tracked with provenance and fails closed: an agent
+whose support is unknown gets its own native copy.

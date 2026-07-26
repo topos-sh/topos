@@ -272,18 +272,24 @@ content edit without a regenerate turns CI red instead of shipping stale docs.
 
 The pipeline (`scripts/gen-docs.mjs` + `scripts/docs/`) is the app's OWN remark/rehype chain, not a
 second markdown stack: remark-parse → remark-gfm → the component fold → remark-rehype →
-headings/anchors → shiki → stringify. `TOPOS_DOCS_DIR` re-points the content root (tests aim it at
+headings/anchors → code frames → shiki (both themes) → the colour pass → stringify.
+`TOPOS_DOCS_DIR` re-points the content root (tests aim it at
 `tests/fixtures/docs`). Four contracts are enforced at generate time, loudly, naming the file:
 frontmatter is exactly `title` + `description` (+ optional `sidebar_label`); `docs/nav.json` is the
 single source of the sidebar and must name exactly the pages on disk (a nav entry with no file, or
 a file no nav lists, fails); the component set is CLOSED (`Note`/`Warning`/`Tip`, `Steps`+`Step`,
-`Tabs`+`Tab`, `CardGrid`+`Card`) and anything else fails rather than rendering empty; and the CLI
+`Tabs`+`Tab`, `CardGrid`+`Card`, `Cta`, `Columns`+`Column`) and anything else fails rather than
+rendering empty; and the CLI
 reference page expands the marker `{/* GENERATED-CLI-REFERENCE */}` from the repo's generated
-`docs/cli.md` (never hand-written, never duplicated). remark-rehype runs WITHOUT
+`docs/cli.md` (never hand-written, never duplicated; its own H1 + provenance quote are stripped on
+splice so the reference's sections and commands land in the page TOC). remark-rehype runs WITHOUT
 `allowDangerousHtml`, so no raw HTML can reach the output — a stronger guarantee than sanitizing
 after the fact, and why this renderer carries no sanitizer. Highlighting happens at GENERATE time;
-the browser downloads no highlighter, and `<Tabs>` switches with a radio group and `:checked`, so
-the page needs no script at all.
+the browser downloads no highlighter, and `<Tabs>` switches with a radio group and `:checked`.
+Every code block is framed with a generated copy button — the ONE bit of docs interactivity, wired
+as a single delegated click handler in `docs-shell.tsx` — and command fences (`bash`/`sh`/
+`console`) sit on the design system's dark terminal glass, recoloured to the dark shiki theme at
+generate time.
 
 Path SHAPE decides the face, as everywhere else here: `/docs/<page>` is the page (sidebar from
 `nav.json`, on-page contents from its own h2/h3, prev/next in nav order), `<the same path>.md` is
