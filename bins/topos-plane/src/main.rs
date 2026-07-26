@@ -93,7 +93,44 @@ async fn main() -> Result<()> {
         .with_context(|| format!("binding {}", cfg.bind))?;
     tracing::info!(addr = %cfg.bind, "topos-plane listening");
     axum::serve(listener, router(state))
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .context("serving the vault")?;
+    tracing::info!("topos-plane stopped");
     Ok(())
+}
+
+/// Resolves when the process is asked to stop, so `axum` can finish in-flight requests and return
+/// instead of being killed mid-response.
+///
+/// This matters more than it looks: a container runtime stops a container by sending SIGTERM and
+/// then waiting out a timeout before SIGKILL. The default disposition of SIGTERM terminates a
+/// process — but only for a process that is NOT PID 1, and this binary IS PID 1 in its image
+/// (`ENTRYPOINT ["topos-plane"]`, no init shim). PID 1 ignores every signal it has no handler
+/// for, so without this function the vault sits deaf through the entire stop timeout and is
+/// SIGKILLed — a fixed, pointless stall on every single restart, and an in-flight request dies
+/// with it. Installing the handler is what makes the process actually stoppable.
+async fn shutdown_signal() {
+    // Ctrl-C for an operator running this in a terminal; SIGTERM for every orchestrator.
+    let interrupt = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("installing the Ctrl-C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("installing the SIGTERM handler")
+            .recv()
+            .await;
+    };
+    // Non-unix hosts have no SIGTERM; Ctrl-C alone decides there.
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = interrupt => tracing::info!("interrupt received; draining in-flight requests"),
+        () = terminate => tracing::info!("SIGTERM received; draining in-flight requests"),
+    }
 }
