@@ -4,11 +4,14 @@ description: Topos places the same files into each agent's skills directories an
 sidebar_label: Supported agents
 ---
 
-Topos does not translate between agent formats. A skill is a plain directory; supporting an
-agent means knowing **which directories it reads and when to refresh them**. Topos places
-the same files where each detected agent looks and arranges for a silent update to run at
-the right moment. There is no dialect translation and no second permission system — how much
-a human sits in the loop belongs to your agent, not to Topos.
+Topos puts the same files wherever each agent on your machine looks for skills, and
+refreshes them at the right moment — so Claude Code, Cursor, and everything else you run
+work from the same shared set, with no per-agent setup.
+
+Nothing is translated between agent formats: a skill is a plain directory, and supporting
+an agent means knowing **which directories it reads and when to refresh them**. There is
+also no second permission system — how much a human sits in the loop belongs to your agent,
+not to Topos.
 
 ## Three tiers of support
 
