@@ -1,0 +1,308 @@
+---
+title: Self-host Topos
+description: Run the whole product from one compose file — deploy, claim, configure mail, upgrade, and back it up.
+sidebar_label: Self-host
+---
+
+Topos is complete for a self-hosted team. There is no reduced open-source edition: the CLI, the
+sharing server, and the entire web app — sign-in, dashboard, review UI, admin pages, and the API
+the CLI dials — are all in the [public repository](https://github.com/topos-sh/topos) under
+Apache-2.0.
+
+```bash title="Try it on a laptop"
+git clone https://github.com/topos-sh/topos && cd topos
+printf 'TOPOS_WEB_AUTH_SECRET=%s\nTOPOS_INTERNAL_TOKEN=%s\n' \
+  "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
+docker compose up --build
+```
+
+Then open `http://localhost:3000` **in a browser** — the first browser request is what mints the
+workspace and prints the setup link to the logs.
+
+<Note>
+  The two secrets are required even for a laptop try-out: the app refuses to start while
+  `TOPOS_WEB_AUTH_SECRET` or `TOPOS_INTERNAL_TOKEN` still hold the published compose defaults —
+  they are public values, so booting on them would be a footgun, not a convenience.
+</Note>
+
+## What runs
+
+Three services, **one published port**:
+
+| Service | What it is | Published port |
+|---|---|---|
+| **web** | The whole product app — the only thing that needs to be reachable | `3000` |
+| **plane** | The vault: pure byte custody for skill versions. One caller — the app, over an internal bearer-gated lane | none, deliberately |
+| **db** | PostgreSQL 18, digest-pinned. Two roles, two schemas — one per application, boundary enforced by grants | none |
+
+<Warning>
+  **The vault must never be externally reachable.** It publishes no port by design. Do not add
+  one, and do not proxy it. The database likewise publishes no port.
+</Warning>
+
+A self-hosted deployment is **single-tenant**: the install *is* one workspace, and every URL is
+rooted at your origin. The workspace address teammates log in with is simply
+`https://topos.example.com`.
+
+## A real deployment
+
+<Steps>
+  <Step title="Set the five values that must change">
+    Create a `.env` beside `docker-compose.yml`:
+
+    ```bash title=".env"
+    # The public origin, behind your reverse proxy. Required.
+    TOPOS_PUBLIC_URL=https://topos.example.com
+
+    # The app's session-signing secret — at least 32 characters.
+    TOPOS_WEB_AUTH_SECRET=<paste output of: openssl rand -hex 32>
+
+    # The app-to-vault internal bearer. Both services read it; they must match.
+    TOPOS_INTERNAL_TOKEN=<paste output of: openssl rand -hex 32>
+
+    # The two database roles' passwords.
+    TOPOS_PLANE_DB_PASSWORD=<paste output of: openssl rand -hex 16>
+    TOPOS_WEB_DB_PASSWORD=<paste output of: openssl rand -hex 16>
+
+    # Optional: the first workspace's slug. Default: team
+    TOPOS_WORKSPACE_NAME=acme
+    ```
+
+    Compose does **not** expand `$(…)` in a `.env` file — generate the values first and paste the
+    literals in. The app refuses to boot on the shipped defaults for the two secrets; the two
+    database passwords are not enforced, but change them anyway.
+  </Step>
+  <Step title="Bring it up">
+    ```bash
+    docker compose up -d --build
+    ```
+
+    Both images build from source, the database provisions its roles and grants on first boot of a
+    fresh volume, and each application migrates its own schema at startup, before serving anything.
+  </Step>
+  <Step title="Terminate TLS at your proxy">
+    Forward to `http://web:3000`. Caddy, for example:
+
+    ```text title="Caddyfile"
+    topos.example.com {
+        reverse_proxy web:3000
+    }
+    ```
+
+    The vault needs no route at all. Give the proxy body-size headroom — a publish carries bundle
+    bytes, and the ingest accepts roughly 160 MiB (`client_max_body_size 200m` in nginx; Caddy and
+    Traefik do not cap by default). Make sure the proxy appends to `X-Forwarded-For` rather than
+    replacing it — the rate belts key on the last hop.
+  </Step>
+  <Step title="Claim the workspace">
+    Open `https://topos.example.com` in a browser once — the first browser request mints the
+    workspace and prints the setup link. Then:
+
+    ```bash
+    docker compose logs web | grep 'Finish setup:'
+    # → Finish setup: https://topos.example.com/claim?code=…
+    ```
+
+    Open the link and create the first account — that seats you as **owner**. The link is
+    single-use and only the code's hash is stored. While the workspace is unclaimed, every boot
+    re-mints a fresh code after the next browser request, so a lost link is recovered by
+    restarting the app. For CI/IaC, preset it with `TOPOS_SETUP_CODE=<at least 16 chars>` (or
+    mirror the printed line to a file with `TOPOS_SETUP_LINK_FILE`).
+  </Step>
+  <Step title="Connect the first machine">
+    ```bash
+    topos login https://topos.example.com
+    ```
+
+    A bare origin means "the workspace that origin addresses" — exactly right for a single-tenant
+    install. Approve at `<origin>/verify`, and you are publishing.
+  </Step>
+</Steps>
+
+### Verify it
+
+```bash
+curl -fsS https://topos.example.com/healthz
+# {"ok":true}
+
+curl -fsS -H 'Accept: application/json' https://topos.example.com
+# {"schema_version":1,"card":"topos-protocol-card","api_base_url":"https://topos.example.com/api"}
+
+bash scripts/compose-smoke.sh    # the same end-to-end smoke the repo's CI runs
+```
+
+<Warning>
+  If `api_base_url` comes back as `http://…` or `localhost`, `TOPOS_PUBLIC_URL` is unset or wrong —
+  and the CLI **refuses** to connect when an `https` address hands it a plain-http API base. That
+  refusal is the symptom. `TOPOS_PUBLIC_URL` drives everything outward-facing: workspace
+  addresses, the API base, invitation and verification links, and the printed setup link.
+</Warning>
+
+<Note>
+  **Probing gotcha:** any non-browser fetch of any path gets the constant protocol card, not HTML —
+  that is how clients discover the API base. Uptime checks and scrapers that expect a page must
+  send `Accept: text/html`.
+</Note>
+
+## Mail
+
+Topos has no built-in mail service. Arm an SMTP relay with all five variables — a partial set is
+treated as unset:
+
+```bash title=".env"
+TOPOS_MAIL_SMTP_HOST=smtp.example.com
+TOPOS_MAIL_SMTP_PORT=587        # port 465 means implicit TLS; others use STARTTLS
+TOPOS_MAIL_SMTP_USER=topos@example.com
+TOPOS_MAIL_SMTP_PASS=<secret>
+TOPOS_MAIL_SMTP_FROM="Topos <topos@example.com>"
+```
+
+**Works without mail:** the claim ceremony, email + password sign-in, `topos login` approval,
+publishing, review, delivery — the entire core loop.
+**Needs mail:** inviting teammates (the mailbox round-trip is the identity proof), password-reset
+mail, and magic-link sign-in (that option only appears on the sign-in page when mail can actually
+send).
+
+Without SMTP an install is effectively single-user until you either arm a relay or open
+registration: **Settings → General → Registration → Open** (owner-only). Open registration lets
+anyone who can reach the origin create an account — reasonable behind a VPN, think twice on a
+public origin.
+
+<Tip>
+  Forgot the only password on a mail-less install? Machine control is the proof:
+  `node web/scripts/mint-recovery-code.mjs <email>` (run from a checkout against the same
+  `DATABASE_URL`) prints a single-use 15-minute code to redeem at `<origin>/recovery`. The script
+  is not in the runtime image — copy it in first with
+  `docker compose cp web/scripts/mint-recovery-code.mjs web:/app/web/`.
+</Tip>
+
+## Workspace policy knobs
+
+Deliberately in-product rather than environment variables, so they are audited and changeable
+without a redeploy. All on **Settings → General**, owner-only:
+
+| Setting | Default | What it does |
+|---|---|---|
+| Review gate | off | Every publish becomes a proposal — the default that unpinned skills inherit |
+| Staleness window | 7 days | When a machine reads *stale* on the sessions page |
+| Session approval | off | A member's new login waits for an owner's approval before anything is delivered |
+| Session expiry | none | How long a login lasts before the machine must log in again |
+| Registration | invite-only | Whether an uninvited sign-up succeeds (single-workspace installs) |
+| Export skills | — | Download every skill at its current version plus a manifest, as one zip |
+
+## Upgrades
+
+```bash
+git pull                       # or: git checkout v0.1.9
+docker compose up -d --build
+docker compose logs -f web     # confirm the boot migration ran
+```
+
+Both applications migrate their own schema at boot, before binding a port — there is no migration
+command to run by hand, and a broken migration crashes loudly rather than serving an unmigrated
+database. Only the vault has a published image (`ghcr.io/topos-sh/topos-plane`); the web app
+builds from source, which is the slow part of an upgrade on a small box.
+
+**Back up first** — migrations apply automatically and there is no automated downgrade. Rolling
+back is: stop the stack, restore the pre-upgrade backup, check out the previous tag, rebuild, and
+pin clients to match (`topos self-update --version <tag>`).
+
+Clients update themselves with `topos self-update`. There is no negotiated client-server
+compatibility mechanism — keep the CLI and the server on the same `0.x` line, and after a server
+upgrade tell people to run `topos self-update`.
+
+<Warning>
+  **Postgres major versions are not an in-place bump.** The bundled image is digest-pinned at
+  PostgreSQL 18 and the volume is mounted at `/var/lib/postgresql` (18 moved its data directory).
+  A pre-18 volume needs a `pg_dump` and restore into the new layout.
+</Warning>
+
+## Backups
+
+All durable state lives in **two volumes** — and the order you snapshot them in matters:
+
+| Volume | Holds |
+|---|---|
+| `plane-data` (`/data`) | The bytes: per-workspace git object stores and large objects |
+| `pg-data` (`/var/lib/postgresql`) | Both schemas: identity, seats, catalog, channels, proposals, audit — plus the version index and `current` pointers |
+
+<Warning>
+  **Snapshot the bytes first, then the database.** A pointer in the database may name a byte
+  written a moment ago. Bytes first, and the worst case is a few unreferenced blobs — harmless.
+  Database first, and a pointer can name a byte your snapshot missed — a real hole.
+</Warning>
+
+```bash
+# 1. Bytes first
+docker run --rm -v topos_plane-data:/data -v "$PWD":/backup alpine \
+  tar czf /backup/plane-data-$(date +%F).tar.gz -C /data .
+
+# 2. Then the database
+docker compose exec -T db pg_dump -U topos -d topos --format=custom > topos-$(date +%F).dump
+```
+
+To restore: bring the stack down, restore the bytes volume, start only `db` and `pg_restore` into
+it, then bring the rest up. **Restore the database before the app first serves a request** — on an
+empty database the first-boot ceremony would mint a fresh workspace and claim link.
+
+A backup deliberately does not cover copies already delivered to people's machines (those are
+theirs), client credentials (`~/.topos/identity/sessions.json` — losing it just means logging in
+again), or your `.env` (keep it safe yourself; rotating `TOPOS_WEB_AUTH_SECRET` signs every
+browser out).
+
+## Bring your own Postgres
+
+The bundled `db` service is a convenience. To use a managed database: run the same provisioning
+script the bundled database runs at first boot (idempotent, needs a superuser once), then point
+both services at it and keep the bundled `db` down.
+
+```bash
+POSTGRES_USER=<superuser> POSTGRES_DB=topos \
+TOPOS_PLANE_DB_PASSWORD=<secret> TOPOS_WEB_DB_PASSWORD=<secret> \
+  sh scripts/compose-init-db.sh
+```
+
+Override each service's `DATABASE_URL` (append `?sslmode=require` for a networked database) and
+start with `docker compose up -d --no-deps plane web`. Verify the grant boundary the same way the
+repo's CI does — it logs in as each role and proves the grants hold:
+
+```bash
+sh scripts/check-db-grants.sh
+```
+
+Match PostgreSQL 18. And remember: a managed-database backup covers the metadata half only — **the
+`plane-data` volume is still yours to back up.**
+
+## Operating it
+
+- **Health:** `GET /healthz` on the app answers `{"ok":true}` — own-database liveness only, so a
+  vault outage is never mistaken for a web outage. Point your platform's health check at it.
+- **Logs:** the app logs to console — the setup line is the one deliberate stdout surface. The
+  vault logs JSON to stderr, filtered by `RUST_LOG` (default `info`).
+- **Audit:** every mutation of shared state — including refused attempts — writes an attributed
+  audit row, readable in the browser on each skill's and channel's History tab and under each
+  settings knob.
+- **Rate limiting:** the API belts key on the last `x-forwarded-for` hop. With **no** reverse
+  proxy in front, every caller shares one bucket — set `TOPOS_WEB_RATELIMIT=off` and let your
+  ingress do it.
+- **Storage:** the vault runs recovery, quarantine-janitor, and GC passes on an interval
+  (`TOPOS_PLANE_GC_INTERVAL_SECS`, default 300). Watch the `plane-data` volume as version history
+  grows.
+- **Error reporting:** optional `SENTRY_DSN`, server-side only — no tracing, no cookies, no PII.
+
+The full environment-variable surface (pool sizes, timeouts, bind addresses, migration paths) is
+documented in the compose file and `topos-plane --help`.
+
+## Known rough edges
+
+Stated plainly so you are not surprised:
+
+- **No published web image.** Only the vault ships as `ghcr.io/topos-sh/topos-plane` (and the
+  bundled compose file builds even that from source); the app builds from source on every
+  upgrade. Building and pushing your own image in CI is a reasonable optimization.
+- **The compose file defines no health checks for `web` or `plane`** — only the database has
+  one, so on a very first boot the app can render before the vault finishes migrating. It
+  settles on its own.
+- **No metrics endpoint, no `/readyz`,** and no structured JSON logging on the web tier.
+- **No zero-downtime upgrade procedure.** For a team-sized deployment, a brief restart is the
+  expected shape.

@@ -88,6 +88,14 @@ function fail(file, message) {
 }
 
 const SCHEMA_DTS = join("app", "lib", "plane", "contract", "schema.d.ts");
+/**
+ * The compiled documentation: prose and shell transcripts from the repo's own docs/, emitted by
+ * scripts/gen-docs.mjs. It is CONTENT, not code — it holds no import, no call, and no capability
+ * — and the words it quotes (the CLI's own `--check`ed reference talks about checksums) would
+ * otherwise trip the identifier rules below. Its own gate is `check:docs`, which regenerates it
+ * from docs/ and fails on any drift.
+ */
+const DOCS_GENERATED = join("app", "lib", "docs", "content.generated.server.ts");
 
 const files = [];
 for (const full of walk(APP)) {
@@ -95,8 +103,8 @@ for (const full of walk(APP)) {
     continue;
   }
   const rel = APP_OVERRIDE ? join("app", relative(APP, full)) : relative(REL_ROOT, full);
-  if (rel === SCHEMA_DTS) {
-    continue; // generated contract types — gated by regen-clean instead
+  if (rel === SCHEMA_DTS || rel === DOCS_GENERATED) {
+    continue; // generated artifacts — gated by their own regen-clean checks instead
   }
   files.push({ rel, text: readFileSync(full, "utf8"), base: rel.slice(rel.lastIndexOf(sep) + 1) });
 }
@@ -256,6 +264,11 @@ const SESSIONLESS_ROUTES = new Set([
   // constant public bytes, sessionless by design.
   "install-sh",
   "agent",
+  // The documentation: public bytes compiled into the build, sessionless by design — the page,
+  // its plain-markdown twin, and the docs index.
+  "docs-page",
+  "docs-markdown",
+  "docs-llms-txt",
   // The machine-discovery lane: llms.txt + the agent-skills discovery index, its legacy
   // spelling, and the built-in skill's files — all constant public bytes, sessionless by design.
   "llms-txt",

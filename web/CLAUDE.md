@@ -260,6 +260,40 @@ read the routes serve — no generation script, no committed digest, drift impos
 module is the ONE sanctioned digest computation in this tier (carved out by name in
 `check-boundary.mjs`; it hashes public bytes, never a secret).
 
+**The documentation is served BY THIS APP, at `/docs`** — same origin, same design system, so a
+self-hosted install ships its own docs and needs no third-party site. The MDX source lives at the
+REPO ROOT (`docs/`, outside `web/`, so the pages stay readable on GitHub) and is compiled ONCE, at
+generate time, into a COMMITTED module (`app/lib/docs/content.generated.server.ts`): the routes
+import it like any other module, so the runtime reads no files, the image carries no documentation,
+and a downstream superset inherits the docs by compiling this app's source unchanged. The
+GENERATE-AND-COMMIT loop is the repo's usual one — **edit the MDX, `bun run gen:docs`, commit the
+result**; `check:docs` (in `bun run check`) regenerates in memory and fails on any drift, so a
+content edit without a regenerate turns CI red instead of shipping stale docs.
+
+The pipeline (`scripts/gen-docs.mjs` + `scripts/docs/`) is the app's OWN remark/rehype chain, not a
+second markdown stack: remark-parse → remark-gfm → the component fold → remark-rehype →
+headings/anchors → shiki → stringify. `TOPOS_DOCS_DIR` re-points the content root (tests aim it at
+`tests/fixtures/docs`). Four contracts are enforced at generate time, loudly, naming the file:
+frontmatter is exactly `title` + `description` (+ optional `sidebar_label`); `docs/nav.json` is the
+single source of the sidebar and must name exactly the pages on disk (a nav entry with no file, or
+a file no nav lists, fails); the component set is CLOSED (`Note`/`Warning`/`Tip`, `Steps`+`Step`,
+`Tabs`+`Tab`, `CardGrid`+`Card`) and anything else fails rather than rendering empty; and the CLI
+reference page expands the marker `{/* GENERATED-CLI-REFERENCE */}` from the repo's generated
+`docs/cli.md` (never hand-written, never duplicated). remark-rehype runs WITHOUT
+`allowDangerousHtml`, so no raw HTML can reach the output — a stronger guarantee than sanitizing
+after the fact, and why this renderer carries no sanitizer. Highlighting happens at GENERATE time;
+the browser downloads no highlighter, and `<Tabs>` switches with a radio group and `:checked`, so
+the page needs no script at all.
+
+Path SHAPE decides the face, as everywhere else here: `/docs/<page>` is the page (sidebar from
+`nav.json`, on-page contents from its own h2/h3, prev/next in nav order), `<the same path>.md` is
+the plain-markdown twin an agent fetches (components reduced to ordinary markdown — an aside
+becomes a labelled paragraph, steps become numbered lines — the author's fences and tables
+untouched), and `/docs/llms.txt` indexes the set with absolute urls on this deployment's own
+origin. All of it is public and sessionless, origin-rooted in BOTH tenancy modes; `docs` is a
+top-level static segment (registered in `app/topos-web/segments.ts`), so no workspace slug can take
+it.
+
 **The signed-in surface:** a workspace dashboard, the skill browser, the rendered review UI (unified diff +
 Approve/Reject + comments + one-click revert), the verification page, the create/join flows, and the ADMIN
 surfaces — the roster page in full (invite / role change / remove / self-serve leave, sole-owner-fenced),
@@ -344,9 +378,11 @@ to the one transport; the retired `x-topos-acting-email` header banned; server m
 every data-reading route guards or is on the sessionless allowlist; the raw DB surface stays inside the
 DAL; zero client env), `check:email` (nothing authorizes by email equality — the one-identity rule),
 `check:contract` (`app/lib/plane/contract/schema.d.ts` regenerated from the committed OpenAPI,
-drift-gated), and `check:bundle` (post-build byte-scan of `build/client` for server secret names + that
-the emitted CSS carries app-only utilities). The repo-level `scripts/check-db-grants.sh` (run in CI)
-proves the cross-lane grant boundary by logging in as each role.
+drift-gated), `check:docs` (`app/lib/docs/content.generated.server.ts` regenerated from the repo's
+`docs/`, drift-gated — edit the MDX, run `bun run gen:docs`, commit), and `check:bundle` (post-build
+byte-scan of `build/client` for server secret names + that the emitted CSS carries app-only
+utilities). The repo-level `scripts/check-db-grants.sh` (run in CI) proves the cross-lane grant
+boundary by logging in as each role.
 
 **Run it.**
 
@@ -356,8 +392,10 @@ bun run dev          # needs DATABASE_URL + PLANE_INTERNAL_URL/PLANE_INTERNAL_TO
 bun run db:migrate   # DATABASE_URL=… apply the web-schema migrations
 bun run test         # vitest unit — NOT `bun test`, which runs BUN's own runner and writes
                      # snapshot entries vitest then reports as obsolete (CI fails on those)
-bun run test:e2e     # playwright
-bun run check        # biome + the boundary/email/token/contract gates + typecheck
+bun run test:e2e     # playwright — E2E_{PLANE,APP,SMTP}_PORT override the ports when two
+                     # checkouts run their suites side by side
+bun run gen:docs     # recompile /docs from the repo's docs/*.mdx into the committed module
+bun run check        # biome + the boundary/email/token/contract/docs gates + typecheck
 ```
 
 `AGENTS.md` symlinks to this file.

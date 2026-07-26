@@ -11,10 +11,18 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // tests/e2e → web → repo root: the in-repo installer + plane migrations live under the repo root.
 const REPO_ROOT = resolve(HERE, "..", "..", "..");
 
-export const PLANE_PORT = 8791;
-export const APP_PORT = 3100;
+/**
+ * The three listeners this suite starts. The defaults are what CI and a lone checkout use; each
+ * is env-overridable so two checkouts of this repo can run their e2e side by side (the same
+ * reason each session gets its own database) instead of colliding on a port.
+ */
+const port = (name: string, fallback: number): number =>
+  Number(process.env[name] ?? "") || fallback;
+
+export const PLANE_PORT = port("E2E_PLANE_PORT", 8791);
+export const APP_PORT = port("E2E_APP_PORT", 3100);
 /** The fake SMTP sink (tests/fixtures/smtp-sink.mjs) the suite arms TOPOS_MAIL_SMTP_* toward. */
-export const SMTP_SINK_PORT = 2598;
+export const SMTP_SINK_PORT = port("E2E_SMTP_PORT", 2598);
 // localhost, NOT 127.0.0.1: the vite dev server blocks its own static/HMR resources cross-origin,
 // and a 127.0.0.1 page against a localhost-bound dev server never loads its client chunks.
 export const BASE_URL = `http://localhost:${APP_PORT}`;

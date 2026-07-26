@@ -1,0 +1,58 @@
+---
+title: Quickstart
+description: Install the CLI, log in, and receive your team's skills.
+---
+
+Five minutes, start to finish. Every command below is copy-pasteable.
+
+## Install and log in
+
+<Steps>
+  <Step title="Install the CLI">
+    No sudo — the binary lands in `~/.local/bin`.
+
+    ```sh
+    curl -fsSL https://topos.sh/install | sh
+    ```
+  </Step>
+
+  <Step title="Log in to your workspace">
+    ```sh title="Log in"
+    topos login https://topos.sh/acme
+    ```
+
+    A signed-in human approves the login once in a browser.
+  </Step>
+</Steps>
+
+<Warning>
+  Logging in is the acceptance step: from then on updates arrive silently. Leaving is
+  always possible — `topos logout` ends the session and the bytes stay put.
+</Warning>
+
+## Check what landed
+
+<Tabs>
+  <Tab title="Agent">
+    ```sh
+    topos status --json
+    ```
+  </Tab>
+
+  <Tab title="Human">
+    ```sh
+    topos status
+    ```
+  </Tab>
+</Tabs>
+
+The table below is the shape you should expect.
+
+| Column | Meaning |
+| --- | --- |
+| Reference | The winning reference for a bundle |
+| Scope | Where the bundle applies |
+
+<Tip>
+  Run `topos` with no arguments for the same snapshot.
+</Tip>
