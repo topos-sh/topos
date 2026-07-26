@@ -51,9 +51,12 @@ Everything else is plain markdown. These are the only components the renderer im
 | `<Steps>` + `<Step title="…">` | an ordered procedure |
 | `<Tabs>` + `<Tab title="…">` | the same task done two ways |
 | `<Card title="…" href="…">`, optionally in `<CardGrid>` | a small set of next destinations |
+| `<Cta title="…" href="…" />` | ONE button-styled link — the page's primary action |
+| `<Columns>` + `<Column title="…">` | two labelled blocks side by side (e.g. terminal vs agent) |
 
 Fenced code blocks take a language and an optional title:
-` ```bash title="Terminal" `.
+` ```bash title="Terminal" `. Command fences (`bash`/`sh`/`console`) render on the dark
+terminal surface; every block gets a copy button automatically.
 
 Two MDX gotchas: angle-bracket placeholders like `<skill>` must live inside code spans or fences,
 never in bare prose (MDX parses them as components), and internal links are written absolute with
@@ -86,8 +89,9 @@ it, and never move it.**
 {/* GENERATED-CLI-REFERENCE */}
 ```
 
-— which the renderer expands with the body of `docs/cli.md` at build time. After changing the
-CLI, run `cargo xtask gen-cli-ref` and commit the regenerated `cli.md`; the page needs no edit.
+— which the renderer expands with the body of `docs/cli.md` at build time (minus the file's own
+H1 and provenance quote — the page provides both). After changing the CLI, run
+`cargo xtask gen-cli-ref` and commit the regenerated `cli.md`; the page needs no edit.
 
 ## Writing conventions
 
@@ -97,9 +101,13 @@ CLI, run `cargo xtask gen-cli-ref` and commit the regenerated `cli.md`; the page
   gets fixed in the same change. Verify commands and output against the CLI and web app before
   publishing them.
 - **Explain with examples.** Concepts are introduced inside the motion that needs them — one or
-  two sentences, then the command and its real output. No standalone concept pages.
-- **Show real output.** Prefer a verbatim receipt over a paragraph describing one. Placeholders
-  are marked `<like-this>` inside code.
+  two sentences, then the command. No standalone concept pages.
+- **The command is the star; output is not.** Lead with what to run, then say what happens in
+  one plain sentence. Do not paste CLI output — it dates fast, buries the command, and the
+  reader's own terminal will show it anyway. The one exception is output that IS the interface
+  (the `--json` envelope on the agents page). Placeholders are marked `<like-this>` inside code.
+- **Write for someone who has never seen Topos.** Product words only (the vocabulary below) —
+  never internal design vocabulary, and never a concept the reader can't act on.
 - **Written for people AND agents.** Commands copy-pasteable and complete, tables parseable,
   explicit over clever.
 - **Vocabulary**: workspace · seat · session · manifest · profile · channel · skill · version ·

@@ -1,3 +1,4 @@
+import type { MouseEvent } from "react";
 import { Link, NavLink } from "react-router";
 import type { DocsPageView } from "@/lib/docs/model";
 
@@ -19,6 +20,27 @@ import type { DocsPageView } from "@/lib/docs/model";
 
 const WRAP = "mx-auto max-w-[1180px] px-6";
 const GITHUB = "https://github.com/topos-sh/topos";
+
+/**
+ * The ONE bit of interactivity a docs page carries: the generator placed a copy button beside
+ * every code block, and this delegated handler serves them all. The payload is read from the
+ * block itself — the highlighted `<pre>`'s `innerText` IS the author's code — so the markup
+ * carries no duplicate copy of it.
+ */
+function copyFromCodeBlock(event: MouseEvent<HTMLElement>) {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("button[data-copy]");
+  if (button === null) {
+    return;
+  }
+  const pre = button.closest(".docs-codeblock")?.querySelector("pre");
+  if (!pre) {
+    return;
+  }
+  void navigator.clipboard.writeText(pre.innerText.replace(/\n$/, "")).then(() => {
+    button.setAttribute("data-copied", "");
+    window.setTimeout(() => button.removeAttribute("data-copied"), 1600);
+  });
+}
 
 function DocsNav() {
   return (
@@ -204,8 +226,10 @@ export function DocsShell({ page }: { page: DocsPageView }) {
             </h1>
             <p className="mt-2 text-[15px] text-dim">{page.description}</p>
           </header>
+          {/* biome-ignore lint/a11y/useKeyWithClickEvents: pure event delegation — the real controls are the generated <button data-copy> elements, and their keyboard activation dispatches a native click this same handler receives. */}
           <article
-            className="docs-prose mt-7"
+            className="docs-prose mt-8"
+            onClick={copyFromCodeBlock}
             // biome-ignore lint/security/noDangerouslySetInnerHtml: this repo's own MDX, compiled to markup at build time by scripts/gen-docs.mjs — the pipeline admits no raw HTML from source (remark-rehype runs without allowDangerousHtml) and the component set is a closed list.
             dangerouslySetInnerHTML={{ __html: page.html }}
           />

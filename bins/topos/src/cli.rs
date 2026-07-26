@@ -9,6 +9,10 @@
 //! describe/`--yes` gates the acts with REACH or LOSS (`publish`'s describe, `review`'s verdicts,
 //! `revert`, `protect`, `invite`, `update --reset`, a permanent `remove`, `uninstall`); manifest
 //! edits apply immediately with an undo-led receipt (`--yes` an accepted no-op).
+//!
+//! The doc comments on the verbs below are USER-FACING twice over: they are `--help`, and
+//! `cli_ref.rs` renders them into `docs/cli.md` + the built-in skill's `reference.md`. Write them
+//! for someone who has never seen topos — plain words, no internal vocabulary.
 
 use clap::{Parser, Subcommand};
 
@@ -20,19 +24,20 @@ pub fn cli_command() -> clap::Command {
     <Cli as clap::CommandFactory>::command()
 }
 
-/// `topos` — share agent behaviors across a team. The agent drives it non-interactively with `--json`.
+/// `topos` — shared skills for your team's AI agents.
 #[derive(Debug, Parser)]
-#[command(name = "topos", version, about = "Share agent behaviors across a team")]
+#[command(
+    name = "topos",
+    version,
+    about = "Shared skills for your team's AI agents"
+)]
 pub(crate) struct Cli {
-    /// Emit one JSON document on stdout (the agent surface) instead of human text. Never prompts.
+    /// Print one JSON object instead of human text — for agents and scripts. Never prompts.
     #[arg(long, global = true)]
     pub(crate) json: bool,
 
-    /// Act in a specific workspace when this installation holds sessions with more than one on the
-    /// same server. Accepts the workspace's address NAME (what you logged in by) or its opaque id.
-    /// Selects the workspace for the ambient team verbs (a genesis `publish`, `invite`) and
-    /// disambiguates a skill name delivered from several workspaces. Optional — with a single
-    /// workspace it is inferred.
+    /// Pick which workspace to act in when this machine is logged into more than one. Takes the
+    /// workspace's name or id. With a single login it is inferred.
     #[arg(long, global = true, value_name = "WORKSPACE")]
     pub(crate) workspace: Option<String>,
 
@@ -47,306 +52,283 @@ pub(crate) struct Cli {
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
     // ---- Self-scoped (affect only you) ----
-    /// Show where this installation stands — the TRUST RAIL: the resolved table for "an agent
-    /// here" (per bundle: the winning reference, ONE source manifest, the scope, an honest
-    /// state), plus the sessions, the auto-update trigger state, and the binary version.
-    /// Entirely offline (nothing is dialed) and read-only (nothing is armed or repaired).
-    /// A bare `topos` on a TTY renders the same snapshot.
+    /// See what topos manages on this machine: each skill with its version and where it comes
+    /// from, your workspace logins, and whether auto-update is armed. Works offline and changes
+    /// nothing. A bare `topos` on a terminal shows the same thing.
     Status,
-    /// Reconcile this machine against the manifests covering the current directory and your
-    /// per-workspace profiles — the harness auto-update entry point (the installed trigger runs
-    /// `update --quiet`). Bare = the full sweep; `<name>` reconciles one resolved line;
-    /// `<skill>@<hash>` goes back to that version's local bytes.
+    /// Fetch and apply the latest version of everything this folder and your profile ask for.
+    /// Runs by itself at the start of each agent session; safe to run by hand any time.
+    /// `topos update <skill>` updates one skill; `topos update <skill>@<version>` puts that
+    /// version's bytes back on this machine only.
     #[command(alias = "pull")]
     Update {
-        /// Optional target(s): a resolved manifest name to reconcile; `<name>@<hash>` goes back
-        /// to that version's bytes. Omitted = the full sweep.
+        /// The skill(s) to update; `<skill>@<version>` restores that version's bytes locally.
+        /// Omitted, everything is updated.
         targets: Vec<String>,
-        /// Reset a delivered skill to `current`, dropping local edits. Lands with the loss-led describe.
+        /// Discard your local edits to a skill and take the team version. Shows what would be
+        /// lost first; `--yes` applies.
         #[arg(long)]
         reset: bool,
-        /// Apply without the describe step. Parses today; the two-phase describe lands later.
+        /// Confirm an action that shows a preview first (like `--reset`).
         #[arg(long)]
         yes: bool,
-        /// Resolve a diverged draft the OTHER way: commit YOUR bytes straight onto `current`, DROPPING
-        /// the pending three-way merge (the changes it would have merged are disclosed first). Requires
-        /// exactly one `<skill>` target. Use when you want your version to win outright.
+        /// Resolve a conflicted skill by keeping your bytes exactly as they are, skipping the
+        /// merge with the team's changes (what the merge would have brought is shown first).
+        /// Takes exactly one skill.
         #[arg(long = "onto-current")]
         onto_current: bool,
-        /// Emit nothing on stdout (the session-start hook's stdout is injected into the session). Errors
-        /// still go to stderr with a non-zero exit. Overrides `--json`.
+        /// Print nothing on stdout — the mode the session-start hook uses. Errors still go to
+        /// stderr with a non-zero exit.
         #[arg(long)]
         quiet: bool,
-        /// The quiet sweep's self-throttle window in seconds (`--quiet` only): a bare quiet sweep
-        /// within this window of the last completed sweep is a silent no-op, so hooks may fire on
-        /// every session event cheaply. `0` disables the throttle for this run. Default 300;
-        /// `TOPOS_UPDATE_TTL` overrides the default. An explicit non-quiet `topos update` always
-        /// runs the full sweep.
+        /// With `--quiet`: skip the run entirely when one already completed within this many
+        /// seconds, so hooks can fire often at no cost. `0` disables the throttle. Default 300;
+        /// `TOPOS_UPDATE_TTL` changes the default.
         #[arg(long, value_name = "SECONDS")]
         ttl: Option<u64>,
     },
-    /// Log this installation into a workspace — the browser-approval flow mints ONE
-    /// workspace-scoped SESSION (further workspaces are further logins). The address: a bare
-    /// workspace name (the default server), a bare server origin ("the workspace that origin
-    /// addresses" — self-hosted installs), `<server>/<workspace>`, or an invitation URL from the
-    /// invite mail. Login is the acceptance: the receipt states what connecting delivers; from
-    /// then on updates arrive silently. Re-invoking `login` RESUMES a pending approval.
+    /// Connect this machine to a workspace. Opens your browser for a one-click approval; from
+    /// then on, the workspace's skills arrive and stay updated by themselves. The address is
+    /// your workspace's URL — like `topos.sh/acme`, or your own server's origin when
+    /// self-hosting — or an invitation link. To connect another workspace, log in again with
+    /// its address.
     Login {
-        /// The workspace address. Omitted, it resumes a pending login.
+        /// The workspace address or invitation link. Omitted, resumes a pending login.
         address: Option<String>,
-        /// Block until the browser approval settles in ONE command. Bare `--wait` waits until the
-        /// code expires; `--wait <seconds>` caps the wait. A TTY blocks by default; a PIPED run
-        /// without `--wait` prints the approval URL and returns — re-invoke to poll.
+        /// Wait for the browser approval before returning. Bare `--wait` waits until the code
+        /// expires; `--wait <seconds>` caps it. On a terminal, login waits by default; piped,
+        /// it prints the approval URL and returns — run `topos login` again to check.
         #[arg(long, value_name = "SECONDS", num_args = 0..=1)]
         wait: Option<Option<u64>>,
     },
-    /// End this installation's session(s): the server-side revoke per session, then the local
-    /// sign-out (which proceeds regardless — the receipt reports the server outcome honestly).
-    /// Skills, drafts, and manifests stay; `topos login <address>` starts a fresh session.
+    /// Disconnect this machine from a workspace. Installed skills, your edits, and manifests
+    /// stay — they just stop updating. `topos login <address>` reconnects.
     Logout {
-        /// The workspace to log out of (its address name or id). With exactly one session it is
-        /// inferred; with several, name one or pass `--all`.
+        /// The workspace to log out of (name or id). With one login it is inferred; with
+        /// several, name one or pass `--all`.
         workspace: Option<String>,
-        /// End EVERY session on this installation.
+        /// Log out of every workspace on this machine.
         #[arg(long)]
         all: bool,
     },
-    /// Create this folder's `topos.toml` — the project MANIFEST `add`/`remove` edit and
-    /// `update`/`status` resolve (committed with the repo, it travels: every teammate's agents get
-    /// the same set here). Any folder, git or not; outside a shared repo the receipt notes the
-    /// file stays local. An existing manifest is a clean no-op, never overwritten.
+    /// Create a `topos.toml` in this folder. The file lists the skills everyone working in this
+    /// project should have — commit it, and teammates' agents pick up the same set by
+    /// themselves. If the file already exists, nothing changes.
     Init,
-    /// Add a skill to this folder's reach — the demand-side edit. The SOURCE is shape-determined:
-    ///   • a WORKSPACE reference (`@<ws>/<name>`, `@<ws>/channels/<name>`, the canonical
-    ///     `<host>/<ws>/<name>`, or a bare catalog name unique across your sessions) — records the
-    ///     line in the nearest `topos.toml` (or, with `-g`, your server-stored profile) and
-    ///     delivers it in the same invocation; an optional `@<digest>` tail pins the version;
-    ///   • a PATH (`./skills/deploy`, `~/x`, `/abs`) — adopt that directory in place (offline);
-    ///   • a GITHUB import (`owner/repo`, `owner/repo#<ref>`, an https://github.com URL) — fetch
-    ///     and pin it (a public repo, no account; the source's trustworthiness is yours to verify).
-    /// `add topos` restores the built-in topos skill.
+    /// Get a skill and keep it updated. The source can be a skill or channel from your
+    /// workspace (`code-review`, `@acme/code-review`, `@acme/channels/backend`), a local folder
+    /// (`./tools/my-skill`), or a public GitHub repo (`owner/repo`, pinned to a commit).
+    /// Records it in this folder's `topos.toml` — or in your personal profile with `-g` — and
+    /// installs it right away. `add topos` restores the built-in topos skill.
     Add {
-        /// The source — a workspace reference, a path, or an `owner/repo`/github.com import.
+        /// What to add: a workspace skill or channel, a local folder, or a GitHub repo.
         source: String,
-        /// Pick a skill from a repo that holds several (repeatable; `'*'` = all). A lone skill needs none.
+        /// When a GitHub repo holds several skills, pick which one(s) (repeatable; `'*'` = all).
         #[arg(long, short = 's', value_name = "NAME")]
         skill: Vec<String>,
-        /// The agent (harness) to land a remote import into (a registry slug, e.g. `cursor`; repeatable;
-        /// `'*'` = all). Default: the active harness. Ignored for a local path / name adopt.
+        /// Which agent to install a GitHub import for (a slug like `cursor`; repeatable;
+        /// `'*'` = all). Default: the agent detected here.
         #[arg(long, short = 'a', value_name = "SLUG")]
         agent: Vec<String>,
-        /// Record PERSON-scoped instead of in the project's `topos.toml`: a workspace reference
-        /// edits your server-stored PROFILE for that workspace (every machine you log in gets
-        /// it); a local path records in the personal manifest (`~/.topos/topos.toml`); a remote
-        /// import lands in the harness's global/user skills dir instead of the project (cwd) dir.
+        /// Add it for you rather than for this project: the skill then follows you to every
+        /// machine you log in on, instead of living in this folder's `topos.toml`.
         #[arg(long, short = 'g')]
         global: bool,
-        /// Apply without the describe step. Parses today; the two-phase describe lands later.
+        /// Accepted everywhere; `add` applies immediately, so this changes nothing.
         #[arg(long)]
         yes: bool,
     },
-    /// Remove skills from this folder's reach. The inverse of `add`: the nearest manifest drops the
-    /// reference (or records an EXCLUDE line when a broader layer still provides the name — the
-    /// receipt names the manifest edited and the paste-ready undo); `-g` edits your server-stored
-    /// profile instead. With local edits ahead, or for a local-only copy whose delete is
-    /// permanent, a bare run describes first and `--yes` applies.
+    /// Stop getting skills here — the inverse of `add`. Edits the same `topos.toml` (or your
+    /// profile with `-g`) and prints exactly what changed and how to undo it. Asks first only
+    /// when removing would lose local work.
     Remove {
-        /// The skill name(s) to remove.
+        /// The skill(s) to remove.
         skill: Vec<String>,
-        /// Edit your server-stored PROFILE for the workspace the reference resolves to instead of
-        /// this folder's manifest — delivery stops on every machine you log in; when a channel or
-        /// the baseline still provides it, an exclude line is recorded (the receipt says which).
+        /// Remove from your personal profile instead — delivery stops on every machine you log
+        /// in on.
         #[arg(long, short = 'g')]
         global: bool,
-        /// Apply a described removal (a draft's loss-guard, or a permanent local delete).
-        /// Accepted as a no-op on a manifest-line remove (which applies immediately).
+        /// Confirm a removal that loses local work (unshared edits, or a local-only skill whose
+        /// delete is permanent).
         #[arg(long)]
         yes: bool,
     },
-    /// Inventory the skills on this machine. By default also discovers **untracked** skills sitting in
-    /// any known harness's skill dir (across the baked registry) that topos could `add`.
+    /// List the skills on this machine — the ones topos manages, plus untracked skills found in
+    /// your agents' skill folders that you could `add`.
     List {
-        /// Narrow to one or more skills by name (errors if a name is ambiguous).
+        /// Show only these skills.
         name: Vec<String>,
-        /// Also list skills available in your logged-in workspace(s) (each session's catalog),
-        /// annotated with their delivery state here. Needs a session — run `topos login
-        /// <workspace-address>` first; `--workspace` (name or id) narrows.
+        /// Also list what your workspace(s) offer, with each skill's state on this machine.
+        /// Needs a login.
         #[arg(long)]
         remote: bool,
-        /// Show only locally-tracked skills — skip discovery of untracked harness-dir skills.
+        /// Only skills topos manages — skip discovery of untracked ones.
         #[arg(long)]
         tracked: bool,
-        /// Also report the paths topos owns outside skill directories.
+        /// Also list the files topos owns outside skill folders.
         #[arg(long)]
         footprint: bool,
-        /// Narrow to one channel's skills (repeatable). Lands with the full resolution grammar.
+        /// Only skills in this channel (repeatable).
         #[arg(long, value_name = "NAME")]
         channel: Vec<String>,
-        /// Narrow to a specific skill (repeatable). Lands with the full resolution grammar.
+        /// Only this skill (repeatable).
         #[arg(long, value_name = "NAME")]
         skill: Vec<String>,
-        /// Emit at most this many rows PER BUCKET (`0` = all). Default: unlimited on the TTY,
-        /// 50 under `--json` (a truncation marker + a NEXT_PAGE next action disclose the rest).
+        /// Print at most this many rows per section (`0` = all). Default: unlimited on a
+        /// terminal, 50 under `--json`.
         #[arg(long, value_name = "N")]
         limit: Option<u64>,
-        /// Skip this many rows per bucket before emitting (the next-page cursor).
+        /// Skip this many rows first — the next page's cursor.
         #[arg(long, value_name = "N")]
         offset: Option<u64>,
     },
-    /// Show a skill's change. Bare = draft ↔ current; `<hash>` / `@<hash>` reviews that version against
-    /// current (`current..<hash>` — a proposal IS a version); `<a>..<b>` = version ↔ version. `--json`
-    /// emits the target digest + `source: local|plane`.
+    /// Show what changed in a skill. Bare: your local edits against the team version. With a
+    /// version id: that version against the team's. `<a>..<b>` compares two versions.
     Diff {
         /// The skill name.
         skill: String,
-        /// The optional ref: `<hash>` / `@<hash>` / `current..<hash>` / `<a>..<b>`. Omitted = draft ↔ current.
+        /// What to compare: a version id, or `<a>..<b>`. Omitted: your edits vs the team version.
         #[arg(value_name = "REF")]
         r#ref: Option<String>,
-        /// Cap the emitted diff body at this many bytes, truncating at FILE boundaries (`0` = no
-        /// cap). Default: unlimited on the TTY, 64 KiB under `--json` — a capped envelope lists
-        /// every file with `patch_omitted` marks and a FETCH_FULL_DIFF next action for the rest.
+        /// Cap the diff at this many bytes, cut at file boundaries (`0` = no cap). Default:
+        /// unlimited on a terminal, 64 KiB under `--json`.
         #[arg(long, value_name = "BYTES")]
         max_bytes: Option<u64>,
     },
-    /// Show a skill's local action log + embedded-git history.
+    /// Show a skill's history — every version with its message and id.
     Log {
         /// The skill name.
         skill: String,
-        /// Emit at most this many events (`0` = all). Default: unlimited on the TTY, 20 under
-        /// `--json` (a truncation marker + a NEXT_PAGE next action disclose the rest).
+        /// Print at most this many entries (`0` = all). Default: unlimited on a terminal, 20
+        /// under `--json`.
         #[arg(long, value_name = "N")]
         limit: Option<u64>,
-        /// Skip this many events before emitting (the next-page cursor).
+        /// Skip this many entries first — the next page's cursor.
         #[arg(long, value_name = "N")]
         offset: Option<u64>,
     },
 
     // ---- Team-scoped ----
-    /// Ship a draft to the team, ADDING the skill to topos first if it isn't tracked yet — and
-    /// TRANSFERRING GOVERNANCE by default: a landed publish rewrites a manifest's local-path line
-    /// to the governed workspace reference. `--propose` opens a PR without moving `current`; pin
-    /// the bytes with an optional `@<digest>` suffix. Needs a session — run `topos login
-    /// <workspace-address>` first. Roster-gated.
+    /// Share a skill with your team. A bare run is a preview — it shows where the skill would
+    /// land and who would receive it, and changes nothing; add `--yes` to apply. Publishing
+    /// again ships a new version; on a skill that requires review, a publish opens a proposal
+    /// instead. Needs a login.
     Publish {
-        /// The skill to publish: a tracked NAME, an untracked `<skill>` / `<skill>@<harness>` to adopt from
-        /// discovery, or a `<dir>` to adopt in place — optionally pinned as `<source>@<digest>`.
+        /// The skill to publish: a name, a folder, or `<name>@<version>` to pin the exact bytes.
         target: String,
-        /// Place the skill's reference into this EXISTING channel (`<name>` or
-        /// `@<ws>/channels/<name>`; a curated channel needs reviewer+; publish never creates a
-        /// channel — that is a web curation act). A brand-new skill with no `--to` lands in
-        /// `everyone` — under a curated `everyone` a member's genesis publishes catalog-only and a
-        /// curator places it.
+        /// Place the skill in this channel. It must already exist — channels are created in the
+        /// browser. A brand-new skill with no `--to` lands in `everyone`.
         #[arg(long, value_name = "CHANNEL")]
         to: Option<String>,
-        /// Open a proposal (a PR) instead of moving `current`.
+        /// Ask for review instead of shipping directly — opens a proposal.
         #[arg(long)]
         propose: bool,
-        /// The commit message for this version (threaded into the candidate commit id).
+        /// A short message saying what changed and why — it becomes the version's history line.
         #[arg(long, short = 'm', value_name = "MSG")]
         message: Option<String>,
-        /// Apply without the describe step. Parses today; the two-phase describe lands later.
+        /// Apply the previewed publish.
         #[arg(long)]
         yes: bool,
     },
-    /// Resolve a proposal (the `gh pr review` model). `--approve` moves `current` to the candidate (a
-    /// compare-and-set on its base; a stale base re-dos); `--reject` declines a proposal (reviewer,
-    /// `-m <reason>` required); `--withdraw` retracts your own open proposal. A bare `review` (no target /
-    /// no verdict) is the review inbox/describe (lands later). Roster-gated.
+    /// See and settle proposals. Bare: your review inbox. With a proposal
+    /// (`<skill>@<version>`): its diff. Add a verdict to settle it — `--approve` ships it,
+    /// `--reject -m <reason>` declines it, `--withdraw` retracts your own.
     #[command(group(clap::ArgGroup::new("verdict").args(["approve", "reject", "withdraw"])))]
     Review {
-        /// The proposal to resolve, as `<skill>@<hash>`. Omitted = the review inbox (lands later).
+        /// The proposal, as `<skill>@<version>`. Omitted: the inbox.
         target: Option<String>,
-        /// Approve the proposal — move `current` to the candidate.
+        /// Ship the proposal — it becomes the version everyone receives.
         #[arg(long)]
         approve: bool,
-        /// Reject the proposal (needs `-m <reason>`).
+        /// Decline the proposal. Say why with `-m` — the author sees the reason.
         #[arg(long)]
         reject: bool,
-        /// Withdraw your own open proposal.
+        /// Retract your own open proposal.
         #[arg(long)]
         withdraw: bool,
-        /// The reject reason / withdrawal note (required with `--reject`).
+        /// The reason or note (required with `--reject`).
         #[arg(long, short = 'm', value_name = "MSG")]
         message: Option<String>,
-        /// Cap the describe's diff body at this many bytes, truncating at FILE boundaries (`0` = no
-        /// cap). Default: unlimited on the TTY, 64 KiB under `--json` — a capped describe carries
-        /// `diff_truncated` and a FETCH_FULL_DIFF next action for the rest.
+        /// Cap the shown diff at this many bytes, cut at file boundaries (`0` = no cap).
+        /// Default: unlimited on a terminal, 64 KiB under `--json`.
         #[arg(long, value_name = "BYTES")]
         max_bytes: Option<u64>,
-        /// Apply without the describe step. Parses today; the two-phase describe lands later.
+        /// Not needed here — the verdict flag is the confirmation.
         #[arg(long)]
         yes: bool,
     },
-    /// Undo a release for the TEAM: move `current` to the older version named by `--to` — a **forward**
-    /// pointer-move (nothing deleted; invertible). `--to <hash>` is the sole source of the GOOD version you
-    /// go back TO (not the bad one). Team-only — the local go-back is `update <skill>@<hash>`. Roster-gated.
+    /// Roll the team back to an earlier version of a skill. `--to` names the good version to
+    /// return to; everyone picks it up at their next update. Nothing is deleted, so a revert
+    /// can itself be reverted. To roll back only this machine, use
+    /// `topos update <skill>@<version>` instead.
     Revert {
-        /// The skill to revert.
+        /// The skill to roll back.
         skill: String,
-        /// The GOOD version id (64-char hex, or a unique ≥8-char prefix) to restore — the destination, NOT
-        /// the bad version.
+        /// The version to return to — the good one, not the bad one. A full id, or a unique
+        /// prefix of at least 8 characters.
         #[arg(long = "to")]
         to: String,
-        /// Apply the described revert; also acknowledges a no-op (good's bytes already are `current`).
-        /// Bare = describe only.
+        /// Apply the previewed revert (also confirms when that version is already live).
         #[arg(long)]
         yes: bool,
     },
-    /// Set a skill's (or channel's) protection level. Bare tightens to `reviewed` (skill) / `curated`
-    /// (channel) — reviewer+; `open` loosens it back — owner.
+    /// Require review before a skill changes — or curation before a channel's contents change.
+    /// `topos protect <skill>` turns it on; `topos protect <skill> open` turns it off (owners
+    /// only).
     Protect {
         /// The skill or channel to protect.
         target: String,
-        /// The level (`reviewed` / `curated` / `open`); omitted tightens to the reviewed/curated default.
+        /// The level: `reviewed` (skill), `curated` (channel), or `open` to loosen. Omitted,
+        /// protection is turned on.
         #[arg(value_name = "LEVEL")]
         level: Option<String>,
-        /// Apply without the describe step. Parses today; the two-phase describe lands later.
+        /// Apply the previewed change.
         #[arg(long)]
         yes: bool,
     },
-    /// Invite emails into the workspace. Each address gets a mailed single-use invite link (accept in
-    /// the browser, hand the mail's paste-block to an agent, or `topos login <invite-url>`); every
-    /// CLI invitee starts as a member. Requires a logged-in session. A bare `invite` (no emails)
-    /// reads the workspace address + policy.
+    /// Invite teammates by email. Each address gets a single-use link that adds them to the
+    /// workspace — they can accept in the browser, hand the mail to their agent, or run
+    /// `topos login <invite-url>`. Owners only; the server must have mail configured. A bare
+    /// `invite` just prints the workspace address.
     Invite {
-        /// The emails to invite (folded to canonical form; each becomes a pending 7-day claim).
+        /// The addresses to invite. Each link stays valid for 7 days; re-inviting sends a
+        /// fresh one.
         email: Vec<String>,
-        /// Lead the invitation with this SKILL — accepting adds it to the invitee's profile (at
-        /// most one of --skill/--channel).
+        /// Set the invitee up with this skill from the start (at most one of
+        /// `--skill`/`--channel`).
         #[arg(long, value_name = "NAME", conflicts_with = "channel")]
         skill: Option<String>,
-        /// Lead the invitation with this CHANNEL — accepting adds it to the invitee's profile.
+        /// Set the invitee up with this channel from the start.
         #[arg(long, value_name = "NAME")]
         channel: Option<String>,
-        /// Apply without the describe step. Parses today; the two-phase describe lands later.
+        /// Send the previewed invitations.
         #[arg(long)]
         yes: bool,
     },
 
     // ---- Maintenance ----
-    /// Update the `topos` binary itself to the latest release, verifying the download's sha256 against the
-    /// release SHA256SUMS (never skippable) and replacing the running binary atomically. A MAINTENANCE
-    /// command — it touches no skills, no plane, no account. (Skills are updated by `topos update`.)
+    /// Update the `topos` binary itself to the latest release. The download's checksum and
+    /// signature are always verified, and the swap is atomic. Your skills are untouched — they
+    /// update with `topos update`.
     SelfUpdate {
-        /// Only check whether a newer release exists; report and exit without downloading or replacing.
+        /// Only report whether a newer release exists — download nothing.
         #[arg(long)]
         check: bool,
-        /// Install a specific release tag (e.g. v0.2.0) instead of the latest — allows a pinned downgrade.
+        /// Install a specific release (e.g. v0.2.0) instead of the latest — downgrades included.
         #[arg(long, value_name = "TAG")]
         version: Option<String>,
     },
-    /// Inspect this installation's sign-in state: `auth status`.
+    /// Check your sign-in state: `topos auth status`.
     Auth {
         #[command(subcommand)]
         cmd: AuthCmd,
     },
-    /// Remove topos from this machine — two-phase (bare describes what goes; `--yes` applies). Scrubs
-    /// the session-start auto-update hook from the harness config and deletes the `~/.topos/` sidecar tree
-    /// (the signed-in credential lives there and goes with it). SKILL FILES IN AGENT DIRS ARE LEFT
-    /// UNTOUCHED — uninstall never deletes a skill byte. The `topos` binary is NOT self-deleted; remove
-    /// it with the installer you used (or `rm` its printed path). Needs no sign-in.
+    /// Remove topos from this machine. Deletes the auto-update hooks and topos's own state
+    /// (`~/.topos/`, logins included); installed skill files are never touched. A bare run
+    /// shows what would go; `--yes` applies. The binary itself is left in place — its path is
+    /// printed so you can delete it with whatever installed it.
     Uninstall {
-        /// Apply the described uninstall (the one-shot consent). Bare = describe only.
+        /// Apply the previewed uninstall.
         #[arg(long)]
         yes: bool,
     },
@@ -362,8 +344,8 @@ pub(crate) enum Command {
 /// top-level `login`/`logout`).
 #[derive(Debug, Subcommand)]
 pub(crate) enum AuthCmd {
-    /// Show who you are, per-workspace session health, hook health, and reporting posture.
-    /// Side-effect-free.
+    /// Show each workspace login and whether it still works, plus the state of the auto-update
+    /// hooks. Changes nothing.
     Status,
 }
 

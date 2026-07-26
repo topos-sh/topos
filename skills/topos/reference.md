@@ -2,298 +2,296 @@
 
 > GENERATED from the `clap` command tree by `cargo xtask gen-cli-ref` — do not hand-edit. Change the CLI, re-run the command, and commit the result; the `--check` variant is the drift gate.
 
-`topos` is the client an agent drives non-interactively. topos asks first when an act REACHES your team, LOSES local work, or TRUSTS something new — those verbs are TWO-PHASE: a bare invocation DESCRIBES what would change (nothing is written), and `--yes` applies it in one shot (`revert` is the exception — `--yes` there also acknowledges a no-op). Everything else — self-scoped acts reversible by their inverse command — applies immediately and prints an undo-led receipt (`--yes` is an accepted no-op there). `--json` works on every verb and prints exactly one envelope on stdout (never a prompt). The exit status is one of three classes: `0` on success, `1` on a domain refusal or a failed operation (the envelope's `ok` + `error.outcome` distinguish a refusal from a transport fault), and `2` on a usage error (an unknown flag or a missing argument). The session-start auto-update hook runs `topos update --quiet`, which stays silent except a freshness one-liner and exits `0` on a network blip so a session never fails to start.
+Every command prints human-readable text on a terminal, or exactly one JSON object with `--json` (for agents and scripts — it never prompts).
+
+One rule covers all of them: **a command that reaches other people, discards local work, or trusts a new source shows a preview first.** Run it bare to see exactly what would happen, then add `--yes` to apply. Everything else applies immediately and prints what changed, along with the command that undoes it.
+
+Exit codes: `0` — success. `1` — the operation was refused or failed (with `--json`, the `error` object says which and how to fix it). `2` — the command line itself was invalid.
 
 ## The `--json` envelope
 
-Every `--json` run prints exactly one envelope object on stdout: `schema_version` (1), `command`, `ok`, the per-verb `data` payload, `warnings` (strings), `next_actions`, and — on `ok: false` — `error` (`code`, `outcome`, `retryable`, and its own `next_actions` mirror). Each entry in `next_actions` is a machine-actionable step: `code` (an open vocabulary — execute an unknown code via its argv, never reject it), `argv` (a complete argv array), optional safety metadata (`mutates`, `needs_network`, `risk_note`; absent = unknown), and `needs` — the placeholder names the argv template still requires before it can execute (e.g. `"workspace-address"` for an argv token `<workspace-address>`; substitute your value for each named `<placeholder>`, then run it). An action without `needs` is executable as-is. Errors whose prose names a concrete `topos` command carry the same command structurally in `next_actions`. The full JSON-Schemas live under `contracts/schemas/` with golden examples under `contracts/fixtures/json/`.
+Every `--json` run prints one object on stdout: `schema_version` (1), `command`, `ok`, a per-command `data` payload, `warnings`, `next_actions`, and — on `ok: false` — an `error` (`code`, `outcome`, `retryable`, plus its own `next_actions`). Each `next_actions` entry is a ready-to-run step: `argv` is a complete command; `needs` lists any `<placeholder>` tokens you must substitute first; `mutates`, `needs_network`, and `risk_note` are safety metadata (absent means unknown). Treat `code` as an open vocabulary — run an unfamiliar action by its `argv` rather than rejecting it. The full JSON-Schemas live under `contracts/schemas/` in the repository, with golden examples under `contracts/fixtures/json/`; the agents guide (topos.sh/docs/agents) shows worked examples.
 
 ## Global options
 
-These work before or after any verb.
+These work before or after any command.
 
-| Flag | Value | Description |
-|---|---|---|
-| `--json` |  | Emit one JSON document on stdout (the agent surface) instead of human text. Never prompts |
-| `--workspace` | `<WORKSPACE>` | Act in a specific workspace when this installation holds sessions with more than one on the same server. Accepts the workspace's address NAME (what you logged in by) or its opaque id. Selects the workspace for the ambient team verbs (a genesis `publish`, `invite`) and disambiguates a skill name delivered from several workspaces. Optional — with a single workspace it is inferred |
+| Flag | What it does |
+|---|---|
+| `--json` | Print one JSON object instead of human text — for agents and scripts. Never prompts |
+| `--workspace <WORKSPACE>` | Pick which workspace to act in when this machine is logged into more than one. Takes the workspace's name or id. With a single login it is inferred |
 
-## Self-scoped verbs
+## Everyday commands
+
+These act on this machine only.
 
 ### `topos status`
 
-```
-topos status
-```
-
-Show where this installation stands — the TRUST RAIL: the resolved table for "an agent here" (per bundle: the winning reference, ONE source manifest, the scope, an honest state), plus the sessions, the auto-update trigger state, and the binary version. Entirely offline (nothing is dialed) and read-only (nothing is armed or repaired). A bare `topos` on a TTY renders the same snapshot
+See what topos manages on this machine: each skill with its version and where it comes from, your workspace logins, and whether auto-update is armed. Works offline and changes nothing. A bare `topos` on a terminal shows the same thing
 
 
 ### `topos login`
+
+Connect this machine to a workspace. Opens your browser for a one-click approval; from then on, the workspace's skills arrive and stay updated by themselves. The address is your workspace's URL — like `topos.sh/acme`, or your own server's origin when self-hosting — or an invitation link. To connect another workspace, log in again with its address
 
 ```
 topos login [OPTIONS] [ADDRESS]
 ```
 
-Log this installation into a workspace — the browser-approval flow mints ONE workspace-scoped SESSION (further workspaces are further logins). The address: a bare workspace name (the default server), a bare server origin ("the workspace that origin addresses" — self-hosted installs), `<server>/<workspace>`, or an invitation URL from the invite mail. Login is the acceptance: the receipt states what connecting delivers; from then on updates arrive silently. Re-invoking `login` RESUMES a pending approval
-
-| Argument / flag | Value | Default | Description |
-|---|---|---|---|
-| `[ADDRESS]` |  |  | The workspace address. Omitted, it resumes a pending login |
-| `--wait` | `<SECONDS>` |  | Block until the browser approval settles in ONE command. Bare `--wait` waits until the code expires; `--wait <seconds>` caps the wait. A TTY blocks by default; a PIPED run without `--wait` prints the approval URL and returns — re-invoke to poll |
+| Argument / flag | What it does |
+|---|---|
+| `[ADDRESS]` | The workspace address or invitation link. Omitted, resumes a pending login |
+| `--wait <SECONDS>` | Wait for the browser approval before returning. Bare `--wait` waits until the code expires; `--wait <seconds>` caps it. On a terminal, login waits by default; piped, it prints the approval URL and returns — run `topos login` again to check |
 
 
 ### `topos logout`
+
+Disconnect this machine from a workspace. Installed skills, your edits, and manifests stay — they just stop updating. `topos login <address>` reconnects
 
 ```
 topos logout [OPTIONS]
 ```
 
-End this installation's session(s): the server-side revoke per session, then the local sign-out (which proceeds regardless — the receipt reports the server outcome honestly). Skills, drafts, and manifests stay; `topos login <address>` starts a fresh session
-
-| Argument / flag | Value | Default | Description |
-|---|---|---|---|
-| `--all` |  |  | End EVERY session on this installation |
+| Argument / flag | What it does |
+|---|---|
+| `--all` | Log out of every workspace on this machine |
 
 
 ### `topos init`
 
-```
-topos init
-```
-
-Create this folder's `topos.toml` — the project MANIFEST `add`/`remove` edit and `update`/`status` resolve (committed with the repo, it travels: every teammate's agents get the same set here). Any folder, git or not; outside a shared repo the receipt notes the file stays local. An existing manifest is a clean no-op, never overwritten
+Create a `topos.toml` in this folder. The file lists the skills everyone working in this project should have — commit it, and teammates' agents pick up the same set by themselves. If the file already exists, nothing changes
 
 
 ### `topos add`
+
+Get a skill and keep it updated. The source can be a skill or channel from your workspace (`code-review`, `@acme/code-review`, `@acme/channels/backend`), a local folder (`./tools/my-skill`), or a public GitHub repo (`owner/repo`, pinned to a commit). Records it in this folder's `topos.toml` — or in your personal profile with `-g` — and installs it right away. `add topos` restores the built-in topos skill
 
 ```
 topos add [OPTIONS] <SOURCE>
 ```
 
-Add a skill to this folder's reach — the demand-side edit. The SOURCE is shape-determined: • a WORKSPACE reference (`@<ws>/<name>`, `@<ws>/channels/<name>`, the canonical `<host>/<ws>/<name>`, or a bare catalog name unique across your sessions) — records the line in the nearest `topos.toml` (or, with `-g`, your server-stored profile) and delivers it in the same invocation; an optional `@<digest>` tail pins the version; • a PATH (`./skills/deploy`, `~/x`, `/abs`) — adopt that directory in place (offline); • a GITHUB import (`owner/repo`, `owner/repo#<ref>`, an https://github.com URL) — fetch and pin it (a public repo, no account; the source's trustworthiness is yours to verify). `add topos` restores the built-in topos skill
-
-| Argument / flag | Value | Default | Description |
-|---|---|---|---|
-| `<SOURCE>` |  |  | The source — a workspace reference, a path, or an `owner/repo`/github.com import |
-| `-s, --skill` | `<NAME>` |  | Pick a skill from a repo that holds several (repeatable; `'*'` = all). A lone skill needs none |
-| `-a, --agent` | `<SLUG>` |  | The agent (harness) to land a remote import into (a registry slug, e.g. `cursor`; repeatable; `'*'` = all). Default: the active harness. Ignored for a local path / name adopt |
-| `-g, --global` |  |  | Record PERSON-scoped instead of in the project's `topos.toml`: a workspace reference edits your server-stored PROFILE for that workspace (every machine you log in gets it); a local path records in the personal manifest (`~/.topos/topos.toml`); a remote import lands in the harness's global/user skills dir instead of the project (cwd) dir |
-| `--yes` |  |  | Apply without the describe step. Parses today; the two-phase describe lands later |
+| Argument / flag | What it does |
+|---|---|
+| `<SOURCE>` | What to add: a workspace skill or channel, a local folder, or a GitHub repo |
+| `-s, --skill <NAME>` | When a GitHub repo holds several skills, pick which one(s) (repeatable; `'*'` = all) |
+| `-a, --agent <SLUG>` | Which agent to install a GitHub import for (a slug like `cursor`; repeatable; `'*'` = all). Default: the agent detected here |
+| `-g, --global` | Add it for you rather than for this project: the skill then follows you to every machine you log in on, instead of living in this folder's `topos.toml` |
+| `--yes` | Accepted everywhere; `add` applies immediately, so this changes nothing |
 
 
 ### `topos remove`
+
+Stop getting skills here — the inverse of `add`. Edits the same `topos.toml` (or your profile with `-g`) and prints exactly what changed and how to undo it. Asks first only when removing would lose local work
 
 ```
 topos remove [OPTIONS] [SKILL]...
 ```
 
-Remove skills from this folder's reach. The inverse of `add`: the nearest manifest drops the reference (or records an EXCLUDE line when a broader layer still provides the name — the receipt names the manifest edited and the paste-ready undo); `-g` edits your server-stored profile instead. With local edits ahead, or for a local-only copy whose delete is permanent, a bare run describes first and `--yes` applies
-
-| Argument / flag | Value | Default | Description |
-|---|---|---|---|
-| `[SKILL]...` |  |  | The skill name(s) to remove |
-| `-g, --global` |  |  | Edit your server-stored PROFILE for the workspace the reference resolves to instead of this folder's manifest — delivery stops on every machine you log in; when a channel or the baseline still provides it, an exclude line is recorded (the receipt says which) |
-| `--yes` |  |  | Apply a described removal (a draft's loss-guard, or a permanent local delete). Accepted as a no-op on a manifest-line remove (which applies immediately) |
+| Argument / flag | What it does |
+|---|---|
+| `[SKILL]...` | The skill(s) to remove |
+| `-g, --global` | Remove from your personal profile instead — delivery stops on every machine you log in on |
+| `--yes` | Confirm a removal that loses local work (unshared edits, or a local-only skill whose delete is permanent) |
 
 
 ### `topos update`
+
+Fetch and apply the latest version of everything this folder and your profile ask for. Runs by itself at the start of each agent session; safe to run by hand any time. `topos update <skill>` updates one skill; `topos update <skill>@<version>` puts that version's bytes back on this machine only
 
 ```
 topos update [OPTIONS] [TARGETS]...
 ```
 
-Reconcile this machine against the manifests covering the current directory and your per-workspace profiles — the harness auto-update entry point (the installed trigger runs `update --quiet`). Bare = the full sweep; `<name>` reconciles one resolved line; `<skill>@<hash>` goes back to that version's local bytes
-
-| Argument / flag | Value | Default | Description |
-|---|---|---|---|
-| `[TARGETS]...` |  |  | Optional target(s): a resolved manifest name to reconcile; `<name>@<hash>` goes back to that version's bytes. Omitted = the full sweep |
-| `--reset` |  |  | Reset a delivered skill to `current`, dropping local edits. Lands with the loss-led describe |
-| `--yes` |  |  | Apply without the describe step. Parses today; the two-phase describe lands later |
-| `--onto-current` |  |  | Resolve a diverged draft the OTHER way: commit YOUR bytes straight onto `current`, DROPPING the pending three-way merge (the changes it would have merged are disclosed first). Requires exactly one `<skill>` target. Use when you want your version to win outright |
-| `--quiet` |  |  | Emit nothing on stdout (the session-start hook's stdout is injected into the session). Errors still go to stderr with a non-zero exit. Overrides `--json` |
-| `--ttl` | `<SECONDS>` |  | The quiet sweep's self-throttle window in seconds (`--quiet` only): a bare quiet sweep within this window of the last completed sweep is a silent no-op, so hooks may fire on every session event cheaply. `0` disables the throttle for this run. Default 300; `TOPOS_UPDATE_TTL` overrides the default. An explicit non-quiet `topos update` always runs the full sweep |
+| Argument / flag | What it does |
+|---|---|
+| `[TARGETS]...` | The skill(s) to update; `<skill>@<version>` restores that version's bytes locally. Omitted, everything is updated |
+| `--reset` | Discard your local edits to a skill and take the team version. Shows what would be lost first; `--yes` applies |
+| `--yes` | Confirm an action that shows a preview first (like `--reset`) |
+| `--onto-current` | Resolve a conflicted skill by keeping your bytes exactly as they are, skipping the merge with the team's changes (what the merge would have brought is shown first). Takes exactly one skill |
+| `--quiet` | Print nothing on stdout — the mode the session-start hook uses. Errors still go to stderr with a non-zero exit |
+| `--ttl <SECONDS>` | With `--quiet`: skip the run entirely when one already completed within this many seconds, so hooks can fire often at no cost. `0` disables the throttle. Default 300; `TOPOS_UPDATE_TTL` changes the default |
 
 
 ### `topos list`
+
+List the skills on this machine — the ones topos manages, plus untracked skills found in your agents' skill folders that you could `add`
 
 ```
 topos list [OPTIONS] [NAME]...
 ```
 
-Inventory the skills on this machine. By default also discovers **untracked** skills sitting in any known harness's skill dir (across the baked registry) that topos could `add`
-
-| Argument / flag | Value | Default | Description |
-|---|---|---|---|
-| `[NAME]...` |  |  | Narrow to one or more skills by name (errors if a name is ambiguous) |
-| `--remote` |  |  | Also list skills available in your logged-in workspace(s) (each session's catalog), annotated with their delivery state here. Needs a session — run `topos login <workspace-address>` first; `--workspace` (name or id) narrows |
-| `--tracked` |  |  | Show only locally-tracked skills — skip discovery of untracked harness-dir skills |
-| `--footprint` |  |  | Also report the paths topos owns outside skill directories |
-| `--channel` | `<NAME>` |  | Narrow to one channel's skills (repeatable). Lands with the full resolution grammar |
-| `--skill` | `<NAME>` |  | Narrow to a specific skill (repeatable). Lands with the full resolution grammar |
-| `--limit` | `<N>` |  | Emit at most this many rows PER BUCKET (`0` = all). Default: unlimited on the TTY, 50 under `--json` (a truncation marker + a NEXT_PAGE next action disclose the rest) |
-| `--offset` | `<N>` |  | Skip this many rows per bucket before emitting (the next-page cursor) |
+| Argument / flag | What it does |
+|---|---|
+| `[NAME]...` | Show only these skills |
+| `--remote` | Also list what your workspace(s) offer, with each skill's state on this machine. Needs a login |
+| `--tracked` | Only skills topos manages — skip discovery of untracked ones |
+| `--footprint` | Also list the files topos owns outside skill folders |
+| `--channel <NAME>` | Only skills in this channel (repeatable) |
+| `--skill <NAME>` | Only this skill (repeatable) |
+| `--limit <N>` | Print at most this many rows per section (`0` = all). Default: unlimited on a terminal, 50 under `--json` |
+| `--offset <N>` | Skip this many rows first — the next page's cursor |
 
 
 ### `topos diff`
+
+Show what changed in a skill. Bare: your local edits against the team version. With a version id: that version against the team's. `<a>..<b>` compares two versions
 
 ```
 topos diff [OPTIONS] <SKILL> [REF]
 ```
 
-Show a skill's change. Bare = draft ↔ current; `<hash>` / `@<hash>` reviews that version against current (`current..<hash>` — a proposal IS a version); `<a>..<b>` = version ↔ version. `--json` emits the target digest + `source: local\|plane`
-
-| Argument / flag | Value | Default | Description |
-|---|---|---|---|
-| `<SKILL>` |  |  | The skill name |
-| `[REF]` |  |  | The optional ref: `<hash>` / `@<hash>` / `current..<hash>` / `<a>..<b>`. Omitted = draft ↔ current |
-| `--max-bytes` | `<BYTES>` |  | Cap the emitted diff body at this many bytes, truncating at FILE boundaries (`0` = no cap). Default: unlimited on the TTY, 64 KiB under `--json` — a capped envelope lists every file with `patch_omitted` marks and a FETCH_FULL_DIFF next action for the rest |
+| Argument / flag | What it does |
+|---|---|
+| `<SKILL>` | The skill name |
+| `[REF]` | What to compare: a version id, or `<a>..<b>`. Omitted: your edits vs the team version |
+| `--max-bytes <BYTES>` | Cap the diff at this many bytes, cut at file boundaries (`0` = no cap). Default: unlimited on a terminal, 64 KiB under `--json` |
 
 
 ### `topos log`
+
+Show a skill's history — every version with its message and id
 
 ```
 topos log [OPTIONS] <SKILL>
 ```
 
-Show a skill's local action log + embedded-git history
+| Argument / flag | What it does |
+|---|---|
+| `<SKILL>` | The skill name |
+| `--limit <N>` | Print at most this many entries (`0` = all). Default: unlimited on a terminal, 20 under `--json` |
+| `--offset <N>` | Skip this many entries first — the next page's cursor |
 
-| Argument / flag | Value | Default | Description |
-|---|---|---|---|
-| `<SKILL>` |  |  | The skill name |
-| `--limit` | `<N>` |  | Emit at most this many events (`0` = all). Default: unlimited on the TTY, 20 under `--json` (a truncation marker + a NEXT_PAGE next action disclose the rest) |
-| `--offset` | `<N>` |  | Skip this many events before emitting (the next-page cursor) |
+## Team commands
 
-## Team-scoped verbs
+These reach your workspace, so each one previews first or confirms via its flag.
 
 ### `topos publish`
+
+Share a skill with your team. A bare run is a preview — it shows where the skill would land and who would receive it, and changes nothing; add `--yes` to apply. Publishing again ships a new version; on a skill that requires review, a publish opens a proposal instead. Needs a login
 
 ```
 topos publish [OPTIONS] <TARGET>
 ```
 
-Ship a draft to the team, ADDING the skill to topos first if it isn't tracked yet — and TRANSFERRING GOVERNANCE by default: a landed publish rewrites a manifest's local-path line to the governed workspace reference. `--propose` opens a PR without moving `current`; pin the bytes with an optional `@<digest>` suffix. Needs a session — run `topos login <workspace-address>` first. Roster-gated
-
-| Argument / flag | Value | Default | Description |
-|---|---|---|---|
-| `<TARGET>` |  |  | The skill to publish: a tracked NAME, an untracked `<skill>` / `<skill>@<harness>` to adopt from discovery, or a `<dir>` to adopt in place — optionally pinned as `<source>@<digest>` |
-| `--to` | `<CHANNEL>` |  | Place the skill's reference into this EXISTING channel (`<name>` or `@<ws>/channels/<name>`; a curated channel needs reviewer+; publish never creates a channel — that is a web curation act). A brand-new skill with no `--to` lands in `everyone` — under a curated `everyone` a member's genesis publishes catalog-only and a curator places it |
-| `--propose` |  |  | Open a proposal (a PR) instead of moving `current` |
-| `-m, --message` | `<MSG>` |  | The commit message for this version (threaded into the candidate commit id) |
-| `--yes` |  |  | Apply without the describe step. Parses today; the two-phase describe lands later |
+| Argument / flag | What it does |
+|---|---|
+| `<TARGET>` | The skill to publish: a name, a folder, or `<name>@<version>` to pin the exact bytes |
+| `--to <CHANNEL>` | Place the skill in this channel. It must already exist — channels are created in the browser. A brand-new skill with no `--to` lands in `everyone` |
+| `--propose` | Ask for review instead of shipping directly — opens a proposal |
+| `-m, --message <MSG>` | A short message saying what changed and why — it becomes the version's history line |
+| `--yes` | Apply the previewed publish |
 
 
 ### `topos review`
+
+See and settle proposals. Bare: your review inbox. With a proposal (`<skill>@<version>`): its diff. Add a verdict to settle it — `--approve` ships it, `--reject -m <reason>` declines it, `--withdraw` retracts your own
 
 ```
 topos review [OPTIONS] [TARGET]
 ```
 
-Resolve a proposal (the `gh pr review` model). `--approve` moves `current` to the candidate (a compare-and-set on its base; a stale base re-dos); `--reject` declines a proposal (reviewer, `-m <reason>` required); `--withdraw` retracts your own open proposal. A bare `review` (no target / no verdict) is the review inbox/describe (lands later). Roster-gated
-
-| Argument / flag | Value | Default | Description |
-|---|---|---|---|
-| `[TARGET]` |  |  | The proposal to resolve, as `<skill>@<hash>`. Omitted = the review inbox (lands later) |
-| `--approve` |  |  | Approve the proposal — move `current` to the candidate |
-| `--reject` |  |  | Reject the proposal (needs `-m <reason>`) |
-| `--withdraw` |  |  | Withdraw your own open proposal |
-| `-m, --message` | `<MSG>` |  | The reject reason / withdrawal note (required with `--reject`) |
-| `--max-bytes` | `<BYTES>` |  | Cap the describe's diff body at this many bytes, truncating at FILE boundaries (`0` = no cap). Default: unlimited on the TTY, 64 KiB under `--json` — a capped describe carries `diff_truncated` and a FETCH_FULL_DIFF next action for the rest |
-| `--yes` |  |  | Apply without the describe step. Parses today; the two-phase describe lands later |
+| Argument / flag | What it does |
+|---|---|
+| `[TARGET]` | The proposal, as `<skill>@<version>`. Omitted: the inbox |
+| `--approve` | Ship the proposal — it becomes the version everyone receives |
+| `--reject` | Decline the proposal. Say why with `-m` — the author sees the reason |
+| `--withdraw` | Retract your own open proposal |
+| `-m, --message <MSG>` | The reason or note (required with `--reject`) |
+| `--max-bytes <BYTES>` | Cap the shown diff at this many bytes, cut at file boundaries (`0` = no cap). Default: unlimited on a terminal, 64 KiB under `--json` |
+| `--yes` | Not needed here — the verdict flag is the confirmation |
 
 
 ### `topos revert`
+
+Roll the team back to an earlier version of a skill. `--to` names the good version to return to; everyone picks it up at their next update. Nothing is deleted, so a revert can itself be reverted. To roll back only this machine, use `topos update <skill>@<version>` instead
 
 ```
 topos revert [OPTIONS] <SKILL>
 ```
 
-Undo a release for the TEAM: move `current` to the older version named by `--to` — a **forward** pointer-move (nothing deleted; invertible). `--to <hash>` is the sole source of the GOOD version you go back TO (not the bad one). Team-only — the local go-back is `update <skill>@<hash>`. Roster-gated
-
-| Argument / flag | Value | Default | Description |
-|---|---|---|---|
-| `<SKILL>` |  |  | The skill to revert |
-| `--to` | `<TO>` |  | The GOOD version id (64-char hex, or a unique ≥8-char prefix) to restore — the destination, NOT the bad version |
-| `--yes` |  |  | Apply the described revert; also acknowledges a no-op (good's bytes already are `current`). Bare = describe only |
+| Argument / flag | What it does |
+|---|---|
+| `<SKILL>` | The skill to roll back |
+| `--to <TO>` | The version to return to — the good one, not the bad one. A full id, or a unique prefix of at least 8 characters |
+| `--yes` | Apply the previewed revert (also confirms when that version is already live) |
 
 
 ### `topos protect`
+
+Require review before a skill changes — or curation before a channel's contents change. `topos protect <skill>` turns it on; `topos protect <skill> open` turns it off (owners only)
 
 ```
 topos protect [OPTIONS] <TARGET> [LEVEL]
 ```
 
-Set a skill's (or channel's) protection level. Bare tightens to `reviewed` (skill) / `curated` (channel) — reviewer+; `open` loosens it back — owner
-
-| Argument / flag | Value | Default | Description |
-|---|---|---|---|
-| `<TARGET>` |  |  | The skill or channel to protect |
-| `[LEVEL]` |  |  | The level (`reviewed` / `curated` / `open`); omitted tightens to the reviewed/curated default |
-| `--yes` |  |  | Apply without the describe step. Parses today; the two-phase describe lands later |
+| Argument / flag | What it does |
+|---|---|
+| `<TARGET>` | The skill or channel to protect |
+| `[LEVEL]` | The level: `reviewed` (skill), `curated` (channel), or `open` to loosen. Omitted, protection is turned on |
+| `--yes` | Apply the previewed change |
 
 
 ### `topos invite`
+
+Invite teammates by email. Each address gets a single-use link that adds them to the workspace — they can accept in the browser, hand the mail to their agent, or run `topos login <invite-url>`. Owners only; the server must have mail configured. A bare `invite` just prints the workspace address
 
 ```
 topos invite [OPTIONS] [EMAIL]...
 ```
 
-Invite emails into the workspace. Each address gets a mailed single-use invite link (accept in the browser, hand the mail's paste-block to an agent, or `topos login <invite-url>`); every CLI invitee starts as a member. Requires a logged-in session. A bare `invite` (no emails) reads the workspace address + policy
-
-| Argument / flag | Value | Default | Description |
-|---|---|---|---|
-| `[EMAIL]...` |  |  | The emails to invite (folded to canonical form; each becomes a pending 7-day claim) |
-| `--skill` | `<NAME>` |  | Lead the invitation with this SKILL — accepting adds it to the invitee's profile (at most one of --skill/--channel) |
-| `--channel` | `<NAME>` |  | Lead the invitation with this CHANNEL — accepting adds it to the invitee's profile |
-| `--yes` |  |  | Apply without the describe step. Parses today; the two-phase describe lands later |
+| Argument / flag | What it does |
+|---|---|
+| `[EMAIL]...` | The addresses to invite. Each link stays valid for 7 days; re-inviting sends a fresh one |
+| `--skill <NAME>` | Set the invitee up with this skill from the start (at most one of `--skill`/`--channel`) |
+| `--channel <NAME>` | Set the invitee up with this channel from the start |
+| `--yes` | Send the previewed invitations |
 
 ## Maintenance
 
+The binary and the installation itself.
+
 ### `topos self-update`
+
+Update the `topos` binary itself to the latest release. The download's checksum and signature are always verified, and the swap is atomic. Your skills are untouched — they update with `topos update`
 
 ```
 topos self-update [OPTIONS]
 ```
 
-Update the `topos` binary itself to the latest release, verifying the download's sha256 against the release SHA256SUMS (never skippable) and replacing the running binary atomically. A MAINTENANCE command — it touches no skills, no plane, no account. (Skills are updated by `topos update`.)
-
-| Argument / flag | Value | Default | Description |
-|---|---|---|---|
-| `--check` |  |  | Only check whether a newer release exists; report and exit without downloading or replacing |
-| `--version` | `<TAG>` |  | Install a specific release tag (e.g. v0.2.0) instead of the latest — allows a pinned downgrade |
+| Argument / flag | What it does |
+|---|---|
+| `--check` | Only report whether a newer release exists — download nothing |
+| `--version <TAG>` | Install a specific release (e.g. v0.2.0) instead of the latest — downgrades included |
 
 
 ### `topos auth`
+
+Check your sign-in state: `topos auth status`
 
 ```
 topos auth <COMMAND>
 ```
 
-Inspect this installation's sign-in state: `auth status`
-
 
 #### `topos auth status`
 
-```
-topos auth status
-```
-
-Show who you are, per-workspace session health, hook health, and reporting posture. Side-effect-free
+Show each workspace login and whether it still works, plus the state of the auto-update hooks. Changes nothing
 
 
 ### `topos uninstall`
+
+Remove topos from this machine. Deletes the auto-update hooks and topos's own state (`~/.topos/`, logins included); installed skill files are never touched. A bare run shows what would go; `--yes` applies. The binary itself is left in place — its path is printed so you can delete it with whatever installed it
 
 ```
 topos uninstall [OPTIONS]
 ```
 
-Remove topos from this machine — two-phase (bare describes what goes; `--yes` applies). Scrubs the session-start auto-update hook from the harness config and deletes the `~/.topos/` sidecar tree (the signed-in credential lives there and goes with it). SKILL FILES IN AGENT DIRS ARE LEFT UNTOUCHED — uninstall never deletes a skill byte. The `topos` binary is NOT self-deleted; remove it with the installer you used (or `rm` its printed path). Needs no sign-in
-
-| Argument / flag | Value | Default | Description |
-|---|---|---|---|
-| `--yes` |  |  | Apply the described uninstall (the one-shot consent). Bare = describe only |
+| Argument / flag | What it does |
+|---|---|
+| `--yes` | Apply the previewed uninstall |
 
 
-## Renamed verbs
+## Aliases
 
-- `topos pull` is a hidden alias of `topos update` (armed session-start hooks in the field still invoke `pull`); the `--json` envelope always reads `update`.
-- `topos upgrade` is intentionally ambiguous and refuses with a disambiguation: `topos update` refreshes followed skills, while `topos self-update` replaces the `topos` binary.
+- `topos pull` — an alias of `topos update`, kept for hooks installed by older versions.
+- `topos upgrade` — deliberately refused with a pointer to both meanings: `topos update` refreshes your skills, `topos self-update` replaces the `topos` binary itself.

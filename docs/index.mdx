@@ -4,14 +4,11 @@ description: Shared skills for every AI agent on your team — publish once, and
 sidebar_label: What is Topos
 ---
 
-Your company tells everyone to use AI agents. Then every agent does the job its own way: one knows
-the deploy checklist, one has a stale copy, one has never seen it. Processes drift, and nobody tells
-an agent when a process changes.
-
-**Topos fixes that.** A *skill* is a folder of files an agent reads and acts on — a `SKILL.md`,
-maybe some scripts. Topos gives your team one shared home for those folders: publish a skill once,
-and every teammate's agent has the current version at the start of its next session. Improve one
-while working, and the improvement flows back to the team as a reviewable change.
+A **skill** is a folder of instructions an agent reads — a `SKILL.md`, maybe a few scripts.
+Topos gives your team one shared home for them: publish a skill once, and every teammate's
+agent has the current version at the start of its next session. When someone improves a
+skill while working, the improvement flows back to the team as a reviewable change instead
+of dying on their machine.
 
 ## The fastest way in
 
@@ -21,13 +18,10 @@ Paste this to the agent you already use — Claude Code, Cursor, Codex, any of t
 Set up Topos for us: fetch https://topos.sh/agent and follow it.
 ```
 
-`topos.sh/agent` is a plain-text walkthrough written for agents; every Topos server serves its own
-copy at `<origin>/agent`. Your agent will show you the install command before running anything, and
-the one browser approval is always yours to click.
+The agent installs the CLI and walks you through login; the one browser approval is always
+yours to click. Prefer the terminal? Two commands:
 
-Prefer to type it yourself? Two commands:
-
-```bash title="Terminal"
+```bash
 curl -fsSL https://topos.sh/install | sh
 topos login https://topos.sh/<your-workspace>
 ```
@@ -36,57 +30,66 @@ topos login https://topos.sh/<your-workspace>
 
 <Steps>
   <Step title="Someone shares a skill">
-    A teammate has a good `pr-describe` skill in their agent's skills folder.
-    `topos publish pr-describe --yes` hands it to the workspace: one name, one version history, one
-    movable `current` pointer that says what the team is on.
+    `topos publish pr-describe --yes` puts a skill folder in the workspace — one name, one
+    version history, one current version for the team.
   </Step>
-  <Step title="Everyone's agents get it">
-    Machines logged into the workspace receive it automatically. A project can also pin the demand
-    in a committed `topos.toml`, so everyone working in that repo gets the same set.
+  <Step title="Everyone's agents receive it">
+    Every machine logged into the workspace gets it automatically. Nothing for teammates to
+    run, nothing to configure.
   </Step>
   <Step title="It stays current by itself">
-    Logging in arms a session-start trigger that runs `topos update --quiet`. When the skill
-    changes, the new bytes are on every machine at the next agent session — verified byte-for-byte,
-    and never written over local edits.
+    At the start of each agent session, the machine silently picks up whatever changed —
+    verified byte-for-byte, and never written over anyone's local edits.
   </Step>
   <Step title="Improvements come back">
-    Someone sharpens the skill while working. `topos publish` offers it back — landing directly on
-    an open skill, or opening a reviewable proposal on a protected one.
+    Someone sharpens the skill while working and publishes again — directly, or as a
+    proposal a teammate reviews first.
   </Step>
 </Steps>
 
-That is the whole loop: **distribute** and **contribute**. Everything else in these docs is detail
-on one of those two motions.
+## Works with the skills you already have
 
-## Two ways to run it
+A skill is a plain folder with a `SKILL.md` — the same open format Claude Code, Cursor, and
+the [skills.sh](https://skills.sh) ecosystem already use. Nothing to convert: share the
+folders you have, and import public skill repos directly:
 
-- **Topos Cloud** — hosted at [topos.sh](https://topos.sh). Sign up, create a workspace, hand out
-  its address (`topos.sh/<name>`).
+```bash
+topos add vercel-labs/skills -s find-skills
+```
+
+What Topos adds on top is **declarative**: a short `topos.toml` states what a project or a
+person should have, and every machine converges on it — a lockfile for agent skills, kept
+current automatically.
+
+## Cloud or self-hosted
+
+- **Topos Cloud** — [create a workspace](https://topos.sh) at topos.sh; your team's address
+  becomes `topos.sh/<name>`.
 - **Self-hosted** — the entire product is Apache-2.0 in
-  [one repository](https://github.com/topos-sh/topos) and runs from one compose file. Your
-  workspace lives at your own origin.
+  [one repository](https://github.com/topos-sh/topos) and runs from one compose file; your
+  address is your own domain.
 
-Both run the same code. The CLI is identical; only the address differs.
+Same code, same CLI — only the address differs.
 
 <Note>
-  **Reading this as an agent?** Every page here is also plain markdown — append `.md` to its URL.
-  The index for machines is [`/docs/llms.txt`](https://topos.sh/docs/llms.txt), and
-  [Driving Topos from an agent](/docs/agents) is the page written for you.
+  **Reading this as an agent?** Every page here is also plain markdown — append `.md` to its
+  URL. The index for machines is [`/docs/llms.txt`](https://topos.sh/docs/llms.txt), and
+  [For agents](/docs/agents) is the page written for you.
 </Note>
 
 ## Start here
 
 <CardGrid>
   <Card title="Quickstart" href="/docs/quickstart">
-    Share your first skill with a teammate in about five minutes.
+    Workspace, first skill, first teammate — about five minutes.
   </Card>
   <Card title="Install the CLI" href="/docs/install">
     One command, no sudo. macOS and Linux, WSL2 on Windows.
   </Card>
-  <Card title="Driving Topos from an agent" href="/docs/agents">
+  <Card title="For agents" href="/docs/agents">
     The JSON surface, the consent rules, and the paste-ready entry points.
   </Card>
-  <Card title="Self-host it" href="/docs/self-host">
+  <Card title="Self-host" href="/docs/self-host">
     The whole product from one compose file.
   </Card>
 </CardGrid>

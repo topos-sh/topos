@@ -12,9 +12,11 @@ import { DocsContentError } from "./frontmatter.mjs";
  *    block's children are dedented to the margin. Fenced code is never touched.
  *
  * 2. EXPAND. One page carries the generated CLI reference marker. It is replaced with the
- *    contents of the repo's generated `docs/cli.md` — headings demoted one level so the page's
- *    frontmatter title stays the only h1 and the reference's own sections land in the page TOC.
- *    The file is written by `cargo xtask gen-cli-ref`; nothing here or in MDX ever restates it.
+ *    contents of the repo's generated `docs/cli.md`, minus the reference's own H1 and its
+ *    "GENERATED" provenance quote — the page provides the title and says where the text comes
+ *    from, and with the H1 gone the reference's sections (h2) and commands (h3) land straight in
+ *    the page TOC, so every command is jumpable. The file is written by
+ *    `cargo xtask gen-cli-ref`; nothing here or in MDX ever restates it.
  */
 
 /** The exact marker line a content page uses to pull in the generated CLI reference. */
@@ -118,17 +120,28 @@ function collapseBlankRuns(lines) {
   return out;
 }
 
-/** Demote every heading one level, leaving fenced code (where `#` is a comment) alone. */
-export function demoteHeadings(markdown) {
-  const out = [];
-  for (const { line, inFence, fenceEdge } of codeAware(markdown.split("\n"))) {
-    if (inFence && !fenceEdge) {
-      out.push(line);
-      continue;
+/**
+ * Drop the reference's own leading H1 and the "GENERATED" provenance blockquote under it. The
+ * standalone file (docs/cli.md on GitHub, the built-in skill's reference.md) needs both; a docs
+ * PAGE already has a title and states the provenance in its own intro.
+ */
+export function stripReferenceHeader(reference) {
+  const lines = reference.split("\n");
+  let index = 0;
+  const skipBlanks = () => {
+    while (index < lines.length && lines[index].trim() === "") {
+      index += 1;
     }
-    out.push(inFence ? line : line.replace(/^(#{1,5}) /, "#$1 "));
+  };
+  skipBlanks();
+  if (lines[index]?.startsWith("# ")) {
+    index += 1;
   }
-  return out.join("\n");
+  skipBlanks();
+  while (index < lines.length && lines[index].startsWith(">")) {
+    index += 1;
+  }
+  return lines.slice(index).join("\n");
 }
 
 /** Does this page pull in the generated CLI reference? */
@@ -144,6 +157,8 @@ export function hasCliReferenceMarker(body) {
 export function expandCliReference(body, reference) {
   return body
     .split("\n")
-    .map((line) => (line.trim() === CLI_REFERENCE_MARKER ? demoteHeadings(reference).trim() : line))
+    .map((line) =>
+      line.trim() === CLI_REFERENCE_MARKER ? stripReferenceHeader(reference).trim() : line,
+    )
     .join("\n");
 }

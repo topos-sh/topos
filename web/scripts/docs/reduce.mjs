@@ -105,6 +105,12 @@ function reduceTag(tag, nextStep) {
   if (tag.name === "Card") {
     return `- [${tag.attributes.title}](${tag.attributes.href})`;
   }
-  // Steps / Tabs / CardGrid are pure containers: their children carry the meaning.
+  if (tag.name === "Cta") {
+    return `**[${tag.attributes.title}](${tag.attributes.href})**`;
+  }
+  if (tag.name === "Column") {
+    return `**${tag.attributes.title}**`;
+  }
+  // Steps / Tabs / CardGrid / Columns are pure containers: their children carry the meaning.
   return null;
 }

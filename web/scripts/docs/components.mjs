@@ -1,7 +1,7 @@
 import { DocsContentError } from "./frontmatter.mjs";
 
 /**
- * THE COMPONENT SET — six components, and nothing else. Anything a page reaches for beyond this
+ * THE COMPONENT SET — a closed list, and nothing else. Anything a page reaches for beyond this
  * list is a build failure, never a silently-empty div: the set is small on purpose, so a page
  * either says something in plain markdown or says it in one of these shapes.
  *
@@ -11,6 +11,8 @@ import { DocsContentError } from "./frontmatter.mjs";
  *   <Tabs> wrapping <Tab title="…">     the same task by two paths — JS-free: the labels drive
  *                                       one radio group and `:checked` shows the panel
  *   <CardGrid> wrapping <Card …>        a small set of next destinations
+ *   <Cta title="…" href="…" />          ONE button-styled link — the page's primary action
+ *   <Columns> wrapping <Column …>       two labelled blocks side by side on a wide screen
  *
  * Components are folded at the MDAST level, before hast. The tags arrive as `html` leaf nodes
  * (markdown's HTML blocks), flat among their siblings; this plugin pairs each opener with its
@@ -36,6 +38,9 @@ export const COMPONENTS = {
   Tab: { tag: "div", classes: ["docs-tab"], attributes: ["title"], childOf: "Tabs" },
   CardGrid: { tag: "div", classes: ["docs-cards"], contains: ["Card"] },
   Card: { tag: "a", classes: ["docs-card"], attributes: ["title", "href"], childOf: "CardGrid" },
+  Cta: { tag: "a", classes: ["docs-cta"], attributes: ["title", "href"] },
+  Columns: { tag: "div", classes: ["docs-columns"], contains: ["Column"] },
+  Column: { tag: "div", classes: ["docs-column"], attributes: ["title"], childOf: "Columns" },
 };
 
 export const COMPONENT_NAMES = Object.keys(COMPONENTS);
@@ -246,6 +251,19 @@ function renderComponent(node, file) {
     return element("a", { className: spec.classes, href: node.attributes.href }, [
       element("span", { className: ["docs-card__title"] }, [textNode(node.attributes.title)]),
       element("span", { className: ["docs-card__body"] }, children),
+    ]);
+  }
+  if (name === "Cta") {
+    // A self-closing button-styled link: the title IS the label, so the reader's next action
+    // renders as one object rather than a sentence.
+    return element("a", { className: spec.classes, href: node.attributes.href }, [
+      textNode(node.attributes.title),
+    ]);
+  }
+  if (name === "Column") {
+    return element(spec.tag, { className: spec.classes }, [
+      element("p", { className: ["docs-column__title"] }, [textNode(node.attributes.title)]),
+      ...children,
     ]);
   }
   if (name === "Tabs") {
