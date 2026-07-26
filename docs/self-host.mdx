@@ -139,9 +139,11 @@ bash scripts/compose-smoke.sh    # the same end-to-end smoke the repo's CI runs
 </Warning>
 
 <Note>
-  **Probing gotcha:** any non-browser fetch of any path gets the constant protocol card, not HTML —
+  **Probing gotcha:** a non-browser fetch of any *page* gets the constant protocol card, not HTML —
   that is how clients discover the API base. Uptime checks and scrapers that expect a page must
-  send `Accept: text/html`.
+  send `Accept: text/html`. The exceptions are the resource routes, which answer with their own
+  payload to any client: `/healthz`, `/install`, `/llms.txt`, and the documentation's machine
+  surfaces (`/docs.md`, `/docs/<page>.md`, `/docs/llms.txt`).
 </Note>
 
 ## Mail
