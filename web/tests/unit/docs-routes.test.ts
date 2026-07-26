@@ -116,10 +116,14 @@ describe("the sidebar and prev/next", () => {
 describe("/docs/llms.txt", () => {
   const index = docsLlmsTxt("https://topos.example.com");
 
-  it("lists every page with an ABSOLUTE url on the deployment's own origin", () => {
+  it("links every page's MARKDOWN twin, ABSOLUTE, on the deployment's own origin", () => {
+    // This index is read by machines, and a non-browser fetch of a PAGE path gets the app's
+    // constant protocol card. The `.md` twins are resource routes, so they answer with prose —
+    // linking anything else would hand an agent a URL that does not resolve to documentation.
     for (const group of docsSidebar()) {
       for (const page of group.pages) {
-        expect(index).toContain(`](https://topos.example.com${page.path})`);
+        expect(index).toContain(`](https://topos.example.com${docsMarkdownPath(page.id)})`);
+        expect(index).not.toContain(`](https://topos.example.com${page.path})`);
       }
     }
   });

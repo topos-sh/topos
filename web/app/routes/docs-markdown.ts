@@ -1,4 +1,5 @@
 import type { LoaderFunctionArgs } from "react-router";
+import { redirect } from "react-router";
 import { DOCS_BASE, DOCS_INDEX_ID, docsMarkdown } from "@/lib/docs/docs.server";
 
 /**
@@ -20,6 +21,10 @@ export async function loader({ request }: LoaderFunctionArgs): Promise<Response>
     pathname === `${DOCS_BASE}.md`
       ? DOCS_INDEX_ID
       : pathname.slice(`${DOCS_BASE}/`.length, -".md".length);
+  // The index twin has ONE address, `/docs.md` — the same one-address rule the page routes keep.
+  if (id === DOCS_INDEX_ID && pathname !== `${DOCS_BASE}.md`) {
+    return redirect(`${DOCS_BASE}.md`);
+  }
   const markdown = docsMarkdown(id);
   if (markdown === null) {
     throw new Response("Not Found", { status: 404 });

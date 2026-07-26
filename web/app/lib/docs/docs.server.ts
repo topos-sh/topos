@@ -91,7 +91,7 @@ export function docsLlmsTxt(origin: string): string {
     "> current on every machine: publish once, every subscribed agent picks the update up at its",
     "> next session start.",
     "",
-    "Every page below is also served as plain markdown at its own path plus `.md`.",
+    "Every link below is the page's plain-markdown twin. Drop the `.md` for the rendered page.",
     "",
   ];
   for (const group of DOCS_NAV) {
@@ -99,7 +99,10 @@ export function docsLlmsTxt(origin: string): string {
     for (const id of group.pages) {
       const page = DOCS_PAGES[id];
       if (page !== undefined) {
-        lines.push(`- [${page.title}](${base}${docsPath(id)}): ${page.description}`);
+        // The MARKDOWN twin, deliberately: this index exists for machines, and a non-browser
+        // fetch of the page path gets the app's constant protocol card, not the documentation.
+        // The `.md` routes are resource routes, so they answer with the prose itself.
+        lines.push(`- [${page.title}](${base}${docsMarkdownPath(id)}): ${page.description}`);
       }
     }
     lines.push("");

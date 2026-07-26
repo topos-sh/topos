@@ -155,7 +155,7 @@ test.describe("the documentation", () => {
     }
   });
 
-  test("/docs/llms.txt indexes every page with an absolute url on this origin", async ({
+  test("/docs/llms.txt indexes every page by its markdown twin, and every link resolves", async ({
     page,
     request,
   }) => {
@@ -166,7 +166,18 @@ test.describe("the documentation", () => {
     expect(response.headers()["content-type"]).toContain("text/plain");
     const body = await response.text();
     for (const path of paths) {
-      expect(body, path).toContain(`${BASE_URL}${path})`);
+      // The MARKDOWN twin, not the page: a non-browser fetch of a page path gets the protocol
+      // card, so an index that pointed there would be useless to the machines it is written for.
+      const twin = path === "/docs" ? "/docs.md" : `${path}.md`;
+      expect(body, path).toContain(`${BASE_URL}${twin})`);
+    }
+    // Follow every emitted link — an index of dead or intercepted URLs is worse than none.
+    const linked = [...body.matchAll(/\]\((https?:\/\/[^)]+)\)/g)].map((m) => m[1] ?? "");
+    expect(linked.length).toBeGreaterThanOrEqual(paths.length);
+    for (const url of linked) {
+      const response = await request.get(url, { maxRedirects: 0 });
+      expect(response.status(), url).toBe(200);
+      expect(response.headers()["content-type"], url).toContain("text/markdown");
     }
   });
 
@@ -207,5 +218,13 @@ test.describe("the documentation", () => {
 
   test("a missing markdown twin 404s without inventing a page", async ({ request }) => {
     expect((await request.get("/docs/no-such-page.md")).status()).toBe(404);
+  });
+
+  test("the index twin has ONE address too — /docs/index.md redirects to /docs.md", async ({
+    request,
+  }) => {
+    const response = await request.get("/docs/index.md", { maxRedirects: 0 });
+    expect(response.status()).toBe(302);
+    expect(response.headers().location).toBe("/docs.md");
   });
 });
