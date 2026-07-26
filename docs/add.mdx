@@ -11,10 +11,10 @@ narrower channel, or pulling in a skill from outside.
 ## One command, three kinds of source
 
 ```bash
-topos add code-review                # from your workspace, by name
-topos add @acme/channels/backend     # a whole channel's set
-topos add ./tools/my-skill           # a local folder — offline, no account
-topos add vercel-labs/skills         # a public GitHub repo, pinned to a commit
+topos add code-review             # from your workspace, by name
+topos add @acme/channels/backend  # a whole channel's set
+topos add ./tools/my-skill        # a local folder, offline
+topos add vercel-labs/skills      # a public GitHub repo
 ```
 
 The shape of what you type is the source: `@` introduces a workspace, a slash without `@` is
@@ -48,10 +48,10 @@ pins exact bytes. Every receipt names the file it edited and the exact undo comm
 exclude = ["topos.sh/acme/noisy-skill"]  # don't deliver this one here
 
 [skills]
-"topos.sh/acme/code-review" = "*"             # follow the team's current version
-"topos.sh/acme/deploy" = "<64-hex version>"   # pin one exact version
-"github.com/vercel-labs/skills/skills/find-skills" = "e173b8c"  # GitHub, pinned
-"./tools/my-skill" = "*"                      # a folder in this repo
+"topos.sh/acme/code-review" = "*"            # the team's current version
+"topos.sh/acme/deploy" = "<64-hex version>"  # pinned to one version
+"github.com/vercel-labs/skills/skills/find-skills" = "e173b8c"  # pinned
+"./tools/my-skill" = "*"                     # a folder in this repo
 
 [channels]
 "topos.sh/acme/channels/backend" = "*"
@@ -76,7 +76,7 @@ catches up. By hand, any time:
 ```bash
 topos update                        # everything
 topos update code-review            # one skill
-topos update code-review@<version>  # put an older version back — this machine only
+topos update code-review@<version>  # roll back this machine only
 ```
 
 New files are verified against the workspace's records before anything lands, and **your
@@ -87,9 +87,9 @@ frozen with a named way out. Details:
 ## Import from GitHub
 
 ```bash
-topos add vercel-labs/skills                  # a public repo — no account needed
-topos add vercel-labs/skills -s find-skills   # one skill from a multi-skill repo
-topos add owner/repo#v1.2.0                   # a tag, branch, or commit
+topos add vercel-labs/skills                 # a public repo
+topos add vercel-labs/skills -s find-skills  # one skill from a repo
+topos add owner/repo#v1.2.0                  # a tag, branch, or commit
 ```
 
 GitHub entries behave like lockfile lines: pinned to a commit, moving only when you bump the
@@ -105,8 +105,8 @@ also a browser import with a preview at `<origin>/skills/import`.
 ## Stop receiving
 
 ```bash
-topos remove code-review        # from this project
-topos remove code-review -g     # from your profile — every machine you log in on
+topos remove code-review     # from this project
+topos remove code-review -g  # from your profile, every machine
 ```
 
 `remove` edits the same file `add` did and prints the undo. When something broader — a
@@ -121,7 +121,10 @@ local copies and edits are always retained.
 ## Check any time
 
 ```bash
-topos status          # every skill here, its version, and the line that asked for it — offline
-topos list            # inventory, plus untracked skills sitting in agent folders
-topos list --remote   # what your workspaces offer, with each skill's state here
+topos status         # every skill here, its version, and its source
+topos list           # inventory, plus untracked skills you could add
+topos list --remote  # what your workspaces offer
 ```
+
+`topos status` works offline and changes nothing — it names the exact line that asked for
+every skill on the machine.

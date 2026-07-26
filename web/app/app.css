@@ -422,6 +422,13 @@ body {
   background: var(--color-glass);
   border-color: var(--color-glass);
   color: var(--color-glass-ink);
+  /* A command WRAPS rather than scrolling: a trailing comment cut off at the right edge is
+     content the reader never learns exists. Data blocks (json, toml) keep their horizontal
+     scroll, where column alignment carries meaning. */
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* Clear the copy button's corner so a long first line never runs under it. */
+  padding-right: 44px;
 }
 
 /* The copy affordance: quiet until the block is hovered or the button holds focus; the check

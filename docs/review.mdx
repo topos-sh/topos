@@ -29,8 +29,8 @@ proposal by itself.
 ## Review it
 
 ```bash
-topos review                            # your inbox: waiting on you, and your own open ones
-topos review deploy@<version>           # read one proposal — author, message, diff
+topos review                    # your inbox
+topos review deploy@<version>   # read one proposal
 topos review deploy@<version> --approve
 topos review deploy@<version> --reject -m "needs a test"
 topos review deploy@<version> --withdraw
@@ -53,8 +53,8 @@ comments, and Approve/Reject.
 ## Require review
 
 ```bash
-topos protect deploy --yes         # changes to this skill now need review
-topos protect deploy open --yes    # back to direct publishing — owners only
+topos protect deploy --yes       # this skill now needs review
+topos protect deploy open --yes  # back to direct publishing (owners)
 ```
 
 There is also a workspace-wide default: the **Review gate** switch on Settings → General.
@@ -65,8 +65,8 @@ Protect the skills many people rely on; a two-person utility usually doesn't nee
 Two rollbacks, with deliberately different reach:
 
 ```bash
-topos revert deploy --to <version> --yes   # the TEAM: everyone is on it at their next update
-topos update deploy@<version>              # just this machine; the team is untouched
+topos revert deploy --to <version> --yes  # for the TEAM
+topos update deploy@<version>             # just this machine
 ```
 
 <Warning>
@@ -85,10 +85,10 @@ overwrite them. When the team's changes and yours genuinely collide, the copy is
 conflict markers and the ways out are named right there:
 
 ```bash
-topos diff deploy                    # see your side
-topos update deploy                  # merge your draft onto the team's latest
-topos update deploy --reset --yes    # drop YOUR edits, take the team version — previews the loss first
-topos update deploy --onto-current   # keep YOUR files exactly as they are; skip the merge
+topos diff deploy                   # see your side
+topos update deploy                 # merge your draft onto the latest
+topos update deploy --reset --yes   # drop YOUR edits, take the team's
+topos update deploy --onto-current  # keep YOUR files, skip the merge
 ```
 
 ## Leaked a secret?
