@@ -1,0 +1,193 @@
+---
+title: Review, protect, roll back
+description: The contribute-back loop — proposals and verdicts, protection levels, team-wide revert, and resolving drafts.
+sidebar_label: Review & roll back
+---
+
+Someone improves a shared skill while working; the improvement comes back as a reviewable change
+instead of drifting into a private fork. This page is that loop, plus the two safety valves:
+protection and revert.
+
+## Versions, in one paragraph
+
+A **version** is the sha-256 of a bundle's exact bytes — `<skill>@<hash>` names those bytes and
+no others. Each skill has one movable **`current`** pointer: what the team is on. The pointer
+only ever moves forward; nothing is deleted when it does, so every move is invertible. And a
+**proposal is not a special object — it is simply a version that `current` has not moved to.**
+
+```bash
+topos log deploy               # the version history, with ids and messages
+topos diff deploy              # your local edits against current
+topos diff deploy @<hash>      # a version against current
+topos diff deploy <a>..<b>     # version against version
+```
+
+## Open a proposal
+
+```bash
+topos publish deploy --propose -m "Cover stacked PRs" --yes
+```
+
+On a `reviewed` skill you do not need `--propose` — an ordinary publish is rerouted into a
+proposal and the receipt says so.
+
+## The inbox and the verdict
+
+```bash
+topos review
+```
+
+```text
+To review (others' proposals):
+  Link the dashboard in the release note  (acme)
+    deploy@500965c7ce72616e86e0e662d16076875c9006f80fb386f03169edd037992605  by bob@acme.com
+    review with `topos review deploy@500965c7ce72616e86e0e662d16076875c9006f80fb386f03169edd037992605 --approve` (or `--reject -m <reason>`)
+Your open proposals:
+  Link the migration guide  (acme)
+    release-notes@d0bcd4fea932503b856b8777fca23d18cec3d613b5f1979d7e0b3976726e1fc6  awaiting review
+```
+
+Name one to see its describe — author, message, base, and the diff against `current` — then land
+a verdict:
+
+```bash
+topos review deploy@<hash>                       # look at it
+topos review deploy@<hash> --approve
+topos review deploy@<hash> --reject -m "needs a test"
+topos review deploy@<hash> --withdraw            # retract your own
+```
+
+```text title="topos review deploy@500965c7ce72… --approve"
+Approved deploy@500965c7ce72616e86e0e662d16076875c9006f80fb386f03169edd037992605 — current moved to generation 5. Every follower picks it up on their next update.
+```
+
+| Flag | Who | Effect |
+|---|---|---|
+| `--approve` | reviewer or owner | Moves `current` to the candidate |
+| `--reject` | reviewer or owner | Declines it; `-m <reason>` is **required** and goes back to the author |
+| `--withdraw` | the author | Retracts your own open proposal |
+
+<Note>
+  `--yes` means nothing on `review` — the **verdict flag is the apply**, and a target with no
+  verdict is the describe. Two verdict flags at once is a usage error.
+</Note>
+
+Three properties make approval trustworthy:
+
+- **Approval is bound to what you reviewed.** It is a compare-and-set against the base the diff
+  was computed on — if `current` moved while you were reading, the approval is refused and you
+  look again. What lands is exactly what was reviewed, never something unseen.
+- **The digest is re-derived from the fetched bytes** and must reproduce the proposal's hash — a
+  tampered server cannot get a reviewer to sign over forged bytes.
+- **Four-eyes:** on a `reviewed` skill you cannot approve your own proposal — a different owner
+  or reviewer must, and the server re-checks it. Your leg is `--withdraw`.
+
+The same review lives in the browser: each skill has a **Proposals** tab with rendered diffs, the
+byte-exact digest, comments (any member), and Approve/Reject for reviewers — Reject behind a
+disclosure with a mandatory reason. The author's verdict comes back with its reason, and their
+agent narrates it at the next session.
+
+## Protection: `open` and `reviewed`
+
+Protection decides what a member's publish does — nothing else.
+
+```bash
+topos protect deploy               # describe: tighten to reviewed, and name the role it takes
+topos protect deploy --yes         # apply — reviewer or owner
+topos protect deploy open --yes    # loosen — owner only
+```
+
+```text title="topos protect deploy"
+Tighten skill 'deploy' to `reviewed` (reviewer or owner)
+Nothing has changed yet — apply with:
+  topos protect deploy --yes
+```
+
+A skill follows the **workspace default** (the *Review gate* switch on Settings → General, off by
+default) unless pinned explicitly on its settings page. Audience is the right trigger for
+tightening: a widely-delivered skill earns `reviewed`; a two-person utility usually does not.
+
+## Roll back
+
+Something landed and it was wrong. There are two rollbacks with deliberately different scopes:
+
+```bash
+topos revert deploy --to 8c7204de --yes   # FOR THE TEAM — moves current, everyone picks it up
+topos update deploy@8c7204de              # FOR THIS MACHINE — local go-back, team untouched
+```
+
+<Warning>
+  **`--to` names the version you are going back TO** — the good one, the destination. Not the bad
+  one you are undoing. This trips people up exactly once. Find it with `topos log deploy`; a
+  unique prefix of at least 8 hex characters works.
+</Warning>
+
+```text title="topos revert deploy --to 8c7204de"
+Revert deploy — move current @500965c7ce72 forward to restore @8c7204de0fd8 (from generation 5).
+  a forward move restoring older bytes; nothing deleted
+Nothing has changed yet — apply with:
+  topos revert deploy --to 8c7204de0fd82d4ab5b1c0ede8c59aea3b77160dbb31d1cb7130df927c692b64 --yes
+```
+
+Note the apply line: you may *type* a unique prefix, but the paste-ready command the describe
+hands back always names the **full 64-hex version**, so what you apply is unambiguous.
+
+A revert records a **new** version whose bytes are the good version's — history stays complete,
+receivers see an ordinary fast-forward at their next sweep, and the revert is itself invertible.
+Reverting takes a **reviewer or owner** — a member's revert is refused, not downgraded. `--yes`
+also acknowledges a no-op when the good bytes already are `current`. In the browser, non-head
+rows on a skill's History tab carry a **Roll back** control for the same roles.
+
+To come back to whatever the team is on after a local go-back: `topos update deploy`.
+
+## When your own edits are in the way
+
+Editing a delivered skill makes a **draft** — the delta between your copy and the version last
+applied. Updates never destroy a draft: they snapshot it, then merge around it. A clean merge
+leaves your draft sitting on top of the new `current`, silently. A conflict freezes the copy with
+markers and a named way out:
+
+```text
+pr-describe  merge conflict with the new current @a7b5980cdc2e — markers written; edit the files, then run `topos update pr-describe --onto-current` to commit your resolution (publish is blocked until then)
+    SKILL.md (content — diff3 markers at the path)
+```
+
+The indented line under it is the checklist: every conflicted path, and what happened to your
+bytes there.
+
+The three exits, disclosed before they act:
+
+```bash
+topos diff deploy                       # what you changed
+topos update deploy                     # merge your draft onto the new current
+topos update deploy --reset --yes       # discard YOUR edits, take current — loss-led describe first
+topos update deploy --onto-current      # keep YOUR bytes outright, drop the pending merge
+```
+
+`--reset` opens with exactly what would be lost and refuses to run without a named skill — it
+never resets everything at once.
+
+## Leaked a secret?
+
+Reverting is not the tool — a revert moves a pointer, and the bad bytes remain fetchable in
+history. In order:
+
+<Steps>
+  <Step title="Publish a scrubbed version">
+    Every machine's next sync replaces the leaked bytes fleet-wide — the fastest-acting step.
+  </Step>
+  <Step title="Watch Settings → Sessions">
+    Until every non-stale session reads current. Stale sessions and copies held by people who
+    left are enumerated for you to chase by hand — never silently omitted.
+  </Step>
+  <Step title="Rotate the credential regardless">
+    The actual security action. Assume the bytes escaped.
+  </Step>
+  <Step title="Purge the poisoned versions">
+    Owner-only, in the browser, once `current` no longer needs them. The hash stays in history as
+    a tombstone; the bytes are dropped.
+  </Step>
+</Steps>
+
+Deletion and purge **cannot recall bytes already on machines** — the sessions page shows who
+still holds them. Visibility, honestly, rather than a false promise.

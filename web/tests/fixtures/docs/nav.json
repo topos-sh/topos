@@ -1,0 +1,5 @@
+[
+  { "group": "Start here", "pages": ["index", "quickstart"] },
+  { "group": "Motions", "pages": ["motions/publish"] },
+  { "group": "Reference", "pages": ["reference/cli"] }
+]

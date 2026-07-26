@@ -8,6 +8,7 @@
       "!build",
       "!.react-router",
       "!app/lib/plane/contract/schema.d.ts",
+      "!app/lib/docs/content.generated.server.ts",
       "!drizzle"
     ]
   },

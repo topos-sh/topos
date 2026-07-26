@@ -89,6 +89,22 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
     route("install.sh", file("install-sh.ts")),
     // The agent-onboarding document: what an agent told "set up Topos for us" fetches and follows.
     route("agent", file("agent.ts")),
+    // THE DOCUMENTATION, rendered by this app from the repo's own MDX (compiled into
+    // app/lib/docs/ at build time). Origin-rooted in BOTH tenancy modes — docs describe the
+    // DEPLOYMENT, not a workspace — and the static `docs` segment outranks the `:ws` face, which
+    // is why it is registered in `segments.ts` (no workspace may take the name).
+    //
+    // Two faces, decided by PATH SHAPE, never by content negotiation: the page (`/docs`,
+    // `/docs/<page>`) and its plain-markdown twin for an agent (`<the same path>.md`). The `.md`
+    // twins are dynamic segments with a literal suffix, one route per nesting depth — the depth
+    // ceiling the page-id contract enforces (see scripts/docs/compile.mjs).
+    route("docs", file("docs-page.tsx"), { id: "docs-index" }),
+    route("docs/llms.txt", file("docs-llms-txt.ts")),
+    route("docs.md", file("docs-markdown.ts"), { id: "docs-index-md" }),
+    route("docs/:page.md", file("docs-markdown.ts"), { id: "docs-md-1" }),
+    route("docs/:section/:page.md", file("docs-markdown.ts"), { id: "docs-md-2" }),
+    route("docs/:section/:subsection/:page.md", file("docs-markdown.ts"), { id: "docs-md-3" }),
+    route("docs/*", file("docs-page.tsx"), { id: "docs-page" }),
     // The machine-discovery lane: llms.txt (the site guide convention) + the agent-skills
     // discovery index, whose ONE entry is the repo's downloadable `topos` skill. The skill's
     // three files serve under the SAME well-known base so relative sibling references resolve;

@@ -1,177 +1,110 @@
 ---
-title: "Install the CLI"
-description: "Hand it to your agent, or run one command yourself. No sudo, no runtime dependencies."
-icon: "download"
+title: Install the CLI
+description: Hand it to your agent or run one command yourself — no sudo, no runtime dependencies.
+sidebar_label: Install
 ---
 
-There are two ways to do this, and they end in the same place.
+Two ways to do this, and they end in the same place.
 
 <Tabs>
   <Tab title="Ask your agent">
-    Paste this to the agent you already use — Claude Code, Cursor, Codex, or any other:
+    Paste this to the agent you already use:
 
-    ```text Paste to your agent
+    ```text title="Paste to your agent"
     Set up Topos for us: fetch https://topos.sh/agent and follow it.
     ```
 
-    Already have a workspace address? Include it, and the agent will log in as well:
+    Already have a workspace address? Include it, and the agent logs the machine in too:
 
-    ```text Paste to your agent
+    ```text title="Paste to your agent"
     Set up Topos for us: fetch https://topos.sh/agent and follow it. Our workspace: https://topos.sh/acme
     ```
 
-    [`topos.sh/agent`](https://topos.sh/agent) is a short plain-text walkthrough written for agents.
-    Every Topos server serves its own at `<origin>/agent`, so self-hosted teams paste their own
-    origin instead.
-
-    Your agent will show you the install command before running it, and it cannot approve the browser
+    Your agent shows you the install command before running it, and it cannot approve the browser
     login on your behalf — that step is yours.
   </Tab>
   <Tab title="Run it yourself">
-    ```bash
+    ```bash title="Terminal"
     curl -fsSL https://topos.sh/install | sh
     ```
 
-    Installs the `topos` binary to `~/.local/bin`. No sudo, no runtime dependencies.
+    Installs the `topos` binary to `~/.local/bin`. No sudo, no runtime dependencies. Then check it:
+
+    ```bash
+    topos --version
+    ```
   </Tab>
 </Tabs>
 
 <Tip>
   Self-hosting? Every Topos server serves the same installer at `<your-origin>/install` (and
-  `/install.sh`), and its own agent walkthrough at `<your-origin>/agent`. The installer is rendered in
-  a browser rather than downloaded, so you can read it first.
+  `/install.sh`), and its own agent walkthrough at `<your-origin>/agent`.
 </Tip>
 
 ## Platforms
 
 | Platform | Supported |
 |---|---|
-| macOS — Apple Silicon | Yes |
-| macOS — Intel | Yes |
-| Linux — x86_64 | Yes (static musl; any distro) |
-| Linux — arm64 | Yes (static musl) |
-| Windows | Inside [WSL2](https://learn.microsoft.com/windows/wsl/install) |
-
-Native Windows is refused explicitly, with a pointer to WSL2.
+| macOS — Apple Silicon and Intel | Yes |
+| Linux — x86_64 and arm64 | Yes (static musl, any distro) |
+| Windows | Inside [WSL2](https://learn.microsoft.com/windows/wsl/install) — native Windows is refused with a pointer there |
 
 ## What the installer does
 
-<Steps>
-  <Step title="Detects OS and architecture">
-    And refuses clearly if there is no asset for it.
-  </Step>
-  <Step title="Downloads the asset, its checksum manifest, and its signature">
-    All over TLS.
-  </Step>
-  <Step title="Verifies">
-    It prints the **expected and actual sha-256** and refuses on mismatch. **This check is never
-    skippable** — there is no flag that disables it.
+It detects your OS and architecture, downloads the release asset with its checksum manifest and
+signature over TLS, prints the **expected and actual sha-256**, and refuses on a mismatch — that
+check is never skippable. The minisign signature is verified when the `minisign` tool is present;
+without it, the skip is announced loudly. The binary is staged and renamed into place atomically,
+and its `--version` is run *before* replacing an existing install, so a bad download can never
+displace a working one. It never edits your shell configuration — it prints a PATH hint instead.
 
-    The minisign signature is required to download, and is verified when the `minisign` tool is
-    present on your machine. Without the tool it skips with a loud note, because installer-side
-    verification can never exceed the trust you already placed in the origin.
-  </Step>
-  <Step title="Installs atomically">
-    It stages inside the destination directory and renames into place, and it runs the staged
-    binary's `--version` **before** replacing an existing install — so a wrong-architecture download
-    can never displace a working one.
-  </Step>
-  <Step title="Prints a PATH hint">
-    Tailored to your shell (fish, zsh, bash). It never edits your shell configuration.
-  </Step>
-</Steps>
-
-Then check it:
-
-```bash
-topos --version
-topos            # on a terminal: the status snapshot, or a welcome if not logged in
-```
-
-<Note>
-  **For agents —** check `topos --version` first; a failure means it is not installed yet. Propose the
-  install command and let the human run it, or get an explicit yes before running it yourself. Never
-  install anything unasked.
-
-  Confirm `~/.local/bin` is on `PATH` before reporting success.
-</Note>
-
-## Installer options
-
-Both a flag and an environment variable, whichever suits:
+Options, as an environment variable or a flag:
 
 | Env var | Flag | Effect |
 |---|---|---|
 | `TOPOS_VERSION` | `--version <tag>` | Pin a release tag instead of the latest |
 | `TOPOS_INSTALL_DIR` | `--to <dir>` | Install somewhere other than `~/.local/bin` |
-| `TOPOS_INSTALL_BASE_URL` | — | Point at a mirror or an air-gapped proxy |
+| `TOPOS_INSTALL_BASE_URL` | — | Point at a mirror or air-gapped proxy |
+
+Prefer to verify a release yourself? Download from
+[the releases page](https://github.com/topos-sh/topos/releases) and check any of:
 
 ```bash
-curl -fsSL https://topos.sh/install | sh -s -- --version v0.1.9
-TOPOS_INSTALL_DIR=/usr/local/bin curl -fsSL https://topos.sh/install | sh
-```
-
-A pinned `--version` additionally binds the signature's trusted comment to that tag, so an old valid
-signature cannot be re-served under a newer one.
-
-## Verifying a release yourself
-
-Releases are signed with minisign and carry Sigstore build-provenance attestations. Download from
-[the releases page](https://github.com/topos-sh/topos/releases) and check any or all of:
-
-```bash
-# checksum
 shasum -a 256 -c SHA256SUMS
-
-# minisign signature
 minisign -Vm topos-<target>.tar.gz \
   -P RWRsqhNImLJGum9BdXy1X/p7Dhr+xc0JQTyNPxaGW5emP/K/+828Euav
-
-# build provenance
 gh attestation verify topos-<target>.tar.gz --repo topos-sh/topos
 ```
 
-Each signature's trusted comment is bound to one release (`topos-sh/topos <tag> <file>`), so a
-signature from an older release cannot be replayed against a newer tag.
-
-## Next: connect to a workspace
-
-```bash
-topos login https://topos.sh/acme
-```
-
-That mints a **session** and arms the auto-update trigger in your harness. Full walkthrough:
-[Quickstart](/quickstart).
-
-<Note>
-  **For agents —** `topos login` prints an approval URL for the human to open. **You cannot complete
-  the approval yourself.**
-
-  A piped or `--json` run **never blocks**: it prints the URL, polls once, and exits `0`. That is
-  success, not failure — re-run `topos login --json` to poll again. Use `--wait <seconds>` only when
-  you deliberately want to block, and always cap it.
-</Note>
+Each signature's trusted comment is bound to one release (`topos-sh/topos <tag> <file>`), so an old
+signature cannot be replayed against a newer tag.
 
 ## Keeping the binary current
 
 ```bash
 topos self-update            # replace the running binary
 topos self-update --check    # only report whether a newer release exists
-topos self-update --version v0.1.9   # pin, including a downgrade
+topos self-update --version v0.1.9   # pin a specific tag, including a downgrade
 ```
 
-`self-update` verifies the minisign signature **before** the checksum, and **both are mandatory** — a
-failure is a typed integrity error, never a fallback. A verified upgrade reports `"signed": true`.
-
-It touches no skills, no workspace, and no account.
+`self-update` verifies the minisign signature and the checksum, both mandatory — a failure is a
+typed integrity error, never a fallback. It touches no skills, no workspace, and no account.
 
 <Warning>
-  `topos upgrade` is deliberately ambiguous and refuses, naming both fixes:
-  **`topos update`** refreshes your skills; **`topos self-update`** replaces the binary.
+  `topos upgrade` is deliberately ambiguous and refuses, naming both fixes: **`topos update`**
+  refreshes your skills; **`topos self-update`** replaces the binary.
 </Warning>
 
-With `TOPOS_INSTALL_BASE_URL` set (a mirror), `self-update` requires an explicit `--version`, because
-a mirror cannot answer "what is latest".
+## Client environment variables
+
+| Variable | Default | Effect |
+|---|---|---|
+| `TOPOS_HOME` | `~/.topos` | The client state root — sessions, drafts, logs. Also how you run two installations against two servers on one machine |
+| `TOPOS_PLANE_URL` | `https://topos.sh` | The default server a bare workspace name resolves against |
+| `TOPOS_DEBUG=1` | off | Print each error's full source chain to stderr (it always lands in `~/.topos/log.jsonl`) |
+| `TOPOS_NO_BROWSER` | unset | Never auto-open the login approval page |
+| `TOPOS_UPDATE_TTL` | `300` | The quiet sweep's self-throttle window in seconds (`0` disables) |
+| `TOPOS_NO_UPDATE_CHECK` | unset | Disable the passive once-a-day "newer version" note |
 
 ## No CLI yet, and want the docs first?
 
@@ -183,23 +116,7 @@ npx skills add topos-sh/topos
 
 That places `SKILL.md`, the generated command reference, and an `INSTALL.md` that walks your agent
 through the real install. Afterwards, one explicit `topos add topos` hands the downloaded copy over
-to the CLI.
-
-## Client environment variables
-
-| Variable | Default | Effect |
-|---|---|---|
-| `TOPOS_HOME` | `~/.topos` | The client state root — sessions, drafts, logs |
-| `TOPOS_PLANE_URL` | `https://topos.sh` | The default server a bare workspace name resolves against |
-| `TOPOS_DEBUG=1` | off | Print each error's full source chain to stderr (it always lands in `~/.topos/log.jsonl`) |
-| `TOPOS_NO_BROWSER` | unset | Never auto-open the login approval page |
-| `TOPOS_UPDATE_TTL` | `300` | The quiet sweep's self-throttle window, in seconds (`0` disables) |
-| `TOPOS_NO_UPDATE_CHECK` | unset | Disable the passive once-a-day "newer version" note |
-| `TOPOS_NO_STAT_CACHE=1` | off | Disable the stat cache; every scan re-hashes in full |
-
-<Tip>
-  `TOPOS_HOME` is also how you run two installations against two different servers on one machine.
-</Tip>
+to the CLI to keep current.
 
 ## Uninstalling
 
@@ -208,6 +125,15 @@ topos uninstall          # describe what would go
 topos uninstall --yes    # apply
 ```
 
-Removes the auto-update triggers from your harness configs and deletes `~/.topos/`. **It never
-deletes a skill byte**, and it does not delete the binary — its path is printed so you can remove it
-with whatever installed it.
+Removes the auto-update triggers from your harness configs and deletes `~/.topos/`. It **never
+deletes a skill byte** — everything in your agent directories stays where it is. The binary is not
+self-deleted; its path is printed so you can remove it with whatever installed it.
+
+## Next
+
+```bash
+topos login https://topos.sh/acme
+```
+
+That logs the machine into a workspace and arms auto-update. Full walkthrough:
+[Quickstart](/docs/quickstart).

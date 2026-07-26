@@ -299,6 +299,346 @@ body {
   margin-right: 0.4em;
 }
 
+/* ── The documentation body (build-time markup from scripts/gen-docs.mjs) ─────────────────────
+   The docs pages are the same Klein system as the app: warm-gray ground, ink running text,
+   Martian Mono headings and micro-labels, ONE blue used as a placed object (the aside rules, the
+   anchor affordance, the active tab). No new color values — every rule below resolves a token
+   from the @theme block above. Everything scopes under .docs-prose so nothing leaks into chrome. */
+.docs-prose {
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--color-ink);
+  overflow-wrap: break-word;
+}
+.docs-prose > :first-child {
+  margin-top: 0;
+}
+.docs-prose h2,
+.docs-prose h3,
+.docs-prose h4 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: -0.02em;
+  color: var(--color-ink);
+  scroll-margin-top: 80px;
+}
+.docs-prose h2 {
+  font-size: 19px;
+  margin: 2.2em 0 0.7em;
+  padding-top: 0.7em;
+  border-top: 1px solid var(--color-line-soft);
+}
+.docs-prose h3 {
+  font-size: 15.5px;
+  margin: 1.8em 0 0.5em;
+}
+.docs-prose h4 {
+  font-size: 14px;
+  margin: 1.5em 0 0.4em;
+}
+/* The self-link every h2/h3 carries: invisible until the heading is hovered or it takes focus. */
+.docs-prose .docs-anchor {
+  margin-left: 0.4em;
+  color: var(--color-accent);
+  text-decoration: none;
+  border: 0;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.docs-prose h2:hover .docs-anchor,
+.docs-prose h3:hover .docs-anchor,
+.docs-prose .docs-anchor:focus-visible {
+  opacity: 1;
+}
+.docs-prose p,
+.docs-prose ul,
+.docs-prose ol,
+.docs-prose blockquote,
+.docs-prose table,
+.docs-prose pre,
+.docs-prose figure {
+  margin: 0 0 1em;
+}
+.docs-prose a {
+  color: var(--color-ink);
+  text-decoration: none;
+  border-bottom: 1px solid var(--color-hairline);
+  transition: border-color 120ms ease;
+}
+.docs-prose a:hover {
+  border-bottom-color: var(--color-ink);
+}
+.docs-prose strong {
+  font-weight: 500;
+  color: var(--color-ink);
+}
+.docs-prose code {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  background: var(--color-panel2);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+.docs-prose pre {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.75;
+  background: var(--color-panel);
+  border: 1px solid var(--color-line-soft);
+  border-radius: 6px;
+  padding: 12px 16px;
+  overflow-x: auto;
+}
+.docs-prose pre code {
+  background: transparent;
+  border-radius: 0;
+  padding: 0;
+  font-size: inherit;
+}
+.docs-prose ul,
+.docs-prose ol {
+  padding-left: 1.4em;
+}
+.docs-prose ul {
+  list-style: disc;
+}
+.docs-prose ol {
+  list-style: decimal;
+}
+.docs-prose li {
+  margin: 0.3em 0;
+}
+.docs-prose li::marker {
+  color: var(--color-faint);
+}
+.docs-prose blockquote {
+  border-left: 3px solid var(--color-line);
+  padding-left: 1em;
+  color: var(--color-dim);
+}
+.docs-prose table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+  display: block;
+  overflow-x: auto;
+}
+.docs-prose th,
+.docs-prose td {
+  border: 1px solid var(--color-line-soft);
+  padding: 7px 11px;
+  text-align: left;
+  vertical-align: top;
+}
+.docs-prose th {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--color-dim);
+  background: var(--color-panel2);
+}
+.docs-prose hr {
+  border: 0;
+  border-top: 1px solid var(--color-line-soft);
+  margin: 2em 0;
+}
+
+/* A titled code block: one frame, the title in the micro-label voice on the inset surface. */
+.docs-prose .docs-code {
+  border: 1px solid var(--color-line-soft);
+  border-radius: 6px;
+  overflow: hidden;
+}
+/* A fence's title is usually a filename or the command itself, so it stays in the MONO voice at
+   the author's own case — the uppercase micro-label voice would mangle `--approve`. */
+.docs-prose .docs-code__title {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--color-faint);
+  background: var(--color-panel2);
+  border-bottom: 1px solid var(--color-line-soft);
+  padding: 7px 12px;
+}
+.docs-prose .docs-code pre {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+/* Asides. The rule down the left edge carries the voice: blue for a note, red for a hazard,
+   a quiet hairline for an optional shortcut. Red is the reserved semantic (DESIGN.md), and a
+   Warning is exactly what it is reserved for. */
+.docs-prose .docs-aside {
+  border-left: 3px solid var(--color-line);
+  background: var(--color-panel);
+  border-radius: 0 6px 6px 0;
+  padding: 12px 16px;
+  margin: 0 0 1.2em;
+}
+.docs-prose .docs-aside__label {
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-faint);
+  margin: 0 0 0.35em;
+}
+.docs-prose .docs-aside__body > :last-child {
+  margin-bottom: 0;
+}
+.docs-prose .docs-aside--note {
+  border-left-color: var(--color-accent);
+  background: var(--color-accent-wash);
+}
+.docs-prose .docs-aside--note .docs-aside__label {
+  color: var(--color-accent);
+}
+.docs-prose .docs-aside--warning {
+  border-left-color: var(--destructive);
+}
+.docs-prose .docs-aside--warning .docs-aside__label {
+  color: var(--destructive);
+}
+
+/* An ordered procedure: the numbers are the list's own, set in the mono voice on the margin. */
+.docs-prose .docs-steps {
+  list-style: none;
+  padding-left: 0;
+  counter-reset: docs-step;
+  margin: 0 0 1.2em;
+}
+.docs-prose .docs-step {
+  counter-increment: docs-step;
+  position: relative;
+  padding-left: 2.2em;
+  padding-bottom: 1.2em;
+  border-left: 1px solid var(--color-line-soft);
+  margin: 0;
+}
+.docs-prose .docs-step:last-child {
+  border-left-color: transparent;
+  padding-bottom: 0;
+}
+.docs-prose .docs-step::before {
+  content: counter(docs-step);
+  position: absolute;
+  left: -13px;
+  top: 0;
+  width: 25px;
+  height: 25px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.docs-prose .docs-step__title {
+  font-weight: 500;
+  color: var(--color-ink);
+  margin: 0.15em 0 0.5em;
+}
+.docs-prose .docs-step > :last-child {
+  margin-bottom: 0;
+}
+
+/* Tabs, WITHOUT JavaScript: the radios are the state, the labels are the control, and
+   `:checked ~` shows the matching panel. The radios stay focusable (keyboard switching works)
+   but take no space; the enumerated rules cover the six tabs a set may hold. */
+.docs-prose .docs-tabs {
+  border: 1px solid var(--color-line-soft);
+  border-radius: 6px;
+  padding: 0 14px 4px;
+  margin: 0 0 1.2em;
+  display: flow-root;
+}
+.docs-prose .docs-tabs__radio {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.docs-prose .docs-tabs__label {
+  display: inline-block;
+  padding: 9px 2px 7px;
+  margin-right: 16px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--color-faint);
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+.docs-prose .docs-tabs__label:hover {
+  color: var(--color-ink);
+}
+.docs-prose .docs-tabs__radio:checked + .docs-tabs__label {
+  color: var(--color-ink);
+  border-bottom-color: var(--color-accent);
+}
+.docs-prose .docs-tabs__radio:focus-visible + .docs-tabs__label {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+.docs-prose .docs-tab {
+  display: none;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-line-soft);
+}
+.docs-prose .docs-tab > :last-child {
+  margin-bottom: 0;
+}
+.docs-prose .docs-tabs__radio:nth-of-type(1):checked ~ .docs-tab:nth-of-type(1),
+.docs-prose .docs-tabs__radio:nth-of-type(2):checked ~ .docs-tab:nth-of-type(2),
+.docs-prose .docs-tabs__radio:nth-of-type(3):checked ~ .docs-tab:nth-of-type(3),
+.docs-prose .docs-tabs__radio:nth-of-type(4):checked ~ .docs-tab:nth-of-type(4),
+.docs-prose .docs-tabs__radio:nth-of-type(5):checked ~ .docs-tab:nth-of-type(5),
+.docs-prose .docs-tabs__radio:nth-of-type(6):checked ~ .docs-tab:nth-of-type(6) {
+  display: block;
+}
+
+/* A small set of next destinations. */
+.docs-prose .docs-cards {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  margin: 0 0 1.2em;
+}
+/* A card is an <a>, so it also has to undo the running-text link underline above. */
+.docs-prose .docs-card {
+  display: block;
+  border: 1px solid var(--color-line-soft);
+  border-radius: 10px;
+  background: var(--color-panel);
+  padding: 16px 18px;
+  transition: border-color 120ms ease;
+}
+.docs-prose .docs-card:hover {
+  border-color: var(--color-line);
+}
+.docs-prose .docs-card__title {
+  display: block;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 13.5px;
+  letter-spacing: -0.02em;
+  color: var(--color-ink);
+}
+.docs-prose .docs-card__body {
+  display: block;
+  margin-top: 4px;
+  font-size: 13.5px;
+  color: var(--color-dim);
+}
+.docs-prose .docs-card__body > :last-child {
+  margin-bottom: 0;
+}
+
 /* ── Highlighted code file view (server-sanitized github-light HTML from lib/view/highlight) ───
    The renderer's spans carry the theme colors as inline styles; this owns only the <pre> frame. */
 .code-view pre {

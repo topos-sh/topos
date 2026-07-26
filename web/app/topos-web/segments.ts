@@ -22,6 +22,9 @@ export const OSS_TOP_LEVEL_SEGMENTS: readonly string[] = [
   "api",
   "app",
   "claim",
+  // The documentation and the docs root's markdown twin (`/docs.md`), both origin-rooted.
+  "docs",
+  "docs.md",
   "healthz",
   "install",
   "install.sh",
@@ -45,7 +48,7 @@ export const FUTURE_RESERVED_SEGMENTS: readonly string[] = [
   "cloud",
   "demo",
   "dev",
-  "docs",
+  // `docs` moved to OSS_TOP_LEVEL_SEGMENTS above when the documentation became a real route.
   "download",
   "help",
   "internal",

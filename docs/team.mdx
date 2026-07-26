@@ -1,0 +1,171 @@
+---
+title: Run it as a team
+description: Invite people, group skills into channels, watch the fleet, and set workspace policy.
+sidebar_label: Team & channels
+---
+
+A **workspace** is your team: one roster, one address, one catalog of skills. On Topos Cloud its
+address is `https://topos.sh/<name>`; on a self-hosted install it is your origin. This page is the
+team-side toolkit — inviting, channels, roles, and the pages that answer "did it reach everyone?"
+
+<Note>
+  Agents distribute skills; **they do not manage people**. `topos invite` is the one roster verb in
+  the CLI. Reading the roster, changing roles, removing members, and leaving a workspace are
+  browser acts, deliberately.
+</Note>
+
+## Invite people
+
+Inviting is **owner-only** and **requires mail to be configured** on the server — the mailbox
+round-trip is the identity proof.
+
+```bash
+topos invite dev@acme.com ops@acme.com             # describe first
+topos invite dev@acme.com ops@acme.com --yes       # send
+topos invite dev@acme.com --channel backend --yes  # lead with a first destination
+topos invite deploy@acme.com --skill deploy --yes
+```
+
+At most one of `--skill` / `--channel`. The hint prefills the newcomer's profile when they accept,
+so their machines land already carrying the set. A bare `topos invite` with no addresses mutates
+nothing — it prints the workspace address and policy. The browser equivalent is the **Members**
+page.
+
+The invitation mail carries three routes, so whoever receives it can use whichever fits:
+
+1. A browser link to the accept page.
+2. A paste-block for their agent:
+   ```text
+   Set up Topos for us: fetch https://topos.sh/agent and follow it. Our invite: <invite-url>
+   ```
+3. `topos login <invite-url>` — straight from a terminal.
+
+The accept is **email-bound**: signed in as the invited address it is one click; signed in as
+someone else, the page offers "sign out and continue" and never accepts as the wrong account; with
+no account yet, accepting mints one, born verified — the token arrived in that mailbox, which is
+the proof. Invitees can also decline, visibly. Invitations lapse after 7 days; re-inviting an
+address mints a fresh link and kills the old one — there is no separate resend button. Every dead
+token renders one constant page naming neither the workspace nor the email.
+
+**Every invitee starts as a member.** Roles are raised afterwards, on the roster. And note:
+accepting in the browser seats the person, but **nothing lands on any machine** until they run
+`topos login` there.
+
+## Roles
+
+Set on the **Members** page, owner-only, with a two-step confirm:
+
+| Role | Adds |
+|---|---|
+| **member** | Self-scoped verbs; publish to open skills; create channels; curate open channels |
+| **reviewer** | Approve/reject proposals, roll back, curate curated channels, see everyone's sessions |
+| **owner** | Invitations, roles, removal, loosening protection, archive/delete, workspace settings |
+
+The workspace must always keep an owner: the last owner can be neither demoted, removed, nor
+allowed to leave — ownership transfers by promoting someone else first.
+
+## Channels — "this group needs this set"
+
+A **channel** is a named set of skill references. Curating one is how a lead says *this team needs
+these* without administering people. Channels reference, they do not own: a skill in three
+channels is one skill, delivered once.
+
+Create one in the browser (**Channels → New channel** — member-level, no confirmation; an empty
+named group destroys nothing), add skills on its Skills tab, then tell people to carry it:
+
+```bash
+topos add @acme/channels/backend -g    # follow it everywhere you log in
+topos add @acme/channels/backend       # or pin it in this project's topos.toml
+```
+
+Or prefill it for a newcomer: `topos invite dev@acme.com --channel backend --yes`.
+
+Skills are placed into a channel on the channel's Skills tab, or at publish time:
+
+```bash
+topos publish deploy --to backend --yes
+```
+
+`--to` must name an **existing** channel — publish never creates one.
+
+**Who may curate** depends on the channel's mode: any member on an `open` channel (the default);
+reviewer or owner on a `curated` one. Tighten or loosen with the CLI — channel mode has no browser
+control today:
+
+```bash
+topos protect backend --yes        # tighten to curated — reviewer or owner
+topos protect backend open --yes   # loosen — owner only
+```
+
+<Note>
+  Name the channel plainly here. `protect` does not yet resolve the `@workspace/channels/name`
+  reference form that `add` accepts — the bare name (or the channel's full URL) is what works today.
+</Note>
+
+### The `everyone` channel
+
+Every workspace is born with `everyone`, and it is the **baseline**: implicitly part of every
+member's profile, so anything placed there reaches the whole roster's machines automatically. A
+brand-new skill published with no `--to` lands in `everyone`. Individuals can subtract single
+items with `topos remove <skill> -g`, which records a personal exclude line; the baseline itself
+cannot be dropped, renamed, or deleted.
+
+<Note>
+  Under a **curated** `everyone`, a member's first publish of a new skill lands catalog-only and a
+  curator places it — the receipt discloses the withheld placement rather than failing.
+</Note>
+
+Renaming a channel (owner, Settings tab) keeps its skills and history. Deleting one is a
+type-the-name confirmation: skills another channel, profile, or project manifest still delivers
+keep flowing; what only that channel delivered leaves machines at their next update, local edits
+snapshotted first.
+
+## Watch the fleet
+
+**Settings → Sessions** answers *"is everyone current? did the revert land?"* Owners and reviewers
+see the whole workspace grouped by person; a member sees only their own. Each session shows its
+machine name, when it logged in and was last seen, and its per-skill applied state — `current` or
+`behind`, with the applied version id.
+
+| Status chip | Means |
+|---|---|
+| **fresh** | Reported within the staleness window |
+| **stale** | No report within the window. Sessions report when an agent runs, so an idle machine reads stale — unconfirmed, not wrong |
+| **never reported** | Logged in, but nothing has synced yet |
+| **expired** | Past the workspace's session expiry — the machine logs in again |
+
+Owners can approve, reject, and remove sessions there. People end their own from
+`/account/sessions` or with `topos logout`.
+
+## Remove access
+
+- **Remove a member** (owner, Members page): removes the seat and ends that person's sessions in
+  this workspace in the same transaction. Their local copies stay theirs — removal stops future
+  delivery; it does not reach onto a machine and delete files.
+- **Remove one session** (owner, Settings → Sessions): ends delivery and reporting for exactly
+  that machine-and-workspace pair.
+- **Leave** (anyone, on their own seat): removes the seat and cuts off every one of their
+  machines. A sole owner is refused until they promote someone else.
+
+## Workspace policy
+
+Owners, on **Settings → General** — each knob shows who last set it, read from the audit ledger:
+
+| Setting | Default | What it does |
+|---|---|---|
+| **Review gate** | off | Require review for every change — the default unpinned skills inherit |
+| **Staleness window** | 7 days | When a session reads *stale* on the sessions page |
+| **Session approval** | off | A member's new login waits for an owner's approval; nothing is delivered while pending |
+| **Session expiry** | none | How long a login lasts before the machine logs in again |
+| **Registration** | invite-only | Self-hosted single-workspace installs only — whether an uninvited sign-up succeeds |
+| **Export skills** | — | Every skill at its current version plus a manifest, as one zip |
+
+## Who can see what
+
+A workspace's skill and channel pages answer **only for signed-in members** — anyone else gets a
+plain 404, indistinguishable from a mistyped path, so a URL cannot leak what exists.
+
+<Warning>
+  Do not hand a skill-page URL to someone outside the workspace as their way in — it 404s for
+  them. Hand out the workspace address (for `topos login`) or send an invitation.
+</Warning>

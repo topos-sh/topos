@@ -1,0 +1,23 @@
+---
+title: Publish a skill
+description: Share a local behavior with your team, and keep it current.
+sidebar_label: Publish
+---
+
+Publishing takes a directory you already have and gives it one identity, one
+version history, and one movable current version.
+
+## Publish
+
+```sh title="Publish from a directory"
+topos publish ./skills/code-review --yes
+```
+
+### What the receipt tells you
+
+A publish prints what changed and how to undo it. Read the receipt before you
+publish again.
+
+<Note>
+  A version is the hash of its bytes, so what you pin is exactly what you get.
+</Note>
