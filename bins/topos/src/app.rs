@@ -385,24 +385,35 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                     "note: could not open a local listener — falling back to the typed-code login."
                 );
             }
-            let listening = bound.is_some();
-            // `loopback: false` on the FIRST poll, deliberately. An `awaiting_redirect` here means
-            // the approval happened before this process existed, so the code it minted went to a
-            // listener that is gone — terminal, and the resume path says so. Only the polls AFTER
-            // this invocation opened its own browser may tolerate the wait (the closure below).
+            let holds_listener = bound.is_some();
+            // TWO facts, deliberately split. `bind_loopback: holds_listener` — a FRESH start must
+            // declare the flow loopback-bound exactly when this invocation holds the listener the
+            // approval page will redirect to (declaring less once shipped a device-bound flow
+            // behind a loopback terminal: the page could not pre-arm, the suppressed code was
+            // nowhere, and the wait ran out the whole TTL). `listening: false` on the FIRST poll —
+            // an `awaiting_redirect` here means the approval happened before this process existed,
+            // so the code it minted went to a listener that is gone — terminal, and the resume
+            // path says so. Only the polls AFTER this invocation opened its own browser may
+            // tolerate the wait (the closure below).
             let first = ops::session_login(
                 &ctx,
                 &connectors,
                 address.as_deref(),
                 ops::Handoff {
-                    loopback: false,
+                    bind_loopback: holds_listener,
+                    listening: false,
                     auth_code: None,
                 },
             );
             // The auto-open plan: the page URL needs the flow's challenge, which only exists once
-            // the start above has written the WAL.
+            // the start above has written the WAL. Only a LOOPBACK-BOUND flow gets the plan — a
+            // resumed device-bound flow (started piped, resumed on a TTY) keeps the typed-code
+            // ceremony, and the plan's absence is what makes the wait print its code.
             let loopback_plan = bound.and_then(|(opener, listener, state)| {
                 let wal = crate::enroll::read_wal(&fs, &ctx.layout).ok().flatten()?;
+                if !wal.loopback {
+                    return None;
+                }
                 Some(LoopbackPlan {
                     opener,
                     runner: &fs,
@@ -411,6 +422,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                     state,
                 })
             });
+            let listening = loopback_plan.is_some();
             let result = block_on_pending(
                 &clock,
                 &policy,
@@ -423,9 +435,10 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                         &connectors,
                         address.as_deref(),
                         ops::Handoff {
-                            // Whether THIS invocation holds a listener open. Polls from here on
-                            // are waiting on a redirect this process is genuinely able to receive.
-                            loopback: listening,
+                            bind_loopback: holds_listener,
+                            // Whether THIS invocation armed its listener in the wait. Polls from
+                            // here on wait on a redirect this process can genuinely receive.
+                            listening,
                             auth_code,
                         },
                     )

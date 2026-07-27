@@ -159,14 +159,21 @@ pub(crate) fn parse_login_address(
 /// transport / io failures otherwise.
 /// What the caller can do locally to complete this login.
 ///
-/// The pair travels together because they are two halves of one posture: `loopback` declares at
-/// the START that this machine has a browser and a bound 127.0.0.1 listener — which makes the
-/// flow's credential unredeemable without the code that redirect delivers — and `auth_code`
-/// carries that code back in once the listener has it. A client with neither is the classic
-/// device grant: the human types the short code and the poll alone redeems.
+/// Two facts that sound alike but must never be one flag (conflating them once shipped a login
+/// that started device-bound while the terminal held a listener and suppressed the code — the
+/// approval page then had nothing to pre-arm and the wait ran out the whole TTL):
+/// `bind_loopback` is what a FRESH start declares the flow AS (write-once, server-side) — this
+/// machine has a browser and a bound 127.0.0.1 listener, so the flow's credential is
+/// unredeemable without the code that redirect delivers. `listening` is whether THIS POLL may
+/// tolerate `awaiting_redirect` — true only once this invocation's own listener is armed; on the
+/// first poll of a resume it is false, because an approval that predates this process handed its
+/// code to a listener that no longer exists. `auth_code` carries the delivered code back in. A
+/// client with none of the three is the classic device grant: the human types the short code and
+/// the poll alone redeems.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Handoff<'a> {
-    pub loopback: bool,
+    pub bind_loopback: bool,
+    pub listening: bool,
     pub auth_code: Option<&'a str>,
 }
 
@@ -215,11 +222,13 @@ pub(crate) fn login(
     // The constant protocol card at the origin declares the API base (same-security re-root).
     let card = (connectors.enroll)(&target.origin).fetch_card(&target.origin)?;
     let base_url = resolve_api_base(&target.origin, &card.api_base_url)?;
+    // THE START IS THE DECLARATION: the flow is bound, write-once, to how its credential may be
+    // collected. `bind_loopback` — never `listening`, which is about polls — is what decides it.
     let start = (connectors.enroll)(&base_url).device_auth_start(
         &target.workspace,
         &machine_name(),
         target.invite_token.as_deref(),
-        handoff.loopback,
+        handoff.bind_loopback,
     )?;
     let now = i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX);
     let expires_at = now.saturating_add(
@@ -236,7 +245,7 @@ pub(crate) fn login(
         verification_uri: start.verification_uri,
         interval_secs: start.interval_secs,
         expires_at_millis: expires_at,
-        loopback: handoff.loopback,
+        loopback: handoff.bind_loopback,
         auth_code: None,
     };
     enroll::write_wal(ctx.fs, &ctx.layout, &wal)?;
@@ -293,7 +302,7 @@ fn resume(
     let enroll_src = (connectors.enroll)(&wal.base_url);
     match enroll_src.device_auth_poll(&wal.device_code, wal.auth_code.as_deref())? {
         DeviceAuthPoll::Pending => Ok(pending_data(wal)),
-        DeviceAuthPoll::AwaitingRedirect if handoff.loopback => {
+        DeviceAuthPoll::AwaitingRedirect if handoff.listening => {
             // A live listener is still open — the human has approved and the redirect is on its
             // way. Reported as pending so the wait loop keeps its shape.
             Ok(pending_data(wal))
@@ -603,11 +612,21 @@ mod tests {
     }
 
     /// A fake enrollment transport: the card declares an API base; the poll answers a scripted
-    /// sequence (pending → granted). State is Rc-shared so the connector can mint a fresh box per
-    /// call over ONE script.
-    #[derive(Clone)]
+    /// sequence (pending → granted); every start's BINDING declaration is recorded. State is
+    /// Rc-shared so the connector can mint a fresh box per call over ONE script.
+    #[derive(Clone, Default)]
     struct FakeEnroll {
         polls: std::rc::Rc<RefCell<Vec<DeviceAuthPoll>>>,
+        /// The `loopback` declaration each `device_auth_start` carried — the write-once binding.
+        starts: std::rc::Rc<RefCell<Vec<bool>>>,
+    }
+    impl FakeEnroll {
+        fn scripted(polls: Vec<DeviceAuthPoll>) -> Self {
+            Self {
+                polls: std::rc::Rc::new(RefCell::new(polls)),
+                starts: std::rc::Rc::default(),
+            }
+        }
     }
     impl EnrollSource for FakeEnroll {
         fn fetch_card(&self, _url: &str) -> Result<WireProtocolCard, ClientError> {
@@ -622,9 +641,10 @@ mod tests {
             workspace: &str,
             _requested_name: &str,
             _invite_token: Option<&str>,
-            _loopback: bool,
+            loopback: bool,
         ) -> Result<DeviceAuthStart, ClientError> {
             assert_eq!(workspace, "eng");
+            self.starts.borrow_mut().push(loopback);
             Ok(DeviceAuthStart {
                 device_code: "flow-secret".to_owned(),
                 user_code: "AB12-CD34".to_owned(),
@@ -682,12 +702,8 @@ mod tests {
     fn login_starts_pends_resumes_and_persists_the_session() {
         let home = scratch("flow");
         with_ctx(&home, |ctx| {
-            let fake = FakeEnroll {
-                polls: std::rc::Rc::new(RefCell::new(vec![
-                    DeviceAuthPoll::Pending,
-                    granted(LinkStatus::Active),
-                ])),
-            };
+            let fake =
+                FakeEnroll::scripted(vec![DeviceAuthPoll::Pending, granted(LinkStatus::Active)]);
             // The connector mints a fresh box per call, all sharing ONE poll script.
             let shim = {
                 let fake = fake.clone();
@@ -745,9 +761,7 @@ mod tests {
     fn a_pending_session_grant_persists_pending_and_skips_the_count() {
         let home = scratch("pend");
         with_ctx(&home, |ctx| {
-            let fake = FakeEnroll {
-                polls: std::rc::Rc::new(RefCell::new(vec![granted(LinkStatus::Pending)])),
-            };
+            let fake = FakeEnroll::scripted(vec![granted(LinkStatus::Pending)]);
             let shim = {
                 let fake = fake.clone();
                 move |_base: &str| -> Box<dyn EnrollSource> { Box::new(fake.clone()) }
@@ -772,6 +786,116 @@ mod tests {
             assert!(done.delivered.is_none());
             let all = sessions::read_sessions(ctx.fs, &ctx.layout).unwrap();
             assert_eq!(all.sessions[0].status, SESSION_PENDING);
+        });
+    }
+
+    #[test]
+    fn a_fresh_start_declares_the_binding_the_handoff_holds() {
+        let home = scratch("bind");
+        with_ctx(&home, |ctx| {
+            // With a listener held, the START must declare the flow loopback-bound — the
+            // write-once fact the approval page's zero-typing card resolves on. (Declaring less
+            // once shipped a device-bound flow behind a loopback terminal: the page could not
+            // pre-arm, the suppressed code was nowhere, and the wait ran out the whole TTL.)
+            let fake = FakeEnroll::scripted(Vec::new());
+            let shim = {
+                let fake = fake.clone();
+                move |_base: &str| -> Box<dyn EnrollSource> { Box::new(fake.clone()) }
+            };
+            let delivery = |_b: &str, _c: &str, _w: &str| -> Box<dyn DeliverySource> {
+                Box::new(EmptyDelivery)
+            };
+            let connectors = LoginConnectors {
+                enroll: &shim,
+                delivery: &delivery,
+                web_origin: "https://topos.sh".to_owned(),
+            };
+            let start = login(
+                ctx,
+                &connectors,
+                Some("topos.example.com/eng"),
+                Handoff {
+                    bind_loopback: true,
+                    listening: false,
+                    auth_code: None,
+                },
+            )
+            .unwrap();
+            assert!(start.pending.is_some());
+            assert_eq!(fake.starts.borrow().as_slice(), &[true]);
+            let wal = enroll::read_wal(ctx.fs, &ctx.layout).unwrap().unwrap();
+            assert!(
+                wal.loopback,
+                "the WAL records the binding the start declared"
+            );
+            // Without a listener, the same start is the classic device grant.
+            enroll::delete_wal(ctx.fs, &ctx.layout).unwrap();
+            login(
+                ctx,
+                &connectors,
+                Some("topos.example.com/eng"),
+                Handoff::default(),
+            )
+            .unwrap();
+            assert_eq!(fake.starts.borrow().as_slice(), &[true, false]);
+            let wal = enroll::read_wal(ctx.fs, &ctx.layout).unwrap().unwrap();
+            assert!(!wal.loopback);
+        });
+    }
+
+    #[test]
+    fn awaiting_redirect_is_terminal_unless_this_invocation_listens() {
+        let home = scratch("redirect");
+        with_ctx(&home, |ctx| {
+            let fake = FakeEnroll::scripted(vec![
+                DeviceAuthPoll::AwaitingRedirect,
+                DeviceAuthPoll::AwaitingRedirect,
+            ]);
+            let shim = {
+                let fake = fake.clone();
+                move |_base: &str| -> Box<dyn EnrollSource> { Box::new(fake.clone()) }
+            };
+            let delivery = |_b: &str, _c: &str, _w: &str| -> Box<dyn DeliverySource> {
+                Box::new(EmptyDelivery)
+            };
+            let connectors = LoginConnectors {
+                enroll: &shim,
+                delivery: &delivery,
+                web_origin: "https://topos.sh".to_owned(),
+            };
+            login(
+                ctx,
+                &connectors,
+                Some("topos.example.com/eng"),
+                Handoff {
+                    bind_loopback: true,
+                    listening: false,
+                    auth_code: None,
+                },
+            )
+            .unwrap();
+            // A LIVE listener tolerates the wait: the human approved, the redirect is coming.
+            let mid = login(
+                ctx,
+                &connectors,
+                None,
+                Handoff {
+                    bind_loopback: true,
+                    listening: true,
+                    auth_code: None,
+                },
+            )
+            .unwrap();
+            assert!(mid.pending.is_some());
+            assert!(enroll::read_wal(ctx.fs, &ctx.layout).unwrap().is_some());
+            // Without one, the code went to a listener that is gone — terminal, WAL cleared.
+            let err = login(ctx, &connectors, None, Handoff::default()).unwrap_err();
+            assert_eq!(err.code(), "LOGIN_FAILED");
+            assert!(
+                err.to_string().contains("could not be handed back"),
+                "{err}"
+            );
+            assert!(enroll::read_wal(ctx.fs, &ctx.layout).unwrap().is_none());
         });
     }
 
