@@ -55,6 +55,20 @@ export function shortDevice(deviceId: string): string {
   return deviceId.slice(0, 8);
 }
 
+/**
+ * A custody-recorded author fit for humans, or nothing. The client folds its device id
+ * (`d_` + 32 hex) into the commit as the author — machine identity that keeps the
+ * content-addressed commit id stable, not a name — so an id-shaped author is withheld and the
+ * directory-backed "proposed by" line stays the human attribution. Any other recorded author
+ * passes through untouched.
+ */
+export function humanAuthor(author: string | undefined): string | undefined {
+  if (author === undefined || /^d_[0-9a-f]{32}$/.test(author)) {
+    return undefined;
+  }
+  return author;
+}
+
 /** "12.3 KiB"-style byte count. */
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) {

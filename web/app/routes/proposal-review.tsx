@@ -7,6 +7,7 @@ import {
   useRevalidator,
   useRouteError,
 } from "react-router";
+import { humanAuthor } from "@/components/format";
 import { ApproveHandoff } from "@/components/review/ApproveHandoff";
 import { CommentsSection } from "@/components/review/CommentsSection";
 import { DiffFileCard } from "@/components/review/DiffFileCard";
@@ -263,7 +264,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     header: {
       skillName: skill,
       versionId,
-      author: candidateMeta.data.author,
+      author: humanAuthor(candidateMeta.data.author),
       message: candidateMeta.data.message,
       createdAt: shared.createdAt,
       proposer: shared.proposer,
