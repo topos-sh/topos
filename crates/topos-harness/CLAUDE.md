@@ -3,8 +3,14 @@
 The `HarnessAdapter` trait + the `ConfigStore` + `CommandRunner` ports + the harness impls. The one real
 client-side port. Does discovery + byte-exact placement targeting + the auto-update-trigger (un)install
 (session-start hooks for Claude Code and Hermes; a scheduled silent cron for OpenClaw). The registered
-sweep everywhere is the ONE byte-stable `topos update --quiet`, which self-throttles client-side (TTL +
+sweep everywhere is the ONE `topos update --quiet`, which self-throttles client-side (TTL +
 single-flight), so a trigger may fire on every session-shaped event (or a 1-minute cron tick) cheaply.
+**One optional marker varies per harness:** `--hook <harness>` names the calling trigger and selects
+what a byte-changing quiet sweep may print. UNMARKED — every trigger here except Claude Code's — is the
+schema-conservative default: `hookEventName` + `additionalContext` only, and nothing at all when there
+is nothing a person must read, the shape a strict hook-output validator accepts (codex rejects any
+unknown field and paints the whole session-start hook as failed). A harness proven to understand an
+extension declares itself; `--hook claude-code` is the one such declaration today.
 `HarnessAdapter::trigger_present` is the hook-HEALTH probe `list`/`auth status` read: it defaults to the
 footprint's managed-entry answer for the config-file adapters, and OpenClaw overrides it with a live
 scheduler probe — health is never claimed on faith, and the footprint stays a PATH disclosure.
@@ -20,10 +26,13 @@ content-blind `install_currency_trigger` /
 sentinel; fail-closed on a malformed/wrong-typed config; `uninstall_footprint` discloses the config path
 only when our entry is present, and never as a delete target). The managed entry is a **matcher-free,
 `async: true`** SessionStart group (an omitted matcher fires on every source — startup, resume, clear,
-compact; async so the sweep never blocks a session event), and the quiet sweep answers with the
-SessionStart hook-output JSON (`reloadSkills`) when it changed bytes, so pulled skills go live
-same-session. A re-arm MIGRATES a sentinel-marked entry from any earlier shape (the old `topos pull`
-command; the `matcher: startup` sync handler) to the canonical one in place — on a group also holding a
+compact; async so the sweep never blocks a session event) whose command carries `--hook claude-code`
+— the marker that opts this harness into the `reloadSkills` field, so a byte-changing quiet sweep
+answers with the SessionStart hook-output JSON that makes pulled skills go live same-session (the
+command is otherwise the shared shell sweep line verbatim; a test pins the two against drift).
+A re-arm MIGRATES a sentinel-marked entry from any earlier shape (an earlier command spelling; the
+`matcher: startup` sync handler) to the canonical one in place — ownership keys on the sentinel ALONE,
+so the command's spelling is free to change — on a group also holding a
 user's handler, OUR handler is EXTRACTED into its own matcher-free group (their matcher would pin it to
 one source) and the user's group, handlers, and matcher stay byte-identical.
 `$CLAUDE_CONFIG_DIR` (else `$HOME/.claude`) is honored and **injected** so tests never touch the real
@@ -116,7 +125,9 @@ and topos never writes it), `amp` (`~/.config/amp/plugins/topos.js`, vendor docs
 no exec bit needed). Each instance's evidence level (live-probed vs vendor-docs) is stated in its
 module doc and rides the outcome's `note`. `adapter_for_slug`/`supported_slugs` is the seam the
 CLI's breadth arming sweep consumes; the ONE sweep spelling is composed from shared consts so it
-cannot drift per-surface.
+cannot drift per-surface, and every one of them is UNMARKED (no `--hook`) — none of these harnesses
+is proven to tolerate hook-output fields beyond the two the strict schema permits, and codex
+actively rejects them.
 
 **Planned:** the byte-writing materialization (atomic dir-swap) lives in the CLI's update path, not here;
 what remains for the adapters themselves is the two pilot readiness probes above, not code.

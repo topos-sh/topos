@@ -179,17 +179,26 @@ consent step, and no device-link lane; `follow`/`unfollow`/`channel` are gone.
   error.
 - **The hook posture + notices** (`ops/reconcile`, `sync_status`, `ops/quiet_gate`) — the reconcile
   stamps `state/sync_status.json` on every delivery/report; `update --quiet` (the session-start hook
-  path) self-throttles (single-flight lock + TTL, default 300 s) and stays near-byte-silent: a
-  no-change sweep emits nothing; a changed sweep emits the ONE SessionStart hook JSON
-  (`reloadSkills`) with the ended-session freeze and unreachable-AND-stale facts riding
-  `additionalContext`. An auth/transport failure warns and exits 0; a genuinely local failure exits
-  nonzero.
+  path) self-throttles (single-flight lock + TTL, default 300 s) and stays near-byte-silent. ONE
+  renderer (`hook_output_json`) decides its stdout in every case: at most ONE SessionStart hook
+  JSON, in the DIALECT the calling trigger declares with the hidden `--hook <harness>` arg, and
+  NOTHING when there is nothing to say. Two INDEPENDENT axes drive it — `changed` (bytes actually
+  moved) is the only thing that may set `reloadSkills`, and the person-facing facts (the
+  ended-session freeze, unreachable-AND-stale) ride `additionalContext` whenever they exist,
+  changed or not. Raw text is never used: `additionalContext` is what INJECTS into the session,
+  and a harness validating hook stdout against a strict schema may discard anything else — a fact
+  a person must not miss cannot depend on that. So `--hook claude-code` (the marker that harness's
+  own registered hook command carries) speaks when either axis is live, carrying `reloadSkills`
+  only on a real byte change; unmarked and any unrecognized name (it fails closed, never errors)
+  is the schema-conservative dialect — those two keys only, ever, so it speaks only when there are
+  lines. An auth/transport failure warns and exits 0; a genuinely local failure exits nonzero.
 - **The BUILT-IN `topos` skill** (`ops/builtin`, `cli_ref`, the repo-top-level `skills/topos/` source) —
   the meta-skill teaching an agent the manifest surface, the contribute loop, distillation, and the
   team-genesis runbook. The binary embeds the three files (`SKILL.md` + `INSTALL.md` + the generated
   `reference.md` = the same bytes as `docs/cli.md`, one renderer `cli_ref::cli_ref_md()`, both copies
   drift-gated) and places them through the ORDINARY engine at the trigger-arming moments, force-synced
-  on every bare sweep (changes ride `reloadSkills`). A pre-existing `topos` dir is never written by the
+  on every bare sweep (a change counts as a changed sweep for the hook document above). A
+  pre-existing `topos` dir is never written by the
   sweep; a marker-carrying downloaded copy is adopted snapshot-first by the explicit **`add topos`**
   restore (which also clears the durable **`remove topos --yes`** opt-out). NOT a subscription — no
   manifest row, the plane never hears of it; the name is reserved end-to-end.

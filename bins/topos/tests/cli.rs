@@ -197,8 +197,8 @@ fn end_to_end_claude_code_adopt_arms_currency_and_pull_is_silent() {
 
     let settings = std::fs::read_to_string(claude.join("settings.json")).unwrap();
     assert!(
-        settings.contains("topos update --quiet"),
-        "the hook command was installed"
+        settings.contains("topos update --quiet --hook claude-code"),
+        "the hook command was installed, carrying the dialect marker"
     );
     assert!(
         settings.contains("# topos:currency"),
@@ -217,9 +217,10 @@ fn end_to_end_claude_code_adopt_arms_currency_and_pull_is_silent() {
     assert!(ok);
     assert_eq!(v["data"]["tracked"][0]["skill"], "pr-describe");
 
-    // The installed hook runs `topos update --quiet`; the field's already-armed hooks run the retained
-    // `topos pull --quiet` alias. BOTH must exit 0 and emit NOTHING on stdout (a SessionStart hook's
-    // stdout is injected into the session). Exercise the alias here (it must keep working).
+    // The installed hook runs `topos update --quiet --hook claude-code`; the field's already-armed
+    // hooks run the retained `topos pull --quiet` alias. BOTH must exit 0 and emit NOTHING on stdout
+    // (a SessionStart hook's stdout is injected into the session). Exercise the alias here (it must
+    // keep working).
     let out = Command::new(bin())
         .env("TOPOS_HOME", &home)
         .env("CLAUDE_CONFIG_DIR", &claude)
@@ -533,4 +534,245 @@ fn reference_shaped_grammar_refusals_never_reach_the_path_arms() {
         );
     }
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The hermetic sweep runner: a scratch `$HOME` (so no real harness on the dev's machine is
+/// "present" and nothing lands in a real skills dir), an injected Claude config home, the other
+/// per-harness home overrides scrubbed — returning BOTH raw streams, because the hook document IS
+/// the stdout under test.
+fn sweep_raw(
+    topos_home: &Path,
+    disc_home: &Path,
+    claude: &Path,
+    args: &[&str],
+) -> std::process::Output {
+    Command::new(bin())
+        .env("TOPOS_HOME", topos_home)
+        .env("HOME", disc_home)
+        .current_dir(disc_home)
+        .env("CLAUDE_CONFIG_DIR", claude)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("CODEX_HOME")
+        .env_remove("HERMES_HOME")
+        .env_remove("VIBE_HOME")
+        .env_remove("AUTOHAND_HOME")
+        .env_remove("APPDATA")
+        .env_remove("FLATPAK_XDG_CONFIG_HOME")
+        .args(args)
+        .output()
+        .expect("spawn topos update --quiet")
+}
+
+#[test]
+fn the_quiet_sweeps_hook_document_follows_the_calling_triggers_dialect() {
+    // The REAL command path, over the REAL argv: this is the seam the helper's unit tests cannot
+    // reach — a hard-coded dialect, or a `--hook` value parsed and then dropped on the floor,
+    // would leave every one of those green while shipping the bug back.
+    //
+    // Forcing a CHANGED-BYTES sweep needs no server: a FRESH `TOPOS_HOME`'s first bare sweep
+    // places the built-in `topos` skill, and that placement is a byte change. Each arm therefore
+    // gets its own untouched home, and asserts the placement really happened — otherwise a sweep
+    // that quietly changed nothing would make the whole assertion vacuous.
+    for (tag, marker, wants_reload) in [
+        ("cc", vec!["--hook", "claude-code"], true),
+        ("bare", vec![], false),
+        ("codex", vec!["--hook", "codex"], false),
+    ] {
+        let home = scratch(&format!("dialect-{tag}-home"));
+        let disc = scratch(&format!("dialect-{tag}-disc"));
+        let claude = scratch(&format!("dialect-{tag}-claude"));
+
+        let mut args = vec!["update", "--quiet", "--ttl", "0"];
+        args.extend_from_slice(&marker);
+        let out = sweep_raw(&home, &disc, &claude, &args);
+
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            out.status.success(),
+            "{tag}: a session-start sweep always exits 0 — stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // Non-vacuity: the sweep DID change bytes, so a hook document was genuinely in play.
+        assert!(
+            claude
+                .join("skills")
+                .join("topos")
+                .join("SKILL.md")
+                .exists(),
+            "{tag}: the sweep must have placed the built-in skill (a changed-bytes sweep)"
+        );
+
+        if wants_reload {
+            let v: serde_json::Value = serde_json::from_str(stdout.trim())
+                .unwrap_or_else(|_| panic!("{tag}: the hook document must be JSON: {stdout:?}"));
+            assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
+            assert_eq!(
+                v["hookSpecificOutput"]["reloadSkills"], true,
+                "{tag}: the declared harness opts INTO the reload extension"
+            );
+        } else {
+            // The whole point: an agent that never declared itself must never be handed a field
+            // its schema may reject — one unknown key fails the entire session-start hook.
+            assert!(
+                !stdout.contains("reloadSkills"),
+                "{tag}: an undeclared harness must never receive the reload extension: {stdout:?}"
+            );
+            assert!(
+                stdout.is_empty(),
+                "{tag}: with nothing a person must read, the conservative dialect stays silent: \
+                 {stdout:?}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&disc);
+        let _ = std::fs::remove_dir_all(&claude);
+    }
+}
+
+/// A throwaway HTTP server that answers EVERY request `404 Not Found` — the shape a workspace this
+/// device no longer reaches presents (unlinked, seat removed, workspace gone). Std-only; the guard
+/// shuts the listener when dropped.
+struct Gone404 {
+    port: u16,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Gone404 {
+    fn start() -> Self {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a 404 server");
+        let port = listener.local_addr().unwrap().port();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&stop);
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                let Ok(mut c) = conn else { return };
+                let _ = c.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut buf = [0_u8; 4096];
+                let _ = c.read(&mut buf);
+                let _ = c.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+                let _ = c.flush();
+            }
+        });
+        Self { port, stop }
+    }
+}
+
+impl Drop for Gone404 {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
+    }
+}
+
+/// Write a session row pointing at `port` — an ACTIVE login whose server answers 404, which is how
+/// "this device no longer has access" reaches the sweep.
+fn write_gone_session(topos_home: &Path, port: u16) {
+    let identity = topos_home.join("identity");
+    std::fs::create_dir_all(&identity).unwrap();
+    let doc = serde_json::json!({
+        "schema_version": 1,
+        "sessions": [{
+            "host": "gone.example",
+            "base_url": format!("http://127.0.0.1:{port}"),
+            "workspace_id": "w_gone",
+            "workspace_name": "gonews",
+            "display_name": "Gone WS",
+            "session_id": "sn_gone",
+            "credential": "tok_gone",
+            "status": "active",
+            "logged_in_at": 1_000,
+        }],
+    });
+    let path = identity.join("sessions.json");
+    std::fs::write(&path, doc.to_string()).unwrap();
+    // The sessions doc holds a bearer credential, so the client reads it through the private-file
+    // primitives and REFUSES anything looser than 0600 — a fixture must be born the same way.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+#[test]
+fn a_person_facing_line_reaches_every_dialect_as_an_injectable_document() {
+    // The fact under test: a quiet sweep that changed NOTHING but has something a person must not
+    // miss (here, a workspace this device can no longer reach — its skills are frozen in place)
+    // must still deliver that text through `additionalContext`. Raw stdout is not a substitute: an
+    // agent that validates hook output against a strict schema is free to discard anything else,
+    // and the warning would evaporate silently — which is exactly the defect.
+    //
+    // `reloadSkills` must NOT ride along: nothing moved, so asking Claude Code to re-scan its
+    // skill dirs would be a lie. Both halves are asserted per dialect.
+    for (tag, marker, dialect_reloads) in [
+        ("bare", vec![], false),
+        ("codex", vec!["--hook", "codex"], false),
+        ("cc", vec!["--hook", "claude-code"], true),
+    ] {
+        let home = scratch(&format!("notice-{tag}-home"));
+        let disc = scratch(&format!("notice-{tag}-disc"));
+        let claude = scratch(&format!("notice-{tag}-claude"));
+
+        // Settle the built-in FIRST, with no session in play, so the sweep under test is a genuine
+        // no-change sweep — otherwise the built-in placement would set `changed` and the
+        // `reloadSkills` half of this test would prove nothing.
+        let warmup = sweep_raw(&home, &disc, &claude, &["update", "--quiet", "--ttl", "0"]);
+        assert!(warmup.status.success(), "{tag}: warm-up sweep exits 0");
+        assert!(
+            claude
+                .join("skills")
+                .join("topos")
+                .join("SKILL.md")
+                .exists(),
+            "{tag}: the warm-up placed the built-in, so the next sweep changes nothing"
+        );
+
+        let server = Gone404::start();
+        write_gone_session(&home, server.port);
+
+        let mut args = vec!["update", "--quiet", "--ttl", "0"];
+        args.extend_from_slice(&marker);
+        let out = sweep_raw(&home, &disc, &claude, &args);
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            out.status.success(),
+            "{tag}: a session-start sweep always exits 0 — stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // It arrives as a DOCUMENT, not raw text.
+        let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| {
+            panic!("{tag}: the line must arrive as an injectable document, got raw: {stdout:?}")
+        });
+        let inner = v["hookSpecificOutput"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{tag}: no hookSpecificOutput: {stdout:?}"));
+        assert_eq!(inner["hookEventName"], "SessionStart", "{tag}");
+        let ctx = inner
+            .get("additionalContext")
+            .and_then(|c| c.as_str())
+            .unwrap_or_else(|| panic!("{tag}: the fact must ride additionalContext: {stdout:?}"));
+        assert!(
+            ctx.contains("no longer has access"),
+            "{tag}: the person-facing fact itself must be in the injected text: {ctx:?}"
+        );
+        // Nothing moved — so no dialect may claim a reload, not even the one that understands it.
+        assert!(
+            !stdout.contains("reloadSkills"),
+            "{tag}: a no-change sweep must never ask for a skill re-scan (dialect reloads: \
+             {dialect_reloads}): {stdout:?}"
+        );
+
+        drop(server);
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&disc);
+        let _ = std::fs::remove_dir_all(&claude);
+    }
 }

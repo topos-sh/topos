@@ -921,6 +921,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             onto_current,
             quiet,
             ttl,
+            hook,
         } => {
             // `--reset` is its own two-phase discard verb (loss-led describe / `--yes` apply); it
             // does not flow through the reconcile and is never a `--quiet` hook shape.
@@ -955,7 +956,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             }
             // The bare sweep also re-syncs the BUILT-IN `topos` skill (force-synced to this
             // binary; the durable opt-out honored inside). Best-effort: a built-in hiccup must
-            // never block the team sweep; its byte changes ride the quiet hook's `reloadSkills`.
+            // never block the team sweep; its byte changes count as a changed sweep below.
             let builtin_changed = if bare_sweep {
                 match ops::ensure_builtin(&ctx) {
                     Ok(r) => r.changed,
@@ -1030,29 +1031,40 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 );
             }
             if quiet {
-                // NEAR-byte-silent stdout (a session-start hook's stdout reaches the session): a
-                // clean no-change sweep emits nothing; a sweep that CHANGED skill bytes emits the
-                // ONE SessionStart hook-output JSON (`reloadSkills`), with the two facts a person
-                // must not miss — an ended-session freeze, and unreachable-AND-stale — riding its
-                // context injection; without changes those facts stay ONE plain line each. An
+                // NEAR-byte-silent stdout (a session-start hook's stdout reaches the session).
+                // ONE renderer decides what a hook hears, always, in the CALLING trigger's dialect
+                // (`--hook <harness>`): at most ONE SessionStart hook-output document, carrying
+                // `reloadSkills` only when bytes actually MOVED, and the two facts a person must
+                // not miss — an ended-session freeze, and unreachable-AND-stale — on
+                // `additionalContext` whenever they exist. Never raw text: that field is what
+                // INJECTS into the session, and an agent validating hook output against a strict
+                // schema may discard anything else. Nothing to say → nothing printed. An
                 // auth/transport failure warns and exits 0; a genuinely local failure still
                 // surfaces on stderr with a non-zero exit.
+                let dialect = ops::HookDialect::from_slug(hook.as_deref());
                 let now = i64::try_from(clock.now_unix_millis()).unwrap_or(i64::MAX);
                 match result {
                     Ok(out) => {
                         let lines = ops::quiet_hook_lines(&fs, &ctx.layout, now, &out);
-                        if ops::sweep_changed_bytes(&out.data) || builtin_changed {
-                            println!("{}", ops::reload_skills_json(&lines));
-                        } else {
-                            for line in lines {
-                                println!("{line}");
-                            }
+                        let changed = ops::sweep_changed_bytes(&out.data) || builtin_changed;
+                        if let Some(doc) = ops::hook_output_json(dialect, changed, &lines) {
+                            println!("{doc}");
                         }
                         ExitCode::SUCCESS
                     }
                     Err(e) if ops::quiet_soft_failure(&e) => {
+                        // A SOFT failure (auth/transport) is a person-facing line like any other,
+                        // so it rides the SAME renderer — never raw text a strict-schema agent may
+                        // discard instead of inject. Nothing landed, so `changed` is false: no
+                        // dialect may claim a reload here. The exit stays 0 — only the message's
+                        // shape changes, never the status.
                         let _ = diag.note(cmd_name, &e);
-                        println!("topos: update skipped — {}", render::safe_message(&e));
+                        let line = format!("topos: update skipped — {}", render::safe_message(&e));
+                        if let Some(doc) =
+                            ops::hook_output_json(dialect, false, std::slice::from_ref(&line))
+                        {
+                            println!("{doc}");
+                        }
                         ExitCode::SUCCESS
                     }
                     Err(e) => emit_err(false, cmd_name, &e, &diag),

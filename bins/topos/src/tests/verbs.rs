@@ -858,8 +858,9 @@ fn add_recognizes_a_claude_code_skill_tags_it_installs_the_hook_and_writes_nothi
     // The hook landed in the harness settings.json (the only write outside ~/.topos/).
     let settings = std::fs::read_to_string(claude.0.join("settings.json")).unwrap();
     assert!(
-        settings.contains("topos update --quiet"),
-        "hook command installed"
+        settings.contains("topos update --quiet --hook claude-code"),
+        "hook command installed, carrying the dialect marker that opts Claude Code into the \
+         reload extension"
     );
     assert!(settings.contains("# topos:currency"), "sentinel present");
 

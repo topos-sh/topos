@@ -104,8 +104,8 @@ pub(crate) use reference::{
 // The withdrawal/exclusion clean is driven through `remove`/the reconcile; the direct re-export
 // serves the placement-breadth suite's foreign-preservation regression.
 pub(crate) use quiet_gate::{
-    QuietGate, quiet_gate, reload_skills_json, resolve_ttl_ms, stamp_sweep, sweep_changed_bytes,
-    sweep_lock,
+    HookDialect, QuietGate, hook_output_json, quiet_gate, resolve_ttl_ms, stamp_sweep,
+    sweep_changed_bytes, sweep_lock,
 };
 pub(crate) use remove::{RemoveConnectors, RemoveOutcome, remove};
 pub(crate) use revert::{RevertOutcome, revert};

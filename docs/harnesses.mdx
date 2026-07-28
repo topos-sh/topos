@@ -16,8 +16,11 @@ not to Topos.
 ## Three tiers of support
 
 - **auto-update** — Topos installs an update trigger inside the agent (a session-start hook,
-  or a scheduled job where that's what the agent offers). Managed skills refresh silently
-  and are current before the agent uses them.
+  or a scheduled job where that's what the agent offers), so managed skills refresh without
+  you asking. Exactly when a refresh becomes visible depends on the form: a session-start hook
+  has the new bytes on disk before the session begins work; OpenClaw's scheduled job catches
+  up within about a minute; and Hermes builds its skill index once per process, so changed
+  content is picked up immediately but a brand-new skill appears at the next cold start.
 - **delivery** — no trigger in that agent, but every managed skill is still placed into its
   skills directory and refreshed by *every* update on the machine — another agent's trigger,
   or a manual `topos update`.
@@ -27,23 +30,46 @@ not to Topos.
 <Note>
   Some agents require **their own one-time approval** before they run an installed trigger
   (Codex trusts hooks in-app via `/hooks`; Gemini CLI confirms new hooks; Goose enables
-  plugins itself). Until you grant it, `topos status` reports that trigger honestly as *not
-  yet active*, and the agent behaves like the delivery tier.
+  plugins itself). Until you grant it the trigger sits there and never fires, and the agent
+  behaves like the delivery tier. `topos status` answers whether the trigger is *installed* —
+  it reports `armed` as soon as the artifact is in place — so it cannot tell you an approval
+  is still outstanding. That step is yours to complete in the agent.
 </Note>
 
 ## The trigger
 
-Every trigger runs the same line:
+Every trigger runs the same base sweep — `topos update --quiet` — registered in whatever form
+the agent accepts. Claude Code's line adds a short flag naming itself, which is how that agent
+opts into the extra answer described below; every other trigger runs the sweep unadorned.
 
-```sh
-command -v topos >/dev/null 2>&1 && topos update --quiet || true  # topos:currency
-```
+Two separate things decide whether a failed sweep ever reaches the agent. First, what `topos`
+itself does: an unreachable server or a login that has ended is treated as a soft failure —
+reported quietly, exit `0` — while a genuinely local problem, like a corrupt file or a failed
+write, exits non-zero. Second, whether the trigger's form passes that through. A shell hook
+wraps the sweep in a guard that skips it when the `topos` binary isn't there and a tail that
+exits `0` regardless, so the agent sees success either way; a plugin hook calls the sweep from
+the plugin's own code and swallows errors there, with the same effect. Only the plain-command
+form — run as-is under the agent's own timeout, with no wrapper — lets a non-zero exit reach
+the agent. The deliberate result is that a best-effort update almost never surfaces as a
+session-start error.
 
-It exits `0` no matter what, prints nothing into the session, self-throttles (default 300
-seconds), and the trailing marker is how Topos recognizes its own line and never touches
-yours. Triggers are installed when Topos wires into an agent (a completed login, an adopt)
-and removed by `topos uninstall --yes`. Every adapter is idempotent and fails closed: if a
-config file's shape can't be proven, Topos reports it honestly and writes nothing.
+The sweep self-throttles (default 300 seconds), so a trigger can fire on every session event
+cheaply. It speaks only when there is something worth saying: skills actually changed, or
+there is a fact you shouldn't miss — a workspace this machine can no longer reach, say, whose
+skills are now frozen in place. With neither, it prints nothing at all. When it does speak, it
+uses the narrowest shape the calling agent is known to accept, because some agents check hook
+output against a strict schema and treat anything unexpected as a failed hook. Claude Code —
+the agent that names itself in its trigger — is the one that additionally gets asked to
+re-scan its skills, which is what makes freshly pulled skills usable in the session already
+open; it is asked only when skills really did change.
+
+An ownership marker written alongside each trigger is how Topos recognizes its own and never
+touches yours. Triggers are installed when Topos wires into an agent (a completed login, an
+adopt) and removed by `topos uninstall --yes`. Removal is confirmed for the triggers that live
+in a config file Topos can read; where one lives behind an agent's own service and that
+service isn't reachable at the time, Topos reports the removal as unconfirmed — a scheduled job
+may survive and resume — rather than claiming it is gone. Every adapter is idempotent and fails
+closed: if a config file's shape can't be proven, Topos reports it honestly and writes nothing.
 
 ## Where the files land
 

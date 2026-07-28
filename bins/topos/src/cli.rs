@@ -86,6 +86,12 @@ pub(crate) enum Command {
         /// `TOPOS_UPDATE_TTL` changes the default.
         #[arg(long, value_name = "SECONDS")]
         ttl: Option<u64>,
+        /// Which agent's trigger is calling (machinery for registered triggers, not a human
+        /// verb). It selects the stdout shape a changed `--quiet` sweep may emit: an agent that
+        /// understands the reload extension declares itself here; everyone else — including an
+        /// unrecognized name — gets the conservative document every agent's schema accepts.
+        #[arg(long, value_name = "HARNESS", hide = true)]
+        hook: Option<String>,
     },
     /// Connect this machine to a workspace. Opens your browser for a one-click approval; from
     /// then on, the workspace's skills arrive and stay updated by themselves. The address is

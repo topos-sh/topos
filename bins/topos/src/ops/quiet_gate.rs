@@ -141,19 +141,79 @@ pub(crate) fn sweep_changed_bytes(data: &PullData) -> bool {
     })
 }
 
-/// The quiet hook's ONE stdout document when the sweep changed bytes: the SessionStart hook-output
-/// JSON telling Claude Code to re-scan its skill dirs (`reloadSkills`), with any person-facing
-/// lines riding `additionalContext` (context-injected — exactly where plain hook stdout lands, so
-/// nothing a person must see is lost to the JSON shape). Harnesses that ignore hook stdout
-/// (Hermes session hooks, a silent cron) simply discard it — the command stays byte-identical
-/// across every adapter. With NO byte changes the caller keeps today's plain-lines behavior.
-pub(crate) fn reload_skills_json(person_lines: &[String]) -> String {
+/// Which stdout dialect the quiet sweep speaks, chosen by the calling trigger's `--hook <harness>`
+/// marker.
+///
+/// The SessionStart hook-output document is NOT one universal shape. Some agents validate hook
+/// stdout against a strict schema that permits only `hookEventName` + `additionalContext` and
+/// REJECTS any other key (Codex does exactly this — an unknown field paints the whole hook as
+/// failed at session start). Others understand a reload extension that makes freshly pulled skill
+/// bytes live in the same session. So the conservative shape is the DEFAULT every trigger gets,
+/// and an agent that understands the extension opts in by naming itself in its own registered
+/// command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HookDialect {
+    /// Claude Code: the reload extension (`reloadSkills`) is understood, so pulled bytes go live
+    /// same-session.
+    ClaudeCode,
+    /// Everyone else: only the two schema-universal keys, and nothing at all to say when there is
+    /// nothing a person must read (empty stdout is accepted everywhere).
+    Conservative,
+}
+
+impl HookDialect {
+    /// Resolve the dialect from the `--hook <harness>` marker. Unknown names and a missing marker
+    /// both fall back to [`HookDialect::Conservative`] — this runs inside a session-start hook, so
+    /// an unrecognized value must degrade quietly, never fail the sweep.
+    pub(crate) fn from_slug(slug: Option<&str>) -> Self {
+        match slug {
+            Some("claude-code") => Self::ClaudeCode,
+            _ => Self::Conservative,
+        }
+    }
+}
+
+/// The quiet hook's ONE stdout document, in the caller's dialect — or `None` when there is nothing
+/// to say (the caller then prints NOTHING, the shape every agent accepts).
+///
+/// This is the sweep's only way to reach a session, both when bytes moved and when they did not.
+/// Raw text on stdout is not a substitute: `additionalContext` is the field that actually INJECTS
+/// text into the session, and an agent validating hook output against a strict schema is free to
+/// discard anything that is not the document it expects. A person-facing fact — an ended session's
+/// freeze, a stale/unreachable warning — must never depend on that discarding not happening.
+///
+/// The two axes are independent, and keeping them independent is the point:
+///
+/// - `changed` — bytes actually moved on disk. It is the ONLY thing that may set `reloadSkills`,
+///   because that field asks the agent to re-scan its skill dirs; saying it on a sweep that
+///   changed nothing would be a lie with a cost.
+/// - `person_lines` — facts a person must not miss. They ride `additionalContext` whenever they
+///   exist, in EITHER dialect, changed or not.
+///
+/// So [`ClaudeCode`] speaks when either axis is live (with `reloadSkills` only on `changed`), and
+/// [`Conservative`] speaks only when there are lines — it can carry nothing else, so a
+/// changed-but-silent sweep has nothing to tell it. Agents that ignore hook stdout entirely
+/// (Hermes session hooks, a silent cron) simply discard whatever arrives.
+///
+/// [`ClaudeCode`]: HookDialect::ClaudeCode
+/// [`Conservative`]: HookDialect::Conservative
+pub(crate) fn hook_output_json(
+    dialect: HookDialect,
+    changed: bool,
+    person_lines: &[String],
+) -> Option<String> {
+    let reload = changed && dialect == HookDialect::ClaudeCode;
+    if !reload && person_lines.is_empty() {
+        return None;
+    }
     let mut inner = serde_json::Map::new();
     inner.insert(
         "hookEventName".to_owned(),
         serde_json::Value::String("SessionStart".to_owned()),
     );
-    inner.insert("reloadSkills".to_owned(), serde_json::Value::Bool(true));
+    if reload {
+        inner.insert("reloadSkills".to_owned(), serde_json::Value::Bool(true));
+    }
     if !person_lines.is_empty() {
         inner.insert(
             "additionalContext".to_owned(),
@@ -161,7 +221,7 @@ pub(crate) fn reload_skills_json(person_lines: &[String]) -> String {
         );
     }
     let doc = serde_json::json!({ "hookSpecificOutput": inner });
-    doc.to_string()
+    Some(doc.to_string())
 }
 
 #[cfg(test)]
@@ -346,22 +406,137 @@ mod tests {
         assert!(!sweep_changed_bytes(&empty));
     }
 
+    /// The WHOLE decision surface: dialect × `changed` × person-lines, with the exact bytes. A
+    /// hook document is a wire a harness parses, so every cell is pinned byte-for-byte.
     #[test]
-    fn reload_skills_json_is_the_documented_session_start_shape() {
-        let bare = reload_skills_json(&[]);
-        let v: serde_json::Value = serde_json::from_str(&bare).unwrap();
-        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
-        assert_eq!(v["hookSpecificOutput"]["reloadSkills"], true);
-        assert!(
-            v["hookSpecificOutput"].get("additionalContext").is_none(),
-            "no person lines → no context field"
-        );
+    fn the_hook_document_matrix_over_dialect_changed_and_lines() {
+        let lines = ["topos: a".to_owned(), "topos: b".to_owned()];
+        const CC: HookDialect = HookDialect::ClaudeCode;
+        const CO: HookDialect = HookDialect::Conservative;
 
-        let with_lines = reload_skills_json(&["topos: a".to_owned(), "topos: b".to_owned()]);
-        let v: serde_json::Value = serde_json::from_str(&with_lines).unwrap();
+        for (dialect, changed, has_lines, want) in [
+            // Claude Code — `reloadSkills` tracks `changed` and NOTHING else.
+            (
+                CC,
+                true,
+                false,
+                Some(
+                    r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","reloadSkills":true}}"#,
+                ),
+            ),
+            (
+                CC,
+                true,
+                true,
+                Some(
+                    r#"{"hookSpecificOutput":{"additionalContext":"topos: a\ntopos: b","hookEventName":"SessionStart","reloadSkills":true}}"#,
+                ),
+            ),
+            // THE case the two-axis split exists for: nothing moved, but a person must read
+            // something. The lines go out; asking for a re-scan would be a lie with a cost.
+            (
+                CC,
+                false,
+                true,
+                Some(
+                    r#"{"hookSpecificOutput":{"additionalContext":"topos: a\ntopos: b","hookEventName":"SessionStart"}}"#,
+                ),
+            ),
+            (CC, false, false, None),
+            // Conservative — never `reloadSkills`, on any axis; it can carry only the two keys a
+            // strict validator permits, so a changed-but-silent sweep has nothing to tell it.
+            (CO, true, false, None),
+            (
+                CO,
+                true,
+                true,
+                Some(
+                    r#"{"hookSpecificOutput":{"additionalContext":"topos: a\ntopos: b","hookEventName":"SessionStart"}}"#,
+                ),
+            ),
+            (
+                CO,
+                false,
+                true,
+                Some(
+                    r#"{"hookSpecificOutput":{"additionalContext":"topos: a\ntopos: b","hookEventName":"SessionStart"}}"#,
+                ),
+            ),
+            (CO, false, false, None),
+        ] {
+            let given: &[String] = if has_lines { &lines } else { &[] };
+            let got = hook_output_json(dialect, changed, given);
+            let case = format!("{dialect:?} changed={changed} lines={has_lines}");
+            assert_eq!(got.as_deref(), want, "{case}");
+
+            let Some(doc) = got else { continue };
+            let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+            let inner = v["hookSpecificOutput"].as_object().unwrap();
+            assert_eq!(inner["hookEventName"], "SessionStart", "{case}");
+            // `reloadSkills` appears if and ONLY if bytes moved under a dialect that grasps it.
+            assert_eq!(
+                inner.get("reloadSkills").is_some(),
+                changed && dialect == CC,
+                "{case}: the reload extension tracks changed bytes under ClaudeCode alone"
+            );
+            // Person-facing lines are never dropped, in either dialect, changed or not.
+            assert_eq!(
+                inner.get("additionalContext").and_then(|c| c.as_str()),
+                has_lines.then_some("topos: a\ntopos: b"),
+                "{case}: person lines ride the context injection or nothing does"
+            );
+            if dialect == CO {
+                assert!(
+                    inner.len() <= 2,
+                    "{case}: only the two keys a strict validator permits"
+                );
+            }
+        }
+    }
+
+    /// The quiet path's SOFT failure (auth/transport: warn, still exit 0) is a person-facing line
+    /// like any other, so it takes the same route — a document, never raw stdout a strict-schema
+    /// agent may discard instead of inject. Nothing landed, so `changed` is false and NO dialect
+    /// may claim a reload. (The caller's exit status is unaffected; only the shape is.)
+    #[test]
+    fn a_soft_failure_warning_is_a_document_in_both_dialects_never_raw_text() {
+        let line = "topos: update skipped — the server is unreachable".to_owned();
+        for dialect in [HookDialect::ClaudeCode, HookDialect::Conservative] {
+            let doc = hook_output_json(dialect, false, std::slice::from_ref(&line)).unwrap_or_else(
+                || panic!("{dialect:?}: a soft-failure warning must still be said"),
+            );
+            let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+            let inner = v["hookSpecificOutput"].as_object().unwrap();
+            assert_eq!(inner["hookEventName"], "SessionStart", "{dialect:?}");
+            assert_eq!(
+                inner["additionalContext"], line,
+                "{dialect:?}: the warning rides the context injection verbatim"
+            );
+            assert!(
+                !inner.contains_key("reloadSkills"),
+                "{dialect:?}: a skipped update landed nothing — never ask for a re-scan"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_or_absent_hook_marker_falls_back_to_conservative() {
         assert_eq!(
-            v["hookSpecificOutput"]["additionalContext"], "topos: a\ntopos: b",
-            "person-facing lines ride the context injection, never lost"
+            HookDialect::from_slug(Some("claude-code")),
+            HookDialect::ClaudeCode
         );
+        for slug in [
+            None,
+            Some(""),
+            Some("codex"),
+            Some("Claude-Code"),
+            Some("x"),
+        ] {
+            assert_eq!(
+                HookDialect::from_slug(slug),
+                HookDialect::Conservative,
+                "{slug:?} must fail closed onto the schema-conservative dialect"
+            );
+        }
     }
 }

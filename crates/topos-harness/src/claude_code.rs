@@ -40,13 +40,23 @@ const MARKER_ID: &str = "topos:claude-code:currency:2";
 /// code would otherwise become the hook's, which the harness paints as a session-start hook error), and
 /// equally when an update degrades (plane down): a best-effort update sweep must never surface as an
 /// error at session start (diagnostics go to `~/.topos/log.jsonl`, never the session). `--quiet` keeps
-/// stdout near-empty — a no-change sweep emits nothing; a sweep that changed skill bytes emits the ONE
-/// SessionStart hook-output JSON (`reloadSkills`) so Claude Code re-scans its skill dirs same-session
-/// (any person-facing line rides that document's context injection). The quiet path also self-throttles
-/// (a TTL + single-flight gate in the client), so this command may fire on EVERY SessionStart source —
-/// startup, resume, clear, compact — cheaply. The trailing comment is the idempotency sentinel.
-const HOOK_COMMAND: &str =
-    "command -v topos >/dev/null 2>&1 && topos update --quiet || true  # topos:currency";
+/// stdout near-empty — a no-change sweep emits nothing; a sweep that changed skill bytes emits ONE
+/// SessionStart hook-output JSON.
+///
+/// **`--hook claude-code` is what opts THIS harness into the `reloadSkills` extension** — the field
+/// that makes Claude Code re-scan its skill dirs same-session, so pulled bytes are live immediately
+/// (any person-facing line rides the same document's context injection). It is a marker, not a
+/// behavior switch: a trigger that does NOT carry it gets a schema-conservative document
+/// (`hookEventName` + `additionalContext` only, and nothing at all when there is nothing to read),
+/// because other harnesses validate hook stdout against a strict schema and reject unknown fields —
+/// Codex fails the whole session-start hook on one. Conservative is therefore the default every
+/// trigger gets, and each harness proven to understand an extension names itself here.
+///
+/// The quiet path also self-throttles (a TTL + single-flight gate in the client), so this command may
+/// fire on EVERY SessionStart source — startup, resume, clear, compact — cheaply. The trailing comment
+/// is the idempotency sentinel; ownership keys on that sentinel ALONE, so changing the command's
+/// spelling stays free (a re-arm migrates any earlier spelling in place).
+const HOOK_COMMAND: &str = "command -v topos >/dev/null 2>&1 && topos update --quiet --hook claude-code || true  # topos:currency";
 
 /// The per-hook timeout (seconds). A real sweep makes network calls (one delivery call per enrolled
 /// workspace, plus fetches when a pointer moved), so this must cover a slow-but-working plane — while a
@@ -639,7 +649,7 @@ mod tests {
         \"hooks\": [
           {
             \"async\": true,
-            \"command\": \"command -v topos >/dev/null 2>&1 && topos update --quiet || true  # topos:currency\",
+            \"command\": \"command -v topos >/dev/null 2>&1 && topos update --quiet --hook claude-code || true  # topos:currency\",
             \"timeout\": 60,
             \"type\": \"command\"
           }
@@ -649,6 +659,23 @@ mod tests {
   }
 }
 ";
+
+    #[test]
+    fn the_hook_command_is_the_shared_shell_sweep_plus_the_dialect_marker() {
+        // The two spellings must never drift apart silently: this harness's command IS the breadth
+        // surfaces' shell sweep line with ONE addition — the `--hook claude-code` marker that opts
+        // it into the `reloadSkills` extension. Every other harness stays on the unmarked line,
+        // whose answer is the schema-conservative document a strict validator accepts.
+        assert_eq!(
+            HOOK_COMMAND,
+            crate::triggers::SHELL_SWEEP_LINE.replace(
+                "topos update --quiet",
+                "topos update --quiet --hook claude-code"
+            ),
+            "the Claude Code command is the shared sweep line + the dialect marker"
+        );
+        assert!(HOOK_COMMAND.ends_with(SENTINEL), "ownership keys on this");
+    }
 
     #[test]
     fn install_into_absent_settings_writes_the_exact_managed_hook() {
@@ -824,8 +851,8 @@ mod tests {
             "exactly ONE managed hook line — never a duplicate"
         );
         assert!(
-            text.contains("topos update --quiet"),
-            "rewritten to the new update command"
+            text.contains("topos update --quiet --hook claude-code"),
+            "rewritten to the new update command, carrying the dialect marker"
         );
         assert!(
             !text.contains("topos pull"),

@@ -209,7 +209,10 @@ fn rendered_bundle() -> Result<ScannedBundle, ClientError> {
 // ensure — create/refresh the sidecar entry and converge every planned placement.
 // ---------------------------------------------------------------------------------------------
 
-/// What a sync did (the quiet hook ORs `changed` into its `reloadSkills` decision).
+/// What a sync did. The quiet hook ORs `changed` into its changed-bytes decision, which gates two
+/// things: whether a hook-output document is emitted at all when there is nothing else to say, and
+/// whether Claude Code is asked to reload its skills. Which dialect that document speaks is the
+/// calling trigger's business, not this flag's.
 #[derive(Debug, Default)]
 pub(crate) struct BuiltinSync {
     pub changed: bool,

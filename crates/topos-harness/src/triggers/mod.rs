@@ -1,6 +1,8 @@
 //! `triggers` — breadth auto-update triggers: one [`TriggerAdapter`] per additional registry-slug
-//! harness, all running the ONE byte-stable sweep (`topos update --quiet`, which self-throttles
-//! client-side, so session-shaped re-fires are cheap).
+//! harness, all running the ONE sweep (`topos update --quiet`, which self-throttles client-side,
+//! so session-shaped re-fires are cheap) in its SCHEMA-CONSERVATIVE form — no `--hook <harness>`
+//! marker, because none of these harnesses is proven to tolerate hook-output fields beyond
+//! `hookEventName` + `additionalContext` and one of them (codex) rejects them outright.
 //!
 //! The three fully-adapted harnesses (Claude Code, OpenClaw, Hermes) keep their own
 //! [`HarnessAdapter`](crate::HarnessAdapter) reports; this module is the breadth surface — a
@@ -59,14 +61,23 @@ pub(crate) const SENTINEL: &str = "# topos:currency";
 pub(crate) const GUARDED_SWEEP: &str =
     "command -v topos >/dev/null 2>&1 && topos update --quiet || true";
 
-/// The ONE shell-string sweep line every shell surface registers: the guarded sweep + the
-/// trailing ownership sentinel (inert under `sh -c`), exactly the Claude Code spelling.
+/// The ONE shell-string sweep line every shell surface here registers: the guarded sweep + the
+/// trailing ownership sentinel (inert under `sh -c`).
+///
+/// It carries NO `--hook <harness>` marker, and that is the point: unmarked is the
+/// schema-conservative default. A changed sweep then answers with `hookEventName` +
+/// `additionalContext` only — or, with nothing a person must read, nothing at all — the shape a
+/// strict hook-output validator accepts (Codex rejects any unknown field and paints the whole
+/// session-start hook as failed). Only a harness proven to understand an extension names itself
+/// with `--hook`; the Claude Code reference adapter does, and its command is otherwise this exact
+/// line — pinned against drift by that adapter's
+/// `the_hook_command_is_the_shared_shell_sweep_plus_the_dialect_marker` test.
 pub(crate) const SHELL_SWEEP_LINE: &str =
     "command -v topos >/dev/null 2>&1 && topos update --quiet || true  # topos:currency";
 
 /// The plain argv sweep for non-shell / code surfaces: plugin code runs this and swallows
 /// failures itself (no shell guard is possible there, and none is needed — the plugin's own
-/// try/catch is the exit-0 tail's analog).
+/// try/catch is the exit-0 tail's analog). Unmarked, so the conservative dialect applies.
 pub(crate) const PLAIN_SWEEP: &str = "topos update --quiet";
 
 /// One trigger (un)install outcome for a registry-slug harness. The big-three adapters keep
@@ -199,11 +210,20 @@ mod tests {
         assert_eq!(
             SHELL_SWEEP_LINE,
             format!("{GUARDED_SWEEP}  {SENTINEL}"),
-            "the shell line is the guarded sweep + two spaces + the sentinel — the Claude Code spelling"
+            "the shell line is the guarded sweep + two spaces + the sentinel"
         );
         assert!(GUARDED_SWEEP.contains(PLAIN_SWEEP));
         assert!(GUARDED_SWEEP.starts_with("command -v topos"));
         assert!(GUARDED_SWEEP.ends_with("|| true"));
+        // The breadth surfaces stay UNMARKED — the conservative hook-output dialect is what a
+        // harness gets unless it declares itself, and none of these has been proven to accept
+        // more (codex actively rejects unknown hook-output fields).
+        for line in [GUARDED_SWEEP, SHELL_SWEEP_LINE, PLAIN_SWEEP] {
+            assert!(
+                !line.contains("--hook"),
+                "{line}: no dialect marker on a breadth sweep"
+            );
+        }
     }
 
     #[test]
