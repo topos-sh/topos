@@ -103,10 +103,14 @@ fn answer_connection(mut stream: TcpStream, state: &str) -> Option<LoopbackOutco
     match parse_callback(path, state) {
         Some(outcome) => {
             let body = match outcome {
-                LoopbackOutcome::Approved { .. } => {
-                    "You're set — this device is approved. Return to your terminal."
+                LoopbackOutcome::Approved { .. } => handoff_page(
+                    "Login approved",
+                    "You're set — this device is approved.",
+                    "Return to your terminal.",
+                ),
+                LoopbackOutcome::Denied => {
+                    handoff_page("Request denied", "Request denied", "Nothing was connected.")
                 }
-                LoopbackOutcome::Denied => "Request denied — nothing was connected.",
             };
             let _ = stream.write_all(
                 format!(
@@ -124,6 +128,42 @@ fn answer_connection(mut stream: TcpStream, state: &str) -> Option<LoopbackOutco
             None
         }
     }
+}
+
+/// The hand-off page's stylesheet — INLINE by necessity. This document is served by the CLI
+/// itself off `127.0.0.1`, so it can reach no stylesheet and no font CDN: the design tokens are
+/// written out as literals and the type falls back to the platform stacks when the product's own
+/// faces aren't installed here. Light only — the dark surfaces in this system belong to terminal
+/// glass, never to a page.
+const HANDOFF_CSS: &str = "\
+:root{color-scheme:light}\
+*{box-sizing:border-box}\
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;\
+padding:24px;background:#f1f1ee;color:#161618;\
+font-family:'IBM Plex Sans',ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;\
+font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased}\
+::selection{background:#ebf0ff;color:#161618}\
+main{width:100%;max-width:26rem;padding:24px;background:#f8f8f5;border:1px solid #e3e3dd;\
+border-radius:10px;box-shadow:0 8px 22px -20px rgba(22,22,28,.35)}\
+.wordmark{margin:0;font-size:13px;font-weight:600;letter-spacing:-.02em;color:#161618;\
+font-family:'Martian Mono',ui-monospace,SFMono-Regular,Menlo,monospace}\
+.wordmark span{color:#002fa7}\
+.bar{width:28px;height:2px;margin:24px 0 16px;background:#002fa7}\
+h1{margin:0;font-size:18px;font-weight:600;line-height:1.45;letter-spacing:-.02em;color:#161618;\
+font-family:'Martian Mono',ui-monospace,SFMono-Regular,Menlo,monospace}\
+p.detail{margin:8px 0 0;color:#3f3f3a}";
+
+/// Render the page the approver's browser lands on when the redirect comes home. Every argument
+/// is a literal from this module — nothing here is caller- or request-supplied, so there is no
+/// escaping step to get wrong.
+fn handoff_page(title: &str, heading: &str, detail: &str) -> String {
+    format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+<title>{title} · Topos</title><style>{HANDOFF_CSS}</style></head>\
+<body><main><p class=\"wordmark\">topos<span>_</span></p><div class=\"bar\"></div>\
+<h1>{heading}</h1><p class=\"detail\">{detail}</p></main></body></html>"
+    )
 }
 
 /// Parse a redirect path (`/cb?state=…&outcome=approved|denied[&code=…]`) against the
@@ -371,6 +411,27 @@ mod tests {
             approval_url("https://x/invite/tok?device=ab12", "ab12", 4321, "st"),
             "https://x/invite/tok?device=ab12&port=4321&state=st"
         );
+    }
+
+    #[test]
+    fn the_handoff_page_is_a_self_contained_document() {
+        let page = handoff_page(
+            "Login approved",
+            "You're set — this device is approved.",
+            "Return to your terminal.",
+        );
+        assert!(page.starts_with("<!doctype html>"), "{page}");
+        assert!(
+            page.contains("You're set — this device is approved."),
+            "{page}"
+        );
+        assert!(page.contains("Return to your terminal."), "{page}");
+        // Served off 127.0.0.1 by the CLI: a machine mid-login may have no route anywhere else,
+        // so the page must fetch NOTHING — no stylesheet, no font, no image.
+        assert!(!page.contains("http://"), "{page}");
+        assert!(!page.contains("https://"), "{page}");
+        assert!(!page.contains("<link"), "{page}");
+        assert!(!page.contains("<script"), "{page}");
     }
 
     #[test]
