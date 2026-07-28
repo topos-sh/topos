@@ -70,7 +70,8 @@ consent step, and no device-link lane; `follow`/`unfollow`/`channel` are gone.
   workspace's items in place; `login` reconnects.
 - **The MANIFEST RECONCILE** (`ops/reconcile` — what `update` runs) — dial each live session's
   `GET /v1/workspaces/{ws}/delivery` ONCE (a pending session skips quietly; NotFound = the ended-session
-  line + local flip; unreachable degrades that session's profile layer to the OFFLINE CACHE so the local
+  line + local flip; ANY no-fresh-delivery fault (unreached · unsuccessful exchange · unreadable answer)
+  degrades that session's profile layer to the OFFLINE CACHE so the local
   converge keeps working), build the layers for the cwd's scope chain, resolve, then reconcile each
   resolved item BY KIND: profile items sync against the delivery's pre-resolved target (installed
   SILENTLY under their catalog names — login was the acceptance); project/personal workspace refs
@@ -184,8 +185,16 @@ consent step, and no device-link lane; `follow`/`unfollow`/`channel` are gone.
   JSON, in the DIALECT the calling trigger declares with the hidden `--hook <harness>` arg, and
   NOTHING when there is nothing to say. Two INDEPENDENT axes drive it — `changed` (bytes actually
   moved) is the only thing that may set `reloadSkills`, and the person-facing facts (the
-  ended-session freeze, unreachable-AND-stale) ride `additionalContext` whenever they exist,
-  changed or not. Raw text is never used: `additionalContext` is what INJECTS into the session,
+  ended-session freeze, no-fresh-delivery-AND-stale) ride `additionalContext` whenever they exist,
+  changed or not. The staleness half is a CONDITIONAL line: a workspace that got no fresh delivery
+  warns only once its own recorded window is blown, so the sweep hands the hook both halves of that
+  workspace's identity — the id the freshness cache is keyed by, and the name the line says — plus
+  WHICH fault it was. All three faults (the plane could not be dialed; the exchange did not land —
+  a failure status, or an answer that never fully arrived; a COMPLETE answer whose structure is
+  wrong) degrade the sweep identically and are equally stale, but the line names the real one, and
+  each clause must hold for its whole variant: blaming the network for garbled bytes — or the
+  server for a truncated read — sends a person the wrong way.
+  Raw text is never used: `additionalContext` is what INJECTS into the session,
   and a harness validating hook stdout against a strict schema may discard anything else — a fact
   a person must not miss cannot depend on that. So `--hook claude-code` (the marker that harness's
   own registered hook command carries) speaks when either axis is live, carrying `reloadSkills`

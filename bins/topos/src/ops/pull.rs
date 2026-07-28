@@ -80,11 +80,60 @@ pub(crate) struct PullOutcome {
     pub data: PullData,
     pub warnings: Vec<String>,
     /// Workspaces whose whole delivery answered the uniform 404 THIS run (removed / revoked) — every
-    /// copy froze in place.
+    /// copy froze in place. Display NAMES: the freeze line and the `update` prose both just say them.
     pub access_gone: Vec<String>,
-    /// Workspaces whose delivery could not be fetched THIS run (transport-level) — state kept, retry
-    /// next session; the quiet hook warns only once the staleness window is blown.
-    pub unreachable: Vec<String>,
+    /// Workspaces that got NO fresh delivery THIS run (the plane could not be dialed, answered with
+    /// a failure, or answered unreadably) — state kept, retry next session; the quiet hook warns
+    /// only once the staleness window is blown.
+    pub unreachable: Vec<UnreachableWorkspace>,
+}
+
+/// One workspace left without a fresh delivery this run. It carries BOTH halves of the workspace's
+/// identity on purpose: the freshness cache (`state/sync_status.json`) is keyed by workspace **id**,
+/// while the warning line a person reads must name the workspace the way they know it. Keeping only
+/// the name made the staleness lookup miss every time — and a miss reads as "not stale", so the line
+/// never printed.
+pub(crate) struct UnreachableWorkspace {
+    /// The cache key — what `sync_status` records a workspace's last delivery under.
+    pub workspace_id: String,
+    /// What the person is shown.
+    pub workspace_name: String,
+    /// What actually went wrong — the line says it instead of blaming the network for all three.
+    pub reason: StaleReason,
+}
+
+/// Why a workspace got no fresh delivery this run. All three keep local state and retry later, and
+/// the staleness nudge ("no fresh data in N days") is equally true of each — but they are DIFFERENT
+/// things to the person reading the line, and only the first is a failure to reach the server at
+/// all: the other two happen AFTER the plane answered (or began to). Mirrors the
+/// [`crate::plane::PlaneError`] variants the sweep degrades on, so the mapping stays checkable at
+/// the push site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StaleReason {
+    /// Connect-level: the plane could not be dialed at all (dial / TLS / timeout).
+    Unreachable,
+    /// The plane was reachable but this exchange did not land — it answered with a failure status,
+    /// or the answer never fully arrived (a 5xx / unexpected status / a truncated or over-limit
+    /// body). Retry later; nothing here says the bytes were wrong, only that they did not get here.
+    Unavailable,
+    /// A COMPLETE answer arrived and its structure was wrong (corrupt or forged bytes) — a
+    /// different thing from a failed exchange, and a different thing to go look at.
+    Malformed,
+}
+
+impl StaleReason {
+    /// The warning line's reason clause — true of what actually happened, in a person's terms.
+    /// Pointing someone at their network when the bytes were the problem sends them the wrong way.
+    fn clause(self) -> &'static str {
+        match self {
+            Self::Unreachable => "the server could not be reached",
+            // True of the WHOLE variant: a failure status, an unexpected one, and an answer that
+            // never fully arrived. Distinct from the malformed clause, which is about a complete
+            // answer whose contents are wrong — a different thing to go look at.
+            Self::Unavailable => "the server did not answer successfully",
+            Self::Malformed => "the server's answer could not be read",
+        }
+    }
 }
 
 impl PullOutcome {
@@ -399,9 +448,9 @@ fn note_skill_failure(ctx: &Ctx<'_>, warnings: &mut Vec<String>, skill_id: &str,
 /// session-start hook injects into the session), and only for the two facts a person must not miss:
 ///
 /// - a workspace whose access is GONE this run (removed / revoked) — one line naming the freeze;
-/// - a workspace that was UNREACHABLE this run AND whose last successful delivery is older than its
-///   staleness window — one line with the age (a fresh miss stays silent: transient blips must not
-///   spam every session).
+/// - a workspace that got NO fresh delivery this run AND whose last successful delivery is older
+///   than its staleness window — one line with the age and an honest reason (a fresh miss stays
+///   silent: transient blips must not spam every session).
 ///
 /// Reads the freshness doc best-effort (an unreadable one warns nowhere — the hook stays silent
 /// rather than noisy).
@@ -423,12 +472,17 @@ pub(crate) fn quiet_hook_lines(
     }
     let status = sync_status::read(fs, layout).unwrap_or_default();
     for ws in &out.unreachable {
-        let entry = status.workspaces.get(ws);
+        // Keyed by ID (what the cache records under), rendered by NAME (what the person knows).
+        let entry = status.workspaces.get(&ws.workspace_id);
         if sync_status::is_stale(entry, now_millis) {
             let last = entry.and_then(|e| e.last_delivery_at).unwrap_or(now_millis);
+            // The nudge (the shared prefix) is the same fact for every kind; only the reason
+            // clause varies, so each line is TRUE of what happened.
             lines.push(format!(
-                "topos: {ws} last synced {} ago — server unreachable",
-                sync_status::human_duration(now_millis.saturating_sub(last))
+                "topos: {} last synced {} ago — {}",
+                ws.workspace_name,
+                sync_status::human_duration(now_millis.saturating_sub(last)),
+                ws.reason.clause()
             ));
         }
     }

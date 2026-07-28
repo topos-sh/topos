@@ -49,7 +49,7 @@ use crate::sessions::{self, SESSION_ACTIVE, SESSION_ENDED, SESSION_PENDING, Sess
 use crate::sync_status::{self, DeliveredSkill, WorkspaceSync};
 use crate::{doc, placement, sidecar};
 
-use super::pull::PullOutcome;
+use super::pull::{PullOutcome, StaleReason, UnreachableWorkspace};
 use super::sync_engine::{self, Invocation};
 
 /// The per-session transports the reconcile drives: the byte/delivery lane (one `UreqPlane` under
@@ -81,13 +81,36 @@ pub(crate) struct ManifestUpdateOpts {
 struct SessionRun {
     session: Session,
     transports: SessionTransports,
-    /// The delivery answer (`None` = unreachable this run — the profile layer is cache-fed and
-    /// the engine converges from the local store).
+    /// The delivery answer (`None` = no fresh delivery this run, whatever the fault — the profile
+    /// layer is cache-fed and the engine converges from the local store).
     snapshot: Option<DeliverySnapshot>,
     /// Lazily fetched catalog (project-ref resolution). `Some(None)` = fetch failed this run.
     /// `Rc`, so the per-item reads share ONE fetch instead of deep-cloning the index each time.
     skills_index: std::cell::RefCell<Option<Option<std::rc::Rc<WireSkillIndex>>>>,
     channels_index: std::cell::RefCell<Option<Option<std::rc::Rc<WireChannelIndex>>>>,
+}
+
+/// The offline-degraded run: no snapshot, so the profile layer is fed from the local delivery cache
+/// and the converge still runs. Every no-fresh-delivery arm builds exactly this.
+fn offline_run(s: &Session, transports: SessionTransports) -> SessionRun {
+    SessionRun {
+        session: s.clone(),
+        transports,
+        snapshot: None,
+        skills_index: std::cell::RefCell::new(None),
+        channels_index: std::cell::RefCell::new(None),
+    }
+}
+
+/// The quiet hook's staleness signal for a session that got no fresh delivery. ONE place pairs the
+/// id with the name: the cache lookup is keyed by the id, the line says the name, and a swap between
+/// them silently kills the warning (a missed lookup reads as "not stale").
+fn stale_signal(s: &Session, reason: StaleReason) -> UnreachableWorkspace {
+    UnreachableWorkspace {
+        workspace_id: s.workspace_id.clone(),
+        workspace_name: s.workspace_name.clone(),
+        reason,
+    }
 }
 
 impl SessionRun {
@@ -281,7 +304,9 @@ impl PlaneSource for SessionRoutedPlane {
 
 /// The manifest reconcile (see the module doc). Returns the same [`PullOutcome`] shape the hook
 /// and the `update` finishers already consume — `access_gone` carries sessions that answered the
-/// uniform 404 (ended server-side), `unreachable` the transport failures.
+/// uniform 404 (ended server-side), `unreachable` the sessions that got no fresh delivery for any
+/// other reason — the server unreached, the exchange unsuccessful, or the answer unreadable — each
+/// tagged with which, since only the first is the network's doing.
 pub(crate) fn manifest_update(
     ctx: &Ctx<'_>,
     connect: &SessionConnect<'_>,
@@ -290,7 +315,7 @@ pub(crate) fn manifest_update(
 ) -> Result<PullOutcome, ClientError> {
     let mut warnings: Vec<String> = Vec::new();
     let mut access_gone: Vec<String> = Vec::new();
-    let mut unreachable: Vec<String> = Vec::new();
+    let mut unreachable: Vec<UnreachableWorkspace> = Vec::new();
     let mut rows: Vec<PullSkill> = Vec::new();
     let mut notices = Vec::new();
     let mut proposals_awaiting: u32 = 0;
@@ -361,32 +386,26 @@ pub(crate) fn manifest_update(
                     SESSION_ENDED,
                 );
             }
-            Err(PlaneError::Unreachable(m) | PlaneError::Unavailable(m)) => {
+            // The three no-fresh-delivery faults degrade IDENTICALLY: the profile layer falls back
+            // to the OFFLINE CACHE below, so a dead network keeps the local converge working (and
+            // the hook never wedges a session start); dropping the layer would let the cleaner
+            // treat its items as undemanded. They differ ONLY in what the person is told — the
+            // staleness nudge is true of all three, but blaming the network for a 500 or for
+            // garbled bytes would send someone the wrong way.
+            Err(PlaneError::Unreachable(m)) => {
                 warnings.push(format!("PLANE_UNAVAILABLE {}: {m}", s.workspace_name));
-                unreachable.push(s.workspace_name.clone());
-                // The profile layer degrades to the OFFLINE CACHE below — a dead network keeps
-                // the local converge working (and the hook never wedges a session start).
-                runs.push(SessionRun {
-                    session: s.clone(),
-                    transports,
-                    snapshot: None,
-                    skills_index: std::cell::RefCell::new(None),
-                    channels_index: std::cell::RefCell::new(None),
-                });
+                unreachable.push(stale_signal(s, StaleReason::Unreachable));
+                runs.push(offline_run(s, transports));
+            }
+            Err(PlaneError::Unavailable(m)) => {
+                warnings.push(format!("PLANE_UNAVAILABLE {}: {m}", s.workspace_name));
+                unreachable.push(stale_signal(s, StaleReason::Unavailable));
+                runs.push(offline_run(s, transports));
             }
             Err(PlaneError::Malformed(m)) => {
-                // A malformed answer degrades EXACTLY like an unreachable one: the cached
-                // profile layer stands in and the local converge keeps working — dropping the
-                // layer would let the cleaner treat its items as undemanded.
                 warnings.push(format!("WIRE_INVALID {}: {m}", s.workspace_name));
-                unreachable.push(s.workspace_name.clone());
-                runs.push(SessionRun {
-                    session: s.clone(),
-                    transports,
-                    snapshot: None,
-                    skills_index: std::cell::RefCell::new(None),
-                    channels_index: std::cell::RefCell::new(None),
-                });
+                unreachable.push(stale_signal(s, StaleReason::Malformed));
+                runs.push(offline_run(s, transports));
             }
         }
     }

@@ -244,6 +244,19 @@ impl FakePlane {
     fn serve_unreachable(&self) {
         *self.delivery.lock().unwrap() = Err("unreachable");
     }
+    /// The plane ANSWERED, with a failure (a 5xx) — not the same fact as an unreachable server.
+    fn serve_unavailable(&self) {
+        *self.delivery.lock().unwrap() = Err("unavailable");
+    }
+    /// The plane answered and the answer got CUT OFF mid-body — the other half of the same
+    /// variant, where nothing says the server itself failed.
+    fn serve_truncated(&self) {
+        *self.delivery.lock().unwrap() = Err("truncated");
+    }
+    /// The plane ANSWERED, unreadably (garbled bytes) — not a network fault at all.
+    fn serve_malformed(&self) {
+        *self.delivery.lock().unwrap() = Err("malformed");
+    }
 }
 fn empty_snapshot() -> DeliverySnapshot {
     DeliverySnapshot {
@@ -289,6 +302,15 @@ impl DeliverySource for FakePlane {
         match &*self.delivery.lock().unwrap() {
             Ok(s) => Ok(s.clone()),
             Err(m) if *m == "unreachable" => Err(PlaneError::Unreachable("network down".into())),
+            Err(m) if *m == "unavailable" => Err(PlaneError::Unavailable("HTTP 500".into())),
+            // What the real transport reports when the body read faults part-way (the same
+            // variant as a 5xx, but the server may have answered perfectly well).
+            Err(m) if *m == "truncated" => Err(PlaneError::Unavailable(
+                "read body: unexpected end of stream".into(),
+            )),
+            Err(m) if *m == "malformed" => Err(PlaneError::Malformed(
+                "delivery body: expected object".into(),
+            )),
             Err(_) => Err(PlaneError::NotFound),
         }
     }
@@ -688,6 +710,226 @@ fn an_ended_session_freezes_and_prints_once() {
     )
     .unwrap();
     assert!(out2.warnings.is_empty(), "{:?}", out2.warnings);
+}
+
+// -------------------------------------------------------------------------------------------------
+// The quiet hook's OTHER fact: no-fresh-delivery-AND-stale (whichever of the three faults caused
+// it — the line names the real one). Unlike the freeze line it is conditional on
+// the freshness cache, which is keyed by workspace ID — while the line a person reads must name the
+// workspace the way they know it. Both halves are asserted together below (the ID and the NAME
+// differ in this rig on purpose: an id-only or name-only carrier fails one assertion or the other).
+// -------------------------------------------------------------------------------------------------
+
+/// The rig's fixed wall clock, as the millis the freshness cache stamps.
+fn rig_now(rig: &Rig) -> i64 {
+    i64::try_from(rig.clock.0).expect("the rig clock fits an i64")
+}
+
+const DAY_MS: i64 = 86_400_000;
+
+#[test]
+fn an_unreachable_and_stale_workspace_warns_by_name() {
+    let rig = Rig::new("stalewarn");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    // One good sweep stamps the freshness row — under the workspace ID, with the served window.
+    ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    let status = sync_status::read(&rig.fs, &rig.layout()).unwrap();
+    assert_eq!(status.workspaces[WS].last_delivery_at, Some(rig_now(&rig)));
+    assert_eq!(status.workspaces[WS].staleness_window_ms, 604_800_000);
+    assert!(
+        !status.workspaces.contains_key(WS_NAME),
+        "the freshness cache is keyed by id, never by name — the warning must look it up that way"
+    );
+
+    // Now the server is gone.
+    plane.serve_unreachable();
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert_eq!(out.unreachable.len(), 1);
+    assert_eq!(out.unreachable[0].workspace_id, WS);
+    assert_eq!(out.unreachable[0].workspace_name, WS_NAME);
+
+    // Past the recorded 7-day window: the ONE line, naming the workspace a person knows.
+    let stale_now = rig_now(&rig) + 8 * DAY_MS;
+    let lines = ops::quiet_hook_lines(&rig.fs, &rig.layout(), stale_now, &out);
+    assert_eq!(
+        lines,
+        vec![format!(
+            "topos: {WS_NAME} last synced 8d ago — the server could not be reached"
+        )]
+    );
+
+    // INSIDE the window: silence — a transient blip must not spam every session start.
+    let fresh_now = rig_now(&rig) + 3_600_000;
+    assert!(
+        ops::quiet_hook_lines(&rig.fs, &rig.layout(), fresh_now, &out).is_empty(),
+        "a fresh miss stays quiet"
+    );
+}
+
+#[test]
+fn an_answering_server_never_gets_blamed_on_the_network() {
+    let rig = Rig::new("stalekind");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let sweep = || {
+        ops::manifest_update(
+            &ctx,
+            &connect(&plane, &dir),
+            None,
+            &ops::ManifestUpdateOpts::default(),
+        )
+        .unwrap()
+    };
+    // One good sweep stamps the freshness row the staleness check reads.
+    sweep();
+    let stale_now = rig_now(&rig) + 8 * DAY_MS;
+
+    // The plane ANSWERED with a failure status. The nudge is just as true — but the network is fine.
+    plane.serve_unavailable();
+    let out = sweep();
+    assert_eq!(out.unreachable.len(), 1);
+    assert_eq!(out.unreachable[0].workspace_id, WS);
+    assert_eq!(out.unreachable[0].workspace_name, WS_NAME);
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.starts_with("PLANE_UNAVAILABLE")),
+        "{:?}",
+        out.warnings
+    );
+    let unavailable_line =
+        format!("topos: {WS_NAME} last synced 8d ago — the server did not answer successfully");
+    assert_eq!(
+        ops::quiet_hook_lines(&rig.fs, &rig.layout(), stale_now, &out),
+        vec![unavailable_line.clone()]
+    );
+
+    // The OTHER half of the same variant: the answer got cut off part-way. Nothing here says the
+    // server failed — so the clause must be true without claiming it did.
+    plane.serve_truncated();
+    let out = sweep();
+    assert_eq!(out.unreachable.len(), 1);
+    assert_eq!(out.unreachable[0].workspace_id, WS);
+    assert_eq!(out.unreachable[0].workspace_name, WS_NAME);
+    assert_eq!(
+        ops::quiet_hook_lines(&rig.fs, &rig.layout(), stale_now, &out),
+        vec![unavailable_line],
+        "a truncated body is the same variant and reads the same"
+    );
+
+    // The plane ANSWERED unreadably. Pointing a person at their network here sends them the wrong
+    // way entirely — the signal is about the bytes.
+    plane.serve_malformed();
+    let out = sweep();
+    assert_eq!(out.unreachable.len(), 1);
+    assert_eq!(out.unreachable[0].workspace_id, WS);
+    assert_eq!(out.unreachable[0].workspace_name, WS_NAME);
+    assert!(
+        out.warnings.iter().any(|w| w.starts_with("WIRE_INVALID")),
+        "the MALFORMED arm ran, not the transport one: {:?}",
+        out.warnings
+    );
+    assert_eq!(
+        ops::quiet_hook_lines(&rig.fs, &rig.layout(), stale_now, &out),
+        vec![format!(
+            "topos: {WS_NAME} last synced 8d ago — the server's answer could not be read"
+        )]
+    );
+
+    // All three still stay quiet inside the window — the reason never overrides the threshold.
+    let fresh_now = rig_now(&rig) + 3_600_000;
+    assert!(
+        ops::quiet_hook_lines(&rig.fs, &rig.layout(), fresh_now, &out).is_empty(),
+        "a fresh miss stays quiet whatever the reason"
+    );
+}
+
+#[test]
+fn a_never_delivered_workspace_stays_silent_while_unreachable() {
+    let rig = Rig::new("stalenever");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serve_unreachable();
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    // Unreachable from the very first sweep: nothing was ever delivered, so there is no freshness
+    // row — and nothing to be stale FROM. Warning here would train people to ignore the line.
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert_eq!(out.unreachable.len(), 1);
+    assert!(
+        ops::quiet_hook_lines(&rig.fs, &rig.layout(), i64::MAX, &out).is_empty(),
+        "no record, no warning"
+    );
+}
+
+#[test]
+fn a_zero_staleness_window_never_warns() {
+    let rig = Rig::new("stalezero");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serve(DeliverySnapshot {
+        staleness_window_ms: 0,
+        ..empty_snapshot()
+    });
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        sync_status::read(&rig.fs, &rig.layout())
+            .unwrap()
+            .workspaces[WS]
+            .staleness_window_ms,
+        0
+    );
+
+    plane.serve_unreachable();
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert_eq!(out.unreachable.len(), 1);
+    assert!(
+        ops::quiet_hook_lines(&rig.fs, &rig.layout(), i64::MAX, &out).is_empty(),
+        "a zero window opts the workspace out of the warning entirely"
+    );
 }
 
 #[test]
