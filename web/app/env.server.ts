@@ -88,6 +88,16 @@ const serverSchema = z.object({
       .optional(),
   ),
   /**
+   * Optional build identifier `/healthz` reports (a deployment stamps its image's revision in,
+   * so deploy tooling can tell old from new during a rolling replacement — "the site answers
+   * 200" no longer proves which build answered). Unset — the OSS default — the field is simply
+   * absent from the health body. Empty spells unset.
+   */
+  TOPOS_BUILD: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z.string().max(200).optional(),
+  ),
+  /**
    * The outbound-mail relay — BRING YOUR OWN SMTP, all five or none (the vault's old five-flag
    * rule, moved app-side with the mail unification). With all five set, the app's ONE mail seam
    * really sends: invite notices, the enrollment passcode, and a composition's magic links. Any
