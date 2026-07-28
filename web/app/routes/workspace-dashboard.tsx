@@ -25,11 +25,11 @@ export const meta: MetaFunction<typeof loader> = ({ loaderData }) => {
   }
   if (loaderData?.face === "landing") {
     return [
-      { title: "Topos: align the behavior of every agent in your team" },
+      { title: "Topos: keep every AI agent in your company up to date" },
       {
         name: "description",
         content:
-          "Your agents share skills, keep them current, and improve them together: one teammate’s fix upgrades every agent on the team.",
+          "Topos syncs skills and context across your team’s agents, and anyone can contribute improvements back: one teammate’s fix upgrades everyone’s agents by their next session.",
       },
     ];
   }

@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 
 /**
  * The routing diagram: a skill chip leaves its publisher, is verified at the hub (gains a
- * check), then splits and travels onward to every follower — across harnesses. The five nodes
+ * check), then splits and travels onward to every teammate — across harnesses. The five nodes
  * and the hub are static SVG rendered by React; the animated chips live in one ref-owned <g>
  * that React never reconciles, driven by requestAnimationFrame on straight ease-in-out paths.
  * Reduced motion shows the static diagram only.
@@ -238,7 +238,7 @@ export function RoutingStar() {
         ref={svgRef}
         viewBox="0 0 420 372"
         role="img"
-        aria-label="A skill published by one person is verified by Topos, then delivered onward to every teammate who follows it, across different agent apps"
+        aria-label="A skill published by one person is verified by Topos, then delivered onward to every teammate's agent, across different agent apps"
         className="block h-auto w-full"
       >
         <title>Skill routing through Topos</title>
@@ -291,7 +291,7 @@ export function RoutingStar() {
         <g ref={chipLayer} />
       </svg>
       <p className="mt-2 text-center text-[12.5px] text-faint">
-        Verified by Topos, then delivered to everyone who follows it.
+        Verified by Topos, then delivered to the whole team.
       </p>
     </div>
   );

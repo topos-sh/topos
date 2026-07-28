@@ -1,6 +1,6 @@
 /**
  * The two-machine propagation demo: Maya publishes on one harness yesterday, Dev's agent
- * follows the updated skill on another harness this morning. A STATIC transcript — the whole
+ * receives the updated skill on another harness this morning. A STATIC transcript — the whole
  * exchange is readable at a glance, nothing types, nothing waits, nothing moves.
  */
 
@@ -23,7 +23,7 @@ const SCRIPT: Step[] = [
   {
     pane: "a",
     kind: "ok",
-    text: "✓ Published. Every follower gets it at their next session.",
+    text: "✓ Published. Everyone’s agents get it at their next session.",
   },
   {
     pane: "b",

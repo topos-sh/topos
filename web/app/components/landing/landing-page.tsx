@@ -39,13 +39,13 @@ function GitHubMark({ className }: { className?: string }) {
 
 const AGENT_TAB = {
   value: "agent",
-  label: "Agent",
+  label: "Paste to your agent",
   text: AGENT_SETUP_PROMPT,
   copyLabel: "Copy the agent setup prompt",
 };
 const HUMAN_TAB = {
   value: "human",
-  label: "Human",
+  label: "In a terminal",
   text: INSTALL,
   copyLabel: "Copy the install command",
 };
@@ -53,8 +53,8 @@ const SETUP_TABS = [AGENT_TAB, HUMAN_TAB];
 
 /**
  * The one setup block: a glass command block whose header row carries small inline tabs by
- * AUDIENCE — Agent (the paste-ready prompt) first, Human (the by-hand install) second — under
- * one constant `❯` chip. Nothing outside the header changes shape on a switch: the label above
+ * PATH — "Paste to your agent" (the paste-ready prompt) first, "In a terminal" (the by-hand
+ * install) second — under one constant `❯` chip. Nothing outside the header changes shape on a switch: the label above
  * is static, and both contents stay mounted in one grid cell (the inactive one invisible) so
  * the block keeps the taller content's height and the hero never jumps. The WHOLE block is
  * LIGHT: one panel2 field, header and body alike, ink command text, a bare accent ❯ leading
@@ -81,7 +81,7 @@ function SetupBlock({ label }: { label: string }) {
                 <TabsTrigger
                   key={t.value}
                   value={t.value}
-                  className="rounded-md border border-transparent px-2 py-0.5 font-mono text-[11px] text-faint transition-colors hover:text-ink data-[state=active]:border-line data-[state=active]:bg-panel data-[state=active]:text-ink"
+                  className="whitespace-nowrap rounded-md border border-transparent px-2 py-0.5 font-mono text-[11px] text-faint transition-colors hover:text-ink data-[state=active]:border-line data-[state=active]:bg-panel data-[state=active]:text-ink"
                 >
                   {t.label}
                 </TabsTrigger>
@@ -146,12 +146,12 @@ const VERBS: { tag: string; main?: boolean; prompt: string; out: string; ok: str
     tag: "Join",
     prompt: "[pastes topos.sh/acme]",
     out: "● topos login topos.sh/acme",
-    ok: "  approve this device in your browser — then I keep it current.",
+    ok: "  one click in your browser approves it — then I keep this machine current.",
   },
   {
-    tag: "Follow",
-    prompt: "follow incident-response",
-    out: "● Following incident-response@a7d2",
+    tag: "Add",
+    prompt: "add the team’s incident-response skill here",
+    out: "● Added @acme/incident-response",
     ok: "  updates land at session start; your local edits stay yours",
   },
   {
@@ -159,6 +159,25 @@ const VERBS: { tag: string; main?: boolean; prompt: string; out: string; ok: str
     prompt: "the new escalation step pages the wrong team, roll it back",
     out: "● Reverted incident-response to a7d2",
     ok: "  every agent rolls back at next session",
+  },
+];
+
+/**
+ * Three concrete scenes under the two-machine demo: the deploy transcript above is ONE loop —
+ * these say the same loop runs for every team in the company, not just engineering.
+ */
+const SCENES: { who: string; text: string }[] = [
+  {
+    who: "Marketing updates the brand guidelines",
+    text: "— design agents cite the new reference the same day.",
+  },
+  {
+    who: "Platform ships an internal tool",
+    text: "— every agent in the org learns it exists and how to call it.",
+  },
+  {
+    who: "An agent finds a sharper deploy checklist",
+    text: "— reviewed once, every teammate’s agent runs it tomorrow.",
   },
 ];
 
@@ -281,13 +300,13 @@ export function LandingPage({
         >
           <div>
             <h1 className="font-display font-semibold text-[clamp(19px,2.4vw,25px)] leading-[1.45] tracking-[-0.03em]">
-              Align the behavior of every <br className="max-lg:hidden" />
-              agent in your team.
+              Keep every AI agent in <br className="max-lg:hidden" />
+              your company up to date.
             </h1>
             <p className="mt-4 max-w-[47ch] text-[16px] text-dim">
-              Your agents share skills, keep them current, and{" "}
-              <strong className="font-medium text-ink">improve them together</strong>: one
-              teammate’s fix upgrades every agent on the team.
+              Topos syncs skills and context across your team’s agents, and anyone can{" "}
+              <strong className="font-medium text-ink">contribute improvements back</strong>: one
+              teammate’s fix upgrades everyone’s agents by their next session.
             </p>
             <HeroPaths tenancy={tenancy} />
           </div>
@@ -299,6 +318,16 @@ export function LandingPage({
 
       <div id="demo" className={`${WRAP} pt-[52px] pb-2 lg:pt-[72px]`}>
         <TerminalDemo />
+        <div className="mt-9 grid gap-[14px] lg:mt-11 lg:grid-cols-3 lg:gap-[18px]">
+          {SCENES.map((scene) => (
+            <p
+              key={scene.who}
+              className="rounded-lg border border-line-soft bg-panel px-5 py-4 text-[13.5px] text-dim shadow-card"
+            >
+              <strong className="font-medium text-ink">{scene.who}</strong> {scene.text}
+            </p>
+          ))}
+        </div>
       </div>
 
       <section id="agent" className="pt-[84px] lg:pt-[116px]">
@@ -331,7 +360,7 @@ export function LandingPage({
           <p className="mt-5 text-[13px] text-faint">
             Everything the agent does is a plain command you can run yourself: an open-source CLI (
             <code className="font-mono text-[12px] text-dim">
-              topos publish, follow, update, revert
+              topos publish, add, update, revert
             </code>
             ) with <code className="font-mono text-[12px] text-dim">--json</code> output.
           </p>
@@ -348,6 +377,10 @@ export function LandingPage({
               <p className="mt-3 max-w-[58ch] text-dim">
                 The value is the loop: every improvement anyone ships reaches every agent, and every
                 agent can propose the next one.
+              </p>
+              <p className="mt-3 max-w-[58ch] text-dim">
+                And underneath, a workspace <em>is</em> a plain git repo: history you can inspect,
+                versions you can pin, and a repo your team can take and leave with at any time.
               </p>
             </div>
             <div className="overflow-hidden rounded-md border border-line-soft bg-panel">
