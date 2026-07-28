@@ -144,9 +144,9 @@ const VERBS: { tag: string; main?: boolean; prompt: string; out: string; ok: str
   },
   {
     tag: "Join",
-    prompt: "[pastes topos.sh/acme]",
+    prompt: "join our team’s workspace: topos.sh/acme",
     out: "● topos login topos.sh/acme",
-    ok: "  one click in your browser approves it — then I keep this machine current.",
+    ok: "  one click in the browser tab it opens — then I keep this machine current",
   },
   {
     tag: "Add",
@@ -159,26 +159,6 @@ const VERBS: { tag: string; main?: boolean; prompt: string; out: string; ok: str
     prompt: "the new escalation step pages the wrong team, roll it back",
     out: "● Reverted incident-response to a7d2",
     ok: "  every agent rolls back at next session",
-  },
-];
-
-/**
- * The problem band: the three pains the page answers, named before any mechanics. Every team
- * runs agents now, and each one is a silo — the same skills rebuilt per person, agents going
- * stale when the process moves, session-won improvements dying on one machine.
- */
-const PAINS: { lead: string; text: string }[] = [
-  {
-    lead: "The same skills, rebuilt",
-    text: "Each person maintains their own skills and context files — the same prompt gets reinvented five desks apart.",
-  },
-  {
-    lead: "Processes change, agents don’t",
-    text: "The deploy checklist gains a step, and every agent keeps shipping the old way until someone notices.",
-  },
-  {
-    lead: "Improvements die locally",
-    text: "An agent works out a better way mid-session — and it never leaves that one machine.",
   },
 ];
 
@@ -346,9 +326,6 @@ export function LandingPage({
             <a href="#vs" className="transition-colors hover:text-ink max-sm:hidden">
               Why Topos
             </a>
-            <a href="#oss" className="transition-colors hover:text-ink max-sm:hidden">
-              Open source
-            </a>
             <a href={DOCS} className="transition-colors hover:text-ink max-sm:hidden">
               Docs
             </a>
@@ -402,27 +379,7 @@ export function LandingPage({
         </div>
       </header>
 
-      <section className="mt-[52px] border-line-soft border-y bg-panel lg:mt-[72px]">
-        <div className={`${WRAP} py-11 lg:py-[52px]`}>
-          <h2 className="max-w-[44ch] font-display font-semibold text-[clamp(18px,2.2vw,23px)] leading-[1.45] tracking-[-0.02em]">
-            Teams run on agents now — and every agent is on its own.
-          </h2>
-          <div className="mt-7 grid gap-6 lg:grid-cols-3 lg:gap-10">
-            {PAINS.map((pain) => (
-              <div key={pain.lead}>
-                <p className="font-medium text-ink">{pain.lead}</p>
-                <p className="mt-1.5 text-[14px] text-dim">{pain.text}</p>
-              </div>
-            ))}
-          </div>
-          <p className="mt-8 max-w-[64ch] text-[15px]">
-            Topos is the layer underneath: one shared, versioned home for how your team{"’"}s agents
-            work — synced to every machine, improved from every session.
-          </p>
-        </div>
-      </section>
-
-      <section id="demo" className="pt-[84px] lg:pt-[116px]">
+      <section id="demo" className="pt-[52px] lg:pt-[72px]">
         <div className={WRAP}>
           <h2 className="max-w-[40ch] font-display font-semibold text-[clamp(18px,2.2vw,23px)] leading-[1.45] tracking-[-0.02em]">
             Publish once — then the whole loop runs itself.
@@ -492,7 +449,8 @@ export function LandingPage({
               </h2>
               <p className="mt-3 max-w-[58ch] text-dim">
                 The value is the loop: every improvement anyone ships reaches every agent, and every
-                agent can propose the next one.
+                agent can propose the next one. And a workspace <em>is</em> a plain git repo
+                underneath — open source, self-hostable, yours to leave with.
               </p>
             </div>
             <div className="overflow-hidden rounded-md border border-line-soft bg-panel">
@@ -523,40 +481,6 @@ export function LandingPage({
                   </div>
                 </div>
               ))}
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section id="oss" className="pt-[84px] lg:pt-[116px]">
-        <div className={WRAP}>
-          <div className="grid items-start gap-7 lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] lg:gap-12">
-            <div>
-              <h2 className="max-w-[40ch] font-display font-semibold text-[clamp(18px,2.2vw,23px)] leading-[1.45] tracking-[-0.02em]">
-                Open source, self-hostable, and yours to leave with.
-              </h2>
-            </div>
-            <div>
-              <p className="max-w-[62ch] text-dim">
-                The entire product is Apache-2.0 in one repository — the CLI, the server, and this
-                web app. Run it yourself from one compose file, or use Topos Cloud and let us host
-                it. Same code, same CLI — only the address differs.
-              </p>
-              <p className="mt-3 max-w-[62ch] text-dim">
-                And underneath, a workspace <em>is</em> a plain git repo: history you can inspect,
-                versions you can pin, and bytes your team can take and walk away with at any time.
-                Adopting Topos is never a one-way door.
-              </p>
-              <a
-                href={GITHUB}
-                target="_blank"
-                rel="noreferrer"
-                className="mt-5 inline-flex items-center gap-2 rounded-md border border-line px-4 py-2.5 font-mono text-[12.5px] text-ink transition-colors hover:border-ink focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
-              >
-                <GitHubMark className="h-4 w-4" />
-                topos-sh/topos
-                <span className="sr-only"> (opens in a new tab)</span>
-              </a>
             </div>
           </div>
         </div>
