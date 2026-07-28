@@ -163,28 +163,9 @@ const VERBS: { tag: string; main?: boolean; prompt: string; out: string; ok: str
 ];
 
 /**
- * Three concrete scenes under the two-machine demo: the deploy transcript above is ONE loop —
- * these say the same loop runs for every team in the company, not just engineering.
- */
-const SCENES: { who: string; text: string }[] = [
-  {
-    who: "Marketing updates the brand guidelines",
-    text: "— design agents cite the new reference the same day.",
-  },
-  {
-    who: "Platform ships an internal tool",
-    text: "— every agent in the org learns it exists and how to call it.",
-  },
-  {
-    who: "An agent finds a sharper deploy checklist",
-    text: "— reviewed once, every teammate’s agent runs it tomorrow.",
-  },
-];
-
-/**
- * The contribute-back row: the return half of the loop, mirrored on the distribute demo above
- * it — Dev's TERMINAL proposes the improvement, and the right-hand card is the BROWSER review
- * (the half that needs no terminal at all), ending in the same delivered-to-everyone beat.
+ * The contribute-back row: the return half of the loop, in EXACTLY the language of the
+ * distribute demo above it — the same two people, the same two dark windows, the same line
+ * grammar. Dev's agent proposes the improvement; Maya's agent reviews and approves it.
  */
 function ContributeDemo() {
   return (
@@ -212,31 +193,21 @@ function ContributeDemo() {
           </p>
         </div>
         <div className="lg:mt-[30px]">
-          <div className="overflow-hidden rounded-lg border border-line-soft bg-panel shadow-card">
-            <div className="flex items-center gap-2 border-line-soft border-b px-4 py-2.5">
-              <span className="font-mono text-[12px] text-ink">deploy</span>
-              <span className="rounded-full bg-accent px-2 py-[2px] font-display text-[9px] text-on-accent uppercase tracking-[0.14em]">
-                proposal
-              </span>
-              <span className="ml-auto font-mono text-[11px] text-faint">4c1e</span>
-            </div>
-            <div className="px-4 py-3.5">
-              <pre className="whitespace-pre-wrap break-words font-mono text-[12.5px] leading-[1.75]">
-                <span className="block text-faint"> …watch the canary for ten minutes.</span>
-                <span className="block text-accent">
-                  + Roll back automatically past a 2% error rate.
-                </span>
-              </pre>
-              <div className="mt-3 flex items-center gap-2 border-line-soft border-t pt-3 text-[13px]">
-                <CheckChip />
-                <span className="text-ink">Approved by Maya</span>
-                <span className="text-faint max-sm:hidden">— in the browser, no terminal</span>
-              </div>
-            </div>
-          </div>
+          <TerminalWindow
+            title="Maya"
+            harness="Claude Code"
+            lines={[
+              {
+                kind: "note",
+                text: "✓ Proposal from Dev: roll back automatically past a 2% error rate.",
+              },
+              { kind: "prompt", text: "show me the diff … looks right, approve it" },
+              { kind: "ok", text: "✓ Approved. Every agent runs it at their next session." },
+            ]}
+          />
           <p className="mt-2.5 text-[12.5px] text-faint">
-            <b className="font-medium text-ink">Maya</b> reviews the diff in the browser and
-            approves. Every agent runs it at the next session.
+            <b className="font-medium text-ink">Maya</b> reviews and approves — here, or in the
+            browser without a terminal.
           </p>
         </div>
       </div>
@@ -389,16 +360,6 @@ export function LandingPage({
           </div>
           <div className="mt-10 lg:mt-12">
             <ContributeDemo />
-          </div>
-          <div className="mt-9 grid gap-[14px] lg:mt-11 lg:grid-cols-3 lg:gap-[18px]">
-            {SCENES.map((scene) => (
-              <p
-                key={scene.who}
-                className="rounded-lg border border-line-soft bg-panel px-5 py-4 text-[13.5px] text-dim shadow-card"
-              >
-                <strong className="font-medium text-ink">{scene.who}</strong> {scene.text}
-              </p>
-            ))}
           </div>
         </div>
       </section>
