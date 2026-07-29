@@ -9,11 +9,12 @@ import {
   useActionData,
   useLoaderData,
 } from "react-router";
-import { buttonClasses } from "@/components/ui";
+import { BusyFields, buttonClasses } from "@/components/ui";
 import { notFound } from "@/lib/auth/guards.server";
 import { withRegistrationCeremony } from "@/lib/auth/registration.server";
 import { getAuth } from "@/lib/auth/server";
 import { claimableWorkspace, consumeClaim } from "@/lib/db/identity.server";
+import { useSubmittingIntent } from "@/lib/pending";
 import { allowPublicRead, clientKeyFromXff } from "@/lib/rate-limit.server";
 
 export const meta: MetaFunction = () => [{ title: "Finish setup · Topos" }];
@@ -116,6 +117,11 @@ const INPUT =
 export default function ClaimPage() {
   const { workspaceName, code } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
+  // The claim is a sign-up (a deliberate slow password hash) plus the consuming transaction, and
+  // it lands by REDIRECT — so the wait covers the submit AND the navigation to the dashboard.
+  // Nothing about the page changes until then, which is exactly when a second click gets tried;
+  // the code is single-use, so that second submit would race itself into the uniform miss.
+  const busy = useSubmittingIntent() !== null;
   return (
     <Shell>
       <p className="font-medium text-faint text-xs uppercase tracking-wide">Finish setup</p>
@@ -125,44 +131,46 @@ export default function ClaimPage() {
       <p className="mt-1 text-faint text-sm">
         Create the first account on this install — it becomes the workspace owner.
       </p>
-      <Form method="post" className="mt-6 space-y-3">
+      <Form method="post" className="mt-6">
         <input type="hidden" name="code" value={code} />
-        <label className="block">
-          <span className="mb-1 block font-medium text-dim text-sm">Name</span>
-          <input
-            type="text"
-            name="name"
-            autoComplete="name"
-            className={INPUT}
-            placeholder="Ada Lovelace"
-          />
-        </label>
-        <label className="block">
-          <span className="mb-1 block font-medium text-dim text-sm">Email</span>
-          <input
-            type="email"
-            name="email"
-            required
-            autoComplete="email"
-            className={INPUT}
-            placeholder="you@company.com"
-          />
-        </label>
-        <label className="block">
-          <span className="mb-1 block font-medium text-dim text-sm">Password</span>
-          <input
-            type="password"
-            name="password"
-            required
-            minLength={8}
-            autoComplete="new-password"
-            className={INPUT}
-            placeholder="••••••••"
-          />
-        </label>
-        <button type="submit" className={`${buttonClasses("primary")} min-h-11 w-full`}>
-          Claim this workspace
-        </button>
+        <BusyFields busy={busy} className="space-y-3">
+          <label className="block">
+            <span className="mb-1 block font-medium text-dim text-sm">Name</span>
+            <input
+              type="text"
+              name="name"
+              autoComplete="name"
+              className={INPUT}
+              placeholder="Ada Lovelace"
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1 block font-medium text-dim text-sm">Email</span>
+            <input
+              type="email"
+              name="email"
+              required
+              autoComplete="email"
+              className={INPUT}
+              placeholder="you@company.com"
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1 block font-medium text-dim text-sm">Password</span>
+            <input
+              type="password"
+              name="password"
+              required
+              minLength={8}
+              autoComplete="new-password"
+              className={INPUT}
+              placeholder="••••••••"
+            />
+          </label>
+          <button type="submit" className={`${buttonClasses("primary")} min-h-11 w-full`}>
+            {busy ? "Claiming…" : "Claim this workspace"}
+          </button>
+        </BusyFields>
       </Form>
       {actionData?.error !== undefined && (
         <p className="mt-3 text-red-600 text-sm" role="alert">

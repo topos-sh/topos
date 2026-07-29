@@ -8,9 +8,8 @@ import {
   redirect,
   useActionData,
   useLoaderData,
-  useNavigation,
 } from "react-router";
-import { buttonClasses, Chip } from "@/components/ui";
+import { BusyFields, buttonClasses, Chip } from "@/components/ui";
 import { composition } from "@/composition.server";
 import { actorFromSession, notFound } from "@/lib/auth/guards.server";
 import { withInvitationCeremony } from "@/lib/auth/registration.server";
@@ -23,6 +22,7 @@ import {
   mintInvitationSignIn,
 } from "@/lib/db/identity.server";
 import { mailDelivery } from "@/lib/mail/transport.server";
+import { useSubmittingIntent } from "@/lib/pending";
 import { personDisplay } from "@/lib/person-display";
 import { allowPublicRead, clientKeyFromXff } from "@/lib/rate-limit.server";
 import { wsPathServer } from "@/lib/ws-url.server";
@@ -437,17 +437,17 @@ function BranchArm({ data }: { data: ViewData }) {
 
 /** Signed in as the invited address — a live session plus the explicit click is the ceremony. */
 function OneClickAccept() {
-  const busy = useNavigation().state !== "idle";
+  const flying = useSubmittingIntent();
   return (
     <div className="flex flex-col gap-3">
       <Form method="post">
         <input type="hidden" name="intent" value="accept" />
         <button
           type="submit"
-          disabled={busy}
+          disabled={flying !== null}
           className={`${buttonClasses("primary")} min-h-11 w-full`}
         >
-          {busy ? "Working…" : "Accept invitation"}
+          {flying === "accept" ? "Accepting…" : "Accept invitation"}
         </button>
       </Form>
       <DeclineArm />
@@ -457,48 +457,48 @@ function OneClickAccept() {
 
 /** A brand-new person: the account mint, email locked to the invited address. */
 function CreateAccount({ passwordless }: { passwordless: boolean }) {
-  const busy = useNavigation().state !== "idle";
+  const flying = useSubmittingIntent();
   return (
     <div className="flex flex-col gap-3">
-      <Form method="post" className="flex flex-col gap-3">
+      <Form method="post">
         <input type="hidden" name="intent" value="accept-new" />
-        <label className="block">
-          <span className="mb-1 block font-medium text-dim text-sm">Your name (optional)</span>
-          <input
-            type="text"
-            name="name"
-            autoComplete="name"
-            className={INPUT}
-            placeholder="Ada Lovelace"
-          />
-        </label>
-        {!passwordless && (
+        {/* Minting the account is a sign-up (slow hash) plus the accept transaction, then a
+            redirect into the workspace — the whole stretch stays inert here. */}
+        <BusyFields busy={flying !== null} className="flex flex-col gap-3">
           <label className="block">
-            <span className="mb-1 block font-medium text-dim text-sm">Choose a password</span>
+            <span className="mb-1 block font-medium text-dim text-sm">Your name (optional)</span>
             <input
-              type="password"
-              name="password"
-              required
-              minLength={8}
-              autoComplete="new-password"
+              type="text"
+              name="name"
+              autoComplete="name"
               className={INPUT}
-              placeholder="••••••••"
+              placeholder="Ada Lovelace"
             />
           </label>
-        )}
-        <button
-          type="submit"
-          disabled={busy}
-          className={`${buttonClasses("primary")} min-h-11 w-full`}
-        >
-          {busy ? "Working…" : "Accept and create my account"}
-        </button>
-        {passwordless && (
-          <p className="text-center text-faint text-xs">
-            No password needed — this link came to your mailbox, and future sign-ins go the same
-            way.
-          </p>
-        )}
+          {!passwordless && (
+            <label className="block">
+              <span className="mb-1 block font-medium text-dim text-sm">Choose a password</span>
+              <input
+                type="password"
+                name="password"
+                required
+                minLength={8}
+                autoComplete="new-password"
+                className={INPUT}
+                placeholder="••••••••"
+              />
+            </label>
+          )}
+          <button type="submit" className={`${buttonClasses("primary")} min-h-11 w-full`}>
+            {flying === "accept-new" ? "Creating your account…" : "Accept and create my account"}
+          </button>
+          {passwordless && (
+            <p className="text-center text-faint text-xs">
+              No password needed — this link came to your mailbox, and future sign-ins go the same
+              way.
+            </p>
+          )}
+        </BusyFields>
       </Form>
       <DeclineArm />
     </div>
@@ -528,7 +528,7 @@ function SwitchAccount({
   invitedEmail: string;
   signedInEmail: string | null;
 }) {
-  const busy = useNavigation().state !== "idle";
+  const flying = useSubmittingIntent();
   return (
     <div className="flex flex-col gap-3">
       <p className="text-center text-dim text-sm">
@@ -540,10 +540,10 @@ function SwitchAccount({
         <input type="hidden" name="intent" value="switch" />
         <button
           type="submit"
-          disabled={busy}
+          disabled={flying !== null}
           className={`${buttonClasses("primary")} min-h-11 w-full`}
         >
-          Sign out and continue as {invitedEmail}
+          {flying === "switch" ? "Signing out…" : `Sign out and continue as ${invitedEmail}`}
         </button>
       </Form>
       <DeclineArm />
@@ -553,7 +553,7 @@ function SwitchAccount({
 
 /** Signed in as the invited address, but the mailbox was never proven — one round-trip first. */
 function UnverifiedFence({ mailArmed }: { mailArmed: boolean }) {
-  const busy = useNavigation().state !== "idle";
+  const flying = useSubmittingIntent();
   return (
     <div className="flex flex-col gap-3">
       <p className="text-center text-dim text-sm">
@@ -565,10 +565,10 @@ function UnverifiedFence({ mailArmed }: { mailArmed: boolean }) {
           <input type="hidden" name="intent" value="send-verification" />
           <button
             type="submit"
-            disabled={busy}
+            disabled={flying !== null}
             className={`${buttonClasses("primary")} min-h-11 w-full`}
           >
-            Send the verification mail
+            {flying === "send-verification" ? "Sending…" : "Send the verification mail"}
           </button>
         </Form>
       ) : (
@@ -583,16 +583,16 @@ function UnverifiedFence({ mailArmed }: { mailArmed: boolean }) {
 
 /** The quiet decline — recorded; whoever invited you sees it; re-invitable. */
 function DeclineArm() {
-  const busy = useNavigation().state !== "idle";
+  const flying = useSubmittingIntent();
   return (
     <Form method="post" className="text-center">
       <input type="hidden" name="intent" value="decline" />
       <button
         type="submit"
-        disabled={busy}
-        className="text-faint text-xs underline-offset-2 hover:underline"
+        disabled={flying !== null}
+        className="text-faint text-xs underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:opacity-60"
       >
-        Decline this invitation
+        {flying === "decline" ? "Declining…" : "Decline this invitation"}
       </button>
     </Form>
   );

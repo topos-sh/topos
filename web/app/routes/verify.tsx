@@ -8,9 +8,8 @@ import {
   redirect,
   useActionData,
   useLoaderData,
-  useNavigation,
 } from "react-router";
-import { buttonClasses } from "@/components/ui";
+import { BusyFields, buttonClasses } from "@/components/ui";
 import { composition } from "@/composition.server";
 import {
   actorFromSession,
@@ -32,6 +31,7 @@ import {
   workspaceByName,
 } from "@/lib/db/identity.server";
 import { membershipsFor } from "@/lib/db/queries.server";
+import { useSubmittingIntent } from "@/lib/pending";
 import { allowVerifyLookup } from "@/lib/rate-limit.server";
 
 export const meta: MetaFunction = () => [{ title: "Approve a login · Topos" }];
@@ -398,25 +398,27 @@ export default function VerifyPage() {
 
 /** State one: the code form — a POST, so the code never lands in a URL. */
 function CodeLookup() {
-  const busy = useNavigation().state !== "idle";
+  const busy = useSubmittingIntent() !== null;
   return (
-    <Form method="post" className="flex items-end gap-2">
+    <Form method="post">
       <input type="hidden" name="intent" value="lookup" />
-      <label className="block flex-1">
-        <span className="mb-1 block font-medium text-dim text-sm">Code</span>
-        <input
-          type="text"
-          name="code"
-          required
-          autoComplete="off"
-          spellCheck={false}
-          className={`${INPUT} font-mono uppercase`}
-          placeholder="AB29-CD34"
-        />
-      </label>
-      <button type="submit" disabled={busy} className={`${buttonClasses("quiet")} min-h-11`}>
-        Look up
-      </button>
+      <BusyFields busy={busy} className="flex items-end gap-2">
+        <label className="block flex-1">
+          <span className="mb-1 block font-medium text-dim text-sm">Code</span>
+          <input
+            type="text"
+            name="code"
+            required
+            autoComplete="off"
+            spellCheck={false}
+            className={`${INPUT} font-mono uppercase`}
+            placeholder="AB29-CD34"
+          />
+        </label>
+        <button type="submit" className={`${buttonClasses("quiet")} min-h-11`}>
+          {busy ? "Looking up…" : "Look up"}
+        </button>
+      </BusyFields>
     </Form>
   );
 }
@@ -434,8 +436,10 @@ interface ResolvedCard extends PendingLoginFlowView {
  * lookup input held.
  */
 function PendingRequest({ card, loopback }: { card: ResolvedCard; loopback: Loopback | null }) {
-  const navigation = useNavigation();
-  const submitting = navigation.state !== "idle";
+  // WHICH arm is on the wire — both disable together (one decision per request), but only the one
+  // that was clicked names its wait. Without this the approve button read "Working…" for a deny.
+  const flying = useSubmittingIntent();
+  const submitting = flying !== null;
   const passThrough = (
     <>
       {loopback !== null && (
@@ -488,7 +492,7 @@ function PendingRequest({ card, loopback }: { card: ResolvedCard; loopback: Loop
           disabled={submitting}
           className={`${buttonClasses("primary")} min-h-11 w-full`}
         >
-          {submitting ? "Working…" : `Approve “${card.requestedName}”`}
+          {flying === "approve" ? "Approving…" : `Approve “${card.requestedName}”`}
         </button>
       </Form>
       <Form method="post">
@@ -500,7 +504,7 @@ function PendingRequest({ card, loopback }: { card: ResolvedCard; loopback: Loop
           disabled={submitting}
           className={`${buttonClasses("danger")} min-h-11 w-full`}
         >
-          Deny — this isn’t me
+          {flying === "deny" ? "Denying…" : "Deny — this isn’t me"}
         </button>
       </Form>
     </div>

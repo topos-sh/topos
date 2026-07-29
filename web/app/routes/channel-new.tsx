@@ -1,9 +1,10 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { data, Link, redirect, useActionData } from "react-router";
-import { buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
+import { data, Form, Link, redirect, useActionData } from "react-router";
+import { BusyFields, buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
 import { requireMemberInScope } from "@/lib/auth/guards.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import { type ChannelCreateOutcome, createChannel } from "@/lib/db/queries.channels.server";
+import { useSubmittingIntent } from "@/lib/pending";
 import { useWsPath } from "@/lib/ws-path";
 import { wsPathServer } from "@/lib/ws-url.server";
 
@@ -71,6 +72,10 @@ export async function action({ request, params }: ActionFunctionArgs) {
 export default function ChannelNew() {
   const state = useActionData<typeof action>();
   const wsPath = useWsPath();
+  // A landed create redirects to the new channel, so the wait spans the POST and that navigation.
+  // The unique index makes a double-submit safe on the server (the loser reads name_taken), but
+  // "that name already exists" is a confusing answer to your own second click.
+  const busy = useSubmittingIntent() !== null;
   return (
     <div className="space-y-8">
       <PageHeader
@@ -90,29 +95,32 @@ export default function ChannelNew() {
             A channel is a named group: skills placed in it are delivered to its members. Any member
             can create one — the CLI creates them on first use the same way.
           </p>
-          {/* A full-page POST: a landed create redirects to the new channel; a refusal re-renders
-              here with the typed copy. */}
-          <form method="post" className="flex flex-wrap items-end gap-2">
-            <label className="block flex-1">
-              <span className="mb-1 block font-medium text-sm text-dim">Channel name</span>
-              <input
-                type="text"
-                name="name"
-                required
-                autoComplete="off"
-                spellCheck={false}
-                placeholder="frontend-guild"
-                pattern="[a-z0-9][a-z0-9-]*"
-                maxLength={64}
-                key={state?.submittedName ?? "initial"}
-                defaultValue={state?.submittedName ?? ""}
-                className="block h-11 w-full min-w-56 rounded-md border border-line px-3 text-ink text-sm placeholder:text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
-              />
-            </label>
-            <button type="submit" className={`${buttonClasses("quiet")} min-h-11`}>
-              Create channel
-            </button>
-          </form>
+          {/* A landed create redirects to the new channel; a refusal re-renders here with the
+              typed copy. React Router's <Form> (not a bare one) so the submit is observable as
+              navigation state — it still posts natively if scripts never loaded. */}
+          <Form method="post">
+            <BusyFields busy={busy} className="flex flex-wrap items-end gap-2">
+              <label className="block flex-1">
+                <span className="mb-1 block font-medium text-sm text-dim">Channel name</span>
+                <input
+                  type="text"
+                  name="name"
+                  required
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="frontend-guild"
+                  pattern="[a-z0-9][a-z0-9-]*"
+                  maxLength={64}
+                  key={state?.submittedName ?? "initial"}
+                  defaultValue={state?.submittedName ?? ""}
+                  className="block h-11 w-full min-w-56 rounded-md border border-line px-3 text-ink text-sm placeholder:text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
+                />
+              </label>
+              <button type="submit" className={`${buttonClasses("quiet")} min-h-11`}>
+                {busy ? "Creating…" : "Create channel"}
+              </button>
+            </BusyFields>
+          </Form>
           {state !== undefined && state.error.length > 0 && (
             <p className="text-red-600 text-sm" role="alert">
               {state.error}

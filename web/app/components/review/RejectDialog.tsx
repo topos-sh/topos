@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useFetcher } from "react-router";
-import { buttonClasses } from "@/components/ui";
+import { BusyFields, buttonClasses } from "@/components/ui";
 
 /** The review route's typed reply (shared approve/reject shape; this fetcher reads the reject arm). */
 interface ReviewActionData {
@@ -74,33 +74,31 @@ export function RejectDialog({
       <summary className="cursor-pointer select-none font-mono text-[13px] text-dim hover:text-ink">
         {copy.summary}
       </summary>
-      <fetcher.Form ref={formRef} method="post" className="mt-3 flex flex-col gap-2">
+      <fetcher.Form ref={formRef} method="post" className="mt-3">
         <input type="hidden" name="intent" value={variant === "withdraw" ? "withdraw" : "reject"} />
         <input type="hidden" name="version_id" value={versionId} />
-        <label className="block">
-          <span className="mb-1 block font-medium text-sm text-dim">{copy.label}</span>
-          <textarea
-            name="reason"
-            required
-            rows={3}
-            maxLength={2000}
-            placeholder="Say why — the proposer and every reviewer will see it."
-            // The echoed submittedReason (keyed, so the node remounts) keeps the typed text through
-            // a non-success re-render.
-            key={state?.submittedReason ?? "initial"}
-            defaultValue={state?.submittedReason ?? ""}
-            className="block w-full rounded-md border border-line px-3 py-2 text-sm text-ink placeholder:text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
-          />
-        </label>
-        <div>
-          <button
-            type="submit"
-            disabled={pending}
-            className={`${buttonClasses("danger")} min-h-11`}
-          >
-            {pending ? copy.pending : copy.submit}
-          </button>
-        </div>
+        <BusyFields busy={pending} className="flex flex-col gap-2">
+          <label className="block">
+            <span className="mb-1 block font-medium text-sm text-dim">{copy.label}</span>
+            <textarea
+              name="reason"
+              required
+              rows={3}
+              maxLength={2000}
+              placeholder="Say why — the proposer and every reviewer will see it."
+              // The echoed submittedReason (keyed, so the node remounts) keeps the typed text
+              // through a non-success re-render.
+              key={state?.submittedReason ?? "initial"}
+              defaultValue={state?.submittedReason ?? ""}
+              className="block w-full rounded-md border border-line px-3 py-2 text-sm text-ink placeholder:text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
+            />
+          </label>
+          <div>
+            <button type="submit" className={`${buttonClasses("danger")} min-h-11`}>
+              {pending ? copy.pending : copy.submit}
+            </button>
+          </div>
+        </BusyFields>
       </fetcher.Form>
       {state?.status === "rejected" && (
         <p className="mt-2 text-sm text-dim" role="status">

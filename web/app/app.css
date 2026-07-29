@@ -171,6 +171,18 @@ body {
   }
 }
 
+/* The in-flight look for a <BusyFields> group (components/ui.tsx). A Klein input paints its own
+   background and border, so the browser's default disabled rendering barely shows through — this
+   makes "on the wire, don't type here" legible. Scoped to fieldset:disabled so it can only ever
+   fire inside that wrapper, and deliberately NOT applied to buttons: the submit inside carries the
+   pending label, and it has to stay readable. */
+@layer base {
+  fieldset:disabled :is(input, textarea, select) {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+}
+
 /* ── Rendered markdown (server-sanitized GFM from lib/view/markdown) ──────────────────────────
    Compact README-style typography for the skill browser's doc preview + markdown file view.
    Klein tokens only — no new colors — and every rule scopes under .doc-prose so nothing leaks
