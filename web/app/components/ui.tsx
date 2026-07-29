@@ -37,6 +37,34 @@ export function Chip({
   );
 }
 
+/**
+ * The in-flight wrapper for a form's controls. A submit that crosses the network — a sign-in, a
+ * mailed link, an account ceremony — leaves a window where the page looks untouched and a second
+ * click is the obvious thing to try; this closes it. `busy` goes inert in ONE attribute (a native
+ * `<fieldset disabled>`: every control inside stops accepting input and stops submitting, no
+ * per-field bookkeeping) and announces itself to assistive tech.
+ *
+ * The VISIBLE half is the button inside, which keeps its own pending label ("Sending the link…") —
+ * fields dim, the "we're working" copy does not. The fieldset is a transparent box: Tailwind's
+ * preflight zeroes its margin/padding/border, so pass the layout classes the form would have
+ * carried.
+ */
+export function BusyFields({
+  busy,
+  className = "",
+  children,
+}: {
+  busy: boolean;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <fieldset disabled={busy} aria-busy={busy} className={className}>
+      {children}
+    </fieldset>
+  );
+}
+
 /** A short identifier (version hash, fingerprint) in mono, self-labeling as truncated. */
 export function ShortId({ value, length = 12 }: { value: string; length?: number }) {
   return (

@@ -1,18 +1,11 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import {
-  data,
-  Form,
-  Link,
-  redirect,
-  useActionData,
-  useLoaderData,
-  useNavigation,
-} from "react-router";
-import { buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
+import { data, Form, Link, redirect, useActionData, useLoaderData } from "react-router";
+import { BusyFields, buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
 import { requireMemberInScope } from "@/lib/auth/guards.server";
 import { mintBundleId } from "@/lib/db/identity.server";
 import { inFinalTx, registerGenesisBundleInTx } from "@/lib/db/queries.custody.server";
 import { fetchUpstreamTree, governedCopiesOf, resolveTreeSource } from "@/lib/db/upstream.server";
+import { useSubmittingIntent } from "@/lib/pending";
 import { publishVersion } from "@/lib/plane/custody.server";
 import { allowUpstreamFetch } from "@/lib/rate-limit.server";
 import { useWsPath } from "@/lib/ws-path";
@@ -288,9 +281,9 @@ export async function action({ request, params }: ActionFunctionArgs) {
 
 export default function SkillImport() {
   const actionData = useActionData<typeof action>();
-  const navigation = useNavigation();
   const wsPath = useWsPath();
-  const busy = navigation.state !== "idle";
+  const flying = useSubmittingIntent();
+  const busy = flying !== null;
   const preview =
     actionData !== undefined && actionData.form === "preview" && actionData.error === undefined
       ? actionData
@@ -312,21 +305,24 @@ export default function SkillImport() {
         repository changes later, the change arrives as a proposal in the review queue, never a
         silent update.
       </p>
-      <Form method="post" className="flex max-w-2xl items-end gap-2">
+      <Form method="post" className="max-w-2xl">
         <input type="hidden" name="intent" value="preview" />
-        <label className="block flex-1">
-          <span className="mb-1 block font-medium text-dim text-sm">Repository or folder</span>
-          <input
-            type="text"
-            name="source"
-            required
-            placeholder="vercel-labs/skills or https://github.com/owner/repo/tree/main/skills/x"
-            className="block h-11 w-full rounded-md border border-line px-3 font-mono text-[13px] text-ink placeholder:text-faint focus:border-accent focus:outline-none"
-          />
-        </label>
-        <button type="submit" disabled={busy} className={`${buttonClasses("primary")} min-h-11`}>
-          {busy ? "Fetching…" : "Preview"}
-        </button>
+        {/* The preview is a live GitHub fetch on the server — seconds, not milliseconds. */}
+        <BusyFields busy={busy} className="flex items-end gap-2">
+          <label className="block flex-1">
+            <span className="mb-1 block font-medium text-dim text-sm">Repository or folder</span>
+            <input
+              type="text"
+              name="source"
+              required
+              placeholder="vercel-labs/skills or https://github.com/owner/repo/tree/main/skills/x"
+              className="block h-11 w-full rounded-md border border-line px-3 font-mono text-[13px] text-ink placeholder:text-faint focus:border-accent focus:outline-none"
+            />
+          </label>
+          <button type="submit" className={`${buttonClasses("primary")} min-h-11`}>
+            {flying === "preview" ? "Fetching…" : "Preview"}
+          </button>
+        </BusyFields>
       </Form>
       {error !== undefined && (
         <p role="alert" className="text-red-700 text-sm">
@@ -339,10 +335,10 @@ export default function SkillImport() {
 }
 
 function PreviewCard({ preview }: { preview: PreviewData }) {
-  const navigation = useNavigation();
   const { wsName, refHost } = useLoaderData<typeof loader>();
   const wsPath = useWsPath();
-  const busy = navigation.state !== "idle";
+  const flying = useSubmittingIntent();
+  const busy = flying !== null;
   return (
     <section aria-labelledby="import-preview-heading" className="max-w-2xl space-y-3">
       <SectionHeading>
@@ -407,29 +403,29 @@ function PreviewCard({ preview }: { preview: PreviewData }) {
             The archive carried no commit stamp — try again (the publish pins an exact commit).
           </p>
         ) : (
-          <Form method="post" className="flex items-end gap-2">
+          <Form method="post">
             <input type="hidden" name="intent" value="publish" />
             <input type="hidden" name="repo" value={preview.repo} />
             <input type="hidden" name="subdir" value={preview.subdir} />
             <input type="hidden" name="commit" value={preview.commit} />
-            <label className="block flex-1">
-              <span className="mb-1 block font-medium text-dim text-sm">Publish as</span>
-              <input
-                type="text"
-                name="name"
-                required
-                defaultValue={preview.suggestedName}
-                pattern="[a-z0-9][a-z0-9-]*"
-                className="block h-11 w-full rounded-md border border-line px-3 font-mono text-[13px] text-ink focus:border-accent focus:outline-none"
-              />
-            </label>
-            <button
-              type="submit"
-              disabled={busy}
-              className={`${buttonClasses("primary")} min-h-11`}
-            >
-              {busy ? "Publishing…" : "Publish to the workspace"}
-            </button>
+            {/* A publish re-fetches the repo at the pinned commit and writes — the slowest act
+                on this page, and the name is what it writes under. */}
+            <BusyFields busy={busy} className="flex items-end gap-2">
+              <label className="block flex-1">
+                <span className="mb-1 block font-medium text-dim text-sm">Publish as</span>
+                <input
+                  type="text"
+                  name="name"
+                  required
+                  defaultValue={preview.suggestedName}
+                  pattern="[a-z0-9][a-z0-9-]*"
+                  className="block h-11 w-full rounded-md border border-line px-3 font-mono text-[13px] text-ink focus:border-accent focus:outline-none"
+                />
+              </label>
+              <button type="submit" className={`${buttonClasses("primary")} min-h-11`}>
+                {flying === "publish" ? "Publishing…" : "Publish to the workspace"}
+              </button>
+            </BusyFields>
           </Form>
         )}
       </Card>

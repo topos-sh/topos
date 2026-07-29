@@ -153,6 +153,23 @@ export default function ProfilePage() {
   );
 }
 
+/**
+ * Which ROW of a section is on the wire, by the hidden id its form posts — or null when the
+ * section is idle. Each section here drives every one of its rows from ONE fetcher, so
+ * `fetcher.state` alone cannot tell the clicked row from its neighbours; without the id the whole
+ * list would announce a wait that belongs to one line of it.
+ */
+function flyingSkillId(fetcher: { state: string; formData?: FormData }): string | null {
+  return fetcher.state === "idle" ? null : (fetcher.formData?.get("skill_id")?.toString() ?? null);
+}
+
+/** The channel-row twin of [`flyingSkillId`]. */
+function flyingChannelId(fetcher: { state: string; formData?: FormData }): string | null {
+  return fetcher.state === "idle"
+    ? null
+    : (fetcher.formData?.get("channel_id")?.toString() ?? null);
+}
+
 function DeliveredSection({
   delivered,
 }: {
@@ -160,6 +177,9 @@ function DeliveredSection({
 }) {
   const wsPath = useWsPath();
   const fetcher = useFetcher<ProfileActionData>();
+  // ONE fetcher serves every row, so every row's button disables together — but only the row that
+  // was clicked names its wait. Without the id check the whole list would read "Removing…".
+  const removing = flyingSkillId(fetcher);
   const excludedNote =
     fetcher.data?.intent === "remove-skill" && fetcher.data.status === "excluded"
       ? "Removed — a channel still carries it, so a personal exclude line now holds it back. Adding it again clears the exclude."
@@ -210,7 +230,7 @@ function DeliveredSection({
                       disabled={fetcher.state !== "idle"}
                       className={buttonClasses("quiet")}
                     >
-                      Remove
+                      {removing === skill.skillId ? "Removing…" : "Remove"}
                     </button>
                   </fetcher.Form>
                 </span>
@@ -230,6 +250,10 @@ function ChannelsSection({
 }) {
   const fetcher = useFetcher<ProfileActionData>();
   const wsPath = useWsPath();
+  // Carrying or dropping a channel rewrites the person's profile rows and changes what every one
+  // of their machines is owed — this toggle had no in-flight state at all, so a slow answer read
+  // as a dead button and invited the second click that toggles it straight back.
+  const toggling = flyingChannelId(fetcher);
   return (
     <section aria-labelledby="profile-channels-heading" className="space-y-3">
       <SectionHeading>
@@ -266,7 +290,12 @@ function ChannelsSection({
                     value={channel.included ? "remove-channel" : "include-channel"}
                   />
                   <input type="hidden" name="channel_id" value={channel.channelId} />
-                  <ChannelToggle name={channel.name} included={channel.included} />
+                  <ChannelToggle
+                    name={channel.name}
+                    included={channel.included}
+                    busy={fetcher.state !== "idle"}
+                    flying={toggling === channel.channelId}
+                  />
                 </fetcher.Form>
               </span>
             </li>
@@ -277,10 +306,28 @@ function ChannelsSection({
   );
 }
 
-function ChannelToggle({ name, included }: { name: string; included: boolean }) {
+function ChannelToggle({
+  name,
+  included,
+  busy,
+  flying,
+}: {
+  name: string;
+  included: boolean;
+  /** Any row of this section is on the wire — every toggle disables together. */
+  busy: boolean;
+  /** THIS row is the one on the wire — only it names the wait. */
+  flying: boolean;
+}) {
   return (
-    <button type="submit" className={buttonClasses("quiet")}>
-      {included ? `Drop ${name}` : `Carry ${name}`}
+    <button type="submit" disabled={busy} className={buttonClasses("quiet")}>
+      {flying
+        ? included
+          ? `Dropping ${name}…`
+          : `Carrying ${name}…`
+        : included
+          ? `Drop ${name}`
+          : `Carry ${name}`}
     </button>
   );
 }
@@ -313,6 +360,7 @@ function AddSection({
   addable: ReturnType<typeof useLoaderData<typeof loader>>["addable"];
 }) {
   const fetcher = useFetcher<ProfileActionData>();
+  const adding = flyingSkillId(fetcher);
   if (addable.length === 0) {
     return null;
   }
@@ -343,7 +391,7 @@ function AddSection({
                     className={buttonClasses("quiet")}
                   >
                     <Plus aria-hidden className="mr-1 inline size-3.5" />
-                    Add
+                    {adding === skill.skillId ? "Adding…" : "Add"}
                   </button>
                 </fetcher.Form>
               </span>

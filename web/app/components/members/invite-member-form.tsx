@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useFetcher } from "react-router";
-import { buttonClasses } from "@/components/ui";
+import { BusyFields, buttonClasses } from "@/components/ui";
 
 /** The members route's typed reply for `intent=invite`. */
 interface InviteActionData {
@@ -54,26 +54,30 @@ export function InviteMemberForm({ mailArmed, isOwner }: { mailArmed: boolean; i
 
   return (
     <div className="space-y-3">
-      <fetcher.Form ref={formRef} method="post" className="flex flex-wrap items-end gap-2">
+      <fetcher.Form ref={formRef} method="post">
         <input type="hidden" name="intent" value="invite" />
-        <label className="block flex-1">
-          <span className="mb-1 block font-medium text-sm text-dim">Invite by email</span>
-          <input
-            type="text"
-            name="emails"
-            required
-            autoComplete="off"
-            placeholder="teammate@company.com, another@company.com"
-            // The echoed submittedEmails (keyed, so the node remounts) keeps the typed addresses
-            // through a denial/error re-render.
-            key={state?.submittedEmails ?? "initial"}
-            defaultValue={state?.submittedEmails ?? ""}
-            className="block h-11 w-full min-w-56 rounded-md border border-line px-3 text-sm text-ink placeholder:text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
-          />
-        </label>
-        <button type="submit" disabled={pending} className={`${buttonClasses("quiet")} min-h-11`}>
-          {pending ? "Inviting…" : "Invite"}
-        </button>
+        {/* Inviting mints tokens and sends mail — an SMTP round-trip per address, so the wait is
+            real and the field goes inert with the button. */}
+        <BusyFields busy={pending} className="flex flex-wrap items-end gap-2">
+          <label className="block flex-1">
+            <span className="mb-1 block font-medium text-sm text-dim">Invite by email</span>
+            <input
+              type="text"
+              name="emails"
+              required
+              autoComplete="off"
+              placeholder="teammate@company.com, another@company.com"
+              // The echoed submittedEmails (keyed, so the node remounts) keeps the typed addresses
+              // through a denial/error re-render.
+              key={state?.submittedEmails ?? "initial"}
+              defaultValue={state?.submittedEmails ?? ""}
+              className="block h-11 w-full min-w-56 rounded-md border border-line px-3 text-sm text-ink placeholder:text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
+            />
+          </label>
+          <button type="submit" className={`${buttonClasses("quiet")} min-h-11`}>
+            {pending ? "Inviting…" : "Invite"}
+          </button>
+        </BusyFields>
       </fetcher.Form>
       <p className="text-faint text-xs">
         Invitations lapse after 7 days. Inviting an address again re-sends the mail and re-arms the

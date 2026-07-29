@@ -293,7 +293,13 @@ function StanceSection({ detail }: { detail: ChannelDetailData }) {
         />
         <input type="hidden" name="channel_id" value={detail.channelId} />
         <button type="submit" disabled={pending} className={buttonClasses("quiet")}>
-          {detail.viewerIncluded ? "Remove from my skills" : "Add to my skills"}
+          {pending
+            ? detail.viewerIncluded
+              ? "Removing…"
+              : "Adding…"
+            : detail.viewerIncluded
+              ? "Remove from my skills"
+              : "Add to my skills"}
         </button>
       </fetcher.Form>
       {error !== undefined && (

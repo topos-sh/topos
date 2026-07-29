@@ -5,6 +5,7 @@ import {
   useLoaderData,
   useNavigate,
 } from "react-router";
+import { BusyFields } from "@/components/ui";
 import { composition } from "@/composition.server";
 import { authClient } from "@/lib/auth/client";
 import { safeNextPath } from "@/lib/auth/guards.server";
@@ -53,12 +54,37 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
 type Mode = "signin" | "signup";
 
+/**
+ * The rung with a request on the wire — at most ONE at a time. Every rung goes inert while any is
+ * in flight (starting Google mid-magic-link would race two sign-ins against one page), and the
+ * busy rung is the one that swaps its label, so the wait always names what it is waiting for.
+ * Sign-in is the page where a slow answer is most likely — a mailed link is an SMTP round-trip,
+ * a password is a deliberate slow hash — and it is exactly where an unmarked wait reads as a
+ * dead button.
+ */
+type Busy = { rung: "password" } | { rung: "magic" } | { rung: "social"; provider: string } | null;
+
+/**
+ * What a rung says when its call REJECTED rather than answering. Better Auth's client returns
+ * `{ error }` for anything the server decided and throws only when the request never completed —
+ * offline, connection reset — so this line carries no information about the account and is not
+ * an enumeration risk. It gets its own words because a rung's constant refusal would send
+ * someone off to re-check a password that was fine.
+ *
+ * Every rejection path MUST re-arm the form. The fields are inside a disabled fieldset by then,
+ * so a busy state left set is a login page you can only escape by reloading — the exact
+ * dead-looking form this whole change exists to prevent.
+ */
+const UNREACHABLE = "Couldn’t reach the server. Check your connection and try again.";
+
 const INPUT =
   "block h-11 w-full rounded-md border border-line px-3 text-sm text-ink placeholder:text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25";
 const PRIMARY_BTN =
-  "h-11 w-full rounded-md bg-accent font-mono text-[13px] text-on-accent hover:bg-accent-deep focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 disabled:opacity-60";
+  "h-11 w-full rounded-md bg-accent font-mono text-[13px] text-on-accent hover:bg-accent-deep focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60";
 const QUIET_BTN =
-  "flex h-11 w-full items-center justify-center gap-2 rounded-md border border-line bg-panel font-mono text-[13px] text-dim hover:bg-panel2 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2";
+  "flex h-11 w-full items-center justify-center gap-2 rounded-md border border-line bg-panel font-mono text-[13px] text-dim hover:bg-panel2 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60";
+/** The two quiet text toggles (rung switch, sign-in/sign-up switch) — inert while a rung flies. */
+const TOGGLE_BTN = "disabled:cursor-not-allowed disabled:opacity-60";
 
 /** The label/icon map for social providers — google today; an unknown id gets a titled fallback. */
 function socialLabel(id: string): string {
@@ -84,7 +110,7 @@ export default function LoginPage() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [pending, setPending] = useState(false);
+  const [busy, setBusy] = useState<Busy>(null);
   const [error, setError] = useState<string | null>(null);
   const [magicSent, setMagicSent] = useState(false);
   const [verifySent, setVerifySent] = useState(false);
@@ -97,25 +123,32 @@ export default function LoginPage() {
   // composition that turned the password rung OFF never renders (or submits) a password form,
   // and its sign-up motion is whatever its remaining rungs provide (invite + magic link/social).
   const showMagic = magicLink && !signup && (!passwordRevealed || !emailAndPassword);
+  const anyBusy = busy !== null;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (pending) return;
-    setPending(true);
+    if (anyBusy) return;
+    setBusy({ rung: "password" });
     setError(null);
     const address = email.trim();
-    const { error: authError } =
-      mode === "signin"
-        ? await authClient.signIn.email({ email: address, password })
-        : await authClient.signUp.email({
-            email: address,
-            password,
-            // Better Auth requires a name on sign-up; the email is an honest default when the
-            // optional field is left blank.
-            name: name.trim() || address,
-          });
+    const attempt = await (mode === "signin"
+      ? authClient.signIn.email({ email: address, password })
+      : authClient.signUp.email({
+          email: address,
+          password,
+          // Better Auth requires a name on sign-up; the email is an honest default when the
+          // optional field is left blank.
+          name: name.trim() || address,
+        })
+    ).catch(() => null);
+    if (attempt === null) {
+      setBusy(null);
+      setError(UNREACHABLE);
+      return;
+    }
+    const { error: authError } = attempt;
     if (authError) {
-      setPending(false);
+      setBusy(null);
       // GATED, the sign-up refusal is CONSTANT whatever failed — an uninvited address, an
       // expired invitation, and a taken email all read the same, so the form enumerates
       // nothing. OPEN, sign-up isn't invitation-framed: a failure gets a plain retry line
@@ -132,43 +165,66 @@ export default function LoginPage() {
     if (mode === "signup" && mailArmed) {
       // The seat binds only after the mailbox round-trip — hold here instead of navigating
       // into an app the account cannot enter yet.
-      setPending(false);
+      setBusy(null);
       setVerifySent(true);
       return;
     }
-    // Sign-up signs in on success, so both rungs land the same place.
+    // Sign-up signs in on success, so both rungs land the same place. The rung stays BUSY across
+    // the navigate: this card is on its way out, and re-arming it for those frames would offer a
+    // second submit of a sign-in that already succeeded.
     navigate(next);
   }
 
   async function submitMagicLink(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (anyBusy) return;
     const address = email.trim();
     if (!address) {
       setError("Enter your email first.");
       return;
     }
     setError(null);
-    const { error: linkError } = await authClient.signIn.magicLink({
-      email: address,
-      callbackURL: next,
-    });
-    if (linkError) {
+    // Held busy from here: the send is an SMTP round-trip on the server, the slowest wait the
+    // page has, and until it answers this card must not look idle.
+    setBusy({ rung: "magic" });
+    const sent = await authClient.signIn
+      .magicLink({ email: address, callbackURL: next })
+      .catch(() => null);
+    if (sent === null) {
+      setBusy(null);
+      setError(UNREACHABLE);
+      return;
+    }
+    if (sent.error) {
+      setBusy(null);
       setError("Couldn’t send the link. Check the address and try again.");
       return;
     }
+    // The sent card replaces this one — leaving busy set keeps the form inert for those frames.
     setMagicSent(true);
   }
 
   async function continueWithSocial(provider: string) {
+    if (anyBusy) return;
     setError(null);
-    const { error: socialError } = await authClient.signIn.social({
-      // The composed provider id is a string; the client types it as its known-provider union.
-      provider: provider as Parameters<typeof authClient.signIn.social>[0]["provider"],
-      callbackURL: next,
-    });
-    if (socialError) {
+    setBusy({ rung: "social", provider });
+    const started = await authClient.signIn
+      .social({
+        // The composed provider id is a string; the client types it as its known-provider union.
+        provider: provider as Parameters<typeof authClient.signIn.social>[0]["provider"],
+        callbackURL: next,
+      })
+      .catch(() => null);
+    if (started === null) {
+      setBusy(null);
+      setError(UNREACHABLE);
+      return;
+    }
+    if (started.error) {
+      setBusy(null);
       setError("Couldn’t start that sign-in. Try again.");
     }
+    // Success hands the browser to the provider — stay busy through the redirect.
   }
 
   if (magicSent) {
@@ -214,52 +270,62 @@ export default function LoginPage() {
       </p>
 
       {showMagic ? (
-        <form onSubmit={submitMagicLink} className="mt-6 space-y-3">
-          <EmailField value={email} onChange={setEmail} />
-          <button type="submit" className={PRIMARY_BTN}>
-            {registrationOpen ? "Continue with email" : "Email me a sign-in link"}
-          </button>
+        <form onSubmit={submitMagicLink} className="mt-6">
+          <BusyFields busy={anyBusy} className="space-y-3">
+            <EmailField value={email} onChange={setEmail} />
+            <button type="submit" className={PRIMARY_BTN}>
+              {busy?.rung === "magic"
+                ? "Sending the link…"
+                : registrationOpen
+                  ? "Continue with email"
+                  : "Email me a sign-in link"}
+            </button>
+          </BusyFields>
         </form>
       ) : !emailAndPassword ? null : (
-        <form onSubmit={submit} className="mt-6 space-y-3">
-          {signup && (
+        <form onSubmit={submit} className="mt-6">
+          <BusyFields busy={anyBusy} className="space-y-3">
+            {signup && (
+              <label className="block">
+                <span className="mb-1 block text-sm font-medium text-dim">Name</span>
+                <input
+                  type="text"
+                  name="name"
+                  autoComplete="name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className={INPUT}
+                  placeholder="Ada Lovelace"
+                />
+              </label>
+            )}
+            <EmailField value={email} onChange={setEmail} />
             <label className="block">
-              <span className="mb-1 block text-sm font-medium text-dim">Name</span>
+              <span className="mb-1 block text-sm font-medium text-dim">Password</span>
               <input
-                type="text"
-                name="name"
-                autoComplete="name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
+                type="password"
+                name="password"
+                required
+                minLength={8}
+                autoComplete={signup ? "new-password" : "current-password"}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
                 className={INPUT}
-                placeholder="Ada Lovelace"
+                placeholder="••••••••"
               />
             </label>
-          )}
-          <EmailField value={email} onChange={setEmail} />
-          <label className="block">
-            <span className="mb-1 block text-sm font-medium text-dim">Password</span>
-            <input
-              type="password"
-              name="password"
-              required
-              minLength={8}
-              autoComplete={signup ? "new-password" : "current-password"}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className={INPUT}
-              placeholder="••••••••"
-            />
-          </label>
-          <button type="submit" disabled={pending} className={PRIMARY_BTN}>
-            {pending
-              ? signup
-                ? "Creating…"
-                : "Signing in…"
-              : signup
-                ? "Create account"
-                : "Sign in"}
-          </button>
+            {/* The label names THIS rung's wait only: another rung in flight disables the button
+                without pretending a password is being checked. */}
+            <button type="submit" className={PRIMARY_BTN}>
+              {busy?.rung === "password"
+                ? signup
+                  ? "Creating…"
+                  : "Signing in…"
+                : signup
+                  ? "Create account"
+                  : "Sign in"}
+            </button>
+          </BusyFields>
         </form>
       )}
 
@@ -278,10 +344,13 @@ export default function LoginPage() {
                 key={id}
                 type="button"
                 onClick={() => continueWithSocial(id)}
+                disabled={anyBusy}
                 className={QUIET_BTN}
               >
                 {id === "google" && <GoogleIcon />}
-                {socialLabel(id)}
+                {busy?.rung === "social" && busy.provider === id
+                  ? "Taking you there…"
+                  : socialLabel(id)}
               </button>
             ))}
           </div>
@@ -292,11 +361,12 @@ export default function LoginPage() {
       {magicLink && !signup && emailAndPassword && (
         <button
           type="button"
+          disabled={anyBusy}
           onClick={() => {
             setPasswordRevealed((v) => !v);
             setError(null);
           }}
-          className="mt-4 block w-full text-center text-sm text-dim underline-offset-2 hover:text-ink hover:underline"
+          className={`mt-4 block w-full text-center text-sm text-dim underline-offset-2 hover:text-ink hover:underline ${TOGGLE_BTN}`}
         >
           {passwordRevealed
             ? registrationOpen
@@ -311,11 +381,12 @@ export default function LoginPage() {
           {signup ? "Already have an account?" : "New to Topos?"}{" "}
           <button
             type="button"
+            disabled={anyBusy}
             onClick={() => {
               setMode(signup ? "signin" : "signup");
               setError(null);
             }}
-            className="border-b border-hairline text-ink transition-colors hover:border-ink"
+            className={`border-b border-hairline text-ink transition-colors hover:border-ink ${TOGGLE_BTN}`}
           >
             {signup ? "Sign in" : "Create an account"}
           </button>

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useFetcher } from "react-router";
-import { buttonClasses } from "@/components/ui";
+import { BusyFields, buttonClasses } from "@/components/ui";
 
 /** The review route's typed reply for `intent=comment`. */
 interface CommentActionData {
@@ -42,30 +42,32 @@ export function CommentForm({
 
   return (
     <div className="flex flex-col gap-2">
-      <fetcher.Form ref={formRef} method="post" className="flex flex-col gap-2">
+      <fetcher.Form ref={formRef} method="post">
         <input type="hidden" name="intent" value="comment" />
         <input type="hidden" name="version_id" value={versionId} />
         <input type="hidden" name="comment_id" value={commentId} />
-        <label className="block">
-          <span className="sr-only">Comment</span>
-          <textarea
-            name="body"
-            required
-            rows={2}
-            maxLength={4000}
-            placeholder="Comment on this proposal — plain text, visible to the workspace."
-            // The echoed submittedBody (keyed, so the node remounts) keeps the typed text through a
-            // non-success re-render.
-            key={state?.submittedBody ?? "initial"}
-            defaultValue={state?.submittedBody ?? ""}
-            className="block w-full rounded-md border border-line px-3 py-2 text-sm text-ink placeholder:text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
-          />
-        </label>
-        <div>
-          <button type="submit" disabled={pending} className={`${buttonClasses("quiet")} min-h-11`}>
-            {pending ? "Posting…" : "Comment"}
-          </button>
-        </div>
+        <BusyFields busy={pending} className="flex flex-col gap-2">
+          <label className="block">
+            <span className="sr-only">Comment</span>
+            <textarea
+              name="body"
+              required
+              rows={2}
+              maxLength={4000}
+              placeholder="Comment on this proposal — plain text, visible to the workspace."
+              // The echoed submittedBody (keyed, so the node remounts) keeps the typed text through
+              // a non-success re-render.
+              key={state?.submittedBody ?? "initial"}
+              defaultValue={state?.submittedBody ?? ""}
+              className="block w-full rounded-md border border-line px-3 py-2 text-sm text-ink placeholder:text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
+            />
+          </label>
+          <div>
+            <button type="submit" className={`${buttonClasses("quiet")} min-h-11`}>
+              {pending ? "Posting…" : "Comment"}
+            </button>
+          </div>
+        </BusyFields>
       </fetcher.Form>
       {state?.status === "empty" && (
         <p className="text-red-600 text-sm" role="alert">

@@ -8,9 +8,10 @@ import {
   redirect,
   useActionData,
 } from "react-router";
-import { buttonClasses } from "@/components/ui";
+import { BusyFields, buttonClasses } from "@/components/ui";
 import { notFound } from "@/lib/auth/guards.server";
 import { consumeRecoveryCode } from "@/lib/auth/recovery.server";
+import { useSubmittingIntent } from "@/lib/pending";
 import { allowPublicRead, clientKeyFromXff } from "@/lib/rate-limit.server";
 
 export const meta: MetaFunction = () => [{ title: "Account recovery · Topos" }];
@@ -66,6 +67,10 @@ const INPUT =
 
 export default function RecoveryPage() {
   const actionData = useActionData<typeof action>();
+  // Consuming the code is a password hash plus a write, and a landed reset REDIRECTS to /login —
+  // so the wait spans both. The code is single-use: a second submit while the first is on the
+  // wire spends it and answers the one constant refusal, reading as "my code didn't work".
+  const busy = useSubmittingIntent() !== null;
   return (
     <Shell>
       <p className="font-medium text-faint text-xs uppercase tracking-wide">Account recovery</p>
@@ -75,34 +80,36 @@ export default function RecoveryPage() {
       <p className="mt-1 text-faint text-sm">
         Enter the recovery code from the server operator and choose a new password.
       </p>
-      <Form method="post" className="mt-6 space-y-3">
-        <label className="block">
-          <span className="mb-1 block font-medium text-dim text-sm">Recovery code</span>
-          <input
-            type="text"
-            name="code"
-            required
-            autoComplete="off"
-            spellCheck={false}
-            className={`${INPUT} font-mono`}
-            placeholder="paste the code"
-          />
-        </label>
-        <label className="block">
-          <span className="mb-1 block font-medium text-dim text-sm">New password</span>
-          <input
-            type="password"
-            name="password"
-            required
-            minLength={8}
-            autoComplete="new-password"
-            className={INPUT}
-            placeholder="••••••••"
-          />
-        </label>
-        <button type="submit" className={`${buttonClasses("primary")} min-h-11 w-full`}>
-          Reset password
-        </button>
+      <Form method="post" className="mt-6">
+        <BusyFields busy={busy} className="space-y-3">
+          <label className="block">
+            <span className="mb-1 block font-medium text-dim text-sm">Recovery code</span>
+            <input
+              type="text"
+              name="code"
+              required
+              autoComplete="off"
+              spellCheck={false}
+              className={`${INPUT} font-mono`}
+              placeholder="paste the code"
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1 block font-medium text-dim text-sm">New password</span>
+            <input
+              type="password"
+              name="password"
+              required
+              minLength={8}
+              autoComplete="new-password"
+              className={INPUT}
+              placeholder="••••••••"
+            />
+          </label>
+          <button type="submit" className={`${buttonClasses("primary")} min-h-11 w-full`}>
+            {busy ? "Resetting…" : "Reset password"}
+          </button>
+        </BusyFields>
       </Form>
       {actionData?.error !== undefined && (
         <p className="mt-3 text-red-600 text-sm" role="alert">

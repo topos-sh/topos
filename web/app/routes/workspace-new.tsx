@@ -12,12 +12,13 @@ import {
   useLocation,
   useNavigation,
 } from "react-router";
-import { buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
+import { BusyFields, buttonClasses, Card, PageHeader, SectionHeading } from "@/components/ui";
 import { actorFromSession, notFound, requireSession, safeNextPath } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
 import { announceCeremony } from "@/lib/ceremony-event";
 import { createWorkspace, workspaceNameAvailable } from "@/lib/db/workspace-create.server";
 import { destinationPathname } from "@/lib/destination-path";
+import { useSubmittingIntent } from "@/lib/pending";
 import { followBase } from "@/lib/plane/follow-base.server";
 import { isWorkspaceNameShape, toWorkspaceSlug, WORKSPACE_NAME_MAX } from "@/lib/workspace-name";
 import { wsPathServer } from "@/lib/ws-url.server";
@@ -236,6 +237,7 @@ function CreateForm({
   const checkData = check.data && "available" in check.data ? check.data : undefined;
   const forCurrent = checkData !== undefined && checkData.name === slug;
   const checking = check.state !== "idle";
+  const busy = useSubmittingIntent() !== null;
 
   function onDisplayNameChange(value: string) {
     setDisplayName(value);
@@ -260,54 +262,59 @@ function CreateForm({
           <span id="create-workspace-heading">Name it</span>
         </SectionHeading>
         <Card className="space-y-4 px-4 py-4">
-          <Form method="post" className="space-y-4">
+          <Form method="post">
             {next !== null && <input type="hidden" name="next" value={next} />}
-            <label className="block">
-              <span className="mb-1 block font-medium text-dim text-sm">Workspace name</span>
-              <input
-                type="text"
-                name="displayName"
-                required
-                autoComplete="off"
-                spellCheck={false}
-                placeholder="Acme Engineering"
-                maxLength={100}
-                value={displayName}
-                onChange={(e) => onDisplayNameChange(e.target.value)}
-                className={INPUT}
-              />
-            </label>
+            {/* The create is one transaction (workspace + default channel + owner seat + audit)
+                and lands by REDIRECT into the new workspace, so the wait spans both. The
+                availability probe is a FETCHER, never navigation state — it can't dim the form. */}
+            <BusyFields busy={busy} className="space-y-4">
+              <label className="block">
+                <span className="mb-1 block font-medium text-dim text-sm">Workspace name</span>
+                <input
+                  type="text"
+                  name="displayName"
+                  required
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="Acme Engineering"
+                  maxLength={100}
+                  value={displayName}
+                  onChange={(e) => onDisplayNameChange(e.target.value)}
+                  className={INPUT}
+                />
+              </label>
 
-            <label className="block">
-              <span className="mb-1 block font-medium text-dim text-sm">Address</span>
-              <input
-                type="text"
-                name="slug"
-                required
-                autoComplete="off"
-                spellCheck={false}
-                placeholder="acme-engineering"
-                pattern="[a-z0-9][a-z0-9-]*"
-                maxLength={WORKSPACE_NAME_MAX}
-                value={slug}
-                onChange={(e) => onSlugChange(e.target.value)}
-                className={`${INPUT} font-mono`}
-              />
-              <AddressStatus
-                slug={slug}
-                origin={origin}
-                checking={checking}
-                available={forCurrent ? checkData?.available : undefined}
-              />
-            </label>
+              <label className="block">
+                <span className="mb-1 block font-medium text-dim text-sm">Address</span>
+                <input
+                  type="text"
+                  name="slug"
+                  required
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="acme-engineering"
+                  pattern="[a-z0-9][a-z0-9-]*"
+                  maxLength={WORKSPACE_NAME_MAX}
+                  value={slug}
+                  onChange={(e) => onSlugChange(e.target.value)}
+                  className={`${INPUT} font-mono`}
+                />
+                <AddressStatus
+                  slug={slug}
+                  origin={origin}
+                  checking={checking}
+                  available={forCurrent ? checkData?.available : undefined}
+                />
+              </label>
 
-            <button
-              type="submit"
-              disabled={slug.length === 0 || displayName.trim().length === 0}
-              className={`${buttonClasses("primary")} min-h-11`}
-            >
-              Create workspace
-            </button>
+              <button
+                type="submit"
+                disabled={slug.length === 0 || displayName.trim().length === 0}
+                className={`${buttonClasses("primary")} min-h-11`}
+              >
+                {busy ? "Creating…" : "Create workspace"}
+              </button>
+            </BusyFields>
           </Form>
 
           {actionData !== undefined && actionData.error.length > 0 && (

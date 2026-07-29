@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useFetcher } from "react-router";
-import { buttonClasses, Card } from "@/components/ui";
+import { BusyFields, buttonClasses, Card } from "@/components/ui";
 
 /** The skill route's typed reply for `intent=invite` (mirrors the action's return union). */
 interface SkillInviteReply {
@@ -86,30 +86,28 @@ export function SkillInviteAffordance({
         <p className="text-dim text-sm">Only a workspace owner can invite (and revoke) members.</p>
       ) : (
         <>
-          <fetcher.Form ref={formRef} method="post" className="flex flex-wrap items-end gap-2">
+          <fetcher.Form ref={formRef} method="post">
             <input type="hidden" name="intent" value="invite" />
-            <label className="block flex-1">
-              <span className="mb-1 block font-medium text-dim text-sm">Invite by email</span>
-              <input
-                type="text"
-                name="email"
-                required
-                autoComplete="off"
-                placeholder="teammate@company.com"
-                // The echoed submittedEmail (keyed, so the node remounts) keeps the typed address
-                // through a denial/error re-render.
-                key={state?.submittedEmail ?? "initial"}
-                defaultValue={state?.submittedEmail ?? ""}
-                className="block h-11 w-full min-w-56 rounded-md border border-line px-3 text-ink text-sm placeholder:text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
-              />
-            </label>
-            <button
-              type="submit"
-              disabled={pending}
-              className={`${buttonClasses("quiet")} min-h-11`}
-            >
-              {pending ? "Inviting…" : "Invite"}
-            </button>
+            <BusyFields busy={pending} className="flex flex-wrap items-end gap-2">
+              <label className="block flex-1">
+                <span className="mb-1 block font-medium text-dim text-sm">Invite by email</span>
+                <input
+                  type="text"
+                  name="email"
+                  required
+                  autoComplete="off"
+                  placeholder="teammate@company.com"
+                  // The echoed submittedEmail (keyed, so the node remounts) keeps the typed address
+                  // through a denial/error re-render.
+                  key={state?.submittedEmail ?? "initial"}
+                  defaultValue={state?.submittedEmail ?? ""}
+                  className="block h-11 w-full min-w-56 rounded-md border border-line px-3 text-ink text-sm placeholder:text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
+                />
+              </label>
+              <button type="submit" className={`${buttonClasses("quiet")} min-h-11`}>
+                {pending ? "Inviting…" : "Invite"}
+              </button>
+            </BusyFields>
           </fetcher.Form>
           <p className="text-faint text-xs">
             The invitation leads with this skill — it is the first thing the invitee sees.
