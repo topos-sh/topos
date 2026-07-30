@@ -4142,9 +4142,9 @@ fn a_copy_edited_between_the_scan_and_the_delete_is_snapshotted_before_it_goes()
     rig.write_global("[bundles]\n");
     // The racer edits the (clean) copy between the sweep's scan and its delete.
     let racing = placed.clone();
-    // The seam: the retiring loop probes `exists(dir)` immediately before it removes the dir —
+    // The seam: the retiring loop probes `exists(dir)` immediately before it acts on the dir —
     // AFTER the scan that classified every placement as clean. An edit landing there was captured
-    // by no snapshot, so only a re-scan at the delete can save it.
+    // by no snapshot, so only a fresh read at the retirement can save it.
     let fs = crate::fs_seam::HookFs::before_nth_exists(&placed, 1, move || {
         std::fs::write(racing.join("SKILL.md"), b"# raced edit\n").unwrap();
     });
@@ -4158,5 +4158,840 @@ fn a_copy_edited_between_the_scan_and_the_delete_is_snapshotted_before_it_goes()
         store_versions(&rig.layout(), "s_deploy"),
         before + 1,
         "the raced edit was committed into the store before the dir went"
+    );
+}
+
+#[test]
+fn a_copy_edited_in_the_instant_before_the_park_is_snapshotted_too() {
+    // The sharper seam: an edit landing between the LAST check and the mutation itself. A
+    // verify-then-delete has nothing left to check with there; park-then-verify does — the rename
+    // takes the tree out of reach and the read that decides happens on bytes nobody can still be
+    // writing. The hook fires immediately before that rename.
+    let rig = Rig::new("clean-park-race");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
+    let placed = install_feed_deploy(&rig, &plane, &dir);
+    let before = store_versions(&rig.layout(), "s_deploy");
+
+    rig.write_global("[bundles]\n");
+    let racing = placed.clone();
+    let fs = crate::fs_seam::HookFs::before_first_move_of(&placed, move || {
+        std::fs::write(racing.join("SKILL.md"), b"# raced at the park\n").unwrap();
+    });
+    let ctx = Ctx {
+        fs: &fs,
+        ..rig.ctx_at(Some(&rig.work.0))
+    };
+    sweep(&ctx, &plane, &dir);
+    assert!(!placed.exists(), "the undemanded placement is retired");
+    assert_eq!(
+        store_versions(&rig.layout(), "s_deploy"),
+        before + 1,
+        "the edit that landed in the last instant was parked, read, and committed"
+    );
+    // No park is left behind once its bytes are safe.
+    let leftovers: Vec<String> = std::fs::read_dir(placed.parent().unwrap())
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with(".topos-retiring-"))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
+fn a_copy_edited_in_the_instant_before_the_swap_is_snapshotted_too() {
+    // The materializer's own park: an update lands new bytes over a clean copy, and the edit
+    // arrives after the pre-swap re-stat — the one window a stat can never close. The swap PARKS
+    // the old tree instead of deleting it, so the bytes that were really there are read and
+    // committed before anything is dropped.
+    let rig = Rig::new("swap-park-race");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v1 = one_file(b"# deploy v1\n");
+    let v2 = one_file(b"# deploy v2\n");
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &v1)
+        .with_version("s_deploy", &v2);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v1)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v1)], Vec::new());
+    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
+    let placed = install_feed_deploy(&rig, &plane, &dir);
+    let before = store_versions(&rig.layout(), "s_deploy");
+
+    // v2 is served (a real pointer move — the next generation); the copy on disk is CLEAN, so the
+    // sweep will overwrite it.
+    let mut moved = delivered("s_deploy", "deploy", &v2);
+    moved.generation = 2;
+    plane.serves(vec![moved]);
+    let racing = placed.clone();
+    // The materializer operates on the CANONICAL dir (a symlinked temp prefix is resolved), which
+    // is the path the swap actually names.
+    let swapped = placed.canonicalize().unwrap();
+    let fs = crate::fs_seam::HookFs::before_first_move_of(&swapped, move || {
+        std::fs::write(racing.join("SKILL.md"), b"# raced at the swap\n").unwrap();
+    });
+    let ctx = Ctx {
+        fs: &fs,
+        ..rig.ctx_at(Some(&rig.work.0))
+    };
+    sweep(&ctx, &plane, &dir);
+    assert_eq!(
+        std::fs::read(placed.join("SKILL.md")).unwrap(),
+        b"# deploy v2\n",
+        "the new bytes landed"
+    );
+    assert_eq!(
+        store_versions(&rig.layout(), "s_deploy"),
+        before + 2,
+        "the served version AND the raced edit are both in the store"
+    );
+}
+
+// =================================================================================================
+// A bare name that several LINES answer to is refused — one candidate set, gathered before any
+// decision (row vs set, set vs set, feed vs set).
+// =================================================================================================
+
+/// A channel entry carrying `skills`.
+fn channel(name: &str, skills: &[(&str, &str)]) -> WireChannelEntry {
+    WireChannelEntry {
+        name: name.into(),
+        mode: "open".into(),
+        builtin: false,
+        included: true,
+        skills: skills
+            .iter()
+            .map(|(id, n)| WireChannelSkill {
+                skill_id: (*id).into(),
+                name: (*n).into(),
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn a_bare_name_a_row_and_a_set_both_answer_to_is_refused_not_guessed() {
+    // ROW vs SET. Dropping the row leaves the channel delivering `deploy`; splitting the channel
+    // leaves the row delivering it. Picking either silently is a removal that does not remove.
+    let rig = Rig::new("ambig-row-set");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let d = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &d);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(
+        vec![catalog_entry("s_deploy", "deploy", &d)],
+        vec![channel("backend", &[("s_deploy", "deploy")])],
+    );
+    rig.write_global(&format!(
+        "[bundles]\n\"github.com/o/r/deploy\" = \"*\"\n\"{HOST}/{WS_NAME}/channels/backend\" = \
+         \"*\"\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    let err =
+        ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], true).unwrap_err();
+    assert_eq!(err.code(), "AMBIGUOUS_NAME", "{err:?}");
+    let msg = err.to_string();
+    assert!(msg.contains("github.com/o/r/deploy"), "{msg}");
+    assert!(msg.contains("channels/backend"), "{msg}");
+
+    // The EXACT spelling is an answer, never an ambiguity — otherwise the refusal would be a dead
+    // end (a set member has no spelling of its own).
+    let one = "github.com/o/r/deploy".to_owned();
+    assert!(matches!(
+        ops::remove_global(&ctx, &connect(&plane, &dir), &[one], true).unwrap(),
+        ops::RemoveOutcome::Applied(_)
+    ));
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(!text.contains("github.com/o/r/deploy"), "{text}");
+    assert!(
+        text.contains("channels/backend"),
+        "the set line stands: {text}"
+    );
+}
+
+#[test]
+fn a_bare_name_two_sets_carry_is_refused_not_split_at_random() {
+    // SET vs SET — the fault the old first-match resolution hid completely: whichever channel
+    // expanded first got split, and the other went on delivering the bundle.
+    let rig = Rig::new("ambig-set-set");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let d = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &d);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(
+        vec![catalog_entry("s_deploy", "deploy", &d)],
+        vec![
+            channel("backend", &[("s_deploy", "deploy")]),
+            channel("platform", &[("s_deploy", "deploy")]),
+        ],
+    );
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n\
+         \"{HOST}/{WS_NAME}/channels/platform\" = \"*\"\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let err =
+        ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], true).unwrap_err();
+    assert_eq!(err.code(), "AMBIGUOUS_NAME", "{err:?}");
+    let msg = err.to_string();
+    assert!(msg.contains("channels/backend"), "{msg}");
+    assert!(msg.contains("channels/platform"), "{msg}");
+    // Neither line was touched.
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(
+        text.contains("channels/backend") && text.contains("channels/platform"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_bare_name_the_feed_and_a_repo_set_both_deliver_is_refused() {
+    // FEED vs SET: the feed's `"off"` switch used to answer first, so a repo set carrying the same
+    // name never even got looked at.
+    let rig = Rig::new("ambig-feed-set");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let d = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &d);
+    plane.serves(vec![delivered("s_deploy", "deploy", &d)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &d)], Vec::new());
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/deploy/SKILL.md", b"# repo deploy\n")],
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    // The repo import is a real tracked member of the home store (the set's expansion reads it).
+    gate_add(&ctx, &plane, &dir, &git, "o/r");
+    // Both lines stand: the workspace feed AND the repo set.
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"github.com/o/r\" = \"*\"\n"
+    ));
+
+    let err =
+        ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], true).unwrap_err();
+    assert_eq!(err.code(), "AMBIGUOUS_NAME", "{err:?}");
+    let msg = err.to_string();
+    assert!(msg.contains(&format!("{HOST}/{WS_NAME}/deploy")), "{msg}");
+    assert!(msg.contains("github.com/o/r/deploy"), "{msg}");
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(!text.contains("\"off\""), "no switch was written: {text}");
+}
+
+// =================================================================================================
+// A manifest that moves between the decision and the write refuses — no plan built from bytes
+// that are gone.
+// =================================================================================================
+
+#[test]
+fn a_manifest_edited_between_the_decision_and_the_write_refuses() {
+    // The set split is the sharpest case: its survivor rows are computed FROM the file (which
+    // members already have their own row), so a row someone else adds in between would be
+    // overwritten by a line rebuilt from the older reading.
+    let rig = Rig::new("changed-underfoot");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let a = one_file(b"# alpha\n");
+    let b = one_file(b"# beta\n");
+    let plane = FakePlane::new(log)
+        .with_version("s_a", &a)
+        .with_version("s_b", &b);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(
+        vec![
+            catalog_entry("s_a", "alpha", &a),
+            catalog_entry("s_b", "beta", &b),
+        ],
+        vec![channel("backend", &[("s_a", "alpha"), ("s_b", "beta")])],
+    );
+    let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
+    let line = format!("\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n");
+    rig.write_global(&format!("[bundles]\n{line}"));
+
+    // The racer: an outside editor writes beta's own row AFTER the arms were resolved and before
+    // they are re-proven (topos's own writers serialize on the file's lock; a person's editor does
+    // not).
+    let racing = manifest.clone();
+    let raced = format!("[bundles]\n{line}\"{HOST}/{WS_NAME}/beta\" = \"*\"\n");
+    let fs = crate::fs_seam::HookFs::before_nth_read(&manifest, 2, move || {
+        std::fs::write(&racing, &raced).unwrap();
+    });
+    let ctx = Ctx {
+        fs: &fs,
+        ..rig.ctx_at(Some(&rig.work.0))
+    };
+    let err =
+        ops::remove_global(&ctx, &connect(&plane, &dir), &["alpha".into()], true).unwrap_err();
+    assert_eq!(err.code(), "MANIFEST_CHANGED", "{err:?}");
+
+    // NOTHING was written: the racer's row stands, the set line stands, no split landed.
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    assert!(text.contains("channels/backend"), "{text}");
+    assert!(text.contains(&format!("{HOST}/{WS_NAME}/beta")), "{text}");
+    assert!(
+        !text.contains(&format!("{HOST}/{WS_NAME}/alpha")),
+        "no stale survivor row was written: {text}"
+    );
+
+    // Re-run against the file as it now is: the split honours beta's own row and applies.
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    assert!(matches!(
+        ops::remove_global(&ctx, &connect(&plane, &dir), &["alpha".into()], true).unwrap(),
+        ops::RemoveOutcome::Applied(_)
+    ));
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    assert!(!text.contains("channels/backend"), "the line split: {text}");
+    assert!(text.contains(&format!("{HOST}/{WS_NAME}/beta")), "{text}");
+}
+
+// =================================================================================================
+// The visited-store index unions under its own lock.
+// =================================================================================================
+
+#[test]
+fn the_visited_store_index_unions_under_its_own_lock() {
+    // Two sweeps from two checkouts are the ordinary case. Each one's union is built from the
+    // bytes it read, so without a lock across read → union → write the second writer's document
+    // simply does not contain the first writer's checkout, and that checkout's holdings drop out
+    // of every later applied report.
+    let rig = Rig::new("visited-lock");
+    let a = project("visited-lock-a", "[bundles]\n");
+    let b = project("visited-lock-b", "[bundles]\n");
+    crate::sidecar::ensure_project_store(&rig.fs, &a.0).unwrap();
+    crate::sidecar::ensure_project_store(&rig.fs, &b.0).unwrap();
+
+    // Run one records checkout A.
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    assert_eq!(
+        crate::visited_stores::recall_and_record(&ctx, std::slice::from_ref(&a.0)).len(),
+        1
+    );
+
+    // Run two records checkout B — and a would-be concurrent writer probing the lock at the moment
+    // between the read and the write finds it HELD.
+    let lock_path = rig.layout().visited_stores_lock_file();
+    let free_in_the_window = std::cell::Cell::new(true);
+    let fs =
+        crate::fs_seam::HookFs::before_nth_create_dir_all(&rig.layout().state_dir(), 1, || {
+            let taken = crate::fs_seam::FsOps::try_lock_exclusive(&RealFs, &lock_path)
+                .map(|g| g.is_none())
+                .unwrap_or(true);
+            free_in_the_window.set(!taken);
+        });
+    let ctx = Ctx {
+        fs: &fs,
+        ..rig.ctx_at(Some(&rig.work.0))
+    };
+    let layouts = crate::visited_stores::recall_and_record(&ctx, std::slice::from_ref(&b.0));
+    assert!(
+        !free_in_the_window.get(),
+        "the index's writer lock is held across its whole read-union-write"
+    );
+    assert_eq!(layouts.len(), 2, "both checkouts survive the union");
+
+    // …and the document itself holds both, for every later report.
+    let doc: crate::visited_stores::VisitedStores =
+        crate::doc::read_doc(&rig.fs, &rig.layout().visited_stores_path())
+            .unwrap()
+            .unwrap();
+    assert!(doc.stores.contains(&a.0.display().to_string()), "{doc:?}");
+    assert!(doc.stores.contains(&b.0.display().to_string()), "{doc:?}");
+}
+
+// =================================================================================================
+// A pasted subtree URL records a SKILL row — and nothing is granted when the row would refuse.
+// =================================================================================================
+
+#[test]
+fn a_subtree_url_records_a_skill_row_carrying_the_literal_path() {
+    // `/tree/<ref>/<path>` canonicalizes to the REPO, and a repo-set row cannot legally carry
+    // `subdir` or `version` — so the write refused AFTER the origin had been trusted. The path
+    // names one skill: it records the 4-segment row whose fields take both.
+    let rig = Rig::new("tree-url");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[
+            ("tools/find-skills/SKILL.md", b"# find\n"),
+            ("skills/other/SKILL.md", b"# other\n"),
+        ],
+    ));
+    let url = "https://github.com/o/r/tree/main/tools/find-skills";
+    match ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        url,
+        true,
+        true,
+    )
+    .unwrap()
+    {
+        ops::AddRefOutcome::Applied(_) => {}
+        ops::AddRefOutcome::Described { .. } => panic!("--yes applies"),
+    }
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    let doc = crate::manifest::document::parse_manifest(
+        &text,
+        crate::manifest::document::ManifestScope::Global,
+    )
+    .unwrap_or_else(|e| panic!("{e}: {text}"));
+    let row = doc
+        .rows
+        .iter()
+        .find(|r| r.reference == "github.com/o/r/find-skills")
+        .unwrap_or_else(|| panic!("the subtree records a skill row: {text}"));
+    match &row.value {
+        crate::manifest::document::EntryValue::Fields(f) => {
+            assert_eq!(f.subdir.as_deref(), Some("tools/find-skills"), "{text}");
+        }
+        other => panic!("the literal path rides the subdir field, got {other:?}: {text}"),
+    }
+    assert!(
+        rig.home
+            .0
+            .join(".claude/skills/find-skills/SKILL.md")
+            .exists(),
+        "the selected subtree landed"
+    );
+}
+
+#[test]
+fn a_subtree_url_naming_several_skills_grants_nothing() {
+    // The row is PROVEN before the consent is recorded: a subtree that names no single skill
+    // refuses with the names, and the machine is not left trusting a source whose row never landed.
+    let rig = Rig::new("tree-url-many");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[
+            ("skills/alpha/SKILL.md", b"# alpha\n"),
+            ("skills/beta/SKILL.md", b"# beta\n"),
+        ],
+    ));
+    let err = match ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        "https://github.com/o/r/tree/main/skills",
+        true,
+        true,
+    ) {
+        Err(e) => e,
+        Ok(_) => panic!("a subtree naming several skills names none of them"),
+    };
+    assert_eq!(err.code(), "AMBIGUOUS_SKILL", "{err:?}");
+    assert!(
+        !crate::forge_trust::is_trusted(&ctx, "github.com/o/r"),
+        "nothing was granted"
+    );
+    assert!(
+        !rig.layout()
+            .home()
+            .join(crate::manifest::MANIFEST_FILE)
+            .exists(),
+        "and no file was born for a row that cannot exist"
+    );
+}
+
+// =================================================================================================
+// A prior placement record is a memory, not a permission.
+// =================================================================================================
+
+#[test]
+fn a_prior_placement_that_no_longer_resolves_inside_the_checkout_is_refused() {
+    // The record was written when `.agents` was a plain directory; the checkout has since
+    // committed it as a symlink out of the tree. A lexical `starts_with` still says "inside" —
+    // only the containment proof catches it, and it must catch it on REUSED paths too.
+    let rig = Rig::new("prior-escape");
+    let proj = project("prior-escape-proj", "[bundles]\n");
+    let outside = Scratch::new("prior-escape-outside");
+    std::fs::create_dir_all(outside.0.join("skills/deploy")).unwrap();
+    std::os::unix::fs::symlink(&outside.0, proj.0.join(".claude")).unwrap();
+    let recorded = proj.0.join(".claude/skills/deploy");
+
+    let prior = topos_types::persisted::PlacementMap {
+        schema_version: topos_types::PLACEMENT_MAP_SCHEMA_VERSION,
+        placements: vec![recorded.display().to_string()],
+        applied_commit: "b".repeat(64),
+        placement_state: vec![topos_types::persisted::PlacementState {
+            kind: topos_types::persisted::PlacementKind::Native,
+            agent: Some("claude-code".to_owned()),
+            materialized_sha: Some("a".repeat(64)),
+            pre_existing_sha: None,
+            swap_capability: topos_types::persisted::SwapCapability::AtomicExchange,
+        }],
+        materialized_sha: "a".repeat(64),
+        pre_existing_sha: None,
+        swap_capability: topos_types::persisted::SwapCapability::AtomicExchange,
+        harness: None,
+        harness_layer: None,
+        harness_slug: None,
+    };
+
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let plan = crate::placement::project_plan(
+        &ctx,
+        &proj.0,
+        "topos_deadbeef",
+        topos_harness::PlacementNaming {
+            name: Some("deploy"),
+            workspace_slug: Some(WS_NAME),
+        },
+        None,
+        Some(&prior),
+        None,
+    );
+    assert!(
+        plan.refused
+            .iter()
+            .any(|r| r.starts_with("PLACEMENT_ESCAPES_PROJECT")),
+        "the escaping record is refused: {:?}",
+        plan.refused
+    );
+    assert!(
+        plan.targets.iter().all(|t| !t.dir.starts_with(&outside.0)),
+        "the symlink is never followed: {:?}",
+        plan.targets
+    );
+}
+
+// =================================================================================================
+// The forge refresh: under the skill's own lock, and its stash is a PARK it reads before deleting.
+// =================================================================================================
+
+#[test]
+fn a_forge_refresh_holds_the_lock_and_keeps_an_edit_that_lands_at_the_stash() {
+    // The refresh reads the map, classifies every placement, then moves those dirs and the sidecar
+    // record aside — a sequence a second writer must not cross, and a classification that is only
+    // a claim about a directory anyone could still be editing. So: the lock is held for the whole
+    // replacement, and the stash is re-read AS A PARK before anything is dropped.
+    let rig = Rig::new("refresh-park");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/deploy/SKILL.md", b"# deploy v1\n")],
+    ));
+    gate_add(&ctx, &plane, &dir, &git, "o/r");
+    let placed = rig.home.0.join(".claude/skills/deploy");
+    assert!(placed.join("SKILL.md").exists());
+    let imports = crate::ops::forge_imports(&ctx);
+    let sid = imports
+        .first()
+        .map(|i| i.sid.clone())
+        .expect("the import is tracked");
+    let recorded = std::fs::read_to_string(
+        rig.layout()
+            .home()
+            .join("skills")
+            .join(sid.as_str())
+            .join("origin.json"),
+    )
+    .unwrap();
+
+    // The source moved — the refresh is what this update would run.
+    git.serve(build_repo_targz(
+        "o-r-bbbbbbbbbbbb2",
+        &[("skills/deploy/SKILL.md", b"# deploy v2\n")],
+    ));
+    let lock_path = rig.layout().lock_file(&sid);
+    let lock_free = std::cell::Cell::new(true);
+    let racing = placed.canonicalize().unwrap();
+    let editing = racing.clone();
+    let fs = crate::fs_seam::HookFs::before_first_move_of(&racing, || {
+        // (a) the replacement runs under the skill's writer lock…
+        let taken = crate::fs_seam::FsOps::try_lock_exclusive(&RealFs, &lock_path)
+            .map(|g| g.is_none())
+            .unwrap_or(true);
+        lock_free.set(!taken);
+        // (b) …and the person's edit lands in the last instant before the stash.
+        std::fs::write(editing.join("SKILL.md"), b"# my local edit\n").unwrap();
+    });
+    let hooked = Ctx {
+        fs: &fs,
+        ..rig.ctx_at(Some(&rig.work.0))
+    };
+    let out = ops::manifest_update(
+        &hooked,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+
+    assert!(
+        !lock_free.get(),
+        "the whole refresh replacement runs under the skill's writer lock"
+    );
+    assert!(
+        out.warnings.iter().any(|w| w.contains("was edited while")),
+        "the refresh refuses and says why: {:?}",
+        out.warnings
+    );
+    assert_eq!(
+        std::fs::read(placed.join("SKILL.md")).unwrap(),
+        b"# my local edit\n",
+        "the edit that arrived after the scan is restored, never deleted"
+    );
+    assert_eq!(
+        std::fs::read_to_string(
+            rig.layout()
+                .home()
+                .join("skills")
+                .join(sid.as_str())
+                .join("origin.json"),
+        )
+        .unwrap(),
+        recorded,
+        "the old import is intact — a refused refresh replaces nothing"
+    );
+}
+
+// =================================================================================================
+// A `-a` selector is a standing placement decision: the row carries it, and the update honours it.
+// =================================================================================================
+
+#[test]
+fn a_selector_imports_harness_choice_rides_the_row_into_the_next_update() {
+    // Without the field, the next commit move re-lands the copy through the DEFAULT agent dir and
+    // the person's `-a` choice quietly evaporates.
+    let rig = Rig::new("harness-row");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/deploy/SKILL.md", b"# deploy v1\n")],
+    ));
+    match ops::add_forge_selected(
+        &ctx,
+        &connect(&plane, &dir),
+        &git,
+        "o/r",
+        &["deploy".to_owned()],
+        &["codestudio".to_owned()],
+        true,
+        true,
+    )
+    .unwrap()
+    {
+        ops::AddManyOutcome::Applied(items) => assert_eq!(items.len(), 1),
+        ops::AddManyOutcome::Described { .. } => panic!("--yes applies"),
+    }
+    let chosen = rig.home.0.join(".codestudio/skills/deploy");
+    assert!(chosen.join("SKILL.md").exists(), "the selector's dir");
+
+    // The ROW carries the selection.
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    let doc = crate::manifest::document::parse_manifest(
+        &text,
+        crate::manifest::document::ManifestScope::Global,
+    )
+    .unwrap_or_else(|e| panic!("{e}: {text}"));
+    let row = doc
+        .rows
+        .iter()
+        .find(|r| r.reference == "github.com/o/r/deploy")
+        .unwrap_or_else(|| panic!("the import records its row: {text}"));
+    match &row.value {
+        crate::manifest::document::EntryValue::Fields(f) => assert_eq!(
+            f.harness.as_deref(),
+            Some(&["codestudio".to_owned()][..]),
+            "{text}"
+        ),
+        other => panic!("the harness selection rides the row, got {other:?}: {text}"),
+    }
+
+    // The source moves: the copy converges WHERE IT WAS ASKED FOR, and no default-dir copy appears.
+    git.serve(build_repo_targz(
+        "o-r-bbbbbbbbbbbb2",
+        &[("skills/deploy/SKILL.md", b"# deploy v2\n")],
+    ));
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(
+        out.warnings.iter().all(|w| w.starts_with("GIT_UPDATED")),
+        "the moved source is disclosed and nothing else: {:?}",
+        out.warnings
+    );
+    assert_eq!(
+        std::fs::read(chosen.join("SKILL.md")).unwrap(),
+        b"# deploy v2\n",
+        "the selected harness keeps the copy: {:?}",
+        out.data.skills
+    );
+    assert!(
+        !rig.home.0.join(".claude/skills/deploy").exists(),
+        "and nothing was re-imported into the default agent dir"
+    );
+}
+
+// =================================================================================================
+// A pinned set whose imports recorded no member list is UNSETTLED — it converges once, then rests.
+// =================================================================================================
+
+#[test]
+fn a_pinned_set_with_no_recorded_members_converges_on_the_next_update() {
+    // "Nothing is missing" and "nothing is known" are different answers. Reading the second as the
+    // first pinned a legacy-shaped import to whatever partial landing it held, forever.
+    let rig = Rig::new("legacy-members");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[
+            ("skills/alpha/SKILL.md", b"# alpha\n"),
+            ("skills/beta/SKILL.md", b"# beta\n"),
+        ],
+    ));
+    // Land ONLY alpha, then age the import into the legacy shape: no recorded member set.
+    match ops::add_forge_selected(
+        &ctx,
+        &connect(&plane, &dir),
+        &git,
+        "o/r",
+        &["alpha".to_owned()],
+        &[],
+        true,
+        true,
+    )
+    .unwrap()
+    {
+        ops::AddManyOutcome::Applied(items) => assert_eq!(items.len(), 1),
+        ops::AddManyOutcome::Described { .. } => panic!("--yes applies"),
+    }
+    for import in crate::ops::forge_imports(&ctx) {
+        let path = rig.layout().published(&import.sid).origin;
+        let mut doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        doc.as_object_mut().unwrap().remove("members");
+        std::fs::write(&path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+    }
+    assert!(
+        crate::ops::forge_imports(&ctx)
+            .iter()
+            .all(|i| i.members.is_empty()),
+        "the legacy shape: no member list"
+    );
+
+    // The recipe is the PINNED set at exactly that commit — every tracked member satisfies the pin.
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"aaaaaaaaaaaa1\"\n");
+    let before = git.fetches();
+
+    // The explicit update refetches ONCE, records what the archive holds, and lands the gap.
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(
+        rig.home.0.join(".claude/skills/beta/SKILL.md").exists(),
+        "the missing member converges: {:?} / {:?}",
+        out.data.skills,
+        out.warnings
+    );
+    assert_eq!(git.fetches(), before + 1, "one fetch");
+    assert!(
+        crate::ops::forge_imports(&ctx)
+            .iter()
+            .all(|i| i.members == vec!["alpha".to_owned(), "beta".to_owned()]),
+        "the member set is written down, so the pin can rest"
+    );
+
+    // …and it RESTS: the settled pin never dials again.
+    let after = git.fetches();
+    ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert_eq!(git.fetches(), after, "a settled pin makes no forge call");
+}
+
+#[test]
+fn a_pinned_whole_repo_row_keeps_its_pin_and_says_the_selection_did_not_fit() {
+    // The one shape that cannot carry both: a whole-repo row takes `harness` and nothing else, so a
+    // PINNED repo-root import has no legal spelling for the `-a` choice. The pin wins — it decides
+    // which bytes, the selection only decides where they sit — and the receipt says so, rather than
+    // writing a row the file would refuse or dropping the pin in silence.
+    let rig = Rig::new("pin-vs-harness");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    // A repo whose SKILL.md is at the ROOT — its row key is the repo itself.
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("SKILL.md", b"# whole repo\n")],
+    ));
+    let data = match ops::add_forge_selected(
+        &ctx,
+        &connect(&plane, &dir),
+        &git,
+        "o/r#aaaaaaaaaaaa1",
+        &[],
+        &["codestudio".to_owned()],
+        true,
+        true,
+    )
+    .unwrap()
+    {
+        ops::AddManyOutcome::Applied(mut items) => items.remove(0),
+        ops::AddManyOutcome::Described { .. } => panic!("--yes applies"),
+    };
+    let note = data.note.unwrap_or_default();
+    assert!(note.contains("not recorded"), "{note}");
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    let doc = crate::manifest::document::parse_manifest(
+        &text,
+        crate::manifest::document::ManifestScope::Global,
+    )
+    .unwrap_or_else(|e| panic!("{e}: {text}"));
+    let row = doc
+        .rows
+        .iter()
+        .find(|r| r.reference == "github.com/o/r")
+        .unwrap_or_else(|| panic!("the repo row: {text}"));
+    assert_eq!(
+        row.value,
+        crate::manifest::document::EntryValue::Pin("aaaaaaaaaaaa1".into()),
+        "the pin is kept whole: {text}"
     );
 }

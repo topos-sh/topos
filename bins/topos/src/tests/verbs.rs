@@ -348,6 +348,61 @@ fn add_remote_refuses_a_destination_that_gained_content_during_staging() {
     );
 }
 
+/// PARK-THEN-VERIFY, at the sharpest instant there is. The previous test's racer arrives during
+/// the staging window — early enough for any re-check to catch. This one arrives in the LAST
+/// instant before the destructive move itself, where a verify-then-delete has nothing left to
+/// check with. The park closes it: the rename takes whatever is there out of reach, the judgment
+/// happens on the parked tree, and bytes this run cannot account for go straight back.
+#[test]
+fn add_remote_refuses_a_destination_filled_in_the_instant_before_the_park() {
+    let targz = build_repo_tarball(
+        "o-r-abc1234",
+        &[("skills/alpha/SKILL.md", b"# alpha\n", 0o644)],
+    );
+    let git = FakeGit(targz);
+    let spec = github_spec("o", "r", None);
+    let h = Harness::new("park-race");
+    let project = Scratch::new("park-race-proj");
+    let dest = project.0.join(".claude/skills/alpha");
+    // An EMPTY destination passes the up-front check — it is legitimately ours to fill.
+    std::fs::create_dir_all(&dest).unwrap();
+    // The RACE: the hook fires immediately before the rename that parks `dest`, i.e. after every
+    // check this run will ever make.
+    let racer = crate::fs_seam::HookFs::before_first_move_of(&dest, || {
+        std::fs::write(dest.join("SOMEONE-ELSES.md"), b"not topos's bytes\n").unwrap();
+    });
+    let ctx = Ctx {
+        fs: &racer,
+        ..h.ctx()
+    };
+    let roots = ops::DiscoveryRoots {
+        home: h.home.0.clone(),
+        cwd: Some(project.0.clone()),
+    };
+    let opts = ops::AddRemoteOpts {
+        skill: Some("alpha".into()),
+        harness: None,
+        global: false,
+    };
+    let err = ops::add_remote(&ctx, &git, &spec, &roots, &opts).unwrap_err();
+    assert_eq!(err.code(), "PLACEMENT_OCCUPIED", "{err:?}");
+    // The witness: the parked tree was READ, judged foreign, and put back whole.
+    assert_eq!(
+        std::fs::read(dest.join("SOMEONE-ELSES.md")).unwrap(),
+        b"not topos's bytes\n"
+    );
+    assert!(!dest.join("SKILL.md").exists(), "the import did not land");
+    let siblings: Vec<String> = std::fs::read_dir(project.0.join(".claude/skills"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        siblings,
+        vec!["alpha".to_owned()],
+        "no park and no staging sibling is left behind"
+    );
+}
+
 #[test]
 fn add_remote_ambiguous_multi_skill_repo_lists_choices() {
     let targz = build_repo_tarball(
