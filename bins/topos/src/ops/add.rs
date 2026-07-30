@@ -389,11 +389,44 @@ pub(crate) fn add_remote_fetched(
     //    `.`-prefixed staging sibling (discovery ignores it) and rename it into place, so a crash or a
     //    mid-write I/O error never leaves a PARTIAL skill at the real path — only a stray staging dir the
     //    next run clears. On a failed adopt we remove the (now-complete) dest so the tree is left clean.
-    ctx.fs.create_dir_all(&dest_root)?;
+    //    A PROJECT-scope root is created with the NO-FOLLOW walk under the proven checkout: `mkdir -p`
+    //    through an ancestor swapped since the proof is refused, never followed.
+    match (scope, roots.cwd.as_deref()) {
+        (SkillScope::Project, Some(cwd)) => {
+            crate::materialize::create_dir_contained(ctx.fs, cwd, &dest_root)
+                .map_err(|e| ClientError::Io(format!("create import root: {e}")))?;
+        }
+        _ => ctx.fs.create_dir_all(&dest_root)?,
+    }
+    // The PROOF-TO-WRITE anchor (see `materialize`'s module doc): the proven destination root is
+    // pinned OPEN here, and the predictable-stage deletion + the landing rename below run at this
+    // handle — `(dev, ino)`-verified against the path immediately before each op — so an ancestor
+    // swapped for a symlink after the proof is met as itself and refused. A PERSON-scope root that
+    // IS a symlink (a dotfiles setup — there is no containment contract to defend in home dirs)
+    // resolves once and pins the real directory, matching the materializer's symlink-placement
+    // support; a project root gets no such rung (its proof already refused symlink components).
+    let dest_handle = match ctx.fs.open_dir_handle(&dest_root) {
+        Ok(h) => h,
+        Err(e) if scope != SkillScope::Project => {
+            let real = std::fs::canonicalize(&dest_root)
+                .map_err(|_| ClientError::Io(format!("open import root: {e}")))?;
+            ctx.fs
+                .open_dir_handle(&real)
+                .map_err(|e| ClientError::Io(format!("open import root: {e}")))?
+        }
+        Err(e) => return Err(ClientError::Io(format!("open import root: {e}"))),
+    };
     let stage_dir = dest_root.join(format!(".topos-import-{}", selected.name));
     if ctx.fs.exists(&stage_dir) {
+        dest_handle
+            .verify_unmoved()
+            .map_err(|e| ClientError::Io(format!("clear import staging: {e}")))?;
         ctx.fs.remove_dir_all(&stage_dir)?;
     }
+    // The staging dir itself: one lstat-checked level below the proven root.
+    ctx.fs
+        .create_dir_nofollow(&dest_root, &stage_dir)
+        .map_err(|e| ClientError::Io(format!("create import staging: {e}")))?;
     if let Err(e) = write_skill_dir(ctx, &stage_dir, &selected.files) {
         let _ = ctx.fs.remove_dir_all(&stage_dir);
         return Err(e);
@@ -436,13 +469,32 @@ pub(crate) fn add_remote_fetched(
     let staged_digest = scan::scan(&stage_dir).ok().map(|s| s.bundle_digest);
     // The containment proof AGAIN, immediately before the rename that lands the bytes — the
     // extract + staging took real time, and an ancestor turned symlink inside that window would
-    // route the rename through it.
+    // route the rename through it. (The rename itself then runs at the held root handle, so even
+    // a swap in the beat after this proof cannot re-aim it.)
     if let Err(e) = prove_import_containment(scope, roots, &dest_dir) {
         let _ = ctx.fs.remove_dir_all(&stage_dir);
         return Err(e);
     }
-    if let Err(e) = ctx.fs.rename_dir_noreplace(&stage_dir, &dest_dir) {
-        let _ = ctx.fs.remove_dir_all(&stage_dir);
+    let (stage_leaf, dest_leaf) = match (
+        stage_dir.file_name().and_then(|n| n.to_str()),
+        dest_dir.file_name().and_then(|n| n.to_str()),
+    ) {
+        (Some(s), Some(d)) => (s, d),
+        _ => {
+            let _ = ctx.fs.remove_dir_all(&stage_dir);
+            return Err(ClientError::Io(format!(
+                "place import at {}: no usable final component",
+                dest_dir.display()
+            )));
+        }
+    };
+    if let Err(e) = ctx
+        .fs
+        .rename_at_noreplace(&dest_handle, stage_leaf, dest_leaf)
+    {
+        if dest_handle.verify_unmoved().is_ok() {
+            let _ = ctx.fs.remove_dir_all(&stage_dir);
+        }
         return Err(ClientError::Io(format!(
             "place import at {}: {e}",
             dest_dir.display()
@@ -779,9 +831,14 @@ fn preserve_failed_adopt(ctx: &Ctx<'_>, dest: &Path, staged_digest: Option<[u8; 
     if !ctx.fs.exists(dest) {
         return;
     }
-    let Ok(parked) =
-        crate::materialize::park_aside_journaled(ctx.fs, &ctx.layout, dest, "import-failed", true)
-    else {
+    let Ok(parked) = crate::materialize::park_aside_journaled(
+        ctx.fs,
+        &ctx.layout,
+        dest,
+        "import-failed",
+        true,
+        None,
+    ) else {
         return; // could not park: the dir stays whole at the destination — preserved in place
     };
     let mut prev: Option<[u8; 32]> = None;
@@ -866,6 +923,11 @@ fn check_destination(ctx: &Ctx<'_>, dest: &Path) -> Result<(), ClientError> {
 /// stands: never delete bytes this run cannot account for. A destination that has been re-created
 /// while the park was out keeps the parked bytes under the park's own name, and the refusal says
 /// where.
+///
+/// The park is JOURNALED before the rename (and the entry settled when it is dropped or
+/// restored): a crash mid-judgment would otherwise strand the prior occupant under a
+/// `.topos-import-old-*` name no sweep recognizes — the journal is what makes the next run's
+/// recovery restore (or preserve + disclose) it.
 fn park_and_verify_destination(
     ctx: &Ctx<'_>,
     dest: &Path,
@@ -874,7 +936,14 @@ fn park_and_verify_destination(
     if !ctx.fs.exists(dest) {
         return Ok(());
     }
-    let parked = crate::materialize::park_aside(ctx.fs, dest, "import-old")?;
+    let parked = crate::materialize::park_aside_journaled(
+        ctx.fs,
+        &ctx.layout,
+        dest,
+        "import-old",
+        true,
+        None,
+    )?;
     // Judged with the settle rail: a rename takes the tree out of every path but not away from an
     // already-open fd, so the drop is authorized only by TWO CONSECUTIVE AGREEING READS of a
     // disposable state — empty, or byte-identical to what this call is about to place — the
@@ -912,9 +981,13 @@ fn park_and_verify_destination(
     }
     if disposable {
         ctx.fs.remove_dir_all(&parked)?;
+        crate::sidecar::settle_park_journal(ctx.fs, &ctx.layout, &parked);
         return Ok(());
     }
     let restored = crate::materialize::restore_parked(ctx.fs, &parked, dest);
+    if restored {
+        crate::sidecar::settle_park_journal(ctx.fs, &ctx.layout, &parked);
+    }
     Err(ClientError::PlacementOccupied {
         path: if restored {
             dest.display().to_string()
@@ -930,7 +1003,9 @@ fn park_and_verify_destination(
 
 /// Write a selected skill's byte-exact files into `dest`, preserving the executable bit (part of the
 /// digest). Paths are archive-relative forward-slash and already `..`/absolute-safe (extraction rejected
-/// hazards), so the component-wise join stays inside `dest`.
+/// hazards), so the component-wise join stays inside `dest` — and the creates walk NO-FOLLOW below
+/// `dest` (with `O_NOFOLLOW` file opens), so a symlink swapped into the staged tree mid-write is
+/// met as itself and refused, never traversed.
 fn write_skill_dir(ctx: &Ctx<'_>, dest: &Path, files: &[RepoFile]) -> Result<(), ClientError> {
     for f in files {
         let mut path = dest.to_path_buf();
@@ -939,7 +1014,7 @@ fn write_skill_dir(ctx: &Ctx<'_>, dest: &Path, files: &[RepoFile]) -> Result<(),
         }
         if let Some(parent) = path.parent() {
             ctx.fs
-                .create_dir_all(parent)
+                .create_dir_nofollow(dest, parent)
                 .map_err(|e| ClientError::Io(format!("create {}: {e}", parent.display())))?;
         }
         let executable = f.mode & 0o111 != 0;

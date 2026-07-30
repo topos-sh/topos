@@ -137,6 +137,17 @@ impl Layout {
         self.locks_dir().join("currency.lock")
     }
 
+    /// `locks/park-journal.lock` — the PARK JOURNAL's writer lock (a fixed name): every
+    /// read-modify-write of `state/park_journal.json` (recording a park, settling one, recovery's
+    /// rewrite) runs under it, because two per-skill writers journaling concurrently would each
+    /// write a document missing the other's entry — and a lost entry is a park a crash strands
+    /// invisibly. Lock ORDER: operations hold their per-skill lock and then take this one
+    /// (briefly, per RMW); recovery holds this one and takes per-skill locks only via TRY-lock —
+    /// so no cycle can block.
+    pub(crate) fn park_journal_lock_file(&self) -> PathBuf {
+        self.locks_dir().join("park-journal.lock")
+    }
+
     pub(crate) fn log_path(&self) -> PathBuf {
         self.home.join("log.jsonl")
     }
@@ -325,7 +336,12 @@ pub(crate) fn ensure_project_store(
         });
     }
     let layout = project_store_layout(project_dir);
-    fs.create_dir_all(&store_dir)?;
+    // NO-FOLLOW creation (the proof-to-write boundary): each component below the checkout is
+    // lstat-ed and created ONE level at a time, so an ancestor that becomes a symlink mid-create
+    // is met as itself and REFUSED — `mkdir -p` through it is structurally impossible on the
+    // walked components (the per-component check-to-mkdir beat is backstopped by the re-proof
+    // below).
+    fs.create_dir_nofollow(project_dir, &store_dir)?;
     let ignore = store_dir.join(crate::scan::IGNORE_FILE);
     // TRUE exclusive create (`O_EXCL`), not check-then-write: a file already at the path — a
     // hand-authored ignore, or a concurrent creator's — is NEVER overwritten, and two racing
@@ -335,7 +351,7 @@ pub(crate) fn ensure_project_store(
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e.into()),
     }
-    fs.create_dir_all(layout.home())?;
+    fs.create_dir_nofollow(project_dir, layout.home())?;
     // RE-PROVE containment at the WRITE boundary: the check above and the creates below it are
     // separate syscalls, and an ancestor that became a symlink between them routes the created
     // tree — and every engine byte that would flow through this layout — wherever it points.
@@ -368,7 +384,7 @@ pub(crate) struct ParkJournal {
 
 /// One journaled park: where the tree sits now, and where it must return if the operation that
 /// moved it never concludes.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ParkEntry {
     /// The park path (where the tree was moved TO).
     pub park: String,
@@ -381,6 +397,13 @@ pub(crate) struct ParkEntry {
     /// + discloses it instead — a human decision, never a guess.
     #[serde(default = "restore_default")]
     pub restore: bool,
+    /// The skill whose per-skill writer lock governs the operation that took this park —
+    /// recovery's LIVENESS FENCE: an entry whose owner lock is currently HELD belongs to an
+    /// operation still running, and recovery leaves it alone (restoring a live op's park out from
+    /// under it would corrupt the very state the journal protects). Absent on parks taken outside
+    /// any per-skill lock (a pre-adoption import destination) and on older documents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
 fn restore_default() -> bool {
@@ -388,19 +411,25 @@ fn restore_default() -> bool {
 }
 
 /// Record one park in the journal — durably, BEFORE the rename that creates it (the caller's
-/// contract). An unreadable/newer journal REFUSES the write (and therefore the park): an older
-/// binary must not clobber a newer document, and a park that cannot be journaled is a park a
-/// crash would strand invisibly.
+/// contract), the whole read→modify→write under the journal's exclusive writer lock (two
+/// concurrent per-skill writers would otherwise each persist a document missing the other's
+/// entry, and a lost entry is a park a crash strands invisibly). An unreadable/newer journal
+/// REFUSES the write (and therefore the park): an older binary must not clobber a newer document,
+/// and a park that cannot be journaled is a park a crash would strand invisibly.
+///
+/// `owner` — see [`ParkEntry::owner`] (the liveness fence).
 ///
 /// # Errors
-/// The journal read/write failure (fail-closed on an unknown schema).
+/// The lock or journal read/write failure (fail-closed on an unknown schema).
 pub(crate) fn journal_park(
     fs: &dyn FsOps,
     layout: &Layout,
     original: &Path,
     park: &Path,
     restore: bool,
+    owner: Option<&SkillId>,
 ) -> Result<(), ClientError> {
+    let _guard = fs.lock_exclusive(&layout.park_journal_lock_file())?;
     let path = layout.park_journal_path();
     let mut journal: ParkJournal = crate::doc::read_doc(fs, &path)?.unwrap_or_default();
     journal.schema_version = topos_types::PERSISTED_SCHEMA_VERSION;
@@ -410,15 +439,21 @@ pub(crate) fn journal_park(
         park: park_s,
         original: original.to_string_lossy().into_owned(),
         restore,
+        owner: owner.map(|o| o.as_str().to_owned()),
     });
     fs.create_dir_all(&layout.state_dir())?;
     crate::doc::write_doc(fs, &path, &journal)
 }
 
 /// Clear one park's journal entry — the operation concluded (the park was dropped, or restored).
-/// Best-effort by contract: a failure leaves a stale entry, which recovery resolves harmlessly
-/// (an absent park is a concluded one).
+/// The read→retain→write runs under the journal lock, so an entry another writer added between
+/// this settle's read and its write can never be erased with it. Best-effort by contract: a
+/// failure leaves a stale entry, which recovery resolves harmlessly (an absent park is a
+/// concluded one).
 pub(crate) fn settle_park_journal(fs: &dyn FsOps, layout: &Layout, park: &Path) {
+    let Ok(_guard) = fs.lock_exclusive(&layout.park_journal_lock_file()) else {
+        return;
+    };
     let path = layout.park_journal_path();
     let Ok(Some(mut journal)) = crate::doc::read_doc::<ParkJournal>(fs, &path) else {
         return;
@@ -435,11 +470,29 @@ pub(crate) fn settle_park_journal(fs: &dyn FsOps, layout: &Layout, park: &Path) 
 /// original has since been re-taken, or the restore fails — PRESERVED as a `.topos-kept-*`
 /// sibling and disclosed in the log. An absent park is a concluded operation (its entry is
 /// dropped); an undecipherable journal is left untouched (never "unreadable = empty").
+///
+/// **The journal is UNTRUSTED INPUT.** A PROJECT store travels with its checkout, so a hostile
+/// clone can commit a `park_journal.json` naming ANY path this user can write — and a recovery
+/// that trusted it would rename arbitrary trees on the journal's say-so. Every entry passes
+/// [`journal_entry_inadmissible`] before recovery acts: a refused entry moves NOTHING (the bytes,
+/// if any, stay exactly where they sit), is disclosed with a typed warning + a log event, and is
+/// dropped from the journal (acting on it can never become safe; the log keeps the record).
+///
+/// **The liveness fence.** An entry whose owning per-skill operation lock is currently HELD
+/// belongs to an operation still running in another process — its park is live state, not a
+/// crash leftover, so the entry is skipped whole (kept for the next run).
+///
+/// Concurrency: the journal lock is held across the WHOLE read→act→rewrite. Writers
+/// ([`journal_park`] / [`settle_park_journal`]) block on it briefly; the fence takes per-skill
+/// locks only via TRY-lock, so no lock cycle can block (see
+/// [`Layout::park_journal_lock_file`]).
 fn recover_park_journal(
     fs: &dyn FsOps,
     layout: &Layout,
     now_millis: i64,
+    warnings: &mut Vec<String>,
 ) -> Result<(), ClientError> {
+    let _guard = fs.lock_exclusive(&layout.park_journal_lock_file())?;
     let path = layout.park_journal_path();
     let journal = match crate::doc::read_doc::<ParkJournal>(fs, &path) {
         Ok(Some(j)) => j,
@@ -454,8 +507,41 @@ fn recover_park_journal(
     for entry in journal.parks {
         let park = PathBuf::from(&entry.park);
         let original = PathBuf::from(&entry.original);
+        // The liveness fence: a held owner lock means the operation that took this park is STILL
+        // RUNNING — leave its park alone (the guard, when acquired, is held for this entry's
+        // whole treatment so the op cannot restart under it).
+        let _owner_guard = match entry.owner.as_deref().and_then(|o| SkillId::parse(o).ok()) {
+            Some(id) => match fs.try_lock_exclusive(&layout.lock_file(&id))? {
+                Some(guard) => Some(guard),
+                None => {
+                    remaining.push(entry);
+                    continue;
+                }
+            },
+            None => None,
+        };
         if !fs.exists(&park) {
             continue; // concluded: dropped or restored before the crash cleared the entry
+        }
+        // The untrusted-journal gate — refuse before the first rename, move nothing, disclose.
+        if let Some(reason) = journal_entry_inadmissible(layout, &park, &original) {
+            warnings.push(format!(
+                "PARK_JOURNAL_REFUSED {}: {reason} — the entry was ignored and nothing was moved \
+                 (bytes at that path, if any, stay exactly where they are)",
+                entry.park
+            ));
+            let _ = crate::logfile::append_event(
+                fs,
+                &layout.log_path(),
+                &serde_json::json!({
+                    "action": "park_journal_refused",
+                    "park": entry.park,
+                    "original": entry.original,
+                    "reason": reason,
+                    "at": now_millis,
+                }),
+            );
+            continue;
         }
         if entry.restore && !fs.exists(&original) && fs.rename(&park, &original).is_ok() {
             let _ = crate::logfile::append_event(
@@ -493,6 +579,57 @@ fn recover_park_journal(
         parks: remaining,
     };
     crate::doc::write_doc(fs, &path, &rewritten)
+}
+
+/// Why a park-journal entry may NOT be acted on — `None` means admissible. The journal names
+/// paths recovery will RENAME, so an entry is trusted only as far as its provenance:
+///
+/// - EVERY store: the park's basename must be one of topos's own park names (`.topos-*` — the
+///   ladder every park primitive mints). Recovery never renames a tree whose name topos cannot
+///   have created.
+/// - A PROJECT store's journal is repo content a hostile clone controls, so both paths must
+///   additionally prove containment in that store's own checkout (the same no-follow
+///   symlink-component + canonical proof every placement passes), and the restore target must
+///   lie inside a topos-managed namespace of that checkout — the store itself (`.topos/`), the
+///   shared skills dir (`.agents/skills`), or a known harness's project skills dir. A manifest
+///   `path` override outside those namespaces fails toward preservation-in-place (the typed
+///   warning says where the bytes sit), never toward a journal-directed rename.
+fn journal_entry_inadmissible(layout: &Layout, park: &Path, original: &Path) -> Option<String> {
+    let park_name = park.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if !park_name.starts_with(".topos-") {
+        return Some("its park name is not a topos park".to_owned());
+    }
+    // The home store's journal is machine-local state topos itself wrote — it does not arrive
+    // via a checkout, and its parks legitimately sit beside placements anywhere on the machine.
+    let root = layout.project_root()?;
+    if !crate::materialize::contained_in(root, park) {
+        return Some("its park path does not resolve inside this project".to_owned());
+    }
+    if !crate::materialize::contained_in(root, original) {
+        return Some("its restore target does not resolve inside this project".to_owned());
+    }
+    if !within_managed_namespace(root, original) {
+        return Some("its restore target is not a topos-managed path in this project".to_owned());
+    }
+    None
+}
+
+/// Whether `path` sits inside one of the namespaces topos itself manages under a checkout — the
+/// only places a project store's journaled park can legitimately have come from.
+fn within_managed_namespace(root: &Path, path: &Path) -> bool {
+    let mut namespaces: Vec<PathBuf> = vec![
+        root.join(PROJECT_STORE_DIR),
+        root.join(".agents").join("skills"),
+    ];
+    namespaces.extend(
+        topos_harness::registry::known_harnesses()
+            .iter()
+            .filter_map(|h| {
+                let dir = h.project_dir();
+                (!dir.is_empty()).then(|| root.join(dir))
+            }),
+    );
+    namespaces.iter().any(|ns| path.starts_with(ns))
 }
 
 /// Acquire the per-skill writer lock (blocking), held across snapshot → docs → publish. The lock file
@@ -549,14 +686,23 @@ fn walk(fs: &dyn FsOps, dir: &Path, out: &mut Vec<String>) -> Result<(), ClientE
 /// The user's source dir is never touched, so a draft (the live source bytes, or a committed version in
 /// the store) always survives.
 ///
+/// `warnings` collects the typed disclosure lines recovery makes (a refused park-journal entry —
+/// see [`recover_park_journal`]); the caller surfaces them (the reconcile's warning rows, the
+/// command-start stderr).
+///
 /// # Errors
 /// An [`FsOps`] failure during the sweep.
-pub(crate) fn recover(fs: &dyn FsOps, layout: &Layout, now_millis: i64) -> Result<(), ClientError> {
+pub(crate) fn recover(
+    fs: &dyn FsOps,
+    layout: &Layout,
+    now_millis: i64,
+    warnings: &mut Vec<String>,
+) -> Result<(), ClientError> {
     crate::logfile::repair_torn_tail(fs, &layout.log_path())?;
     crate::enroll::sweep_expired_wal(fs, layout, now_millis)?;
     // Restore (or preserve + disclose) the parks an interrupted operation journaled — BEFORE the
     // per-skill sweeps below, so a restored tree is back where its map/manifest rows expect it.
-    recover_park_journal(fs, layout, now_millis)?;
+    recover_park_journal(fs, layout, now_millis, warnings)?;
 
     // Sweep the retired device-era identity documents on sight: the keypair seed, the pinned
     // instance, the device credential, the membership roster, and the subscription file — the
@@ -652,11 +798,13 @@ fn recover_published(
     //
     // The staging/graveyard names are PARKS, and a crash between the swap and its
     // `verify_parked_old` strands the OLD tree there — raced edits included — so they are JUDGED,
-    // never deleted on their name alone: bytes this skill's own records account for (the lock's
-    // current digest, a placement's recorded baseline) drop; anything else — an unaccounted tree,
-    // an unreadable one, an unparsable lock — is PRESERVED as a `.topos-kept-*` sibling and
-    // disclosed in the log. Recovery has no snapshotter, so preservation is its absorb. Only the
-    // probe dirs (throwaway empties the materializer mints) are removed blind.
+    // never deleted on their name alone, and every deletion rides the materializer's SETTLE RAIL
+    // (two consecutive agreeing reads, the second immediately before the removal — a pre-park fd
+    // writer's edit landing mid-judgment is seen, not destroyed): bytes this skill's own records
+    // account for (the lock's current digest, a placement's recorded baseline) drop; anything
+    // else — an unaccounted tree, an unreadable one — is PRESERVED as a `.topos-kept-*` sibling
+    // and disclosed in the log. Recovery has no snapshotter, so preservation is its absorb. Only
+    // the probe dirs (throwaway empties the materializer mints) are removed blind.
     if let Some(map) = doc::read_map(fs, &paths.map)? {
         let mut accounted: Vec<String> = map
             .placement_state
@@ -664,12 +812,29 @@ fn recover_published(
             .filter_map(|st| st.materialized_sha.clone())
             .collect();
         accounted.push(map.materialized_sha.clone());
-        if let Ok(Some(lock)) =
-            crate::doc::read_doc::<topos_types::persisted::Lock>(fs, &paths.lock)
-        {
-            accounted.push(lock.bundle_digest);
-        }
+        // The lock's digest completes the accounted set — and a lock that CANNOT be read (an
+        // unknown/newer schema, torn bytes) fails CLOSED: the set is provably incomplete, so
+        // NOTHING is deleted against it — every park is preserved + disclosed instead. (The
+        // read_opt above only proved bytes exist at the path, not that this binary can decide
+        // with them.)
+        let lock_readable =
+            match crate::doc::read_doc::<topos_types::persisted::Lock>(fs, &paths.lock) {
+                Ok(Some(lock)) => {
+                    accounted.push(lock.bundle_digest);
+                    true
+                }
+                Ok(None) | Err(_) => false,
+            };
         for placement in &map.placements {
+            // A PROJECT store's map is repo content a hostile clone controls — its rows must not
+            // aim this sweep's judgments (or their preserve-renames) outside the checkout. The
+            // same containment every project placement proves runs here; a row that fails it is
+            // simply not visited (nothing read, nothing moved).
+            if let Some(root) = layout.project_root()
+                && !crate::materialize::contained_in(root, Path::new(placement))
+            {
+                continue;
+            }
             let Some(parent) = Path::new(placement).parent() else {
                 continue;
             };
@@ -682,26 +847,35 @@ fn recover_published(
                     fs.remove_dir_all(&litter)?;
                     continue;
                 }
-                let benign = crate::scan::scan(&litter).is_ok_and(|scanned| {
-                    let hex = topos_core::digest::to_hex(&scanned.bundle_digest);
-                    accounted.contains(&hex)
-                });
-                if benign {
-                    fs.remove_dir_all(&litter)?;
-                } else if let Some(kept) = crate::materialize::preserve_park(fs, &litter) {
-                    let _ = crate::logfile::append_event(
-                        fs,
-                        &layout.log_path(),
-                        &serde_json::json!({
-                            "action": "park_preserved",
-                            "park": litter.to_string_lossy(),
-                            "kept_at": kept.to_string_lossy(),
-                            "skill_id": id.as_str(),
-                        }),
-                    );
+                let fate = if lock_readable {
+                    crate::materialize::settle_park_among(fs, &litter, &accounted, None)?
+                } else {
+                    // Unreadable lock: preserve without judging — a deletion decided over an
+                    // incomplete accounted set is exactly the loss this sweep exists to prevent.
+                    match crate::materialize::preserve_park(fs, &litter) {
+                        Some(kept) => crate::materialize::ParkFate::Kept(kept),
+                        None => crate::materialize::ParkFate::Stuck,
+                    }
+                };
+                match fate {
+                    crate::materialize::ParkFate::Dropped => {}
+                    crate::materialize::ParkFate::Kept(kept) => {
+                        let _ = crate::logfile::append_event(
+                            fs,
+                            &layout.log_path(),
+                            &serde_json::json!({
+                                "action": "park_preserved",
+                                "park": litter.to_string_lossy(),
+                                "kept_at": kept.to_string_lossy(),
+                                "skill_id": id.as_str(),
+                            }),
+                        );
+                    }
+                    // A park that can neither be accounted for nor moved stays under its own
+                    // name — the materializer's litter judge refuses over it rather than
+                    // deleting blind.
+                    crate::materialize::ParkFate::Stuck => {}
                 }
-                // A park that can neither be accounted for nor moved stays under its own name —
-                // the materializer's litter judge refuses over it rather than deleting blind.
             }
         }
     }
@@ -772,7 +946,7 @@ mod tests {
         std::fs::create_dir_all(&orig_a).unwrap();
         std::fs::write(orig_a.join("SKILL.md"), b"# a draft worth keeping\n").unwrap();
         let park_a =
-            crate::materialize::park_aside_journaled(&fs, &layout, &orig_a, "retiring", true)
+            crate::materialize::park_aside_journaled(&fs, &layout, &orig_a, "retiring", true, None)
                 .unwrap();
         assert!(!orig_a.exists());
 
@@ -781,21 +955,27 @@ mod tests {
         let orig_b = home.join("place-b").join("demo");
         std::fs::create_dir_all(&orig_b).unwrap();
         std::fs::write(orig_b.join("SKILL.md"), b"# old record\n").unwrap();
-        let park_b =
-            crate::materialize::park_aside_journaled(&fs, &layout, &orig_b, "refresh-old", false)
-                .unwrap();
+        let park_b = crate::materialize::park_aside_journaled(
+            &fs,
+            &layout,
+            &orig_b,
+            "refresh-old",
+            false,
+            None,
+        )
+        .unwrap();
 
         // (c) ORIGINAL RETAKEN: something re-created the original — the park must not clobber it.
         let orig_c = home.join("place-c").join("demo");
         std::fs::create_dir_all(&orig_c).unwrap();
         std::fs::write(orig_c.join("SKILL.md"), b"# first\n").unwrap();
         let park_c =
-            crate::materialize::park_aside_journaled(&fs, &layout, &orig_c, "retiring", true)
+            crate::materialize::park_aside_journaled(&fs, &layout, &orig_c, "retiring", true, None)
                 .unwrap();
         std::fs::create_dir_all(&orig_c).unwrap();
         std::fs::write(orig_c.join("SKILL.md"), b"# the newcomer\n").unwrap();
 
-        recover(&fs, &layout, 1).unwrap();
+        recover(&fs, &layout, 1, &mut Vec::new()).unwrap();
 
         // (a) restored whole; its journal entry settled.
         assert_eq!(
@@ -912,7 +1092,7 @@ mod tests {
         std::fs::create_dir_all(&novel_park).unwrap();
         std::fs::write(novel_park.join("SKILL.md"), b"# a raced edit\n").unwrap();
 
-        recover(&fs, &layout, 1).unwrap();
+        recover(&fs, &layout, 1, &mut Vec::new()).unwrap();
 
         assert!(
             !accounted_park.exists(),
@@ -930,5 +1110,385 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&home);
         let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// Write the skill's lock + map records the litter judge accounts against — the placement's
+    /// recorded baseline is `content`'s digest.
+    fn record_skill(layout: &Layout, id: &SkillId, placement: &Path, content: &[u8]) -> String {
+        use topos_types::PERSISTED_SCHEMA_VERSION;
+        use topos_types::persisted::{
+            Lock, LockedFile, PlacementKind, PlacementMap, PlacementState, SwapCapability,
+        };
+        let fs = RealFs;
+        std::fs::create_dir_all(placement).unwrap();
+        std::fs::write(placement.join("SKILL.md"), content).unwrap();
+        let baseline = {
+            let scanned = crate::scan::scan(placement).unwrap();
+            topos_core::digest::to_hex(&scanned.bundle_digest)
+        };
+        let sp = layout.published(id);
+        std::fs::create_dir_all(&sp.store).unwrap();
+        crate::doc::write_doc(
+            &fs,
+            &sp.lock,
+            &Lock {
+                schema_version: PERSISTED_SCHEMA_VERSION,
+                skill_id: id.to_string(),
+                name: "demo".into(),
+                base_commit: "1".repeat(64),
+                bundle_digest: baseline.clone(),
+                files: Vec::<LockedFile>::new(),
+            },
+        )
+        .unwrap();
+        crate::doc::write_map(
+            &fs,
+            &sp.map,
+            &PlacementMap {
+                schema_version: topos_types::PLACEMENT_MAP_SCHEMA_VERSION,
+                placements: vec![placement.to_string_lossy().into_owned()],
+                applied_commit: "1".repeat(64),
+                materialized_sha: baseline.clone(),
+                pre_existing_sha: None,
+                swap_capability: SwapCapability::Unsupported,
+                placement_state: vec![PlacementState {
+                    kind: PlacementKind::Native,
+                    agent: None,
+                    materialized_sha: Some(baseline.clone()),
+                    pre_existing_sha: None,
+                    swap_capability: SwapCapability::Unsupported,
+                }],
+                harness: None,
+                harness_layer: None,
+                harness_slug: None,
+            },
+        )
+        .unwrap();
+        baseline
+    }
+
+    /// P1: THE JOURNAL IS UNTRUSTED INPUT. A project store's `park_journal.json` travels with the
+    /// checkout, so a hostile clone can commit one naming any path this user can write — and a
+    /// recovery that trusted it would rename arbitrary trees on the journal's say-so. Every
+    /// inadmissible entry must move NOTHING (inside or outside the checkout), be disclosed, and
+    /// die out of the journal — while a lawful entry in the same document still restores.
+    #[test]
+    fn a_malicious_committed_journal_cannot_move_bytes_and_is_refused_disclosed() {
+        let proj = scratch("hostile-journal");
+        let victim = scratch("hostile-journal-victim");
+        let fs = RealFs;
+        let layout = project_store_layout(&proj);
+        std::fs::create_dir_all(layout.state_dir()).unwrap();
+        std::fs::create_dir_all(layout.skills_dir()).unwrap();
+
+        let skills = proj.join(".claude").join("skills");
+        // (a) restore target OUTSIDE the checkout — the containment bypass the finding names.
+        let park_a = skills.join(".topos-retiring-payload");
+        std::fs::create_dir_all(&park_a).unwrap();
+        std::fs::write(park_a.join("SKILL.md"), b"# payload\n").unwrap();
+        // (b) park name that is NOT a topos park — recovery must never rename a tree whose name
+        // topos cannot have minted (here: the checkout's own `.git`).
+        let git_dir = proj.join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("config"), b"[core]\n").unwrap();
+        // (c) restore target inside the checkout but OUTSIDE every topos-managed namespace.
+        let park_c = skills.join(".topos-retiring-b");
+        std::fs::create_dir_all(&park_c).unwrap();
+        std::fs::write(park_c.join("SKILL.md"), b"# c\n").unwrap();
+        // (d) a `..` escape spelled to pass a lexical prefix check — the canonical proof must
+        // still catch it.
+        let park_d = skills.join(".topos-retiring-d");
+        std::fs::create_dir_all(&park_d).unwrap();
+        std::fs::write(park_d.join("SKILL.md"), b"# d\n").unwrap();
+        // (e) the LAWFUL entry: park + original both in the harness skills dir.
+        let park_e = skills.join(".topos-retiring-good");
+        std::fs::create_dir_all(&park_e).unwrap();
+        std::fs::write(park_e.join("SKILL.md"), b"# keep me\n").unwrap();
+        let good_orig = skills.join("good");
+
+        let entry = |park: &Path, original: &Path| ParkEntry {
+            park: park.to_string_lossy().into_owned(),
+            original: original.to_string_lossy().into_owned(),
+            restore: true,
+            owner: None,
+        };
+        let journal = ParkJournal {
+            schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+            parks: vec![
+                entry(&park_a, &victim.join("planted")),
+                entry(&git_dir, &skills.join("innocuous")),
+                entry(&park_c, &proj.join("src").join("planted")),
+                entry(
+                    &park_d,
+                    &proj.join(".topos").join("..").join("..").join("planted"),
+                ),
+                entry(&park_e, &good_orig),
+            ],
+        };
+        crate::doc::write_doc(&fs, &layout.park_journal_path(), &journal).unwrap();
+
+        let mut warnings = Vec::new();
+        recover(&fs, &layout, 1, &mut warnings).unwrap();
+
+        // Nothing moved anywhere the journal aimed: the victim dir is untouched, no in-project
+        // plant appeared, and every refused park sits exactly where it was.
+        assert_eq!(std::fs::read_dir(&victim).unwrap().count(), 0);
+        assert!(!proj.join("src").exists());
+        assert!(!skills.join("innocuous").exists());
+        assert_eq!(
+            std::fs::read(park_a.join("SKILL.md")).unwrap(),
+            b"# payload\n"
+        );
+        assert_eq!(std::fs::read(git_dir.join("config")).unwrap(), b"[core]\n");
+        assert_eq!(std::fs::read(park_c.join("SKILL.md")).unwrap(), b"# c\n");
+        assert_eq!(std::fs::read(park_d.join("SKILL.md")).unwrap(), b"# d\n");
+        // The lawful entry still restored.
+        assert_eq!(
+            std::fs::read(good_orig.join("SKILL.md")).unwrap(),
+            b"# keep me\n"
+        );
+        assert!(!park_e.exists());
+        // Disclosed: one typed warning per refused entry + the log events; the journal is clean.
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|w| w.starts_with("PARK_JOURNAL_REFUSED"))
+                .count(),
+            4,
+            "{warnings:?}"
+        );
+        let log = std::fs::read_to_string(layout.log_path()).unwrap();
+        assert!(log.contains("park_journal_refused"), "{log}");
+        let rewritten: ParkJournal = crate::doc::read_doc(&fs, &layout.park_journal_path())
+            .unwrap()
+            .unwrap();
+        assert!(rewritten.parks.is_empty(), "{:?}", rewritten.parks);
+
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&victim);
+    }
+
+    /// P1 (same class as the journal): a PROJECT store's `map.json` is repo content too — a
+    /// hostile clone must not aim the litter sweep's judgments at placements outside the
+    /// checkout. An out-of-project row is not visited: the park beside it is neither dropped nor
+    /// preserve-renamed.
+    #[test]
+    fn a_hostile_project_map_cannot_aim_the_litter_sweep_outside_the_checkout() {
+        let proj = scratch("hostile-map");
+        let outside = scratch("hostile-map-outside");
+        let fs = RealFs;
+        let layout = project_store_layout(&proj);
+        let id = SkillId::parse("topos_hmap1").unwrap();
+        // The committed store records a placement OUTSIDE the checkout, whose parent holds a
+        // park matching the map's own (attacker-declared) accounted sha.
+        let placement = outside.join("demo");
+        record_skill(&layout, &id, &placement, b"# bait\n");
+        let park = outside.join(".topos-staging-topos_hmap1");
+        std::fs::create_dir_all(&park).unwrap();
+        std::fs::write(park.join("SKILL.md"), b"# bait\n").unwrap();
+
+        recover(&fs, &layout, 1, &mut Vec::new()).unwrap();
+
+        assert_eq!(
+            std::fs::read(park.join("SKILL.md")).unwrap(),
+            b"# bait\n",
+            "an out-of-project map row is not visited — the park is untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// P2: THE LIVENESS FENCE. A journal entry whose owning per-skill operation lock is HELD
+    /// belongs to an operation still running — recovery must not restore its park out from under
+    /// it; once the lock is free, the ordinary restore proceeds.
+    #[test]
+    fn recovery_skips_a_journaled_park_whose_owning_operation_is_live() {
+        let home = scratch("fence");
+        let layout = Layout::new(&home);
+        std::fs::create_dir_all(layout.skills_dir()).unwrap();
+        let fs = RealFs;
+        let id = SkillId::parse("topos_fence1").unwrap();
+        let orig = home.join("place").join("demo");
+        std::fs::create_dir_all(&orig).unwrap();
+        std::fs::write(orig.join("SKILL.md"), b"# live op bytes\n").unwrap();
+        let park = crate::materialize::park_aside_journaled(
+            &fs,
+            &layout,
+            &orig,
+            "retiring",
+            true,
+            Some(&id),
+        )
+        .unwrap();
+
+        // The op is LIVE: its writer lock is held.
+        let guard = fs.lock_exclusive(&layout.lock_file(&id)).unwrap();
+        let mut warnings = Vec::new();
+        recover(&fs, &layout, 1, &mut warnings).unwrap();
+        assert!(park.exists(), "a live op's park is left alone");
+        assert!(!orig.exists(), "…and not restored under the running op");
+        let journal: ParkJournal = crate::doc::read_doc(&fs, &layout.park_journal_path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(journal.parks.len(), 1, "the entry is kept for the next run");
+
+        // The op ended (crashed) — the lock is free, recovery restores.
+        drop(guard);
+        recover(&fs, &layout, 2, &mut warnings).unwrap();
+        assert_eq!(
+            std::fs::read(orig.join("SKILL.md")).unwrap(),
+            b"# live op bytes\n"
+        );
+        assert!(!park.exists());
+        let journal: ParkJournal = crate::doc::read_doc(&fs, &layout.park_journal_path())
+            .unwrap()
+            .unwrap();
+        assert!(journal.parks.is_empty());
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// P2: the journal's read-modify-write is serialized under its own lock — concurrent
+    /// per-skill writers journaling parks must not overwrite each other's entries.
+    #[test]
+    fn concurrent_journal_writers_lose_no_entries() {
+        let home = scratch("jconc");
+        let layout = Layout::new(&home);
+        const N: usize = 8;
+        std::thread::scope(|s| {
+            for i in 0..N {
+                let layout = &layout;
+                let home = &home;
+                s.spawn(move || {
+                    journal_park(
+                        &RealFs,
+                        layout,
+                        &home.join(format!("orig-{i}")),
+                        &home.join(format!(".topos-retiring-{i}")),
+                        true,
+                        None,
+                    )
+                    .unwrap();
+                });
+            }
+        });
+        let journal: ParkJournal = crate::doc::read_doc(&RealFs, &layout.park_journal_path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(journal.parks.len(), N, "{:?}", journal.parks);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// P1: an UNREADABLE `lock.json` (newer schema, torn bytes) fails CLOSED — with the accounted
+    /// set possibly incomplete, recovery deletes NOTHING against it: even a park whose bytes
+    /// match the map's recorded sha is preserved + disclosed instead of dropped.
+    #[test]
+    fn an_unreadable_lock_preserves_every_litter_park_never_deletes() {
+        let home = scratch("badlock");
+        let parent = scratch("badlock-place");
+        let layout = Layout::new(&home);
+        let fs = RealFs;
+        let id = SkillId::parse("topos_badlock1").unwrap();
+        let placement = parent.join("demo");
+        record_skill(&layout, &id, &placement, b"# current\n");
+        // The lock is torn/foreign — read_doc cannot decide with it.
+        std::fs::write(layout.published(&id).lock, b"not a document").unwrap();
+        // The park holds exactly the MAP-accounted bytes — the arm the finding names: without
+        // the fail-closed rail this would still be deleted on the map row alone.
+        let park = parent.join(".topos-staging-topos_badlock1");
+        std::fs::create_dir_all(&park).unwrap();
+        std::fs::write(park.join("SKILL.md"), b"# current\n").unwrap();
+
+        recover(&fs, &layout, 1, &mut Vec::new()).unwrap();
+
+        assert!(!park.exists(), "the park left its swept name…");
+        let kept = parent.join(".topos-kept-.topos-staging-topos_badlock1");
+        assert_eq!(
+            std::fs::read(kept.join("SKILL.md")).unwrap(),
+            b"# current\n",
+            "…preserved whole, never deleted over an undecidable lock"
+        );
+        let log = std::fs::read_to_string(layout.log_path()).unwrap();
+        assert!(log.contains("park_preserved"), "{log}");
+
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// P1: THE DYNAMIC BOUNDARY. Recovery's litter judge rides the settle rail — an edit landing
+    /// through a PRE-PARK file descriptor between recovery's first read and the unlink is seen by
+    /// the second read and the park is preserved, never deleted on the stale first judgment.
+    #[test]
+    fn a_pre_park_fd_edit_landing_mid_judgment_survives_recovery() {
+        use std::io::Write;
+        let home = scratch("fdedit");
+        let parent = scratch("fdedit-place");
+        let layout = Layout::new(&home);
+        let id = SkillId::parse("topos_fdedit1").unwrap();
+        let placement = parent.join("demo");
+        record_skill(&layout, &id, &placement, b"# current\n");
+        // The stranded park holds exactly the ACCOUNTED bytes — one scan would judge it
+        // droppable.
+        let park = parent.join(".topos-staging-topos_fdedit1");
+        std::fs::create_dir_all(&park).unwrap();
+        std::fs::write(park.join("SKILL.md"), b"# current\n").unwrap();
+        // The pre-park fd: a writer that opened the file before any judgment began.
+        let fd = std::cell::RefCell::new(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(park.join("SKILL.md"))
+                .unwrap(),
+        );
+        // exists() on the park: #1 the litter check, #2 settle pass 1 (first scan follows), #3
+        // settle pass 2 — so firing before #3 lands the write BETWEEN the two reads.
+        let fs = crate::fs_seam::HookFs::before_nth_exists(&park, 3, move || {
+            let mut f = fd.borrow_mut();
+            f.write_all(b"# edited through the fd\n").unwrap();
+            f.flush().unwrap();
+        });
+
+        recover(&fs, &layout, 1, &mut Vec::new()).unwrap();
+
+        assert!(!park.exists(), "the park left its swept name…");
+        let kept = parent.join(".topos-kept-.topos-staging-topos_fdedit1");
+        let kept_bytes = std::fs::read(kept.join("SKILL.md")).unwrap();
+        assert!(
+            kept_bytes.starts_with(b"# edited through the fd\n"),
+            "the fd edit survives whole under the kept name: {:?}",
+            String::from_utf8_lossy(&kept_bytes)
+        );
+        let log = std::fs::read_to_string(layout.log_path()).unwrap();
+        assert!(log.contains("park_preserved"), "{log}");
+
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// P1: the store-creation walk refuses a component that becomes a symlink BETWEEN the
+    /// containment proof and the create — the mid-walk swap `mkdir -p` would have followed.
+    #[test]
+    fn ensure_project_store_refuses_a_component_swapped_to_a_symlink_mid_create() {
+        let proj = scratch("midswap");
+        let victim = scratch("midswap-victim");
+        let store_dir = proj.join(PROJECT_STORE_DIR);
+        let link_at = store_dir.clone();
+        let link_to = victim.clone();
+        // The swap lands after `within_project` proved the (absent) path and immediately before
+        // the creation walk touches it.
+        let fs = crate::fs_seam::HookFs::before_nth_create_dir_all(&store_dir, 1, move || {
+            std::os::unix::fs::symlink(&link_to, &link_at).unwrap();
+        });
+
+        let err = ensure_project_store(&fs, &proj);
+        assert!(err.is_err(), "a swapped component refuses the store");
+        assert_eq!(
+            std::fs::read_dir(&victim).unwrap().count(),
+            0,
+            "nothing was created through the symlink"
+        );
+
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&victim);
     }
 }

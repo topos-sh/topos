@@ -45,6 +45,23 @@
 //! the final verifying scan and the completion of the unlink walk can still die unexamined. No
 //! sequence of path syscalls closes that window; narrowing it to one scan-to-unlink beat — and
 //! preserving anything observed moving — is the honest limit.
+//!
+//! ## The proof-to-write boundary (no-follow writes; the held parent handle)
+//!
+//! The containment proofs above are statements about a PATH at one instant, and re-proving a path
+//! harder never closes the gap to the syscall that writes through it — an ancestor swapped for a
+//! symlink in that gap re-aims the same spelling at a different tree. So this module writes
+//! through the seam's no-follow boundary instead (see `fs_seam`'s module doc): staged files open
+//! `O_NOFOLLOW`, staging directories are built one `lstat`-checked component at a time
+//! ([`crate::fs_seam::FsOps::create_dir_nofollow`]), and every landing rename/exchange runs *at a
+//! held directory handle* opened on the placement's parent immediately after the proof
+//! ([`crate::fs_seam::DirHandle`] — `(dev, ino)` captured at proof time, re-checked against the
+//! path immediately before the namespace op, the op itself `renameat` against the held fd). A
+//! swap between the proof and the landing is therefore met as itself and refused, never followed.
+//! Named residuals (also in `fs_seam`): a whole REAL directory relocated after the proof keeps
+//! its identity — the held fd then lands bytes inside that same (moved) directory object, never
+//! through the swapped path; recursive removals of parks stay path-based behind the settle rail;
+//! a non-unix port would fall back to path-based checks and must revisit this boundary.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -220,11 +237,19 @@ pub(crate) fn materialize(
         let placement_dir = PathBuf::from(&map.placements[i]);
         // The containment rail, re-proven at the WRITE boundary (see [`MaterializeReq::project_root`]):
         // resolve_target below creates + canonicalizes the parent, which is already a write into
-        // whatever the path resolves to — so the proof comes first.
+        // whatever the path resolves to — so the proof comes first (and resolve_target's own
+        // parent creation walks no-follow under the proven root).
         prove_containment(req.project_root, &placement_dir)?;
         let kind = fs.path_kind(&placement_dir)?;
-        let target = resolve_target(fs, &placement_dir, kind)?;
+        let target = resolve_target(fs, &placement_dir, kind, req.project_root)?;
         let parent = target.parent.clone();
+        // The PROOF-TO-WRITE anchor (see the module doc): the proven parent is pinned OPEN here,
+        // and every namespace op that lands or removes bytes in it below runs at this handle —
+        // verified `(dev, ino)`-identical to the path immediately before each op — so an
+        // ancestor swapped for a symlink after this line is met as itself and refused.
+        let parent_handle = fs
+            .open_dir_handle(&parent)
+            .map_err(|e| ClientError::Io(format!("open placement parent: {e}")))?;
 
         // A dir the caller expected PRESENT that has since vanished: bytes moved in the window —
         // skip, never guess (the next sweep reconciles from a fresh scan).
@@ -362,7 +387,12 @@ pub(crate) fn materialize(
                         captured = Some(to_hex(&scanned.bundle_digest));
                     }
                     _ => {
-                        fs.remove_dir_all(&staging)?;
+                        // The staging removal rides the same anchor: with the parent's identity
+                        // unverifiable the staged tree stays (preserved, never deleted through a
+                        // possibly-swapped path).
+                        if parent_handle.verify_unmoved().is_ok() {
+                            fs.remove_dir_all(&staging)?;
+                        }
                         continue;
                     }
                 }
@@ -371,17 +401,27 @@ pub(crate) fn materialize(
 
         // The containment proof AGAIN, immediately before the namespace op that installs the
         // bytes — the staging build took real time, and an ancestor that became a symlink inside
-        // that window would route the rename through it.
+        // that window would route the rename through it. (The op itself then runs at the held
+        // parent handle, so even a swap in the beat after this proof cannot re-aim it.)
         if let Err(e) = prove_containment(req.project_root, &placement_dir) {
-            fs.remove_dir_all(&staging)?;
+            if parent_handle.verify_unmoved().is_ok() {
+                fs.remove_dir_all(&staging)?;
+            }
             return Err(e);
         }
 
-        // Place the bytes.
+        // Place the bytes — every namespace op at the held parent handle.
         if target.dir_was_present {
             let baseline = map.placement_state[i].materialized_sha.clone();
-            let (next_cap, parked) =
-                place_update(fs, &staging, &target.dir, &parent, req.skill_id, cap)?;
+            let (next_cap, parked) = place_update(
+                fs,
+                &parent_handle,
+                &staging,
+                &target.dir,
+                &parent,
+                req.skill_id,
+                cap,
+            )?;
             cap = next_cap;
             // The old tree is parked, not gone: judge it, then drop it.
             verify_parked_old(
@@ -394,7 +434,8 @@ pub(crate) fn materialize(
             )?;
         } else {
             // First install: an atomic create — no prior bytes to mix.
-            fs.rename_dir_noreplace(&staging, &target.dir)
+            let (from, to) = (leaf_name(&staging)?, leaf_name(&target.dir)?);
+            fs.rename_at_noreplace(&parent_handle, from, to)
                 .map_err(|e| ClientError::Io(format!("first-install rename: {e}")))?;
             fs.fsync_dir(&parent)?;
         }
@@ -467,23 +508,52 @@ struct Target {
     dir_was_present: bool,
 }
 
+/// The final path component as `&str` — the leaf name the fd-anchored `*_at` ops take.
+fn leaf_name(path: &Path) -> Result<&str, ClientError> {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| ClientError::PlacementUnsupported {
+            reason: format!("{} has no usable final component", path.display()),
+        })
+}
+
+/// [`FsOps::create_dir_nofollow`] under a PROVEN root, absorbing the one spelling wrinkle
+/// [`contained_in`] names: a path recorded canonically under a root held raw (macOS `/var` vs
+/// `/private/var`) strips against the CANONICAL root instead. Nothing is weakened — whichever
+/// base matches, every component below it is `lstat`-walked and created one level at a time.
+pub(crate) fn create_dir_contained(fs: &dyn FsOps, root: &Path, dir: &Path) -> std::io::Result<()> {
+    if dir.strip_prefix(root).is_ok() {
+        return fs.create_dir_nofollow(root, dir);
+    }
+    match root.canonicalize() {
+        Ok(canon) if dir.strip_prefix(&canon).is_ok() => fs.create_dir_nofollow(&canon, dir),
+        _ => fs.create_dir_nofollow(root, dir), // fails with the not-under-base refusal
+    }
+}
+
 /// Resolve the placement to a real directory, or detect a first install, or refuse a non-directory.
 fn resolve_target(
     fs: &dyn FsOps,
     placement_dir: &Path,
     kind: Option<PathKind>,
+    project_root: Option<&Path>,
 ) -> Result<Target, ClientError> {
     match kind {
         None => {
             // First install: canonicalize the PARENT (must exist) so ancestor symlinks resolve, then
             // re-join the leaf. Create the parent if absent (the harness skills dir may not exist yet).
+            // A project-scope parent is created with the NO-FOLLOW walk under the proven checkout —
+            // `mkdir -p` through an ancestor swapped since the proof is refused, never followed.
             let parent_raw =
                 placement_dir
                     .parent()
                     .ok_or_else(|| ClientError::PlacementUnsupported {
                         reason: "placement path has no parent directory".into(),
                     })?;
-            fs.create_dir_all(parent_raw)?;
+            match project_root {
+                Some(root) => create_dir_contained(fs, root, parent_raw)?,
+                None => fs.create_dir_all(parent_raw)?,
+            }
             let parent = std::fs::canonicalize(parent_raw)
                 .map_err(|e| ClientError::Io(format!("canonicalize placement parent: {e}")))?;
             let leaf =
@@ -531,17 +601,21 @@ fn resolve_target(
 /// Place new bytes over an existing directory, self-healing a stale `AtomicExchange` to
 /// `RenameDance`. Returns the effective capability AND the path the OLD tree is now PARKED at —
 /// both swap shapes park rather than delete, so the caller inspects those bytes before they go
-/// (see [`verify_parked_old`]).
+/// (see [`verify_parked_old`]). Every namespace op runs at the caller's HELD parent handle
+/// (verified against the path immediately before each op), so a parent swapped after the
+/// containment proof refuses instead of re-aiming the op.
 fn place_update(
     fs: &dyn FsOps,
+    h: &crate::fs_seam::DirHandle,
     staging: &Path,
     dir: &Path,
     parent: &Path,
     skill_id: &str,
     cap: SwapCapability,
 ) -> Result<(SwapCapability, PathBuf), ClientError> {
+    let (staging_leaf, dir_leaf) = (leaf_name(staging)?, leaf_name(dir)?);
     match cap {
-        SwapCapability::AtomicExchange => match fs.exchange_dir(staging, dir) {
+        SwapCapability::AtomicExchange => match fs.exchange_at(h, staging_leaf, dir_leaf) {
             Ok(()) => {
                 fs.fsync_dir(parent)?;
                 // The swap PARKED the old bytes at the staging path — the caller judges them.
@@ -550,13 +624,13 @@ fn place_update(
             Err(e) if is_unsupported(&e) => {
                 // The cached capability is stale (the placement moved onto a swap-incapable FS). Fall
                 // back to the rename-dance, reusing the already-built staging.
-                let parked = do_dance(fs, staging, dir, parent, skill_id)?;
+                let parked = do_dance(fs, h, staging, dir, parent, skill_id)?;
                 Ok((SwapCapability::RenameDance, parked))
             }
             Err(e) => Err(ClientError::Io(format!("atomic directory swap: {e}"))),
         },
         SwapCapability::RenameDance => {
-            let parked = do_dance(fs, staging, dir, parent, skill_id)?;
+            let parked = do_dance(fs, h, staging, dir, parent, skill_id)?;
             Ok((SwapCapability::RenameDance, parked))
         }
         SwapCapability::Unsupported => Err(ClientError::PlacementUnsupported {
@@ -572,36 +646,46 @@ fn place_update(
 /// still in the sidecar store).
 fn do_dance(
     fs: &dyn FsOps,
+    h: &crate::fs_seam::DirHandle,
     staging: &Path,
     dir: &Path,
     parent: &Path,
     skill_id: &str,
 ) -> Result<PathBuf, ClientError> {
     let graveyard = graveyard_path(parent, skill_id);
+    // The graveyard clear rides the handle's identity check too — a leftover was already judged
+    // by the litter rail this run; this only clears what that judgment left droppable.
+    h.verify_unmoved()
+        .map_err(|e| ClientError::Io(format!("rename-dance parent check: {e}")))?;
     fs.remove_dir_all(&graveyard)?;
-    fs.rename(dir, &graveyard)
+    let (dir_leaf, grave_leaf, staging_leaf) =
+        (leaf_name(dir)?, leaf_name(&graveyard)?, leaf_name(staging)?);
+    fs.rename_at(h, dir_leaf, grave_leaf)
         .map_err(|e| ClientError::Io(format!("rename-dance park old: {e}")))?;
     // --- the brief ABSENT (never mixed) window is between these two atomic renames ---
-    fs.rename(staging, dir)
+    fs.rename_at(h, staging_leaf, dir_leaf)
         .map_err(|e| ClientError::Io(format!("rename-dance install new: {e}")))?;
     fs.fsync_dir(parent)?;
     Ok(graveyard)
 }
 
-/// What became of a judged park (see [`settle_park`]).
-enum ParkFate {
-    /// Every byte accounted for, two consecutive reads agreed — the park was removed.
+/// What became of a judged park (see [`settle_park_among`]).
+pub(crate) enum ParkFate {
+    /// Every byte accounted for, two consecutive reads agreed — the park was removed (or had
+    /// already vanished: a concurrent command concluded it first).
     Dropped,
     /// The bytes could not be dropped (unreadable, unaccountable, or still moving) and the park
-    /// was renamed to a `.topos-kept-*` sibling no sweep touches.
-    Kept,
+    /// was renamed to the carried `.topos-kept-*` sibling no sweep touches.
+    Kept(PathBuf),
     /// Same, but the rename ALSO failed — the park still sits under its original name. Nothing
     /// was deleted; the caller decides whether that name being occupied is fatal.
     Stuck,
 }
 
-/// PARK-THEN-VERIFY's judging half: account for every byte a parked tree holds, then drop it —
-/// and only on TWO CONSECUTIVE AGREEING READS, the second immediately before the removal.
+/// PARK-THEN-VERIFY's judging half over an explicit ACCOUNTED set: account for every byte a
+/// parked tree holds, then drop it — and only on TWO CONSECUTIVE AGREEING READS, the second
+/// immediately before the removal. The one settle rail every recovery/apply deletion of a park
+/// rides (command-start recovery included), so no path ever deletes on a single scan.
 ///
 /// A rename takes the tree out of every PATH, but not away from an already-open file descriptor
 /// (see the module doc's residual-window section): a process that opened a file before the park
@@ -609,17 +693,17 @@ enum ParkFate {
 /// gone. The loop re-reads until the tree holds still across two scans, absorbing every distinct
 /// content it sees along the way:
 ///
-/// - bytes that ARE the target, or equal this placement's recorded baseline, or that a snapshot
-///   already captured (`captured` / an earlier loop pass) → accounted;
+/// - bytes whose digest sits in `accounted` (the target, a recorded baseline, an already-taken
+///   snapshot — the caller says which), or that an earlier loop pass absorbed → accounted;
 /// - anything else → snapshotted right then (the callers that destroy carry a snapshotter);
 /// - unreadable, unaccountable with no snapshotter, or never settling within the bound → the park
-///   is preserved (renamed to a `.topos-kept-*` sibling), never deleted.
-fn settle_park(
+///   is preserved (renamed to a `.topos-kept-*` sibling), never deleted;
+/// - a park that VANISHED mid-judgment was concluded by a concurrent command — nothing left to
+///   account for.
+pub(crate) fn settle_park_among(
     fs: &dyn FsOps,
     parked: &Path,
-    target_hex: &str,
-    baseline: Option<&str>,
-    captured: Option<&str>,
+    accounted: &[String],
     snapshot: Option<SnapshotFn<'_>>,
 ) -> Result<ParkFate, ClientError> {
     /// Two agreeing reads authorize the drop; a tree still moving after this many passes is
@@ -628,16 +712,17 @@ fn settle_park(
     let mut prev: Option<String> = None;
     let mut absorbed: Vec<String> = Vec::new();
     for _ in 0..SETTLE_PASSES {
+        if !fs.exists(parked) {
+            return Ok(ParkFate::Dropped);
+        }
         let Ok(scanned) = scan::scan(parked) else {
             // An unreadable park is not a park we may delete.
             return keep_parked(fs, parked);
         };
         let hex = to_hex(&scanned.bundle_digest);
-        let accounted = hex == target_hex
-            || baseline == Some(hex.as_str())
-            || captured == Some(hex.as_str())
-            || absorbed.iter().any(|a| a == &hex);
-        if !accounted {
+        let is_accounted =
+            accounted.iter().any(|a| a == &hex) || absorbed.iter().any(|a| a == &hex);
+        if !is_accounted {
             match snapshot {
                 Some(snapshot) => {
                     snapshot(&scanned)?;
@@ -653,6 +738,22 @@ fn settle_park(
         prev = Some(hex);
     }
     keep_parked(fs, parked)
+}
+
+/// [`settle_park_among`] with the apply path's accounted shape: the target bytes, this
+/// placement's recorded baseline, and what a snapshot already captured.
+fn settle_park(
+    fs: &dyn FsOps,
+    parked: &Path,
+    target_hex: &str,
+    baseline: Option<&str>,
+    captured: Option<&str>,
+    snapshot: Option<SnapshotFn<'_>>,
+) -> Result<ParkFate, ClientError> {
+    let mut accounted: Vec<String> = vec![target_hex.to_owned()];
+    accounted.extend(baseline.map(str::to_owned));
+    accounted.extend(captured.map(str::to_owned));
+    settle_park_among(fs, parked, &accounted, snapshot)
 }
 
 /// [`settle_park`] at the swap's own call site: whatever the fate, the apply proceeds — a Kept or
@@ -675,7 +776,7 @@ fn verify_parked_old(
 /// the caller learns it via [`ParkFate::Stuck`].
 fn keep_parked(fs: &dyn FsOps, parked: &Path) -> Result<ParkFate, ClientError> {
     Ok(match preserve_park(fs, parked) {
-        Some(_) => ParkFate::Kept,
+        Some(kept) => ParkFate::Kept(kept),
         None => ParkFate::Stuck,
     })
 }
@@ -761,7 +862,16 @@ fn build_staging(
             ),
         });
     }
-    fs.create_dir_all(staging)?;
+    // NO-FOLLOW creates throughout the staged tree (see the module doc's proof-to-write
+    // boundary): the staging dir is one lstat-checked level below the canonical parent, and every
+    // file-parent below it is walked component-wise — a symlink swapped in mid-build is met as
+    // itself and refused, never traversed.
+    let staging_parent = staging
+        .parent()
+        .ok_or_else(|| ClientError::PlacementUnsupported {
+            reason: "staging path has no parent directory".into(),
+        })?;
+    fs.create_dir_nofollow(staging_parent, staging)?;
     let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
     dirs.insert(staging.to_path_buf());
     if self_ignore && !bundle.files.iter().any(|f| f.path == scan::IGNORE_FILE) {
@@ -772,7 +882,7 @@ fn build_staging(
     for f in &bundle.files {
         let dest = staging.join(&f.path);
         if let Some(file_parent) = dest.parent() {
-            fs.create_dir_all(file_parent)?;
+            fs.create_dir_nofollow(staging, file_parent)?;
             // Collect every directory from the file's parent up to (and including) the staging root, so
             // each directory entry is fsynced before the swap. `f.path` is kernel-validated (no `..`, no
             // absolute), so the walk stays inside staging.
@@ -801,28 +911,9 @@ fn build_staging(
 // PARK-THEN-VERIFY — the one primitive behind every destructive path
 // ---------------------------------------------------------------------------------------------
 
-/// Move `dir` ASIDE, atomically, to a `.`-prefixed sibling — the first half of park-then-verify.
-///
-/// Verify-then-delete cannot be made safe by checking harder: between the last look and the
-/// `rm -rf` there is always a window, and whatever lands in it dies unexamined. A `rename` has no
-/// such window — after it, the tree is out of every path anyone else can write through, and the
-/// caller can inspect it at leisure and decide: drop it (nothing of the person's was there),
-/// snapshot it (bytes worth keeping), or put it back (this run may not have it).
-///
-/// The sibling name is UNIQUE — an existing park (a prior crashed run's) is never deleted to make
-/// room, and a leftover is dot-prefixed so no harness discovery reads it as a skill.
-///
-/// # Errors
-/// The rename failed, or 64 parks already sit beside the directory (a person's cleanup, not ours).
-pub(crate) fn park_aside(fs: &dyn FsOps, dir: &Path, tag: &str) -> Result<PathBuf, ClientError> {
-    let to = park_name(fs, dir, tag)?;
-    fs.rename(dir, &to)
-        .map_err(|e| ClientError::Io(format!("park {}: {e}", dir.display())))?;
-    Ok(to)
-}
-
 /// Choose the unique sibling name a park of `dir` would take (the ladder past existing parks) —
-/// split out of [`park_aside`] so a JOURNALED park can record the name durably BEFORE the rename.
+/// split out of [`park_aside_journaled`] so the JOURNAL can record the name durably BEFORE the
+/// rename.
 fn park_name(fs: &dyn FsOps, dir: &Path, tag: &str) -> Result<PathBuf, ClientError> {
     let name = dir
         .file_name()
@@ -844,12 +935,25 @@ fn park_name(fs: &dyn FsOps, dir: &Path, tag: &str) -> Result<PathBuf, ClientErr
     Ok(to)
 }
 
-/// [`park_aside`] with a PARK-JOURNAL entry written durably BEFORE the rename: a park under a
-/// unique name is invisible to every name-keyed sweep, so a crash between this rename and the
-/// caller's conclusion would otherwise strand the tree's only bytes undisclosed. The journal
-/// closes that: the next run's recovery ([`crate::sidecar::recover`]) restores the park to its
-/// original path, or preserves + discloses it. The caller SETTLES the entry
-/// ([`crate::sidecar::settle_park_journal`]) once the park is dropped or restored.
+/// Move `dir` ASIDE, atomically, to a unique `.`-prefixed sibling — the first half of
+/// park-then-verify — with a PARK-JOURNAL entry written durably BEFORE the rename.
+///
+/// Verify-then-delete cannot be made safe by checking harder: between the last look and the
+/// `rm -rf` there is always a window, and whatever lands in it dies unexamined. A `rename` has no
+/// such window — after it, the tree is out of every path anyone else can write through, and the
+/// caller can inspect it at leisure and decide: drop it, snapshot it, or put it back. The sibling
+/// name is UNIQUE (an existing park is never deleted to make room) and dot-prefixed (no harness
+/// discovery reads it as a skill) — which is exactly why a park is invisible to every name-keyed
+/// sweep, and why a crash between this rename and the caller's conclusion would otherwise strand
+/// the tree's only bytes undisclosed. The journal closes that: the next run's recovery
+/// ([`crate::sidecar::recover`]) restores the park to its original path, or preserves +
+/// discloses it. The caller SETTLES the entry ([`crate::sidecar::settle_park_journal`]) once the
+/// park is dropped or restored.
+///
+/// `owner` is the skill whose per-skill writer lock the calling operation HOLDS across this park —
+/// recovery's liveness fence: while that lock is held, recovery leaves the entry alone rather than
+/// restoring a live operation's park out from under it. `None` only for parks taken outside any
+/// per-skill lock (a pre-adoption import destination).
 ///
 /// # Errors
 /// The journal write (fail-closed: an unjournalable park is not taken) or the rename.
@@ -859,9 +963,10 @@ pub(crate) fn park_aside_journaled(
     dir: &Path,
     tag: &str,
     restore: bool,
+    owner: Option<&crate::id::SkillId>,
 ) -> Result<PathBuf, ClientError> {
     let to = park_name(fs, dir, tag)?;
-    crate::sidecar::journal_park(fs, layout, dir, &to, restore)?;
+    crate::sidecar::journal_park(fs, layout, dir, &to, restore, owner)?;
     match fs.rename(dir, &to) {
         Ok(()) => Ok(to),
         Err(e) => {
@@ -902,7 +1007,7 @@ fn cleanup_litter(
             continue;
         }
         match settle_park(fs, &park, target_hex, baseline, None, snapshot)? {
-            ParkFate::Dropped | ParkFate::Kept => {}
+            ParkFate::Dropped | ParkFate::Kept(_) => {}
             ParkFate::Stuck => {
                 return Err(ClientError::PlacementUnsupported {
                     reason: format!(
@@ -2282,5 +2387,81 @@ mod tests {
                 "fail_at={fail_at}: no converge"
             );
         }
+    }
+
+    /// P1: the NO-FOLLOW creation walk — a symlink component refuses the whole create (nothing
+    /// lands beyond it), a `..` climb refuses, and an ordinary nested create still works.
+    #[test]
+    fn create_dir_nofollow_refuses_symlink_components_and_climbs() {
+        let base = Scratch::new("nofollow");
+        let victim = Scratch::new("nofollow-victim");
+
+        // Ordinary nested create works.
+        RealFs
+            .create_dir_nofollow(&base.0, &base.0.join("a").join("b").join("c"))
+            .unwrap();
+        assert!(base.0.join("a/b/c").is_dir());
+
+        // A symlink component is met as itself and refused — nothing created through it.
+        std::os::unix::fs::symlink(&victim.0, base.0.join("link")).unwrap();
+        let err = RealFs.create_dir_nofollow(&base.0, &base.0.join("link").join("inner"));
+        assert!(err.is_err(), "a symlink component must refuse");
+        assert_eq!(
+            std::fs::read_dir(&victim.0).unwrap().count(),
+            0,
+            "nothing was created through the link"
+        );
+
+        // A `..` climb out of the base refuses outright.
+        let err = RealFs.create_dir_nofollow(&base.0, &base.0.join("..").join("escape"));
+        assert!(err.is_err(), "a climb out of the base must refuse");
+    }
+
+    /// P1: THE PROOF-TO-WRITE ANCHOR. The placement parent is swapped for an outward symlink
+    /// AFTER the containment proof and the staging build, immediately before the landing rename —
+    /// the held parent handle detects the swap and the landing REFUSES: nothing is written
+    /// through the link, and the staged bytes stay whole inside the (moved) real parent.
+    #[test]
+    fn a_parent_swapped_after_the_proof_refuses_the_landing_rename() {
+        let parent = Scratch::new("swap-anchor");
+        let home = Scratch::new("swap-anchor-home");
+        let victim = Scratch::new("swap-anchor-victim");
+        let skills = parent.0.join("skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        let skills_canon = skills.canonicalize().unwrap();
+        let placement = skills.join("demo"); // absent → first install
+        let bundle = rendered(NEW);
+        let lock = lock_of("topos_swapp1", NEW, &"1".repeat(64));
+        let sync = sync_at(1, 1, &"1".repeat(64), &digest_hex(NEW));
+        let mut prior = prior_map(&[&placement], &"0".repeat(64), SwapCapability::RenameDance);
+        prior.placement_state[0].materialized_sha = None;
+        let d = docs_under(&home.0, "topos_swapp1");
+
+        // The swap: the REAL parent is moved aside and an outward symlink takes its place, in
+        // the beat between the staging build and the landing rename.
+        let staging = skills_canon.join(".topos-staging-topos_swapp1");
+        let moved = parent.0.join("moved-aside");
+        let (link_from, link_to, moved_to) =
+            (skills_canon.clone(), victim.0.clone(), moved.clone());
+        let fs = crate::fs_seam::HookFs::before_first_move_of(&staging, move || {
+            std::fs::rename(&link_from, &moved_to).unwrap();
+            std::os::unix::fs::symlink(&link_to, &link_from).unwrap();
+        });
+
+        let err = materialize(
+            &fs,
+            &req("topos_swapp1", &[0], &bundle, &prior, &lock, &sync, &d.sp),
+        );
+        assert!(err.is_err(), "the swapped parent must refuse the landing");
+        assert_eq!(
+            std::fs::read_dir(&victim.0).unwrap().count(),
+            0,
+            "nothing landed through the symlink"
+        );
+        assert_eq!(
+            dir_snapshot(&moved.join(".topos-staging-topos_swapp1")),
+            Some(expected(NEW)),
+            "the staged bytes stay whole inside the moved real parent — preserved, not deleted"
+        );
     }
 }

@@ -608,7 +608,7 @@ pub(crate) fn manifest_update(
     let now_millis = i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX);
     for pd in &manifest_dirs {
         if let Some(playout) = sidecar::existing_project_store(ctx.fs, pd)
-            && let Err(e) = sidecar::recover(ctx.fs, &playout, now_millis)
+            && let Err(e) = sidecar::recover(ctx.fs, &playout, now_millis, &mut sweep.warnings)
         {
             sweep.warnings.push(format!(
                 "STORE_RECOVERY_FAILED {}: {}",
@@ -2264,6 +2264,7 @@ fn refresh_repo_skill(
             from,
             "refresh-old",
             digest.is_some(),
+            Some(sid),
         )?;
         stashed.push((from.to_path_buf(), to.clone(), digest));
         Ok(to)
@@ -2881,8 +2882,14 @@ fn clean_placements(
             // record recovery restores from (a park under a unique name is otherwise invisible
             // to every sweep). The read below then sees exactly the bytes about to be dropped —
             // not a snapshot of a moving target.
-            let parked =
-                crate::materialize::park_aside_journaled(ctx.fs, &ctx.layout, p, "retiring", true)?;
+            let parked = crate::materialize::park_aside_journaled(
+                ctx.fs,
+                &ctx.layout,
+                p,
+                "retiring",
+                true,
+                Some(sid),
+            )?;
             // The SETTLE rail: a rename cannot revoke an already-open file descriptor, so the
             // drop is authorized only by TWO CONSECUTIVE AGREEING READS — every distinct content
             // seen along the way snapshotted before it could die. A tree that keeps moving, or
@@ -3185,7 +3192,17 @@ pub(crate) fn handover_legacy_project_rows(
             // Project-only: the project store owns the scope now, but the home dir still holds
             // embedded history + draft snapshots no adoption carried over — PARK it (rename to a
             // `.topos-handover-*` sibling no sweep touches), disclose, and log; never delete.
-            match crate::materialize::park_aside(ctx.fs, &ctx.layout.skill_dir(&sid), "handover") {
+            // The park is JOURNALED before the rename and the entry settled only AFTER the
+            // disclosure lands: a crash in between leaves the entry, recovery restores the dir,
+            // and the handover simply re-runs — the park can never sit undisclosed.
+            match crate::materialize::park_aside_journaled(
+                ctx.fs,
+                &ctx.layout,
+                &ctx.layout.skill_dir(&sid),
+                "handover",
+                true,
+                Some(&sid),
+            ) {
                 Ok(parked) => {
                     warnings.push(format!(
                         "STATE_HANDOVER {id}: the project store now tracks it; the old home-side \
@@ -3203,6 +3220,9 @@ pub(crate) fn handover_legacy_project_rows(
                             "at": ctx.clock.now_unix_millis(),
                         }),
                     );
+                    // The disclosure above IS this park's conclusion — the parked history is a
+                    // deliberate, named leftover now, not a stranded one.
+                    crate::sidecar::settle_park_journal(ctx.fs, &ctx.layout, &parked);
                     Ok(())
                 }
                 Err(e) => Err(e),
