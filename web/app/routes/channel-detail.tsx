@@ -20,11 +20,10 @@ import {
   type ChannelPlaceOutcome,
   type ChannelUnplaceOutcome,
   channelDetail,
-  includeChannelInProfile,
   placeBundleInChannel,
-  removeChannelFromProfile,
   unplaceBundleFromChannel,
 } from "@/lib/db/queries.channels.server";
+import { assignChannelToSelf, unassignChannelFromSelf } from "@/lib/db/queries.feed.server";
 import { skillIndexOf } from "@/lib/db/queries.server";
 import { useWsPath } from "@/lib/ws-path";
 
@@ -124,18 +123,28 @@ export async function action({ request, params }: ActionFunctionArgs) {
   if (intent === "remove-skill") {
     return removeSkillIntent(request, ws, channelId, skillId);
   }
-  // The viewer's OWN stance: put this set in (or take it out of) their profile — a personal,
-  // self-scoped act (the default channel's remove records the one exclude line).
-  if (intent === "profile-add" || intent === "profile-remove") {
+  // The viewer's OWN stance: carry this set, or stop carrying it — a personal, self-scoped
+  // assignment row. The baseline is refused typed: it reaches everyone, and one person's
+  // window onto it is the per-skill switches on Your skills.
+  if (intent === "stance-carry" || intent === "stance-drop") {
     const actor = await requireMember(request, ws);
     try {
       const outcome =
-        intent === "profile-add"
-          ? await includeChannelInProfile(actor, channelId)
-          : await removeChannelFromProfile(actor, channelId);
+        intent === "stance-carry"
+          ? await assignChannelToSelf(actor, channelId)
+          : await unassignChannelFromSelf(actor, channelId);
       if (outcome === "unknown_channel") {
         return data<SkillCurationActionData>(
           { form: "stance", error: "This channel no longer exists." },
+          { status: 400 },
+        );
+      }
+      if (outcome === "baseline") {
+        return data<SkillCurationActionData>(
+          {
+            form: "stance",
+            error: "Everyone gets the baseline. Turn individual skills off on Your skills.",
+          },
           { status: 400 },
         );
       }
@@ -254,10 +263,10 @@ function ChannelSkillsPage({
 }
 
 /**
- * The viewer's own stance on this SET: whether their profile carries it, and the one-click
- * toggle (self-scoped — a personal profile line, never anyone else's). A channel has no
- * membership: people carry it by referencing it; the default channel is the implicit baseline
- * and its remove records the one exclude line.
+ * Whether this SET reaches the viewer, and the one-click carry/drop (self-scoped — the
+ * viewer's own assignment row, never anyone else's). A channel has no membership: it reaches
+ * someone because an assignment aims it at them, or at everyone. The BASELINE is the second
+ * case, so no one person drops it — its skills are turned off one at a time on Your skills.
  */
 function StanceSection({ detail }: { detail: ChannelDetailData }) {
   const fetcher = useFetcher<SkillCurationActionData>();
@@ -266,8 +275,7 @@ function StanceSection({ detail }: { detail: ChannelDetailData }) {
     fetcher.data?.form === "stance" && fetcher.data.error.length > 0
       ? fetcher.data.error
       : undefined;
-  const audience =
-    detail.audienceCount === 1 ? "1 person's profile" : `${detail.audienceCount} people's profiles`;
+  const audience = detail.audienceCount === 1 ? "1 person" : `${detail.audienceCount} people`;
   return (
     <div
       data-testid="channel-stance"
@@ -275,9 +283,9 @@ function StanceSection({ detail }: { detail: ChannelDetailData }) {
     >
       <span className="text-dim text-sm">
         {detail.isDefault ? (
-          <>The baseline set — carried by {audience}.</>
+          <>The workspace baseline — assigned to everyone, so it reaches {audience}.</>
         ) : (
-          <>A curated set — carried by {audience}.</>
+          <>A curated set — assigned to {audience}.</>
         )}
       </span>
       {detail.viewerIncluded ? (
@@ -285,23 +293,29 @@ function StanceSection({ detail }: { detail: ChannelDetailData }) {
       ) : (
         <Chip tone="neutral">not in your skills</Chip>
       )}
-      <fetcher.Form method="post" className="ml-auto">
-        <input
-          type="hidden"
-          name="intent"
-          value={detail.viewerIncluded ? "profile-remove" : "profile-add"}
-        />
-        <input type="hidden" name="channel_id" value={detail.channelId} />
-        <button type="submit" disabled={pending} className={buttonClasses("quiet")}>
-          {pending
-            ? detail.viewerIncluded
-              ? "Removing…"
-              : "Adding…"
-            : detail.viewerIncluded
-              ? "Remove from my skills"
-              : "Add to my skills"}
-        </button>
-      </fetcher.Form>
+      {detail.isDefault ? (
+        <span className="ml-auto text-faint text-xs">
+          Turn individual skills off on Your skills.
+        </span>
+      ) : (
+        <fetcher.Form method="post" className="ml-auto">
+          <input
+            type="hidden"
+            name="intent"
+            value={detail.viewerIncluded ? "stance-drop" : "stance-carry"}
+          />
+          <input type="hidden" name="channel_id" value={detail.channelId} />
+          <button type="submit" disabled={pending} className={buttonClasses("quiet")}>
+            {pending
+              ? detail.viewerIncluded
+                ? "Removing…"
+                : "Adding…"
+              : detail.viewerIncluded
+                ? "Remove from my skills"
+                : "Add to my skills"}
+          </button>
+        </fetcher.Form>
+      )}
       {error !== undefined && (
         <p role="alert" className="w-full text-red-700 text-xs">
           {error}

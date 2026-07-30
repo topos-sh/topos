@@ -135,11 +135,9 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
       route("invitations", file("api.v1.invitations.ts")),
       route("proposals", file("api.v1.ws-proposals.ts")),
       route("skills", file("api.v1.skills-index.ts")),
-      // The caller's per-workspace PROFILE (the person-side manifest): the read + the
-      // include/exclude line edits (`add -g` / `remove -g`).
-      route("profile", file("api.v1.profile.ts")),
-      route("profile/skills/:skill", file("api.v1.profile-skill.ts")),
-      route("profile/channels/:channel", file("api.v1.profile-channel.ts")),
+      // No route writes a person's feed: what the server says someone should have is decided
+      // here (a curator's assignment, or their own click), never by a machine they logged in
+      // from. The retired `profile*` paths fall through to the splat's uniform 404.
       route("channels/:channel/skills/:skill", file("api.v1.curation.ts")),
       route("channels/:channel/protection", file("api.v1.channel-protection.ts")),
       route("skills/:skill/reach", file("api.v1.skill-reach.ts")),
@@ -173,8 +171,8 @@ function memberWorkspaceChildren(
   file: (p: string) => string,
 ): RouteConfigEntry[] {
   const children: RouteConfigEntry[] = [
-    // The person's per-workspace PROFILE editor ("Your skills") — the web face of the same
-    // include/exclude lines `topos add -g` / `remove -g` edit.
+    // The person's own feed ("Your skills"): what is assigned to them, and the switches that
+    // add one to their own feed or turn one off.
     route("profile", file("profile.tsx")),
     // Add-from-GitHub: server-side fetch → preview → publish WITH upstream provenance.
     route("skills/import", file("skill-import.tsx")),

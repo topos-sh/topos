@@ -11,21 +11,16 @@ import { action as deviceAuthorizeAction } from "@/routes/api.v1.login-authorize
 import { action as deviceTokenAction } from "@/routes/api.v1.login-token";
 import { loader as meLoader, action as meWrongMethod } from "@/routes/api.v1.me";
 import { action as noticesAction } from "@/routes/api.v1.notices-ack";
-import {
-  action as profileChannelAction,
-  loader as profileChannelWrongMethod,
-} from "@/routes/api.v1.profile-channel";
-import {
-  action as profileSkillAction,
-  loader as profileSkillWrongMethod,
-} from "@/routes/api.v1.profile-skill";
 import { action as reportAction, loader as reportWrongMethod } from "@/routes/api.v1.report";
 import { loader as skillCurrentLoader } from "@/routes/api.v1.skill-current";
 import { action as skillProtAction } from "@/routes/api.v1.skill-protection";
 import { loader as reachLoader } from "@/routes/api.v1.skill-reach";
 import { loader as skillsIndexLoader } from "@/routes/api.v1.skills-index";
 import {
+  assignBundleRow,
+  assignChannelRow,
   createScratchDb,
+  declineRow,
   placeBundle,
   type ScratchDb,
   seatUser,
@@ -192,8 +187,13 @@ async function expectUniform404(res: Response): Promise<void> {
   expect(await res.json()).toEqual(NOT_FOUND_BODY);
 }
 
-/** The member's delivered skill ids, through the REAL delivery route. */
-async function deliveredSkillIds(cred: string): Promise<string[]> {
+interface DeliveredSkill {
+  skill_id: string;
+  via: { channels: string[]; direct: boolean };
+}
+
+/** The caller's delivered skills, through the REAL delivery route. */
+async function deliveredSkills(cred: string): Promise<DeliveredSkill[]> {
   const res = await drive(
     deliveryLoader,
     req("GET", `/api/v1/workspaces/${wsId}/delivery`, { cred }),
@@ -202,8 +202,18 @@ async function deliveredSkillIds(cred: string): Promise<string[]> {
     },
   );
   expect(res.status).toBe(200);
-  const body = (await res.json()) as { skills: { skill_id: string }[] };
-  return body.skills.map((s) => s.skill_id).sort();
+  const body = (await res.json()) as { skills: DeliveredSkill[] };
+  return body.skills;
+}
+
+/** The caller's delivered skill ids, sorted. */
+async function deliveredSkillIds(cred: string): Promise<string[]> {
+  return (await deliveredSkills(cred)).map((s) => s.skill_id).sort();
+}
+
+/** ONE delivered skill (with its `via` attribution), or undefined when it does not arrive. */
+async function deliveredSkill(cred: string, skillId: string): Promise<DeliveredSkill | undefined> {
+  return (await deliveredSkills(cred)).find((s) => s.skill_id === skillId);
 }
 
 // ── fixture ──────────────────────────────────────────────────────────────────────────────────
@@ -301,17 +311,10 @@ beforeAll(async () => {
   await seedChannel(db, wsId, "c_ops", "ops");
   await seedChannel(db, wsId, "c_locked", "locked", "curated");
   await placeBundle(db, wsId, "c_eng", "s_alpha");
-  await db.q(
-    `INSERT INTO web.profile_entry (channel_id, workspace_id, user_id, mode)
-     VALUES ('c_eng', $1, 'u_mem', 'include')`,
-    [wsId],
-  );
-  // The owner's profile includes alpha directly (so its reach counts two people).
-  await db.q(
-    `INSERT INTO web.profile_entry (user_id, workspace_id, bundle_id, mode)
-     VALUES ('u_owner', $1, 's_alpha', 'include')`,
-    [wsId],
-  );
+  // The member carries `eng` (a self-assignment of the set); the owner is assigned alpha
+  // directly — so alpha's reach counts two people through two different kinds of row.
+  await assignChannelRow(db, wsId, "c_eng", "u_mem");
+  await assignBundleRow(db, wsId, "s_alpha", "u_owner");
   // An unacked verdict notice for the member.
   const noticeRows = await db.q<{ id: string }>(
     `INSERT INTO web.notice (user_id, workspace_id, kind, payload)
@@ -477,34 +480,6 @@ const ALL_ROUTES: RouteCase[] = [
     body: { emails: ["x@y.z"] },
   },
   {
-    name: "profile-include",
-    h: profileSkillAction,
-    method: "PUT",
-    params: { skill: "s_alpha" },
-    path: "/profile/skills/s_alpha",
-  },
-  {
-    name: "profile-remove",
-    h: profileSkillAction,
-    method: "DELETE",
-    params: { skill: "s_alpha" },
-    path: "/profile/skills/s_alpha",
-  },
-  {
-    name: "profile-channel-include",
-    h: profileChannelAction,
-    method: "PUT",
-    params: { channel: "ops" },
-    path: "/profile/channels/ops",
-  },
-  {
-    name: "profile-channel-remove",
-    h: profileChannelAction,
-    method: "DELETE",
-    params: { channel: "ops" },
-    path: "/profile/channels/ops",
-  },
-  {
     name: "place",
     h: curationAction,
     method: "PUT",
@@ -553,9 +528,9 @@ describe("the uniform 404 (indistinguishable from a missing credential)", () => 
 
   it("an ENDED session's credential → 404 (a write)", async () => {
     const res = await drive(
-      profileSkillAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/profile/skills/s_alpha`, { cred: CREDS.revoked }),
-      { ws: wsId, skill: "s_alpha" },
+      curationAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/channels/eng/skills/s_beta`, { cred: CREDS.revoked }),
+      { ws: wsId, channel: "eng", skill: "s_beta" },
     );
     await expectUniform404(res);
   });
@@ -580,9 +555,9 @@ describe("the uniform 404 (indistinguishable from a missing credential)", () => 
 
   it("an unsupported method on a served action → the uniform 404 (no method oracle)", async () => {
     const res = await drive(
-      profileSkillAction,
-      req("POST", `/api/v1/workspaces/${wsId}/profile/skills/s_alpha`, { cred: CREDS.mem }),
-      { ws: wsId, skill: "s_alpha" },
+      curationAction,
+      req("POST", `/api/v1/workspaces/${wsId}/channels/eng/skills/s_alpha`, { cred: CREDS.mem }),
+      { ws: wsId, channel: "eng", skill: "s_alpha" },
     );
     await expectUniform404(res);
   });
@@ -595,8 +570,6 @@ describe("the uniform 404 (indistinguishable from a missing credential)", () => 
       deliveryWrongMethod,
       channelsWrongMethod,
       reportWrongMethod,
-      profileSkillWrongMethod,
-      profileChannelWrongMethod,
     ]) {
       await expectUniform404(wrongMethod());
     }
@@ -609,13 +582,38 @@ describe("the uniform 404 (indistinguishable from a missing credential)", () => 
     );
   });
 
-  it("a profile include on an unknown skill folds to the uniform 404 (never an existence oracle)", async () => {
+  it("a curation write on an unknown skill folds to the uniform 404 (never an existence oracle)", async () => {
     const res = await drive(
-      profileSkillAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/profile/skills/s_nope`, { cred: CREDS.mem }),
-      { ws: wsId, skill: "s_nope" },
+      curationAction,
+      req("PUT", `/api/v1/workspaces/${wsId}/channels/eng/skills/s_nope`, { cred: CREDS.mem }),
+      { ws: wsId, channel: "eng", skill: "s_nope" },
     );
     await expectUniform404(res);
+  });
+
+  // The RETIRED feed-writing paths. Nothing a machine presents decides what a person should
+  // have any more, so these paths are not served at all — and the splat answers them
+  // BYTE-IDENTICALLY to a path that never existed, with a good credential and a bad one alike.
+  it.each([
+    { name: "profile read", method: "GET", path: `/profile` },
+    { name: "profile skill include", method: "PUT", path: `/profile/skills/s_alpha` },
+    { name: "profile skill remove", method: "DELETE", path: `/profile/skills/s_alpha` },
+    { name: "profile channel include", method: "PUT", path: `/profile/channels/ops` },
+    { name: "profile channel remove", method: "DELETE", path: `/profile/channels/everyone` },
+  ])("$name is no longer served — the splat answers it", async ({ method, path }) => {
+    const url = `/api/v1/workspaces/${wsId}${path}`;
+    const handler = method === "GET" ? catchAllLoader : catchAllAction;
+    const served = await drive(handler, req(method, url, { cred: CREDS.mem }), {});
+    expect(served.status).toBe(404);
+    const body = await served.json();
+    expect(body).toEqual(NOT_FOUND_BODY);
+    const garbage = await drive(
+      handler,
+      req(method, "/api/v1/not/a/route", { cred: CREDS.mem }),
+      {},
+    );
+    expect(garbage.status).toBe(404);
+    expect(await garbage.json()).toEqual(body);
   });
 });
 
@@ -799,15 +797,6 @@ describe("200 DENIED (a member's refusal names WHY, never a 403)", () => {
     expect(await res.json()).toEqual(deniedBody("protect", "REVIEWER_ROLE_REQUIRED"));
   });
 
-  it("including an ARCHIVED skill → SKILL_NOT_ACTIVE", async () => {
-    const res = await drive(
-      profileSkillAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/profile/skills/s_arch`, { cred: CREDS.mem }),
-      { ws: wsId, skill: "s_arch" },
-    );
-    expect(await res.json()).toEqual(deniedBody("add", "SKILL_NOT_ACTIVE"));
-  });
-
   it("a member curating into a CURATED channel → CURATED_ROLE_REQUIRED", async () => {
     const res = await drive(
       curationAction,
@@ -845,7 +834,7 @@ describe("200 DENIED (a member's refusal names WHY, never a 403)", () => {
   });
 });
 
-// ── (e) delivery + the subscription writes that move it ─────────────────────────────────────
+// ── (e) delivery over the assignment/decline model ──────────────────────────────────────────
 
 describe("delivery", () => {
   it("GET /delivery — the full body shape, no-store, one snapshot", async () => {
@@ -887,103 +876,60 @@ describe("delivery", () => {
     });
   });
 
-  it("include → remove move `beta` in and out of the member's delivery", async () => {
+  it("delivery follows the rows: baseline, everyone-assignment, decline, self-assignment", async () => {
+    // The starting picture: alpha only, through the `eng` channel the member carries.
     expect(await deliveredSkillIds(CREDS.mem)).toEqual(["s_alpha"]);
 
-    const included = await drive(
-      profileSkillAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/profile/skills/s_beta`, { cred: CREDS.mem }),
-      { ws: wsId, skill: "s_beta" },
+    // The BASELINE is a row like any other: placing beta in the default channel delivers it
+    // to every seat, with no per-person row anywhere.
+    await db.q(
+      `INSERT INTO web.channel_bundle (channel_id, workspace_id, bundle_id)
+       SELECT id, workspace_id, 's_beta' FROM web.channel WHERE is_default AND workspace_id = $1`,
+      [wsId],
     );
-    expect(await included.json()).toEqual(okStatusBody("add", "included"));
     expect(await deliveredSkillIds(CREDS.mem)).toEqual(["s_alpha", "s_beta"]);
+    const viaBaseline = await deliveredSkill(CREDS.mem, "s_beta");
+    expect(viaBaseline?.via).toEqual({ channels: ["everyone"], direct: false });
 
-    // Nothing broader provides beta, so the removal deletes the include line outright.
-    const removed = await drive(
-      profileSkillAction,
-      req("DELETE", `/api/v1/workspaces/${wsId}/profile/skills/s_beta`, { cred: CREDS.mem }),
-      { ws: wsId, skill: "s_beta" },
-    );
-    expect(await removed.json()).toEqual(okStatusBody("remove", "removed"));
+    // A DECLINE subtracts it — the one negative row, and it beats every source.
+    await declineRow(db, wsId, "u_mem", "s_beta");
     expect(await deliveredSkillIds(CREDS.mem)).toEqual(["s_alpha"]);
 
-    // alpha IS provided broader (the eng channel the profile includes) — removing it records
-    // the EXCLUDE line, disclosed in the answer.
-    const excluded = await drive(
-      profileSkillAction,
-      req("DELETE", `/api/v1/workspaces/${wsId}/profile/skills/s_alpha`, { cred: CREDS.mem }),
-      { ws: wsId, skill: "s_alpha" },
-    );
-    expect(await excluded.json()).toEqual(okStatusBody("remove", "excluded"));
-    expect(await deliveredSkillIds(CREDS.mem)).toEqual([]);
-    // Re-including flips the stance back.
-    const reIncluded = await drive(
-      profileSkillAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/profile/skills/s_alpha`, { cred: CREDS.mem }),
-      { ws: wsId, skill: "s_alpha" },
-    );
-    expect(await reIncluded.json()).toEqual(okStatusBody("add", "included"));
+    // A decline holds even against a direct assignment to this person …
+    await assignBundleRow(db, wsId, "s_beta", "u_mem");
+    expect(await deliveredSkillIds(CREDS.mem)).toEqual(["s_alpha"]);
+    // … and clearing it lets the assignment through, now flagged direct AND via the baseline.
+    await db.q(`DELETE FROM web.decline WHERE user_id = 'u_mem' AND bundle_id = 's_beta'`);
+    const both = await deliveredSkill(CREDS.mem, "s_beta");
+    expect(both?.via).toEqual({ channels: ["everyone"], direct: true });
+
+    // Restore the fixture for the suites that follow.
+    await db.q(`DELETE FROM web.assignment WHERE user_id = 'u_mem' AND bundle_id = 's_beta'`);
+    await db.q(`DELETE FROM web.channel_bundle WHERE bundle_id = 's_beta'`);
     expect(await deliveredSkillIds(CREDS.mem)).toEqual(["s_alpha"]);
   });
-});
 
-// ── (f) the profile's channel lines (the DEFAULT channel's exclude arm included) ────────────
-
-describe("profile channel lines", () => {
-  it("include, remove, then remove-again (not_in_profile) on a named channel", async () => {
-    const included = await drive(
-      profileChannelAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/profile/channels/ops`, { cred: CREDS.mem }),
-      { ws: wsId, channel: "ops" },
-    );
-    expect(await included.json()).toEqual(okStatusBody("add", "included"));
-    const removed = await drive(
-      profileChannelAction,
-      req("DELETE", `/api/v1/workspaces/${wsId}/profile/channels/ops`, { cred: CREDS.mem }),
-      { ws: wsId, channel: "ops" },
-    );
-    expect(await removed.json()).toEqual(okStatusBody("remove", "removed"));
-    const again = await drive(
-      profileChannelAction,
-      req("DELETE", `/api/v1/workspaces/${wsId}/profile/channels/ops`, { cred: CREDS.mem }),
-      { ws: wsId, channel: "ops" },
-    );
-    expect(await again.json()).toEqual(okStatusBody("remove", "not_in_profile"));
+  it("an EVERYONE assignment of a bundle delivers with no channel behind it", async () => {
+    await assignBundleRow(db, wsId, "s_beta", null, "u_owner");
+    const served = await deliveredSkill(CREDS.mem, "s_beta");
+    expect(served?.via).toEqual({ channels: [], direct: true });
+    // It reaches the owner too — one row, whole roster.
+    expect(await deliveredSkillIds(CREDS.owner)).toContain("s_beta");
+    await db.q(`DELETE FROM web.assignment WHERE bundle_id = 's_beta' AND user_id IS NULL`);
+    expect(await deliveredSkillIds(CREDS.mem)).toEqual(["s_alpha"]);
   });
 
-  it("the DEFAULT channel: remove records the EXCLUDE line, include clears it", async () => {
-    const removed = await drive(
-      profileChannelAction,
-      req("DELETE", `/api/v1/workspaces/${wsId}/profile/channels/everyone`, { cred: CREDS.mem }),
-      { ws: wsId, channel: "everyone" },
-    );
-    expect(await removed.json()).toEqual(okStatusBody("remove", "excluded"));
-    expect(
-      await db.q(
-        `SELECT 1 FROM web.profile_entry WHERE user_id = 'u_mem' AND mode = 'exclude' AND channel_id IS NOT NULL`,
-      ),
-    ).toHaveLength(1);
-
-    const included = await drive(
-      profileChannelAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/profile/channels/everyone`, { cred: CREDS.mem }),
-      { ws: wsId, channel: "everyone" },
-    );
-    expect(await included.json()).toEqual(okStatusBody("add", "included"));
-    expect(
-      await db.q(
-        `SELECT 1 FROM web.profile_entry WHERE user_id = 'u_mem' AND mode = 'exclude' AND channel_id IS NOT NULL`,
-      ),
-    ).toHaveLength(0);
-  });
-
-  it("an unknown channel is the uniform 404", async () => {
-    const res = await drive(
-      profileChannelAction,
-      req("PUT", `/api/v1/workspaces/${wsId}/profile/channels/nope`, { cred: CREDS.mem }),
-      { ws: wsId, channel: "nope" },
-    );
-    await expectUniform404(res);
+  it("a channel assigned to ONE person delivers its members to them alone", async () => {
+    await placeBundle(db, wsId, "c_ops", "s_beta");
+    await assignChannelRow(db, wsId, "c_ops", "u_mem", "u_owner");
+    expect(await deliveredSkillIds(CREDS.mem)).toEqual(["s_alpha", "s_beta"]);
+    const served = await deliveredSkill(CREDS.mem, "s_beta");
+    expect(served?.via).toEqual({ channels: ["ops"], direct: false });
+    // The owner holds no row for `ops`, so nothing of it reaches them.
+    expect(await deliveredSkillIds(CREDS.owner)).not.toContain("s_beta");
+    await db.q(`DELETE FROM web.assignment WHERE user_id = 'u_mem' AND channel_id = 'c_ops'`);
+    await db.q(`DELETE FROM web.channel_bundle WHERE channel_id = 'c_ops'`);
+    expect(await deliveredSkillIds(CREDS.mem)).toEqual(["s_alpha"]);
   });
 });
 

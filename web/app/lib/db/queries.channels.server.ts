@@ -2,7 +2,7 @@ import { and, asc, count, desc, eq, sql } from "drizzle-orm";
 import type { MemberActor, OwnerActor } from "@/lib/auth/guards.server";
 import { auditInTx, mintChannelId } from "@/lib/db/identity.server";
 import { type Db, getDb, isUniqueViolation } from "@/lib/db/index.server";
-import { bundle, channel, channelBundle, profileEntry, seat } from "@/lib/db/schema.app";
+import { assignment, bundle, channel, channelBundle, seat } from "@/lib/db/schema.app";
 
 /**
  * The CHANNELS data access layer — reads over the app's own channel tables, the existence
@@ -12,12 +12,13 @@ import { bundle, channel, channelBundle, profileEntry, seat } from "@/lib/db/sch
  * workspace FROM the actor, so a caller that skipped its guard cannot compile and a
  * wrong-scope read never leaks.
  *
- * A channel is a NAMED, CURATED SET OF BUNDLES — nothing else. It has no membership: people
- * carry a channel by referencing it in their profile, projects by referencing it in
- * `topos.toml`. The DEFAULT channel ('everyone') is the BASELINE — implicit in every member's
- * profile (a profile exclude subtracts it); rename/delete refuse it. `mode` gates who edits
- * the set (open = any member, curated = reviewer+). Channel names use the same charset as
- * bundle names; audit rows ride every existence/mode write (subject = the immutable id).
+ * A channel is a NAMED, CURATED SET OF BUNDLES — nothing else. It has no membership: a
+ * channel reaches someone because an ASSIGNMENT aims it at them (or at everyone), and a
+ * project carries one by referencing it in `topos.toml`. The DEFAULT channel ('everyone') is
+ * the BASELINE — the workspace is born with it assigned to everyone, one ordinary row;
+ * rename/delete refuse it. `mode` gates who edits the set (open = any member, curated =
+ * reviewer+). Channel names use the same charset as bundle names; audit rows ride every
+ * existence/mode write (subject = the immutable id).
  */
 
 /** The channel-name rule (the old birth mint's bound, kept). */
@@ -41,11 +42,12 @@ export interface ChannelSummary {
   channelId: string;
   name: string;
   mode: "open" | "curated";
-  /** The default channel — the implicit baseline of every member's profile. */
+  /** The default channel — the workspace baseline, born assigned to everyone. */
   isDefault: boolean;
   /** Distinct bundle references the channel holds. */
   skillCount: number;
-  /** People whose profile carries this set (the baseline: seats − excludes). */
+  /** People the set is assigned to: every seat when an everyone-assignment carries it, else
+   * the persons named by their own assignment rows. */
   audienceCount: number;
 }
 
@@ -66,11 +68,11 @@ async function channelByName(ws: string, name: string) {
 
 /**
  * Every channel in the actor's workspace, the default first (then name order), each with its
- * bundle-reference count and its audience (how many members' profiles carry the set).
+ * bundle-reference count and its audience (how many people the set is assigned to).
  */
 export async function channelsOf(actor: MemberActor): Promise<ChannelSummary[]> {
   const ws = actor.workspaceId;
-  const [channels, skillCounts, includeCounts, excludeCounts, seats] = await Promise.all([
+  const [channels, skillCounts, personCounts, everyoneRows, seats] = await Promise.all([
     getDb()
       .select()
       .from(channel)
@@ -82,29 +84,40 @@ export async function channelsOf(actor: MemberActor): Promise<ChannelSummary[]> 
       .where(eq(channelBundle.workspaceId, ws))
       .groupBy(channelBundle.channelId),
     getDb()
-      .select({ channelId: profileEntry.channelId, n: count() })
-      .from(profileEntry)
-      .where(and(eq(profileEntry.workspaceId, ws), eq(profileEntry.mode, "include")))
-      .groupBy(profileEntry.channelId),
+      .select({ channelId: assignment.channelId, n: count() })
+      .from(assignment)
+      .where(
+        and(
+          eq(assignment.workspaceId, ws),
+          sql`${assignment.channelId} is not null`,
+          sql`${assignment.userId} is not null`,
+        ),
+      )
+      .groupBy(assignment.channelId),
     getDb()
-      .select({ channelId: profileEntry.channelId, n: count() })
-      .from(profileEntry)
-      .where(and(eq(profileEntry.workspaceId, ws), eq(profileEntry.mode, "exclude")))
-      .groupBy(profileEntry.channelId),
+      .select({ channelId: assignment.channelId })
+      .from(assignment)
+      .where(
+        and(
+          eq(assignment.workspaceId, ws),
+          sql`${assignment.channelId} is not null`,
+          sql`${assignment.userId} is null`,
+        ),
+      ),
     seatCount(ws),
   ]);
   const skills = new Map(skillCounts.map((c) => [c.channelId, c.n]));
-  const includes = new Map(includeCounts.map((c) => [c.channelId, c.n]));
-  const excludes = new Map(excludeCounts.map((c) => [c.channelId, c.n]));
+  const persons = new Map(personCounts.map((c) => [c.channelId, c.n]));
+  const everyone = new Set(everyoneRows.map((r) => r.channelId));
   return channels.map((ch) => ({
     channelId: ch.id,
     name: ch.name,
     mode: ch.mode as ChannelSummary["mode"],
     isDefault: ch.isDefault,
     skillCount: skills.get(ch.id) ?? 0,
-    audienceCount: ch.isDefault
-      ? Math.max(0, seats - (excludes.get(ch.id) ?? 0))
-      : (includes.get(ch.id) ?? 0),
+    // An everyone-assignment reaches the whole roster; otherwise the audience is exactly the
+    // people named by a row (each seat-anchored, so no ghost counts).
+    audienceCount: everyone.has(ch.id) ? seats : (persons.get(ch.id) ?? 0),
   }));
 }
 
@@ -160,15 +173,15 @@ export interface ChannelDetail {
   createdAt: Date;
   /** The bundle references, catalog-name order. */
   skills: ChannelSkillRef[];
-  /** People whose profile carries this set (the baseline: seats − excludes). */
+  /** People the set is assigned to (every seat when it is assigned to everyone). */
   audienceCount: number;
-  /** THIS member's stance: the set is in their profile (default: not excluded). */
+  /** Whether the set is assigned to THIS member — by name, or to everyone. */
   viewerIncluded: boolean;
 }
 
 /**
  * One channel's full read: the row, its bundle references (joined to the catalog), its
- * audience, and the VIEWER's own stance (the page's add-to/remove-from-my-skills arm renders
+ * audience, and whether the VIEWER is assigned it (the page's carry/stop-carrying arm renders
  * from it). Undefined when the channel does not exist (the route renders the 404).
  */
 export async function channelDetail(
@@ -199,13 +212,18 @@ export async function channelDetail(
       .where(and(eq(channelBundle.workspaceId, ws), eq(channelBundle.channelId, row.id)))
       .orderBy(asc(bundle.name)),
     getDb()
-      .select({ mode: profileEntry.mode })
-      .from(profileEntry)
-      .where(and(eq(profileEntry.channelId, row.id), eq(profileEntry.userId, actor.userId)))
+      .select({ userId: assignment.userId })
+      .from(assignment)
+      .where(
+        and(
+          eq(assignment.workspaceId, ws),
+          eq(assignment.channelId, row.id),
+          sql`(${assignment.userId} = ${actor.userId} or ${assignment.userId} is null)`,
+        ),
+      )
       .limit(1),
-    channelAudienceCount(ws, row.id, row.isDefault),
+    channelAudienceCount(ws, row.id),
   ]);
-  const stance = stanceRows[0]?.mode;
   return {
     channelId: row.id,
     name: row.name,
@@ -215,104 +233,38 @@ export async function channelDetail(
     createdAt: row.createdAt,
     skills: skills.map((s) => ({ ...s, status: s.status as ChannelSkillRef["status"] })),
     audienceCount: audience,
-    viewerIncluded: row.isDefault ? stance !== "exclude" : stance === "include",
+    viewerIncluded: stanceRows.length > 0,
   };
 }
 
-async function channelAudienceCount(
-  ws: string,
-  channelId: string,
-  isDefault: boolean,
-): Promise<number> {
-  if (isDefault) {
-    const [seats, excludes] = await Promise.all([
-      seatCount(ws),
-      getDb()
-        .select({ n: count() })
-        .from(profileEntry)
-        .where(and(eq(profileEntry.channelId, channelId), eq(profileEntry.mode, "exclude"))),
-    ]);
-    return Math.max(0, seats - (excludes[0]?.n ?? 0));
-  }
-  const includes = await getDb()
-    .select({ n: count() })
-    .from(profileEntry)
-    .where(and(eq(profileEntry.channelId, channelId), eq(profileEntry.mode, "include")));
-  return includes[0]?.n ?? 0;
-}
-
-// ── The viewer's own profile stance (the channel page's self-service arm) ───────────────────
-
-/**
- * Add this channel to the viewer's profile — for the default channel, clear any exclude (the
- * baseline needs no include line). Mirrors the session lane's profile ops; a personal act.
- */
-export async function includeChannelInProfile(
-  actor: MemberActor,
-  channelId: string,
-): Promise<"included" | "unknown_channel"> {
-  const ws = actor.workspaceId;
-  return await getDb().transaction(async (tx) => {
-    const rows = await tx
-      .select({ id: channel.id, isDefault: channel.isDefault })
-      .from(channel)
-      .where(and(eq(channel.workspaceId, ws), eq(channel.id, channelId)))
-      .limit(1);
-    const row = rows[0];
-    if (row === undefined) {
-      return "unknown_channel";
-    }
-    if (row.isDefault) {
-      await tx.execute(sql`
-        DELETE FROM web.profile_entry
-        WHERE user_id = ${actor.userId} AND channel_id = ${row.id} AND mode = 'exclude'
-      `);
-      return "included";
-    }
-    await tx.execute(sql`
-      INSERT INTO web.profile_entry (workspace_id, user_id, mode, channel_id)
-      VALUES (${ws}, ${actor.userId}, 'include', ${row.id})
-      ON CONFLICT (user_id, channel_id) WHERE channel_id is not null
-      DO UPDATE SET mode = 'include', updated_at = now()
-    `);
-    return "included";
-  });
-}
-
-/**
- * Take this channel out of the viewer's profile — the default channel, being implicit, takes
- * an EXCLUDE line (the one negative state) instead of a deletion.
- */
-export async function removeChannelFromProfile(
-  actor: MemberActor,
-  channelId: string,
-): Promise<"removed" | "unknown_channel"> {
-  const ws = actor.workspaceId;
-  return await getDb().transaction(async (tx) => {
-    const rows = await tx
-      .select({ id: channel.id, isDefault: channel.isDefault })
-      .from(channel)
-      .where(and(eq(channel.workspaceId, ws), eq(channel.id, channelId)))
-      .limit(1);
-    const row = rows[0];
-    if (row === undefined) {
-      return "unknown_channel";
-    }
-    if (row.isDefault) {
-      await tx.execute(sql`
-        INSERT INTO web.profile_entry (workspace_id, user_id, mode, channel_id)
-        VALUES (${ws}, ${actor.userId}, 'exclude', ${row.id})
-        ON CONFLICT (user_id, channel_id) WHERE channel_id is not null
-        DO UPDATE SET mode = 'exclude', updated_at = now()
-      `);
-      return "removed";
-    }
-    await tx.execute(sql`
-      DELETE FROM web.profile_entry
-      WHERE user_id = ${actor.userId} AND channel_id = ${row.id} AND mode = 'include'
-    `);
-    return "removed";
-  });
+/** One channel's audience: the whole roster when it is assigned to everyone, else the people
+ * a row names. The default channel takes the same path — its everyone-row is what makes it the
+ * baseline, so nothing here special-cases it. */
+async function channelAudienceCount(ws: string, channelId: string): Promise<number> {
+  const [everyoneRows, personRows] = await Promise.all([
+    getDb()
+      .select({ channelId: assignment.channelId })
+      .from(assignment)
+      .where(
+        and(
+          eq(assignment.workspaceId, ws),
+          eq(assignment.channelId, channelId),
+          sql`${assignment.userId} is null`,
+        ),
+      )
+      .limit(1),
+    getDb()
+      .select({ n: count() })
+      .from(assignment)
+      .where(
+        and(
+          eq(assignment.workspaceId, ws),
+          eq(assignment.channelId, channelId),
+          sql`${assignment.userId} is not null`,
+        ),
+      ),
+  ]);
+  return everyoneRows.length > 0 ? await seatCount(ws) : (personRows[0]?.n ?? 0);
 }
 
 // ── Existence admin (create / rename / delete) ──────────────────────────────────────────────

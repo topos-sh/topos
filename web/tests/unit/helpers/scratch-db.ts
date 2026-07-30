@@ -240,12 +240,56 @@ export async function placeBundle(
   );
 }
 
-/** Place a bundle into the workspace's DEFAULT channel. */
+/** Place a bundle into the workspace's DEFAULT channel — the baseline every seat is assigned. */
 export async function placeInDefault(db: ScratchDb, ws: string, bundleId: string): Promise<void> {
   await db.q(
     `INSERT INTO web.channel_bundle (channel_id, workspace_id, bundle_id)
      SELECT id, workspace_id, $2 FROM web.channel WHERE is_default AND workspace_id = $1`,
     [ws, bundleId],
+  );
+}
+
+/** Assign a channel to one person (`userId`) or to everyone (`null`). */
+export async function assignChannelRow(
+  db: ScratchDb,
+  ws: string,
+  channelId: string,
+  userId: string | null,
+  createdBy = userId ?? "system",
+): Promise<void> {
+  await db.q(
+    `INSERT INTO web.assignment (workspace_id, user_id, channel_id, created_by)
+     VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+    [ws, userId, channelId, createdBy],
+  );
+}
+
+/** Assign a bundle to one person (`userId`) or to everyone (`null`). */
+export async function assignBundleRow(
+  db: ScratchDb,
+  ws: string,
+  bundleId: string,
+  userId: string | null,
+  createdBy = userId ?? "system",
+): Promise<void> {
+  await db.q(
+    `INSERT INTO web.assignment (workspace_id, user_id, bundle_id, created_by)
+     VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+    [ws, userId, bundleId, createdBy],
+  );
+}
+
+/** Record a person's decline of one bundle (the one negative row). */
+export async function declineRow(
+  db: ScratchDb,
+  ws: string,
+  userId: string,
+  bundleId: string,
+): Promise<void> {
+  await db.q(
+    `INSERT INTO web.decline (workspace_id, user_id, bundle_id)
+     VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+    [ws, userId, bundleId],
   );
 }
 

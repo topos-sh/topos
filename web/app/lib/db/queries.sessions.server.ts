@@ -113,6 +113,10 @@ export interface WorkspaceSession {
   freshness: SessionFreshness;
   /** The bundles this session last reported, catalog-name order. */
   skills: SessionSkillState[];
+  /** Skills the session's OWNER has turned off on the web that this machine still holds —
+   * names only, catalog order. Bytes already on a machine stay there until it reconciles, so
+   * this is the honest gap between the decision and the disk, not an error. */
+  declinedButApplied: string[];
 }
 
 export interface WorkspaceSessions {
@@ -207,6 +211,26 @@ export async function workspaceSessions(actor: MemberActor): Promise<WorkspaceSe
     .where(inArray(sessionBundleState.sessionId, sessionIds))
     .orderBy(asc(sessionBundleState.sessionId), asc(bundle.name));
 
+  // The declined-but-still-applied gap: a bundle this session reports holding whose OWNER has
+  // declined it. One query over the same session set, keyed by session so the page can say it
+  // per machine.
+  const declinedRows = await db.execute(sql`
+    SELECT st.session_id, b.name
+    FROM web.session_bundle_state st
+    JOIN web.cli_session cs ON cs.id = st.session_id
+    JOIN web.bundle b ON b.id = st.bundle_id AND b.workspace_id = ${ws}
+    JOIN web.decline d ON d.workspace_id = ${ws} AND d.user_id = cs.user_id
+                      AND d.bundle_id = st.bundle_id
+    WHERE cs.workspace_id = ${ws} AND st.session_id = ANY(${sessionIds}::text[])
+    ORDER BY b.name
+  `);
+  const declinedBySession = new Map<string, string[]>();
+  for (const raw of declinedRows.rows as { session_id: string; name: string }[]) {
+    const list = declinedBySession.get(raw.session_id) ?? [];
+    list.push(raw.name);
+    declinedBySession.set(raw.session_id, list);
+  }
+
   const statesBySession = new Map<string, SessionSkillState[]>();
   for (const row of stateRows) {
     const status: SessionSkillStatus =
@@ -249,6 +273,7 @@ export async function workspaceSessions(actor: MemberActor): Promise<WorkspaceSe
         now,
       ),
       skills: statesBySession.get(s.id) ?? [],
+      declinedButApplied: declinedBySession.get(s.id) ?? [],
     })),
     stalenessWindowMs,
     sessionApproval,

@@ -3,10 +3,10 @@ import { alias } from "drizzle-orm/pg-core";
 import type { SessionActor } from "@/lib/auth/guards.server";
 import {
   auditInTx,
+  feedDemandSql,
   mintChannelId,
   mintInvitationId,
   mintInviteToken,
-  profileDemandSql,
   sessionUnexpiredSql,
   supersedeDeclinedInvitationTx,
 } from "@/lib/db/identity.server";
@@ -39,14 +39,13 @@ import { planeCurrentPointer, planeVersionDigest } from "@/lib/db/schema.custody
  * the credential itself. Role gates read the actor's seat role; existence misses answer the
  * same status vocabulary as before so the wire mapping stays uniform.
  *
- * Delivery is DEMAND ∩ ENTITLEMENT: the person-side demand is the profile (profileDemandSql —
- * the default-channel baseline + included channels + included bundles − excludes), the
- * entitlement is the seat itself (whole catalog). Project-side demand never reaches this
- * module: the client resolves `topos.toml` refs through ordinary catalog reads, each one
- * seat-gated the same way.
+ * Delivery is DEMAND ∩ ENTITLEMENT: the person-side demand is their FEED (feedDemandSql —
+ * everything assigned to them or to everyone, minus what they declined), the entitlement is
+ * the seat itself (whole catalog). Project-side demand never reaches this module: the client
+ * resolves `topos.toml` refs through ordinary catalog reads, each one seat-gated the same way.
  *
  * Multi-read answers (delivery, the channels index) run inside ONE REPEATABLE READ
- * transaction — one snapshot, so the served sets can never straddle a profile change.
+ * transaction — one snapshot, so the served sets can never straddle a feed change.
  */
 
 const CHANNEL_NAME = /^[a-z0-9][a-z0-9-]*$/;
@@ -77,10 +76,8 @@ export interface DeliverySkill {
   bundle_digest: string;
   generation: number;
   updated_at: number;
-  /** Why the profile delivers it: which channels carry it, and/or a direct include line. */
+  /** Why the feed carries it: which assigned channels hold it, and/or a direct assignment. */
   via: { channels: string[]; direct: boolean };
-  /** Set when a profile include pins a version — the served version_id IS the pin then. */
-  pinned?: boolean;
 }
 
 export interface DeliveryNotice {
@@ -136,14 +133,13 @@ function isoSeconds(date: Date): string {
 }
 
 /**
- * The person-layer answer for ONE session: the profile's demand (default-channel baseline ∪
- * included channels ∪ included bundles − excludes), active + current-holding only, with `via`
- * attribution, the resolved protection, and the pin resolution (a pinned include serves the
- * pinned version when the plane still holds it, else falls back to current — honest, never a
- * hole), plus the unacked notices, the open-proposal count over the demanded set, and the ONE
- * staleness clock.
+ * The person-layer answer for ONE session: their FEED (everything assigned to them or to
+ * everyone, minus their declines), active + current-holding only, with `via` attribution, the
+ * resolved protection, plus the unacked notices, the open-proposal count over the same set,
+ * and the ONE staleness clock. Every delivered skill is served at the workspace's `current` —
+ * the server holds no version pins; a machine that wants an older version pins it locally.
  */
-export async function deliveryFor(actor: ProfileActor): Promise<DeliveryBody> {
+export async function deliveryFor(actor: FeedActor): Promise<DeliveryBody> {
   const ws = actor.workspaceId;
   return await getDb().transaction(
     async (tx) => {
@@ -153,57 +149,42 @@ export async function deliveryFor(actor: ProfileActor): Promise<DeliveryBody> {
                cp.version_id AS current_version_id, cp.generation,
                (extract(epoch from cp.moved_at) * 1000)::bigint AS updated_at,
                vd.bundle_digest AS current_digest,
-               pe.pin AS pin, pvd.bundle_digest AS pin_digest,
                COALESCE((
-                 SELECT array_agg(ch.name ORDER BY ch.name)
+                 SELECT array_agg(DISTINCT ch.name ORDER BY ch.name)
                  FROM web.channel_bundle cb
                  JOIN web.channel ch ON ch.id = cb.channel_id
+                 JOIN web.assignment ca
+                   ON ca.channel_id = ch.id AND ca.workspace_id = ${ws}
+                      AND (ca.user_id = ${actor.userId} OR ca.user_id IS NULL)
                  WHERE cb.workspace_id = ${ws} AND cb.bundle_id = b.id
-                   AND (
-                     (ch.is_default AND NOT EXISTS (
-                        SELECT 1 FROM web.profile_entry px
-                        WHERE px.channel_id = ch.id AND px.user_id = ${actor.userId}
-                          AND px.mode = 'exclude'))
-                     OR EXISTS (
-                        SELECT 1 FROM web.profile_entry pi
-                        WHERE pi.channel_id = ch.id AND pi.user_id = ${actor.userId}
-                          AND pi.mode = 'include')
-                   )
                ), '{}') AS via_channels,
-               (pe.bundle_id IS NOT NULL) AS direct
-        FROM (${profileDemandSql(actor.userId, ws)}) e
+               EXISTS (
+                 SELECT 1 FROM web.assignment da
+                 WHERE da.workspace_id = ${ws} AND da.bundle_id = b.id
+                   AND (da.user_id = ${actor.userId} OR da.user_id IS NULL)
+               ) AS direct
+        FROM (${feedDemandSql(actor.userId, ws)}) e
         JOIN web.bundle b ON b.id = e.bundle_id
         JOIN web.workspace w ON w.id = ${ws}
         JOIN plane.current_pointer cp ON cp.workspace_id = ${ws} AND cp.bundle_id = b.id
         LEFT JOIN plane.version_digest vd
           ON vd.workspace_id = ${ws} AND vd.bundle_id = b.id AND vd.version_id = cp.version_id
-        LEFT JOIN web.profile_entry pe
-          ON pe.user_id = ${actor.userId} AND pe.bundle_id = b.id AND pe.mode = 'include'
-        LEFT JOIN plane.version_digest pvd
-          ON pe.pin IS NOT NULL AND pvd.workspace_id = ${ws} AND pvd.bundle_id = b.id
-             AND pvd.version_id = pe.pin
         ORDER BY b.name
       `);
-      const skills: DeliverySkill[] = (skillRows.rows as Record<string, unknown>[]).map((r) => {
-        // Pin resolution: a live pin (its digest row still present) is the served target; a
-        // stale pin (purged version) serves current instead of a hole.
-        const pinLive = r.pin !== null && r.pin_digest !== null;
-        return {
-          skill_id: r.skill_id as string,
-          name: r.name as string,
-          kind: r.kind as string,
-          ...(r.display_name === null ? {} : { display_name: r.display_name as string }),
-          protection: r.protection as string,
-          version_id: (pinLive ? r.pin : r.current_version_id) as string,
-          // A pointer without its digest row is a custody fault; serve the honest empty string
-          // rather than fail the whole delivery (the client's re-hash will refuse the bundle).
-          bundle_digest: ((pinLive ? r.pin_digest : r.current_digest) as string | null) ?? "",
-          generation: Number(r.generation),
-          updated_at: Number(r.updated_at),
-          via: { channels: r.via_channels as string[], direct: r.direct as boolean },
-          ...(pinLive ? { pinned: true } : {}),
-        };
-      });
+      const skills: DeliverySkill[] = (skillRows.rows as Record<string, unknown>[]).map((r) => ({
+        skill_id: r.skill_id as string,
+        name: r.name as string,
+        kind: r.kind as string,
+        ...(r.display_name === null ? {} : { display_name: r.display_name as string }),
+        protection: r.protection as string,
+        version_id: r.current_version_id as string,
+        // A pointer without its digest row is a custody fault; serve the honest empty string
+        // rather than fail the whole delivery (the client's re-hash will refuse the bundle).
+        bundle_digest: (r.current_digest as string | null) ?? "",
+        generation: Number(r.generation),
+        updated_at: Number(r.updated_at),
+        via: { channels: r.via_channels as string[], direct: r.direct as boolean },
+      }));
 
       const noticeRows = await tx.execute(sql`
         SELECT n.id, n.kind, n.payload, n.created_at, b.name AS live_name
@@ -246,7 +227,7 @@ export async function deliveryFor(actor: ProfileActor): Promise<DeliveryBody> {
       const proposalRows = await tx.execute(sql`
         SELECT COUNT(*) AS n FROM web.proposal p
         WHERE p.workspace_id = ${ws} AND p.status = 'open'
-          AND p.bundle_id IN (${profileDemandSql(actor.userId, ws)})
+          AND p.bundle_id IN (${feedDemandSql(actor.userId, ws)})
       `);
       const proposalsAwaiting = Number((proposalRows.rows[0] as { n: string | number }).n);
 
@@ -359,18 +340,19 @@ export async function laneMe(actor: SessionActor): Promise<LaneMe | null> {
 }
 
 export interface LaneChannel {
-  /** The immutable channel id (the web profile editor's toggle key; the wire route omits it). */
+  /** The immutable channel id (the web editor's toggle key; the wire route omits it). */
   channelId: string;
   name: string;
   mode: string;
   builtin: boolean;
-  /** Whether the CALLER's profile references this channel (the default: not excluded). */
+  /** Whether this channel is ASSIGNED to the caller — to them by name, or to everyone (which
+   * is how the workspace baseline reaches them). The wire keeps the field name `included`. */
   included: boolean;
   skills: { skillId: string; name: string }[];
 }
 
 /** The workspace channels index (`GET /channels`) — name-sorted, the default included. */
-export async function laneChannels(actor: ProfileActor): Promise<LaneChannel[]> {
+export async function laneChannels(actor: FeedActor): Promise<LaneChannel[]> {
   const ws = actor.workspaceId;
   return await getDb().transaction(
     async (tx) => {
@@ -393,14 +375,9 @@ export async function laneChannels(actor: ProfileActor): Promise<LaneChannel[]> 
       }
       const channelRows = await tx.execute(sql`
         SELECT ch.id, ch.name, ch.mode, ch.is_default,
-          (CASE WHEN ch.is_default
-                THEN NOT EXISTS (SELECT 1 FROM web.profile_entry px
-                                 WHERE px.channel_id = ch.id AND px.user_id = ${actor.userId}
-                                   AND px.mode = 'exclude')
-                ELSE EXISTS (SELECT 1 FROM web.profile_entry pi
-                             WHERE pi.channel_id = ch.id AND pi.user_id = ${actor.userId}
-                               AND pi.mode = 'include')
-           END) AS included
+          EXISTS (SELECT 1 FROM web.assignment a
+                  WHERE a.channel_id = ch.id AND a.workspace_id = ${ws}
+                    AND (a.user_id = ${actor.userId} OR a.user_id IS NULL)) AS included
         FROM web.channel ch
         WHERE ch.workspace_id = ${ws}
         ORDER BY ch.name
@@ -418,7 +395,8 @@ export async function laneChannels(actor: ProfileActor): Promise<LaneChannel[]> 
   );
 }
 
-/** A bundle's audience (`GET /skills/{skill}/reach`): demanding persons + their live sessions. */
+/** A bundle's audience (`GET /skills/{skill}/reach`): the people whose feed carries it + their
+ * live sessions. */
 export async function laneReach(
   actor: SessionActor,
   bundleId: string,
@@ -436,7 +414,7 @@ export async function laneReach(
   const persons = await db.execute(sql`
     SELECT COUNT(*) AS n FROM web.seat s
     WHERE s.workspace_id = ${ws}
-      AND EXISTS (SELECT 1 FROM (${profileDemandSql(sql`s.user_id`, ws)}) e
+      AND EXISTS (SELECT 1 FROM (${feedDemandSql(sql`s.user_id`, ws)}) e
                   WHERE e.bundle_id = ${bundleId})
   `);
   // A session counts toward reach only while ACTIVE and within the owner-set expiry — a
@@ -446,7 +424,7 @@ export async function laneReach(
     JOIN web.workspace w ON w.id = cs.workspace_id
     WHERE cs.workspace_id = ${ws} AND cs.status = 'active'
       AND ${sessionUnexpiredSql("cs", "w")}
-      AND EXISTS (SELECT 1 FROM (${profileDemandSql(sql`cs.user_id`, ws)}) e
+      AND EXISTS (SELECT 1 FROM (${feedDemandSql(sql`cs.user_id`, ws)}) e
                   WHERE e.bundle_id = ${bundleId})
   `);
   return {
@@ -455,184 +433,16 @@ export async function laneReach(
   };
 }
 
-// ── The profile (the person-side manifest: add -g / remove -g / the web editor) ─────────────
+// ── The feed actor (the shape every feed-shaped read takes) ────────────────────────────────
 
 /**
- * The actor shape BOTH profile doors satisfy: the session lane's SessionActor and the web
- * page's MemberActor (the ops read only the person + workspace — a profile is personal, so
- * no role gates apply). Structural, so both branded actors pass without a cast.
+ * The actor shape BOTH feed doors satisfy: the session lane's SessionActor and the web page's
+ * MemberActor (these reads take only the person + workspace — a feed is personal, so no role
+ * gates apply). Structural, so both branded actors pass without a cast.
  */
-export interface ProfileActor {
+export interface FeedActor {
   readonly userId: string;
   readonly workspaceId: string;
-}
-
-export interface ProfileEntryView {
-  mode: "include" | "exclude";
-  kind: "skill" | "channel";
-  /** The catalog kind for bundles ('skill' today); 'channel' rows repeat the literal. */
-  bundleKind?: string;
-  name: string;
-  pin: string | null;
-}
-
-/** The person's whole profile in this workspace, resolved to names (name-sorted per group). */
-export async function profileOf(actor: ProfileActor): Promise<ProfileEntryView[]> {
-  const rows = await getDb().execute(sql`
-    SELECT pe.mode, pe.pin, b.name AS bundle_name, b.kind AS bundle_kind, c.name AS channel_name
-    FROM web.profile_entry pe
-    LEFT JOIN web.bundle b ON b.id = pe.bundle_id
-    LEFT JOIN web.channel c ON c.id = pe.channel_id
-    WHERE pe.workspace_id = ${actor.workspaceId} AND pe.user_id = ${actor.userId}
-    ORDER BY pe.mode, COALESCE(b.name, c.name)
-  `);
-  return (rows.rows as Record<string, unknown>[]).map((r) => ({
-    mode: r.mode as "include" | "exclude",
-    kind: r.bundle_name !== null ? ("skill" as const) : ("channel" as const),
-    ...(r.bundle_name !== null ? { bundleKind: r.bundle_kind as string } : {}),
-    name: (r.bundle_name ?? r.channel_name) as string,
-    pin: r.pin as string | null,
-  }));
-}
-
-/**
- * `add -g <skill>`: upsert the include line (an exclude on the same bundle flips to include —
- * one stance per pair, the flip IS the re-add). Archived bundles refuse (a freed name is a
- * NEW identity; the old one is out of circulation).
- */
-export async function profileIncludeBundle(
-  actor: ProfileActor,
-  bundleId: string,
-  pin: string | null,
-): Promise<"included" | "unknown_skill" | "skill_not_active"> {
-  const ws = actor.workspaceId;
-  return await getDb().transaction(async (tx) => {
-    const status = await bundleStatusInTx(tx, ws, bundleId);
-    if (status === null) {
-      return "unknown_skill";
-    }
-    if (status !== "active") {
-      return "skill_not_active";
-    }
-    await tx.execute(sql`
-      INSERT INTO web.profile_entry (workspace_id, user_id, mode, bundle_id, pin)
-      VALUES (${ws}, ${actor.userId}, 'include', ${bundleId}, ${pin})
-      ON CONFLICT (user_id, bundle_id) WHERE bundle_id is not null
-      DO UPDATE SET mode = 'include', pin = excluded.pin, updated_at = now()
-    `);
-    return "included";
-  });
-}
-
-export type ProfileRemoveOutcome =
-  /** The include line was deleted; nothing broader provides it — delivery just ends. */
-  | "removed"
-  /** A broader layer (a channel, the baseline) still provides it — an EXCLUDE line was
-   * recorded (the one negative state; the receipt says so). */
-  | "excluded"
-  /** Neither an include line nor any channel provides it — nothing to do. */
-  | "not_in_profile"
-  | "unknown_skill";
-
-/**
- * `remove -g <skill>`: delete the include line; when a broader layer (an included channel or
- * the default baseline) still provides the bundle, record an EXCLUDE line instead — the
- * manifest-layer semantics, applied to the profile.
- */
-export async function profileRemoveBundle(
-  actor: ProfileActor,
-  bundleId: string,
-): Promise<ProfileRemoveOutcome> {
-  const ws = actor.workspaceId;
-  return await getDb().transaction(async (tx) => {
-    const status = await bundleStatusInTx(tx, ws, bundleId);
-    if (status === null) {
-      return "unknown_skill";
-    }
-    const deleted = await tx.execute(sql`
-      DELETE FROM web.profile_entry
-      WHERE user_id = ${actor.userId} AND bundle_id = ${bundleId} AND mode = 'include'
-      RETURNING bundle_id
-    `);
-    // Still provided by a channel the profile carries (baseline or include)? Then the removal
-    // needs the one negative state: an exclude line.
-    const provided = await tx.execute(sql`
-      SELECT 1 FROM (${profileDemandSql(actor.userId, ws)}) e
-      WHERE e.bundle_id = ${bundleId}
-    `);
-    if (provided.rows.length > 0) {
-      await tx.execute(sql`
-        INSERT INTO web.profile_entry (workspace_id, user_id, mode, bundle_id)
-        VALUES (${ws}, ${actor.userId}, 'exclude', ${bundleId})
-        ON CONFLICT (user_id, bundle_id) WHERE bundle_id is not null
-        DO UPDATE SET mode = 'exclude', pin = NULL, updated_at = now()
-      `);
-      return "excluded";
-    }
-    return deleted.rows.length > 0 ? "removed" : "not_in_profile";
-  });
-}
-
-/** `add -g @ws/channels/x`: upsert the channel include (an exclude flips back to include). */
-export async function profileIncludeChannel(
-  actor: ProfileActor,
-  channelName: string,
-): Promise<"included" | "unknown_channel"> {
-  const ws = actor.workspaceId;
-  return await getDb().transaction(async (tx) => {
-    const row = await channelByNameInTx(tx, ws, channelName);
-    if (row === undefined) {
-      return "unknown_channel";
-    }
-    if (row.isDefault) {
-      // The baseline is implicit; "including" it = clearing any exclude line.
-      await tx.execute(sql`
-        DELETE FROM web.profile_entry
-        WHERE user_id = ${actor.userId} AND channel_id = ${row.id} AND mode = 'exclude'
-      `);
-      return "included";
-    }
-    await tx.execute(sql`
-      INSERT INTO web.profile_entry (workspace_id, user_id, mode, channel_id)
-      VALUES (${ws}, ${actor.userId}, 'include', ${row.id})
-      ON CONFLICT (user_id, channel_id) WHERE channel_id is not null
-      DO UPDATE SET mode = 'include', updated_at = now()
-    `);
-    return "included";
-  });
-}
-
-/**
- * `remove -g @ws/channels/x`: delete the include line; the DEFAULT channel — the implicit
- * baseline with no include line to delete — takes an exclude line instead (the one negative
- * state).
- */
-export async function profileRemoveChannel(
-  actor: ProfileActor,
-  channelName: string,
-): Promise<"removed" | "excluded" | "not_in_profile" | "unknown_channel"> {
-  const ws = actor.workspaceId;
-  return await getDb().transaction(async (tx) => {
-    const row = await channelByNameInTx(tx, ws, channelName);
-    if (row === undefined) {
-      return "unknown_channel";
-    }
-    if (row.isDefault) {
-      await tx.execute(sql`
-        INSERT INTO web.profile_entry (workspace_id, user_id, mode, channel_id)
-        VALUES (${ws}, ${actor.userId}, 'exclude', ${row.id})
-        ON CONFLICT (user_id, channel_id) WHERE channel_id is not null
-        DO UPDATE SET mode = 'exclude', updated_at = now()
-      `);
-      return "excluded";
-    }
-    const deleted = await tx.execute(sql`
-      DELETE FROM web.profile_entry
-      WHERE user_id = ${actor.userId} AND channel_id = ${row.id} AND mode = 'include'
-      RETURNING channel_id
-    `);
-    return deleted.rows.length > 0 ? "removed" : "not_in_profile";
-  });
 }
 
 // ── Curation (place / unplace, create-on-first-use) ─────────────────────────────────────────

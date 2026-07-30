@@ -5,14 +5,15 @@ import { isWorkspaceNameShape } from "@/lib/workspace-name";
 import { isReservedWorkspaceName } from "@/topos-web/segments";
 import { auditInTx, mintChannelId, mintWorkspaceId, workspaceByName } from "./identity.server";
 import { getDb, isUniqueViolation } from "./index.server";
-import { auditEvent, channel, seat, workspace } from "./schema.app";
+import { assignment, auditEvent, channel, seat, workspace } from "./schema.app";
 
 /**
  * The ONE door that mints a self-serve workspace — the multi-tenant counterpart to the
  * single-tenant boot claim (`identity.server.ts`). A signed-in person with a seatless (or any)
  * identity creates a workspace they own; it is born CLAIMED (the creator IS the owner, so there
- * is no claim code), with its default `everyone` channel and an owner seat, all in ONE
- * transaction with the audit row emitted inside it — the same idioms the claim ceremony uses.
+ * is no claim code), with its default `everyone` channel, an owner seat, and the baseline
+ * assignment that aims that channel at everyone, all in ONE transaction with the audit row
+ * emitted inside it — the same idioms the claim ceremony uses.
  *
  * A RESERVED name (a top-level route/operator segment) and a name-race unique violation return
  * the SAME typed `taken` refusal: the caller — and therefore the form — cannot tell a reserved
@@ -104,13 +105,23 @@ export async function createWorkspace(
         // claim-state CHECK ties claimed_at set ⇔ claim_code_sha256 null). now() is the DB clock.
         claimedAt: sql`now()` as never,
       });
+      const defaultChannelId = mintChannelId();
       await tx.insert(channel).values({
-        id: mintChannelId(),
+        id: defaultChannelId,
         workspaceId,
         name: "everyone",
         isDefault: true,
       });
       await tx.insert(seat).values({ workspaceId, userId: actor.userId, role: "owner" });
+      // The BASELINE, as a row: the default channel assigned to everyone. It is an ordinary
+      // assignment, not a rule in the delivery query, so a workspace born without it would
+      // deliver nothing. Written after the seat — the creator is its author.
+      await tx.insert(assignment).values({
+        workspaceId,
+        userId: null,
+        channelId: defaultChannelId,
+        createdBy: actor.userId,
+      });
       await auditInTx(tx, {
         workspaceId,
         actor: { userId: actor.userId, display: actor.display },

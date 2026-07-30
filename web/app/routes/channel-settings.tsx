@@ -152,7 +152,7 @@ async function renameChannelIntent(
 
 /**
  * DELETE — owner-only + type-the-channel-name. On success redirect to the channels index.
- * Deleting stops delivery THROUGH this channel only; skills another channel, a profile, or a
+ * Deleting stops delivery THROUGH this channel only; skills another channel, an assignment, or a
  * project manifest still delivers keep flowing — what only this channel delivered leaves
  * machines at their next update (local edits snapshotted first).
  */
@@ -344,7 +344,7 @@ function DeleteChannelForm({ channel, channelId }: { channel: string; channelId:
         <h3 className="font-medium text-ink text-sm">Delete this channel</h3>
         <p className="mt-1 text-dim text-sm">
           Deleting <span className="font-mono">{channel}</span> stops delivery through it. Skills
-          another channel, a member's profile, or a project manifest still delivers keep flowing;
+          another channel, a direct assignment, or a project manifest still delivers keep flowing;
           what only this channel delivered leaves machines at their next update (local edits are
           snapshotted first). This can't be undone from here.
         </p>

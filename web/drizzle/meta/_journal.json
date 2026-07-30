@@ -71,6 +71,13 @@
       "when": 1784983153718,
       "tag": "0009_loopback-mint-at-exchange",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1785383018121,
+      "tag": "0010_assignments-and-declines",
+      "breakpoints": true
     }
   ]
 }

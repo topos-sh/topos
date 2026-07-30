@@ -89,6 +89,15 @@ describe("createWorkspace", () => {
       [wsId],
     );
     expect(channels).toEqual([{ name: "everyone", is_default: true }]);
+    // The baseline is a ROW, minted with the workspace: the default channel assigned to
+    // everyone, authored by the creator (who is its owner).
+    const baseline = await db.q<{ channel_id: string; created_by: string }>(
+      `SELECT channel_id, created_by FROM web.assignment
+       WHERE workspace_id = $1 AND user_id IS NULL`,
+      [wsId],
+    );
+    expect(baseline).toHaveLength(1);
+    expect(baseline[0]?.created_by).toBe("u_owner");
 
     const seats = await db.q<{ user_id: string; role: string }>(
       `SELECT user_id, role FROM web.seat WHERE workspace_id = $1`,

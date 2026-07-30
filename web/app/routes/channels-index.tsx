@@ -79,9 +79,7 @@ function ChannelRow({ channel }: { channel: ChannelSummary }) {
           </span>
           <Chip tone={channel.mode === "curated" ? "pending" : "neutral"}>{channel.mode}</Chip>
           {channel.isDefault && (
-            <span className="text-faint text-xs">
-              the baseline — every member's profile starts with it
-            </span>
+            <span className="text-faint text-xs">the baseline — assigned to everyone</span>
           )}
         </div>
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-faint text-xs">

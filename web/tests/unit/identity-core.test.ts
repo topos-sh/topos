@@ -7,13 +7,13 @@ import { applyPlaneDdl } from "../helpers/plane-ddl";
 import { installTestEnv } from "./helpers/test-env";
 
 /**
- * The identity model's concurrency-critical ceremonies + the profile-demand predicate,
- * against a REAL scratch Postgres (the drizzle migration + the plane custody DDL applied
- * verbatim): the claim-consume race, the login flow's one-shot answers, session revocation,
- * the session-approval knob, the last-owner fence, seat removal ending sessions + profile,
- * the demand ∩ entitlement delivery matrix, pins, and the delivery wire shape. Actors are
- * minted by CAST — the one thing production code must never do (the brand is module-private
- * to guards.server.ts).
+ * The identity model's concurrency-critical ceremonies + the FEED predicate, against a REAL
+ * scratch Postgres (the drizzle migration + the plane custody DDL applied verbatim): the
+ * claim-consume race, the login flow's one-shot answers, session revocation, the
+ * session-approval knob, the last-owner fence, seat removal ending sessions + feed rows, the
+ * assignment/decline delivery matrix (self-service and curator-side), and the delivery wire
+ * shape. Actors are minted by CAST — the one thing production code must never do (the brand is
+ * module-private to guards.server.ts).
  */
 const ADMIN_URL =
   process.env.TEST_DATABASE_URL ?? "postgresql://postgres:identity2@localhost:5443/postgres";
@@ -567,9 +567,10 @@ describe("the last-owner fence", () => {
   });
 });
 
-describe("demand ∩ entitlement (the profile) + delivery", () => {
-  it("derives (baseline − channel excludes) ∪ included channels ∪ includes − excludes", async () => {
+describe("the feed (assignments − declines) + delivery", () => {
+  it("delivers the union of what is assigned to the person and to everyone, minus declines", async () => {
     const identity = await import("@/lib/db/identity.server");
+    const feed = await import("@/lib/db/queries.feed.server");
     const lane = await import("@/lib/db/queries.lane.server");
     await seedUser("u_ent", "Entitled", "entitled@example.com");
     await seatUser("u_ent", "member");
@@ -590,93 +591,174 @@ describe("demand ∩ entitlement (the profile) + delivery", () => {
       `INSERT INTO web.channel_bundle (channel_id, workspace_id, bundle_id) VALUES ('c_named', $1, 's_named')`,
       [wsId],
     );
-    await seedBundle("s_included", "via-direct-include");
+    await seedBundle("s_picked", "picked-by-me");
 
-    // Baseline: only the everyone-channel bundle (the default channel is implicit).
+    // The BASELINE is a row, not a rule: the default channel is assigned to everyone, so the
+    // bundle it carries arrives with no per-person row at all.
     let delivery = await lane.deliveryFor(actor);
     expect(delivery.skills.map((s) => s.skill_id)).toEqual(["s_everyone"]);
     expect(delivery.skills[0]?.via).toEqual({ channels: ["everyone"], direct: false });
 
-    // A channel include adds its bundles; a bundle include adds the third.
-    expect(await lane.profileIncludeChannel(actor, "named-channel")).toBe("included");
-    expect(await lane.profileIncludeBundle(actor, "s_included", null)).toBe("included");
+    // Carrying a channel adds its members; adding a bundle to your own feed adds the third.
+    expect(await feed.assignChannelToSelf(actor, "c_named")).toBe("assigned");
+    expect(await feed.addToMine(actor, "s_picked")).toBe("added");
     delivery = await lane.deliveryFor(actor);
     expect(delivery.skills.map((s) => s.skill_id).sort()).toEqual([
       "s_everyone",
-      "s_included",
       "s_named",
+      "s_picked",
     ]);
 
-    // Removing a channel-provided bundle records an EXCLUDE (the one negative state) — and
-    // the exclude beats every providing source.
-    expect(await lane.profileRemoveBundle(actor, "s_named")).toBe("excluded");
+    // A DECLINE is the one negative row, and it beats every source that assigns the bundle.
+    expect(await feed.declineBundle(actor, "s_named")).toBe("declined");
     delivery = await lane.deliveryFor(actor);
-    expect(delivery.skills.map((s) => s.skill_id).sort()).toEqual(["s_everyone", "s_included"]);
+    expect(delivery.skills.map((s) => s.skill_id).sort()).toEqual(["s_everyone", "s_picked"]);
 
-    // Removing a direct include (nothing else provides it) just deletes the line.
-    expect(await lane.profileRemoveBundle(actor, "s_included")).toBe("removed");
+    // UNPICKING takes back only the person's own assignment — nothing broader is touched.
+    expect(await feed.unpickBundle(actor, "s_picked")).toBe("unpicked");
+    expect(await feed.unpickBundle(actor, "s_picked")).toBe("not_picked");
     delivery = await lane.deliveryFor(actor);
     expect(delivery.skills.map((s) => s.skill_id)).toEqual(["s_everyone"]);
 
-    // Excluding the DEFAULT channel subtracts the baseline.
-    expect(await lane.profileRemoveChannel(actor, "everyone")).toBe("excluded");
+    // The BASELINE cannot be dropped by one person: it is assigned to everyone, so the
+    // per-bundle decline is the only window onto it.
+    const everyoneChannel = (
+      await q<{ id: string }>(`SELECT id FROM web.channel WHERE is_default AND workspace_id = $1`, [
+        wsId,
+      ])
+    )[0]?.id as string;
+    expect(await feed.unassignChannelFromSelf(actor, everyoneChannel)).toBe("baseline");
+    expect(await feed.declineBundle(actor, "s_everyone")).toBe("declined");
     delivery = await lane.deliveryFor(actor);
     expect(delivery.skills.map((s) => s.skill_id)).toEqual([]);
-    // Re-including the baseline clears the exclude.
-    expect(await lane.profileIncludeChannel(actor, "everyone")).toBe("included");
-    // Re-adding a previously excluded bundle flips the stance back to include.
-    expect(await lane.profileIncludeBundle(actor, "s_named", null)).toBe("included");
+
+    // Clearing a decline lets the thing flow again from whatever still assigns it …
+    expect(await feed.undeclineBundle(actor, "s_everyone")).toBe("cleared");
+    // … and "add to mine" on a DECLINED bundle clears the decline in the same act.
+    expect(await feed.addToMine(actor, "s_named")).toBe("added");
     delivery = await lane.deliveryFor(actor);
     expect(delivery.skills.map((s) => s.skill_id).sort()).toEqual(["s_everyone", "s_named"]);
+    const named = delivery.skills.find((s) => s.skill_id === "s_named");
+    expect(named?.via).toEqual({ channels: ["named-channel"], direct: true });
 
-    // The profile read serves the resolved lines.
-    const profile = await lane.profileOf(actor);
-    expect(profile.map((e) => `${e.mode}:${e.kind}:${e.name}`).sort()).toEqual([
-      "include:channel:named-channel",
-      "include:skill:via-named-channel",
+    // The person's own view: their rows, each labelled by audience and by who placed it.
+    const view = await feed.feedOf(actor);
+    expect(
+      view.assignments.map((a) => `${a.kind}:${a.name}:${a.audience}:${a.own}`).sort(),
+    ).toEqual([
+      "channel:everyone:everyone:false",
+      "channel:named-channel:you:true",
+      "skill:via-named-channel:you:true",
     ]);
+    expect(view.declines).toEqual([]);
   });
 
-  it("a pinned include serves the pinned version; a stale pin falls back to current", async () => {
-    const lane = await import("@/lib/db/queries.lane.server");
+  it("an archived bundle refuses the add typed; an unknown one is unknown_skill", async () => {
+    const feed = await import("@/lib/db/queries.feed.server");
     const sessionRow = await q(`SELECT id FROM web.cli_session WHERE user_id = 'u_ent'`);
     const actor = sessionActorFor("u_ent", sessionRow[0]?.id as string, "member");
-    const vid = await seedBundle("s_pinned", "pinned-skill");
-    // A second version becomes current; the pin holds the first.
-    const v2 = "e".repeat(64);
     await q(
-      `INSERT INTO plane.version (workspace_id, bundle_id, version_id, commit_id, author_display)
-       VALUES ($1, 's_pinned', $2, $2, 'seed')`,
-      [wsId, v2],
+      `INSERT INTO web.bundle (id, workspace_id, name, status, base_name, archived_at)
+       VALUES ('s_arch', $1, 'old-2026-07-01', 'archived', 'old', now())`,
+      [wsId],
     );
-    await q(
-      `UPDATE plane.current_pointer SET version_id = $2, generation = generation + 1
-       WHERE workspace_id = $1 AND bundle_id = 's_pinned'`,
-      [wsId, v2],
-    );
-    await q(
-      `INSERT INTO plane.version_digest (workspace_id, bundle_id, version_id, bundle_digest)
-       VALUES ($1, 's_pinned', $2, $3)`,
-      [wsId, v2, "f".repeat(64)],
-    );
-    expect(await lane.profileIncludeBundle(actor, "s_pinned", vid)).toBe("included");
-    let delivery = await lane.deliveryFor(actor);
-    let pinned = delivery.skills.find((s) => s.skill_id === "s_pinned");
-    expect(pinned?.version_id).toBe(vid);
-    expect(pinned?.pinned).toBe(true);
-    // The pinned version is purged: delivery falls back to current, honestly un-pinned.
-    await q(
-      `DELETE FROM plane.version_digest WHERE workspace_id = $1 AND bundle_id = 's_pinned' AND version_id = $2`,
-      [wsId, vid],
-    );
-    delivery = await lane.deliveryFor(actor);
-    pinned = delivery.skills.find((s) => s.skill_id === "s_pinned");
-    expect(pinned?.version_id).toBe(v2);
-    expect(pinned?.pinned).toBeUndefined();
-    await lane.profileRemoveBundle(actor, "s_pinned");
+    expect(await feed.addToMine(actor, "s_arch")).toBe("skill_not_active");
+    expect(await feed.addToMine(actor, "s_nope")).toBe("unknown_skill");
+    expect(await feed.declineBundle(actor, "s_nope")).toBe("unknown_skill");
+    expect(await feed.assignChannelToSelf(actor, "c_nope")).toBe("unknown_channel");
   });
 
-  it("the delivery wire shape carries the pinned fields snake_case", async () => {
+  it("curator assignments aim at a person or at everyone, audited, and withdraw cleanly", async () => {
+    const feed = await import("@/lib/db/queries.feed.server");
+    const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner' LIMIT 1`))[0]
+      ?.user_id as string;
+    const ownerActor = { userId: owner, display: "O", workspaceId: wsId, role: "owner" } as never;
+    const sessionRow = await q(`SELECT id FROM web.cli_session WHERE user_id = 'u_ent'`);
+    const actor = sessionActorFor("u_ent", sessionRow[0]?.id as string, "member");
+    await seedBundle("s_curated", "curator-assigned");
+
+    // Aimed at ONE person: it delivers to them, flagged direct, and nobody else holds a row.
+    expect(await feed.assignBundle(ownerActor, "s_curated", { userId: "u_ent" })).toBe("assigned");
+    const lane = await import("@/lib/db/queries.lane.server");
+    let delivery = await lane.deliveryFor(actor);
+    expect(delivery.skills.map((s) => s.skill_id)).toContain("s_curated");
+    // The person did NOT place it, so it is not theirs to unpick — declining is their switch.
+    const view = await feed.feedOf(actor);
+    expect(view.assignments.find((a) => a.name === "curator-assigned")).toMatchObject({
+      audience: "you",
+      own: false,
+    });
+    expect(await feed.unpickBundle(actor, "s_curated")).toBe("not_picked");
+    expect(await feed.declineBundle(actor, "s_curated")).toBe("declined");
+    delivery = await lane.deliveryFor(actor);
+    expect(delivery.skills.map((s) => s.skill_id)).not.toContain("s_curated");
+    await feed.undeclineBundle(actor, "s_curated");
+
+    // Withdrawing the assignment ends the offer; the audit trail keeps both acts.
+    expect(await feed.unassign(ownerActor, { bundleId: "s_curated" }, { userId: "u_ent" })).toBe(
+      "unassigned",
+    );
+    expect(await feed.unassign(ownerActor, { bundleId: "s_curated" }, { userId: "u_ent" })).toBe(
+      "not_assigned",
+    );
+    delivery = await lane.deliveryFor(actor);
+    expect(delivery.skills.map((s) => s.skill_id)).not.toContain("s_curated");
+    const audits = await q<{ kind: string }>(
+      `SELECT kind FROM web.audit_event WHERE subject = 's_curated' ORDER BY id`,
+    );
+    expect(audits.map((a) => a.kind)).toEqual(["assigned", "unassigned"]);
+
+    // Aimed at EVERYONE: one row, whole roster — and a stranger is refused typed.
+    expect(await feed.assignBundle(ownerActor, "s_curated", { everyone: true })).toBe("assigned");
+    delivery = await lane.deliveryFor(actor);
+    expect(delivery.skills.map((s) => s.skill_id)).toContain("s_curated");
+    expect(await feed.assignBundle(ownerActor, "s_curated", { userId: "u_nobody" })).toBe(
+      "unknown_member",
+    );
+    expect(await feed.unassign(ownerActor, { bundleId: "s_curated" }, { everyone: true })).toBe(
+      "unassigned",
+    );
+
+    // The channel arms are the same act one set wider.
+    expect(await feed.assignChannel(ownerActor, "c_named", { everyone: true })).toBe("assigned");
+    delivery = await lane.deliveryFor(actor);
+    expect(delivery.skills.map((s) => s.skill_id)).toContain("s_named");
+    expect(await feed.unassign(ownerActor, { channelId: "c_named" }, { everyone: true })).toBe(
+      "unassigned",
+    );
+    expect(await feed.assignChannel(ownerActor, "c_nope", { everyone: true })).toBe(
+      "unknown_channel",
+    );
+  });
+
+  it("declining a channel's contents fans out per bundle, today's members only", async () => {
+    const feed = await import("@/lib/db/queries.feed.server");
+    const sessionRow = await q(`SELECT id FROM web.cli_session WHERE user_id = 'u_ent'`);
+    const actor = sessionActorFor("u_ent", sessionRow[0]?.id as string, "member");
+    const everyoneChannel = (
+      await q<{ id: string }>(`SELECT id FROM web.channel WHERE is_default AND workspace_id = $1`, [
+        wsId,
+      ])
+    )[0]?.id as string;
+    const fanned = await feed.declineChannelContents(actor, everyoneChannel);
+    expect(fanned).toEqual({ outcome: "declined", count: 1 });
+    expect(
+      await q(`SELECT 1 FROM web.decline WHERE user_id = 'u_ent' AND bundle_id = 's_everyone'`),
+    ).toHaveLength(1);
+    // A bundle placed in the set AFTERWARDS is not covered — that is the point of per-bundle.
+    await seedBundle("s_later", "added-later");
+    await placeInEveryone("s_later");
+    const lane = await import("@/lib/db/queries.lane.server");
+    const delivery = await lane.deliveryFor(actor);
+    expect(delivery.skills.map((s) => s.skill_id)).toContain("s_later");
+    expect(await feed.declineChannelContents(actor, "c_nope")).toEqual({
+      outcome: "unknown_channel",
+    });
+    await q(`DELETE FROM web.decline WHERE user_id = 'u_ent'`);
+    await q(`DELETE FROM web.channel_bundle WHERE bundle_id = 's_later'`);
+  });
+
+  it("the delivery wire shape serves current, snake_case, with no pin field", async () => {
     const lane = await import("@/lib/db/queries.lane.server");
     const sessionRow = await q(`SELECT id FROM web.cli_session WHERE user_id = 'u_ent'`);
     const actor = sessionActorFor("u_ent", sessionRow[0]?.id as string, "member");
@@ -726,21 +808,38 @@ describe("demand ∩ entitlement (the profile) + delivery", () => {
 });
 
 describe("seat removal", () => {
-  it("ends the person's sessions (audited) and cascades the profile away", async () => {
+  it("ends the person's sessions (audited) and cascades their feed rows away", async () => {
     const identity = await import("@/lib/db/identity.server");
+    const feed = await import("@/lib/db/queries.feed.server");
     const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner' LIMIT 1`))[0]
       ?.user_id as string;
-    const profileBefore = await q(`SELECT 1 FROM web.profile_entry WHERE user_id = 'u_ent'`);
-    expect(profileBefore.length).toBeGreaterThan(0);
+    const sessionRow = await q(`SELECT id FROM web.cli_session WHERE user_id = 'u_ent'`);
+    const actor = sessionActorFor("u_ent", sessionRow[0]?.id as string, "member");
+    // Both row kinds, so the cascade is proven on each.
+    await feed.declineBundle(actor, "s_everyone");
+    const assignedBefore = await q(
+      `SELECT 1 FROM web.assignment WHERE user_id = 'u_ent' AND workspace_id = $1`,
+      [wsId],
+    );
+    expect(assignedBefore.length).toBeGreaterThan(0);
+    expect(
+      await q(`SELECT 1 FROM web.decline WHERE user_id = 'u_ent' AND workspace_id = $1`, [wsId]),
+    ).toHaveLength(1);
     const sessionsBefore = await q(`SELECT id FROM web.cli_session WHERE user_id = 'u_ent'`);
     expect(sessionsBefore.length).toBeGreaterThan(0);
 
     expect(await identity.removeSeat({ userId: owner, display: "O" }, wsId, "u_ent")).toBe("ok");
 
     // The standing rows die with the seat (re-invite starts clean) …
-    expect(await q(`SELECT 1 FROM web.profile_entry WHERE user_id = 'u_ent'`)).toHaveLength(0);
+    expect(await q(`SELECT 1 FROM web.assignment WHERE user_id = 'u_ent'`)).toHaveLength(0);
+    expect(await q(`SELECT 1 FROM web.decline WHERE user_id = 'u_ent'`)).toHaveLength(0);
     expect(await q(`SELECT 1 FROM web.cli_session WHERE user_id = 'u_ent'`)).toHaveLength(0);
     expect(await q(`SELECT 1 FROM web.seat WHERE user_id = 'u_ent'`)).toHaveLength(0);
+    // … while the workspace's own everyone-rows are untouched: they are a workspace fact, not
+    // a person's, and the baseline must survive any roster change.
+    expect(
+      await q(`SELECT 1 FROM web.assignment WHERE workspace_id = $1 AND user_id IS NULL`, [wsId]),
+    ).not.toHaveLength(0);
     // … and the ending is AUDITED, cause-tagged (history outlives the rows).
     const audits = await q(
       `SELECT 1 FROM web.audit_event

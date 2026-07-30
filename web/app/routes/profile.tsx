@@ -4,16 +4,15 @@ import { data, Link, useFetcher, useLoaderData } from "react-router";
 import { buttonClasses, Card, Chip, PageHeader, SectionHeading, ShortId } from "@/components/ui";
 import { requireMember, requireMemberInScope } from "@/lib/auth/guards.server";
 import {
-  includeChannelInProfile,
-  removeChannelFromProfile,
-} from "@/lib/db/queries.channels.server";
-import {
-  deliveryFor,
-  laneChannels,
-  profileIncludeBundle,
-  profileOf,
-  profileRemoveBundle,
-} from "@/lib/db/queries.lane.server";
+  addToMine,
+  assignChannelToSelf,
+  declineBundle,
+  feedOf,
+  unassignChannelFromSelf,
+  undeclineBundle,
+  unpickBundle,
+} from "@/lib/db/queries.feed.server";
+import { deliveryFor, laneChannels } from "@/lib/db/queries.lane.server";
 import { skillIndexOf } from "@/lib/db/queries.server";
 import { useWsPath } from "@/lib/ws-path";
 
@@ -22,36 +21,36 @@ export function meta() {
 }
 
 /**
- * The PROFILE editor — the web face of the person-side manifest ("Your skills"): the same
- * per-(user, workspace) include/exclude lines `topos add -g` / `remove -g` edit, so a
- * non-technical member can shape what their agents receive without a terminal. Server-stored,
- * so it roams: every machine this person logs into delivers the same set.
+ * YOUR SKILLS — the web face of the person's FEED: what the workspace says their agents should
+ * have, and the two switches they hold over it. Server-stored, so it roams: every machine this
+ * person logs in from delivers the same set.
  *
- * Three sections: what the profile DELIVERS right now (the resolved set, with why), the
- * CHANNELS (the baseline + curated sets — carry or drop each), and the DIRECT skill lines
- * (add from the catalog; removing something a channel still provides records the one exclude
- * line, disclosed inline). All acts are SELF-scoped (personal lines, nobody else's) — plain
- * one-click toggles, no ceremony.
+ * The model is two rows. An ASSIGNMENT is positive — the workspace baseline (the `everyone`
+ * channel, assigned to everyone), a curator aiming something at this person, or the person
+ * adding it themselves. A DECLINE is the one negative — off for me, whatever assigns it, and
+ * it survives new versions and channel reshuffles. Turning something off never removes it from
+ * the team library, and turning it back on is one click.
+ *
+ * Every act here is SELF-scoped (personal rows, nobody else's) — plain one-click toggles, no
+ * ceremony.
  */
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const { actor } = await requireMemberInScope(request, params);
-  const [delivery, channels, entries, catalog] = await Promise.all([
+  const [delivery, channels, feed, catalog] = await Promise.all([
     deliveryFor(actor),
     laneChannels(actor),
-    profileOf(actor),
+    feedOf(actor),
     skillIndexOf(actor, actor.workspaceId),
   ]);
-  const included = new Set(
-    entries.filter((e) => e.mode === "include" && e.kind === "skill").map((e) => e.name),
+  // A bundle the person assigned to THEMSELVES is theirs to take back (an unpick); one aimed
+  // at them (or at everyone) is not — declining is the switch for those.
+  const picked = new Set(
+    feed.assignments.filter((a) => a.kind === "skill" && a.own).map((a) => a.targetId),
   );
-  const excluded = new Set(
-    entries.filter((e) => e.mode === "exclude" && e.kind === "skill").map((e) => e.name),
+  const assignedSkills = new Set(
+    feed.assignments.filter((a) => a.kind === "skill").map((a) => a.targetId),
   );
-  const pins = new Map(
-    entries
-      .filter((e) => e.mode === "include" && e.kind === "skill" && e.pin !== null)
-      .map((e) => [e.name, e.pin as string]),
-  );
+  const declined = new Set(feed.declines.map((d) => d.skillId));
   return {
     delivered: delivery.skills.map((s) => ({
       skillId: s.skill_id,
@@ -60,20 +59,22 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       versionId: s.version_id,
       viaChannels: s.via.channels,
       direct: s.via.direct,
-      pin: pins.get(s.name) ?? null,
+      picked: picked.has(s.skill_id),
     })),
     channels: channels.map((c) => ({
       channelId: c.channelId,
       name: c.name,
       mode: c.mode,
       builtin: c.builtin,
-      included: c.included,
+      assigned: c.included,
       skillCount: c.skills.length,
     })),
-    excluded: [...excluded].sort(),
-    // The add picker: active catalog skills the profile does not already deliver or include.
+    declined: feed.declines,
+    // The add picker: active catalog skills the feed neither delivers nor already assigns —
+    // a declined skill is offered by its own section's switch, not here.
     addable: catalog
-      .filter((row) => !included.has(row.name))
+      .filter((row) => !assignedSkills.has(row.skillId))
+      .filter((row) => !declined.has(row.skillId))
       .filter((row) => !delivery.skills.some((s) => s.skill_id === row.skillId))
       .map((row) => ({ skillId: row.skillId, name: row.name, displayName: row.displayName })),
   };
@@ -82,9 +83,9 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 type ProfileActionData = { intent: string; status: string };
 
 /**
- * The profile's self-service acts, dispatched on the hidden `intent` — all four are personal
- * lines (the data layer's profile ops), naturally idempotent, unconfirmed. Channel intents key
- * on the IMMUTABLE channel id; skill intents on the immutable bundle id.
+ * The page's self-service acts, dispatched on the hidden `intent` — all personal rows (the feed
+ * data layer), naturally idempotent, unconfirmed. Channel intents key on the IMMUTABLE channel
+ * id; skill intents on the immutable bundle id.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
   const { workspace } = await requireMemberInScope(request, params);
@@ -95,25 +96,23 @@ export async function action({ request, params }: ActionFunctionArgs) {
   const channelId = String(formData.get("channel_id") ?? "");
   try {
     switch (intent) {
-      case "include-skill":
+      case "add-skill":
+        return data<ProfileActionData>({ intent, status: await addToMine(actor, skillId) });
+      case "decline-skill":
+        return data<ProfileActionData>({ intent, status: await declineBundle(actor, skillId) });
+      case "undecline-skill":
+        return data<ProfileActionData>({ intent, status: await undeclineBundle(actor, skillId) });
+      case "unpick-skill":
+        return data<ProfileActionData>({ intent, status: await unpickBundle(actor, skillId) });
+      case "carry-channel":
         return data<ProfileActionData>({
           intent,
-          status: await profileIncludeBundle(actor, skillId, null),
+          status: await assignChannelToSelf(actor, channelId),
         });
-      case "remove-skill":
+      case "drop-channel":
         return data<ProfileActionData>({
           intent,
-          status: await profileRemoveBundle(actor, skillId),
-        });
-      case "include-channel":
-        return data<ProfileActionData>({
-          intent,
-          status: await includeChannelInProfile(actor, channelId),
-        });
-      case "remove-channel":
-        return data<ProfileActionData>({
-          intent,
-          status: await removeChannelFromProfile(actor, channelId),
+          status: await unassignChannelFromSelf(actor, channelId),
         });
       default:
         return data<ProfileActionData>({ intent: "unknown", status: "error" }, { status: 400 });
@@ -124,7 +123,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
 }
 
 export default function ProfilePage() {
-  const { delivered, channels, excluded, addable } = useLoaderData<typeof loader>();
+  const { delivered, channels, declined, addable } = useLoaderData<typeof loader>();
   return (
     <div className="space-y-8">
       <PageHeader
@@ -136,18 +135,15 @@ export default function ProfilePage() {
         }
       />
       <p className="max-w-2xl text-dim text-sm leading-relaxed">
-        Your profile is the set of skills YOUR agents receive in this workspace — on every machine
-        you log in to. It starts with the workspace baseline (the{" "}
-        <span className="font-mono text-[13px]">everyone</span> channel); carry or drop whole sets
-        below, add individual skills, or remove one — removing a skill a set still provides records
-        a personal exclude, and adding it back clears it. From a terminal,{" "}
-        <code className="rounded bg-panel2 px-1.5 py-0.5 font-mono text-[13px]">topos add -g</code>{" "}
-        and <code className="rounded bg-panel2 px-1.5 py-0.5 font-mono text-[13px]">remove -g</code>{" "}
-        edit the same lines.
+        These are the skills your agents receive in this workspace — on every machine you log in
+        from. Some are assigned to the whole team (the{" "}
+        <span className="font-mono text-[13px]">everyone</span> channel is the workspace baseline),
+        some you add yourself. Turn any of them off: it stops arriving for you and stays in the team
+        library, and turning it back on is one click.
       </p>
       <DeliveredSection delivered={delivered} />
       <ChannelsSection channels={channels} />
-      {excluded.length > 0 && <ExcludedSection excluded={excluded} />}
+      {declined.length > 0 && <DeclinedSection declined={declined} />}
       <AddSection addable={addable} />
     </div>
   );
@@ -178,22 +174,13 @@ function DeliveredSection({
   const wsPath = useWsPath();
   const fetcher = useFetcher<ProfileActionData>();
   // ONE fetcher serves every row, so every row's button disables together — but only the row that
-  // was clicked names its wait. Without the id check the whole list would read "Removing…".
-  const removing = flyingSkillId(fetcher);
-  const excludedNote =
-    fetcher.data?.intent === "remove-skill" && fetcher.data.status === "excluded"
-      ? "Removed — a channel still carries it, so a personal exclude line now holds it back. Adding it again clears the exclude."
-      : undefined;
+  // was clicked names its wait. Without the id check the whole list would read "Turning off…".
+  const flying = flyingSkillId(fetcher);
   return (
     <section aria-labelledby="delivered-heading" className="space-y-3">
       <SectionHeading>
         <span id="delivered-heading">Delivered to your agents</span>
       </SectionHeading>
-      {excludedNote !== undefined && (
-        <p role="status" className="text-dim text-sm">
-          {excludedNote}
-        </p>
-      )}
       {delivered.length === 0 ? (
         <p className="text-dim text-sm">
           Nothing yet — carry a channel or add a skill below, and your agents pick it up on their
@@ -215,22 +202,43 @@ function DeliveredSection({
                   {skill.displayName ?? skill.name}
                 </Link>
                 <ShortId value={skill.versionId} />
-                {skill.pin !== null && <Chip tone="pending">pinned</Chip>}
                 <span className="text-faint text-xs">
                   {skill.viaChannels.length > 0 && <>via {skill.viaChannels.join(", ")}</>}
                   {skill.viaChannels.length > 0 && skill.direct && " · "}
-                  {skill.direct && "added by you"}
+                  {skill.direct && (skill.picked ? "added by you" : "assigned to you")}
                 </span>
-                <span className="ml-auto">
+                <span className="ml-auto flex items-center gap-2">
+                  {/* Two distinct affordances, never merged: un-adding takes back the person's
+                      own act (and leaves anything a channel still carries arriving), while
+                      turning off holds the skill back whatever assigns it. */}
+                  {skill.picked && (
+                    <fetcher.Form method="post">
+                      <input type="hidden" name="intent" value="unpick-skill" />
+                      <input type="hidden" name="skill_id" value={skill.skillId} />
+                      <button
+                        type="submit"
+                        disabled={fetcher.state !== "idle"}
+                        className={buttonClasses("quiet")}
+                      >
+                        {flying === skill.skillId &&
+                        fetcher.formData?.get("intent") === "unpick-skill"
+                          ? "Un-adding…"
+                          : "Un-add"}
+                      </button>
+                    </fetcher.Form>
+                  )}
                   <fetcher.Form method="post">
-                    <input type="hidden" name="intent" value="remove-skill" />
+                    <input type="hidden" name="intent" value="decline-skill" />
                     <input type="hidden" name="skill_id" value={skill.skillId} />
                     <button
                       type="submit"
                       disabled={fetcher.state !== "idle"}
                       className={buttonClasses("quiet")}
                     >
-                      {removing === skill.skillId ? "Removing…" : "Remove"}
+                      {flying === skill.skillId &&
+                      fetcher.formData?.get("intent") === "decline-skill"
+                        ? "Turning off…"
+                        : "Turn off"}
                     </button>
                   </fetcher.Form>
                 </span>
@@ -250,9 +258,9 @@ function ChannelsSection({
 }) {
   const fetcher = useFetcher<ProfileActionData>();
   const wsPath = useWsPath();
-  // Carrying or dropping a channel rewrites the person's profile rows and changes what every one
-  // of their machines is owed — this toggle had no in-flight state at all, so a slow answer read
-  // as a dead button and invited the second click that toggles it straight back.
+  // Carrying or dropping a channel changes what every one of this person's machines is owed —
+  // a slow answer with no in-flight state reads as a dead button and invites the second click
+  // that toggles it straight back.
   const toggling = flyingChannelId(fetcher);
   return (
     <section aria-labelledby="profile-channels-heading" className="space-y-3">
@@ -278,25 +286,31 @@ function ChannelsSection({
                 {channel.skillCount === 1 ? "1 skill" : `${channel.skillCount} skills`}
               </span>
               <span className="ml-auto flex items-center gap-2">
-                {channel.included ? (
+                {channel.assigned ? (
                   <Chip tone="verified">in your skills</Chip>
                 ) : (
                   <Chip tone="neutral">not carried</Chip>
                 )}
-                <fetcher.Form method="post">
-                  <input
-                    type="hidden"
-                    name="intent"
-                    value={channel.included ? "remove-channel" : "include-channel"}
-                  />
-                  <input type="hidden" name="channel_id" value={channel.channelId} />
-                  <ChannelToggle
-                    name={channel.name}
-                    included={channel.included}
-                    busy={fetcher.state !== "idle"}
-                    flying={toggling === channel.channelId}
-                  />
-                </fetcher.Form>
+                {channel.builtin ? (
+                  // The baseline reaches the whole team, so no one person drops it. Its skills
+                  // are turned off one at a time, above.
+                  <span className="text-faint text-xs">assigned to everyone</span>
+                ) : (
+                  <fetcher.Form method="post">
+                    <input
+                      type="hidden"
+                      name="intent"
+                      value={channel.assigned ? "drop-channel" : "carry-channel"}
+                    />
+                    <input type="hidden" name="channel_id" value={channel.channelId} />
+                    <ChannelToggle
+                      name={channel.name}
+                      assigned={channel.assigned}
+                      busy={fetcher.state !== "idle"}
+                      flying={toggling === channel.channelId}
+                    />
+                  </fetcher.Form>
+                )}
               </span>
             </li>
           ))}
@@ -308,12 +322,12 @@ function ChannelsSection({
 
 function ChannelToggle({
   name,
-  included,
+  assigned,
   busy,
   flying,
 }: {
   name: string;
-  included: boolean;
+  assigned: boolean;
   /** Any row of this section is on the wire — every toggle disables together. */
   busy: boolean;
   /** THIS row is the one on the wire — only it names the wait. */
@@ -322,34 +336,59 @@ function ChannelToggle({
   return (
     <button type="submit" disabled={busy} className={buttonClasses("quiet")}>
       {flying
-        ? included
+        ? assigned
           ? `Dropping ${name}…`
           : `Carrying ${name}…`
-        : included
+        : assigned
           ? `Drop ${name}`
           : `Carry ${name}`}
     </button>
   );
 }
 
-function ExcludedSection({ excluded }: { excluded: string[] }) {
+function DeclinedSection({
+  declined,
+}: {
+  declined: ReturnType<typeof useLoaderData<typeof loader>>["declined"];
+}) {
+  const fetcher = useFetcher<ProfileActionData>();
+  const flying = flyingSkillId(fetcher);
   return (
-    <section aria-labelledby="excluded-heading" className="space-y-3">
+    <section aria-labelledby="declined-heading" className="space-y-3">
       <SectionHeading>
-        <span id="excluded-heading">Excluded by you</span>
+        <span id="declined-heading">Turned off</span>
       </SectionHeading>
       <p className="text-dim text-sm leading-relaxed">
-        The one kind of negative line a profile holds: these skills are provided by a channel you
-        carry, but your exclude holds them back. Adding one back (below, or{" "}
-        <code className="font-mono text-[13px]">topos add -g</code>) clears it.
+        Off for you, whatever assigns them — the team still has them, and the switch survives new
+        versions and changes to the channels that carry them.
       </p>
-      <div className="flex flex-wrap gap-2">
-        {excluded.map((name) => (
-          <Chip key={name} tone="neutral">
-            {name}
-          </Chip>
-        ))}
-      </div>
+      <Card className="overflow-hidden">
+        <ul>
+          {declined.map((skill) => (
+            <li
+              key={skill.skillId}
+              data-testid={`profile-declined-${skill.name}`}
+              className="flex items-center gap-3 border-line-soft border-b px-4 py-3 last:border-b-0 opacity-60"
+            >
+              <span className="min-w-0 truncate text-dim text-sm">{skill.name}</span>
+              <span className="text-faint text-xs">off — still in the team library</span>
+              <span className="ml-auto">
+                <fetcher.Form method="post">
+                  <input type="hidden" name="intent" value="undecline-skill" />
+                  <input type="hidden" name="skill_id" value={skill.skillId} />
+                  <button
+                    type="submit"
+                    disabled={fetcher.state !== "idle"}
+                    className={buttonClasses("quiet")}
+                  >
+                    {flying === skill.skillId ? "Turning on…" : "Turn on"}
+                  </button>
+                </fetcher.Form>
+              </span>
+            </li>
+          ))}
+        </ul>
+      </Card>
     </section>
   );
 }
@@ -383,7 +422,7 @@ function AddSection({
               </span>
               <span className="ml-auto">
                 <fetcher.Form method="post">
-                  <input type="hidden" name="intent" value="include-skill" />
+                  <input type="hidden" name="intent" value="add-skill" />
                   <input type="hidden" name="skill_id" value={skill.skillId} />
                   <button
                     type="submit"
