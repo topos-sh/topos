@@ -708,13 +708,16 @@ pub(crate) fn manifest_update(
         .map(str::to_owned)
         .collect::<HashSet<String>>();
     // The applied report is COMPLETE-state per session: what this installation holds for the
-    // workspace, wherever it holds it — the home store AND every visited project store — over
-    // the feed's deliveries AND the manifest-row deliveries (a declined-but-locally-added bundle
-    // included, which is what makes the server's declined-but-applied disclosure real).
-    let visited_stores: Vec<sidecar::Layout> = manifest_dirs
-        .iter()
-        .filter_map(|pd| sidecar::existing_project_store(ctx.fs, pd))
-        .collect();
+    // workspace, wherever it holds it — the home store AND every visited project store, THIS
+    // run's chain unioned with the machine-local visited-stores index (an update run from one
+    // checkout must still report another checkout's holdings) — over the feed's deliveries AND
+    // the manifest-row deliveries (a declined-but-locally-added bundle included, which is what
+    // makes the server's declined-but-applied disclosure real).
+    let visited_stores: Vec<sidecar::Layout> =
+        crate::visited_stores::recall_and_record(ctx, &manifest_dirs);
+    // What the MACHINE still holds bytes for, across all those stores — the prior cache's ids
+    // filtered through it keep reporting until their placements really go (the natural drop).
+    let held = held_skill_ids(ctx, &visited_stores);
     let mut sync_updates: Vec<(String, WorkspaceSync)> = Vec::new();
     for run in &runs {
         let Some(snap) = &run.snapshot else {
@@ -729,6 +732,17 @@ pub(crate) fn manifest_update(
                 .filter(|(ws, _, _)| *ws == run.session.workspace_id)
                 .map(|(_, id, _)| id.clone()),
         );
+        // This workspace's PRIOR deliveries that the machine still holds — another checkout's
+        // project rows above all — stay in the complete-state report until their bytes go.
+        if let Some(prior) = prior_sync.workspaces.get(&run.session.workspace_id) {
+            reported.extend(
+                prior
+                    .delivered
+                    .keys()
+                    .filter(|id| held.contains(*id))
+                    .cloned(),
+            );
+        }
         let delivered_ids: HashSet<&str> = reported.iter().map(String::as_str).collect();
         let mut report_ok = false;
         match super::pull::applied_snapshot(ctx, &delivered_ids, &visited_stores) {
@@ -781,16 +795,18 @@ pub(crate) fn manifest_update(
                     .or_insert_with(|| ds.clone());
             }
         }
-        // A channel that FAILED to expand this run froze its members' placements, and a name the
-        // recipes still MENTION was not re-recorded either: keep both kinds' prior cache rows — the
-        // provenance must survive the same sweep the bytes do, or a LATER drop of the row would find
-        // nothing for the cleaner to discover.
+        // A channel that FAILED to expand this run froze its members' placements, a name the
+        // recipes still MENTION was not re-recorded either, and a bundle the machine still HOLDS
+        // (another checkout's project row — its manifest is not on this run's chain at all): keep
+        // all three kinds' prior cache rows — the provenance must survive the same sweep the
+        // bytes do, or a LATER drop of the row would find nothing for the cleaner to discover.
         if let Some(prior) = prior_sync.workspaces.get(&run.session.workspace_id) {
             for (skill_id, ds) in &prior.delivered {
                 if ds.via_manifest
                     && !ds.withdrawn
                     && !delivered_cache.contains_key(skill_id)
                     && (mentioned.contains(&ds.name)
+                        || held.contains(skill_id)
                         || ds.via_channels.iter().any(|c| {
                             sweep
                                 .failed_channels
@@ -1441,30 +1457,26 @@ fn row_override(
 }
 
 /// A LANDED publish whose local governance rewrite failed leaves a path row for a bundle that is
-/// already GOVERNED — this converges it: the dir must be a recorded placement of a tracked home
-/// bundle whose sync has observed a published version, and exactly ONE connected workspace's
-/// catalog must hold that bundle (ambiguity never guesses). On a hit the manifest's path line is
-/// rewritten to the canonical reference (the same rewrite the publish would have run), disclosed
-/// with one line. Returns whether a rewrite happened.
+/// already GOVERNED — this converges it: the dir must be a recorded placement of a bundle tracked
+/// in its OWNING store (the home store, or a cwd-chain project store — a project-scope publish's
+/// pending transfer lives in the checkout's own store), and exactly ONE connected workspace's
+/// catalog must hold that bundle (ambiguity never guesses). That single-catalog-home condition is
+/// the whole safety: an ordinary local bundle — genesis `--propose` included until it lands — is
+/// in no catalog, and a proposal that DID land remotely satisfies it. On a hit the manifest's
+/// path line is rewritten to the canonical reference (the same rewrite the publish would have
+/// run), disclosed with one line. Returns whether a rewrite happened.
 fn converge_pending_governance(env: &Env<'_>, dir: &Path, sweep: &mut Sweep) -> bool {
     let ctx = env.ctx;
     let Ok(canonical) = dir.canonicalize() else {
         return false;
     };
-    let Ok(Some(skill_id)) = super::add::tracked_skill_at(ctx, &canonical) else {
+    let Some((store, skill_id)) = owning_store_at(ctx, &canonical) else {
         return false;
     };
     let Ok(sid) = SkillId::parse(&skill_id) else {
         return false;
     };
-    let sp = ctx.layout.published(&sid);
-    // GENESIS-observed = never published/received: an ordinary adopted-in-place local bundle.
-    let Ok(Some(sync)) = doc::read_doc::<SyncState>(ctx.fs, &sp.sync) else {
-        return false;
-    };
-    if sync.observed == GENESIS {
-        return false;
-    }
+    let sp = store.published(&sid);
     let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &sp.lock) else {
         return false;
     };
@@ -1497,6 +1509,27 @@ fn converge_pending_governance(env: &Env<'_>, dir: &Path, sweep: &mut Sweep) -> 
             false
         }
     }
+}
+
+/// The store TRACKING the bundle placed at `canonical` — the home store first, then every
+/// cwd-chain project store (the same order the write verbs resolve names across stores) — with
+/// the tracked skill id. `None` when no store records the dir as a placement.
+fn owning_store_at(ctx: &Ctx<'_>, canonical: &Path) -> Option<(sidecar::Layout, String)> {
+    if let Ok(Some(id)) = super::add::tracked_skill_at(ctx, canonical) {
+        return Some((ctx.layout.clone(), id));
+    }
+    let roots = ctx.roots.as_ref()?;
+    let cwd = roots.cwd.as_deref()?;
+    for pd in scopes::manifest_dirs_up(ctx.fs, cwd, Some(&roots.home)) {
+        let Some(playout) = sidecar::existing_project_store(ctx.fs, &pd) else {
+            continue;
+        };
+        let pctx = super::pull::ctx_with_layout(ctx, &playout);
+        if let Ok(Some(id)) = super::add::tracked_skill_at(&pctx, canonical) {
+            return Some((playout, id));
+        }
+    }
+    None
 }
 
 /// Where a local-folder row points: relative to the project dir at project scope, to the sidecar
@@ -1587,9 +1620,10 @@ fn disclose_namespaced(ctx: &Ctx<'_>, sid: &SkillId, name: &str, warnings: &mut 
 }
 
 // =================================================================================================
-// The forge arms — git rows move ONLY on an explicit update, and NEVER first-install: an origin no
-// tracked import vouches for refuses toward the `topos add … --yes` gate (a manifest row alone is
-// a repo fact anyone could have committed — it is demand, never consent).
+// The forge arms — git rows move ONLY on an explicit update, and NEVER first-install: an origin
+// the MACHINE's trust registry (`crate::forge_trust`, home sidecar) has not granted refuses toward
+// the `topos add … --yes` gate. Neither a manifest row NOR per-checkout store contents vouch —
+// both are repo facts anyone could have committed: demand, never consent.
 // =================================================================================================
 
 /// The store a forge row's tracked imports live in, per scope: the person scope's home store, or
@@ -1614,7 +1648,7 @@ fn first_trust_line(sc: &ScopeCtx<'_>, reference: &str) -> String {
             sc.label
         ),
         ResolvedScope::Project { dir } => format!(
-            "FIRST_TRUST {}: \"{reference}\" — an external source this checkout has not adopted \
+            "FIRST_TRUST {}: \"{reference}\" — an external source this machine has not adopted \
              through its first-trust gate; nothing is fetched or installed by `update` until \
              `topos add {reference} --yes` (run from {}) adds it once",
             sc.label,
@@ -1645,23 +1679,28 @@ fn reconcile_repo_set(
     // live in the project's own store, so two checkouts of one repo row never share state.
     let store_layout = forge_store_layout(env.ctx, &sc.scope);
     let sctx = super::pull::ctx_with_layout(env.ctx, &store_layout);
-    let tracked = tracked_repo_members(&sctx, &origin);
-    // FIRST TRUST: no tracked import vouches for this origin in this scope's store — the
-    // reconcile never first-installs a forge source; the add gate is the one way in.
-    if tracked.is_empty() {
+    // FIRST TRUST is the MACHINE registry (the home sidecar), consulted in EVERY scope — never
+    // store contents: a checkout can commit a valid-looking `.topos/` store, and per-checkout
+    // files are demand, not consent. The reconcile never first-installs an ungranted origin;
+    // the add gate is the one way in.
+    if !crate::forge_trust::is_trusted(env.ctx, &origin) {
         sweep.warnings.push(first_trust_line(sc, &row.reference));
         return;
     }
+    let tracked = tracked_repo_members(&sctx, &origin);
     for (_, lock, _) in &tracked {
         sweep.mention(&sc.label, &lock.name);
     }
     let pin = row.pin();
 
     // A pinned row that every tracked member already satisfies is settled — no forge call, ever.
+    // (A granted origin with NOTHING tracked yet in this scope's store — a partial add landing,
+    // a fresh checkout of a trusted row — is never "satisfied": the fetch below converges it.)
     let pin_satisfied = pin.as_ref().is_some_and(|p| {
-        tracked
-            .iter()
-            .all(|(_, _, o)| commit_matches(o.commit.as_deref().unwrap_or_default(), p))
+        !tracked.is_empty()
+            && tracked
+                .iter()
+                .all(|(_, _, o)| commit_matches(o.commit.as_deref().unwrap_or_default(), p))
     });
 
     let Some(git) = env.git.filter(|_| !pin_satisfied) else {
@@ -1770,8 +1809,8 @@ fn reconcile_repo_set(
 }
 
 /// ONE skill inside a repo, by its leaf directory name (or the literal `subdir` the row spells).
-/// The ORIGIN must already be tracked in this scope's store (any member — the add gate's
-/// ceremony covered the source); a new member of a trusted origin then flows on explicit update.
+/// The ORIGIN must already be granted in the machine's trust registry (the add gate's ceremony
+/// covered the source); a new member of a trusted origin then flows on explicit update.
 #[allow(clippy::too_many_arguments)]
 fn reconcile_repo_skill(
     env: &Env<'_>,
@@ -1787,11 +1826,12 @@ fn reconcile_repo_skill(
     let fields = row.fields();
     let store_layout = forge_store_layout(env.ctx, &sc.scope);
     let sctx = super::pull::ctx_with_layout(env.ctx, &store_layout);
-    let members = tracked_repo_members(&sctx, &origin);
-    if members.is_empty() {
+    // The same MACHINE-registry gate as the repo-set arm: store contents never grant.
+    if !crate::forge_trust::is_trusted(env.ctx, &origin) {
         sweep.warnings.push(first_trust_line(sc, &row.reference));
         return;
     }
+    let members = tracked_repo_members(&sctx, &origin);
     let tracked = members
         .into_iter()
         .find(|(_, lock, o)| lock.name == skill || subdir_leaf(o).as_deref() == Some(skill));
@@ -2107,6 +2147,34 @@ fn discovery_roots(ctx: &Ctx<'_>, scope: &ResolvedScope) -> Option<super::Discov
     })
 }
 
+/// Every skill id this MACHINE currently holds managed bytes for — a recorded placement that
+/// still exists on disk — across the home store and every visited project store. What keeps the
+/// applied report (and the cache's provenance rows) complete across checkouts: an id whose store
+/// or placements are gone contributes nothing, so retired holdings drop out naturally.
+fn held_skill_ids(ctx: &Ctx<'_>, visited: &[sidecar::Layout]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for layout in std::iter::once(&ctx.layout).chain(visited.iter()) {
+        let Ok(entries) = ctx.fs.read_dir(&layout.skills_dir()) else {
+            continue;
+        };
+        for entry in entries {
+            let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Ok(sid) = SkillId::parse(id) else {
+                continue;
+            };
+            let Ok(Some(map)) = doc::read_map(ctx.fs, &layout.published(&sid).map) else {
+                continue;
+            };
+            if map.placements.iter().any(|p| ctx.fs.exists(Path::new(p))) {
+                out.insert(sid.into_string());
+            }
+        }
+    }
+    out
+}
+
 /// Every tracked skill imported from `origin_source` in THIS ctx's store, by walking the
 /// sidecar's origin docs. Best-effort: unreadable entries are skipped.
 pub(crate) fn tracked_repo_members(
@@ -2398,7 +2466,9 @@ fn clean_written_placements(
 
 /// Every forge-imported skill a store tracks (an `origin.json` beside its docs), whatever the
 /// origin. Best-effort: unreadable entries are skipped.
-fn forge_imports(ctx: &Ctx<'_>) -> Vec<(SkillId, Lock, topos_types::results::SkillOrigin)> {
+pub(crate) fn forge_imports(
+    ctx: &Ctx<'_>,
+) -> Vec<(SkillId, Lock, topos_types::results::SkillOrigin)> {
     let mut out = Vec::new();
     let Ok(entries) = ctx.fs.read_dir(&ctx.layout.skills_dir()) else {
         return out;

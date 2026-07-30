@@ -245,7 +245,10 @@ pub(crate) fn sync_one_planned(
         // applied version) is still converged from the LOCAL store — this is where a new agent's dir
         // (or a scope change) gets its bytes without waiting for the next served version.
         sync::SyncStatus::Current | sync::SyncStatus::Draft => {
-            converge_placements(ctx, &sp, skill_id, &lock, &sync, &map, &managed, &work)?;
+            // The converge COMMITS an updated map — every later committing step this run must see
+            // it (a stale map handed to the fan-out's materialize would erase the baselines the
+            // converge just recorded, and the next scan would read the installed dir as foreign).
+            let map = converge_placements(ctx, &sp, skill_id, &lock, &sync, &map, &managed, &work)?;
             // The SETTLED-DRAFT fan-out: a draft whose content is unchanged since the previous
             // run's observation is copied onto the bundle's other placements in this scope (their
             // baselines advance with it); an unsettled draft only updates the observation — a
@@ -732,6 +735,11 @@ fn apply_forward(
 /// current did not move; this is purely the local fan-out catching up). A draft copy is never
 /// touched (only Absent / stale-Clean dirs are targets), and a never-received baseline (no local
 /// bytes yet) is a no-op.
+///
+/// Returns the COMMITTED map — the caller must thread it into any later committing step this run
+/// (the settled-draft fan-out): handing a later materialize the pre-converge map would commit it
+/// wholesale and erase the baselines just recorded here, leaving an installed dir that the next
+/// scan classifies as foreign.
 #[allow(clippy::too_many_arguments)]
 fn converge_placements(
     ctx: &Ctx<'_>,
@@ -742,9 +750,9 @@ fn converge_placements(
     map: &PlacementMap,
     managed: &[usize],
     work: &WorkTree,
-) -> Result<(), ClientError> {
+) -> Result<PlacementMap, ClientError> {
     if is_zero_commit(&lock.base_commit) {
-        return Ok(()); // never received — nothing local to place yet
+        return Ok(map.clone()); // never received — nothing local to place yet
     }
     let missing: Vec<usize> = managed
         .iter()
@@ -767,7 +775,7 @@ fn converge_placements(
         })
         .collect();
     if missing.is_empty() {
-        return Ok(());
+        return Ok(map.clone());
     }
     let base = super::parse_hex32(&lock.base_commit)?;
     let base_digest = super::parse_hex32(&lock.bundle_digest)?;
@@ -793,7 +801,9 @@ fn converge_placements(
         },
     )?;
     log_apply(ctx, skill_id, "converge", base, &report);
-    Ok(())
+    // The materializer committed the map (per-target skips included) — re-read it so the caller
+    // holds exactly what is on disk, never the pre-converge picture.
+    read_map_required(ctx, sp)
 }
 
 /// The settled-draft fan-out. Compares the draft's digest against the durable observation

@@ -2692,6 +2692,83 @@ fn a_settled_draft_spreads_and_advances_the_sibling_baselines() {
 }
 
 #[test]
+fn a_converge_landing_survives_the_same_runs_settled_fanout() {
+    // The corruption regression: ONE run both CONVERGES a reservation (a never-materialized
+    // placement first-installs from the local store) and runs the settled-draft fan-out. The
+    // fan-out's materialize must commit the POST-converge map — handing it the stale pre-converge
+    // map would erase the reservation's just-recorded baseline, and the next scan would classify
+    // the installed dir as FOREIGN (a managed placement lost to its own sweep).
+    use topos_types::persisted::{PlacementKind, PlacementState, SwapCapability};
+    let (rig, id, plane, foll, replica) = fanout_rig("converge-settle");
+    let ctx = rig.ctx(&plane, &foll);
+
+    // THE draft, observed once (sweep 1) — the next sweep's fan-out will see it settled.
+    std::fs::write(rig.placement().join("SKILL.md"), b"# my draft\n").unwrap();
+    pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
+
+    // A RESERVATION row: recorded, never materialized, dir absent — exactly what the converge
+    // first-installs (a newly added target).
+    let extra = rig.work.0.join("extra");
+    let sp = rig.layout().published(&sid(&id));
+    let mut map = doc::read_map(&rig.fs, &sp.map).unwrap().unwrap();
+    map.placements.push(extra.display().to_string());
+    map.placement_state.push(PlacementState {
+        kind: PlacementKind::Native,
+        agent: Some("extra".to_owned()),
+        materialized_sha: None,
+        pre_existing_sha: None,
+        swap_capability: SwapCapability::Unsupported,
+    });
+    doc::write_map(&rig.fs, &sp.map, &map).unwrap();
+
+    // Sweep 2: the converge lands `extra` at the pristine v1 AND the settled draft spreads onto
+    // the replica — in ONE run.
+    let out = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    assert_eq!(
+        only(&out.data).action,
+        PullAction::DraftSynced,
+        "{:?}",
+        out.warnings
+    );
+    assert_eq!(
+        snapshot(&extra),
+        Some(expect(V1)),
+        "the converge landed the reservation from the local store"
+    );
+    assert_eq!(
+        std::fs::read(replica.join("SKILL.md")).unwrap(),
+        b"# my draft\n",
+        "the settled draft spread onto the replica in the same run"
+    );
+    // THE regression assertion: the converge's recorded baseline SURVIVES the fan-out's commit.
+    let map = doc::read_map(&rig.fs, &sp.map).unwrap().unwrap();
+    let extra_idx = map
+        .placements
+        .iter()
+        .position(|p| Path::new(p) == extra)
+        .expect("the reservation row is still recorded");
+    let v1_digest = {
+        let lock: topos_types::persisted::Lock = doc::read_doc(&rig.fs, &sp.lock).unwrap().unwrap();
+        lock.bundle_digest
+    };
+    assert_eq!(
+        map.placement_state[extra_idx].materialized_sha.as_deref(),
+        Some(v1_digest.as_str()),
+        "the just-converged placement stays MANAGED — the fan-out must not commit a stale map"
+    );
+
+    // And the placement keeps behaving managed: the next sweep spreads the settled draft onto it
+    // (a clean copy stale behind the draft), never reading it as foreign.
+    let out = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    assert_eq!(
+        std::fs::read(extra.join("SKILL.md")).unwrap(),
+        b"# my draft\n",
+        "{:?}",
+        out.warnings
+    );
+}
+
+#[test]
 fn an_unsettled_draft_never_spreads() {
     let (rig, id, plane, foll, replica) = fanout_rig("unsettled");
     let ctx = rig.ctx(&plane, &foll);

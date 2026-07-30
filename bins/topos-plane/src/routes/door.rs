@@ -66,7 +66,7 @@ pub(crate) fn get_channels() {}
         ("Authorization" = String, Header, description = "`Bearer <workspace credential>`."),
     ),
     responses(
-        (status = 200, description = "The skill's audience (entitled members + their non-revoked devices).", body = WireReach),
+        (status = 200, description = "The skill's audience (entitled members + their live sessions).", body = WireReach),
         (status = 404, description = "Missing/blank credential, non-member, or unknown skill (indistinguishable).", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),

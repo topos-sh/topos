@@ -113,9 +113,12 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   and a row naming a declined bundle still delivers with the decline disclosed — a file is a machine
   fact, the decline is a server fact about the feed); a forge row resolves against ITS SCOPE'S OWN
   store (a project row's tracked import lives in the checkout's `.topos/` store — two checkouts of one
-  repo row never share state) and NEVER first-installs: an origin the store does not track refuses with
-  one typed line naming the `topos add … --yes` gate (a manifest row is demand, never consent — anyone
-  could have committed it); a TRACKED origin's rows advance ONLY on an explicit `update` (never on the
+  repo row never share state) and NEVER first-installs an ungranted origin: the gate is the MACHINE's
+  trust registry (`state/forge_trust.json`, home sidecar — `crate::forge_trust`; a one-time legacy seed
+  from the home store's own imports), consulted in EVERY scope, and an origin it has not granted
+  refuses with one typed line naming the `topos add … --yes` gate — neither a manifest row NOR
+  per-checkout store contents vouch (both are repo facts anyone could have committed: demand, never
+  consent); a GRANTED origin's rows advance ONLY on an explicit `update` (never on the
   quiet sweep — no session start dials a forge), receipted with the commit motion and the member delta,
   members the new archive dropped cleaned snapshot-first in the same run; a local-path row is an
   adopt-in-place presence check (and the idempotent converge of a landed publish's PENDING governance
@@ -125,7 +128,11 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   never-received; each scope consults ITS OWN mention set — a project mention never shields a
   person-scope clean — and a dropped repo row's members retire like any undemanded item) and each
   session gets the applied report (`PUT …/report` — complete-state per session, across the home store
-  AND every visited project store, manifest-row deliveries included — declined-but-locally-added
+  AND every visited project store: this run's cwd chain unioned with the machine-local
+  **visited-stores index** (`state/visited_stores.json` — every project store a reconcile visits is
+  recorded, so an update run from one checkout still reports another checkout's holdings; a store
+  that is gone, or whose placements are, drops out naturally on read), manifest-row deliveries
+  included — declined-but-locally-added
   bundles report too, which is what makes the web's declined-but-applied disclosure real). The **delivery
   cache** (`state/sync_status.json`) records host/workspace_name per workspace + name/review_required/
   served_version per skill PLUS each row's attribution and the caller's declines, so `status`/`list`
@@ -145,10 +152,12 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   disclosure rather than a write: an add the FEED already delivers writes nothing and says so; an add
   over a standing `"off"` row DELETES the row (never a stacked positive); an explicit pin or field set
   converts a feed-delivered bundle to machine-local control. FIRST TRUST is the one gate here, and it
-  is a STORE fact: a forge origin the target scope's own store does not yet track is DESCRIBED
-  (source, discovered members, the exact row and file) and applied only under `--yes` — a manifest ROW
-  never vouches (it is demand anyone could have committed; a describe over an already-recorded row
-  says so), and a tracked origin applies immediately with an undo-led receipt. A forge apply writes the ROW first (the
+  is a MACHINE fact: a forge origin this machine's trust registry (`state/forge_trust.json`, home
+  sidecar) has not granted is DESCRIBED (source, discovered members, the exact row and file) and
+  applied only under `--yes` — neither a manifest ROW nor per-checkout store contents vouch (both are
+  repo facts anyone could have committed; a describe over an already-recorded row says so), and a
+  granted origin applies immediately with an undo-led receipt. A forge apply records the CONSENT first
+  (the origin lands in the registry at the consent moment), then the ROW (the
   demand), then installs member-by-member into the scope's store — a member failure never unwinds the
   batch: the receipt names the partial landing and the recorded row is what the next update converges.
   Re-adding an EXISTING row keeps the exact-inverse discipline: the same value is the redundancy
@@ -157,9 +166,11 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   for a prior pin; a prior fields table gets NO undo, said why). `remove <targets…> [-g]` is the EXACT
   FILE INVERSE (property-tested): drop
   the row; or, `-g`, write `"off"` when the feed still provides the bundle, or drop a FEED row whole; a
-  set member's removal is the set-minus-one rewrite (that one line replaced by its current members,
-  each carrying the set line's pin/fields where the member's shape legally takes them — anything not
-  carryable named in the describe), offered as a describe because later curation stops arriving through
+  set member's removal is the set-minus-one rewrite (that one line replaced by its current members —
+  explicit beats set: a survivor that already has its OWN row keeps it untouched, and new rows are
+  written only for the rest, each carrying the set line's pin/fields where the member's shape legally
+  takes them; the describe names which survivors get new rows, which keep their own, and anything not
+  carryable), offered as a describe because later curation stops arriving through
   this file. Its two-phase arms are LOSS (an affected bundle with unshared edits, or an unclassifiable
   scan — the guard fails TOWARD the gate, and it covers EVERY placement-retiring arm: the row drop, the
   feed-row drop, and the `"off"` switch alike) and the set split; everything else applies immediately,

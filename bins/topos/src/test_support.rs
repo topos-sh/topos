@@ -434,6 +434,26 @@ impl SessionInstall {
         })
     }
 
+    /// `topos protect <target>` (bare — the describe): the audience line's datum, read live over
+    /// the session lane. `Some(n)` proves the web-served reach body deserialized through the
+    /// Rust wire type (a shape mismatch degrades it to `None`, and the line never renders).
+    pub fn protect_describe_audience(&self, target: &str) -> Result<Option<u64>, String> {
+        self.with_ctx(None, |ctx| {
+            let connect = connect_session();
+            let dir_legacy = |_b: &str| -> Box<dyn crate::plane::DirectorySource> {
+                unreachable!("the session lane carries every protect read")
+            };
+            let connectors = ops::ProtectConnectors {
+                directory: &dir_legacy,
+                session: &connect,
+            };
+            match ops::protect(ctx, &connectors, target, None, None, false).map_err(err_str)? {
+                ops::ProtectOutcome::Described { data, .. } => Ok(data.audience),
+                ops::ProtectOutcome::Applied(_) => Err("a bare protect describes first".to_owned()),
+            }
+        })
+    }
+
     /// `topos protect <target> [<level>] --yes`.
     pub fn protect(&self, target: &str, level: Option<&str>) -> Result<(), String> {
         self.with_ctx(None, |ctx| {

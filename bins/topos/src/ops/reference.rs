@@ -479,12 +479,13 @@ fn add_forge(
         ManifestScope::Global => ctx.layout.clone(),
     };
     let sctx = super::pull::ctx_with_layout(ctx, &store_layout);
-    // FIRST TRUST is a STORE fact: the origin counts as known ONLY when the target scope's own
-    // store already tracks an import from it. A manifest ROW is demand, never consent — a
-    // VCS-delivered file must not skip the member-listing describe — and the predicate is
-    // evaluated HERE, before any write, so this add's own row can never satisfy the gate it is
-    // behind.
-    let trusted = !super::reconcile::tracked_repo_members(&sctx, &source_label).is_empty();
+    // FIRST TRUST is a MACHINE fact: the origin counts as known ONLY when this machine's own
+    // trust registry (the HOME sidecar — `crate::forge_trust`) granted it at a prior add's
+    // consent moment. Never a store fact — a project `.topos/` store travels with the checkout,
+    // so committed store contents could otherwise smuggle trust in — and never a manifest ROW
+    // (demand anyone could have committed). The predicate is evaluated HERE, before any write,
+    // so this add's own row can never satisfy the gate it is behind.
+    let trusted = crate::forge_trust::is_trusted(ctx, &source_label);
 
     // ONE fetch serves both the describe and the apply (read-only either way).
     let targz = git.fetch(&spec)?;
@@ -568,10 +569,15 @@ fn add_forge(
     }
 
     // ---- APPLY ----
-    // The DEMAND lands FIRST: with the row durably recorded, a member-install failure part-way
-    // leaves a CONVERGENT state — the manifest asks for exactly what the consent covered, and
-    // the next explicit update (or a re-run of this add) finishes the landing — instead of
-    // installed members no manifest row asks for.
+    // The CONSENT lands FIRST: reaching here IS the consent moment (a granted registry, or the
+    // accepted describe's `--yes`), and the machine registry records it durably before any other
+    // write — so a partial landing retries as a trusted origin, and the reconcile's forge arms
+    // may converge it.
+    crate::forge_trust::grant(ctx, &source_label)?;
+    // Then the DEMAND: with the row durably recorded, a member-install failure part-way leaves a
+    // CONVERGENT state — the manifest asks for exactly what the consent covered, and the next
+    // explicit update (or a re-run of this add) finishes the landing — instead of installed
+    // members no manifest row asks for.
     let mut row_receipt = set_data(members.first().map_or(&repo, |m| m));
     medit::write_row(ctx, &mut row_receipt, &target, &reference, &value)?;
     // A project install writes through the project's own self-ignoring `.topos/` store; mint its
@@ -627,17 +633,13 @@ fn add_forge(
     }
     if !failed.is_empty() {
         let names: Vec<String> = failed.iter().map(|(n, e)| format!("{n} ({e})")).collect();
-        // With the origin tracked (any member landed, now or before), the ordinary explicit
-        // update converges the rest; with NOTHING tracked yet, the gate command is the retry.
-        let converge = if landed.is_empty() && skipped.is_empty() {
-            format!("re-run `topos add {raw} --yes` to retry")
-        } else {
-            "`topos update` completes the landing".to_owned()
-        };
+        // The origin's trust was granted above, so the ordinary explicit update converges the
+        // rest — even when NO member landed this run.
         medit::push_note(
             &mut data,
             format!(
-                "did not land: {} — the row records the demand; {converge}",
+                "did not land: {} — the row records the demand; `topos update` completes the \
+                 landing",
                 names.join("; ")
             ),
         );

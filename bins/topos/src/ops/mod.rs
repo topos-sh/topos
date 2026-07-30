@@ -93,7 +93,7 @@ pub(crate) use pull::{
 };
 pub(crate) use reconcile::{
     CacheFollow, ManifestUpdateOpts, SessionConnect, SessionRoutedPlane, SessionTransports,
-    manifest_update,
+    forge_imports, manifest_update,
 };
 pub(crate) use reference::{
     AddRefOutcome, WriteLane, add_reference, find_path_line, resolve_session_lane,
