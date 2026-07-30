@@ -1,14 +1,16 @@
 //! The `clap` surface. Thin: it only parses argv; every verb's logic lives in the lib over the seams.
 //!
 //! The MANIFEST-MODEL verb surface: `login`/`logout` manage this installation's workspace
-//! sessions; `init` creates a folder's `topos.toml`; `add`/`remove` edit the nearest manifest
-//! (`-g` = the server-stored profile of the workspace the reference resolves to); `update` is the
+//! sessions; `init` creates a folder's `topos.toml` and `fmt` tidies one; `add`/`remove` edit the
+//! nearest manifest (`-g` = this machine's own `~/.topos/topos.toml`); `update` is the
 //! reconcile (targeted forms + the `--quiet` sweep); `status` is the offline trust rail;
 //! `publish`/`review`/`revert`/`protect`/`invite` are the workspace governance verbs; the utility
 //! verbs (`list`, `diff`, `log`, `self-update`, `uninstall`, `auth status`) persist. Two-phase
-//! describe/`--yes` gates the acts with REACH or LOSS (`publish`'s describe, `review`'s verdicts,
-//! `revert`, `protect`, `invite`, `update --reset`, a permanent `remove`, `uninstall`); manifest
-//! edits apply immediately with an undo-led receipt (`--yes` an accepted no-op).
+//! describe/`--yes` gates the acts with REACH, LOSS, or FIRST TRUST (`publish`'s describe,
+//! `review`'s verdicts, `revert`, `protect`, `invite`, `update --reset`, `uninstall`; a `remove`
+//! over local edits, a permanent delete, or a set-splitting row rewrite; a bare `add` of an
+//! untrusted git source); every other manifest edit applies immediately with an undo-led receipt
+//! (`--yes` an accepted no-op).
 //!
 //! The doc comments on the verbs below are USER-FACING twice over: they are `--help`, and
 //! `cli_ref.rs` renders them into `docs/cli.md` + the built-in skill's `reference.md`. Write them
@@ -62,7 +64,8 @@ pub(crate) enum Command {
         /// One skill to answer in depth. Omitted, the full table.
         bundle: Option<String>,
     },
-    /// Fetch and apply the latest version of everything this folder and your profile ask for.
+    /// Fetch and apply the latest version of everything this folder's `topos.toml` asks for and
+    /// everything your workspaces give you.
     /// Runs by itself at the start of each agent session; safe to run by hand any time.
     /// `topos update <skill>` updates one skill; `topos update <skill>@<version>` puts that
     /// version's bytes back on this machine only.
@@ -571,7 +574,7 @@ mod tests {
         // The device-local `--agent` scope flags died with the machine-level content state.
         let removed = Cli::try_parse_from(["topos", "remove", "docs", "-a", "cursor"]).unwrap_err();
         assert_eq!(removed.kind(), ErrorKind::UnknownArgument);
-        // `remove -g` edits the server-stored profile.
+        // `remove -g` edits this machine's own `~/.topos/topos.toml`.
         assert!(Cli::try_parse_from(["topos", "remove", "-g", "@acme/docs"]).is_ok());
     }
 

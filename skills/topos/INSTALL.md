@@ -36,8 +36,10 @@ topos login <workspace-address>
 ```
 
 Open the printed approval URL in a browser and approve — that logs this machine in. Login is the
-acceptance: what your profile and this folder's manifest demand lands immediately and stays
-current from then on (`topos update` sweeps on demand; `topos add <name>` records more).
+acceptance: everything the workspace gives you — its shared baseline, any channel you carry,
+anything assigned to you — lands immediately and stays current from then on, along with whatever
+this folder's `topos.toml` asks for (`topos update` sweeps on demand; `topos add <name>` records
+more). Nothing else needs accepting per skill.
 
 **Start fresh.** Sign up at <https://topos.sh> and create a workspace in the browser, then log
 this machine in against your own address the same way: `topos login https://topos.sh/<your-workspace>`
