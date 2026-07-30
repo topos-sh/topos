@@ -270,6 +270,23 @@ fn pin_check(reference: &str, shape: &KeyShape, s: &str) -> Result<(), ManifestE
     }
 }
 
+/// DRY-RUN one row: classify the reference and validate the value against its shape + scope —
+/// exactly what [`ManifestEditor::set_row`] would do, without a file, an editor, or a write. A
+/// caller whose write is preceded by a durable side effect (a granted forge origin, a minted
+/// store) proves the row is writable FIRST, so a refusal cannot land after the consent it was
+/// supposed to gate.
+///
+/// # Errors
+/// The reference must classify, and the value must be legal for its shape and this scope.
+pub(crate) fn check_row(
+    reference: &str,
+    scope: ManifestScope,
+    value: &EntryValue,
+) -> Result<(), ManifestError> {
+    let shape = classify_key(reference).map_err(|e| at(reference, e.message))?;
+    check_value(reference, &shape, scope, value)
+}
+
 /// Validate a TYPED value (the editor's input) against its shape + scope — the same rules the
 /// parser enforces reading a file, so an editor can never write what `open` would refuse.
 fn check_value(

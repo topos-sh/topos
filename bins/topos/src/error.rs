@@ -313,6 +313,16 @@ pub(crate) enum ClientError {
          place (`topos add {path}`), or land elsewhere with `--harness <slug>`/`--global`"
     )]
     PlacementOccupied { path: String },
+    /// The target manifest CHANGED between the read that decided an edit and the write that would
+    /// apply it (a person's editor, another tool — topos's own writers serialize on the file's
+    /// lock). Every arm of an edit is a claim about a document; applying a plan built from bytes
+    /// that are gone is how a concurrent row disappears with no error anywhere. Nothing was
+    /// written — the re-run reads the file as it now is.
+    #[error(
+        "'{path}' changed while this edit was being prepared — nothing was written; re-run the \
+         command to act on the file as it is now"
+    )]
+    ManifestChanged { path: String },
     /// A terminal protocol outcome the verb does not special-case (e.g. the plane's `RetryableFailure` /
     /// `Unavailable` / `PermanentFailure`), carried verbatim so the agent branches on the TRUE outcome
     /// (not a generic transport error). `retryable` selects a Retry next-action + the outcome class.
@@ -426,6 +436,8 @@ impl ClientError {
             ClientError::AmbiguousSkillInRepo { .. } => "AMBIGUOUS_SKILL",
             ClientError::DuplicateSkillName { .. } => "AMBIGUOUS_SKILL",
             ClientError::PlacementOccupied { .. } => "PLACEMENT_OCCUPIED",
+            // A concurrent edit of the same document — the file-scoped twin of a pointer CAS loss.
+            ClientError::ManifestChanged { .. } => "MANIFEST_CHANGED",
             // The plane's fine code rides the Display message + context; the agent branches on `outcome`.
             ClientError::PlaneTerminal { .. } => "PLANE_TERMINAL",
             ClientError::UpgradeAmbiguous => "UPGRADE_AMBIGUOUS",
@@ -471,6 +483,9 @@ impl ClientError {
             // The contribute typed outcomes carry their own terminal classification (the plane's verdict,
             // surfaced 1:1 so the agent branches on the same outcome it would on the wire).
             ClientError::Conflict { .. } => TerminalOutcome::Conflict,
+            // A document that moved under a prepared edit is the same class: re-read, re-decide,
+            // then act — never a blind retry of the same plan.
+            ClientError::ManifestChanged { .. } => TerminalOutcome::Conflict,
             ClientError::Denied(_) => TerminalOutcome::Denied,
             ClientError::PublishBlocked { .. } => TerminalOutcome::Diverged,
             // Divergent per-placement edits are the same class as a diverged draft: local

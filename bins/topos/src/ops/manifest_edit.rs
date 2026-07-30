@@ -601,12 +601,19 @@ pub(super) fn is_commit(s: &str) -> bool {
 /// DEFAULT BRANCH unless the input carried an explicit ref: only a deliberately-referenced
 /// commit pins (a freeze the person asked for).
 ///
+/// `harness` carries the import's `-a` SELECTION onto the row. A selector decides where the bytes
+/// land, and a decision only this invocation remembers is not a decision at all — the next
+/// `update` would re-land the copy in the default agent dir. Written as the `harness` field (legal
+/// on every forge shape), it is a standing fact the reconcile's forge arms plan against; an empty
+/// slice records the plain value exactly as before.
+///
 /// # Errors
 /// As [`write_row`].
 pub(crate) fn note_added_remote(
     ctx: &Ctx<'_>,
     data: &mut AddData,
     global: bool,
+    harness: &[String],
 ) -> Result<(), ClientError> {
     let Some(origin) = data.origin.clone() else {
         return Ok(());
@@ -626,7 +633,38 @@ pub(crate) fn note_added_remote(
         (Some(_), Some(c)) if is_commit(c) => Some(c.as_str()),
         _ => None,
     };
-    note_added(ctx, data, &reference, pin, global)
+    if harness.is_empty() {
+        return note_added(ctx, data, &reference, pin, global);
+    }
+    let Some(target) = edit_target(ctx, global)? else {
+        return Ok(());
+    };
+    // The fields must be LEGAL for the reference's own shape — a whole-repo row takes `harness`
+    // and nothing else, so a pinned repo-root import has no spelling that carries both. The PIN
+    // wins there (it decides which bytes; the selection only decides where they sit) and the
+    // receipt says the selection could not be recorded, rather than a row the file would refuse
+    // or a pin quietly dropped.
+    let shape = crate::manifest::keys::classify_key(&reference)
+        .map_err(|e| ClientError::InvalidArgument(e.message))?;
+    let version_legal = crate::manifest::document::legal_fields(&shape).contains(&"version");
+    if pin.is_some() && !version_legal {
+        note_added(ctx, data, &reference, pin, global)?;
+        push_note(
+            data,
+            format!(
+                "the `-a` selection is not recorded on `{reference}` — a whole-repo row cannot \
+                 carry both a commit pin and a harness list; name the skill (`{reference}/<skill>`) \
+                 to keep it"
+            ),
+        );
+        return Ok(());
+    }
+    let value = EntryValue::Fields(crate::manifest::document::EntryFields {
+        version: pin.filter(|_| version_legal).map(str::to_owned),
+        harness: Some(harness.to_vec()),
+        ..Default::default()
+    });
+    write_row(ctx, data, &target, &reference, &value)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -812,6 +850,12 @@ pub(crate) fn remove_global(
     yes: bool,
 ) -> Result<RemoveOutcome, ClientError> {
     let target = global_target(ctx);
+    // THE LOCK COMES FIRST — before the read that decides the edit, not just around the write.
+    // Every arm below is computed FROM the file (which rows exist, which survivors of a split
+    // already have their own row), so a read outside the lock and a write inside it are two
+    // different documents: the second writer would rebuild the set line from members the first
+    // writer had already re-homed, and silently drop that row.
+    let _guard = lock_manifest(ctx, &target.path)?;
     let arms = resolve_arms(ctx, connect, &target, tokens)?;
     let mut resolved = Vec::with_capacity(tokens.len());
     for (token, arm) in tokens.iter().zip(arms) {
@@ -838,15 +882,14 @@ pub(crate) fn remove_project(
     let Some(target) = project_target(ctx)? else {
         return Ok(None);
     };
-    if target.scope == ManifestScope::Global {
+    // Held across the resolve AND the apply — see [`remove_global`].
+    let _guard = lock_manifest(ctx, &target.path)?;
+    let arms = resolve_arms(ctx, connect, &target, tokens)?;
+    if target.scope == ManifestScope::Global && arms.iter().all(Option::is_none) {
         // The home-routing guard sent this edit to the global file — a bare `remove` there is
         // still a file edit, but it must not silently claim a token the classic removal owns.
-        let arms = resolve_arms(ctx, connect, &target, tokens)?;
-        if arms.iter().all(Option::is_none) {
-            return Ok(None);
-        }
+        return Ok(None);
     }
-    let arms = resolve_arms(ctx, connect, &target, tokens)?;
     if arms.iter().all(Option::is_none) {
         // Nothing here claims any token — but a GLOBAL row of that name is a near-miss worth
         // naming rather than answering "no such skill" through the classic path.
@@ -902,6 +945,26 @@ fn resolve_arms(
     Ok(out)
 }
 
+/// Resolve ONE token against everything the target file (and the feed it adopts) offers.
+///
+/// EVERY source is consulted before anything is decided — the file's feed row, its explicit rows,
+/// the bundles the feed delivers, and every SET line's current members — because a token that two
+/// of them answer names two different things, and there is no order in which picking one of them
+/// is right. The old shape returned at the first hit, so a name carried by two channels removed it
+/// from whichever expanded first, and a name the feed delivered hid a repo set that also carried
+/// it. Now the candidates are gathered and the count decides: one answers, several refuse with the
+/// qualified references, and the caller re-spells the one it meant.
+///
+/// Candidates are keyed by the QUALIFIED SPELLING they act on and deduped by it, in the order
+/// below — one bundle reached two ways (its own row, and the feed that also delivers it) is ONE
+/// candidate, and the order picks the arm that edits this file most directly. A SET member is
+/// keyed by its own reference AND the line it comes from: two channels carrying one bundle are two
+/// different edits of two different lines, and splitting whichever expanded first leaves the other
+/// line delivering it — a removal that appears to do nothing.
+///
+/// An EXACT spelling is always an answer, never an ambiguity: a token that literally is a row's
+/// reference names that row, even when a set line also carries the bundle. That is what keeps the
+/// refusal actionable — the candidates it lists can be typed back.
 #[allow(clippy::too_many_arguments)]
 fn resolve_one(
     ctx: &Ctx<'_>,
@@ -913,6 +976,9 @@ fn resolve_one(
     feeds: &mut Option<Vec<FeedItem>>,
     sets: &mut Option<Vec<(PlanRow, Vec<String>)>>,
 ) -> Result<Option<Arm>, ClientError> {
+    let mut found: Vec<Candidate> = Vec::new();
+    let is_exact = |reference: &str| reference == token || canonical == Some(reference);
+
     // 1. A FEED row this file spells (global only).
     if let Some(c) = canonical
         && let Ok(KeyShape::Feed { host, workspace }) = keys::classify_key(c)
@@ -926,24 +992,23 @@ fn resolve_one(
             .filter(|i| !i.declined && i.host == host && i.workspace == workspace)
             .map(|i| i.name.clone())
             .collect();
-        return Ok(Some(Arm::FeedDrop {
-            reference: c.to_owned(),
-            workspace,
-            bundles,
-        }));
+        found.push(Candidate {
+            spelling: c.to_owned(),
+            exact: true,
+            arm: Arm::FeedDrop {
+                reference: c.to_owned(),
+                workspace,
+                bundles,
+            },
+        });
     }
     // 2. An explicit row, by canonical reference or by the name it delivers under. A BARE NAME can
     //    name more than one row (two workspaces, or a workspace and a forge repo, that each carry a
-    //    `deploy`) — taking the first would remove someone's row on alphabetical luck, so the
-    //    refusal lists the qualified references and the caller re-spells one.
-    let rows: Vec<PlanRow> = all_rows(plan)
+    //    `deploy`) — taking the first would remove someone's row on alphabetical luck.
+    for row in all_rows(plan)
         .into_iter()
         .filter(|r| row_matches(token, canonical, r))
-        .collect();
-    if rows.len() > 1 {
-        return Err(ambiguous(token, rows.iter().map(|r| r.reference.clone())));
-    }
-    if let Some(row) = rows.into_iter().next() {
+    {
         if matches!(row.value, EntryValue::Off) {
             return Err(ClientError::InvalidArgument(format!(
                 "'{token}' is already switched off on this machine — `topos add -g {}` turns it \
@@ -952,65 +1017,96 @@ fn resolve_one(
             )));
         }
         let name = row.display_name();
-        return Ok(Some(Arm::RowDrop { row, name }));
+        found.push(Candidate {
+            spelling: row.reference.clone(),
+            exact: is_exact(&row.reference),
+            arm: Arm::RowDrop { row, name },
+        });
     }
-    // 3. No row — the workspace FEED delivers it: the one machine-local negative is the `"off"`
-    //    switch, and it lives in the global file only. Same discipline: two connected workspaces
-    //    can both deliver a `deploy`, and switching off the wrong one is silent.
+    // 3. The workspace FEED delivers it: the one machine-local negative is the `"off"` switch, and
+    //    it lives in the global file only. Same discipline — two connected workspaces can both
+    //    deliver a `deploy`, and switching off the wrong one is silent.
     if target.scope == ManifestScope::Global {
         let items = feeds.get_or_insert_with(|| feed_items(ctx, connect));
-        let hits: Vec<&FeedItem> = items
-            .iter()
-            .filter(|i| {
-                !i.declined
-                    && feed_matches(token, canonical, i)
-                    && plan.has_feed(&i.host, &i.workspace)
-            })
-            .collect();
-        if hits.len() > 1 {
-            return Err(ambiguous(
-                token,
-                hits.iter()
-                    .map(|i| format!("{}/{}/{}", i.host, i.workspace, i.name)),
-            ));
-        }
-        if let Some(item) = hits.into_iter().next() {
-            return Ok(Some(Arm::OffWrite {
-                reference: format!("{}/{}/{}", item.host, item.workspace, item.name),
-                name: item.name.clone(),
-                workspace: item.workspace.clone(),
-            }));
+        for item in items.iter().filter(|i| {
+            !i.declined && feed_matches(token, canonical, i) && plan.has_feed(&i.host, &i.workspace)
+        }) {
+            let reference = format!("{}/{}/{}", item.host, item.workspace, item.name);
+            found.push(Candidate {
+                spelling: reference.clone(),
+                exact: is_exact(&reference),
+                arm: Arm::OffWrite {
+                    reference,
+                    name: item.name.clone(),
+                    workspace: item.workspace.clone(),
+                },
+            });
         }
     }
-    // 4. A SET row in this file delivers it — the removal is a rewrite of that line.
+    // 4. A SET row in this file delivers it — the removal is a rewrite of that line. A member is
+    //    qualified by the reference its OWN row would carry (`<ws>/<bundle>`, `<repo>/<skill>`),
+    //    which is both the paste-ready spelling and the identity the dedup compares.
     let expansions = sets.get_or_insert_with(|| expand_sets(ctx, connect, target, plan));
+    let rows = all_rows(plan);
     for (row, members) in expansions.iter() {
         let want = member_of(row, canonical);
-        if let Some(member) = members
+        let Some(member) = members
             .iter()
             .find(|m| m.as_str() == token || Some(m.as_str()) == want.as_deref())
-        {
-            // Explicit beats set: a survivor whose own row this file already spells KEEPS it —
-            // the split must never replace a stronger pin/fields row with the set's value.
-            let rows = all_rows(plan);
-            let keeps_own: Vec<String> = members
-                .iter()
-                .filter(|m| m.as_str() != member.as_str())
-                .filter(|m| {
-                    member_reference(row, m)
-                        .is_some_and(|r| rows.iter().any(|pr| pr.reference == r))
-                })
-                .cloned()
-                .collect();
-            return Ok(Some(Arm::SetSplit {
+        else {
+            continue;
+        };
+        // Explicit beats set: a survivor whose own row this file already spells KEEPS it —
+        // the split must never replace a stronger pin/fields row with the set's value.
+        let keeps_own: Vec<String> = members
+            .iter()
+            .filter(|m| m.as_str() != member.as_str())
+            .filter(|m| {
+                member_reference(row, m).is_some_and(|r| rows.iter().any(|pr| pr.reference == r))
+            })
+            .cloned()
+            .collect();
+        let member_ref =
+            member_reference(row, member).unwrap_or_else(|| format!("{}/{member}", row.reference));
+        found.push(Candidate {
+            spelling: format!("{member_ref} (via {})", row.reference),
+            // A set member is never spelled in the file — the token cannot BE it.
+            exact: false,
+            arm: Arm::SetSplit {
                 set: row.clone(),
                 names: vec![member.clone()],
                 members: members.clone(),
                 keeps_own,
-            }));
-        }
+            },
+        });
     }
-    Ok(None)
+
+    // The DECISION. An exact spelling settles it; otherwise one distinct thing answers, or the
+    // token names several and refuses with all of them.
+    if found.iter().any(|c| c.exact) {
+        found.retain(|c| c.exact);
+    }
+    let mut seen: Vec<String> = Vec::new();
+    found.retain(|c| {
+        let first = !seen.contains(&c.spelling);
+        if first {
+            seen.push(c.spelling.clone());
+        }
+        first
+    });
+    match found.len() {
+        0 => Ok(None),
+        1 => Ok(Some(found.remove(0).arm)),
+        _ => Err(ambiguous(token, seen)),
+    }
+}
+
+/// One thing a `remove` token could name, with the QUALIFIED SPELLING the refusal would print and
+/// whether the token spelled it exactly (see [`resolve_one`]).
+struct Candidate {
+    spelling: String,
+    exact: bool,
+    arm: Arm,
 }
 
 /// The typed refusal for a token this file answers more than once — the paste-ready qualified
@@ -1258,6 +1354,10 @@ fn draft_state(ctx: &Ctx<'_>, name: &str) -> DraftState {
 // ---------------------------------------------------------------------------------------------
 
 /// Describe or apply the resolved arms: a batch that mixes gated and ungated arms gates WHOLE.
+///
+/// THE CALLER HOLDS THE FILE'S WRITER LOCK across the resolve that produced `arms` and this apply
+/// — the arms are decisions about a document, and they are only true of the document they were
+/// read from.
 fn apply_arms(
     ctx: &Ctx<'_>,
     target: &EditTarget,
@@ -1447,7 +1547,12 @@ fn apply_arms(
     }
 
     // ---- APPLY ----
-    let _guard = lock_manifest(ctx, &target.path)?;
+    // The lock fences topos's own writers; it cannot fence a person's editor or a `sed`. So the
+    // arms are RE-PROVEN against the file as it is right now, and a document that no longer
+    // matches the one they were read from refuses rather than writing a plan built from bytes
+    // that are gone — most sharply for a set split, whose survivor rows would otherwise be
+    // rebuilt from a member list that predates someone else's row.
+    prove_unchanged(ctx, target, &arms)?;
     let Opened { mut editor, born } = open_for_edit(ctx, target)?;
     for arm in &arms {
         match arm {
@@ -1505,6 +1610,67 @@ fn apply_arms(
         items,
         applied: true,
     }))
+}
+
+/// Re-prove every arm against the file as it stands RIGHT NOW, immediately before the write.
+///
+/// The arms carry decisions the file decided: which row to drop, at which value, and — for a set
+/// split — which survivors already have their own row and which need one written. Each of those is
+/// falsified by an edit this process did not make, and applying a falsified plan is how a
+/// concurrent row disappears without an error anywhere. So a document that has moved refuses; the
+/// re-run reads the file as it is.
+///
+/// # Errors
+/// [`ClientError::ManifestChanged`] when any arm no longer describes the file; a read failure, or
+/// a manifest the grammar now refuses.
+fn prove_unchanged(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> Result<(), ClientError> {
+    // A file that does not exist yet is about to be BORN by this call — there is nothing to have
+    // changed, and the birth is part of the edit.
+    if read_text(ctx, &target.path)?.is_none() {
+        return Ok(());
+    }
+    let plan = plan_for(ctx, target)?;
+    let rows = all_rows(&plan);
+    let holds = |arm: &Arm| -> bool {
+        match arm {
+            Arm::RowDrop { row, .. } => rows
+                .iter()
+                .any(|r| r.reference == row.reference && r.value == row.value),
+            Arm::FeedDrop { reference, .. } => {
+                matches!(keys::classify_key(reference), Ok(KeyShape::Feed { host, workspace })
+                    if plan.has_feed(&host, &workspace))
+            }
+            // The switch is written BECAUSE no row claims the bundle; a row that appeared since
+            // would have to be dropped instead.
+            Arm::OffWrite { reference, .. } => !rows.iter().any(|r| r.reference == *reference),
+            Arm::SetSplit {
+                set,
+                names,
+                members,
+                keeps_own,
+            } => {
+                let line_stands = rows
+                    .iter()
+                    .any(|r| r.reference == set.reference && r.value == set.value);
+                let now: Vec<String> = members
+                    .iter()
+                    .filter(|m| !names.contains(m))
+                    .filter(|m| {
+                        member_reference(set, m)
+                            .is_some_and(|r| rows.iter().any(|pr| pr.reference == r))
+                    })
+                    .cloned()
+                    .collect();
+                line_stands && now == *keeps_own
+            }
+        }
+    };
+    if arms.iter().all(holds) {
+        return Ok(());
+    }
+    Err(ClientError::ManifestChanged {
+        path: target.path.display().to_string(),
+    })
 }
 
 /// Join a loss-guard line with an arm's own removal note (` · `-separated when both exist).

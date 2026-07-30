@@ -345,57 +345,112 @@ mod hook {
 
     use super::*;
 
-    /// Wraps `RealFs` and runs a hook exactly once, immediately before a chosen op:
-    ///
-    /// - [`HookFs::new`] — before the FIRST [`FsOps::write_staged`] (inside a staging window);
-    /// - [`HookFs::before_nth_exists`] — before the Nth [`FsOps::exists`] of ONE named path (the
-    ///   read a destructive loop takes immediately before it removes a directory, and therefore
-    ///   the seam that sits AFTER the scan which decided to remove it).
-    ///
-    /// Every other op passes straight through.
+    /// WHEN a [`HookFs`] fires — one trigger per instance, each naming the exact seam a race
+    /// would land in.
+    enum Trigger {
+        /// The FIRST [`FsOps::write_staged`] (inside a staging window).
+        FirstStagedWrite,
+        /// The Nth [`FsOps::exists`] of ONE named path (the read a destructive loop takes
+        /// immediately before it acts on a directory, and therefore the seam that sits AFTER the
+        /// scan which decided to).
+        NthExists { target: PathBuf, nth: usize },
+        /// The Nth [`FsOps::create_dir_all`] of ONE named directory — the seam a read-modify-write
+        /// crosses on its way from the read to the write.
+        NthCreateDirAll { target: PathBuf, nth: usize },
+        /// The Nth [`FsOps::read_opt`] of ONE named file — how a test lands an outside edit
+        /// BETWEEN the read that decides an act and the read that re-proves it.
+        NthRead { target: PathBuf, nth: usize },
+        /// The FIRST namespace move of ONE directory — the [`FsOps::rename`] that PARKS it or the
+        /// [`FsOps::exchange_dir`] that swaps it. The park-then-verify rail's race point: after
+        /// this instant the tree is parked (or replaced) and no path reaches it, so an edit
+        /// landing here is the last one a run can lose.
+        FirstMoveOf { dir: PathBuf },
+    }
+
+    /// Wraps `RealFs` and runs a hook exactly once, immediately before the op its [`Trigger`]
+    /// names. Every other op passes straight through.
     pub(crate) struct HookFs<'a> {
         inner: RealFs,
         fired: AtomicBool,
-        on_first_staged_write: Option<Box<dyn Fn() + 'a>>,
-        exists_target: Option<PathBuf>,
-        exists_nth: usize,
-        exists_seen: AtomicUsize,
-        on_exists: Option<Box<dyn Fn() + 'a>>,
+        seen: AtomicUsize,
+        trigger: Trigger,
+        hook: Box<dyn Fn() + 'a>,
     }
 
     impl<'a> HookFs<'a> {
-        pub(crate) fn new(on_first_staged_write: impl Fn() + 'a) -> Self {
+        fn with(trigger: Trigger, hook: impl Fn() + 'a) -> Self {
             Self {
                 inner: RealFs,
                 fired: AtomicBool::new(false),
-                on_first_staged_write: Some(Box::new(on_first_staged_write)),
-                exists_target: None,
-                exists_nth: 0,
-                exists_seen: AtomicUsize::new(0),
-                on_exists: None,
+                seen: AtomicUsize::new(0),
+                trigger,
+                hook: Box::new(hook),
             }
         }
 
+        pub(crate) fn new(on_first_staged_write: impl Fn() + 'a) -> Self {
+            Self::with(Trigger::FirstStagedWrite, on_first_staged_write)
+        }
+
         pub(crate) fn before_nth_exists(target: &Path, nth: usize, hook: impl Fn() + 'a) -> Self {
-            Self {
-                inner: RealFs,
-                fired: AtomicBool::new(false),
-                on_first_staged_write: None,
-                exists_target: Some(target.to_path_buf()),
-                exists_nth: nth,
-                exists_seen: AtomicUsize::new(0),
-                on_exists: Some(Box::new(hook)),
+            Self::with(
+                Trigger::NthExists {
+                    target: target.to_path_buf(),
+                    nth,
+                },
+                hook,
+            )
+        }
+
+        pub(crate) fn before_nth_create_dir_all(
+            target: &Path,
+            nth: usize,
+            hook: impl Fn() + 'a,
+        ) -> Self {
+            Self::with(
+                Trigger::NthCreateDirAll {
+                    target: target.to_path_buf(),
+                    nth,
+                },
+                hook,
+            )
+        }
+
+        pub(crate) fn before_nth_read(target: &Path, nth: usize, hook: impl Fn() + 'a) -> Self {
+            Self::with(
+                Trigger::NthRead {
+                    target: target.to_path_buf(),
+                    nth,
+                },
+                hook,
+            )
+        }
+
+        pub(crate) fn before_first_move_of(dir: &Path, hook: impl Fn() + 'a) -> Self {
+            Self::with(
+                Trigger::FirstMoveOf {
+                    dir: dir.to_path_buf(),
+                },
+                hook,
+            )
+        }
+
+        /// Fire once when `matched` and the trigger's own counter reaches `nth`.
+        fn maybe_fire(&self, matched: bool, nth: usize) {
+            if !matched {
+                return;
+            }
+            if self.seen.fetch_add(1, Ordering::Relaxed) + 1 == nth
+                && !self.fired.swap(true, Ordering::Relaxed)
+            {
+                (self.hook)();
             }
         }
     }
 
     impl FsOps for HookFs<'_> {
         fn write_staged(&self, path: &Path, bytes: &[u8], executable: bool) -> io::Result<()> {
-            if let Some(hook) = &self.on_first_staged_write
-                && !self.fired.swap(true, Ordering::Relaxed)
-            {
-                hook();
-            }
+            self.maybe_fire(matches!(self.trigger, Trigger::FirstStagedWrite), 1);
             self.inner.write_staged(path, bytes, executable)
         }
         fn write_temp(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -405,15 +460,28 @@ mod hook {
             self.inner.fsync_file(path)
         }
         fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+            self.maybe_fire(
+                matches!(&self.trigger, Trigger::FirstMoveOf { dir } if dir == from),
+                1,
+            );
             self.inner.rename(from, to)
         }
         fn fsync_dir(&self, dir: &Path) -> io::Result<()> {
             self.inner.fsync_dir(dir)
         }
         fn rename_dir_noreplace(&self, from: &Path, to: &Path) -> io::Result<()> {
+            self.maybe_fire(
+                matches!(&self.trigger, Trigger::FirstMoveOf { dir } if dir == from),
+                1,
+            );
             self.inner.rename_dir_noreplace(from, to)
         }
         fn create_dir_all(&self, dir: &Path) -> io::Result<()> {
+            let (matched, nth) = match &self.trigger {
+                Trigger::NthCreateDirAll { target, nth } => (target == dir, *nth),
+                _ => (false, 0),
+            };
+            self.maybe_fire(matched, nth);
             self.inner.create_dir_all(dir)
         }
         fn append_fsync(&self, path: &Path, line: &[u8]) -> io::Result<()> {
@@ -429,25 +497,32 @@ mod hook {
             self.inner.write_private(path, bytes)
         }
         fn exchange_dir(&self, a: &Path, b: &Path) -> io::Result<()> {
+            self.maybe_fire(
+                matches!(&self.trigger, Trigger::FirstMoveOf { dir } if dir == a || dir == b),
+                1,
+            );
             self.inner.exchange_dir(a, b)
         }
         fn write_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
             self.inner.write_new(path, bytes)
         }
         fn read_opt(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+            let (matched, nth) = match &self.trigger {
+                Trigger::NthRead { target, nth } => (target == path, *nth),
+                _ => (false, 0),
+            };
+            self.maybe_fire(matched, nth);
             self.inner.read_opt(path)
         }
         fn read_dir(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
             self.inner.read_dir(dir)
         }
         fn exists(&self, path: &Path) -> bool {
-            if let (Some(target), Some(hook)) = (&self.exists_target, &self.on_exists)
-                && path == target
-                && self.exists_seen.fetch_add(1, Ordering::Relaxed) + 1 == self.exists_nth
-                && !self.fired.swap(true, Ordering::Relaxed)
-            {
-                hook();
-            }
+            let (matched, nth) = match &self.trigger {
+                Trigger::NthExists { target, nth } => (target == path, *nth),
+                _ => (false, 0),
+            };
+            self.maybe_fire(matched, nth);
             self.inner.exists(path)
         }
         fn path_kind(&self, path: &Path) -> io::Result<Option<PathKind>> {

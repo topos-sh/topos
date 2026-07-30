@@ -67,7 +67,10 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   fact, so both refuse there toward channels. `parse_input` additionally accepts the CLI sugar (`@ws`,
   `@ws/bundle`, `@ws/channels/x`, bare `owner/repo[/skill]`, pasted `https://` URLs incl.
   `/tree/<ref>/<path>`, a trailing `@<pin>`) and resolves to the same shapes; manifests store only the
-  canonical joined form. The `#` sigil is a typed refusal. **The editor** (`document::ManifestEditor`)
+  canonical joined form. A subtree URL carrying a PATH names ONE skill, so `add` records the
+  4-segment skill row (the leaf name selects) whose fields carry the literal `subdir` and the pin —
+  both legal there, neither legal on the repo-set row the grammar canonicalizes the URL to; a path
+  holding several skills names none of them and refuses with their names. The `#` sigil is a typed refusal. **The editor** (`document::ManifestEditor`)
   is format-preserving over `toml_edit` with a property-tested INVERSE: set-then-remove restores the
   bytes exactly (it never deletes an emptied section header), which is what makes `add`/`remove` exact
   file inverses. **`fmt_normal`** (`manifest/normal`, the `topos fmt [-g]` verb over `ops/fmt`) renders
@@ -88,7 +91,12 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   `init`, login's feed-row append, publish's governance rewrite — takes the file's own WRITER LOCK
   (an `flock` in the home store's `locks/`, keyed by a stable hash of the manifest path) across
   read→edit→write; without it a concurrent process's row is built into a document the other one has
-  already replaced, and vanishes with no error anywhere.
+  already replaced, and vanishes with no error anywhere. `remove` holds that lock across the RESOLVE
+  as well as the write — its arms (which row, at which value, which split survivors already have
+  their own row) are decisions read FROM the file — and re-proves every arm against the file
+  immediately before writing: a document that moved under a prepared edit (a person's editor, a
+  `sed` — topos's own writers serialize on the lock) earns the typed `MANIFEST_CHANGED` refusal
+  with nothing written, never a set line rebuilt from a member list that predates someone else's row.
 - **SESSIONS** (`sessions`, `ops/login`, `enroll`) — `topos login <address>` runs against
   `/v1/login/authorize|token` (the constant protocol card re-roots onto the declared API base,
   same-security only; the `0600` WAL holds the flow; re-invoking IS the resume). TWO SHAPES,
@@ -129,11 +137,17 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   per-checkout store contents vouch (both are repo facts anyone could have committed: demand, never
   consent); a GRANTED origin's rows advance ONLY on an explicit `update` (never on the
   quiet sweep — no session start dials a forge), receipted with the commit motion and the member delta,
-  members the new archive dropped cleaned snapshot-first in the same run. A PINNED repo set is
+  members the new archive dropped cleaned snapshot-first in the same run. A row's `harness` list (a
+  `-a` selector import's recorded placement decision) is CONSUMED here: one converge slot per named
+  agent, each paired with the copy already placed under that agent's skills root, so a refresh keeps
+  the bytes where they were asked for instead of re-landing them in the default dir (no field = one
+  default slot = the old behavior). A PINNED repo set is
   settled only when the tracked members cover the member set RECORDED at landing (`origin.json`) —
   "every tracked member is at the pin" is true and useless after a partial landing, and would leave
-  the missing members unreachable forever; an import that recorded no member set keeps the older,
-  weaker predicate rather than inventing a gap. A local-path row is an
+  the missing members unreachable forever; an import that recorded NO member set is not evidence of
+  completeness either ("nothing missing" ≠ "nothing known"), so it is unsettled: the next explicit
+  update refetches ONCE, writes the archive's member list onto those imports, converges, and rests
+  from then on (the quiet sweep still never dials — it carries no git source at all). A local-path row is an
   adopt-in-place presence check (and the idempotent converge of a landed publish's PENDING governance
   rewrite). A manifest the grammar refuses FREEZES its whole scope — no delivery, no cleaning: a typo
   must keep bytes, never drop them. Placement is PER-SCOPE (see below); after the fan-out
@@ -144,8 +158,10 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   AND every visited project store: this run's cwd chain unioned with the machine-local
   **visited-stores index** (`state/visited_stores.json` — every project store a reconcile visits is
   recorded, so an update run from one checkout still reports another checkout's holdings; a store
-  that is gone, or whose placements are, drops out naturally on read), manifest-row deliveries
-  included — declined-but-locally-added
+  that is gone, or whose placements are, drops out naturally on read; the whole read→union→write
+  runs under the index's own `locks/visited-stores.lock`, because two sweeps from two checkouts are
+  the ordinary case and an unserialized union simply drops the other one's checkout), manifest-row
+  deliveries included — declined-but-locally-added
   bundles report too, which is what makes the web's declined-but-applied disclosure real). The wire
   carries exactly ONE row per (session, bundle), so which store answers is DETERMINISTIC and stated:
   the person store whenever it holds the bundle, else the project stores in ascending path order —
@@ -185,10 +201,12 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   whose bytes these are — so an ungranted origin describes (members + where each lands) and applies
   only under `--yes`, ONE fetch serves every (skill × harness) combination, and a project-destined
   import writes the checkout's own `.topos/` store, the one the project reconcile converges. The
-  destination is RE-PROVEN immediately before the delete + rename that lands it: the emptiness check
-  ran before the staging window, and anything that appeared in that window is refused
-  (`PLACEMENT_OCCUPIED`) unless it is byte-identical to what is being placed — never deleted on a
-  stale observation. Re-adding an EXISTING row keeps the exact-inverse discipline: the same value is the redundancy
+  `-a` selection is RECORDED on the row (`harness = [slugs]`) — a placement decision only the
+  invocation remembers is no decision at all, and the reconcile's forge arms plan against it. The
+  destination is PARKED, then judged, immediately before the rename that lands it: the emptiness
+  check ran before the staging window, so the dir is moved aside (a rename has no window) and read
+  there — empty or byte-identical drops, anything else is put back whole with `PLACEMENT_OCCUPIED`,
+  never deleted on a stale observation. Re-adding an EXISTING row keeps the exact-inverse discipline: the same value is the redundancy
   disclosure (nothing written, no undo); a different value applies with the prior value named and the
   undo offered ONLY where it verifiably restores it (`add <ref>` for a prior `"*"`, `add <ref>@<pin>`
   for a prior pin; a prior fields table gets NO undo, said why). `remove <targets…> [-g]` is the EXACT
@@ -202,8 +220,14 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   this file. A set line is split exactly ONCE per invocation: several targets inside one set resolve
   against it together (members minus ALL of them), because two sequential splits would each rebuild
   the line from its full member list and the second would write the first's removal straight back.
-  A bare NAME that more than one row (or more than one workspace's feed) answers to is an
-  `AMBIGUOUS_NAME` refusal listing the qualified references — never the first match. Its two-phase arms are LOSS (an affected bundle with unshared edits, or an unclassifiable
+  A bare NAME is resolved by GATHERING every candidate first — the file's feed row, its explicit
+  rows, the bundles the feed delivers, and every SET line's current members — and then counting: one
+  answers, several earn the `AMBIGUOUS_NAME` refusal listing the qualified references (a set member
+  is qualified by its own reference AND the line it comes from, because two channels carrying one
+  bundle are two different edits and splitting whichever expanded first leaves the other delivering
+  it). An EXACT spelling is always an answer, never an ambiguity, which is what keeps the refusal
+  actionable; one identity reached two ways (its own row and the feed that also delivers it) is ONE
+  candidate. Its two-phase arms are LOSS (an affected bundle with unshared edits, or an unclassifiable
   scan — the guard fails TOWARD the gate, and it covers EVERY placement-retiring arm: the row drop, the
   feed-row drop, and the `"off"` switch alike) and the set split; everything else applies immediately,
   and the receipt offers the literal inverse ONLY when it restores the whole prior state. A tracked never-published local (or an untracked
@@ -231,7 +255,10 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   registry project dir, the `.claude/skills` default, and the `path` override alike — must have no
   symlink component below the checkout AND canonicalize inside it, or that root is REFUSED with a
   `PLACEMENT_ESCAPES_PROJECT` line and the placement is skipped, never redirected (a repo can commit
-  `.claude/skills` as a symlink exactly as easily as it can write `path = "../.."`); every landed
+  `.claude/skills` as a symlink exactly as easily as it can write `path = "../.."`) — and a REUSED
+  prior path passes the same proof, because a record is a memory, not a permission: the checkout can
+  turn a recorded ancestor into a symlink long after the record was written, and a lexical
+  `starts_with` would still call it inside; every landed
   project dir SELF-IGNORES (the staged tree carries the exact sentinel `.gitignore` unless the bundle
   ships its own — the node_modules model; the scanner treats the byte-exact sentinel at the bundle
   root as topos metadata, so it never reads as an edit; no repository file is ever touched).
@@ -265,10 +292,21 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   materializer re-fingerprints the dir (stat-only — `(mtime_ns, ctime_ns, size)` per entry, O(stat),
   never a second hash) immediately before the swap; a tree that MOVED in that window is re-snapshotted
   where a snapshotter exists and otherwise SKIPPED (its recorded state stays behind the bytes, so the
-  next sweep reconciles from a fresh scan). The retiring clean carries the same rule the other way
-  round: each placement is re-scanned immediately before its own delete and whatever is actually
-  there is committed then, and a dir that became unreadable in the window refuses rather than being
-  removed blind. The TWO DETECTORS are
+  next sweep reconciles from a fresh scan). That is the DECISION rail, and a decision must precede
+  the mutation — so the residual window it cannot close (between the stat and the syscall) is closed
+  from the other side: **PARK-THEN-VERIFY** is the one primitive every destructive path uses now
+  (`materialize::park_aside` / `restore_parked`). Checking harder never closes a window; a rename
+  has none. The swap PARKS the old tree (the exchange leaves it at the staging path, the
+  rename-dance at the graveyard) and the park is READ before it is dropped — bytes that are the
+  target, this placement's recorded baseline, or an already-taken snapshot go; anything else is
+  snapshotted first (and, with no snapshotter at all, moved to a `.topos-kept-*` sibling no litter
+  sweep touches). The retiring clean parks each placement aside and reads THAT tree — an
+  unreadable park goes back and the clean refuses, never removes blind. A remote import parks the
+  destination before the landing rename: empty or byte-identical drops, anything else is restored
+  whole with the typed `PLACEMENT_OCCUPIED`. The forge refresh's stash IS its park (and the whole
+  replacement now runs under the skill's writer lock): each stashed dir is re-read, and a local edit
+  that arrived after the classifying scan restores every stash and refuses, exactly like an edit
+  found up front. The TWO DETECTORS are
   split: DRAFT reads each copy against the pristine version (one distinct edited content per
   bundle+scope is THE draft), CONFLICT reads the edited copies against each other — competitors
   ONLY when neither's bytes equal the other's RECORDED baseline (a copy at a sibling's baseline is

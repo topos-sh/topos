@@ -121,6 +121,14 @@ impl Layout {
         self.locks_dir().join("identity.lock")
     }
 
+    /// `locks/visited-stores.lock` — the visited-store index's writer lock (a fixed name). The
+    /// index is a read-union-write over one machine-local document, so two sweeps running from
+    /// two checkouts would each write a set built from bytes the other had already replaced, and
+    /// the loser's checkout would vanish from every later applied report with no error anywhere.
+    pub(crate) fn visited_stores_lock_file(&self) -> PathBuf {
+        self.locks_dir().join("visited-stores.lock")
+    }
+
     /// `locks/currency.lock` — the bare-sweep single-flight lock (a fixed name): the quiet hook
     /// TRY-locks it (a held lock means another sweep is in flight → silent no-op), an explicit bare
     /// `update` takes it blocking. Per-skill writer locks still guard every actual placement write —

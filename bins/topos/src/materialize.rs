@@ -211,6 +211,9 @@ pub(crate) fn materialize(
         // immediately before the swap so the decision the scan made is re-proven against the bytes
         // actually about to be destroyed (see the re-stat below).
         let mut observed: Option<Vec<DirStat>> = None;
+        // What a snapshot on this placement has ALREADY captured (by digest) — read again by the
+        // park verification below, so bytes committed once are not committed twice.
+        let mut captured: Option<String> = None;
         if target.dir_was_present {
             // Pre-swap scan: heal a dir that already holds the target bytes (a crash after a prior
             // swap, or an idempotent re-apply) with NO second swap; snapshot an uncaptured edit
@@ -262,6 +265,7 @@ pub(crate) fn materialize(
                         && let Some(snapshot) = req.snapshot
                     {
                         snapshot(&scanned)?;
+                        captured = Some(on_disk);
                     }
                 }
                 Err(_) => {
@@ -300,6 +304,11 @@ pub(crate) fn materialize(
         // - a sweep's opportunistic arm, a caller with no snapshotter, and a dir that has become
         //   unreadable all SKIP the placement — its recorded state stays behind the bytes, so the
         //   next sweep reconciles it from a fresh scan. Nothing unaccounted-for is overwritten.
+        //
+        // This is the DECISION rail (skip or proceed), and a decision must be made before the
+        // mutation. The residual window it cannot close — between this stat and the swap syscall —
+        // is closed on the other side: the swap PARKS the old tree instead of deleting it, and
+        // `verify_parked_old` reads what is really in it before anything is dropped.
         if target.dir_was_present {
             let now = dir_fingerprint(&target.dir);
             if now.is_none() || now != observed {
@@ -310,6 +319,7 @@ pub(crate) fn materialize(
                             && to_hex(&scanned.bundle_digest) != target_hex =>
                     {
                         snapshot(scanned)?;
+                        captured = Some(to_hex(&scanned.bundle_digest));
                     }
                     _ => {
                         fs.remove_dir_all(&staging)?;
@@ -321,7 +331,19 @@ pub(crate) fn materialize(
 
         // Place the bytes.
         if target.dir_was_present {
-            cap = place_update(fs, &staging, &target.dir, &parent, req.skill_id, cap)?;
+            let baseline = map.placement_state[i].materialized_sha.clone();
+            let (next_cap, parked) =
+                place_update(fs, &staging, &target.dir, &parent, req.skill_id, cap)?;
+            cap = next_cap;
+            // The old tree is parked, not gone: judge it, then drop it.
+            verify_parked_old(
+                fs,
+                &parked,
+                &target_hex,
+                baseline.as_deref(),
+                captured.as_deref(),
+                req.snapshot,
+            )?;
         } else {
             // First install: an atomic create — no prior bytes to mix.
             fs.rename_dir_noreplace(&staging, &target.dir)
@@ -458,7 +480,10 @@ fn resolve_target(
     }
 }
 
-/// Place new bytes over an existing directory, self-healing a stale `AtomicExchange` to `RenameDance`.
+/// Place new bytes over an existing directory, self-healing a stale `AtomicExchange` to
+/// `RenameDance`. Returns the effective capability AND the path the OLD tree is now PARKED at —
+/// both swap shapes park rather than delete, so the caller inspects those bytes before they go
+/// (see [`verify_parked_old`]).
 fn place_update(
     fs: &dyn FsOps,
     staging: &Path,
@@ -466,26 +491,25 @@ fn place_update(
     parent: &Path,
     skill_id: &str,
     cap: SwapCapability,
-) -> Result<SwapCapability, ClientError> {
+) -> Result<(SwapCapability, PathBuf), ClientError> {
     match cap {
         SwapCapability::AtomicExchange => match fs.exchange_dir(staging, dir) {
             Ok(()) => {
                 fs.fsync_dir(parent)?;
-                // The swap parked the OLD bytes at the staging path; drop them.
-                fs.remove_dir_all(staging)?;
-                Ok(SwapCapability::AtomicExchange)
+                // The swap PARKED the old bytes at the staging path — the caller judges them.
+                Ok((SwapCapability::AtomicExchange, staging.to_path_buf()))
             }
             Err(e) if is_unsupported(&e) => {
                 // The cached capability is stale (the placement moved onto a swap-incapable FS). Fall
                 // back to the rename-dance, reusing the already-built staging.
-                do_dance(fs, staging, dir, parent, skill_id)?;
-                Ok(SwapCapability::RenameDance)
+                let parked = do_dance(fs, staging, dir, parent, skill_id)?;
+                Ok((SwapCapability::RenameDance, parked))
             }
             Err(e) => Err(ClientError::Io(format!("atomic directory swap: {e}"))),
         },
         SwapCapability::RenameDance => {
-            do_dance(fs, staging, dir, parent, skill_id)?;
-            Ok(SwapCapability::RenameDance)
+            let parked = do_dance(fs, staging, dir, parent, skill_id)?;
+            Ok((SwapCapability::RenameDance, parked))
         }
         SwapCapability::Unsupported => Err(ClientError::PlacementUnsupported {
             reason: "no safe directory swap on this filesystem".into(),
@@ -493,17 +517,18 @@ fn place_update(
     }
 }
 
-/// The degraded fallback when no atomic swap exists: park the old dir, move the new in, drop the old.
-/// Each `rename` is atomic, so the dir is never *mixed*; between the two renames it is briefly **absent**
-/// (the named, logged residual). A crash in that window leaves the dir absent → the next pull takes the
-/// first-install branch and restores the new bytes (the old version is still in the sidecar store).
+/// The degraded fallback when no atomic swap exists: park the old dir, move the new in, hand the
+/// park back. Each `rename` is atomic, so the dir is never *mixed*; between the two renames it is
+/// briefly **absent** (the named, logged residual). A crash in that window leaves the dir absent →
+/// the next pull takes the first-install branch and restores the new bytes (the old version is
+/// still in the sidecar store).
 fn do_dance(
     fs: &dyn FsOps,
     staging: &Path,
     dir: &Path,
     parent: &Path,
     skill_id: &str,
-) -> Result<(), ClientError> {
+) -> Result<PathBuf, ClientError> {
     let graveyard = graveyard_path(parent, skill_id);
     fs.remove_dir_all(&graveyard)?;
     fs.rename(dir, &graveyard)
@@ -512,7 +537,62 @@ fn do_dance(
     fs.rename(staging, dir)
         .map_err(|e| ClientError::Io(format!("rename-dance install new: {e}")))?;
     fs.fsync_dir(parent)?;
-    fs.remove_dir_all(&graveyard)?;
+    Ok(graveyard)
+}
+
+/// PARK-THEN-VERIFY, the swap's own half: judge the OLD tree the swap parked, and only then drop
+/// it.
+///
+/// Every decision above the swap — heal, snapshot, never-clobber, the pre-mutation re-stat — was
+/// made against bytes still reachable by their path, so the last instant before the syscall is
+/// still a window. This read is not: the tree is parked, nobody can write it through the placement
+/// path any more, and what it holds is exactly what would have been lost.
+///
+/// - bytes that ARE the target, or that equal this placement's recorded baseline, or that a
+///   snapshot above already captured → nothing of the person's is in them; drop;
+/// - anything else → snapshot it first (the callers that destroy always carry a snapshotter);
+/// - unaccountable with no snapshotter (a test seam, never a production path) → the park is RENAMED
+///   to a `.topos-kept-*` sibling no litter sweep touches and left on disk. No unsnapshotted byte
+///   dies, even when there is nowhere to put it.
+fn verify_parked_old(
+    fs: &dyn FsOps,
+    parked: &Path,
+    target_hex: &str,
+    baseline: Option<&str>,
+    captured: Option<&str>,
+    snapshot: Option<SnapshotFn<'_>>,
+) -> Result<(), ClientError> {
+    let Ok(scanned) = scan::scan(parked) else {
+        // An unreadable park is not a park we may delete.
+        return keep_parked(fs, parked);
+    };
+    let hex = to_hex(&scanned.bundle_digest);
+    if hex == target_hex || baseline == Some(hex.as_str()) || captured == Some(hex.as_str()) {
+        fs.remove_dir_all(parked)?;
+        return Ok(());
+    }
+    match snapshot {
+        Some(snapshot) => {
+            snapshot(&scanned)?;
+            fs.remove_dir_all(parked)?;
+            Ok(())
+        }
+        None => keep_parked(fs, parked),
+    }
+}
+
+/// Move a park out of the litter sweep's reach and leave it — the "we could not account for these
+/// bytes and have nowhere to put them" arm. Best-effort: a park that cannot be renamed simply
+/// stays where it is (still not deleted).
+fn keep_parked(fs: &dyn FsOps, parked: &Path) -> Result<(), ClientError> {
+    let name = parked
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "dir".to_owned());
+    let kept = parked.with_file_name(format!(".topos-kept-{name}"));
+    if !fs.exists(&kept) {
+        let _ = fs.rename(parked, &kept);
+    }
     Ok(())
 }
 
@@ -571,6 +651,53 @@ fn build_staging(
         fs.fsync_dir(d)?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// PARK-THEN-VERIFY — the one primitive behind every destructive path
+// ---------------------------------------------------------------------------------------------
+
+/// Move `dir` ASIDE, atomically, to a `.`-prefixed sibling — the first half of park-then-verify.
+///
+/// Verify-then-delete cannot be made safe by checking harder: between the last look and the
+/// `rm -rf` there is always a window, and whatever lands in it dies unexamined. A `rename` has no
+/// such window — after it, the tree is out of every path anyone else can write through, and the
+/// caller can inspect it at leisure and decide: drop it (nothing of the person's was there),
+/// snapshot it (bytes worth keeping), or put it back (this run may not have it).
+///
+/// The sibling name is UNIQUE — an existing park (a prior crashed run's) is never deleted to make
+/// room, and a leftover is dot-prefixed so no harness discovery reads it as a skill.
+///
+/// # Errors
+/// The rename failed, or 64 parks already sit beside the directory (a person's cleanup, not ours).
+pub(crate) fn park_aside(fs: &dyn FsOps, dir: &Path, tag: &str) -> Result<PathBuf, ClientError> {
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "dir".to_owned());
+    let mut to = dir.with_file_name(format!(".topos-{tag}-{name}"));
+    let mut n = 1u32;
+    while fs.exists(&to) {
+        n += 1;
+        if n > 64 {
+            return Err(ClientError::Io(format!(
+                "park {}: too many `.topos-{tag}-*` siblings beside it — remove the stale ones \
+                 first (they hold bytes topos declined to delete)",
+                dir.display()
+            )));
+        }
+        to = dir.with_file_name(format!(".topos-{tag}-{name}.{n}"));
+    }
+    fs.rename(dir, &to)
+        .map_err(|e| ClientError::Io(format!("park {}: {e}", dir.display())))?;
+    Ok(to)
+}
+
+/// Put a parked tree back where it came from — the "this run may not have it" arm. Best-effort by
+/// contract: a destination that has since been re-created is NOT overwritten (the park stays on
+/// disk, named, rather than clobbering whatever took its place), and the caller's refusal says so.
+pub(crate) fn restore_parked(fs: &dyn FsOps, parked: &Path, orig: &Path) -> bool {
+    !fs.exists(orig) && fs.rename(parked, orig).is_ok()
 }
 
 /// Remove any leftover staging / graveyard / probe siblings of THIS skill (idempotent, NotFound-tolerant).

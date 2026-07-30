@@ -679,6 +679,9 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 crate::source::SourceSpec::Remote(spec) => match list_discovery(false) {
                     Some(roots) => {
                         let git = crate::plane_http::UreqGitSource::new();
+                        // The `-a` selection is a standing fact, not a one-run choice: it rides
+                        // the row so the next update keeps the copy where it was asked for.
+                        let chosen: Vec<String> = single_agent.iter().cloned().collect();
                         ops::add_remote(
                             &ctx,
                             &git,
@@ -686,12 +689,12 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                             &roots,
                             &ops::AddRemoteOpts {
                                 skill: single_skill,
-                                harness: single_agent,
+                                harness: single_agent.clone(),
                                 global,
                             },
                         )
                         .and_then(|mut d| {
-                            ops::note_added_remote(&ctx, &mut d, global)?;
+                            ops::note_added_remote(&ctx, &mut d, global, &chosen)?;
                             // The DEDUP courtesy: when a connected workspace already governs this
                             // source (its catalog's upstream provenance matches), the receipt
                             // SUGGESTS the governed reference — visible, never blocking (the

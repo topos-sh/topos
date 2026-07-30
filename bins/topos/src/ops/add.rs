@@ -416,18 +416,14 @@ pub(crate) fn add_remote_fetched(
             Some(f) => git_visible = !crate::materialize::ignores_all(&f.bytes),
         }
     }
-    // RE-PROVE the destination immediately before the destructive pair. Step 3's check ran BEFORE
-    // the staging window, and building the staged tree takes real time — anything that appeared at
-    // `dest_dir` since then was validated by nobody, and the recursive delete two lines down would
-    // destroy it on the strength of a stale observation.
-    if let Err(e) = revalidate_destination(ctx, &dest_dir, &stage_dir) {
+    // PARK, THEN VERIFY. Step 3's check ran BEFORE the staging window, and building the staged
+    // tree takes real time — anything that appeared at `dest_dir` since then was validated by
+    // nobody. Re-checking and then deleting only narrows the window; moving the directory aside
+    // first CLOSES it: after the rename nothing can land in the tree we are about to judge, and
+    // the judgment therefore covers exactly the bytes at stake.
+    if let Err(e) = park_and_verify_destination(ctx, &dest_dir, &stage_dir) {
         let _ = ctx.fs.remove_dir_all(&stage_dir);
         return Err(e);
-    }
-    // An empty pre-existing dest is fine to fill (check_destination allowed it) but blocks the no-replace
-    // rename — clear it first. A non-empty dest was already refused above.
-    if ctx.fs.exists(&dest_dir) {
-        ctx.fs.remove_dir_all(&dest_dir)?;
     }
     if let Err(e) = ctx.fs.rename_dir_noreplace(&stage_dir, &dest_dir) {
         let _ = ctx.fs.remove_dir_all(&stage_dir);
@@ -757,24 +753,56 @@ fn check_destination(ctx: &Ctx<'_>, dest: &Path) -> Result<(), ClientError> {
     })
 }
 
-/// Re-prove the destination is ours to fill, IMMEDIATELY before the delete + rename that lands the
-/// import — the second half of [`check_destination`], run after the staging window rather than
-/// before it. TIME PASSES between the two: extracting and writing the staged tree is real work, and
-/// a directory that appeared at `dest` in that window carries bytes nobody validated.
+/// PARK the destination aside, then prove it was ours to replace — the second half of
+/// [`check_destination`], run after the staging window rather than before it, and run on a tree
+/// nothing can still be writing to.
 ///
-/// One benign case proceeds: content BYTE-IDENTICAL to what this call is about to place (a
-/// concurrent run of the same import that landed first). Replacing it changes nothing observable.
-/// Everything else — a foreign occupant, a now-tracked dir, an unreadable one — keeps its typed
-/// refusal and the staged tree is dropped: never delete bytes this run cannot account for.
-fn revalidate_destination(ctx: &Ctx<'_>, dest: &Path, staged: &Path) -> Result<(), ClientError> {
-    let Err(refusal) = check_destination(ctx, dest) else {
+/// TIME PASSES between the two checks: extracting and writing the staged tree is real work, and a
+/// directory that appeared at `dest` in that window carries bytes nobody validated. Verifying and
+/// then deleting leaves a window between the two; the rename here has none — after it, `dest` is
+/// free for the caller's no-replace rename and the parked tree is a still photograph.
+///
+/// Two benign cases drop the park: an EMPTY directory (what [`check_destination`] already
+/// allowed), and content BYTE-IDENTICAL to what this call is about to place (a concurrent run of
+/// the same import that landed first — replacing it changes nothing observable). Everything else
+/// — a foreign occupant, a now-tracked dir, an unreadable one — is PUT BACK and the typed refusal
+/// stands: never delete bytes this run cannot account for. A destination that has been re-created
+/// while the park was out keeps the parked bytes under the park's own name, and the refusal says
+/// where.
+fn park_and_verify_destination(
+    ctx: &Ctx<'_>,
+    dest: &Path,
+    staged: &Path,
+) -> Result<(), ClientError> {
+    if !ctx.fs.exists(dest) {
         return Ok(());
-    };
-    let identical = match (scan::scan(dest), scan::scan(staged)) {
+    }
+    let parked = crate::materialize::park_aside(ctx.fs, dest, "import-old")?;
+    let empty = ctx
+        .fs
+        .read_dir(&parked)
+        .map(|v| v.is_empty())
+        .unwrap_or(false);
+    let identical = || match (scan::scan(&parked), scan::scan(staged)) {
         (Ok(there), Ok(here)) => there.bundle_digest == here.bundle_digest,
         _ => false,
     };
-    if identical { Ok(()) } else { Err(refusal) }
+    if empty || identical() {
+        ctx.fs.remove_dir_all(&parked)?;
+        return Ok(());
+    }
+    let restored = crate::materialize::restore_parked(ctx.fs, &parked, dest);
+    Err(ClientError::PlacementOccupied {
+        path: if restored {
+            dest.display().to_string()
+        } else {
+            format!(
+                "{} (its bytes are parked at {})",
+                dest.display(),
+                parked.display()
+            )
+        },
+    })
 }
 
 /// Write a selected skill's byte-exact files into `dest`, preserving the executable bit (part of the

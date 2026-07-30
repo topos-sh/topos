@@ -259,6 +259,26 @@ pub(crate) fn plan_targets(
     plan
 }
 
+/// What a PROJECT-scope prior record yields for one `(kind, agent)` key: nothing recorded, a
+/// recorded dir re-proven inside the checkout, or a recorded dir that no longer resolves inside it
+/// (a committed symlink can be swapped in AFTER the record was written — a record is a memory, not
+/// a permission).
+enum PriorProjectDir {
+    None,
+    Reuse(PathBuf),
+    Escaped(PathBuf),
+}
+
+impl PriorProjectDir {
+    /// The reusable dir, if this key has one.
+    fn reuse(self) -> Option<PathBuf> {
+        match self {
+            PriorProjectDir::Reuse(dir) => Some(dir),
+            _ => None,
+        }
+    }
+}
+
 /// The PROJECT-scope placement plan — where a project manifest's bundles land INSIDE the checkout
 /// (a project-scope bundle materializes in the project itself, so every agent visiting the
 /// checkout reads the same bytes): its harness dirs, never committed (each landed dir carries the
@@ -283,9 +303,18 @@ pub(crate) fn project_plan(
         |p: &Path| topos_harness::dir_taken(p) || recorded_by_another_skill(ctx, skill_id, p);
     // Prior stability, PROJECT-LOCAL: the recorded dir for a (kind, agent) key is reused only when
     // it sits under this project (a home-dir record for the same key belongs to the person scope).
-    let prior_in = |kind: PlacementKind, agent: Option<&str>| -> Option<PathBuf> {
-        let map = prior?;
-        map.placements
+    //
+    // A record is not a permission. `starts_with` is LEXICAL — it proves the string, not the path —
+    // and the checkout can turn any recorded ancestor into a symlink after the record was written.
+    // So a reused prior path passes the SAME containment proof a fresh root does, and one that
+    // fails is refused exactly like a fresh escape: a typed line, the placement skipped, the link
+    // never followed.
+    let prior_in = |kind: PlacementKind, agent: Option<&str>| -> PriorProjectDir {
+        let Some(map) = prior else {
+            return PriorProjectDir::None;
+        };
+        let hit = map
+            .placements
             .iter()
             .zip(&map.placement_state)
             .find(|(dir, st)| {
@@ -296,7 +325,12 @@ pub(crate) fn project_plan(
                         || !topos_harness::dir_taken(Path::new(dir))
                         || adoption_reservation_holds(dir, st, adopt))
             })
-            .map(|(dir, _)| PathBuf::from(dir))
+            .map(|(dir, _)| PathBuf::from(dir));
+        match hit {
+            None => PriorProjectDir::None,
+            Some(dir) if within_project(project_dir, &dir) => PriorProjectDir::Reuse(dir),
+            Some(dir) => PriorProjectDir::Escaped(dir),
+        }
     };
     let choose = |root: &Path| {
         adopt_override(
@@ -317,12 +351,16 @@ pub(crate) fn project_plan(
         .filter(|r| safe_project_rel(r))
         .and_then(|rel| override_root_within(project_dir, rel))
     {
-        let dir = prior_in(PlacementKind::Native, None).unwrap_or_else(|| choose(&root));
-        plan.targets.push(PlannedTarget {
-            dir,
-            kind: PlacementKind::Native,
-            agent: None,
-        });
+        match prior_in(PlacementKind::Native, None) {
+            PriorProjectDir::Escaped(dir) => {
+                plan.refused.push(escape_line("the recorded dir", &dir));
+            }
+            prior => plan.targets.push(PlannedTarget {
+                dir: prior.reuse().unwrap_or_else(|| choose(&root)),
+                kind: PlacementKind::Native,
+                agent: None,
+            }),
+        }
         return plan;
     }
 
@@ -347,19 +385,25 @@ pub(crate) fn project_plan(
     if !plan.shared_covers.is_empty() {
         let shared_root = project_dir.join(".agents/skills");
         match prior_in(PlacementKind::Shared, None) {
-            Some(dir) => plan.targets.push(PlannedTarget {
+            PriorProjectDir::Reuse(dir) => plan.targets.push(PlannedTarget {
                 dir,
                 kind: PlacementKind::Shared,
                 agent: None,
             }),
+            // A recorded dir that no longer resolves inside the checkout is refused, never
+            // followed — the rail does not care whether a path is fresh or remembered.
+            PriorProjectDir::Escaped(dir) => {
+                plan.refused
+                    .push(escape_line("the recorded shared dir", &dir));
+            }
             // THE CONTAINMENT RAIL, on the DEFAULT root — not just the override. A committed
             // `.agents/skills` symlink aiming out of the checkout would otherwise place every
             // covered agent's bytes wherever it points.
-            None if !within_project(project_dir, &shared_root) => {
+            PriorProjectDir::None if !within_project(project_dir, &shared_root) => {
                 plan.refused
                     .push(escape_line("the shared agents dir", &shared_root));
             }
-            None => plan.targets.push(PlannedTarget {
+            PriorProjectDir::None => plan.targets.push(PlannedTarget {
                 dir: choose(&shared_root),
                 kind: PlacementKind::Shared,
                 agent: None,
@@ -378,12 +422,16 @@ pub(crate) fn project_plan(
             continue; // no project-scope dir for this harness — nothing to place in-project
         };
         let dir = match prior_in(PlacementKind::Native, Some(h.slug)) {
-            Some(dir) => dir,
-            None if !within_project(project_dir, &root) => {
+            PriorProjectDir::Reuse(dir) => dir,
+            PriorProjectDir::Escaped(dir) => {
+                plan.refused.push(escape_line(h.slug, &dir));
+                continue;
+            }
+            PriorProjectDir::None if !within_project(project_dir, &root) => {
                 plan.refused.push(escape_line(h.slug, &root));
                 continue;
             }
-            None => choose(&root),
+            PriorProjectDir::None => choose(&root),
         };
         if plan.targets.iter().any(|t| t.dir == dir) {
             continue;
@@ -412,17 +460,18 @@ pub(crate) fn project_plan(
             })
             .unwrap_or_else(|| project_dir.join(".claude/skills"));
         match prior_in(PlacementKind::Native, Some(active)) {
-            Some(dir) => plan.targets.push(PlannedTarget {
+            PriorProjectDir::Reuse(dir) => plan.targets.push(PlannedTarget {
                 dir,
                 kind: PlacementKind::Native,
                 agent: Some(active.to_owned()),
             }),
+            PriorProjectDir::Escaped(dir) => plan.refused.push(escape_line(active, &dir)),
             // The last root is the rail's last stand: refusing leaves this scope with NO target,
             // which is the honest answer — nothing lands rather than landing outside the checkout.
-            None if !within_project(project_dir, &root) => {
+            PriorProjectDir::None if !within_project(project_dir, &root) => {
                 plan.refused.push(escape_line(active, &root));
             }
-            None => plan.targets.push(PlannedTarget {
+            PriorProjectDir::None => plan.targets.push(PlannedTarget {
                 dir: choose(&root),
                 kind: PlacementKind::Native,
                 agent: Some(active.to_owned()),

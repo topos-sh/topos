@@ -507,9 +507,15 @@ fn add_forge(
 
     // The row's KEY: the repo (every skill it holds) or ONE discovered skill by its LEAF
     // directory name — a frontmatter name is accepted as input when it uniquely names one.
-    let (reference, members) = match &want_skill {
-        None => (source_label.clone(), discovered.clone()),
-        Some(want) => {
+    //
+    // A pasted SUBTREE URL (`/tree/<ref>/<path>`) is the third case: the grammar canonicalizes it
+    // to the repo and hands the literal path back as a hint, but the path names ONE skill, not the
+    // repo — and a repo-SET row cannot legally carry `subdir` or `version`, so recording it as one
+    // would refuse the write after the origin had already been trusted. It becomes the 4-segment
+    // skill row (the leaf name selects) whose fields carry the literal path and the pin, both
+    // legal there. A path holding SEVERAL skills names none of them: it refuses, with the names.
+    let (reference, members) = match (&want_skill, parsed.subdir_hint.as_deref()) {
+        (Some(want), _) => {
             let leaf = canonical_leaf(
                 &extracted,
                 &discovered,
@@ -520,6 +526,16 @@ fn add_forge(
             )?;
             (format!("{source_label}/{leaf}"), vec![leaf])
         }
+        (None, Some(sub)) => match discovered.as_slice() {
+            [one] => (format!("{source_label}/{one}"), vec![one.clone()]),
+            _ => {
+                return Err(ClientError::AmbiguousSkillInRepo {
+                    src: format!("{source_label}/{sub}"),
+                    skills: discovered.clone(),
+                });
+            }
+        },
+        (None, None) => (source_label.clone(), discovered.clone()),
     };
 
     // The row's VALUE: `"*"` tracks the default branch; a hex ref pins straight through; a NAMED
@@ -532,13 +548,18 @@ fn add_forge(
     };
     let value = match (&pin, &parsed.subdir_hint) {
         (_, Some(sub)) => EntryValue::Fields(EntryFields {
-            version: pin.clone().or_else(|| Some("*".to_owned())),
+            version: pin.clone(),
             subdir: Some(sub.clone()),
             ..EntryFields::default()
         }),
         (Some(p), None) => EntryValue::Pin(p.clone()),
         (None, None) => EntryValue::Star,
     };
+    // PROVE THE ROW BEFORE THE CONSENT. The apply below grants the origin durably and only then
+    // writes; a value the file would refuse must therefore be caught here, while nothing has
+    // happened yet — a machine must never be left trusting a source whose row never landed.
+    crate::manifest::document::check_row(&reference, target.scope, &value)
+        .map_err(|e| ClientError::InvalidArgument(e.message))?;
 
     // FIRST TRUST: an origin the scope's store does not track is described, never installed,
     // until `--yes` — however many manifests spell its row.
@@ -816,6 +837,9 @@ pub(crate) fn add_forge_selected(
     if target.scope == ManifestScope::Project {
         crate::sidecar::ensure_project_store(ctx.fs, &target.dir)?;
     }
+    // The harness SELECTION the rows carry: the slugs this invocation aimed at (a `*` fan-out is
+    // the detected set, spelled out — a row must say what it means, not re-resolve `*` later).
+    let chosen: Vec<String> = agent_opts.iter().flatten().cloned().collect();
     let mut out = Vec::with_capacity(skill_opts.len() * agent_opts.len());
     for s in &skill_opts {
         for a in &agent_opts {
@@ -826,8 +850,10 @@ pub(crate) fn add_forge_selected(
             };
             let mut data = super::add::add_remote_fetched(&sctx, &targz, &spec, &roots, &opts)?;
             // Each landed (skill × harness) records its manifest line like the single-select
-            // path — and carries the same dedup courtesy, judged against ITS resolved subdir.
-            medit::note_added_remote(ctx, &mut data, global)?;
+            // path — carrying the WHOLE harness selection (so the second combination of one
+            // skill rewrites the identical row rather than narrowing it) and the same dedup
+            // courtesy, judged against ITS resolved subdir.
+            medit::note_added_remote(ctx, &mut data, global, &chosen)?;
             let imported_subdir = data.origin.as_ref().and_then(|o| o.subdir.clone());
             data.governed_copy = super::add::governed_copy_suggestion(
                 ctx,
