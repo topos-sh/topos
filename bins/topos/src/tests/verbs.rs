@@ -295,6 +295,59 @@ fn add_remote_imports_a_repo_skill_places_bytes_and_records_origin() {
     assert_eq!(err.code(), "ALREADY_TRACKED");
 }
 
+/// The staging window is not a licence to delete. A destination validated as EMPTY before the
+/// staged tree is built, then filled by someone else while it is being built, must NOT be
+/// recursively removed by the landing rename: the import refuses typed and the foreign bytes stay.
+#[test]
+fn add_remote_refuses_a_destination_that_gained_content_during_staging() {
+    let targz = build_repo_tarball(
+        "o-r-abc1234",
+        &[
+            ("skills/alpha/SKILL.md", b"# alpha\n", 0o644),
+            ("skills/alpha/reference/notes.md", b"notes\n", 0o644),
+        ],
+    );
+    let git = FakeGit(targz);
+    let spec = github_spec("o", "r", None);
+    let h = Harness::new("remote-race");
+    let project = Scratch::new("remote-race-proj");
+    let dest = project.0.join(".claude/skills/alpha");
+    // The RACE: the first staged write is inside the window between the destination check and the
+    // delete + rename that lands the import. A concurrent writer fills the destination there.
+    let racer = crate::fs_seam::HookFs::new(|| {
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("SOMEONE-ELSES.md"), b"not topos's bytes\n").unwrap();
+    });
+    let ctx = Ctx {
+        fs: &racer,
+        ..h.ctx()
+    };
+    let roots = ops::DiscoveryRoots {
+        home: h.home.0.clone(),
+        cwd: Some(project.0.clone()),
+    };
+    let opts = ops::AddRemoteOpts {
+        skill: Some("alpha".into()),
+        harness: None,
+        global: false,
+    };
+    let err = ops::add_remote(&ctx, &git, &spec, &roots, &opts).unwrap_err();
+    assert_eq!(err.code(), "PLACEMENT_OCCUPIED", "{err:?}");
+    // The witness: the racer's bytes are still there, untouched, and nothing of the import landed.
+    assert_eq!(
+        std::fs::read(dest.join("SOMEONE-ELSES.md")).unwrap(),
+        b"not topos's bytes\n"
+    );
+    assert!(!dest.join("SKILL.md").exists(), "the import did not land");
+    // And the staged sibling was cleaned up rather than left behind.
+    assert!(
+        !project
+            .0
+            .join(".claude/skills/.topos-import-alpha")
+            .exists()
+    );
+}
+
 #[test]
 fn add_remote_ambiguous_multi_skill_repo_lists_choices() {
     let targz = build_repo_tarball(

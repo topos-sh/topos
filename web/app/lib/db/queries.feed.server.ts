@@ -500,7 +500,10 @@ export type AssignOutcome =
   | "unknown_member"
   | "unknown_skill"
   | "skill_not_active"
-  | "unknown_channel";
+  | "unknown_channel"
+  /** The workspace baseline: the default channel assigned to everyone. It is what every member
+   * gets by being a member, so it is not an assignment a curator can withdraw. */
+  | "baseline";
 
 /** Aim a bundle at a person or at everyone. Idempotent; the audit row records the audience. */
 export async function assignBundle(
@@ -575,6 +578,13 @@ export async function assignChannel(
  * ONLY those: it deletes curator provenance (`NOT self`), so a person who also picked the
  * thing themselves keeps their own row. It withdraws the OFFER only: bytes already on a
  * machine stay there until that machine reconciles.
+ *
+ * THE BASELINE IS REFUSED HERE, in the data layer. The default channel assigned to everyone is
+ * what membership MEANS in this workspace — every member's feed rests on it, and no page offers
+ * to withdraw it. But "no page offers it" is not a rule; a crafted POST carrying the
+ * `unassign-everyone` intent for the default channel would have deleted the row and silently
+ * emptied every member's baseline. A refusal that only exists as a hidden form field is not a
+ * refusal, so the transaction itself says no.
  */
 export async function unassign(
   actor: OwnerActor,
@@ -586,6 +596,12 @@ export async function unassign(
     const userId = await resolveAudienceTx(tx, ws, audience);
     if (userId === undefined) {
       return "unknown_member";
+    }
+    if ("channelId" in target && userId === null) {
+      const row = await channelRowInTx(tx, ws, target.channelId);
+      if (row?.isDefault) {
+        return "baseline";
+      }
     }
     const subject = "bundleId" in target ? target.bundleId : target.channelId;
     const targetMatch =

@@ -79,6 +79,12 @@ impl Layout {
         self.project_root.is_some()
     }
 
+    /// The checkout this layout is the store OF — `None` for the person scope's home store. What a
+    /// cross-store disclosure names the holder by.
+    pub(crate) fn project_root(&self) -> Option<&Path> {
+        self.project_root.as_deref()
+    }
+
     pub(crate) fn skills_dir(&self) -> PathBuf {
         self.home.join("skills")
     }
@@ -267,8 +273,14 @@ pub(crate) fn project_store_layout(project_dir: &Path) -> Layout {
 }
 
 /// The project's store layout when its state tree already EXISTS on disk (this user's), else
-/// `None` — the read-side probe (recovery, cleaning) that must never mint a store.
+/// `None` — the read-side probe (recovery, cleaning) that must never mint a store. A `.topos` that
+/// does not resolve inside the checkout is refused here too (see [`ensure_project_store`]): the
+/// probe decides which stores the applied report and the cleaning sweep visit, and neither should
+/// follow a committed symlink out of the tree.
 pub(crate) fn existing_project_store(fs: &dyn FsOps, project_dir: &Path) -> Option<Layout> {
+    if !crate::placement::within_project(project_dir, &project_dir.join(PROJECT_STORE_DIR)) {
+        return None;
+    }
     let layout = project_store_layout(project_dir);
     fs.exists(layout.home()).then_some(layout)
 }
@@ -278,13 +290,23 @@ pub(crate) fn existing_project_store(fs: &dyn FsOps, project_dir: &Path) -> Opti
 /// `state/<user>/` tree — and return its [`Layout`]. Idempotent.
 ///
 /// # Errors
-/// The [`FsOps`] failure creating the tree or writing the ignore file.
+/// [`ClientError::PlacementUnsupported`] when `<project>/.topos` does not resolve inside the
+/// checkout — the SAME containment rail every project placement root passes
+/// ([`crate::placement::within_project`]). A repo can commit a `.topos` symlink as easily as a
+/// `.claude/skills` one, and a store minted through it would write this machine's engine state
+/// (and every managed byte routed through it) wherever that symlink points. The store is refused,
+/// not redirected. Otherwise the [`FsOps`] failure creating the tree or writing the ignore file.
 pub(crate) fn ensure_project_store(
     fs: &dyn FsOps,
     project_dir: &Path,
 ) -> Result<Layout, ClientError> {
-    let layout = project_store_layout(project_dir);
     let store_dir = project_dir.join(PROJECT_STORE_DIR);
+    if !crate::placement::within_project(project_dir, &store_dir) {
+        return Err(ClientError::PlacementUnsupported {
+            reason: crate::placement::escape_line("the project store", &store_dir),
+        });
+    }
+    let layout = project_store_layout(project_dir);
     fs.create_dir_all(&store_dir)?;
     let ignore = store_dir.join(crate::scan::IGNORE_FILE);
     // TRUE exclusive create (`O_EXCL`), not check-then-write: a file already at the path — a

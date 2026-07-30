@@ -32,7 +32,11 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   pair) carry every secret: `identity/sessions.json` and the login WAL.
 - **Crash-safe docs** (`atomic`, `doc`) — atomic write (temp → fsync → rename → fsync-dir; never in
   place) + a fail-closed `schema_version` migration dispatch (an unknown/newer doc is never handed to
-  serde and never deleted).
+  serde and never deleted). The machine-local STATE documents carry that discipline through to their
+  own answers: an undecipherable `state/forge_trust.json` grants NOTHING and REFUSES every write
+  (typed `UPGRADE_REQUIRED`), and an undecipherable `state/visited_stores.json` contributes no
+  recorded store and is never written over — an older binary must not clobber a newer document, and
+  "unreadable" must never read as "empty, so re-derive".
 - **The sidecar** (`sidecar`) — the `~/.topos/` layout, the `--footprint` walk, the per-skill lock, and an
   idempotent recovery sweep (torn-log repair, incomplete-staging removal, never delete on unknown schema).
   Recovery also deletes the RETIRED identity documents (`device.key`, `instance.json`,
@@ -80,6 +84,11 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   gets the header plus one feed row per connected workspace, a project file the commented template), then
   the requested edit runs; a hand-written file is never materialized, and a born file STAYS even when a
   gate refuses the act that birthed it (the receipt says so). `init` creates a file without an edit.
+  Every manifest mutation is a read-modify-write, so every one of them — `add`, `remove`, `fmt`,
+  `init`, login's feed-row append, publish's governance rewrite — takes the file's own WRITER LOCK
+  (an `flock` in the home store's `locks/`, keyed by a stable hash of the manifest path) across
+  read→edit→write; without it a concurrent process's row is built into a document the other one has
+  already replaced, and vanishes with no error anywhere.
 - **SESSIONS** (`sessions`, `ops/login`, `enroll`) — `topos login <address>` runs against
   `/v1/login/authorize|token` (the constant protocol card re-roots onto the declared API base,
   same-security only; the `0600` WAL holds the flow; re-invoking IS the resume). TWO SHAPES,
@@ -120,7 +129,11 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   per-checkout store contents vouch (both are repo facts anyone could have committed: demand, never
   consent); a GRANTED origin's rows advance ONLY on an explicit `update` (never on the
   quiet sweep — no session start dials a forge), receipted with the commit motion and the member delta,
-  members the new archive dropped cleaned snapshot-first in the same run; a local-path row is an
+  members the new archive dropped cleaned snapshot-first in the same run. A PINNED repo set is
+  settled only when the tracked members cover the member set RECORDED at landing (`origin.json`) —
+  "every tracked member is at the pin" is true and useless after a partial landing, and would leave
+  the missing members unreachable forever; an import that recorded no member set keeps the older,
+  weaker predicate rather than inventing a gap. A local-path row is an
   adopt-in-place presence check (and the idempotent converge of a landed publish's PENDING governance
   rewrite). A manifest the grammar refuses FREEZES its whole scope — no delivery, no cleaning: a typo
   must keep bytes, never drop them. Placement is PER-SCOPE (see below); after the fan-out
@@ -133,7 +146,12 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   recorded, so an update run from one checkout still reports another checkout's holdings; a store
   that is gone, or whose placements are, drops out naturally on read), manifest-row deliveries
   included — declined-but-locally-added
-  bundles report too, which is what makes the web's declined-but-applied disclosure real). The **delivery
+  bundles report too, which is what makes the web's declined-but-applied disclosure real). The wire
+  carries exactly ONE row per (session, bundle), so which store answers is DETERMINISTIC and stated:
+  the person store whenever it holds the bundle, else the project stores in ascending path order —
+  never "whichever checkout this run happened to start from" — and a bundle held at DIFFERENT
+  versions in more than one store keeps that row and earns one `VERSION_SPLIT` line naming the other
+  holder (the same fact `status`'s cross-scope note makes, said where the pick is made). The **delivery
   cache** (`state/sync_status.json`) records host/workspace_name per workspace + name/review_required/
   served_version per skill PLUS each row's attribution and the caller's declines, so `status`/`list`
   answer offline and `CacheFollow` (the FollowSource over the cache) + `SessionRoutedPlane` (the
@@ -159,8 +177,18 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   granted origin applies immediately with an undo-led receipt. A forge apply records the CONSENT first
   (the origin lands in the registry at the consent moment), then the ROW (the
   demand), then installs member-by-member into the scope's store — a member failure never unwinds the
-  batch: the receipt names the partial landing and the recorded row is what the next update converges.
-  Re-adding an EXISTING row keeps the exact-inverse discipline: the same value is the redundancy
+  batch: the receipt names the partial landing and the recorded row is what the next update converges;
+  each import also records the archive's MEMBER SET at that commit in `origin.json`, which is what
+  later lets a pinned repo-set row tell a partial landing from a complete one. The `-s`/`-a`
+  SELECTORS (single, several, or the `*` fan-outs) ride EXACTLY that gate and that store
+  (`add_forge_selected`): a selector narrows which members land and into which agent dirs, never
+  whose bytes these are — so an ungranted origin describes (members + where each lands) and applies
+  only under `--yes`, ONE fetch serves every (skill × harness) combination, and a project-destined
+  import writes the checkout's own `.topos/` store, the one the project reconcile converges. The
+  destination is RE-PROVEN immediately before the delete + rename that lands it: the emptiness check
+  ran before the staging window, and anything that appeared in that window is refused
+  (`PLACEMENT_OCCUPIED`) unless it is byte-identical to what is being placed — never deleted on a
+  stale observation. Re-adding an EXISTING row keeps the exact-inverse discipline: the same value is the redundancy
   disclosure (nothing written, no undo); a different value applies with the prior value named and the
   undo offered ONLY where it verifiably restores it (`add <ref>` for a prior `"*"`, `add <ref>@<pin>`
   for a prior pin; a prior fields table gets NO undo, said why). `remove <targets…> [-g]` is the EXACT
@@ -171,7 +199,11 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   written only for the rest, each carrying the set line's pin/fields where the member's shape legally
   takes them; the describe names which survivors get new rows, which keep their own, and anything not
   carryable), offered as a describe because later curation stops arriving through
-  this file. Its two-phase arms are LOSS (an affected bundle with unshared edits, or an unclassifiable
+  this file. A set line is split exactly ONCE per invocation: several targets inside one set resolve
+  against it together (members minus ALL of them), because two sequential splits would each rebuild
+  the line from its full member list and the second would write the first's removal straight back.
+  A bare NAME that more than one row (or more than one workspace's feed) answers to is an
+  `AMBIGUOUS_NAME` refusal listing the qualified references — never the first match. Its two-phase arms are LOSS (an affected bundle with unshared edits, or an unclassifiable
   scan — the guard fails TOWARD the gate, and it covers EVERY placement-retiring arm: the row drop, the
   feed-row drop, and the `"off"` switch alike) and the set split; everything else applies immediately,
   and the receipt offers the literal inverse ONLY when it restores the whole prior state. A tracked never-published local (or an untracked
@@ -194,8 +226,12 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   agents, the registry's project dirs for the rest, the Claude-Code-shaped `.claude/skills` default when
   nothing is detected; a manifest `path` field pins ONE project-relative dir instead (the row's own
   field beats `[defaults.<kind>].path` beats the registry mapping, and within each level a
-  harness-named key beats that level's `default`; a value that is not provably inside the checkout is
-  ignored with a warning — a committed file must never aim managed bytes elsewhere); every landed
+  harness-named key beats that level's `default`); **containment is a property of EVERY project-scope
+  path, not just the override** (`within_project`): each candidate root — `.agents/skills`, each
+  registry project dir, the `.claude/skills` default, and the `path` override alike — must have no
+  symlink component below the checkout AND canonicalize inside it, or that root is REFUSED with a
+  `PLACEMENT_ESCAPES_PROJECT` line and the placement is skipped, never redirected (a repo can commit
+  `.claude/skills` as a symlink exactly as easily as it can write `path = "../.."`); every landed
   project dir SELF-IGNORES (the staged tree carries the exact sentinel `.gitignore` unless the bundle
   ships its own — the node_modules model; the scanner treats the byte-exact sentinel at the bundle
   root as topos metadata, so it never reads as an edit; no repository file is ever touched).
@@ -205,7 +241,11 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
 - **The PER-SCOPE stores** (`sidecar`) — ONE `Layout` shape serves both scopes: the person scope's
   `~/.topos/`, and each project's OWN store at `<project>/.topos/state/<user>/` (per-user because
   checkouts are shared; `.topos/` ignores itself whole, venv-style, via an exclusive-create
-  `.gitignore` of `*`). The reconcile routes each item's engine run through its scope's layout —
+  `.gitignore` of `*`). The project store passes the SAME containment rail its placements do: a
+  `<project>/.topos` that does not resolve inside the checkout is refused by both the write
+  (`ensure_project_store`) and the read probe (`existing_project_store`), so a committed symlink can
+  never route this machine's engine state — or the bytes that flow through it — out of the tree.
+  The reconcile routes each item's engine run through its scope's layout —
   the same bundle followed at both scopes has two state trees, two drafts, two baselines, with no
   cross-scope anything — and recovery sweeps a project store lazily when a run visits its project.
   Pre-1.0 handover: home-map rows pointing into a visited project are dropped (bytes in place,
@@ -219,7 +259,16 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   takes an optional `PlanFn` so the reconcile drives per-scope placement through the ONE engine (no
   fork). The served record IS the sync target (adopted in ANY direction); draft snapshot-on-touch;
   fetch + re-verify (digest == tree == `commit_id`); crash-safe dir-swap materialization into every
-  managed placement; the ancestor backfill shallow-stops at purged history. The TWO DETECTORS are
+  managed placement; the ancestor backfill shallow-stops at purged history. **No byte differing from
+  its recorded baseline is destroyed unless a snapshot taken AFTER the last revalidation holds it:**
+  the pre-swap scan decides, but the capability probe and the staging build take real time, so the
+  materializer re-fingerprints the dir (stat-only — `(mtime_ns, ctime_ns, size)` per entry, O(stat),
+  never a second hash) immediately before the swap; a tree that MOVED in that window is re-snapshotted
+  where a snapshotter exists and otherwise SKIPPED (its recorded state stays behind the bytes, so the
+  next sweep reconciles from a fresh scan). The retiring clean carries the same rule the other way
+  round: each placement is re-scanned immediately before its own delete and whatever is actually
+  there is committed then, and a dir that became unreadable in the window refuses rather than being
+  removed blind. The TWO DETECTORS are
   split: DRAFT reads each copy against the pristine version (one distinct edited content per
   bundle+scope is THE draft), CONFLICT reads the edited copies against each other — competitors
   ONLY when neither's bytes equal the other's RECORDED baseline (a copy at a sibling's baseline is

@@ -421,6 +421,8 @@ fn resume(
 /// receipt, never a failed login.
 fn record_feed_row(ctx: &Ctx<'_>, host: &str, workspace: &str) -> Option<String> {
     let path = ctx.layout.home().join(crate::manifest::MANIFEST_FILE);
+    // The same writer lock every manifest mutation takes — this append is a read-modify-write too.
+    let _guard = super::manifest_edit::lock_manifest(ctx, &path).ok()?;
     let bytes = ctx.fs.read_opt(&path).ok()??;
     let text = String::from_utf8(bytes).ok()?;
     let reference = format!("{host}/{workspace}");

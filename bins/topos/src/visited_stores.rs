@@ -10,6 +10,13 @@
 //! on read (and a recorded store whose placements are gone simply contributes nothing) — the
 //! natural drop. A PLAIN document (paths, never a secret) through the ordinary crash-safe
 //! [`crate::doc`] writers.
+//!
+//! UNDECIPHERABLE IS NOT EMPTY. A corrupt document — or one written by a NEWER build, which
+//! [`crate::doc::read_doc`] refuses rather than guesses at — contributes NO recorded stores (this
+//! run still knows its own cwd chain, which is a fact of the run, not of the file) and the
+//! write-back is REFUSED: an older binary that re-derived an empty index would erase the newer
+//! one's record of every other checkout, and every later report would silently under-state what
+//! this installation holds.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -37,10 +44,12 @@ pub(crate) struct VisitedStores {
 /// layout).
 pub(crate) fn recall_and_record(ctx: &Ctx<'_>, current: &[PathBuf]) -> Vec<sidecar::Layout> {
     let path = ctx.layout.visited_stores_path();
-    let prior: VisitedStores = crate::doc::read_doc(ctx.fs, &path)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    // A document this build cannot decipher contributes nothing AND is never written over (see the
+    // module note): `readable` carries that decision to the persist step below.
+    let (prior, readable) = match crate::doc::read_doc::<VisitedStores>(ctx.fs, &path) {
+        Ok(doc) => (doc.unwrap_or_default(), true),
+        Err(_) => (VisitedStores::default(), false),
+    };
     let mut candidates: BTreeSet<String> = prior.stores;
     for dir in current {
         candidates.insert(dir.display().to_string());
@@ -55,11 +64,12 @@ pub(crate) fn recall_and_record(ctx: &Ctx<'_>, current: &[PathBuf]) -> Vec<sidec
         }
     }
     // Best-effort persistence — a failed write just re-derives next run from what still exists.
+    // An undecipherable standing document is left byte-untouched.
     let next = VisitedStores {
         schema_version: PERSISTED_SCHEMA_VERSION,
         stores: kept,
     };
-    if ctx.fs.create_dir_all(&ctx.layout.state_dir()).is_ok() {
+    if readable && ctx.fs.create_dir_all(&ctx.layout.state_dir()).is_ok() {
         let _ = crate::doc::write_doc(ctx.fs, &path, &next);
     }
     layouts

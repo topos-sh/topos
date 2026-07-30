@@ -92,12 +92,12 @@ pub(crate) use pull::{
     quiet_soft_failure, reset,
 };
 pub(crate) use reconcile::{
-    CacheFollow, ManifestUpdateOpts, SessionConnect, SessionRoutedPlane, SessionTransports,
-    forge_imports, manifest_update,
+    CacheFollow, ManifestUpdateOpts, SessionRoutedPlane, SessionTransports, forge_imports,
+    manifest_update,
 };
 pub(crate) use reference::{
-    AddRefOutcome, WriteLane, add_reference, find_path_line, resolve_session_lane,
-    rewrite_to_governed,
+    AddManyOutcome, AddRefOutcome, WriteLane, add_forge_selected, add_reference, find_path_line,
+    resolve_session_lane, rewrite_to_governed,
 };
 // The withdrawal/exclusion clean is driven through `remove`/the reconcile; the direct re-export
 // serves the placement-breadth suite's foreign-preservation regression.

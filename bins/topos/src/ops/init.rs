@@ -45,6 +45,9 @@ pub(crate) fn init(ctx: &Ctx<'_>, global: bool) -> Result<InitData, ClientError>
     } else {
         None
     };
+    // The same writer lock every manifest mutation takes — `init` is check-then-write, so a
+    // concurrent `add` that births the file must not have its row overwritten by the template.
+    let _guard = medit::lock_manifest(ctx, &path)?;
     if ctx.fs.exists(&path) {
         return Ok(InitData {
             manifest: path.display().to_string(),
@@ -63,6 +66,8 @@ pub(crate) fn init(ctx: &Ctx<'_>, global: bool) -> Result<InitData, ClientError>
 /// The `-g` arm: materialize this machine's own recipe from what it is connected to.
 fn init_global(ctx: &Ctx<'_>) -> Result<InitData, ClientError> {
     let path = ctx.layout.home().join(MANIFEST_FILE);
+    ctx.fs.create_dir_all(ctx.layout.home())?;
+    let _guard = medit::lock_manifest(ctx, &path)?;
     if ctx.fs.exists(&path) {
         return Ok(InitData {
             manifest: path.display().to_string(),

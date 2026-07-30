@@ -36,6 +36,39 @@ use super::reconcile::SessionConnect;
 use super::remove::RemoveOutcome;
 
 // ---------------------------------------------------------------------------------------------
+// The manifest writer lock — every mutation is a read-modify-write
+// ---------------------------------------------------------------------------------------------
+
+/// Serialize the mutations of ONE manifest file. Every manifest edit in this binary is a
+/// read-modify-write over the whole document (open → set/remove rows → atomic write), so two
+/// concurrent topos processes editing the same file — an agent's `add` and a session-start sweep's
+/// governance rewrite, two agents in one checkout — would each write a document built from bytes
+/// the other had already replaced, and the loser's row would vanish with no error anywhere.
+///
+/// The lock is the ordinary [`crate::fs_seam::FsOps::lock_exclusive`] `flock`, held across the
+/// whole read→edit→write, and keyed by a STABLE HASH of the manifest's path so one `locks/`
+/// directory serves every file a machine touches.
+///
+/// It lives in the HOME store's `locks/` — a documented divergence from "the owning store's". The
+/// project store's own `locks/` would give no extra serialization (a project store is per-user,
+/// `state/<user>/`, exactly like the home one), and reaching for it would mint `<project>/.topos/`
+/// on edits that otherwise only write `topos.toml` — a new directory in someone's repo as the price
+/// of a lock nobody else would contend on.
+pub(super) fn lock_manifest(
+    ctx: &Ctx<'_>,
+    path: &Path,
+) -> Result<crate::fs_seam::LockGuard, ClientError> {
+    let key = topos_core::digest::to_hex(&topos_core::digest::sha256(
+        path.as_os_str().as_encoded_bytes(),
+    ));
+    let locks = ctx.layout.locks_dir();
+    ctx.fs.create_dir_all(&locks)?;
+    Ok(ctx
+        .fs
+        .lock_exclusive(&locks.join(format!("manifest-{}.lock", &key[..16])))?)
+}
+
+// ---------------------------------------------------------------------------------------------
 // Sessions — what this installation is connected to
 // ---------------------------------------------------------------------------------------------
 
@@ -410,6 +443,8 @@ pub(super) fn write_row(
     value: &EntryValue,
 ) -> Result<(), ClientError> {
     let global = target.scope == ManifestScope::Global;
+    // Held across read → edit → write: another process's row must not be born and lost inside it.
+    let _guard = lock_manifest(ctx, &target.path)?;
     let Opened { mut editor, born } = open_for_edit(ctx, target)?;
     let prior = editor.row(reference).map(|r| r.value);
     if let Some(note) = born {
@@ -691,10 +726,12 @@ enum Arm {
         workspace: String,
     },
     /// A SET row (a channel, a repo) delivers it — replace the set line with its current members
-    /// minus this one.
+    /// minus the removed ones. `names` is a LIST because a set can only be split ONCE: the rewrite
+    /// is "this line, replaced by its members", and applying two per-target splits in sequence
+    /// would have the second one re-write the member the first had just removed.
     SetSplit {
         set: PlanRow,
-        name: String,
+        names: Vec<String>,
         members: Vec<String>,
         /// Survivors that ALREADY have their own explicit row in this file — explicit beats set,
         /// so the split leaves those rows untouched and writes new rows only for the rest.
@@ -703,14 +740,62 @@ enum Arm {
 }
 
 impl Arm {
-    fn name(&self) -> &str {
+    fn name(&self) -> String {
         match self {
-            Arm::RowDrop { name, .. } | Arm::OffWrite { name, .. } | Arm::SetSplit { name, .. } => {
-                name
-            }
-            Arm::FeedDrop { workspace, .. } => workspace,
+            Arm::RowDrop { name, .. } | Arm::OffWrite { name, .. } => name.clone(),
+            Arm::FeedDrop { workspace, .. } => workspace.clone(),
+            Arm::SetSplit { names, .. } => names.join(", "),
         }
     }
+}
+
+/// Fold every SetSplit against the SAME set line into ONE arm: the split writes the members minus
+/// ALL the removed targets, and the describe reflects that combined result. Applied sequentially,
+/// two splits of one line would each rebuild it from the full member list and the earlier
+/// removal would come straight back. Other arms pass through in order.
+fn coalesce_set_splits(arms: Vec<Arm>) -> Vec<Arm> {
+    let mut out: Vec<Arm> = Vec::with_capacity(arms.len());
+    for arm in arms {
+        let Arm::SetSplit {
+            set,
+            names,
+            members,
+            keeps_own,
+        } = arm
+        else {
+            out.push(arm);
+            continue;
+        };
+        let existing = out
+            .iter_mut()
+            .find(|a| matches!(a, Arm::SetSplit { set: s, .. } if s.reference == set.reference));
+        match existing {
+            Some(Arm::SetSplit {
+                names: have,
+                keeps_own: have_keeps,
+                ..
+            }) => {
+                have.extend(names);
+                have.dedup();
+                have_keeps.extend(keeps_own);
+                have_keeps.dedup();
+                // A survivor that is ITSELF being removed is no survivor.
+                let removed = have.clone();
+                have_keeps.retain(|m| !removed.contains(m));
+            }
+            _ => {
+                let mut keeps_own = keeps_own;
+                keeps_own.retain(|m| !names.contains(m));
+                out.push(Arm::SetSplit {
+                    set,
+                    names,
+                    members,
+                    keeps_own,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// `topos remove -g <token>…` — edit THIS MACHINE's global file: drop a row, drop a feed row, or
@@ -847,11 +932,18 @@ fn resolve_one(
             bundles,
         }));
     }
-    // 2. An explicit row, by canonical reference or by the name it delivers under.
-    if let Some(row) = all_rows(plan)
+    // 2. An explicit row, by canonical reference or by the name it delivers under. A BARE NAME can
+    //    name more than one row (two workspaces, or a workspace and a forge repo, that each carry a
+    //    `deploy`) — taking the first would remove someone's row on alphabetical luck, so the
+    //    refusal lists the qualified references and the caller re-spells one.
+    let rows: Vec<PlanRow> = all_rows(plan)
         .into_iter()
-        .find(|r| row_matches(token, canonical, r))
-    {
+        .filter(|r| row_matches(token, canonical, r))
+        .collect();
+    if rows.len() > 1 {
+        return Err(ambiguous(token, rows.iter().map(|r| r.reference.clone())));
+    }
+    if let Some(row) = rows.into_iter().next() {
         if matches!(row.value, EntryValue::Off) {
             return Err(ClientError::InvalidArgument(format!(
                 "'{token}' is already switched off on this machine — `topos add -g {}` turns it \
@@ -863,14 +955,26 @@ fn resolve_one(
         return Ok(Some(Arm::RowDrop { row, name }));
     }
     // 3. No row — the workspace FEED delivers it: the one machine-local negative is the `"off"`
-    //    switch, and it lives in the global file only.
+    //    switch, and it lives in the global file only. Same discipline: two connected workspaces
+    //    can both deliver a `deploy`, and switching off the wrong one is silent.
     if target.scope == ManifestScope::Global {
         let items = feeds.get_or_insert_with(|| feed_items(ctx, connect));
-        if let Some(item) = items
+        let hits: Vec<&FeedItem> = items
             .iter()
-            .find(|i| !i.declined && feed_matches(token, canonical, i))
-            && plan.has_feed(&item.host, &item.workspace)
-        {
+            .filter(|i| {
+                !i.declined
+                    && feed_matches(token, canonical, i)
+                    && plan.has_feed(&i.host, &i.workspace)
+            })
+            .collect();
+        if hits.len() > 1 {
+            return Err(ambiguous(
+                token,
+                hits.iter()
+                    .map(|i| format!("{}/{}/{}", i.host, i.workspace, i.name)),
+            ));
+        }
+        if let Some(item) = hits.into_iter().next() {
             return Ok(Some(Arm::OffWrite {
                 reference: format!("{}/{}/{}", item.host, item.workspace, item.name),
                 name: item.name.clone(),
@@ -900,13 +1004,26 @@ fn resolve_one(
                 .collect();
             return Ok(Some(Arm::SetSplit {
                 set: row.clone(),
-                name: member.clone(),
+                names: vec![member.clone()],
                 members: members.clone(),
                 keeps_own,
             }));
         }
     }
     Ok(None)
+}
+
+/// The typed refusal for a token this file answers more than once — the paste-ready qualified
+/// references ride the error, so the caller re-spells one instead of guessing which was meant.
+/// Deduped + sorted, so the same ambiguity always reads the same way.
+fn ambiguous(token: &str, candidates: impl IntoIterator<Item = String>) -> ClientError {
+    let mut candidates: Vec<String> = candidates.into_iter().collect();
+    candidates.sort();
+    candidates.dedup();
+    ClientError::AmbiguousTarget {
+        name: token.to_owned(),
+        candidates,
+    }
 }
 
 /// The member NAME a canonical token names inside `set`'s namespace (`host/ws/<name>` under a
@@ -990,7 +1107,7 @@ fn expand_sets(
                     &format!("{host}/{owner}/{repo}"),
                 )
                 .into_iter()
-                .map(|(_, lock, _)| lock.name)
+                .map(|i| i.lock.name)
                 .collect();
                 names.sort();
                 names.dedup();
@@ -1155,6 +1272,8 @@ fn apply_arms(
                 .into(),
         ));
     }
+    // Several targets inside ONE set line are ONE split, resolved against that line once.
+    let arms = coalesce_set_splits(arms);
     // The gate: a file edit is reversible, so it applies immediately — EXCEPT where local work
     // could be lost (an affected bundle's draft, or a copy that cannot be classified) or where
     // the edit rewrites a curated line into its members (a set split changes what future
@@ -1200,24 +1319,27 @@ fn apply_arms(
             }
             Arm::SetSplit {
                 set,
-                name,
+                names,
                 members,
                 keeps_own,
             } => {
                 gated = true;
                 let (_, carried, dropped) = split_carriage(set);
                 let mut note = format!(
-                    "'{name}' comes from the {} line `{}` — removing it replaces that one line \
+                    "'{}' {} from the {} line `{}` — removing {} replaces that one line \
                      with its current members, so later additions by whoever curates it stop \
                      arriving through this file",
+                    names.join("', '"),
+                    if names.len() == 1 { "comes" } else { "come" },
                     set.shape.noun(),
-                    set.reference
+                    set.reference,
+                    if names.len() == 1 { "it" } else { "them" }
                 );
                 // Which survivors get NEW rows and which keep their own (explicit beats set —
                 // an already-explicit row is never overwritten by the split).
                 let new_rows: Vec<&str> = members
                     .iter()
-                    .filter(|m| m.as_str() != name && !keeps_own.contains(m))
+                    .filter(|m| !names.contains(m) && !keeps_own.contains(m))
                     .map(String::as_str)
                     .collect();
                 if !new_rows.is_empty() {
@@ -1294,7 +1416,7 @@ fn apply_arms(
         .iter()
         .zip(notes.iter())
         .map(|(arm, note)| RemoveItem {
-            name: arm.name().to_owned(),
+            name: arm.name(),
             kind: match arm {
                 Arm::OffWrite { .. } => RemoveKind::ManifestExcluded,
                 _ => RemoveKind::ManifestRemoved,
@@ -1325,6 +1447,7 @@ fn apply_arms(
     }
 
     // ---- APPLY ----
+    let _guard = lock_manifest(ctx, &target.path)?;
     let Opened { mut editor, born } = open_for_edit(ctx, target)?;
     for arm in &arms {
         match arm {
@@ -1341,7 +1464,7 @@ fn apply_arms(
             }
             Arm::SetSplit {
                 set,
-                name,
+                names,
                 members,
                 keeps_own,
             } => {
@@ -1353,7 +1476,7 @@ fn apply_arms(
                 // harness/name settings are stronger facts than the set's value).
                 let (member_value, _, _) = split_carriage(set);
                 for member in members {
-                    if member == name || keeps_own.contains(member) {
+                    if names.contains(member) || keeps_own.contains(member) {
                         continue;
                     }
                     let Some(reference) = member_reference(set, member) else {

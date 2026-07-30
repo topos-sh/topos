@@ -273,6 +273,9 @@ struct FakePlane {
     delivery: Arc<Mutex<Result<DeliverySnapshot, &'static str>>>,
     versions: HashMap<(String, String), FetchedVersion>,
     log: CallLog,
+    /// The LAST applied report's rows, `(skill_id, version hex)` — the wire carries exactly one
+    /// row per (session, bundle), so this is what the cross-store pick actually reported.
+    reported: Arc<Mutex<Vec<(String, String)>>>,
 }
 impl FakePlane {
     fn new(log: CallLog) -> Self {
@@ -280,6 +283,7 @@ impl FakePlane {
             delivery: Arc::new(Mutex::new(Ok(empty_snapshot()))),
             versions: HashMap::new(),
             log,
+            reported: Arc::new(Mutex::new(Vec::new())),
         }
     }
     fn with_version(mut self, skill: &str, v: &Version) -> Self {
@@ -379,6 +383,10 @@ impl DeliverySource for FakePlane {
         }
     }
     fn report_applied(&self, _ws: &str, applied: &[(String, [u8; 32])]) -> Result<(), PlaneError> {
+        *self.reported.lock().unwrap() = applied
+            .iter()
+            .map(|(id, v)| (id.clone(), topos_core::digest::to_hex(v)))
+            .collect();
         let mut ids: Vec<&str> = applied.iter().map(|(id, _)| id.as_str()).collect();
         ids.sort_unstable();
         self.log
@@ -3497,4 +3505,658 @@ fn a_manifest_row_alone_never_trusts_the_origin() {
             panic!("a tracked origin's adds apply immediately")
         }
     }
+}
+
+// =================================================================================================
+// The SELECTOR import (`-s`/`-a`) — the same first-trust gate, the same per-scope store.
+// =================================================================================================
+
+#[test]
+fn a_selector_import_describes_first_then_grants_and_installs() {
+    // A selector narrows WHICH members land and WHERE; it is not a way around whose bytes these
+    // are. So `add owner/repo -s alpha` on an origin this machine has never granted DESCRIBES,
+    // fetches nothing into place, and applies only under `--yes` — which grants the origin.
+    let rig = Rig::new("sel-gate");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[
+            ("skills/alpha/SKILL.md", b"# alpha\n"),
+            ("skills/beta/SKILL.md", b"# beta\n"),
+        ],
+    ));
+    let skills = vec!["alpha".to_owned()];
+
+    let described = ops::add_forge_selected(
+        &ctx,
+        &connect(&plane, &dir),
+        &git,
+        "o/r",
+        &skills,
+        &[],
+        true,
+        false,
+    )
+    .unwrap();
+    match described {
+        ops::AddManyOutcome::Described { data, yes_argv } => {
+            assert_eq!(data.source, "github.com/o/r");
+            assert_eq!(data.members, vec!["alpha".to_owned()]);
+            assert!(yes_argv.contains(&"--yes".to_owned()), "{yes_argv:?}");
+            assert!(yes_argv.contains(&"-s".to_owned()), "{yes_argv:?}");
+        }
+        ops::AddManyOutcome::Applied(_) => panic!("an untracked origin describes first"),
+    }
+    assert!(
+        !rig.home.0.join(".claude/skills/alpha").exists(),
+        "a describe installs nothing"
+    );
+
+    // `--yes` GRANTS the origin, then installs.
+    let applied = ops::add_forge_selected(
+        &ctx,
+        &connect(&plane, &dir),
+        &git,
+        "o/r",
+        &skills,
+        &[],
+        true,
+        true,
+    )
+    .unwrap();
+    match applied {
+        ops::AddManyOutcome::Applied(items) => assert_eq!(items.len(), 1),
+        ops::AddManyOutcome::Described { .. } => panic!("--yes applies"),
+    }
+    assert!(rig.home.0.join(".claude/skills/alpha/SKILL.md").exists());
+    assert!(
+        !rig.home.0.join(".claude/skills/beta").exists(),
+        "the selector narrowed the landing"
+    );
+    // The grant is a MACHINE fact now: a later bare reference add of the same origin is ungated.
+    match ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        "github.com/o/r/beta",
+        true,
+        false,
+    )
+    .unwrap()
+    {
+        ops::AddRefOutcome::Applied(_) => {}
+        ops::AddRefOutcome::Described { .. } => panic!("the origin is granted"),
+    }
+}
+
+#[test]
+fn a_project_scope_selector_import_converges_on_a_later_update() {
+    // The bug this pins: a selector import that wrote its engine state into the HOME store while
+    // the row lived in a PROJECT manifest — the project reconcile reads the checkout's own store,
+    // so it could never see the import and would re-install it forever.
+    let rig = Rig::new("sel-project");
+    let proj = project("sel-proj", "[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha\n")],
+    ));
+    match ops::add_forge_selected(
+        &ctx,
+        &connect(&plane, &dir),
+        &git,
+        "o/r",
+        &["alpha".to_owned()],
+        &[],
+        false,
+        true,
+    )
+    .unwrap()
+    {
+        ops::AddManyOutcome::Applied(items) => assert_eq!(items.len(), 1),
+        ops::AddManyOutcome::Described { .. } => panic!("--yes applies"),
+    }
+    // The import lives in the CHECKOUT's own store — the one the project reconcile reads.
+    let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0)
+        .expect("the selector import minted the project store");
+    let pctx = ops_ctx_with_layout(&ctx, &playout);
+    assert_eq!(
+        crate::ops::forge_imports(&pctx).len(),
+        1,
+        "the project store tracks the import"
+    );
+    let fetches_before = git.fetches();
+
+    // The explicit update therefore CONVERGES it — no second fetch, no re-install.
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(
+        out.data
+            .skills
+            .iter()
+            .any(|s| s.skill == "alpha" && s.action == PullAction::UpToDate),
+        "{:?} / {:?}",
+        out.data.skills,
+        out.warnings
+    );
+    assert_eq!(
+        git.fetches(),
+        fetches_before + 1,
+        "one fetch to compare the commit, and nothing re-installed"
+    );
+}
+
+/// The store-routing helper the reconcile uses, reachable from the suite.
+fn ops_ctx_with_layout<'a>(ctx: &'a Ctx<'a>, layout: &Layout) -> Ctx<'a> {
+    Ctx {
+        layout: layout.clone(),
+        fs: ctx.fs,
+        ids: ctx.ids,
+        clock: ctx.clock,
+        device_id: ctx.device_id.clone(),
+        harness: ctx.harness,
+        plane: ctx.plane,
+        follow: ctx.follow,
+        roots: ctx.roots.clone(),
+    }
+}
+
+#[test]
+fn a_partially_landed_pinned_repo_set_converges_on_the_next_update() {
+    // A pinned set that landed 1 of 2 members reads "every tracked member is at the pin" — which
+    // is true and useless: the MISSING member never arrives. The recorded member set (what the
+    // archive held at that commit) is what makes the gap visible.
+    let rig = Rig::new("pin-partial");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[
+            ("skills/alpha/SKILL.md", b"# alpha\n"),
+            ("skills/beta/SKILL.md", b"# beta\n"),
+        ],
+    ));
+    // A PARTIAL landing: only `alpha` is imported (a member failure, a crash — the shape the
+    // gate's own receipt warns about).
+    match ops::add_forge_selected(
+        &ctx,
+        &connect(&plane, &dir),
+        &git,
+        "o/r",
+        &["alpha".to_owned()],
+        &[],
+        true,
+        true,
+    )
+    .unwrap()
+    {
+        ops::AddManyOutcome::Applied(items) => assert_eq!(items.len(), 1),
+        ops::AddManyOutcome::Described { .. } => panic!("--yes applies"),
+    }
+    assert!(rig.home.0.join(".claude/skills/alpha/SKILL.md").exists());
+    assert!(!rig.home.0.join(".claude/skills/beta").exists());
+
+    // The recipe is now the PINNED SET at exactly the commit that landing sits on — every tracked
+    // member satisfies the pin, and only the recorded member set can tell that one is missing.
+    // (The pin is the fake archive's own `TOP/` commit suffix.)
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"aaaaaaaaaaaa1\"\n");
+
+    // The explicit update sees the gap against the RECORDED member set and lands the rest.
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(
+        rig.home.0.join(".claude/skills/beta/SKILL.md").exists(),
+        "the missing member converges: {:?} / {:?}",
+        out.data.skills,
+        out.warnings
+    );
+}
+
+// =================================================================================================
+// Removing SEVERAL members of one set is ONE split; a bare name that names two rows refuses.
+// =================================================================================================
+
+#[test]
+fn removing_two_members_of_one_set_leaves_neither() {
+    // The bug this pins: two SetSplit arms applied in sequence each rebuilt the set line from its
+    // FULL member list, so the second one wrote the first one's removal straight back.
+    let rig = Rig::new("split-multi");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let a = one_file(b"# alpha\n");
+    let b = one_file(b"# beta\n");
+    let c = one_file(b"# gamma\n");
+    let plane = FakePlane::new(log)
+        .with_version("s_a", &a)
+        .with_version("s_b", &b)
+        .with_version("s_c", &c);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(
+        vec![
+            catalog_entry("s_a", "alpha", &a),
+            catalog_entry("s_b", "beta", &b),
+            catalog_entry("s_c", "gamma", &c),
+        ],
+        vec![WireChannelEntry {
+            name: "backend".into(),
+            mode: "open".into(),
+            builtin: false,
+            included: true,
+            skills: vec![
+                WireChannelSkill {
+                    skill_id: "s_a".into(),
+                    name: "alpha".into(),
+                },
+                WireChannelSkill {
+                    skill_id: "s_b".into(),
+                    name: "beta".into(),
+                },
+                WireChannelSkill {
+                    skill_id: "s_c".into(),
+                    name: "gamma".into(),
+                },
+            ],
+        }],
+    );
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let targets = vec!["alpha".to_owned(), "beta".to_owned()];
+
+    // The describe reflects the COMBINED split: one line, both names, one survivor.
+    match ops::remove_global(&ctx, &connect(&plane, &dir), &targets, false).unwrap() {
+        ops::RemoveOutcome::Described { data, .. } => {
+            assert_eq!(data.items.len(), 1, "one line split once: {:?}", data.items);
+            let note = data.items[0].note.clone().unwrap_or_default();
+            assert!(note.contains("alpha") && note.contains("beta"), "{note}");
+            assert!(note.contains("new rows are written for gamma"), "{note}");
+        }
+        other => panic!("a set split describes first: {other:?}"),
+    }
+    assert!(matches!(
+        ops::remove_global(&ctx, &connect(&plane, &dir), &targets, true).unwrap(),
+        ops::RemoveOutcome::Applied(_)
+    ));
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    let doc = crate::manifest::document::parse_manifest(
+        &text,
+        crate::manifest::document::ManifestScope::Global,
+    )
+    .unwrap();
+    let refs: Vec<&str> = doc.rows.iter().map(|r| r.reference.as_str()).collect();
+    assert!(
+        !refs.contains(&format!("{HOST}/{WS_NAME}/alpha").as_str()),
+        "alpha is gone: {text}"
+    );
+    assert!(
+        !refs.contains(&format!("{HOST}/{WS_NAME}/beta").as_str()),
+        "beta is gone too — the second split must not resurrect the first: {text}"
+    );
+    assert!(
+        refs.contains(&format!("{HOST}/{WS_NAME}/gamma").as_str()),
+        "the survivor keeps flowing: {text}"
+    );
+}
+
+#[test]
+fn a_bare_name_two_rows_answer_to_is_refused_not_guessed() {
+    // Two rows deliver a `deploy` — one from a workspace, one from a repo. Taking the first is a
+    // coin flip with someone's row; the refusal names both qualified references.
+    let rig = Rig::new("ambig-remove");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n\"github.com/o/deploy\" = \"*\"\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let err =
+        ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], false).unwrap_err();
+    assert_eq!(err.code(), "AMBIGUOUS_NAME", "{err:?}");
+    let msg = err.to_string();
+    assert!(msg.contains(&format!("{HOST}/{WS_NAME}/deploy")), "{msg}");
+    assert!(msg.contains("github.com/o/deploy"), "{msg}");
+    // Nothing moved.
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(text.contains("github.com/o/deploy"), "{text}");
+
+    // Spelled in full, exactly one row answers — and it applies.
+    let one = format!("{HOST}/{WS_NAME}/deploy");
+    assert!(matches!(
+        ops::remove_global(&ctx, &connect(&plane, &dir), &[one], true).unwrap(),
+        ops::RemoveOutcome::Applied(_)
+    ));
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(
+        !text.contains(&format!("{HOST}/{WS_NAME}/deploy")),
+        "{text}"
+    );
+    assert!(
+        text.contains("github.com/o/deploy"),
+        "the other row stands: {text}"
+    );
+}
+
+// =================================================================================================
+// The project containment rail — a committed symlink never aims managed bytes out of the checkout.
+// =================================================================================================
+
+#[test]
+fn a_committed_topos_symlink_refuses_the_project_store() {
+    // A repo can commit `.topos` as a symlink exactly as easily as `.claude/skills`. The store is
+    // REFUSED, never followed — and a plain directory still works.
+    let rig = Rig::new("store-escape");
+    let proj = project("store-escape-proj", "[bundles]\n");
+    let outside = Scratch::new("store-escape-outside");
+    std::os::unix::fs::symlink(&outside.0, proj.0.join(".topos")).unwrap();
+    let err = crate::sidecar::ensure_project_store(&rig.fs, &proj.0).unwrap_err();
+    assert_eq!(err.code(), "PLACEMENT_UNSUPPORTED", "{err:?}");
+    assert!(
+        err.to_string().contains("PLACEMENT_ESCAPES_PROJECT"),
+        "{err}"
+    );
+    assert!(
+        !outside.0.join("state").exists(),
+        "nothing was written through the symlink"
+    );
+    // The read-side probe refuses it too, so no report or clean ever visits it.
+    assert!(crate::sidecar::existing_project_store(&rig.fs, &proj.0).is_none());
+
+    // A NORMAL checkout still mints its store.
+    let ok = project("store-ok-proj", "[bundles]\n");
+    let layout = crate::sidecar::ensure_project_store(&rig.fs, &ok.0).unwrap();
+    assert!(layout.home().exists());
+    assert!(crate::sidecar::existing_project_store(&rig.fs, &ok.0).is_some());
+}
+
+#[test]
+fn a_committed_skills_symlink_is_refused_as_a_placement_root() {
+    // The DEFAULT project root gets the override's rail: `.claude/skills` committed as a symlink
+    // out of the checkout places nothing, and the sweep says so.
+    let rig = Rig::new("root-escape");
+    let proj = project("root-escape-proj", "[bundles]\n");
+    let outside = Scratch::new("root-escape-outside");
+    std::fs::create_dir_all(proj.0.join(".claude")).unwrap();
+    std::os::unix::fs::symlink(&outside.0, proj.0.join(".claude/skills")).unwrap();
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let plan = crate::placement::project_plan(
+        &ctx,
+        &proj.0,
+        "topos_deadbeef",
+        topos_harness::PlacementNaming {
+            name: Some("deploy"),
+            workspace_slug: Some(WS_NAME),
+        },
+        None,
+        None,
+        None,
+    );
+    assert!(
+        plan.refused
+            .iter()
+            .any(|r| r.starts_with("PLACEMENT_ESCAPES_PROJECT")),
+        "the escaping root is refused: {:?}",
+        plan.refused
+    );
+    assert!(
+        plan.targets.iter().all(|t| !t.dir.starts_with(&outside.0)),
+        "nothing is aimed outside the checkout: {:?}",
+        plan.targets
+    );
+
+    // A NORMAL checkout still plans its in-repo dirs.
+    let ok = project("root-ok-proj", "[bundles]\n");
+    let ok_ctx = rig.ctx_at(Some(&ok.0));
+    let plan = crate::placement::project_plan(
+        &ok_ctx,
+        &ok.0,
+        "topos_deadbeef",
+        topos_harness::PlacementNaming {
+            name: Some("deploy"),
+            workspace_slug: Some(WS_NAME),
+        },
+        None,
+        None,
+        None,
+    );
+    assert!(plan.refused.is_empty(), "{:?}", plan.refused);
+    assert!(
+        plan.targets.iter().all(|t| t.dir.starts_with(&ok.0)),
+        "{:?}",
+        plan.targets
+    );
+}
+
+// =================================================================================================
+// The applied report's cross-store pick is deterministic, and a version split is disclosed.
+// =================================================================================================
+
+#[test]
+fn a_bundle_held_at_two_versions_reports_the_person_copy_and_discloses_the_split() {
+    // The wire carries ONE row per (session, bundle). Which store answers must not depend on which
+    // checkout the update happened to run from — the PERSON store answers whenever it holds the
+    // bundle — and the version the OTHER store holds must not simply vanish from the person's view.
+    let rig = Rig::new("split-report");
+    rig.seed_session();
+    let v1 = one_file(b"# deploy v1\n");
+    let v2 = one_file(b"# deploy v2\n");
+    let v1_hex = topos_core::digest::to_hex(&v1.id);
+    let proj = project(
+        "proj-split",
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"{v1_hex}\"\n"),
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &v1)
+        .with_version("s_deploy", &v2);
+    // The FEED serves the current version; the project row is PINNED to the older one.
+    plane.serves(vec![delivered("s_deploy", "deploy", &v2)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v2)], Vec::new());
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let out = sweep(&ctx, &plane, &dir);
+
+    assert_eq!(
+        std::fs::read(rig.work.0.join("skills/deploy/SKILL.md")).unwrap(),
+        b"# deploy v2\n",
+        "the person scope takes the served current"
+    );
+    assert_eq!(
+        std::fs::read(proj.0.join(".claude/skills/deploy/SKILL.md")).unwrap(),
+        b"# deploy v1\n",
+        "the project scope holds its pin"
+    );
+    // The reported row is the PERSON store's — deterministically, not by iteration luck.
+    let reported = plane.reported.lock().unwrap().clone();
+    let row = reported
+        .iter()
+        .find(|(id, _)| id == "s_deploy")
+        .unwrap_or_else(|| panic!("the bundle is reported: {reported:?}"));
+    assert_eq!(row.1, topos_core::digest::to_hex(&v2.id), "{reported:?}");
+    // And the split the single row cannot carry is said out loud.
+    let line = out
+        .warnings
+        .iter()
+        .find(|w| w.starts_with("VERSION_SPLIT"))
+        .unwrap_or_else(|| panic!("the split is disclosed: {:?}", out.warnings));
+    assert!(line.contains("s_deploy"), "{line}");
+    assert!(
+        line.contains(&v1_hex[..12]),
+        "names the other version: {line}"
+    );
+    assert!(
+        line.contains(&proj.0.display().to_string()),
+        "names which store holds it: {line}"
+    );
+}
+
+// =================================================================================================
+// The machine-local registries fail CLOSED on a document this build cannot decipher.
+// =================================================================================================
+
+/// A `state/<doc>` written at a schema version FROM THE FUTURE — what a newer build leaves behind
+/// when someone downgrades, or runs two versions side by side.
+fn write_newer_schema_doc(layout: &Layout, path: &std::path::Path, body: &str) -> Vec<u8> {
+    std::fs::create_dir_all(layout.state_dir()).unwrap();
+    let bytes = body.as_bytes().to_vec();
+    std::fs::write(path, &bytes).unwrap();
+    bytes
+}
+
+#[test]
+fn a_newer_forge_registry_grants_nothing_and_is_never_written_over() {
+    let rig = Rig::new("trust-newer");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let path = rig.layout().forge_trust_path();
+    let bytes = write_newer_schema_doc(
+        &rig.layout(),
+        &path,
+        "{\n  \"schema_version\": 9999,\n  \"seeded\": true,\n  \"origins\": [\"github.com/o/r\"]\n}\n",
+    );
+    // (a) A trust question over an undecipherable registry answers NO — never "empty, so re-seed".
+    assert!(
+        !crate::forge_trust::is_trusted(&ctx, "github.com/o/r"),
+        "an unreadable registry grants nothing"
+    );
+    // (b) …and the write REFUSES rather than replacing a document it could not read.
+    let err = crate::forge_trust::grant(&ctx, "github.com/o/r").unwrap_err();
+    assert_eq!(err.code(), "UPGRADE_REQUIRED", "{err:?}");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        bytes,
+        "the newer document is byte-untouched"
+    );
+}
+
+#[test]
+fn a_newer_visited_store_index_contributes_nothing_and_is_never_written_over() {
+    let rig = Rig::new("visited-newer");
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let path = rig.layout().visited_stores_path();
+    let bytes = write_newer_schema_doc(
+        &rig.layout(),
+        &path,
+        "{\n  \"schema_version\": 9999,\n  \"stores\": [\"/nowhere\"]\n}\n",
+    );
+    let layouts = crate::visited_stores::recall_and_record(&ctx, &[]);
+    assert!(layouts.is_empty(), "no recorded store is recalled");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        bytes,
+        "the newer document is byte-untouched"
+    );
+}
+
+// =================================================================================================
+// Manifest mutations serialize on the file's own writer lock.
+// =================================================================================================
+
+#[test]
+fn two_manifest_edits_through_the_locked_path_both_land() {
+    // The lock is about SERIALIZATION, not detection: what must hold is that two edits of one file
+    // — each a full read-modify-write — leave BOTH rows standing.
+    let rig = Rig::new("manifest-lock");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let a = one_file(b"# alpha\n");
+    let b = one_file(b"# beta\n");
+    let plane = FakePlane::new(log)
+        .with_version("s_a", &a)
+        .with_version("s_b", &b);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(
+        vec![
+            catalog_entry("s_a", "alpha", &a),
+            catalog_entry("s_b", "beta", &b),
+        ],
+        Vec::new(),
+    );
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    for name in ["alpha", "beta"] {
+        match ops::add_reference(
+            &ctx,
+            &connect(&plane, &dir),
+            None,
+            &format!("@{WS_NAME}/{name}"),
+            true,
+            false,
+        )
+        .unwrap()
+        {
+            ops::AddRefOutcome::Applied(_) => {}
+            ops::AddRefOutcome::Described { .. } => panic!("a workspace ref applies immediately"),
+        }
+    }
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(text.contains("alpha"), "the first row survived: {text}");
+    assert!(text.contains("beta"), "the second row landed: {text}");
+    // The whole file still parses — a lock that let two writers interleave would not guarantee it.
+    crate::manifest::document::parse_manifest(
+        &text,
+        crate::manifest::document::ManifestScope::Global,
+    )
+    .unwrap_or_else(|e| panic!("{e}: {text}"));
+}
+
+#[test]
+fn a_copy_edited_between_the_scan_and_the_delete_is_snapshotted_before_it_goes() {
+    // The retiring sweep scans every placement, snapshots the edited ones, and only THEN deletes.
+    // An edit that lands in that gap was captured by nothing — so the delete re-scans and
+    // snapshots what is actually there. Nothing unsnapshotted disappears.
+    let rig = Rig::new("clean-race");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
+    let placed = install_feed_deploy(&rig, &plane, &dir);
+    let before = store_versions(&rig.layout(), "s_deploy");
+
+    // The recipe stops asking for it — the next sweep retires the placement.
+    rig.write_global("[bundles]\n");
+    // The racer edits the (clean) copy between the sweep's scan and its delete.
+    let racing = placed.clone();
+    // The seam: the retiring loop probes `exists(dir)` immediately before it removes the dir —
+    // AFTER the scan that classified every placement as clean. An edit landing there was captured
+    // by no snapshot, so only a re-scan at the delete can save it.
+    let fs = crate::fs_seam::HookFs::before_nth_exists(&placed, 1, move || {
+        std::fs::write(racing.join("SKILL.md"), b"# raced edit\n").unwrap();
+    });
+    let ctx = Ctx {
+        fs: &fs,
+        ..rig.ctx_at(Some(&rig.work.0))
+    };
+    sweep(&ctx, &plane, &dir);
+    assert!(!placed.exists(), "the undemanded placement is retired");
+    assert_eq!(
+        store_versions(&rig.layout(), "s_deploy"),
+        before + 1,
+        "the raced edit was committed into the store before the dir went"
+    );
 }

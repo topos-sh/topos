@@ -746,24 +746,30 @@ pub(crate) fn manifest_update(
         let delivered_ids: HashSet<&str> = reported.iter().map(String::as_str).collect();
         let mut report_ok = false;
         match super::pull::applied_snapshot(ctx, &delivered_ids, &visited_stores) {
-            Ok(applied) => match run
-                .transports
-                .plane
-                .report_applied(&run.session.workspace_id, &applied)
-            {
-                Ok(()) => report_ok = true,
-                Err(e) => {
-                    let m = match e {
-                        PlaneError::NotFound => "access gone".to_owned(),
-                        PlaneError::Unreachable(m)
-                        | PlaneError::Unavailable(m)
-                        | PlaneError::Malformed(m) => m,
-                    };
-                    sweep
-                        .warnings
-                        .push(format!("REPORT_FAILED {}: {m}", run.session.workspace_name));
+            Ok(snapshot) => {
+                // The wire carries ONE row per (session, bundle); a bundle held at different
+                // versions in different stores says so here, where the pick was made — a local
+                // fact, disclosed whether or not the report reaches the plane.
+                sweep.warnings.extend(snapshot.splits.iter().cloned());
+                match run
+                    .transports
+                    .plane
+                    .report_applied(&run.session.workspace_id, &snapshot.applied)
+                {
+                    Ok(()) => report_ok = true,
+                    Err(e) => {
+                        let m = match e {
+                            PlaneError::NotFound => "access gone".to_owned(),
+                            PlaneError::Unreachable(m)
+                            | PlaneError::Unavailable(m)
+                            | PlaneError::Malformed(m) => m,
+                        };
+                        sweep
+                            .warnings
+                            .push(format!("REPORT_FAILED {}: {m}", run.session.workspace_name));
+                    }
                 }
-            },
+            }
             Err(e) => sweep.warnings.push(format!(
                 "REPORT_FAILED {}: {}",
                 run.session.workspace_name,
@@ -1326,24 +1332,32 @@ fn sync_workspace_skill<'a>(
     // byte-identical copy (a handed-over old-world placement, a teammate's committed copy) BECOMES
     // the placement instead of a namespaced sibling.
     let adopt_digest = target.bundle_digest;
+    // A project root the containment rail refused is a placement that DID NOT HAPPEN — collected
+    // from wherever the engine computes the plan, so the receipt says so instead of the bundle
+    // quietly landing nowhere.
+    let escapes: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
     let plan_fn = |ctx: &Ctx<'_>, skill_id: &str, lock: &Lock, map: &PlacementMap| {
         // The row's `name` is what the directory is called; everything else about the bundle keeps
         // its catalog identity.
         let mut named = lock.clone();
         named.name = display.clone();
         match &project_dir {
-            Some(dir) => placement::project_plan(
-                ctx,
-                dir,
-                skill_id,
-                topos_harness::PlacementNaming {
-                    name: Some(&named.name),
-                    workspace_slug: Some(&naming_slug),
-                },
-                override_dir.as_deref(),
-                Some(map),
-                adopt_digest,
-            ),
+            Some(dir) => {
+                let plan = placement::project_plan(
+                    ctx,
+                    dir,
+                    skill_id,
+                    topos_harness::PlacementNaming {
+                        name: Some(&named.name),
+                        workspace_slug: Some(&naming_slug),
+                    },
+                    override_dir.as_deref(),
+                    Some(map),
+                    adopt_digest,
+                );
+                escapes.borrow_mut().extend(plan.refused.iter().cloned());
+                plan
+            }
             None => placement::plan_for_skill(ctx, skill_id, &named, map),
         }
     };
@@ -1393,14 +1407,26 @@ fn sync_workspace_skill<'a>(
         .plane
         .as_delivery()
         .bind_skill(&run.session.workspace_id, &target.skill_id);
-    match sync_engine::sync_one_planned(
+    let outcome = sync_engine::sync_one_planned(
         &run_ctx,
         &sid,
         &fc,
         Invocation::Accept,
         Some(&record),
         Some(&plan_fn),
-    ) {
+    );
+    // The refused-root lines first (deduped): they explain a delivery that landed in fewer dirs
+    // than it should have — or in none at all.
+    {
+        let mut refused = escapes.borrow_mut();
+        refused.dedup();
+        for line in refused.drain(..) {
+            if !sweep.warnings.contains(&line) {
+                sweep.warnings.push(line);
+            }
+        }
+    }
+    match outcome {
         Ok(mut row) => {
             row.workspace_id = Some(run.session.workspace_id.clone());
             row.scope = Some(sc.label.clone());
@@ -1688,28 +1714,48 @@ fn reconcile_repo_set(
         return;
     }
     let tracked = tracked_repo_members(&sctx, &origin);
-    for (_, lock, _) in &tracked {
-        sweep.mention(&sc.label, &lock.name);
+    for import in &tracked {
+        sweep.mention(&sc.label, &import.lock.name);
     }
     let pin = row.pin();
 
     // A pinned row that every tracked member already satisfies is settled — no forge call, ever.
     // (A granted origin with NOTHING tracked yet in this scope's store — a partial add landing,
     // a fresh checkout of a trusted row — is never "satisfied": the fetch below converges it.)
+    //
+    // "Every tracked member" is NOT "every member": a batch that landed two of five leaves two
+    // rows, both at the pin, and would read as settled forever. So the predicate compares the
+    // tracked names against the member set RECORDED at landing — the archive's own contents at
+    // that commit — and a missing member makes the explicit update refetch and converge it. An
+    // import that recorded no member set (pre-field) keeps the older predicate: it cannot prove a
+    // gap, and inventing one would refetch a settled pin on every run.
+    let is_tracked_name = |name: &str| {
+        tracked
+            .iter()
+            .any(|i| i.lock.name == name || subdir_leaf(&i.origin).as_deref() == Some(name))
+    };
+    let members_complete = recorded_member_set(&tracked)
+        .is_none_or(|recorded| recorded.iter().all(|m| is_tracked_name(m)));
     let pin_satisfied = pin.as_ref().is_some_and(|p| {
         !tracked.is_empty()
+            && members_complete
             && tracked
                 .iter()
-                .all(|(_, _, o)| commit_matches(o.commit.as_deref().unwrap_or_default(), p))
+                .all(|i| commit_matches(i.origin.commit.as_deref().unwrap_or_default(), p))
     });
 
     let Some(git) = env.git.filter(|_| !pin_satisfied) else {
         // Offline (or settled): tracked members converge in place.
-        for (_, lock, _) in &tracked {
-            if !set_selected && !targets.hit(&[lock.name.as_str()]) {
+        for import in &tracked {
+            if !set_selected && !targets.hit(&[import.lock.name.as_str()]) {
                 continue;
             }
-            sweep.push(plain_row(&lock.name, PullAction::UpToDate, None, &sc.label));
+            sweep.push(plain_row(
+                &import.lock.name,
+                PullAction::UpToDate,
+                None,
+                &sc.label,
+            ));
         }
         return;
     };
@@ -1738,28 +1784,29 @@ fn reconcile_repo_set(
     let resolved = tree.commit.clone().unwrap_or_default();
     let recorded = tracked
         .first()
-        .and_then(|(_, _, o)| o.commit.clone())
+        .and_then(|i| i.origin.commit.clone())
         .unwrap_or_default();
     let discovered = tree.skill_names(None, repo);
     for name in &discovered {
         sweep.mention(&sc.label, name);
     }
-    let is_tracked = |name: &str| {
-        tracked
-            .iter()
-            .any(|(_, lock, o)| lock.name == name || subdir_leaf(o).as_deref() == Some(name))
-    };
+    let is_tracked = is_tracked_name;
     // The repo has not moved AND every discovered member is already tracked: settled. (An
     // UNTRACKED member at the same commit — a partial add landing — still installs below.)
     if !resolved.is_empty()
         && commit_matches(&recorded, &resolved)
         && discovered.iter().all(|d| is_tracked(d))
     {
-        for (_, lock, _) in &tracked {
-            if !set_selected && !targets.hit(&[lock.name.as_str()]) {
+        for import in &tracked {
+            if !set_selected && !targets.hit(&[import.lock.name.as_str()]) {
                 continue;
             }
-            sweep.push(plain_row(&lock.name, PullAction::UpToDate, None, &sc.label));
+            sweep.push(plain_row(
+                &import.lock.name,
+                PullAction::UpToDate,
+                None,
+                &sc.label,
+            ));
         }
         return;
     }
@@ -1775,33 +1822,45 @@ fn reconcile_repo_set(
     // Members the NEW archive no longer holds leave with it: the ordinary undemanded clean
     // (snapshot-first — an edited copy is committed into the store before any dir goes), in this
     // scope's own store. The `-member` the receipt line rendered is thereby true on disk.
-    for (sid, lock, o) in &tracked {
+    for import in &tracked {
         let still_held = discovered
             .iter()
-            .any(|d| lock.name == *d || subdir_leaf(o).as_deref() == Some(d));
-        if still_held || (!set_selected && !targets.hit(&[lock.name.as_str()])) {
+            .any(|d| import.lock.name == *d || subdir_leaf(&import.origin).as_deref() == Some(d));
+        if still_held || (!set_selected && !targets.hit(&[import.lock.name.as_str()])) {
             continue;
         }
-        match clean_written_placements(&sctx, sid, matches!(sc.scope, ResolvedScope::Person)) {
+        match clean_written_placements(
+            &sctx,
+            &import.sid,
+            matches!(sc.scope, ResolvedScope::Person),
+        ) {
             Ok(Some(name)) => sweep.push(plain_row(&name, PullAction::Withdrawn, None, &sc.label)),
             Ok(None) => {}
-            Err(e) => note_item_failure(env.ctx, &mut sweep.warnings, &lock.name, &e),
+            Err(e) => note_item_failure(env.ctx, &mut sweep.warnings, &import.lock.name, &e),
         }
     }
     for name in &discovered {
         if !set_selected && !targets.hit(&[name.as_str()]) {
             continue;
         }
-        let member = tracked
-            .iter()
-            .find(|(_, lock, o)| lock.name == *name || subdir_leaf(o).as_deref() == Some(name));
+        let member = tracked.iter().find(|i| {
+            i.lock.name == *name || subdir_leaf(&i.origin).as_deref() == Some(name.as_str())
+        });
         // A tracked member already AT the fetched commit is settled — only the untracked (or
         // moved) members go through the install/refresh below.
-        if let Some((_, lock, o)) = member
+        if let Some(import) = member
             && !resolved.is_empty()
-            && commit_matches(o.commit.as_deref().unwrap_or_default(), &resolved)
+            && commit_matches(
+                import.origin.commit.as_deref().unwrap_or_default(),
+                &resolved,
+            )
         {
-            sweep.push(plain_row(&lock.name, PullAction::UpToDate, None, &sc.label));
+            sweep.push(plain_row(
+                &import.lock.name,
+                PullAction::UpToDate,
+                None,
+                &sc.label,
+            ));
             continue;
         }
         install_or_refresh_repo_skill(env, sc, &sctx, &spec, &targz, name, member, sweep);
@@ -1834,16 +1893,21 @@ fn reconcile_repo_skill(
     let members = tracked_repo_members(&sctx, &origin);
     let tracked = members
         .into_iter()
-        .find(|(_, lock, o)| lock.name == skill || subdir_leaf(o).as_deref() == Some(skill));
+        .find(|i| i.lock.name == skill || subdir_leaf(&i.origin).as_deref() == Some(skill));
     let pin = row.pin();
     let pin_satisfied = match (&pin, &tracked) {
-        (Some(p), Some((_, _, o))) => commit_matches(o.commit.as_deref().unwrap_or_default(), p),
+        (Some(p), Some(i)) => commit_matches(i.origin.commit.as_deref().unwrap_or_default(), p),
         _ => false,
     };
     let Some(git) = env.git.filter(|_| !pin_satisfied) else {
         match &tracked {
-            Some((_, lock, _)) => {
-                sweep.push(plain_row(&lock.name, PullAction::UpToDate, None, &sc.label));
+            Some(import) => {
+                sweep.push(plain_row(
+                    &import.lock.name,
+                    PullAction::UpToDate,
+                    None,
+                    &sc.label,
+                ));
             }
             // The origin is trusted; only THIS member has not been fetched yet.
             None => sweep.warnings.push(format!(
@@ -1871,13 +1935,18 @@ fn reconcile_repo_skill(
         }
     };
     // A tracked member at the same commit is settled: nothing moves without a real change.
-    if let Some((_, lock, o)) = &tracked
+    if let Some(import) = &tracked
         && let Ok(tree) = crate::git_source::extract_tree(&targz)
     {
         let resolved = tree.commit.clone().unwrap_or_default();
-        let recorded = o.commit.clone().unwrap_or_default();
+        let recorded = import.origin.commit.clone().unwrap_or_default();
         if !resolved.is_empty() && commit_matches(&recorded, &resolved) {
-            sweep.push(plain_row(&lock.name, PullAction::UpToDate, None, &sc.label));
+            sweep.push(plain_row(
+                &import.lock.name,
+                PullAction::UpToDate,
+                None,
+                &sc.label,
+            ));
             return;
         }
         if !recorded.is_empty() && !resolved.is_empty() {
@@ -1885,7 +1954,7 @@ fn reconcile_repo_skill(
                 "GIT_UPDATED {origin}: {} -> {}; skills: ~{}",
                 short_commit(&recorded),
                 short_commit(&resolved),
-                lock.name
+                import.lock.name
             ));
         }
     }
@@ -1913,7 +1982,7 @@ fn install_or_refresh_repo_skill(
     spec: &crate::source::RemoteSpec,
     targz: &[u8],
     name: &str,
-    tracked: Option<&(SkillId, Lock, topos_types::results::SkillOrigin)>,
+    tracked: Option<&ForgeImport>,
     sweep: &mut Sweep,
 ) {
     let Some(roots) = discovery_roots(env.ctx, &sc.scope) else {
@@ -1936,7 +2005,7 @@ fn install_or_refresh_repo_skill(
         global: matches!(sc.scope, ResolvedScope::Person),
     };
     let outcome = match tracked {
-        Some((sid, _, _)) => refresh_repo_skill(sctx, targz, spec, &opts, &roots, sid),
+        Some(import) => refresh_repo_skill(sctx, targz, spec, &opts, &roots, &import.sid),
         None => super::add_remote_fetched(sctx, targz, spec, &roots, &opts).map(|d| d.name),
     };
     match outcome {
@@ -2099,10 +2168,10 @@ fn git_updated_line(
     origin: &str,
     old: &str,
     new: &str,
-    tracked: &[(SkillId, Lock, topos_types::results::SkillOrigin)],
+    tracked: &[ForgeImport],
     discovered: &[String],
 ) -> String {
-    let had: Vec<&str> = tracked.iter().map(|(_, l, _)| l.name.as_str()).collect();
+    let had: Vec<&str> = tracked.iter().map(|i| i.lock.name.as_str()).collect();
     let mut parts: Vec<String> = Vec::new();
     for name in discovered {
         if had.contains(&name.as_str()) {
@@ -2177,14 +2246,33 @@ fn held_skill_ids(ctx: &Ctx<'_>, visited: &[sidecar::Layout]) -> HashSet<String>
 
 /// Every tracked skill imported from `origin_source` in THIS ctx's store, by walking the
 /// sidecar's origin docs. Best-effort: unreadable entries are skipped.
-pub(crate) fn tracked_repo_members(
-    ctx: &Ctx<'_>,
-    origin_source: &str,
-) -> Vec<(SkillId, Lock, topos_types::results::SkillOrigin)> {
+pub(crate) fn tracked_repo_members(ctx: &Ctx<'_>, origin_source: &str) -> Vec<ForgeImport> {
     forge_imports(ctx)
         .into_iter()
-        .filter(|(_, _, o)| o.source == origin_source)
+        .filter(|i| i.origin.source == origin_source)
         .collect()
+}
+
+/// The MEMBER SET a pinned repo-set row must see landed before it is settled: the union of the
+/// member lists the tracked imports recorded at landing. `None` when NO tracked import records one
+/// (a pre-`members` import, or none at all) — the caller then cannot tell a partial landing from a
+/// complete one and keeps the older, weaker predicate rather than inventing a fact.
+fn recorded_member_set(tracked: &[ForgeImport]) -> Option<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    let mut any = false;
+    for import in tracked {
+        if import.members.is_empty() {
+            continue;
+        }
+        any = true;
+        out.extend(import.members.iter().cloned());
+    }
+    if !any {
+        return None;
+    }
+    out.sort();
+    out.dedup();
+    Some(out)
 }
 
 /// The last segment of a recorded in-repo path (`skills/alpha` → `alpha`).
@@ -2347,16 +2435,16 @@ fn clean_undemanded(
         // snapshot-first, the sidecar bytes kept, in-checkout placements untouched (they are a
         // project scope's business). A row that still names the origin mentioned every tracked
         // member above, so a transient forge failure can never read as a drop.
-        for (sid, lock, _) in forge_imports(ctx) {
-            if mentioned.contains(&lock.name) || adopted.contains(sid.as_str()) {
+        for import in forge_imports(ctx) {
+            if mentioned.contains(&import.lock.name) || adopted.contains(import.sid.as_str()) {
                 continue;
             }
-            match clean_written_placements(ctx, &sid, true) {
+            match clean_written_placements(ctx, &import.sid, true) {
                 Ok(Some(name)) => {
                     sweep.push(plain_row(&name, PullAction::Withdrawn, None, &label));
                 }
                 Ok(None) => {}
-                Err(e) => note_item_failure(ctx, &mut sweep.warnings, &lock.name, &e),
+                Err(e) => note_item_failure(ctx, &mut sweep.warnings, &import.lock.name, &e),
             }
         }
     }
@@ -2464,11 +2552,19 @@ fn clean_written_placements(
     Ok(Some(lock.name))
 }
 
+/// ONE forge-imported skill a store tracks: its id, its lock, the recorded provenance, and the
+/// member set the archive held at that commit (empty for an import written before the field
+/// existed).
+pub(crate) struct ForgeImport {
+    pub sid: SkillId,
+    pub lock: Lock,
+    pub origin: topos_types::results::SkillOrigin,
+    pub members: Vec<String>,
+}
+
 /// Every forge-imported skill a store tracks (an `origin.json` beside its docs), whatever the
 /// origin. Best-effort: unreadable entries are skipped.
-pub(crate) fn forge_imports(
-    ctx: &Ctx<'_>,
-) -> Vec<(SkillId, Lock, topos_types::results::SkillOrigin)> {
+pub(crate) fn forge_imports(ctx: &Ctx<'_>) -> Vec<ForgeImport> {
     let mut out = Vec::new();
     let Ok(entries) = ctx.fs.read_dir(&ctx.layout.skills_dir()) else {
         return out;
@@ -2487,9 +2583,14 @@ pub(crate) fn forge_imports(
         let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &sp.lock) else {
             continue;
         };
-        out.push((sid, lock, origin.origin));
+        out.push(ForgeImport {
+            sid,
+            lock,
+            origin: origin.origin,
+            members: origin.members,
+        });
     }
-    out.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+    out.sort_by(|a, b| a.lock.name.cmp(&b.lock.name));
     out
 }
 
@@ -2536,6 +2637,12 @@ fn is_project_placement(ctx: &Ctx<'_>, dir: &Path) -> bool {
 /// the sidecar store BEFORE any dir is removed; Foreign dirs are never touched; the cleaned dirs
 /// leave the placement record (demand ended — the explicit act was the manifest edit). Fails closed
 /// on an unscannable placement.
+///
+/// The snapshot pass above rides ONE scan of every placement, and the deletes below happen after it
+/// — so each dir is RE-SCANNED immediately before its own delete and whatever is actually there is
+/// captured then. The invariant is the materializer's: no byte differing from its recorded baseline
+/// is destroyed unless a snapshot taken after the last revalidation holds it. A dir that has become
+/// unreadable in the window fails closed exactly as one that was unreadable up front.
 fn clean_placements(
     ctx: &Ctx<'_>,
     sid: &SkillId,
@@ -2569,6 +2676,39 @@ fn clean_placements(
         }
         let p = &scans[i].dir;
         if ctx.fs.exists(p) {
+            // The RE-SCAN: what is in this dir RIGHT NOW, not what the pass above saw. Bytes that
+            // arrived (or changed) since then were captured by no snapshot, so they are committed
+            // here before the delete; an unreadable dir refuses rather than being removed blind.
+            match crate::scan::scan(p) {
+                Ok(fresh) => {
+                    // Already captured by the pass above (same bytes), or equal to this
+                    // placement's own recorded baseline (nothing of the user's to lose) —
+                    // otherwise these exact bytes are snapshotted now, before they go.
+                    let captured = matches!(
+                        &scans[i].status,
+                        placement::ScanStatus::Modified { scanned }
+                            if scanned.bundle_digest == fresh.bundle_digest
+                    );
+                    let now_hex = topos_core::digest::to_hex(&fresh.bundle_digest);
+                    let at_baseline = map
+                        .placement_state
+                        .get(i)
+                        .and_then(|s| s.materialized_sha.as_deref())
+                        == Some(now_hex.as_str());
+                    if !captured && !at_baseline {
+                        sync_engine::snapshot_draft(ctx, &ctx.layout.published(sid), lock, &fresh)?;
+                    }
+                }
+                Err(e) => {
+                    return Err(ClientError::PlacementUnsupported {
+                        reason: format!(
+                            "{} changed while it was being retired and can no longer be read \
+                             ({e}); refusing to remove it — inspect or move the directory by hand",
+                            p.display()
+                        ),
+                    });
+                }
+            }
             ctx.fs.remove_dir_all(p)?;
         }
         removed.insert(i);

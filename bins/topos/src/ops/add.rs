@@ -297,12 +297,23 @@ pub(crate) struct OriginDoc {
     pub origin: SkillOrigin,
     /// When the import happened (epoch millis).
     pub imported_at: u64,
+    /// Every skill the archive held AT `origin.commit` — the member set this import saw. Additive
+    /// (an older document simply has none), and the whole point of recording it is that a PINNED
+    /// repo-set row can tell "all of them landed" from "some of them landed": without it, a batch
+    /// that installed two of five members reads as settled forever, because every member it DID
+    /// land sits at the pin.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
 }
 
 /// Adopt a skill fetched from a REMOTE source (`owner/repo`, a github.com URL). Resolves the destination
 /// harness dir, refuses to clobber it, materializes the byte-exact skill there, then adopts it through the
-/// unchanged [`add_with_name`] core and records the provenance. Fully non-interactive — the source's
-/// trustworthiness is the caller's (user/agent) responsibility, so there is no disclosure gate.
+/// unchanged [`add_with_name`] core and records the provenance.
+///
+/// This is the byte-placing PRIMITIVE, not a verb: it asks nothing about trust. The first-trust
+/// ceremony (describe → `--yes` → the machine registry grant) lives one layer up, in
+/// [`super::reference`], which every user-facing forge arm — bare reference and `-s`/`-a` selector
+/// alike — goes through before reaching here.
 ///
 /// # Errors
 /// The remote-import family ([`ClientError::RemoteFetch`] / [`ClientError::NoSkillInSource`] /
@@ -405,6 +416,14 @@ pub(crate) fn add_remote_fetched(
             Some(f) => git_visible = !crate::materialize::ignores_all(&f.bytes),
         }
     }
+    // RE-PROVE the destination immediately before the destructive pair. Step 3's check ran BEFORE
+    // the staging window, and building the staged tree takes real time — anything that appeared at
+    // `dest_dir` since then was validated by nobody, and the recursive delete two lines down would
+    // destroy it on the strength of a stale observation.
+    if let Err(e) = revalidate_destination(ctx, &dest_dir, &stage_dir) {
+        let _ = ctx.fs.remove_dir_all(&stage_dir);
+        return Err(e);
+    }
     // An empty pre-existing dest is fine to fill (check_destination allowed it) but blocks the no-replace
     // rename — clear it first. A non-empty dest was already refused above.
     if ctx.fs.exists(&dest_dir) {
@@ -439,6 +458,9 @@ pub(crate) fn add_remote_fetched(
             schema_version: PERSISTED_SCHEMA_VERSION,
             origin: origin.clone(),
             imported_at: ctx.clock.now_unix_millis(),
+            // The whole archive's member set at this commit (the same enumeration the reconcile's
+            // repo-set arm compares against), not just the member this call selected.
+            members: repo.skill_names(None, &spec.repo),
         };
         if let Err(e) = doc::write_doc(ctx.fs, &ctx.layout.published(&id).origin, &doc) {
             let _ = logfile::append_event(
@@ -733,6 +755,26 @@ fn check_destination(ctx: &Ctx<'_>, dest: &Path) -> Result<(), ClientError> {
     Err(ClientError::PlacementOccupied {
         path: dest.display().to_string(),
     })
+}
+
+/// Re-prove the destination is ours to fill, IMMEDIATELY before the delete + rename that lands the
+/// import — the second half of [`check_destination`], run after the staging window rather than
+/// before it. TIME PASSES between the two: extracting and writing the staged tree is real work, and
+/// a directory that appeared at `dest` in that window carries bytes nobody validated.
+///
+/// One benign case proceeds: content BYTE-IDENTICAL to what this call is about to place (a
+/// concurrent run of the same import that landed first). Replacing it changes nothing observable.
+/// Everything else — a foreign occupant, a now-tracked dir, an unreadable one — keeps its typed
+/// refusal and the staged tree is dropped: never delete bytes this run cannot account for.
+fn revalidate_destination(ctx: &Ctx<'_>, dest: &Path, staged: &Path) -> Result<(), ClientError> {
+    let Err(refusal) = check_destination(ctx, dest) else {
+        return Ok(());
+    };
+    let identical = match (scan::scan(dest), scan::scan(staged)) {
+        (Ok(there), Ok(here)) => there.bundle_digest == here.bundle_digest,
+        _ => false,
+    };
+    if identical { Ok(()) } else { Err(refusal) }
 }
 
 /// Write a selected skill's byte-exact files into `dest`, preserving the executable bit (part of the

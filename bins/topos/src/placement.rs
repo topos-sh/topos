@@ -68,6 +68,10 @@ pub(crate) struct PlacementPlan {
     pub targets: Vec<PlannedTarget>,
     /// The harnesses the shared target covers (empty when no shared target is planned).
     pub shared_covers: Vec<CoveredAgent>,
+    /// PROJECT scope only: the candidate roots [`within_project`] refused — each already rendered
+    /// as its disclosure line ([`escape_line`]). The placement is skipped, never redirected; the
+    /// caller surfaces the lines so a silent non-delivery is impossible.
+    pub refused: Vec<String>,
 }
 
 /// The device-local agent scope a plan narrows by (the skill's `follows.json` fields).
@@ -341,13 +345,26 @@ pub(crate) fn project_plan(
         }
     }
     if !plan.shared_covers.is_empty() {
-        let dir = prior_in(PlacementKind::Shared, None)
-            .unwrap_or_else(|| choose(&project_dir.join(".agents/skills")));
-        plan.targets.push(PlannedTarget {
-            dir,
-            kind: PlacementKind::Shared,
-            agent: None,
-        });
+        let shared_root = project_dir.join(".agents/skills");
+        match prior_in(PlacementKind::Shared, None) {
+            Some(dir) => plan.targets.push(PlannedTarget {
+                dir,
+                kind: PlacementKind::Shared,
+                agent: None,
+            }),
+            // THE CONTAINMENT RAIL, on the DEFAULT root — not just the override. A committed
+            // `.agents/skills` symlink aiming out of the checkout would otherwise place every
+            // covered agent's bytes wherever it points.
+            None if !within_project(project_dir, &shared_root) => {
+                plan.refused
+                    .push(escape_line("the shared agents dir", &shared_root));
+            }
+            None => plan.targets.push(PlannedTarget {
+                dir: choose(&shared_root),
+                kind: PlacementKind::Shared,
+                agent: None,
+            }),
+        }
     }
     for h in native {
         let Some(root) = home.as_deref().and_then(|home| {
@@ -360,7 +377,14 @@ pub(crate) fn project_plan(
         }) else {
             continue; // no project-scope dir for this harness — nothing to place in-project
         };
-        let dir = prior_in(PlacementKind::Native, Some(h.slug)).unwrap_or_else(|| choose(&root));
+        let dir = match prior_in(PlacementKind::Native, Some(h.slug)) {
+            Some(dir) => dir,
+            None if !within_project(project_dir, &root) => {
+                plan.refused.push(escape_line(h.slug, &root));
+                continue;
+            }
+            None => choose(&root),
+        };
         if plan.targets.iter().any(|t| t.dir == dir) {
             continue;
         }
@@ -387,11 +411,23 @@ pub(crate) fn project_plan(
                 )
             })
             .unwrap_or_else(|| project_dir.join(".claude/skills"));
-        plan.targets.push(PlannedTarget {
-            dir: prior_in(PlacementKind::Native, Some(active)).unwrap_or_else(|| choose(&root)),
-            kind: PlacementKind::Native,
-            agent: Some(active.to_owned()),
-        });
+        match prior_in(PlacementKind::Native, Some(active)) {
+            Some(dir) => plan.targets.push(PlannedTarget {
+                dir,
+                kind: PlacementKind::Native,
+                agent: Some(active.to_owned()),
+            }),
+            // The last root is the rail's last stand: refusing leaves this scope with NO target,
+            // which is the honest answer — nothing lands rather than landing outside the checkout.
+            None if !within_project(project_dir, &root) => {
+                plan.refused.push(escape_line(active, &root));
+            }
+            None => plan.targets.push(PlannedTarget {
+                dir: choose(&root),
+                kind: PlacementKind::Native,
+                agent: Some(active.to_owned()),
+            }),
+        }
     }
     plan
 }
@@ -442,6 +478,7 @@ fn classic_plan(
         return PlacementPlan {
             targets,
             shared_covers: Vec::new(),
+            refused: Vec::new(),
         };
     }
     PlacementPlan {
@@ -451,6 +488,7 @@ fn classic_plan(
             agent: Some(ctx.harness.id().slug().to_owned()),
         }],
         shared_covers: Vec::new(),
+        refused: Vec::new(),
     }
 }
 
@@ -555,29 +593,66 @@ fn prior_dir(
 /// tail). `None` (override ignored) when containment cannot be proven.
 fn override_root_within(project_dir: &Path, rel: &str) -> Option<PathBuf> {
     let root = project_dir.join(rel.trim_start_matches("./"));
-    let proj_real = project_dir.canonicalize().ok()?;
-    // (a) Reject symlink components: every existing prefix of the override path (below the
-    // project dir) must be a plain directory entry.
+    within_project(project_dir, &root).then_some(root)
+}
+
+/// **The containment rail every PROJECT-scope path passes** — the override's proof, generalized to
+/// the property it always was: a path a checkout can aim is a path a checkout can aim ANYWHERE, and
+/// `.claude/skills` committed as a symlink to `~/` is exactly as effective as a `path = "../.."`
+/// override the grammar already refuses. So the rail is not the override's rail; it is the project
+/// scope's, and every root the plan yields (plus the project's own `.topos` store) goes through it.
+///
+/// Two proofs, both needed:
+/// - **(a)** no component of `candidate` below `project_dir` is a symlink (an existing prefix that
+///   is one aims the rest of the walk wherever it points);
+/// - **(b)** the canonicalized deepest-existing ancestor of `candidate` still sits under the
+///   canonicalized `project_dir` (which catches an ancestor symlink (a) could not see, and a
+///   `..` climb).
+///
+/// A `candidate` that is not even lexically under `project_dir`, and an unresolvable
+/// `project_dir`, both answer `false` — fail closed.
+pub(crate) fn within_project(project_dir: &Path, candidate: &Path) -> bool {
+    let Ok(proj_real) = project_dir.canonicalize() else {
+        return false;
+    };
+    let Ok(rel) = candidate.strip_prefix(project_dir) else {
+        return false;
+    };
+    // (a) Reject symlink components: every existing prefix below the project dir must be a plain
+    // entry.
     let mut prefix = project_dir.to_path_buf();
-    for comp in Path::new(rel.trim_start_matches("./")).components() {
+    for comp in rel.components() {
         prefix = prefix.join(comp);
         match std::fs::symlink_metadata(&prefix) {
-            Ok(meta) if meta.file_type().is_symlink() => return None,
+            Ok(meta) if meta.file_type().is_symlink() => return false,
             Ok(_) => {}
             Err(_) => break, // the rest does not exist yet — nothing left to lstat
         }
     }
     // (b) The canonicalized containment proof over the deepest existing ancestor.
-    let mut probe = root.clone();
+    let mut probe = candidate.to_path_buf();
     let real_prefix = loop {
         match probe.canonicalize() {
             Ok(r) => break r,
             // Walk up to the deepest existing ancestor; the loop terminates at project_dir
             // (which canonicalized above) or bails at the filesystem root.
-            Err(_) => probe = probe.parent()?.to_path_buf(),
+            Err(_) => match probe.parent() {
+                Some(up) => probe = up.to_path_buf(),
+                None => return false,
+            },
         }
     };
-    real_prefix.starts_with(&proj_real).then_some(root)
+    real_prefix.starts_with(&proj_real)
+}
+
+/// The disclosure a refused project root earns — the override's voice, one rail wider.
+pub(crate) fn escape_line(what: &str, path: &Path) -> String {
+    format!(
+        "PLACEMENT_ESCAPES_PROJECT {what}: {} does not resolve inside this checkout (a symlink or \
+         a climb out of it) — a committed file must never aim managed bytes elsewhere, so it is \
+         skipped",
+        path.display()
+    )
 }
 
 /// Whether a manifest `[placement]` value is a SAFE project-relative path: non-empty, relative,
@@ -1215,6 +1290,7 @@ mod tests {
                 agent: Some("claude-code".to_owned()),
             }],
             shared_covers: Vec::new(),
+            refused: Vec::new(),
         };
         let next = reconcile_map(&prior, &plan);
         assert_eq!(next.placements, vec!["/skills/deploy-acme".to_owned()]);
@@ -1319,6 +1395,7 @@ mod tests {
                 agent: Some("claude-code".to_owned()),
             }],
             shared_covers: Vec::new(),
+            refused: Vec::new(),
         };
         let next = reconcile_map(&prior, &plan);
         assert_eq!(next.placements, vec!["/skills/deploy".to_owned()]);
