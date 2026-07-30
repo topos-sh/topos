@@ -6,7 +6,9 @@
 > DECLINES (one positive row PER PROVENANCE — bundle-or-channel × person-or-everyone, with a
 > `self` flag saying whether the person picked it themselves or a curator aimed it, so a
 > self-pick and a curator's aim COEXIST, each unassign arm deletes only its own provenance, and
-> delivery unions both; the workspace baseline is the default channel assigned to everyone; one
+> delivery unions both; the workspace baseline is the default channel assigned to everyone — a row
+> the DATA LAYER refuses to unassign, because "no page offers it" is not a rule and a crafted intent
+> would otherwise empty every member's feed at once; one
 > negative row, per person per bundle, keyed to bundle identity)
 > replaced profile include/exclude rows — no route writes a feed, so the retired
 > `/api/v1/workspaces/{ws}/profile*` paths answer the uniform wire 404, and the `/profile` page

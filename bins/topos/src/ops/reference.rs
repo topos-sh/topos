@@ -13,12 +13,15 @@
 //! global file, whose absence means "one feed row per connected workspace" — so a bare `add -g X`
 //! of something the feed already delivers writes NOTHING and says so.
 //!
-//! One CONSENT gate lives here: a git origin the target scope's own STORE does not yet track is
-//! fetched read-only, described (what it holds, what would be written where), and applied only
-//! under `--yes`. Trust is a store fact — a tracked import of the origin — never a file fact: a
-//! manifest row is demand anyone could have committed, so a row's existence never skips the
-//! member-listing describe (the describe names it instead). Every other arm is a self-scoped
-//! file edit that applies immediately with an undo-led receipt.
+//! One CONSENT gate lives here: a git origin this MACHINE's trust registry (`crate::forge_trust`,
+//! the home sidecar) has not granted is fetched read-only, described (what it holds, what would be
+//! written where), and applied only under `--yes`. Trust is a machine fact — never a file fact and
+//! never a store fact: a manifest row is demand anyone could have committed, and a project
+//! `.topos/` store travels with the checkout, so neither ever skips the member-listing describe
+//! (the describe names a standing row instead). The `-s`/`-a` SELECTOR arm goes through the same
+//! gate and the same per-scope store — a selector narrows which members land and where, never whose
+//! bytes they are. Every other arm is a self-scoped file edit that applies immediately with an
+//! undo-led receipt.
 
 use topos_types::results::{AddData, AddDescribeData};
 
@@ -185,7 +188,9 @@ fn add_workspace(
     if global {
         let target = medit::global_target(ctx);
         // A standing `"off"` switch is the row's own inverse: adding it back DELETES the switch
-        // (never a second, redundant positive row beside it).
+        // (never a second, redundant positive row beside it). The delete is a read-modify-write,
+        // so it holds the manifest writer lock exactly as `write_row` does.
+        let off_guard = medit::lock_manifest(ctx, &target.path)?;
         if let Some(text) = medit::read_text(ctx, &target.path)?
             && let Ok(mut editor) =
                 crate::manifest::document::ManifestEditor::open(&text, ManifestScope::Global)
@@ -205,8 +210,13 @@ fn add_workspace(
                     resolved.name, resolved.session.workspace_name
                 ),
             );
+            drop(off_guard);
             return Ok(finish_workspace(ctx, connect, data, &resolved));
         }
+        // Released before `write_row`, which takes it again for its own read→edit→write (the
+        // `flock` is per open file description, so re-taking it in the same process is fine, but
+        // holding it across the delivery below would block a concurrent verb for a network call).
+        drop(off_guard);
         let feeds = medit::feed_items(ctx, connect);
         let feed_carries = feeds.iter().any(|i| {
             !i.declined
@@ -653,6 +663,207 @@ fn add_forge(
     Ok(AddRefOutcome::Applied(Box::new(data)))
 }
 
+// ---------------------------------------------------------------------------------------------
+// The SELECTOR import — `add owner/repo -s <skill>… -a <agent>…` (and their `*` fan-outs)
+// ---------------------------------------------------------------------------------------------
+
+/// What a selector-driven import did — or, for a first-trust git source, what it WOULD do. Same
+/// two-phase shape as [`AddRefOutcome`]; the applied arm is a LIST because the selectors fan out
+/// over (skill × harness).
+pub(crate) enum AddManyOutcome {
+    Applied(Vec<AddData>),
+    Described {
+        data: AddDescribeData,
+        yes_argv: Vec<String>,
+    },
+}
+
+/// `topos add <owner/repo> [-s <skill>…] [-a <agent>…] [-g] [--yes]` — the SELECTOR arm.
+///
+/// The selectors change WHICH members land and WHERE; they change nothing about whose bytes these
+/// are. So this arm runs the SAME first-trust ceremony as the bare reference arm: an origin this
+/// MACHINE's registry has not granted is described (source, members, what lands where) and applied
+/// only under `--yes`, which grants the origin BEFORE the first member installs. And it runs under
+/// the SCOPE's own store — a project-destined import lands in the checkout's `.topos/`, which is
+/// the store the project reconcile converges, so a selector import is no longer a set of bytes no
+/// scope's `update` can ever see again.
+///
+/// # Errors
+/// [`ClientError::InvalidArgument`] for a non-remote source, no resolvable directory, or `-a '*'`
+/// matching no detected harness; [`ClientError::NoSkillInSource`]; the remote-import family; a
+/// filesystem failure.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_forge_selected(
+    ctx: &Ctx<'_>,
+    connect: &SessionConnect<'_>,
+    git: &dyn GitTarballSource,
+    source: &str,
+    skills: &[String],
+    agents: &[String],
+    global: bool,
+    yes: bool,
+) -> Result<AddManyOutcome, ClientError> {
+    let crate::source::SourceSpec::Remote(spec) = crate::source::classify(source) else {
+        return Err(ClientError::InvalidArgument(
+            "`-s`/`-a` selectors (and `*`) apply to a REMOTE import (`owner/repo` or a \
+             github.com URL) — a local path or name adopts a single skill"
+                .into(),
+        ));
+    };
+    let Some(target) = medit::edit_target(ctx, global)? else {
+        return Err(ClientError::InvalidArgument(
+            "cannot resolve the current directory — run `topos add` inside the folder the \
+             manifest should govern, or use `-g` for your machine-wide file"
+                .into(),
+        ));
+    };
+    let Some(roots) = discovery_roots(ctx, &target) else {
+        return Err(ClientError::InvalidArgument(
+            "cannot import from a repository without $HOME set (needed to resolve the agent \
+             skills dir)"
+                .into(),
+        ));
+    };
+    // The SCOPE's own store — the same routing the bare reference arm and the reconcile's forge
+    // arms use. Without it a project-destined import writes its engine state into the HOME store,
+    // and the project reconcile (which reads the checkout's store) can never converge it.
+    let store_layout = match target.scope {
+        ManifestScope::Project => crate::sidecar::project_store_layout(&target.dir),
+        ManifestScope::Global => ctx.layout.clone(),
+    };
+    let sctx = super::pull::ctx_with_layout(ctx, &store_layout);
+    // Evaluated BEFORE any write, so this add's own row can never satisfy the gate it is behind.
+    let origin_label = spec.origin();
+    let trusted = crate::forge_trust::is_trusted(ctx, &origin_label);
+
+    // ONE fetch serves the describe and the apply alike (read-only either way) — and serves every
+    // (skill × harness) combination, where the old per-combination `add_remote` re-fetched.
+    let targz = git.fetch(&spec)?;
+    let extracted = crate::git_source::extract_tree(&targz)?;
+    let discovered = extracted.skill_names(spec.subdir.as_deref(), &spec.repo);
+    if discovered.is_empty() {
+        return Err(ClientError::NoSkillInSource { src: spec.label() });
+    }
+    // `-s '*'` → every skill the repo holds; explicit names loop as-is; no `-s` at all keeps the
+    // single-select behavior (a lone skill self-selects; several is a typed refusal downstream).
+    let skill_opts: Vec<Option<String>> = if skills.iter().any(|s| s == "*") {
+        discovered.iter().cloned().map(Some).collect()
+    } else if skills.is_empty() {
+        vec![None]
+    } else {
+        skills.iter().cloned().map(Some).collect()
+    };
+    // `-a '*'` → every harness DETECTED here with a skills dir at the chosen scope.
+    let agent_opts: Vec<Option<String>> = if agents.iter().any(|a| a == "*") {
+        let detected = detected_harness_slugs(&roots, global);
+        if detected.is_empty() {
+            return Err(ClientError::InvalidArgument(
+                "`-a '*'` found no harness on this machine to place into at the chosen scope — \
+                 name one with `-a <slug>` (or drop `--global` for project scope)"
+                    .into(),
+            ));
+        }
+        detected.into_iter().map(Some).collect()
+    } else if agents.is_empty() {
+        vec![None]
+    } else {
+        agents.iter().cloned().map(Some).collect()
+    };
+
+    // FIRST TRUST — identical to the bare reference arm's, selectors and all: what the source
+    // holds, and the exact file the rows land in.
+    if !trusted && !yes {
+        let members: Vec<String> = skill_opts
+            .iter()
+            .map(|s| s.clone().unwrap_or_else(|| discovered.join(", ")))
+            .collect();
+        let mut yes_argv = vec!["topos".to_owned(), "add".to_owned(), source.to_owned()];
+        for s in skills {
+            yes_argv.push("-s".to_owned());
+            yes_argv.push(s.clone());
+        }
+        for a in agents {
+            yes_argv.push("-a".to_owned());
+            yes_argv.push(a.clone());
+        }
+        if global {
+            yes_argv.push("-g".to_owned());
+        }
+        yes_argv.push("--yes".to_owned());
+        let placed: Vec<String> = agent_opts
+            .iter()
+            .map(|a| {
+                a.clone()
+                    .unwrap_or_else(|| "the default agent dir".to_owned())
+            })
+            .collect();
+        return Ok(AddManyOutcome::Described {
+            data: AddDescribeData {
+                source: origin_label,
+                members,
+                manifest: target.path.display().to_string(),
+                reference: spec.label(),
+                value: "*".to_owned(),
+                note: Some(format!("lands into: {}", placed.join(", "))),
+            },
+            yes_argv,
+        });
+    }
+
+    // ---- APPLY ---- the CONSENT lands first, then the bytes (a partial landing therefore retries
+    // as a trusted origin, and the reconcile's forge arms may converge it).
+    crate::forge_trust::grant(ctx, &origin_label)?;
+    if target.scope == ManifestScope::Project {
+        crate::sidecar::ensure_project_store(ctx.fs, &target.dir)?;
+    }
+    let mut out = Vec::with_capacity(skill_opts.len() * agent_opts.len());
+    for s in &skill_opts {
+        for a in &agent_opts {
+            let opts = super::AddRemoteOpts {
+                skill: s.clone(),
+                harness: a.clone(),
+                global,
+            };
+            let mut data = super::add::add_remote_fetched(&sctx, &targz, &spec, &roots, &opts)?;
+            // Each landed (skill × harness) records its manifest line like the single-select
+            // path — and carries the same dedup courtesy, judged against ITS resolved subdir.
+            medit::note_added_remote(ctx, &mut data, global)?;
+            let imported_subdir = data.origin.as_ref().and_then(|o| o.subdir.clone());
+            data.governed_copy = super::add::governed_copy_suggestion(
+                ctx,
+                connect,
+                &spec,
+                imported_subdir.as_deref(),
+            );
+            out.push(data);
+        }
+    }
+    Ok(AddManyOutcome::Applied(out))
+}
+
+/// The harness slugs DETECTED on this machine (the same registry discovery `list` uses) that have a
+/// skills directory at the chosen scope — the fan-out set for `add -a '*'`. Deduped + sorted; a
+/// harness with no writable dir at this scope is dropped (so the loop never fails on it).
+fn detected_harness_slugs(roots: &super::DiscoveryRoots, global: bool) -> Vec<String> {
+    let scope = if global {
+        topos_harness::registry::SkillScope::User
+    } else {
+        topos_harness::registry::SkillScope::Project
+    };
+    let mut slugs: Vec<String> =
+        topos_harness::registry::discover_all(&roots.home, roots.cwd.as_deref())
+            .into_iter()
+            .map(|d| d.harness_slug)
+            .filter(|slug| {
+                topos_harness::registry::skills_root(slug, scope, &roots.home, roots.cwd.as_deref())
+                    .is_some()
+            })
+            .collect();
+    slugs.sort();
+    slugs.dedup();
+    slugs
+}
+
 /// The `value` a describe prints (the same spelling the row will carry).
 fn value_spelling(value: &EntryValue) -> String {
     match value {
@@ -876,6 +1087,10 @@ pub(crate) fn rewrite_to_governed(
     } else {
         ManifestScope::Project
     };
+    // The governance rewrite is a read-modify-write of someone's manifest, so it takes the same
+    // writer lock as `add`/`remove` — a publish's transfer must not silently drop a row an agent
+    // added while the publish was in flight.
+    let _guard = medit::lock_manifest(ctx, &path)?;
     let Some(text) = medit::read_text(ctx, &path)? else {
         return Ok(None);
     };

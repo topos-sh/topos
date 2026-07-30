@@ -13,6 +13,12 @@
 //! then on the registry is the single authority (deleting a home import does not revoke; only the
 //! registry speaks). A PLAIN document (origins, never a secret) through the ordinary crash-safe
 //! [`crate::doc`] writers (atomic, fail-closed schema).
+//!
+//! UNDECIPHERABLE IS NOT EMPTY. A corrupt document — or one written by a NEWER build, which
+//! [`crate::doc::read_doc`] refuses rather than guesses at — answers **no grants** (a trust
+//! question must fail closed) and REFUSES every write with the typed upgrade-required error. An
+//! older binary must never overwrite a newer registry: silently re-seeding an empty document over
+//! it would delete consent the person really gave, and then re-grant it without asking.
 
 use std::collections::BTreeSet;
 
@@ -41,26 +47,35 @@ pub(crate) struct ForgeTrust {
 /// Read the registry through the one-time seed: an unseeded (or absent) document takes the HOME
 /// store's already-imported origins as granted — they passed the add gate historically. Reads
 /// only; the caller decides whether to persist. `ctx` must be the BASE ctx (home layout).
-fn read_with_seed(ctx: &Ctx<'_>) -> (ForgeTrust, bool) {
-    let mut doc: ForgeTrust = doc::read_doc(ctx.fs, &ctx.layout.forge_trust_path())
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+///
+/// # Errors
+/// The document is UNDECIPHERABLE — corrupt, or a schema version this build does not know
+/// ([`ClientError::UnknownSchemaVersion`], the upgrade-required answer). Never `Ok` with an empty
+/// document in that case: an empty answer would be indistinguishable from "nothing granted yet",
+/// and the caller would write over bytes it could not read.
+fn read_with_seed(ctx: &Ctx<'_>) -> Result<(ForgeTrust, bool), ClientError> {
+    let mut doc: ForgeTrust =
+        doc::read_doc(ctx.fs, &ctx.layout.forge_trust_path())?.unwrap_or_default();
     if doc.seeded {
-        return (doc, false);
+        return Ok((doc, false));
     }
-    for (_, _, origin) in crate::ops::forge_imports(ctx) {
-        doc.origins.insert(origin.source);
+    for import in crate::ops::forge_imports(ctx) {
+        doc.origins.insert(import.origin.source);
     }
     doc.seeded = true;
-    (doc, true)
+    Ok((doc, true))
 }
 
 /// Whether `origin` (`<host>/<owner>/<repo>`) has passed this machine's first-trust gate. The
 /// one-time legacy seed is persisted best-effort on the way through (a failed write just re-seeds
 /// next time — the trust answer is the same either way).
+///
+/// FAILS CLOSED: an unreadable/undecipherable registry grants NOTHING. The caller's refusal names
+/// the `topos add … --yes` gate, and that gate's own [`grant`] surfaces the real reason.
 pub(crate) fn is_trusted(ctx: &Ctx<'_>, origin: &str) -> bool {
-    let (doc, seeded_now) = read_with_seed(ctx);
+    let Ok((doc, seeded_now)) = read_with_seed(ctx) else {
+        return false;
+    };
     if seeded_now {
         let _ = write(ctx, &doc);
     }
@@ -71,10 +86,12 @@ pub(crate) fn is_trusted(ctx: &Ctx<'_>, origin: &str) -> bool {
 /// Idempotent.
 ///
 /// # Errors
-/// The filesystem failure persisting the registry (consent that cannot be recorded must not be
-/// silently assumed recorded).
+/// [`ClientError::UnknownSchemaVersion`] (or [`ClientError::Corrupt`]) when the standing registry
+/// cannot be read — the write is REFUSED rather than clobbering a document this build does not
+/// understand; otherwise the filesystem failure persisting the registry (consent that cannot be
+/// recorded must not be silently assumed recorded).
 pub(crate) fn grant(ctx: &Ctx<'_>, origin: &str) -> Result<(), ClientError> {
-    let (mut doc, _) = read_with_seed(ctx);
+    let (mut doc, _) = read_with_seed(ctx)?;
     doc.origins.insert(origin.to_owned());
     write(ctx, &doc)
 }

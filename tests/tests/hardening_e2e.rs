@@ -86,9 +86,22 @@ fn a_pinned_reference_delivers_its_version_and_publish_to_never_mints_a_channel(
     let bytes = std::fs::read_to_string(&placed).expect("the pinned version landed in-checkout");
     assert_eq!(bytes, "# pinme v1\n", "the PIN wins over current");
 
-    // A fresh sweep keeps the pin (never silently fast-forwarded to v2).
+    // A fresh sweep keeps the pin (never silently fast-forwarded to v2). The ONE line it earns is
+    // the cross-store disclosure: this installation now holds `pinme` at two versions — the
+    // person scope's current and this checkout's pin — and the applied report carries only one row
+    // per bundle, so the split is said out loud rather than swallowed by the pick.
     let (_, warnings) = dev.update(&[], Some(&proj)).expect("sweep");
-    assert!(warnings.is_empty(), "{warnings:?}");
+    let split: Vec<&String> = warnings
+        .iter()
+        .filter(|w| w.starts_with("VERSION_SPLIT"))
+        .collect();
+    assert_eq!(warnings.len(), split.len(), "{warnings:?}");
+    assert_eq!(split.len(), 1, "{warnings:?}");
+    assert!(
+        split[0].contains(&proj.display().to_string()),
+        "the split names the checkout that holds the other version: {}",
+        split[0]
+    );
     assert_eq!(
         std::fs::read_to_string(&placed).expect("still placed"),
         "# pinme v1\n"

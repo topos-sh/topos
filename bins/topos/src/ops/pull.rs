@@ -21,6 +21,7 @@ use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::Path;
 
+use topos_core::digest::to_hex;
 use topos_types::persisted::SyncState;
 use topos_types::results::{PullData, ResetData};
 
@@ -390,12 +391,27 @@ pub(crate) fn reset_to_never_received(
     Ok(())
 }
 
+/// The applied report, plus what the single row per bundle could not say.
+pub(super) struct AppliedSnapshot {
+    /// The wire rows — one `(skill_id, applied commit)` per held bundle.
+    pub applied: Vec<(String, [u8; 32])>,
+    /// One line per bundle this installation holds at DIFFERENT versions in more than one store —
+    /// the cross-scope version split the reported row cannot carry.
+    pub splits: Vec<String>,
+}
+
 /// What this installation HOLDS after the reconcile, over the skills the workspace's deliveries
 /// (the feed AND the manifest rows) named: the materialized version from `map.json` (the honest
 /// "applied" — an offered-but-unaccepted first receive has none and is skipped, as is any skill
-/// whose placement this sweep removed). COMPLETE-state across stores: the home store first, then
-/// every visited project store — a project-manifest delivery is held exactly as a feed one is,
-/// and the first store holding an applied copy answers for the session. Read-only.
+/// whose placement this sweep removed). COMPLETE-state across stores. Read-only.
+///
+/// THE PICK IS DETERMINISTIC AND STATED, because the wire carries exactly ONE row per
+/// `(session, bundle)`: the PERSON-scope store (the machine's own `~/.topos/`) answers whenever it
+/// holds the bundle, and otherwise the project stores answer in ascending order of their project
+/// directory path. Nothing depends on which checkout the sweep happened to run from. When more
+/// than one store holds the bundle at DIFFERENT versions the deterministic row still stands and
+/// [`AppliedSnapshot::splits`] names the split — the same fact `status`'s cross-scope note makes,
+/// said where the report is produced rather than swallowed by the first-store-wins loop.
 ///
 /// Scoping to the delivered set is load-bearing: reporting a withdrawn or frozen skill would tell
 /// the fleet page this device still serves bytes it does not, and would revive the very detach
@@ -404,13 +420,22 @@ pub(super) fn applied_snapshot(
     ctx: &Ctx<'_>,
     delivered: &HashSet<&str>,
     project_stores: &[crate::sidecar::Layout],
-) -> Result<Vec<(String, [u8; 32])>, ClientError> {
-    let mut out = Vec::new();
+) -> Result<AppliedSnapshot, ClientError> {
+    // The stated order: the person store, then the project stores by path. `recall_and_record`
+    // already yields a path-sorted set; sorting here makes the guarantee this function's own.
+    let mut projects: Vec<&crate::sidecar::Layout> = project_stores.iter().collect();
+    projects.sort_by_key(|l| l.home().to_path_buf());
+
+    let mut applied = Vec::new();
+    let mut splits = Vec::new();
     for skill_id in delivered {
         let Ok(sid) = SkillId::parse(skill_id) else {
             continue;
         };
-        for layout in std::iter::once(&ctx.layout).chain(project_stores.iter()) {
+        // Every store that genuinely holds it, in the stated order — the first is the reported
+        // row, the rest exist only to disclose a version split.
+        let mut holdings: Vec<(String, [u8; 32])> = Vec::new();
+        for layout in std::iter::once(&ctx.layout).chain(projects.iter().copied()) {
             let sp = layout.published(&sid);
             let Some(map) = doc::read_map(ctx.fs, &sp.map)? else {
                 continue;
@@ -422,13 +447,41 @@ pub(super) fn applied_snapshot(
             if let Ok(commit) = super::parse_hex32(&map.applied_commit)
                 && commit != [0u8; 32]
             {
-                out.push(((*skill_id).to_owned(), commit));
-                break;
+                let where_ = layout
+                    .project_root()
+                    .map_or_else(|| "this machine".to_owned(), |d| d.display().to_string());
+                holdings.push((where_, commit));
             }
         }
+        let Some((first_where, first_commit)) = holdings.first().cloned() else {
+            continue;
+        };
+        applied.push(((*skill_id).to_owned(), first_commit));
+        let mut differing: Vec<String> = holdings
+            .iter()
+            .skip(1)
+            .filter(|(_, c)| *c != first_commit)
+            .map(|(w, c)| format!("{w} holds {}", short_hex(c)))
+            .collect();
+        if !differing.is_empty() {
+            differing.sort();
+            differing.dedup();
+            splits.push(format!(
+                "VERSION_SPLIT {skill_id}: reported as {first_where}'s {} — {}; nothing blends, \
+                 so each scope keeps its own copy",
+                short_hex(&first_commit),
+                differing.join("; ")
+            ));
+        }
     }
-    out.sort();
-    Ok(out)
+    applied.sort();
+    splits.sort();
+    Ok(AppliedSnapshot { applied, splits })
+}
+
+/// A version as a disclosure line spells it.
+fn short_hex(commit: &[u8; 32]) -> String {
+    to_hex(commit).get(..12).unwrap_or_default().to_owned()
 }
 
 /// One isolated per-skill failure as a stable, machine-parseable envelope warning:

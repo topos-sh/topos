@@ -14,7 +14,6 @@ use crate::cli::{AuthCmd, Cli, Command};
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::fs_seam::{FsOps, RealFs};
-use crate::git_source::GitTarballSource;
 use crate::ids::{Clock, RealClock, RealIds};
 use crate::plane::{
     ContributeSource, DirectorySource, EnrollSource, GovernanceSource, ReconcileTransport,
@@ -496,24 +495,47 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             global,
             yes,
         } => {
-            let has_star = skill.iter().chain(agent.iter()).any(|v| v == "*");
-            // MULTI selectors (`-s a -s b`, `-a x -a y`) and the `*` fan-outs apply to a REMOTE import —
-            // loop the single-select path per (skill × harness) combination, disclosing each landing. `-s *`
+            // The `-s`/`-a` SELECTORS (single, multiple, or the `*` fan-outs) narrow a REMOTE
+            // import — which members land, into which agent dirs. They pass through the SAME
+            // first-trust gate and the SAME per-scope store as a bare `add owner/repo`: a selector
+            // is a narrowing of what lands, never a way around whose bytes these are. `-s *`
             // expands to every skill in the repo; `-a *` to every harness DETECTED on this machine.
-            if has_star || skill.len() > 1 || agent.len() > 1 {
-                let result = add_multi(
+            let no_selectors = skill.is_empty() && agent.is_empty();
+            let looks_remote = matches!(
+                crate::source::classify(&source),
+                crate::source::SourceSpec::Remote(_)
+            );
+            if !no_selectors && looks_remote {
+                let git = crate::plane_http::UreqGitSource::new();
+                let result = ops::add_forge_selected(
                     &ctx,
                     &connect_session_transports,
+                    &git,
                     &source,
                     &skill,
                     &agent,
                     global,
+                    yes,
                 );
+                let result = result.map(|outcome| match outcome {
+                    // The breadth arming sweep + the built-in ride an APPLIED import exactly as
+                    // they ride any other adopt receipt (the same trigger-arming moment).
+                    ops::AddManyOutcome::Applied(mut items) => {
+                        if items.iter().any(|d| d.currency.is_some()) {
+                            let triggers = breadth_arm(&ctx.roots, harness.as_ref(), &fs);
+                            if let Err(e) = ops::ensure_builtin(&ctx) {
+                                let _ = diag.note(cmd_name, &e);
+                            }
+                            if let Some(first) = items.first_mut() {
+                                first.triggers = triggers;
+                            }
+                        }
+                        ops::AddManyOutcome::Applied(items)
+                    }
+                    described => described,
+                });
                 return finish_add_many(json, cmd_name, result, &diag);
             }
-            // The reference arm owns a bare `add <ref>`; the `-s`/`-a` selectors stay with the
-            // import path below, which places per (skill × harness).
-            let no_selectors = skill.is_empty() && agent.is_empty();
             let single_skill = skill.into_iter().next();
             let single_agent = agent.into_iter().next();
             // The BUILT-IN's restore: `add topos` clears the durable `remove topos` opt-out and
@@ -1629,122 +1651,6 @@ fn finish_log(
     }
 }
 
-/// Resolve the `list --remote` inputs from the on-disk enrollment: the pinned plane base URL
-/// Import a REMOTE source into several skills and/or several harness dirs — the `-s a -s b` / `-a x -a y`
-/// loop over the single-select [`ops::add_remote`] path (disclosing each landing). Multi selectors apply
-/// to a remote import only (a local path/name adopts exactly one skill). A `*` selector fans out:
-/// `-s '*'` imports EVERY skill of a multi-skill repo, `-a '*'` places into every harness DETECTED on
-/// this machine (the same registry discovery `list` uses, filtered to those with a skills dir at the
-/// chosen scope).
-///
-/// # Errors
-/// [`ClientError::InvalidArgument`] for a non-remote source, a missing `$HOME`, or `-a '*'` matching no
-/// detected harness; [`ClientError::NoSkillInSource`] for `-s '*'` on a repo with no skill; whatever
-/// [`ops::add_remote`] returns for a given combination (all-or-error).
-fn add_multi(
-    ctx: &Ctx<'_>,
-    connect: &ops::SessionConnect<'_>,
-    source: &str,
-    skills: &[String],
-    agents: &[String],
-    global: bool,
-) -> Result<Vec<topos_types::results::AddData>, ClientError> {
-    let spec = match crate::source::classify(source) {
-        crate::source::SourceSpec::Remote(spec) => spec,
-        _ => {
-            return Err(ClientError::InvalidArgument(
-                "multiple `-s`/`-a` selectors (or `*`) apply to a REMOTE import (`owner/repo` or a \
-                 github.com URL) — a local path or name adopts a single skill"
-                    .into(),
-            ));
-        }
-    };
-    let Some(roots) = list_discovery(false) else {
-        return Err(ClientError::InvalidArgument(
-            "cannot import a remote skill without $HOME set (needed to resolve the harness skills dir)"
-                .into(),
-        ));
-    };
-    let git = crate::plane_http::UreqGitSource::new();
-    // `-a '*'` → every DETECTED harness with a skills dir at the chosen scope; explicit values loop as-is.
-    let agent_opts: Vec<Option<String>> = if agents.iter().any(|a| a == "*") {
-        let detected = detected_harness_slugs(&roots, global);
-        if detected.is_empty() {
-            return Err(ClientError::InvalidArgument(
-                "`-a '*'` found no harness on this machine to place into at the chosen scope — name one \
-                 with `-a <slug>` (or drop `--global` for project scope)"
-                    .into(),
-            ));
-        }
-        detected.into_iter().map(Some).collect()
-    } else if agents.is_empty() {
-        vec![None]
-    } else {
-        agents.iter().cloned().map(Some).collect()
-    };
-    // `-s '*'` → every skill in the repo (fetch + extract once to enumerate the names).
-    let skill_opts: Vec<Option<String>> = if skills.iter().any(|s| s == "*") {
-        let targz = git.fetch(&spec)?;
-        let repo = crate::git_source::extract_tree(&targz)?;
-        let names = repo.skill_names(spec.subdir.as_deref(), &spec.repo);
-        if names.is_empty() {
-            return Err(ClientError::NoSkillInSource { src: spec.label() });
-        }
-        names.into_iter().map(Some).collect()
-    } else if skills.is_empty() {
-        vec![None]
-    } else {
-        skills.iter().cloned().map(Some).collect()
-    };
-    let mut out = Vec::with_capacity(skill_opts.len() * agent_opts.len());
-    for s in &skill_opts {
-        for a in &agent_opts {
-            let mut data = ops::add_remote(
-                ctx,
-                &git,
-                &spec,
-                &roots,
-                &ops::AddRemoteOpts {
-                    skill: s.clone(),
-                    harness: a.clone(),
-                    global,
-                },
-            )?;
-            // Each landed (skill × harness) records its manifest line like the single-select
-            // path — and carries the same dedup courtesy, judged against ITS resolved subdir.
-            ops::note_added_remote(ctx, &mut data, global)?;
-            let imported_subdir = data.origin.as_ref().and_then(|o| o.subdir.clone());
-            data.governed_copy =
-                ops::governed_copy_suggestion(ctx, connect, &spec, imported_subdir.as_deref());
-            out.push(data);
-        }
-    }
-    Ok(out)
-}
-
-/// The harness slugs DETECTED on this machine (the same registry discovery `list` uses) that have a
-/// skills directory at the chosen scope — the fan-out set for `add -a '*'`. Deduped + sorted; a harness
-/// with no writable dir at this scope is dropped (so the loop never fails on it).
-fn detected_harness_slugs(roots: &ops::DiscoveryRoots, global: bool) -> Vec<String> {
-    let scope = if global {
-        topos_harness::registry::SkillScope::User
-    } else {
-        topos_harness::registry::SkillScope::Project
-    };
-    let mut slugs: Vec<String> =
-        topos_harness::registry::discover_all(&roots.home, roots.cwd.as_deref())
-            .into_iter()
-            .map(|d| d.harness_slug)
-            .filter(|slug| {
-                topos_harness::registry::skills_root(slug, scope, &roots.home, roots.cwd.as_deref())
-                    .is_some()
-            })
-            .collect();
-    slugs.sort();
-    slugs.dedup();
-    slugs
-}
-
 /// The `keep-as-yours` finisher — the local-fork DESCRIBE (with its `--yes` argv) or the applied fork
 /// (rendered as an ordinary `add` receipt over the new local skill).
 fn finish_keep_as_yours(
@@ -1817,11 +1723,24 @@ fn finish_add_reference(
 fn finish_add_many(
     json: bool,
     command: &str,
-    result: Result<Vec<topos_types::results::AddData>, ClientError>,
+    result: Result<ops::AddManyOutcome, ClientError>,
     diag: &Diag<'_>,
 ) -> ExitCode {
     match result {
-        Ok(items) => {
+        // A first-trust git source describes before it installs — the same two-phase receipt the
+        // bare reference arm prints, selectors and all.
+        Ok(ops::AddManyOutcome::Described { data, yes_argv }) => {
+            if json {
+                let value = serde_json::json!({ "describe": data });
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::add_describe_tty(&data, &yes_argv));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::AddManyOutcome::Applied(items)) => {
             if json {
                 let value = serde_json::json!({ "added": items });
                 println!("{}", render::to_json(&render::ok_envelope(command, value)));

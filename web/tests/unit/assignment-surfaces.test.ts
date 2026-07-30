@@ -288,6 +288,46 @@ describe("the curator arm on a channel page", () => {
     ).toHaveLength(0);
   });
 
+  it("refuses to unassign the BASELINE, however the intent arrives", async () => {
+    // The default channel's everyone-assignment is what membership gives. No page offers to
+    // withdraw it — but a hidden form field is not a rule, so the crafted intent goes straight at
+    // the route and the data layer refuses it.
+    const rows = await db.q<{ id: string; name: string }>(
+      `SELECT id, name FROM web.channel WHERE workspace_id = $1 AND is_default`,
+      [ws],
+    );
+    const row = rows[0];
+    if (row === undefined) {
+      throw new Error("the workspace has no default channel");
+    }
+    const before = await db.q(
+      `SELECT 1 FROM web.assignment WHERE channel_id = $1 AND user_id IS NULL`,
+      [row.id],
+    );
+    expect(before).toHaveLength(1);
+
+    signedInAs(OWNER);
+    const { action } = await import("@/routes/channel-detail");
+    const refused = (await action({
+      request: post(`/channels/${row.name}`, {
+        intent: "unassign-everyone",
+        channel_id: row.id,
+      }),
+      params: { channel: row.name },
+      context: {},
+    } as unknown as Parameters<typeof action>[0])) as {
+      data: { form: string; error: string };
+    };
+    expect(refused.data.form).toBe("everyone");
+    expect(refused.data.error).toMatch(/baseline/i);
+    // The witness: the row every member's feed rests on is still there.
+    expect(
+      await db.q(`SELECT 1 FROM web.assignment WHERE channel_id = $1 AND user_id IS NULL`, [
+        row.id,
+      ]),
+    ).toHaveLength(1);
+  });
+
   it("refuses a plain member with the uniform 404", async () => {
     signedInAs(MEMBER);
     const { action } = await import("@/routes/channel-detail");

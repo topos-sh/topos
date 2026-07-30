@@ -332,6 +332,138 @@ fn open_lock_file(path: &Path) -> io::Result<File> {
 
 #[cfg(test)]
 pub(crate) use fault::FaultFs;
+#[cfg(test)]
+pub(crate) use hook::HookFs;
+
+/// A test-only seam that lets a test act BETWEEN two of an operation's syscalls — the way a
+/// concurrent process (or a person with a shell) would. `FaultFs` models a crash; this models a
+/// RACE: the hook runs the first time a `write_staged` lands, i.e. inside the staging window, so a
+/// revalidation-before-mutation rail can be proven rather than assumed.
+#[cfg(test)]
+mod hook {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use super::*;
+
+    /// Wraps `RealFs` and runs a hook exactly once, immediately before a chosen op:
+    ///
+    /// - [`HookFs::new`] — before the FIRST [`FsOps::write_staged`] (inside a staging window);
+    /// - [`HookFs::before_nth_exists`] — before the Nth [`FsOps::exists`] of ONE named path (the
+    ///   read a destructive loop takes immediately before it removes a directory, and therefore
+    ///   the seam that sits AFTER the scan which decided to remove it).
+    ///
+    /// Every other op passes straight through.
+    pub(crate) struct HookFs<'a> {
+        inner: RealFs,
+        fired: AtomicBool,
+        on_first_staged_write: Option<Box<dyn Fn() + 'a>>,
+        exists_target: Option<PathBuf>,
+        exists_nth: usize,
+        exists_seen: AtomicUsize,
+        on_exists: Option<Box<dyn Fn() + 'a>>,
+    }
+
+    impl<'a> HookFs<'a> {
+        pub(crate) fn new(on_first_staged_write: impl Fn() + 'a) -> Self {
+            Self {
+                inner: RealFs,
+                fired: AtomicBool::new(false),
+                on_first_staged_write: Some(Box::new(on_first_staged_write)),
+                exists_target: None,
+                exists_nth: 0,
+                exists_seen: AtomicUsize::new(0),
+                on_exists: None,
+            }
+        }
+
+        pub(crate) fn before_nth_exists(target: &Path, nth: usize, hook: impl Fn() + 'a) -> Self {
+            Self {
+                inner: RealFs,
+                fired: AtomicBool::new(false),
+                on_first_staged_write: None,
+                exists_target: Some(target.to_path_buf()),
+                exists_nth: nth,
+                exists_seen: AtomicUsize::new(0),
+                on_exists: Some(Box::new(hook)),
+            }
+        }
+    }
+
+    impl FsOps for HookFs<'_> {
+        fn write_staged(&self, path: &Path, bytes: &[u8], executable: bool) -> io::Result<()> {
+            if let Some(hook) = &self.on_first_staged_write
+                && !self.fired.swap(true, Ordering::Relaxed)
+            {
+                hook();
+            }
+            self.inner.write_staged(path, bytes, executable)
+        }
+        fn write_temp(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            self.inner.write_temp(path, bytes)
+        }
+        fn fsync_file(&self, path: &Path) -> io::Result<()> {
+            self.inner.fsync_file(path)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+            self.inner.rename(from, to)
+        }
+        fn fsync_dir(&self, dir: &Path) -> io::Result<()> {
+            self.inner.fsync_dir(dir)
+        }
+        fn rename_dir_noreplace(&self, from: &Path, to: &Path) -> io::Result<()> {
+            self.inner.rename_dir_noreplace(from, to)
+        }
+        fn create_dir_all(&self, dir: &Path) -> io::Result<()> {
+            self.inner.create_dir_all(dir)
+        }
+        fn append_fsync(&self, path: &Path, line: &[u8]) -> io::Result<()> {
+            self.inner.append_fsync(path, line)
+        }
+        fn remove_file(&self, path: &Path) -> io::Result<()> {
+            self.inner.remove_file(path)
+        }
+        fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+            self.inner.remove_dir_all(path)
+        }
+        fn write_private(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            self.inner.write_private(path, bytes)
+        }
+        fn exchange_dir(&self, a: &Path, b: &Path) -> io::Result<()> {
+            self.inner.exchange_dir(a, b)
+        }
+        fn write_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            self.inner.write_new(path, bytes)
+        }
+        fn read_opt(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+            self.inner.read_opt(path)
+        }
+        fn read_dir(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
+            self.inner.read_dir(dir)
+        }
+        fn exists(&self, path: &Path) -> bool {
+            if let (Some(target), Some(hook)) = (&self.exists_target, &self.on_exists)
+                && path == target
+                && self.exists_seen.fetch_add(1, Ordering::Relaxed) + 1 == self.exists_nth
+                && !self.fired.swap(true, Ordering::Relaxed)
+            {
+                hook();
+            }
+            self.inner.exists(path)
+        }
+        fn path_kind(&self, path: &Path) -> io::Result<Option<PathKind>> {
+            self.inner.path_kind(path)
+        }
+        fn private_perms_ok(&self, path: &Path) -> io::Result<bool> {
+            self.inner.private_perms_ok(path)
+        }
+        fn lock_exclusive(&self, path: &Path) -> io::Result<LockGuard> {
+            self.inner.lock_exclusive(path)
+        }
+        fn try_lock_exclusive(&self, path: &Path) -> io::Result<Option<LockGuard>> {
+            self.inner.try_lock_exclusive(path)
+        }
+    }
+}
 
 #[cfg(test)]
 mod fault {

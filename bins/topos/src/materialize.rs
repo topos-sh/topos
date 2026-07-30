@@ -207,6 +207,10 @@ pub(crate) fn materialize(
         // Clear any leftover litter from a prior crashed apply of THIS skill (under the caller's flock).
         cleanup_litter(fs, &parent, req.skill_id)?;
 
+        // The tree as the pre-swap scan below saw it — a STAT-only fingerprint, re-taken
+        // immediately before the swap so the decision the scan made is re-proven against the bytes
+        // actually about to be destroyed (see the re-stat below).
+        let mut observed: Option<Vec<DirStat>> = None;
         if target.dir_was_present {
             // Pre-swap scan: heal a dir that already holds the target bytes (a crash after a prior
             // swap, or an idempotent re-apply) with NO second swap; snapshot an uncaptured edit
@@ -215,6 +219,7 @@ pub(crate) fn materialize(
             match scan::scan(&target.dir) {
                 Ok(scanned) => {
                     let on_disk = to_hex(&scanned.bundle_digest);
+                    observed = dir_fingerprint(&target.dir);
                     if on_disk == target_hex {
                         let prior = map.placement_state[i].clone();
                         map.placement_state[i] = PlacementState {
@@ -283,6 +288,37 @@ pub(crate) fn materialize(
         let staging = staging_path(&parent, req.skill_id);
         build_staging(fs, &staging, req.bundle, req.self_ignore)?;
 
+        // THE PRE-MUTATION RE-STAT. Everything decided above — heal, snapshot, never-clobber,
+        // takeover — rode a scan taken BEFORE the capability probe and the staging build, both of
+        // which take real time. The invariant is that no byte differing from its recorded baseline
+        // is destroyed unless a snapshot taken AFTER the last revalidation holds it, so the tree is
+        // re-fingerprinted here, immediately before the swap, and a tree that MOVED in that window
+        // is either captured afresh or left alone:
+        //
+        // - an explicit destructive path that still has a snapshotter commits the bytes that are
+        //   REALLY there (the earlier snapshot, if any, captured a tree that no longer exists);
+        // - a sweep's opportunistic arm, a caller with no snapshotter, and a dir that has become
+        //   unreadable all SKIP the placement — its recorded state stays behind the bytes, so the
+        //   next sweep reconciles it from a fresh scan. Nothing unaccounted-for is overwritten.
+        if target.dir_was_present {
+            let now = dir_fingerprint(&target.dir);
+            if now.is_none() || now != observed {
+                let fresh = scan::scan(&target.dir).ok();
+                match (req.snapshot, &fresh) {
+                    (Some(snapshot), Some(scanned))
+                        if expectation.is_none()
+                            && to_hex(&scanned.bundle_digest) != target_hex =>
+                    {
+                        snapshot(scanned)?;
+                    }
+                    _ => {
+                        fs.remove_dir_all(&staging)?;
+                        continue;
+                    }
+                }
+            }
+        }
+
         // Place the bytes.
         if target.dir_was_present {
             cap = place_update(fs, &staging, &target.dir, &parent, req.skill_id, cap)?;
@@ -317,6 +353,38 @@ pub(crate) fn materialize(
 
 fn sp_map(req: &MaterializeReq<'_>) -> PathBuf {
     req.sp.map.clone()
+}
+
+/// One entry of a directory's stat-only fingerprint: its path relative to the root plus the
+/// `(mtime_ns, ctime_ns, size)` tuple. `ctime` is the load-bearing member — a content write always
+/// bumps it, and `utimensat` cannot move it backwards — so a forged `mtime` never makes a changed
+/// tree look unchanged (the same reasoning the stat cache's own rows rest on).
+type DirStat = (String, crate::stat_cache::StatKey);
+
+/// A STAT-ONLY fingerprint of a directory tree: every entry as a [`DirStat`], sorted. Reads no file
+/// CONTENT, so the pre-mutation re-check costs O(stat) rather than a second full hash of every
+/// placement on every sweep. `None` when the tree cannot be walked — which the caller must treat as
+/// "moved", never as "unchanged" (an unreadable tree is exactly the one we must not destroy).
+fn dir_fingerprint(dir: &Path) -> Option<Vec<DirStat>> {
+    fn walk(base: &Path, d: &Path, out: &mut Vec<DirStat>) -> Option<()> {
+        for entry in std::fs::read_dir(d).ok()? {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path).ok()?;
+            let rel = path.strip_prefix(base).ok()?.to_string_lossy().into_owned();
+            out.push((rel, crate::stat_cache::StatKey::from_metadata(&meta)));
+            if meta.file_type().is_dir() {
+                walk(base, &path, out)?;
+            }
+        }
+        Some(())
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out)?;
+    // Sorted by PATH — directory order is not stable across filesystems, and the tuple's own
+    // ordering is meaningless.
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Some(out)
 }
 
 /// The resolved placement target.
@@ -795,6 +863,96 @@ mod tests {
             self_ignore: false,
             expected: None,
         }
+    }
+
+    /// The RACE cases for the pre-mutation re-stat: the placement's bytes move AFTER the pre-swap
+    /// scan decided what to do with them, while the staging tree is being built.
+    #[test]
+    fn a_placement_that_moves_during_staging_is_captured_or_skipped_never_destroyed() {
+        // (a) NO SNAPSHOTTER (the reset / merge callers, which snapshot before they call): the
+        //     placement is SKIPPED rather than overwritten — its recorded state stays behind the
+        //     bytes, so the next sweep reconciles it from a fresh scan.
+        let parent = Scratch::new("race-skip");
+        let home = Scratch::new("race-skip-home");
+        let placement = parent.0.join("demo");
+        install_old(&placement);
+        let bundle = rendered(NEW);
+        let lock = lock_of("topos_race", NEW, &"1".repeat(64));
+        let sync = sync_at(1, 1, &"1".repeat(64), &digest_hex(NEW));
+        let prior = prior_map(&[&placement], &digest_hex(OLD), SwapCapability::Unsupported);
+        let d = docs_under(&home.0, "topos_race");
+        // The racer writes into the placement the first time a staged file is written — i.e.
+        // inside the window between the pre-swap scan and the swap.
+        let racing = placement.clone();
+        let fs = crate::fs_seam::HookFs::new(move || {
+            std::fs::write(racing.join("SKILL.md"), b"# raced in\n").unwrap();
+        });
+        materialize(
+            &fs,
+            &req("topos_race", &[0], &bundle, &prior, &lock, &sync, &d.sp),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(placement.join("SKILL.md")).unwrap(),
+            b"# raced in\n",
+            "the bytes that moved in the window are still there"
+        );
+        assert!(
+            placement.join("legacy.txt").exists(),
+            "the placement was skipped whole, not half-swapped"
+        );
+
+        // (b) WITH a snapshotter (the ordinary sweep): the bytes that are REALLY there are
+        //     captured — by a snapshot taken after the last revalidation — and only then replaced.
+        let parent = Scratch::new("race-snap");
+        let home = Scratch::new("race-snap-home");
+        let placement = parent.0.join("demo");
+        install_old(&placement);
+        let prior = prior_map(&[&placement], &digest_hex(OLD), SwapCapability::Unsupported);
+        let d = docs_under(&home.0, "topos_race2");
+        let racing = placement.clone();
+        let fs = crate::fs_seam::HookFs::new(move || {
+            std::fs::write(racing.join("SKILL.md"), b"# raced in\n").unwrap();
+        });
+        let captured: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let snapshot = |b: &ScannedBundle| -> Result<(), ClientError> {
+            captured.borrow_mut().push(digest::to_hex(&b.bundle_digest));
+            Ok(())
+        };
+        let mut request = req("topos_race2", &[0], &bundle, &prior, &lock, &sync, &d.sp);
+        request.snapshot = Some(&snapshot);
+        materialize(&fs, &request).unwrap();
+        assert_eq!(
+            dir_snapshot(&placement),
+            Some(expected(NEW)),
+            "the swap happened once the raced bytes were captured"
+        );
+        // The RACED digest is what was captured — the pre-swap scan's older one would be a lie.
+        let raced = {
+            let mut files: Vec<(String, FileMode, Vec<u8>)> = OLD
+                .iter()
+                .map(|(p, m, b)| ((*p).to_owned(), *m, b.to_vec()))
+                .collect();
+            for f in &mut files {
+                if f.0 == "SKILL.md" {
+                    f.2 = b"# raced in\n".to_vec();
+                }
+            }
+            let entries: Vec<ManifestEntry> = files
+                .iter()
+                .map(|(p, m, b)| ManifestEntry {
+                    path: p.clone(),
+                    mode: *m,
+                    content_sha256: digest::sha256(b),
+                })
+                .collect();
+            digest::to_hex(&digest::bundle_digest(&entries).unwrap())
+        };
+        assert!(
+            captured.borrow().contains(&raced),
+            "the snapshot holds what was actually destroyed: {:?}",
+            captured.borrow()
+        );
     }
 
     #[test]

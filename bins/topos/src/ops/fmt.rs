@@ -47,6 +47,9 @@ pub(crate) fn fmt_manifest(ctx: &Ctx<'_>, global: bool) -> Result<FmtData, Clien
         (dir.join(MANIFEST_FILE), ManifestScope::Project)
     };
 
+    // `fmt` is a read-modify-write like every other manifest mutation: it takes the same writer
+    // lock, so a concurrent `add`'s row can never be normalized away by a document read before it.
+    let _guard = super::manifest_edit::lock_manifest(ctx, &path)?;
     let Some(bytes) = ctx.fs.read_opt(&path)? else {
         return Err(ClientError::InvalidArgument(if global {
             "no machine-wide manifest — `topos init -g` materializes one from the workspaces you \

@@ -39,6 +39,7 @@ import {
   unplaceBundleFromChannel,
 } from "@/lib/db/queries.channels.server";
 import {
+  type AssignOutcome,
   assignChannel,
   assignChannelToSelf,
   unassign,
@@ -199,10 +200,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
       return data<SkillCurationActionData>(
         {
           form: "everyone",
-          error:
-            outcome === "not_assigned"
-              ? "This channel is not assigned to everyone."
-              : "This channel no longer exists.",
+          error: everyoneErrorCopy(outcome),
         },
         { status: 400 },
       );
@@ -222,6 +220,19 @@ export async function action({ request, params }: ActionFunctionArgs) {
 
 const ADD_GENERIC_ERROR = "That add didn't go through. Try again.";
 const REMOVE_GENERIC_ERROR = "That remove didn't go through. Try again.";
+
+/** Map the curator arm's outcome codes to honest, owner-facing copy. */
+function everyoneErrorCopy(outcome: AssignOutcome): string {
+  switch (outcome) {
+    case "baseline":
+      // The refusal the data layer makes: the default channel IS what membership gives.
+      return "This is the workspace baseline — everyone gets it by being a member, so it can't be withdrawn.";
+    case "not_assigned":
+      return "This channel is not assigned to everyone.";
+    default:
+      return "This channel no longer exists.";
+  }
+}
 
 /** Map the place outcome's codes to honest, member-facing copy. */
 function placeErrorCopy(outcome: ChannelPlaceOutcome): string {
