@@ -390,9 +390,12 @@ pub(crate) fn reset_to_never_received(
     Ok(())
 }
 
-/// What this device HOLDS after the reconcile, over the skills the delivery actually DELIVERED:
-/// the materialized version from `map.json` (the honest "applied" — an offered-but-unaccepted first
-/// receive has none and is skipped, as is any skill whose placement this sweep removed). Read-only.
+/// What this installation HOLDS after the reconcile, over the skills the workspace's deliveries
+/// (the feed AND the manifest rows) named: the materialized version from `map.json` (the honest
+/// "applied" — an offered-but-unaccepted first receive has none and is skipped, as is any skill
+/// whose placement this sweep removed). COMPLETE-state across stores: the home store first, then
+/// every visited project store — a project-manifest delivery is held exactly as a feed one is,
+/// and the first store holding an applied copy answers for the session. Read-only.
 ///
 /// Scoping to the delivered set is load-bearing: reporting a withdrawn or frozen skill would tell
 /// the fleet page this device still serves bytes it does not, and would revive the very detach
@@ -400,26 +403,31 @@ pub(crate) fn reset_to_never_received(
 pub(super) fn applied_snapshot(
     ctx: &Ctx<'_>,
     delivered: &HashSet<&str>,
+    project_stores: &[crate::sidecar::Layout],
 ) -> Result<Vec<(String, [u8; 32])>, ClientError> {
     let mut out = Vec::new();
     for skill_id in delivered {
         let Ok(sid) = SkillId::parse(skill_id) else {
             continue;
         };
-        let sp = ctx.layout.published(&sid);
-        let Some(map) = doc::read_map(ctx.fs, &sp.map)? else {
-            continue;
-        };
-        // A placement the sweep removed (or never laid) is not held, whatever the doc says.
-        if !map.placements.iter().any(|p| ctx.fs.exists(Path::new(p))) {
-            continue;
-        }
-        if let Ok(commit) = super::parse_hex32(&map.applied_commit)
-            && commit != [0u8; 32]
-        {
-            out.push(((*skill_id).to_owned(), commit));
+        for layout in std::iter::once(&ctx.layout).chain(project_stores.iter()) {
+            let sp = layout.published(&sid);
+            let Some(map) = doc::read_map(ctx.fs, &sp.map)? else {
+                continue;
+            };
+            // A placement the sweep removed (or never laid) is not held, whatever the doc says.
+            if !map.placements.iter().any(|p| ctx.fs.exists(Path::new(p))) {
+                continue;
+            }
+            if let Ok(commit) = super::parse_hex32(&map.applied_commit)
+                && commit != [0u8; 32]
+            {
+                out.push(((*skill_id).to_owned(), commit));
+                break;
+            }
         }
     }
+    out.sort();
     Ok(out)
 }
 

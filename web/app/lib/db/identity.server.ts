@@ -172,6 +172,7 @@ export async function ensureSetup(
         workspaceId,
         userId: null,
         channelId: defaultChannelId,
+        self: false,
         createdBy: "system",
       });
       await auditInTx(tx, {
@@ -1621,9 +1622,9 @@ async function acceptInvitationTx(
     const row = named.rows[0] as { kind: string; name: string } | undefined;
     if (row) {
       await tx.execute(
-        sql`INSERT INTO web.assignment (workspace_id, user_id, bundle_id, created_by)
+        sql`INSERT INTO web.assignment (workspace_id, user_id, bundle_id, self, created_by)
             VALUES (${inv.workspaceId}, ${account.userId}, ${inv.hintBundleId},
-                    ${inv.invitedBy ?? account.userId})
+                    ${inv.invitedBy === null}, ${inv.invitedBy ?? account.userId})
             ON CONFLICT DO NOTHING`,
       );
       await tx.execute(
@@ -1640,9 +1641,9 @@ async function acceptInvitationTx(
     const row = named.rows[0] as { name: string } | undefined;
     if (row) {
       await tx.execute(
-        sql`INSERT INTO web.assignment (workspace_id, user_id, channel_id, created_by)
+        sql`INSERT INTO web.assignment (workspace_id, user_id, channel_id, self, created_by)
             VALUES (${inv.workspaceId}, ${account.userId}, ${inv.hintChannelId},
-                    ${inv.invitedBy ?? account.userId})
+                    ${inv.invitedBy === null}, ${inv.invitedBy ?? account.userId})
             ON CONFLICT DO NOTHING`,
       );
       hint = { kind: "channel", name: row.name };

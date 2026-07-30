@@ -177,8 +177,9 @@ export async function deliveryFor(actor: FeedActor): Promise<DeliveryBody> {
                  WHERE da.workspace_id = ${ws} AND da.bundle_id = b.id
                    AND (da.user_id = ${actor.userId} OR da.user_id IS NULL)
                ) AS direct,
-               -- Who aimed a direct bundle assignment here, when it was someone ELSE: the
-               -- person-targeted row outranks the everyone one, newest as the tiebreak. The
+               -- Who aimed a direct bundle assignment here, when it was someone ELSE: curator
+               -- provenance only (a self-pick coexisting with a curator's aim never masks it);
+               -- the person-targeted row outranks the everyone one, newest as the tiebreak. The
                -- display COALESCEs to 'former member' inside the subquery so a gone creator
                -- account still reads as an attribution, not as "no assignment".
                (
@@ -187,15 +188,15 @@ export async function deliveryFor(actor: FeedActor): Promise<DeliveryBody> {
                  LEFT JOIN web."user" u ON u.id = aa.created_by
                  WHERE aa.workspace_id = ${ws} AND aa.bundle_id = b.id
                    AND (aa.user_id = ${actor.userId} OR aa.user_id IS NULL)
-                   AND aa.created_by <> ${actor.userId}
+                   AND NOT aa.self AND aa.created_by <> ${actor.userId}
                  ORDER BY (aa.user_id IS NOT NULL) DESC, aa.created_at DESC
                  LIMIT 1
                ) AS assigned_by,
-               -- The caller's own pick: a direct bundle assignment they aimed at themselves.
+               -- The caller's own pick: the provenance flag, not a created_by heuristic.
                EXISTS (
                  SELECT 1 FROM web.assignment pa
                  WHERE pa.workspace_id = ${ws} AND pa.bundle_id = b.id
-                   AND pa.user_id = ${actor.userId} AND pa.created_by = ${actor.userId}
+                   AND pa.user_id = ${actor.userId} AND pa.self
                ) AS picked
         FROM (${feedDemandSql(actor.userId, ws)}) e
         JOIN web.bundle b ON b.id = e.bundle_id

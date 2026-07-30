@@ -84,6 +84,12 @@ pub(crate) trait FsOps {
     /// populated harness dir with no torn/mixed/partial state. Errors typed (e.g. `ENOTSUP` on an FS
     /// without the syscall) so the caller can fall back.
     fn exchange_dir(&self, a: &Path, b: &Path) -> io::Result<()>;
+    /// EXCLUSIVE create: write `bytes` to a file that must **not** already exist (`O_EXCL` —
+    /// `create_new`), then fsync it. A true kernel-level exclusive, not a check-then-write: two
+    /// racing creators get exactly one winner, and the loser's [`io::ErrorKind::AlreadyExists`]
+    /// leaves the winner's file untouched. No temp file, no rename — so no shared temp name for a
+    /// concurrent writer to tear.
+    fn write_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
 }
 
 /// The production seam: `std::fs` + `rustix` safe syscalls.
@@ -270,6 +276,16 @@ impl FsOps for RealFs {
         Ok(mode & 0o077 == 0)
     }
 
+    fn write_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        f.write_all(bytes)?;
+        Self::fsync_handle(&f)
+    }
+
     fn exchange_dir(&self, a: &Path, b: &Path) -> io::Result<()> {
         #[cfg(any(
             target_os = "linux",
@@ -406,6 +422,10 @@ mod fault {
         fn exchange_dir(&self, a: &Path, b: &Path) -> io::Result<()> {
             self.tick()?;
             self.inner.exchange_dir(a, b)
+        }
+        fn write_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            self.tick()?;
+            self.inner.write_new(path, bytes)
         }
         // Reads + locks never fault — only durable mutations are crash-relevant.
         fn read_opt(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {

@@ -149,7 +149,7 @@ fn at(key: &str, message: impl Into<String>) -> ManifestError {
 const FIELD_NAMES: [&str; 6] = ["version", "path", "harness", "name", "subdir", "kind"];
 
 /// The fields legal on each shape. The feed takes none (its value is exactly `"*"`).
-fn legal_fields(shape: &KeyShape) -> &'static [&'static str] {
+pub(crate) fn legal_fields(shape: &KeyShape) -> &'static [&'static str] {
     match shape {
         KeyShape::WorkspaceBundle { .. } => &["version", "path", "harness", "name"],
         KeyShape::RepoSkill { .. } => &["version", "path", "harness", "name", "subdir", "kind"],

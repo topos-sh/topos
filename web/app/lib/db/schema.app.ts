@@ -551,6 +551,12 @@ export const channelBundle = webSchema.table(
  * The workspace BASELINE is not a rule — it is the default channel assigned to everyone, one
  * row minted with the workspace.
  *
+ * PROVENANCE is part of the row's identity: `self` says whether the person placed it in their
+ * own name (a pick) or someone else aimed it (a curator / everyone row). One self-row and one
+ * curator-row over the same (person, target) COEXIST — the partial uniques include `self` — so
+ * a curator's aim never collapses into (or is deleted by) the person's own pick: each unassign
+ * arm removes only its own provenance, and delivery unions both.
+ *
  * Same-workspace coherence is composite-FK-pinned on both targets. The seat FK is MATCH
  * SIMPLE by construction: it binds only when `user_id` is present, which is exactly the
  * intent — losing a seat cascades that person's assignments away, while everyone-rows (a
@@ -566,6 +572,10 @@ export const assignment = webSchema.table(
     userId: text("user_id"),
     bundleId: text("bundle_id"),
     channelId: text("channel_id"),
+    /** The person placed it themselves (their own pick — theirs to take back). `false` = a
+     * curator's aim, including every everyone-row (CHECK-enforced: an everyone-row is never
+     * `self`). No default: every writer states the provenance it means. */
+    self: boolean("self").notNull(),
     /** Who made it — an attribution snapshot (a `user.id`, or 'system' for a birth row); it
      * carries no FK so an assignment outlives the account that placed it. */
     createdBy: text("created_by").notNull(),
@@ -576,16 +586,17 @@ export const assignment = webSchema.table(
       .notNull(),
   },
   (table) => [
-    // One assignment per (audience, target) — four partial uniques because a NULL audience is
-    // its own key: person-scoped and everyone-scoped rows never collide with each other.
+    // One assignment per (audience, target, PROVENANCE) — partial uniques because a NULL
+    // audience is its own key: person-scoped and everyone-scoped rows never collide with each
+    // other, and a self-pick coexists with a curator's aim at the same target.
     uniqueIndex("assignment_person_bundle_once")
-      .on(table.workspaceId, table.userId, table.bundleId)
+      .on(table.workspaceId, table.userId, table.bundleId, table.self)
       .where(sql`bundle_id is not null and user_id is not null`),
     uniqueIndex("assignment_everyone_bundle_once")
       .on(table.workspaceId, table.bundleId)
       .where(sql`bundle_id is not null and user_id is null`),
     uniqueIndex("assignment_person_channel_once")
-      .on(table.workspaceId, table.userId, table.channelId)
+      .on(table.workspaceId, table.userId, table.channelId, table.self)
       .where(sql`channel_id is not null and user_id is not null`),
     uniqueIndex("assignment_everyone_channel_once")
       .on(table.workspaceId, table.channelId)
@@ -597,6 +608,8 @@ export const assignment = webSchema.table(
       "assignment_target_check",
       sql`(${table.bundleId} is null) <> (${table.channelId} is null)`,
     ),
+    // An everyone-row is never a self-pick: `self` implies a named person.
+    check("assignment_self_check", sql`${table.userId} is not null or not ${table.self}`),
     foreignKey({
       name: "assignment_seat_fk",
       columns: [table.workspaceId, table.userId],

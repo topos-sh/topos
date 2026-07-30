@@ -552,6 +552,9 @@ pub(crate) fn add_describe_tty(
         "Would write to {}:\n  \"{}\" = \"{}\"\n",
         data.manifest, data.reference, data.value
     ));
+    if let Some(note) = &data.note {
+        s.push_str(&format!("note: {note}\n"));
+    }
     s.push_str(&format!(
         "Nothing has changed yet — apply with:\n  {}",
         argv_line(yes_argv)
@@ -1843,6 +1846,10 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
              restore the \"{from}\" line)"
         ));
     }
+    // The landed-but-rewrite-pending truth: the publish holds; the manifest edit does not, yet.
+    if let Some(note) = &data.rewrite_pending {
+        out.push_str(&format!("\nnote: {note}"));
+    }
     if let Some(note) = &data.origin_note {
         out.push_str(&format!("\nnote: {note}"));
     }
@@ -1887,6 +1894,9 @@ pub(crate) fn propose_tty(data: &ProposeData) -> String {
              follows once the proposal is approved; to undo, edit that manifest and restore the \
              \"{from}\" line)"
         ));
+    }
+    if let Some(note) = &data.rewrite_pending {
+        out.push_str(&format!("\nnote: {note}"));
     }
     out
 }
@@ -2364,6 +2374,7 @@ mod tests {
             placement_missing: None,
             invite_line: None,
             origin_note: None,
+            rewrite_pending: None,
         });
         assert!(line.starts_with("Published smoke-notes@"), "{line}");
         assert!(
@@ -2388,6 +2399,7 @@ mod tests {
             placement_missing: None,
             invite_line: None,
             origin_note: None,
+            rewrite_pending: None,
         });
         assert!(line.starts_with("Published smoke-notes@"), "{line}");
         assert!(
@@ -2420,6 +2432,7 @@ mod tests {
             placement_missing: None,
             invite_line: Some(invite.to_owned()),
             origin_note: None,
+            rewrite_pending: None,
         });
         assert!(line.starts_with("Published smoke-notes@"), "{line}");
         let handoff = format!("\nbring a teammate: {invite}");

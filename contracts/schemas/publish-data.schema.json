@@ -79,6 +79,13 @@
         "null"
       ]
     },
+    "rewrite_pending": {
+      "description": "The publish LANDED but the local governance-transfer rewrite did NOT (a manifest\nread/write fault): the truthful receipt half — the manifest still spells the local-path\nline, and the next `update` (or a re-run of this publish, which resolves no-change)\nconverges the rewrite idempotently. **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "skill_id": {
       "type": "string"
     },

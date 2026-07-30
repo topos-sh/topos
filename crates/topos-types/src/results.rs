@@ -544,6 +544,12 @@ pub struct AddDescribeData {
     pub reference: String,
     /// The row value that would be written (`"*"` or a commit pin).
     pub value: String,
+    /// An honesty line the describe leads with when the manifest ALREADY spells this row (a
+    /// cloned file, a prior add whose installs failed): the row is demand, not consent — trust
+    /// in a forge origin is a store fact, so the describe still gates, and applying is what
+    /// fetches and installs the skills the row names. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// `fmt [-g]` — rewrite a manifest into the normal form. **INFERRED** (additive-only).
@@ -810,6 +816,12 @@ pub struct PublishData {
     /// governed reference. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_note: Option<String>,
+    /// The publish LANDED but the local governance-transfer rewrite did NOT (a manifest
+    /// read/write fault): the truthful receipt half — the manifest still spells the local-path
+    /// line, and the next `update` (or a re-run of this publish, which resolves no-change)
+    /// converges the rewrite idempotently. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewrite_pending: Option<String>,
 }
 
 /// The disclosure a `publish` attaches when it ADDED the skill to topos before shipping — the auto-add
@@ -871,6 +883,11 @@ pub struct ProposeData {
     /// (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub converted_from: Option<String>,
+    /// The proposal OPENED but the local governance-transfer rewrite did NOT (a manifest
+    /// read/write fault): the manifest still spells the local-path line; the next `update` (or a
+    /// re-run) converges the rewrite idempotently. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewrite_pending: Option<String>,
 }
 
 /// `revert` (a **forward** git-revert restoring older bytes as a new, higher-generation version —
@@ -1460,6 +1477,7 @@ mod tests {
             placement_missing: None,
             invite_line: None,
             origin_note: None,
+            rewrite_pending: None,
         };
         let v = serde_json::to_value(&done).unwrap();
         assert_eq!(v["version_id"], "a".repeat(64));

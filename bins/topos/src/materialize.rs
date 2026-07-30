@@ -448,6 +448,17 @@ fn do_dance(
     Ok(())
 }
 
+/// Whether ignore-file BYTES ignore the whole directory they sit in — a line that is exactly `*`
+/// or `/*` (the node_modules/venv idiom the sentinel uses). The disclosure predicate for a bundle
+/// shipping its OWN root ignore file: one that does NOT self-ignore leaves the placement visible
+/// to git, and the sweep says so (bundle content is never edited to fix it).
+pub(crate) fn ignores_all(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    text.lines().map(str::trim).any(|l| l == "*" || l == "/*")
+}
+
 /// Build a fresh staging dir holding the bundle's exact bytes, fsync every file AND every staging dir.
 /// With `self_ignore`, the staged tree additionally carries the root self-ignore sentinel — UNLESS
 /// the bundle ships its own root ignore file (a bundle's `.gitignore` is content, never overlaid).
@@ -958,9 +969,42 @@ mod tests {
         );
     }
 
+    /// Whether ignore bytes self-ignore the directory (`*` / `/*` on a line of their own).
+    #[test]
+    fn ignores_all_reads_only_whole_dir_patterns() {
+        assert!(ignores_all(b"*\n"));
+        assert!(ignores_all(b"# note\n/*\n"));
+        assert!(ignores_all(crate::scan::IGNORE_SENTINEL));
+        assert!(!ignores_all(b"*.log\n"));
+        assert!(!ignores_all(b"build/\n"));
+        assert!(!ignores_all(b""));
+    }
+
+    /// `git init` + `git status --porcelain` over a repo — the REAL visibility witness. `None`
+    /// when no usable git binary is on this machine (the caller skips).
+    fn git_status(repo: &Path) -> Option<String> {
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo)
+            .output()
+            .ok()?;
+        if !init.status.success() {
+            return None;
+        }
+        let out = std::process::Command::new("git")
+            .args(["status", "--porcelain", "-uall"])
+            .current_dir(repo)
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
     /// A self-ignoring apply stages the sentinel beside the bundle — a first install lands it, the
-    /// scanner treats it as metadata (the placed dir reads clean), and a bundle shipping its OWN
-    /// root ignore file is placed verbatim (never overlaid).
+    /// scanner treats it as metadata (the placed dir reads clean), GIT genuinely does not see the
+    /// placement, and a bundle shipping its OWN root ignore file is placed verbatim (never
+    /// overlaid) — visible to git when that file does not self-ignore.
     #[test]
     fn self_ignore_stages_the_sentinel_unless_the_bundle_ships_one() {
         let parent = Scratch::new("selfig");
@@ -1014,6 +1058,23 @@ mod tests {
             b"*.log\n",
             "the bundle's own ignore file is content, never replaced by the sentinel"
         );
+
+        // The REAL visibility check: git itself must not see the sentinel placement, and MUST
+        // see the shipped-ignore one (its `*.log` does not self-ignore) — the assertion that was
+        // previously vacuous.
+        match git_status(&parent.0) {
+            Some(status) => {
+                assert!(
+                    !status.contains("demo"),
+                    "the sentinel placement is invisible to git:\n{status}"
+                );
+                assert!(
+                    status.contains("own"),
+                    "a shipped non-self-ignoring root ignore leaves the placement visible:\n{status}"
+                );
+            }
+            None => eprintln!("skipping git-visibility half: no usable git binary"),
+        }
     }
 
     /// The opportunistic arm: a target whose bytes moved between the caller's scan and the swap is

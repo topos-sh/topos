@@ -64,6 +64,13 @@
         "null"
       ]
     },
+    "rewrite_pending": {
+      "description": "The proposal OPENED but the local governance-transfer rewrite did NOT (a manifest\nread/write fault): the manifest still spells the local-path line; the next `update` (or a\nre-run) converges the rewrite idempotently. **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "title": {
       "type": "string"
     }

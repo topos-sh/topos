@@ -55,7 +55,7 @@ export interface FeedView {
 export async function feedOf(actor: FeedActor): Promise<FeedView> {
   const ws = actor.workspaceId;
   const rows = await getDb().execute(sql`
-    SELECT a.user_id, a.created_by, a.bundle_id, a.channel_id,
+    SELECT a.user_id, a.created_by, a.self, a.bundle_id, a.channel_id,
            b.name AS bundle_name, b.kind AS bundle_kind, c.name AS channel_name
     FROM web.assignment a
     LEFT JOIN web.bundle b ON b.id = a.bundle_id
@@ -69,7 +69,7 @@ export async function feedOf(actor: FeedActor): Promise<FeedView> {
     targetId: (r.bundle_id ?? r.channel_id) as string,
     name: (r.bundle_name ?? r.channel_name) as string,
     audience: r.user_id === null ? ("everyone" as const) : ("you" as const),
-    own: r.user_id === actor.userId && r.created_by === actor.userId,
+    own: r.self === true,
   }));
   const declined = await getDb()
     .select({ skillId: decline.bundleId, name: bundle.name })
@@ -133,6 +133,7 @@ export interface AssignedView {
 interface RawAssignment {
   user_id: string | null;
   created_by: string;
+  self: boolean;
   bundle_id: string | null;
   channel_id: string | null;
   channel_name: string | null;
@@ -153,7 +154,7 @@ export async function assignedView(actor: FeedActor): Promise<AssignedView> {
   const db = getDb();
   const [assignmentRows, declineRows] = await Promise.all([
     db.execute(sql`
-      SELECT a.user_id, a.created_by, a.bundle_id, a.channel_id,
+      SELECT a.user_id, a.created_by, a.self, a.bundle_id, a.channel_id,
              c.name AS channel_name, c.is_default,
              -- The display rule (app/lib/person-display.ts): a blank name falls back to email.
              COALESCE(NULLIF(btrim(u.name), ''), u.email) AS created_by_display
@@ -175,15 +176,18 @@ export async function assignedView(actor: FeedActor): Promise<AssignedView> {
     if (r.user_id === null) {
       return { by: "everyone" };
     }
-    if (r.created_by === actor.userId) {
+    if (r.self) {
       return { by: "you" };
     }
     // A curator whose account is gone still placed the row; the display degrades, never the fact.
     return { by: "person", display: r.created_by_display ?? "former member" };
   };
 
-  // Channels first. The same channel can be assigned twice (to everyone AND to this person);
-  // the WIDER row wins the attribution, because that is the one that would survive an unpick.
+  // Channels first. The same channel can be carried by several rows (to everyone, a curator's
+  // aim, AND this person's own pick — distinct provenances coexist); the WIDEST row wins the
+  // attribution, because that is the one that would survive an unpick.
+  const rank = (a: FeedAttribution): number =>
+    a.by === "everyone" ? 2 : a.by === "person" ? 1 : 0;
   const channels = new Map<string, Omit<AssignedChannel, "bundles">>();
   for (const r of raws) {
     if (r.channel_id === null) {
@@ -191,10 +195,7 @@ export async function assignedView(actor: FeedActor): Promise<AssignedView> {
     }
     const attribution = attributionOf(r);
     const held = channels.get(r.channel_id);
-    if (
-      held !== undefined &&
-      !(attribution.by === "everyone" && held.attribution.by !== "everyone")
-    ) {
+    if (held !== undefined && rank(attribution) <= rank(held.attribution)) {
       continue;
     }
     channels.set(r.channel_id, {
@@ -266,7 +267,7 @@ export async function assignedView(actor: FeedActor): Promise<AssignedView> {
     if (bundleRow === undefined) {
       continue;
     }
-    if (r.user_id === actor.userId && r.created_by === actor.userId) {
+    if (r.user_id === actor.userId && r.self) {
       picked.push(bundleRow);
     } else {
       assigned.push({ ...bundleRow, attribution: attributionOf(r) });
@@ -324,8 +325,8 @@ export async function addToMine(actor: FeedActor, bundleId: string): Promise<Add
       return "skill_not_active";
     }
     await tx.execute(sql`
-      INSERT INTO web.assignment (workspace_id, user_id, bundle_id, created_by)
-      VALUES (${ws}, ${actor.userId}, ${bundleId}, ${actor.userId})
+      INSERT INTO web.assignment (workspace_id, user_id, bundle_id, self, created_by)
+      VALUES (${ws}, ${actor.userId}, ${bundleId}, true, ${actor.userId})
       ON CONFLICT DO NOTHING
     `);
     await tx.execute(sql`
@@ -352,7 +353,7 @@ export async function unpickBundle(actor: FeedActor, bundleId: string): Promise<
     const deleted = await tx.execute(sql`
       DELETE FROM web.assignment
       WHERE workspace_id = ${ws} AND user_id = ${actor.userId} AND bundle_id = ${bundleId}
-        AND created_by = ${actor.userId}
+        AND self
       RETURNING bundle_id
     `);
     return deleted.rows.length > 0 ? "unpicked" : "not_picked";
@@ -421,8 +422,8 @@ export async function assignChannelToSelf(
       return "baseline";
     }
     await tx.execute(sql`
-      INSERT INTO web.assignment (workspace_id, user_id, channel_id, created_by)
-      VALUES (${ws}, ${actor.userId}, ${channelId}, ${actor.userId})
+      INSERT INTO web.assignment (workspace_id, user_id, channel_id, self, created_by)
+      VALUES (${ws}, ${actor.userId}, ${channelId}, true, ${actor.userId})
       ON CONFLICT DO NOTHING
     `);
     return "assigned";
@@ -430,8 +431,10 @@ export async function assignChannelToSelf(
 }
 
 /**
- * Stop carrying a channel — deletes THIS person's own assignment of the set. The baseline is
- * refused typed: it reaches everyone, and one person's window onto it is per-bundle declines.
+ * Stop carrying a channel — deletes THIS person's own (`self`) assignment of the set, and only
+ * that: a curator's aim at them survives, exactly as it would survive an unpick. The baseline
+ * is refused typed: it reaches everyone, and one person's window onto it is per-bundle
+ * declines.
  */
 export async function unassignChannelFromSelf(
   actor: FeedActor,
@@ -449,6 +452,7 @@ export async function unassignChannelFromSelf(
     const deleted = await tx.execute(sql`
       DELETE FROM web.assignment
       WHERE workspace_id = ${ws} AND user_id = ${actor.userId} AND channel_id = ${channelId}
+        AND self
       RETURNING channel_id
     `);
     return deleted.rows.length > 0 ? "unassigned" : "not_assigned";
@@ -518,8 +522,8 @@ export async function assignBundle(
       return "unknown_member";
     }
     await tx.execute(sql`
-      INSERT INTO web.assignment (workspace_id, user_id, bundle_id, created_by)
-      VALUES (${ws}, ${userId}, ${bundleId}, ${actor.userId})
+      INSERT INTO web.assignment (workspace_id, user_id, bundle_id, self, created_by)
+      VALUES (${ws}, ${userId}, ${bundleId}, false, ${actor.userId})
       ON CONFLICT DO NOTHING
     `);
     await auditInTx(tx, {
@@ -550,8 +554,8 @@ export async function assignChannel(
       return "unknown_member";
     }
     await tx.execute(sql`
-      INSERT INTO web.assignment (workspace_id, user_id, channel_id, created_by)
-      VALUES (${ws}, ${userId}, ${channelId}, ${actor.userId})
+      INSERT INTO web.assignment (workspace_id, user_id, channel_id, self, created_by)
+      VALUES (${ws}, ${userId}, ${channelId}, false, ${actor.userId})
       ON CONFLICT DO NOTHING
     `);
     await auditInTx(tx, {
@@ -567,9 +571,10 @@ export async function assignChannel(
 }
 
 /**
- * Withdraw an assignment — by target and audience, the exact inverse of the two above. It
- * withdraws the OFFER only: bytes already on a machine stay there until that machine
- * reconciles, and a person who also assigned the thing to themselves keeps it.
+ * Withdraw an assignment — by target and audience, the exact inverse of the two above, and of
+ * ONLY those: it deletes curator provenance (`NOT self`), so a person who also picked the
+ * thing themselves keeps their own row. It withdraws the OFFER only: bytes already on a
+ * machine stay there until that machine reconciles.
  */
 export async function unassign(
   actor: OwnerActor,
@@ -590,7 +595,7 @@ export async function unassign(
     const audienceMatch = userId === null ? sql`a.user_id IS NULL` : sql`a.user_id = ${userId}`;
     const deleted = await tx.execute(sql`
       DELETE FROM web.assignment a
-      WHERE a.workspace_id = ${ws} AND ${targetMatch} AND ${audienceMatch}
+      WHERE a.workspace_id = ${ws} AND ${targetMatch} AND ${audienceMatch} AND NOT a.self
       RETURNING a.workspace_id
     `);
     if (deleted.rows.length === 0) {

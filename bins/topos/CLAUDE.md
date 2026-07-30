@@ -111,13 +111,22 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   workspace bundle or channel row resolves through that workspace's session (catalog index / channel
   index; a row pin overrides the served current, falling back honestly when the pinned version is gone,
   and a row naming a declined bundle still delivers with the decline disclosed — a file is a machine
-  fact, the decline is a server fact about the feed); a forge row installs at its pin and advances ONLY
-  on an explicit `update` (never on the quiet sweep — no session start dials a forge), receipted with
-  the commit motion and the member delta; a local-path row is an adopt-in-place presence check. A
-  manifest the grammar refuses FREEZES its whole scope — no delivery, no cleaning: a typo must keep
-  bytes, never drop them. Placement is PER-SCOPE (see below); after the fan-out `clean_undemanded`
-  retires what its scope no longer demands (snapshot-first, resetting to never-received) and each
-  session gets the applied report (`PUT …/report` — a complete snapshot per session). The **delivery
+  fact, the decline is a server fact about the feed); a forge row resolves against ITS SCOPE'S OWN
+  store (a project row's tracked import lives in the checkout's `.topos/` store — two checkouts of one
+  repo row never share state) and NEVER first-installs: an origin the store does not track refuses with
+  one typed line naming the `topos add … --yes` gate (a manifest row is demand, never consent — anyone
+  could have committed it); a TRACKED origin's rows advance ONLY on an explicit `update` (never on the
+  quiet sweep — no session start dials a forge), receipted with the commit motion and the member delta,
+  members the new archive dropped cleaned snapshot-first in the same run; a local-path row is an
+  adopt-in-place presence check (and the idempotent converge of a landed publish's PENDING governance
+  rewrite). A manifest the grammar refuses FREEZES its whole scope — no delivery, no cleaning: a typo
+  must keep bytes, never drop them. Placement is PER-SCOPE (see below); after the fan-out
+  `clean_undemanded` retires what its scope no longer demands (snapshot-first, resetting to
+  never-received; each scope consults ITS OWN mention set — a project mention never shields a
+  person-scope clean — and a dropped repo row's members retire like any undemanded item) and each
+  session gets the applied report (`PUT …/report` — complete-state per session, across the home store
+  AND every visited project store, manifest-row deliveries included — declined-but-locally-added
+  bundles report too, which is what makes the web's declined-but-applied disclosure real). The **delivery
   cache** (`state/sync_status.json`) records host/workspace_name per workspace + name/review_required/
   served_version per skill PLUS each row's attribution and the caller's declines, so `status`/`list`
   answer offline and `CacheFollow` (the FollowSource over the cache) + `SessionRoutedPlane` (the
@@ -135,16 +144,26 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   `GitTarballSource`, `..`/symlink-safe, `origin.json` provenance adjunct). Three `-g` arms are pure
   disclosure rather than a write: an add the FEED already delivers writes nothing and says so; an add
   over a standing `"off"` row DELETES the row (never a stacked positive); an explicit pin or field set
-  converts a feed-delivered bundle to machine-local control. FIRST TRUST is the one gate here — a forge
-  source with no row in any local manifest and no tracked import is DESCRIBED (source, discovered
-  members, the exact row and file) and applied only under `--yes`; a known source applies immediately
-  with an undo-led receipt. `remove <targets…> [-g]` is the EXACT FILE INVERSE (property-tested): drop
+  converts a feed-delivered bundle to machine-local control. FIRST TRUST is the one gate here, and it
+  is a STORE fact: a forge origin the target scope's own store does not yet track is DESCRIBED
+  (source, discovered members, the exact row and file) and applied only under `--yes` — a manifest ROW
+  never vouches (it is demand anyone could have committed; a describe over an already-recorded row
+  says so), and a tracked origin applies immediately with an undo-led receipt. A forge apply writes the ROW first (the
+  demand), then installs member-by-member into the scope's store — a member failure never unwinds the
+  batch: the receipt names the partial landing and the recorded row is what the next update converges.
+  Re-adding an EXISTING row keeps the exact-inverse discipline: the same value is the redundancy
+  disclosure (nothing written, no undo); a different value applies with the prior value named and the
+  undo offered ONLY where it verifiably restores it (`add <ref>` for a prior `"*"`, `add <ref>@<pin>`
+  for a prior pin; a prior fields table gets NO undo, said why). `remove <targets…> [-g]` is the EXACT
+  FILE INVERSE (property-tested): drop
   the row; or, `-g`, write `"off"` when the feed still provides the bundle, or drop a FEED row whole; a
-  set member's removal is the set-minus-one rewrite (that one line replaced by its current members),
-  offered as a describe because later curation stops arriving through this file. Its two-phase arms are
-  LOSS (a row whose bundle carries unshared edits, or an unclassifiable scan — the guard fails TOWARD
-  the gate) and the set split; everything else applies immediately, and the receipt offers the literal
-  inverse ONLY when it restores the whole prior state. A tracked never-published local (or an untracked
+  set member's removal is the set-minus-one rewrite (that one line replaced by its current members,
+  each carrying the set line's pin/fields where the member's shape legally takes them — anything not
+  carryable named in the describe), offered as a describe because later curation stops arriving through
+  this file. Its two-phase arms are LOSS (an affected bundle with unshared edits, or an unclassifiable
+  scan — the guard fails TOWARD the gate, and it covers EVERY placement-retiring arm: the row drop, the
+  feed-row drop, and the `"off"` switch alike) and the set split; everything else applies immediately,
+  and the receipt offers the literal inverse ONLY when it restores the whole prior state. A tracked never-published local (or an untracked
   agent-dir copy) keeps the two-phase permanent delete; `remove topos --yes` is the built-in's durable
   opt-out. `fmt [-g]` writes the normal form (validating the whole document first — it never launders a
   malformed file). `update [<target>…] [--quiet]` is the reconcile above (targeted forms narrow it;

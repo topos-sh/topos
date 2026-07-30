@@ -711,6 +711,12 @@ export interface components {
             proposal: string;
             /** @description The canonical workspace reference the manifest now stores. **INFERRED** (additive-only). */
             reference?: string | null;
+            /**
+             * @description The proposal OPENED but the local governance-transfer rewrite did NOT (a manifest
+             *     read/write fault): the manifest still spells the local-path line; the next `update` (or a
+             *     re-run) converges the rewrite idempotently. **INFERRED** (additive-only).
+             */
+            rewrite_pending?: string | null;
             title: string;
         };
         /**
@@ -821,6 +827,13 @@ export interface components {
             placement_withheld?: string | null;
             /** @description The canonical workspace reference the manifest now stores. **INFERRED** (additive-only). */
             reference?: string | null;
+            /**
+             * @description The publish LANDED but the local governance-transfer rewrite did NOT (a manifest
+             *     read/write fault): the truthful receipt half — the manifest still spells the local-path
+             *     line, and the next `update` (or a re-run of this publish, which resolves no-change)
+             *     converges the rewrite idempotently. **INFERRED** (additive-only).
+             */
+            rewrite_pending?: string | null;
             skill_id: string;
             /** @description The new commit (the shipped `version_id`). */
             version_id: string;

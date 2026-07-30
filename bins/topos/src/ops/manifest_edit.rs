@@ -391,6 +391,14 @@ pub(super) fn undo_add(reference: &str, global: bool) -> Vec<String> {
 /// receipt: `data.manifest` names the file, `data.reference` the canonical key, `data.undo` the
 /// inverse, and `data.note` leads with the birth when this call created the file.
 ///
+/// EXACT-INVERSE DISCIPLINE over a pre-existing row:
+/// - the same value again writes NOTHING and says so (and offers no undo — a `remove` would
+///   delete a row that predates this add);
+/// - a DIFFERENT value applies, the receipt names the prior value, and the undo is offered ONLY
+///   in the form that verifiably restores it — `add <ref>` for a prior `"*"`, `add <ref>@<pin>`
+///   for a prior pin; a prior fields table has no single restoring command, so no undo is
+///   offered and the note says why (no undo beats a wrong one).
+///
 /// # Errors
 /// [`ClientError::InvalidArgument`] when the row is illegal for the file (the editor's own typed
 /// refusal — e.g. a feed row while its grouping section stands); a filesystem failure.
@@ -403,17 +411,76 @@ pub(super) fn write_row(
 ) -> Result<(), ClientError> {
     let global = target.scope == ManifestScope::Global;
     let Opened { mut editor, born } = open_for_edit(ctx, target)?;
-    editor
-        .set_row(reference, value)
-        .map_err(|e| ClientError::InvalidArgument(e.message))?;
-    editor.write(ctx.fs, &target.path)?;
+    let prior = editor.row(reference).map(|r| r.value);
     if let Some(note) = born {
         push_note(data, note);
     }
     data.manifest = Some(target.path.display().to_string());
     data.reference = Some(reference.to_owned());
-    data.undo = undo_add(reference, global);
+    if prior.as_ref() == Some(value) {
+        // The redundancy disclosure: the file already spells exactly this row.
+        data.undo = Vec::new();
+        push_note(
+            data,
+            format!("`{reference}` is already recorded in this file — nothing changed"),
+        );
+        return Ok(());
+    }
+    editor
+        .set_row(reference, value)
+        .map_err(|e| ClientError::InvalidArgument(e.message))?;
+    editor.write(ctx.fs, &target.path)?;
+    match &prior {
+        None => {
+            data.undo = undo_add(reference, global);
+        }
+        Some(EntryValue::Star) => {
+            data.undo = restore_add(reference, None, global);
+            push_note(
+                data,
+                "replaced the row's prior value `\"*\"` — the undo restores it".to_owned(),
+            );
+        }
+        Some(EntryValue::Pin(p)) => {
+            data.undo = restore_add(reference, Some(p), global);
+            push_note(
+                data,
+                format!("replaced the row's prior pin `{p}` — the undo restores it"),
+            );
+        }
+        Some(EntryValue::Fields(_) | EntryValue::Off) => {
+            // No single command re-spells the prior value — a wrong undo is worse than none.
+            data.undo = Vec::new();
+            let prior_kind = if matches!(prior, Some(EntryValue::Off)) {
+                "`\"off\"` switch".to_owned()
+            } else {
+                "field table".to_owned()
+            };
+            push_note(
+                data,
+                format!(
+                    "replaced the row's prior {prior_kind} — no undo is offered because no \
+                     single command restores it; edit {} by hand to put it back",
+                    target.path.display()
+                ),
+            );
+        }
+    }
     Ok(())
+}
+
+/// The paste-ready RE-ADD that restores a replaced row's prior value: `topos add [-g] <ref>` for
+/// a prior `"*"`, `topos add [-g] <ref>@<pin>` for a prior pin.
+fn restore_add(reference: &str, pin: Option<&str>, global: bool) -> Vec<String> {
+    let mut argv = vec!["topos".to_owned(), "add".to_owned()];
+    if global {
+        argv.push("-g".to_owned());
+    }
+    argv.push(match pin {
+        Some(p) => format!("{reference}@{p}"),
+        None => reference.to_owned(),
+    });
+    argv
 }
 
 /// Record a workspace/forge/local reference in the manifest a scope flag selects. `pin` writes
@@ -528,47 +595,6 @@ pub(crate) fn note_added_remote(
 }
 
 // ---------------------------------------------------------------------------------------------
-// First trust — has this machine used this git source before?
-// ---------------------------------------------------------------------------------------------
-
-/// Whether this machine has used a git source before: a row naming that repo in ANY local
-/// manifest (the global file + every file on the cwd chain), or an import already tracked from
-/// it. A source with neither is a FIRST TRUST — described, never installed, until `--yes`.
-///
-/// # Errors
-/// A manifest read/parse failure (a file that cannot be read cannot vouch for a source).
-pub(super) fn forge_source_known(
-    ctx: &Ctx<'_>,
-    source: &str,
-    subdir: Option<&str>,
-) -> Result<bool, ClientError> {
-    for (_, _, rows) in local_rows(ctx)? {
-        let hit = rows.iter().any(|row| match &row.shape {
-            KeyShape::RepoSet { host, owner, repo } => format!("{host}/{owner}/{repo}") == source,
-            KeyShape::RepoSkill {
-                host, owner, repo, ..
-            } => format!("{host}/{owner}/{repo}") == source,
-            _ => false,
-        });
-        if hit {
-            return Ok(true);
-        }
-    }
-    // A tracked import records its origin: the repo root, or the exact subdirectory a pasted URL
-    // named. (An import selected deeper by discovery is not matched here — the manifest row above
-    // is what a repeated add carries.)
-    if super::reconcile::find_tracked_github(ctx, source, "").is_some() {
-        return Ok(true);
-    }
-    if let Some(sub) = subdir
-        && super::reconcile::find_tracked_github(ctx, source, sub).is_some()
-    {
-        return Ok(true);
-    }
-    Ok(false)
-}
-
-// ---------------------------------------------------------------------------------------------
 // What the FEED currently delivers (live, else the offline cache)
 // ---------------------------------------------------------------------------------------------
 
@@ -654,6 +680,9 @@ enum Arm {
     FeedDrop {
         reference: String,
         workspace: String,
+        /// The bundles that feed currently delivers here (non-declined) — the loss-guard scans
+        /// each for local edits, because dropping the row retires ALL their placements.
+        bundles: Vec<String>,
     },
     /// No row, and the workspace's FEED delivers it — write the machine-local `"off"` switch.
     OffWrite {
@@ -801,9 +830,18 @@ fn resolve_one(
         && let Ok(KeyShape::Feed { host, workspace }) = keys::classify_key(c)
         && plan.has_feed(&host, &workspace)
     {
+        // What the feed currently delivers — the loss-guard's scan set (dropping the row
+        // retires every one of these placements at the next sweep).
+        let items = feeds.get_or_insert_with(|| feed_items(ctx, connect));
+        let bundles: Vec<String> = items
+            .iter()
+            .filter(|i| !i.declined && i.host == host && i.workspace == workspace)
+            .map(|i| i.name.clone())
+            .collect();
         return Ok(Some(Arm::FeedDrop {
             reference: c.to_owned(),
             workspace,
+            bundles,
         }));
     }
     // 2. An explicit row, by canonical reference or by the name it delivers under.
@@ -838,7 +876,7 @@ fn resolve_one(
         }
     }
     // 4. A SET row in this file delivers it — the removal is a rewrite of that line.
-    let expansions = sets.get_or_insert_with(|| expand_sets(ctx, connect, plan));
+    let expansions = sets.get_or_insert_with(|| expand_sets(ctx, connect, target, plan));
     for (row, members) in expansions.iter() {
         let want = member_of(row, canonical);
         if let Some(member) = members
@@ -909,12 +947,19 @@ fn feed_matches(token: &str, canonical: Option<&str>, item: &FeedItem) -> bool {
 
 /// Expand each SET row of a plan into the member NAMES it currently delivers: a channel's
 /// members from the live channel index (else the offline cache's `via` attribution), a repo's
-/// from the imports this machine tracks with that origin.
+/// from the imports the TARGET SCOPE's store tracks with that origin (a project row's imports
+/// live in the project's own `.topos/` store, a global row's in the home store).
 fn expand_sets(
     ctx: &Ctx<'_>,
     connect: &SessionConnect<'_>,
+    target: &EditTarget,
     plan: &ScopePlan,
 ) -> Vec<(PlanRow, Vec<String>)> {
+    let store_layout = match target.scope {
+        ManifestScope::Project => crate::sidecar::project_store_layout(&target.dir),
+        ManifestScope::Global => ctx.layout.clone(),
+    };
+    let sctx = super::pull::ctx_with_layout(ctx, &store_layout);
     let mut out = Vec::new();
     for row in &plan.sets {
         let members = match &row.shape {
@@ -924,7 +969,16 @@ fn expand_sets(
                 channel,
             } => channel_members(ctx, connect, host, workspace, channel),
             KeyShape::RepoSet { host, owner, repo } => {
-                tracked_from_origin(ctx, &format!("{host}/{owner}/{repo}"))
+                let mut names: Vec<String> = super::reconcile::tracked_repo_members(
+                    &sctx,
+                    &format!("{host}/{owner}/{repo}"),
+                )
+                .into_iter()
+                .map(|(_, lock, _)| lock.name)
+                .collect();
+                names.sort();
+                names.dedup();
+                names
             }
             _ => Vec::new(),
         };
@@ -965,39 +1019,6 @@ fn channel_members(
             if ds.via_channels.iter().any(|c| c == channel) && !ds.name.is_empty() {
                 out.push(ds.name.clone());
             }
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
-/// The bundles this machine tracks that were imported from `origin_source` — a repo row's
-/// current members, read from the sidecar's recorded provenance.
-fn tracked_from_origin(ctx: &Ctx<'_>, origin_source: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let Ok(entries) = ctx.fs.read_dir(&ctx.layout.skills_dir()) else {
-        return out;
-    };
-    for entry in entries {
-        let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        let Ok(sid) = crate::id::SkillId::parse(id) else {
-            continue;
-        };
-        let sp = ctx.layout.published(&sid);
-        let Ok(Some(origin)) = crate::doc::read_doc::<super::add::OriginDoc>(ctx.fs, &sp.origin)
-        else {
-            continue;
-        };
-        if origin.origin.source != origin_source {
-            continue;
-        }
-        if let Ok(Some(lock)) =
-            crate::doc::read_doc::<topos_types::persisted::Lock>(ctx.fs, &sp.lock)
-        {
-            out.push(lock.name);
         }
     }
     out.sort();
@@ -1119,51 +1140,107 @@ fn apply_arms(
         ));
     }
     // The gate: a file edit is reversible, so it applies immediately — EXCEPT where local work
-    // could be lost (a drafted bundle's row, or a copy that cannot be classified) or where the
-    // edit rewrites a curated line into its members (a set split changes what future curation
-    // reaches this file). A scan that cannot classify fails TOWARD the gate.
+    // could be lost (an affected bundle's draft, or a copy that cannot be classified) or where
+    // the edit rewrites a curated line into its members (a set split changes what future
+    // curation reaches this file). EVERY arm that retires placements runs the loss-guard —
+    // the explicit row drop, the feed-row drop (all of that feed's bundles leave), and the
+    // `"off"` switch alike — and a scan that cannot classify fails TOWARD the gate.
     let mut gated = false;
     let mut notes: Vec<Option<String>> = Vec::with_capacity(arms.len());
     for arm in &arms {
         let note = match arm {
-            Arm::RowDrop { name, .. } => match draft_state(ctx, name) {
-                DraftState::Draft => {
-                    gated = true;
-                    Some(format!(
-                        "'{name}' has local edits that are not shared — dropping the row takes it \
-                         out of this scope's agent dirs (the edits are snapshotted first, never \
-                         deleted)"
-                    ))
+            Arm::RowDrop { name, .. } | Arm::OffWrite { name, .. } => {
+                let removal_note = match arm {
+                    Arm::OffWrite { workspace, .. } => Some(format!(
+                        "'{name}' stays assigned to you in {workspace} — this switch is \
+                         machine-local; declining it on the web stops it everywhere"
+                    )),
+                    _ => None,
+                };
+                match draft_state(ctx, name) {
+                    DraftState::Draft => {
+                        gated = true;
+                        Some(join_notes(
+                            format!(
+                                "'{name}' has local edits that are not shared — this removal \
+                                 takes it out of this scope's agent dirs (the edits are \
+                                 snapshotted first, never deleted)"
+                            ),
+                            removal_note,
+                        ))
+                    }
+                    DraftState::Indeterminate => {
+                        gated = true;
+                        Some(join_notes(
+                            format!(
+                                "'{name}''s files could not be read to check for local edits — \
+                                 describing first rather than assuming there are none"
+                            ),
+                            removal_note,
+                        ))
+                    }
+                    DraftState::Clean => removal_note,
                 }
-                DraftState::Indeterminate => {
-                    gated = true;
-                    Some(format!(
-                        "'{name}''s files could not be read to check for local edits — describing \
-                         first rather than assuming there are none"
-                    ))
-                }
-                DraftState::Clean => None,
-            },
+            }
             Arm::SetSplit { set, name, .. } => {
                 gated = true;
-                Some(format!(
+                let (_, carried, dropped) = split_carriage(set);
+                let mut note = format!(
                     "'{name}' comes from the {} line `{}` — removing it replaces that one line \
                      with its current members, so later additions by whoever curates it stop \
                      arriving through this file",
                     set.shape.noun(),
                     set.reference
-                ))
+                );
+                if !carried.is_empty() {
+                    note.push_str(&format!(
+                        "; the line's {} settings carry onto each member row",
+                        carried.join("/")
+                    ));
+                }
+                if !dropped.is_empty() {
+                    note.push_str(&format!(
+                        "; its {} cannot ride a member row and is dropped",
+                        dropped.join("/")
+                    ));
+                }
+                Some(note)
             }
-            Arm::FeedDrop { workspace, .. } => Some(format!(
-                "{workspace}'s feed no longer delivers here; its skills leave this machine at the \
-                 next update, and the rows you spelled yourself survive"
-            )),
-            Arm::OffWrite {
-                name, workspace, ..
-            } => Some(format!(
-                "'{name}' stays assigned to you in {workspace} — this switch is machine-local; \
-                 declining it on the web stops it everywhere"
-            )),
+            Arm::FeedDrop {
+                workspace, bundles, ..
+            } => {
+                let removal_note = format!(
+                    "{workspace}'s feed no longer delivers here; its skills leave this machine \
+                     at the next update, and the rows you spelled yourself survive"
+                );
+                let mut drafted: Vec<&str> = Vec::new();
+                let mut unreadable = false;
+                for bundle in bundles {
+                    match draft_state(ctx, bundle) {
+                        DraftState::Draft => drafted.push(bundle),
+                        DraftState::Indeterminate => unreadable = true,
+                        DraftState::Clean => {}
+                    }
+                }
+                if !drafted.is_empty() {
+                    gated = true;
+                    Some(format!(
+                        "{} of its skills carry local edits that are not shared ({}) — dropping \
+                         the feed row takes them out of this scope's agent dirs (the edits are \
+                         snapshotted first, never deleted) · {removal_note}",
+                        drafted.len(),
+                        drafted.join(", ")
+                    ))
+                } else if unreadable {
+                    gated = true;
+                    Some(format!(
+                        "some of its skills' files could not be read to check for local edits — \
+                         describing first rather than assuming there are none · {removal_note}"
+                    ))
+                } else {
+                    Some(removal_note)
+                }
+            }
         };
         notes.push(note);
     }
@@ -1221,6 +1298,10 @@ fn apply_arms(
                 set, name, members, ..
             } => {
                 editor.remove_row(&set.reference);
+                // Each surviving member row carries the SET line's pin/fields where the member's
+                // shape allows them (disclosed in the describe) — a split must not silently
+                // strip the line's placement/harness discipline.
+                let (member_value, _, _) = split_carriage(set);
                 for member in members {
                     if member == name {
                         continue;
@@ -1229,7 +1310,7 @@ fn apply_arms(
                         continue;
                     };
                     editor
-                        .set_row(&reference, &EntryValue::Star)
+                        .set_row(&reference, &member_value)
                         .map_err(|e| ClientError::InvalidArgument(e.message))?;
                 }
             }
@@ -1251,6 +1332,87 @@ fn apply_arms(
         items,
         applied: true,
     }))
+}
+
+/// Join a loss-guard line with an arm's own removal note (` · `-separated when both exist).
+fn join_notes(lead: String, tail: Option<String>) -> String {
+    match tail {
+        Some(t) => format!("{lead} · {t}"),
+        None => lead,
+    }
+}
+
+/// What a set split writes on each surviving member row, and how the describe words it: the set
+/// line's pin/fields filtered to what the member's shape legally carries —
+/// `(member value, carried field names, dropped field names)`. Today every set-legal field
+/// (`path`, `harness`, a repo set's commit pin) is member-legal too, so `dropped` stays empty;
+/// the filter is still real, so a future set-only field is DISCLOSED rather than silently lost.
+fn split_carriage(set: &PlanRow) -> (EntryValue, Vec<&'static str>, Vec<&'static str>) {
+    use crate::manifest::document::{EntryFields, legal_fields};
+    // A representative member shape: a channel's members are workspace bundles, a repo set's
+    // are repo skills.
+    let member_shape = match &set.shape {
+        KeyShape::Channel {
+            host, workspace, ..
+        } => KeyShape::WorkspaceBundle {
+            host: host.clone(),
+            workspace: workspace.clone(),
+            bundle: "member".to_owned(),
+        },
+        KeyShape::RepoSet { host, owner, repo } => KeyShape::RepoSkill {
+            host: host.clone(),
+            owner: owner.clone(),
+            repo: repo.clone(),
+            skill: "member".to_owned(),
+        },
+        _ => return (EntryValue::Star, Vec::new(), Vec::new()),
+    };
+    let legal = legal_fields(&member_shape);
+    match &set.value {
+        EntryValue::Star | EntryValue::Off => (EntryValue::Star, Vec::new(), Vec::new()),
+        EntryValue::Pin(p) => {
+            // A repo set's commit pin is a legal member pin verbatim; nothing else pins a set.
+            if matches!(member_shape, KeyShape::RepoSkill { .. }) {
+                (EntryValue::Pin(p.clone()), vec!["version"], Vec::new())
+            } else {
+                (EntryValue::Star, Vec::new(), vec!["version"])
+            }
+        }
+        EntryValue::Fields(f) => {
+            let mut out = EntryFields::default();
+            let mut carried = Vec::new();
+            let mut dropped = Vec::new();
+            let mut take = |field: &'static str, present: bool, copy: &mut dyn FnMut()| {
+                if !present {
+                    return;
+                }
+                if legal.contains(&field) {
+                    copy();
+                    carried.push(field);
+                } else {
+                    dropped.push(field);
+                }
+            };
+            take("version", f.version.is_some(), &mut || {
+                out.version = f.version.clone();
+            });
+            take("path", f.path.is_some(), &mut || out.path = f.path.clone());
+            take("harness", f.harness.is_some(), &mut || {
+                out.harness = f.harness.clone();
+            });
+            take("name", f.name.is_some(), &mut || out.name = f.name.clone());
+            take("subdir", f.subdir.is_some(), &mut || {
+                out.subdir = f.subdir.clone();
+            });
+            take("kind", f.kind.is_some(), &mut || out.kind = f.kind.clone());
+            let value = if out == EntryFields::default() {
+                EntryValue::Star
+            } else {
+                EntryValue::Fields(out)
+            };
+            (value, carried, dropped)
+        }
+    }
 }
 
 /// One member's own row key inside a set's namespace.
@@ -1371,6 +1533,50 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn a_set_split_carries_what_the_member_shape_legally_takes() {
+        use crate::manifest::document::{EntryFields, PathSpec};
+        // A repo set's commit PIN rides each member row verbatim.
+        let repo_pinned = PlanRow {
+            reference: "github.com/o/r".into(),
+            shape: keys::classify_key("github.com/o/r").unwrap(),
+            value: EntryValue::Pin("abc1234".into()),
+        };
+        let (value, carried, dropped) = split_carriage(&repo_pinned);
+        assert_eq!(value, EntryValue::Pin("abc1234".into()));
+        assert_eq!(carried, vec!["version"]);
+        assert!(dropped.is_empty());
+
+        // A channel line's fields (`path`, `harness`) carry onto its workspace-bundle members.
+        let channel_fields = PlanRow {
+            reference: "topos.sh/acme/channels/backend".into(),
+            shape: keys::classify_key("topos.sh/acme/channels/backend").unwrap(),
+            value: EntryValue::Fields(EntryFields {
+                path: Some(PathSpec::One(".agents/skills".into())),
+                harness: Some(vec!["codex".into()]),
+                ..Default::default()
+            }),
+        };
+        let (value, carried, dropped) = split_carriage(&channel_fields);
+        match value {
+            EntryValue::Fields(f) => {
+                assert_eq!(f.path, Some(PathSpec::One(".agents/skills".into())));
+                assert_eq!(f.harness.as_deref(), Some(&["codex".to_owned()][..]));
+            }
+            other => panic!("fields carry: {other:?}"),
+        }
+        assert_eq!(carried, vec!["path", "harness"]);
+        assert!(dropped.is_empty());
+
+        // A bare `"*"` set stays a `"*"` member.
+        let star = PlanRow {
+            reference: "github.com/o/r".into(),
+            shape: keys::classify_key("github.com/o/r").unwrap(),
+            value: EntryValue::Star,
+        };
+        assert_eq!(split_carriage(&star).0, EntryValue::Star);
     }
 
     #[test]

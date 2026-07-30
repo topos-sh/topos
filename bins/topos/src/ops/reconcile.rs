@@ -707,15 +707,31 @@ pub(crate) fn manifest_update(
         .into_iter()
         .map(str::to_owned)
         .collect::<HashSet<String>>();
+    // The applied report is COMPLETE-state per session: what this installation holds for the
+    // workspace, wherever it holds it — the home store AND every visited project store — over
+    // the feed's deliveries AND the manifest-row deliveries (a declined-but-locally-added bundle
+    // included, which is what makes the server's declined-but-applied disclosure real).
+    let visited_stores: Vec<sidecar::Layout> = manifest_dirs
+        .iter()
+        .filter_map(|pd| sidecar::existing_project_store(ctx.fs, pd))
+        .collect();
     let mut sync_updates: Vec<(String, WorkspaceSync)> = Vec::new();
     for run in &runs {
         let Some(snap) = &run.snapshot else {
             continue; // unreachable this run: the prior cache entry stands
         };
-        let delivered_ids: HashSet<&str> =
-            snap.skills.iter().map(|s| s.skill_id.as_str()).collect();
+        let mut reported: HashSet<String> =
+            snap.skills.iter().map(|s| s.skill_id.clone()).collect();
+        reported.extend(
+            sweep
+                .delivered
+                .iter()
+                .filter(|(ws, _, _)| *ws == run.session.workspace_id)
+                .map(|(_, id, _)| id.clone()),
+        );
+        let delivered_ids: HashSet<&str> = reported.iter().map(String::as_str).collect();
         let mut report_ok = false;
-        match super::pull::applied_snapshot(ctx, &delivered_ids) {
+        match super::pull::applied_snapshot(ctx, &delivered_ids, &visited_stores) {
             Ok(applied) => match run
                 .transports
                 .plane
@@ -957,7 +973,12 @@ fn reconcile_thing<'a>(
         KeyShape::LocalPath { raw } => {
             let dir = local_dir(env.ctx, sc, raw);
             if env.ctx.fs.exists(&dir) {
-                sweep.push(plain_row(&display, PullAction::UpToDate, None, &sc.label));
+                // A path row whose dir is a placement of an already-GOVERNED bundle is a landed
+                // publish's PENDING transfer (the local rewrite half failed) — converge it here,
+                // idempotently, disclosed.
+                if !converge_pending_governance(env, &dir, sweep) {
+                    sweep.push(plain_row(&display, PullAction::UpToDate, None, &sc.label));
+                }
             } else {
                 sweep.warnings.push(format!(
                     "PATH_MISSING {}: \"{raw}\" — the folder is gone; `topos remove {raw}` drops \
@@ -1374,9 +1395,11 @@ fn sync_workspace_skill<'a>(
                     .push(draft_synced_line(&target.name, row.synced_placements));
             }
             // Disclose a delivery the naming ladder had to place BESIDE a same-named occupant the
-            // record does not own (the never-clobber outcome).
+            // record does not own (the never-clobber outcome) — and a project placement a
+            // bundle's OWN root ignore file leaves visible to git.
             if let ResolvedScope::Project { .. } = sc.scope {
                 disclose_namespaced(&run_ctx, &sid, &st.display, &mut sweep.warnings);
+                disclose_git_visible(&run_ctx, &sid, &target.name, &mut sweep.warnings);
             }
             sweep.push(row);
         }
@@ -1417,6 +1440,65 @@ fn row_override(
     }
 }
 
+/// A LANDED publish whose local governance rewrite failed leaves a path row for a bundle that is
+/// already GOVERNED — this converges it: the dir must be a recorded placement of a tracked home
+/// bundle whose sync has observed a published version, and exactly ONE connected workspace's
+/// catalog must hold that bundle (ambiguity never guesses). On a hit the manifest's path line is
+/// rewritten to the canonical reference (the same rewrite the publish would have run), disclosed
+/// with one line. Returns whether a rewrite happened.
+fn converge_pending_governance(env: &Env<'_>, dir: &Path, sweep: &mut Sweep) -> bool {
+    let ctx = env.ctx;
+    let Ok(canonical) = dir.canonicalize() else {
+        return false;
+    };
+    let Ok(Some(skill_id)) = super::add::tracked_skill_at(ctx, &canonical) else {
+        return false;
+    };
+    let Ok(sid) = SkillId::parse(&skill_id) else {
+        return false;
+    };
+    let sp = ctx.layout.published(&sid);
+    // GENESIS-observed = never published/received: an ordinary adopted-in-place local bundle.
+    let Ok(Some(sync)) = doc::read_doc::<SyncState>(ctx.fs, &sp.sync) else {
+        return false;
+    };
+    if sync.observed == GENESIS {
+        return false;
+    }
+    let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &sp.lock) else {
+        return false;
+    };
+    // The ONE workspace whose catalog holds the bundle — several never guess.
+    let mut homes = env.runs.iter().filter(|run| {
+        run.catalog(&mut Vec::new())
+            .is_some_and(|c| c.skills.iter().any(|e| e.skill_id == skill_id))
+    });
+    let (Some(run), None) = (homes.next(), homes.next()) else {
+        return false;
+    };
+    match super::rewrite_to_governed(
+        ctx,
+        &lock.name,
+        &run.session.host,
+        &run.session.workspace_name,
+        std::slice::from_ref(&canonical),
+    ) {
+        Ok(Some(rw)) => {
+            sweep.warnings.push(format!(
+                "GOVERNANCE_CONVERGED {}: {} — the \"{}\" line is now \"{}\" (a landed publish's \
+                 pending transfer)",
+                lock.name, rw.manifest, rw.from, rw.canonical
+            ));
+            true
+        }
+        Ok(None) => false,
+        Err(e) => {
+            note_item_failure(ctx, &mut sweep.warnings, &lock.name, &e);
+            false
+        }
+    }
+}
+
 /// Where a local-folder row points: relative to the project dir at project scope, to the sidecar
 /// home at person scope; `~/` resolves against the machine home when one is known.
 fn local_dir(ctx: &Ctx<'_>, sc: &ScopeCtx<'_>, raw: &str) -> PathBuf {
@@ -1444,6 +1526,29 @@ fn draft_synced_line(name: &str, synced: Option<u32>) -> String {
         format!("{n} other agent folders")
     };
     format!("DRAFT_SYNCED {name}: synced your edits of {name} to {folders}")
+}
+
+/// Warn ONCE per bundle when a PROJECT placement is visible to git: the bundle ships its OWN
+/// root `.gitignore` (content — the sentinel never overlays it) and that file does not
+/// self-ignore the directory. Bundle content is never edited to fix it; the line is the fix's
+/// whole surface.
+fn disclose_git_visible(ctx: &Ctx<'_>, sid: &SkillId, name: &str, warnings: &mut Vec<String>) {
+    let Ok(Some(map)) = doc::read_map(ctx.fs, &ctx.layout.published(sid).map) else {
+        return;
+    };
+    for p in &map.placements {
+        let ignore = Path::new(p).join(crate::scan::IGNORE_FILE);
+        if let Ok(Some(bytes)) = ctx.fs.read_opt(&ignore)
+            && bytes != crate::scan::IGNORE_SENTINEL
+            && !crate::materialize::ignores_all(&bytes)
+        {
+            warnings.push(format!(
+                "GIT_VISIBLE {name}: the bundle ships its own .gitignore, which does not ignore \
+                 the placement — {p} is visible to git; commit or ignore it deliberately"
+            ));
+            return;
+        }
+    }
 }
 
 /// Warn when a skill's placement had to land under a NAMESPACED dir because the by-name dir is
@@ -1482,12 +1587,47 @@ fn disclose_namespaced(ctx: &Ctx<'_>, sid: &SkillId, name: &str, warnings: &mut 
 }
 
 // =================================================================================================
-// The forge arms — git rows move ONLY on an explicit update.
+// The forge arms — git rows move ONLY on an explicit update, and NEVER first-install: an origin no
+// tracked import vouches for refuses toward the `topos add … --yes` gate (a manifest row alone is
+// a repo fact anyone could have committed — it is demand, never consent).
 // =================================================================================================
+
+/// The store a forge row's tracked imports live in, per scope: the person scope's home store, or
+/// the project's OWN store (pure paths — nothing is minted by the read; an absent project store
+/// simply holds nothing).
+fn forge_store_layout(ctx: &Ctx<'_>, scope: &ResolvedScope) -> crate::sidecar::Layout {
+    match scope {
+        ResolvedScope::Project { dir } => sidecar::project_store_layout(dir),
+        ResolvedScope::Person => ctx.layout.clone(),
+    }
+}
+
+/// The typed refusal an UNTRACKED forge origin earns on any update: nothing is fetched, nothing
+/// installs, and the line names the exact gate command (`topos add … --yes` — the describe-first
+/// first-trust ceremony) and where to run it.
+fn first_trust_line(sc: &ScopeCtx<'_>, reference: &str) -> String {
+    match &sc.scope {
+        ResolvedScope::Person => format!(
+            "FIRST_TRUST {}: \"{reference}\" — an external source this machine has not adopted \
+             through its first-trust gate; nothing is fetched or installed by `update` until \
+             `topos add -g {reference} --yes` adds it once",
+            sc.label
+        ),
+        ResolvedScope::Project { dir } => format!(
+            "FIRST_TRUST {}: \"{reference}\" — an external source this checkout has not adopted \
+             through its first-trust gate; nothing is fetched or installed by `update` until \
+             `topos add {reference} --yes` (run from {}) adds it once",
+            sc.label,
+            dir.display()
+        ),
+    }
+}
 
 /// A whole repo: every skill it holds. `"*"` tracks the repo's default branch (one fetch per sweep,
 /// compared against the recorded commit); a pinned row NEVER moves — a tracked import whose recorded
 /// commit prefix-matches the pin is up to date, and a pin that MOVED re-imports at the new pin.
+/// Tracked members ABSENT from the freshly-fetched archive get the ordinary undemanded cleaning
+/// (snapshot-first) in the same explicit update that rendered them `-member`.
 #[allow(clippy::too_many_arguments)]
 fn reconcile_repo_set(
     env: &Env<'_>,
@@ -1501,7 +1641,17 @@ fn reconcile_repo_set(
 ) {
     let origin = format!("{host}/{owner}/{repo}");
     let set_selected = targets.hit(&[row.reference.as_str(), repo, row.display_name().as_str()]);
-    let tracked = tracked_repo_members(env.ctx, &origin);
+    // Every store read/write below runs against THIS scope's store — a project row's imports
+    // live in the project's own store, so two checkouts of one repo row never share state.
+    let store_layout = forge_store_layout(env.ctx, &sc.scope);
+    let sctx = super::pull::ctx_with_layout(env.ctx, &store_layout);
+    let tracked = tracked_repo_members(&sctx, &origin);
+    // FIRST TRUST: no tracked import vouches for this origin in this scope's store — the
+    // reconcile never first-installs a forge source; the add gate is the one way in.
+    if tracked.is_empty() {
+        sweep.warnings.push(first_trust_line(sc, &row.reference));
+        return;
+    }
     for (_, lock, _) in &tracked {
         sweep.mention(&sc.label, &lock.name);
     }
@@ -1509,22 +1659,13 @@ fn reconcile_repo_set(
 
     // A pinned row that every tracked member already satisfies is settled — no forge call, ever.
     let pin_satisfied = pin.as_ref().is_some_and(|p| {
-        !tracked.is_empty()
-            && tracked
-                .iter()
-                .all(|(_, _, o)| commit_matches(o.commit.as_deref().unwrap_or_default(), p))
+        tracked
+            .iter()
+            .all(|(_, _, o)| commit_matches(o.commit.as_deref().unwrap_or_default(), p))
     });
 
     let Some(git) = env.git.filter(|_| !pin_satisfied) else {
-        // Offline (or settled): tracked members converge in place; an untracked repo says so.
-        if tracked.is_empty() {
-            sweep.warnings.push(format!(
-                "NOT_INSTALLED {}: \"{}\" — an external source this machine has not fetched yet \
-                 (network required)",
-                sc.label, row.reference
-            ));
-            return;
-        }
+        // Offline (or settled): tracked members converge in place.
         for (_, lock, _) in &tracked {
             if !set_selected && !targets.hit(&[lock.name.as_str()]) {
                 continue;
@@ -1564,8 +1705,17 @@ fn reconcile_repo_set(
     for name in &discovered {
         sweep.mention(&sc.label, name);
     }
-    // The repo has not moved: every tracked member is exactly what the row asks for.
-    if !tracked.is_empty() && !resolved.is_empty() && commit_matches(&recorded, &resolved) {
+    let is_tracked = |name: &str| {
+        tracked
+            .iter()
+            .any(|(_, lock, o)| lock.name == name || subdir_leaf(o).as_deref() == Some(name))
+    };
+    // The repo has not moved AND every discovered member is already tracked: settled. (An
+    // UNTRACKED member at the same commit — a partial add landing — still installs below.)
+    if !resolved.is_empty()
+        && commit_matches(&recorded, &resolved)
+        && discovered.iter().all(|d| is_tracked(d))
+    {
         for (_, lock, _) in &tracked {
             if !set_selected && !targets.hit(&[lock.name.as_str()]) {
                 continue;
@@ -1574,7 +1724,7 @@ fn reconcile_repo_set(
         }
         return;
     }
-    if !recorded.is_empty() && !resolved.is_empty() {
+    if !recorded.is_empty() && !resolved.is_empty() && !commit_matches(&recorded, &resolved) {
         sweep.warnings.push(git_updated_line(
             &origin,
             &recorded,
@@ -1583,6 +1733,22 @@ fn reconcile_repo_set(
             &discovered,
         ));
     }
+    // Members the NEW archive no longer holds leave with it: the ordinary undemanded clean
+    // (snapshot-first — an edited copy is committed into the store before any dir goes), in this
+    // scope's own store. The `-member` the receipt line rendered is thereby true on disk.
+    for (sid, lock, o) in &tracked {
+        let still_held = discovered
+            .iter()
+            .any(|d| lock.name == *d || subdir_leaf(o).as_deref() == Some(d));
+        if still_held || (!set_selected && !targets.hit(&[lock.name.as_str()])) {
+            continue;
+        }
+        match clean_written_placements(&sctx, sid, matches!(sc.scope, ResolvedScope::Person)) {
+            Ok(Some(name)) => sweep.push(plain_row(&name, PullAction::Withdrawn, None, &sc.label)),
+            Ok(None) => {}
+            Err(e) => note_item_failure(env.ctx, &mut sweep.warnings, &lock.name, &e),
+        }
+    }
     for name in &discovered {
         if !set_selected && !targets.hit(&[name.as_str()]) {
             continue;
@@ -1590,11 +1756,22 @@ fn reconcile_repo_set(
         let member = tracked
             .iter()
             .find(|(_, lock, o)| lock.name == *name || subdir_leaf(o).as_deref() == Some(name));
-        install_or_refresh_repo_skill(env, sc, &spec, &targz, name, member, sweep);
+        // A tracked member already AT the fetched commit is settled — only the untracked (or
+        // moved) members go through the install/refresh below.
+        if let Some((_, lock, o)) = member
+            && !resolved.is_empty()
+            && commit_matches(o.commit.as_deref().unwrap_or_default(), &resolved)
+        {
+            sweep.push(plain_row(&lock.name, PullAction::UpToDate, None, &sc.label));
+            continue;
+        }
+        install_or_refresh_repo_skill(env, sc, &sctx, &spec, &targz, name, member, sweep);
     }
 }
 
 /// ONE skill inside a repo, by its leaf directory name (or the literal `subdir` the row spells).
+/// The ORIGIN must already be tracked in this scope's store (any member — the add gate's
+/// ceremony covered the source); a new member of a trusted origin then flows on explicit update.
 #[allow(clippy::too_many_arguments)]
 fn reconcile_repo_skill(
     env: &Env<'_>,
@@ -1608,7 +1785,16 @@ fn reconcile_repo_skill(
 ) {
     let origin = format!("{host}/{owner}/{repo}");
     let fields = row.fields();
-    let tracked = find_tracked_repo_skill(env.ctx, &origin, skill);
+    let store_layout = forge_store_layout(env.ctx, &sc.scope);
+    let sctx = super::pull::ctx_with_layout(env.ctx, &store_layout);
+    let members = tracked_repo_members(&sctx, &origin);
+    if members.is_empty() {
+        sweep.warnings.push(first_trust_line(sc, &row.reference));
+        return;
+    }
+    let tracked = members
+        .into_iter()
+        .find(|(_, lock, o)| lock.name == skill || subdir_leaf(o).as_deref() == Some(skill));
     let pin = row.pin();
     let pin_satisfied = match (&pin, &tracked) {
         (Some(p), Some((_, _, o))) => commit_matches(o.commit.as_deref().unwrap_or_default(), p),
@@ -1619,6 +1805,7 @@ fn reconcile_repo_skill(
             Some((_, lock, _)) => {
                 sweep.push(plain_row(&lock.name, PullAction::UpToDate, None, &sc.label));
             }
+            // The origin is trusted; only THIS member has not been fetched yet.
             None => sweep.warnings.push(format!(
                 "NOT_INSTALLED {}: \"{}\" — an external skill this machine has not fetched yet \
                  (network required)",
@@ -1662,24 +1849,45 @@ fn reconcile_repo_skill(
             ));
         }
     }
-    install_or_refresh_repo_skill(env, sc, &spec, &targz, skill, tracked.as_ref(), sweep);
+    install_or_refresh_repo_skill(
+        env,
+        sc,
+        &sctx,
+        &spec,
+        &targz,
+        skill,
+        tracked.as_ref(),
+        sweep,
+    );
 }
 
-/// Install one repo skill, or re-import a tracked one at the new commit. The row's demand already
-/// exists — the reconcile NEVER writes a manifest line of its own.
+/// Install one repo skill, or re-import a tracked one at the new commit — every store op through
+/// `sctx`, the SCOPE's own store (the refresh's stash/restore therefore never reaches across
+/// checkouts). The row's demand already exists — the reconcile NEVER writes a manifest line of
+/// its own.
+#[allow(clippy::too_many_arguments)]
 fn install_or_refresh_repo_skill(
     env: &Env<'_>,
     sc: &ScopeCtx<'_>,
+    sctx: &Ctx<'_>,
     spec: &crate::source::RemoteSpec,
     targz: &[u8],
     name: &str,
     tracked: Option<&(SkillId, Lock, topos_types::results::SkillOrigin)>,
     sweep: &mut Sweep,
 ) {
-    let ctx = env.ctx;
-    let Some(roots) = discovery_roots(ctx, &sc.scope) else {
+    let Some(roots) = discovery_roots(env.ctx, &sc.scope) else {
         return;
     };
+    // A project install writes through the project store, whose self-ignoring `.topos/` shell
+    // must exist first (idempotent; the tracked read above proved the store real, but a fresh
+    // member install may be the store's first write after a hand-cleaned tree).
+    if let ResolvedScope::Project { dir } = &sc.scope
+        && let Err(e) = sidecar::ensure_project_store(env.ctx.fs, dir)
+    {
+        note_item_failure(env.ctx, &mut sweep.warnings, name, &e);
+        return;
+    }
     let opts = super::AddRemoteOpts {
         // A row that spells a literal `subdir` has already narrowed the archive; otherwise the leaf
         // name picks the skill out of a multi-skill repo.
@@ -1688,8 +1896,8 @@ fn install_or_refresh_repo_skill(
         global: matches!(sc.scope, ResolvedScope::Person),
     };
     let outcome = match tracked {
-        Some((sid, _, _)) => refresh_repo_skill(ctx, targz, spec, &opts, &roots, sid),
-        None => super::add_remote_fetched(ctx, targz, spec, &roots, &opts).map(|d| d.name),
+        Some((sid, _, _)) => refresh_repo_skill(sctx, targz, spec, &opts, &roots, sid),
+        None => super::add_remote_fetched(sctx, targz, spec, &roots, &opts).map(|d| d.name),
     };
     match outcome {
         Ok(landed) => sweep.push(plain_row(
@@ -1698,7 +1906,7 @@ fn install_or_refresh_repo_skill(
             None,
             &sc.label,
         )),
-        Err(e) => note_item_failure(ctx, &mut sweep.warnings, name, &e),
+        Err(e) => note_item_failure(env.ctx, &mut sweep.warnings, name, &e),
     }
 }
 
@@ -1899,49 +2107,16 @@ fn discovery_roots(ctx: &Ctx<'_>, scope: &ResolvedScope) -> Option<super::Discov
     })
 }
 
-/// Every tracked skill imported from `origin_source`, by walking the sidecar's origin docs.
-/// Best-effort: unreadable entries are skipped.
-fn tracked_repo_members(
+/// Every tracked skill imported from `origin_source` in THIS ctx's store, by walking the
+/// sidecar's origin docs. Best-effort: unreadable entries are skipped.
+pub(crate) fn tracked_repo_members(
     ctx: &Ctx<'_>,
     origin_source: &str,
 ) -> Vec<(SkillId, Lock, topos_types::results::SkillOrigin)> {
-    let mut out = Vec::new();
-    let Ok(entries) = ctx.fs.read_dir(&ctx.layout.skills_dir()) else {
-        return out;
-    };
-    for entry in entries {
-        let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        let Ok(sid) = SkillId::parse(id) else {
-            continue;
-        };
-        let sp = ctx.layout.published(&sid);
-        let Ok(Some(origin)) = doc::read_doc::<super::add::OriginDoc>(ctx.fs, &sp.origin) else {
-            continue;
-        };
-        if origin.origin.source != origin_source {
-            continue;
-        }
-        let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &sp.lock) else {
-            continue;
-        };
-        out.push((sid, lock, origin.origin));
-    }
-    out.sort_by(|a, b| a.1.name.cmp(&b.1.name));
-    out
-}
-
-/// The tracked import of ONE repo skill, matched by its leaf name (the reference's identity) or by
-/// the recorded in-repo path's leaf.
-fn find_tracked_repo_skill(
-    ctx: &Ctx<'_>,
-    origin_source: &str,
-    leaf: &str,
-) -> Option<(SkillId, Lock, topos_types::results::SkillOrigin)> {
-    tracked_repo_members(ctx, origin_source)
+    forge_imports(ctx)
         .into_iter()
-        .find(|(_, lock, o)| lock.name == leaf || subdir_leaf(o).as_deref() == Some(leaf))
+        .filter(|(_, _, o)| o.source == origin_source)
+        .collect()
 }
 
 /// The last segment of a recorded in-repo path (`skills/alpha` → `alpha`).
@@ -1951,21 +2126,6 @@ fn subdir_leaf(origin: &topos_types::results::SkillOrigin) -> Option<String> {
         .as_deref()
         .and_then(|s| s.rsplit('/').next())
         .map(str::to_owned)
-}
-
-/// Find a tracked skill imported from `origin_source` (+ subdir), by walking the sidecar's origin
-/// docs. Best-effort: unreadable entries are skipped.
-pub(crate) fn find_tracked_github(
-    ctx: &Ctx<'_>,
-    origin_source: &str,
-    subdir: &str,
-) -> Option<(SkillId, Lock, topos_types::results::SkillOrigin)> {
-    tracked_repo_members(ctx, origin_source)
-        .into_iter()
-        .find(|(_, _, o)| match &o.subdir {
-            Some(s) => s == subdir,
-            None => subdir.is_empty(),
-        })
 }
 
 /// Whether a recorded commit satisfies a pin (git-style prefix match, either direction).
@@ -2046,15 +2206,14 @@ fn clean_undemanded(
     sweep: &mut Sweep,
 ) {
     let ctx = env.ctx;
-    let mentioned: HashSet<String> = sweep
-        .mentioned_anywhere()
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
 
     // ---- Person scope. ----
     if let Some(plan) = person {
         let label = ResolvedScope::Person.label();
+        // The PERSON scope's own mentions decide the person clean — scopes are unblended, so a
+        // project manifest naming the same NAME must not shield an unrelated person-scope
+        // placement from retiring.
+        let mentioned: HashSet<String> = sweep.mentioned.get(&label).cloned().unwrap_or_default();
         let adopted: HashSet<String> = sweep
             .synced_in(&label)
             .into_iter()
@@ -2099,7 +2258,7 @@ fn clean_undemanded(
                 let withheld = plan.file_backed() && !plan.has_feed(&host, &ws);
                 let by_choice = switched_off || withheld || cached.via_manifest;
                 let cleaned = if by_choice {
-                    clean_written_home_placements(ctx, &sid)
+                    clean_written_placements(ctx, &sid, true)
                 } else {
                     withdraw_person_scope(ctx, &sid).map(Some)
                 };
@@ -2113,6 +2272,23 @@ fn clean_undemanded(
                     Ok(None) => {}
                     Err(e) => note_item_failure(ctx, &mut sweep.warnings, skill_id, &e),
                 }
+            }
+        }
+        // Forge imports the person recipe no longer names ride the SAME undemanded clean: a
+        // dropped repo row's members retire exactly like a dropped workspace row's placements —
+        // snapshot-first, the sidecar bytes kept, in-checkout placements untouched (they are a
+        // project scope's business). A row that still names the origin mentioned every tracked
+        // member above, so a transient forge failure can never read as a drop.
+        for (sid, lock, _) in forge_imports(ctx) {
+            if mentioned.contains(&lock.name) || adopted.contains(sid.as_str()) {
+                continue;
+            }
+            match clean_written_placements(ctx, &sid, true) {
+                Ok(Some(name)) => {
+                    sweep.push(plain_row(&name, PullAction::Withdrawn, None, &label));
+                }
+                Ok(None) => {}
+                Err(e) => note_item_failure(ctx, &mut sweep.warnings, &lock.name, &e),
             }
         }
     }
@@ -2183,14 +2359,17 @@ fn clean_undemanded(
     }
 }
 
-/// A row-dropped bundle's home-side clean: exactly the NON-project placements topos itself WROTE
-/// (`materialized_sha` present — an adopted-in-place source dir, which topos never wrote, is never
-/// deleted), snapshot-first; the sync doc is NOT reset (a project manifest may still demand the
-/// bundle — that checkout reconciles lazily when visited). `Ok(Some(name))` when something was
-/// actually cleaned.
-fn clean_written_home_placements(
+/// A row-dropped bundle's by-choice clean over ONE store: exactly the placements topos itself
+/// WROTE (`materialized_sha` present — an adopted-in-place source dir, which topos never wrote,
+/// is never deleted), snapshot-first; the sync doc is NOT reset. With `exclude_project` (the
+/// HOME store's posture) placements inside some project checkout are left alone — a project
+/// manifest may still demand the bundle there, and that checkout reconciles lazily when visited;
+/// a PROJECT store passes `false` (its placements are its own). `Ok(Some(name))` when something
+/// was actually cleaned.
+fn clean_written_placements(
     ctx: &Ctx<'_>,
     sid: &SkillId,
+    exclude_project: bool,
 ) -> Result<Option<String>, ClientError> {
     let sp = ctx.layout.published(sid);
     let _guard = crate::sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
@@ -2205,7 +2384,8 @@ fn clean_written_home_placements(
         .zip(&map.placement_state)
         .enumerate()
         .filter(|(_, (p, st))| {
-            st.materialized_sha.is_some() && !is_project_placement(ctx, Path::new(p))
+            st.materialized_sha.is_some()
+                && (!exclude_project || !is_project_placement(ctx, Path::new(p)))
         })
         .map(|(i, _)| i)
         .collect();
@@ -2214,6 +2394,33 @@ fn clean_written_home_placements(
     }
     clean_placements(ctx, sid, &lock, &map, &targets)?;
     Ok(Some(lock.name))
+}
+
+/// Every forge-imported skill a store tracks (an `origin.json` beside its docs), whatever the
+/// origin. Best-effort: unreadable entries are skipped.
+fn forge_imports(ctx: &Ctx<'_>) -> Vec<(SkillId, Lock, topos_types::results::SkillOrigin)> {
+    let mut out = Vec::new();
+    let Ok(entries) = ctx.fs.read_dir(&ctx.layout.skills_dir()) else {
+        return out;
+    };
+    for entry in entries {
+        let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Ok(sid) = SkillId::parse(id) else {
+            continue;
+        };
+        let sp = ctx.layout.published(&sid);
+        let Ok(Some(origin)) = doc::read_doc::<super::add::OriginDoc>(ctx.fs, &sp.origin) else {
+            continue;
+        };
+        let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &sp.lock) else {
+            continue;
+        };
+        out.push((sid, lock, origin.origin));
+    }
+    out.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+    out
 }
 
 /// A feed-withdrawn bundle leaves the PERSON scope: snapshot every edited copy, clean the placements
