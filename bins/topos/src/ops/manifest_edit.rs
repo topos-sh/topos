@@ -696,6 +696,9 @@ enum Arm {
         set: PlanRow,
         name: String,
         members: Vec<String>,
+        /// Survivors that ALREADY have their own explicit row in this file — explicit beats set,
+        /// so the split leaves those rows untouched and writes new rows only for the rest.
+        keeps_own: Vec<String>,
     },
 }
 
@@ -883,10 +886,23 @@ fn resolve_one(
             .iter()
             .find(|m| m.as_str() == token || Some(m.as_str()) == want.as_deref())
         {
+            // Explicit beats set: a survivor whose own row this file already spells KEEPS it —
+            // the split must never replace a stronger pin/fields row with the set's value.
+            let rows = all_rows(plan);
+            let keeps_own: Vec<String> = members
+                .iter()
+                .filter(|m| m.as_str() != member.as_str())
+                .filter(|m| {
+                    member_reference(row, m)
+                        .is_some_and(|r| rows.iter().any(|pr| pr.reference == r))
+                })
+                .cloned()
+                .collect();
             return Ok(Some(Arm::SetSplit {
                 set: row.clone(),
                 name: member.clone(),
                 members: members.clone(),
+                keeps_own,
             }));
         }
     }
@@ -1182,7 +1198,12 @@ fn apply_arms(
                     DraftState::Clean => removal_note,
                 }
             }
-            Arm::SetSplit { set, name, .. } => {
+            Arm::SetSplit {
+                set,
+                name,
+                members,
+                keeps_own,
+            } => {
                 gated = true;
                 let (_, carried, dropped) = split_carriage(set);
                 let mut note = format!(
@@ -1192,9 +1213,33 @@ fn apply_arms(
                     set.shape.noun(),
                     set.reference
                 );
-                if !carried.is_empty() {
+                // Which survivors get NEW rows and which keep their own (explicit beats set —
+                // an already-explicit row is never overwritten by the split).
+                let new_rows: Vec<&str> = members
+                    .iter()
+                    .filter(|m| m.as_str() != name && !keeps_own.contains(m))
+                    .map(String::as_str)
+                    .collect();
+                if !new_rows.is_empty() {
                     note.push_str(&format!(
-                        "; the line's {} settings carry onto each member row",
+                        "; new rows are written for {}",
+                        new_rows.join(", ")
+                    ));
+                }
+                if !keeps_own.is_empty() {
+                    note.push_str(&format!(
+                        "; {} already {} own row here, kept untouched",
+                        keeps_own.join(", "),
+                        if keeps_own.len() == 1 {
+                            "has its"
+                        } else {
+                            "have their"
+                        }
+                    ));
+                }
+                if !carried.is_empty() && !new_rows.is_empty() {
+                    note.push_str(&format!(
+                        "; the line's {} settings carry onto each new member row",
                         carried.join("/")
                     ));
                 }
@@ -1295,15 +1340,20 @@ fn apply_arms(
                     .map_err(|e| ClientError::InvalidArgument(e.message))?;
             }
             Arm::SetSplit {
-                set, name, members, ..
+                set,
+                name,
+                members,
+                keeps_own,
             } => {
                 editor.remove_row(&set.reference);
-                // Each surviving member row carries the SET line's pin/fields where the member's
+                // Each NEW member row carries the SET line's pin/fields where the member's
                 // shape allows them (disclosed in the describe) — a split must not silently
-                // strip the line's placement/harness discipline.
+                // strip the line's placement/harness discipline. Explicit beats set: a survivor
+                // that already has its own explicit row keeps it untouched (its pin/path/
+                // harness/name settings are stronger facts than the set's value).
                 let (member_value, _, _) = split_carriage(set);
                 for member in members {
-                    if member == name {
+                    if member == name || keeps_own.contains(member) {
                         continue;
                     }
                     let Some(reference) = member_reference(set, member) else {

@@ -4,14 +4,14 @@
   "description": "`GET /v1/workspaces/{ws}/skills/{skill}/reach` response — the audience a change to this skill\nreaches (the describe number behind `publish` and `protect`). Member-scoped.",
   "type": "object",
   "properties": {
-    "devices": {
-      "description": "How many registered, non-revoked devices those people hold here.",
+    "persons": {
+      "description": "How many people are entitled to the skill.",
       "type": "integer",
       "format": "uint64",
       "minimum": 0
     },
-    "persons": {
-      "description": "How many people are entitled to the skill.",
+    "sessions": {
+      "description": "How many live (active, unexpired) CLI sessions those people hold here.",
       "type": "integer",
       "format": "uint64",
       "minimum": 0
@@ -19,6 +19,6 @@
   },
   "required": [
     "persons",
-    "devices"
+    "sessions"
   ]
 }

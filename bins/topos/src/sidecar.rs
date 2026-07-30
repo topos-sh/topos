@@ -194,6 +194,20 @@ impl Layout {
         self.state_dir().join("builtin.json")
     }
 
+    /// `state/forge_trust.json` — the MACHINE's forge first-trust registry (see
+    /// `crate::forge_trust`): the origins `add`'s consent moment granted. Home store only — a
+    /// project store's contents travel with the checkout and must never carry consent.
+    pub(crate) fn forge_trust_path(&self) -> PathBuf {
+        self.state_dir().join("forge_trust.json")
+    }
+
+    /// `state/visited_stores.json` — the machine-local index of project stores the reconcile has
+    /// visited (see `crate::visited_stores`): what makes every applied report COMPLETE across
+    /// checkouts, whichever one the update runs from. A plain doc — paths, never a secret.
+    pub(crate) fn visited_stores_path(&self) -> PathBuf {
+        self.state_dir().join("visited_stores.json")
+    }
+
     /// `state/quiet_sweep.json` — when the last bare update sweep completed (epoch millis). The
     /// quiet hook's TTL self-throttle reads it; every completed bare sweep (quiet or explicit)
     /// refreshes it. A plain doc — one timestamp, never a secret.

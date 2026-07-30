@@ -1854,7 +1854,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The skill's audience (entitled members + their non-revoked devices).",
+            "description": "The skill's audience (entitled members + their live sessions).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3792,19 +3792,19 @@
         "description": "`GET /v1/workspaces/{ws}/skills/{skill}/reach` response — the audience a change to this skill\nreaches (the describe number behind `publish` and `protect`). Member-scoped.",
         "required": [
           "persons",
-          "devices"
+          "sessions"
         ],
         "properties": {
-          "devices": {
-            "type": "integer",
-            "format": "int64",
-            "description": "How many registered, non-revoked devices those people hold here.",
-            "minimum": 0
-          },
           "persons": {
             "type": "integer",
             "format": "int64",
             "description": "How many people are entitled to the skill.",
+            "minimum": 0
+          },
+          "sessions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many live (active, unexpired) CLI sessions those people hold here.",
             "minimum": 0
           }
         }

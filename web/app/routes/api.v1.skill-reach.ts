@@ -6,7 +6,7 @@ import { laneReach } from "@/lib/db/queries.lane.server";
 
 /**
  * `GET /api/v1/workspaces/{ws}/skills/{skill}/reach` — a bundle's audience (members entitled
- * to it + their non-revoked devices). `{skill}` is the immutable id, validated against the
+ * to it + their live sessions). `{skill}` is the immutable id, validated against the
  * catalog at ANY status; an unknown id is the uniform 404 (never an existence oracle). Pure
  * counts over the entitlement predicate; per-member and hot, never cacheable.
  */

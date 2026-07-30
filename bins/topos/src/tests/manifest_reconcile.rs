@@ -1257,6 +1257,192 @@ fn an_untracked_repo_row_refuses_toward_the_add_gate() {
     );
 }
 
+#[test]
+fn a_committed_project_store_never_grants_forge_trust() {
+    // RED TEAM: a malicious checkout commits a valid-looking `.topos/` project store (real
+    // lock.json + origin.json — here minted by a real add on ANOTHER machine) plus the manifest
+    // row. On a machine whose OWN registry never granted the origin, the reconcile must refuse
+    // toward the add gate and dial nothing — store contents are a checkout fact, never consent.
+    let victim = Rig::new("redteam-victim");
+    let attacker = Rig::new("redteam-attacker");
+    let proj = project("proj-redteam", "[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+
+    // The attacker's machine populates the checkout's own store through a REAL consented add —
+    // exactly the bytes a hostile repo could commit.
+    let attacker_ctx = attacker.ctx_at(Some(&proj.0));
+    match ops::add_reference(
+        &attacker_ctx,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        "github.com/o/r",
+        false,
+        true,
+    )
+    .unwrap()
+    {
+        ops::AddRefOutcome::Applied(_) => {}
+        ops::AddRefOutcome::Described { .. } => panic!("--yes applies"),
+    }
+    assert!(
+        crate::sidecar::existing_project_store(&victim.fs, &proj.0).is_some(),
+        "the checkout carries a real project store"
+    );
+    let fetches_before = git.fetches();
+
+    // The VICTIM machine opens the checkout: its registry holds nothing — the store must not
+    // vouch, however valid its documents look.
+    git.serve(build_repo_targz(
+        "o-r-bbbbbbbbbbbb2",
+        &[("skills/alpha/SKILL.md", b"# alpha EVIL\n")],
+    ));
+    let victim_ctx = victim.ctx_at(Some(&proj.0));
+    let out = ops::manifest_update(
+        &victim_ctx,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    let w = out
+        .warnings
+        .iter()
+        .find(|w| w.starts_with("FIRST_TRUST"))
+        .unwrap_or_else(|| panic!("the gate refuses: {:?}", out.warnings));
+    assert!(w.contains("topos add github.com/o/r --yes"), "{w}");
+    assert_eq!(
+        git.fetches(),
+        fetches_before,
+        "nothing is fetched on the untrusting machine"
+    );
+    assert_eq!(
+        std::fs::read_to_string(proj.0.join(".claude/skills/alpha/SKILL.md")).unwrap(),
+        "# alpha v1\n",
+        "no forge content installs without this machine's own consent"
+    );
+}
+
+#[test]
+fn a_granted_origin_flows_in_both_scopes() {
+    // The add's consent moment records the origin in the MACHINE registry; a later project-scope
+    // row of the same origin then flows on explicit update — no second ceremony, no refusal —
+    // installing into the checkout's own store.
+    let rig = Rig::new("trust-both-scopes");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    gate_add(&ctx, &plane, &dir, &git, "github.com/o/r");
+    // The consent is durably in the registry.
+    let trust: crate::forge_trust::ForgeTrust =
+        crate::doc::read_doc(&rig.fs, &rig.layout().forge_trust_path())
+            .unwrap()
+            .expect("the registry doc");
+    assert!(trust.origins.contains("github.com/o/r"), "{trust:?}");
+
+    // A fresh checkout spells the same repo row: the explicit update installs into the PROJECT's
+    // own store with no first-trust refusal (the grant is machine-wide).
+    let proj = project("proj-granted", "[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let pctx = rig.ctx_at(Some(&proj.0));
+    let out = ops::manifest_update(
+        &pctx,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(
+        !out.warnings.iter().any(|w| w.starts_with("FIRST_TRUST")),
+        "{:?}",
+        out.warnings
+    );
+    assert!(
+        proj.0.join(".claude/skills/alpha/SKILL.md").exists(),
+        "the granted origin's member lands in the checkout: {:?}",
+        out.warnings
+    );
+    assert!(
+        crate::sidecar::existing_project_store(&rig.fs, &proj.0).is_some(),
+        "installed through the project's own store"
+    );
+}
+
+#[test]
+fn home_store_imports_seed_the_registry_once() {
+    // Legacy machines: origins already imported in the HOME store passed the add gate
+    // historically — the first consult seeds them into the registry, once; afterwards the
+    // registry alone is the authority (the store evidence may go, the grant stands).
+    let rig = Rig::new("trust-seed");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[("skills/alpha/SKILL.md", b"# alpha v1\n")],
+    ));
+    // A pre-registry machine: real home-store imports, NO registry doc.
+    gate_add(&ctx, &plane, &dir, &git, "github.com/o/r");
+    std::fs::remove_file(rig.layout().forge_trust_path()).unwrap();
+
+    // The consult seeds: the update flows with no first-trust refusal, and the written registry
+    // carries the origin with the durable seed marker.
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(
+        !out.warnings.iter().any(|w| w.starts_with("FIRST_TRUST")),
+        "{:?}",
+        out.warnings
+    );
+    let trust: crate::forge_trust::ForgeTrust =
+        crate::doc::read_doc(&rig.fs, &rig.layout().forge_trust_path())
+            .unwrap()
+            .expect("the seeded registry doc");
+    assert!(trust.seeded, "{trust:?}");
+    assert!(trust.origins.contains("github.com/o/r"), "{trust:?}");
+
+    // ONCE: the registry now speaks alone — with the home-store evidence gone, the origin stays
+    // granted and the explicit update converges the landing afresh.
+    for entry in rig.fs.read_dir(&rig.layout().skills_dir()).unwrap() {
+        std::fs::remove_dir_all(&entry).unwrap();
+    }
+    std::fs::remove_dir_all(rig.home.0.join(".claude/skills/alpha")).unwrap();
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(
+        !out.warnings.iter().any(|w| w.starts_with("FIRST_TRUST")),
+        "the registry is the authority once seeded: {:?}",
+        out.warnings
+    );
+    assert!(
+        rig.home.0.join(".claude/skills/alpha/SKILL.md").exists(),
+        "the trusted row converges its landing: {:?}",
+        out.warnings
+    );
+}
+
 // =================================================================================================
 // Cleaning.
 // =================================================================================================
@@ -2065,6 +2251,66 @@ fn the_report_covers_project_manifest_deliveries() {
 }
 
 #[test]
+fn the_report_carries_another_checkouts_holdings() {
+    // COMPLETE-state across checkouts: checkout A's project delivery keeps riding the applied
+    // report when the update runs from checkout B (the visited-stores index) — and deleting A's
+    // store drops it naturally on the next read.
+    let rig = Rig::new("report-cross");
+    rig.seed_session();
+    let proj_a = project(
+        "proj-cross-a",
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+    );
+    let proj_b = project("proj-cross-b", "[bundles]\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log.clone()).with_version("s_deploy", &v);
+    // The FEED delivers nothing — the demand is checkout A's manifest row alone.
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+
+    // Checkout A delivers + reports its project bundle.
+    let ctx_a = rig.ctx_at(Some(&proj_a.0));
+    sweep(&ctx_a, &plane, &dir);
+    assert!(proj_a.0.join(".claude/skills/deploy/SKILL.md").exists());
+    let reports = |want: &str| {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.as_str() == want)
+            .count()
+    };
+    assert_eq!(reports("report s_deploy"), 1, "{:?}", log.lock().unwrap());
+
+    // The update runs from checkout B: A's holdings still ride the complete-state report — an
+    // omission would make the server delete A's fleet rows.
+    let ctx_b = rig.ctx_at(Some(&proj_b.0));
+    sweep(&ctx_b, &plane, &dir);
+    assert_eq!(
+        reports("report s_deploy"),
+        2,
+        "checkout A's holdings ride the report from checkout B: {:?}",
+        log.lock().unwrap()
+    );
+
+    // A's store goes (the checkout was deleted): the holding drops out of the report naturally.
+    std::fs::remove_dir_all(proj_a.0.join(".topos")).unwrap();
+    sweep(&ctx_b, &plane, &dir);
+    assert_eq!(
+        reports("report s_deploy"),
+        2,
+        "a deleted store's holdings leave the report: {:?}",
+        log.lock().unwrap()
+    );
+    assert_eq!(
+        reports("report "),
+        1,
+        "the report is honestly empty now: {:?}",
+        log.lock().unwrap()
+    );
+}
+
+#[test]
 fn the_report_covers_a_declined_but_locally_added_bundle() {
     let rig = Rig::new("report-declined");
     rig.seed_session();
@@ -2480,6 +2726,113 @@ fn a_set_split_carries_the_lines_fields_onto_survivors() {
     );
 }
 
+#[test]
+fn a_set_split_never_overwrites_a_survivors_explicit_row() {
+    // Explicit beats set: a survivor that already has its OWN row keeps it untouched (its pin is
+    // a stronger fact than the set's fields); a survivor without one gets the new carried row.
+    let rig = Rig::new("split-explicit");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let d = one_file(b"# deploy\n");
+    let o = one_file(b"# other\n");
+    let p = one_file(b"# pinned\n");
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &d)
+        .with_version("s_other", &o)
+        .with_version("s_pinned", &p);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(
+        vec![
+            catalog_entry("s_deploy", "deploy", &d),
+            catalog_entry("s_other", "other", &o),
+            catalog_entry("s_pinned", "pinned", &p),
+        ],
+        vec![WireChannelEntry {
+            name: "backend".into(),
+            mode: "open".into(),
+            builtin: false,
+            included: true,
+            skills: vec![
+                WireChannelSkill {
+                    skill_id: "s_deploy".into(),
+                    name: "deploy".into(),
+                },
+                WireChannelSkill {
+                    skill_id: "s_other".into(),
+                    name: "other".into(),
+                },
+                WireChannelSkill {
+                    skill_id: "s_pinned".into(),
+                    name: "pinned".into(),
+                },
+            ],
+        }],
+    );
+    let pin = topos_core::digest::to_hex(&p.id);
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = {{ harness = [\"codex\"] }}\n\
+         \"{HOST}/{WS_NAME}/pinned\" = \"{pin}\"\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+
+    // The describe names which survivors get new rows and which keep their own.
+    let out = ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], false).unwrap();
+    match out {
+        ops::RemoveOutcome::Described { data, .. } => {
+            let note = data.items[0].note.clone().unwrap_or_default();
+            assert!(note.contains("new rows are written for other"), "{note}");
+            assert!(
+                note.contains("pinned already has its own row here, kept untouched"),
+                "{note}"
+            );
+        }
+        other => panic!("a set split describes first: {other:?}"),
+    }
+    let out = ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], true).unwrap();
+    assert!(matches!(out, ops::RemoveOutcome::Applied(_)));
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    let doc = crate::manifest::document::parse_manifest(
+        &text,
+        crate::manifest::document::ManifestScope::Global,
+    )
+    .unwrap();
+    // The explicit survivor KEEPS its pin — never replaced by the set's fields value.
+    let kept = doc
+        .rows
+        .iter()
+        .find(|r| r.reference == format!("{HOST}/{WS_NAME}/pinned"))
+        .unwrap_or_else(|| panic!("the explicit survivor keeps its row: {text}"));
+    assert!(
+        matches!(&kept.value, crate::manifest::document::EntryValue::Pin(v) if *v == pin),
+        "the explicit pin survives the split, got {:?}: {text}",
+        kept.value
+    );
+    // The row-less survivor gets the NEW carried row; the set line and the removed member go.
+    let fresh = doc
+        .rows
+        .iter()
+        .find(|r| r.reference == format!("{HOST}/{WS_NAME}/other"))
+        .unwrap_or_else(|| panic!("the row-less survivor gets a new row: {text}"));
+    assert!(
+        matches!(&fresh.value, crate::manifest::document::EntryValue::Fields(f)
+            if f.harness.as_deref() == Some(&["codex".to_owned()][..])),
+        "{text}"
+    );
+    assert!(
+        !doc.rows
+            .iter()
+            .any(|r| r.reference.contains("channels/backend")),
+        "the set line is gone: {text}"
+    );
+    assert!(
+        !doc.rows
+            .iter()
+            .any(|r| r.reference == format!("{HOST}/{WS_NAME}/deploy")),
+        "the removed member gets no row: {text}"
+    );
+}
+
 // =================================================================================================
 // A landed publish is never failed by its LOCAL rewrite half; the retry/update converge it.
 // =================================================================================================
@@ -2686,6 +3039,234 @@ fn a_landed_publish_survives_a_failed_rewrite_and_the_next_update_converges_it()
             .any(|w| w.starts_with("GOVERNANCE_CONVERGED")),
         "{:?}",
         out2.warnings
+    );
+}
+
+#[test]
+fn a_project_scope_pending_rewrite_converges_from_the_projects_own_store() {
+    // The pending governance transfer of a bundle tracked in the PROJECT's own store: the
+    // converge must search the owning store across the cwd chain — a home-only search would
+    // leave a project-scope publish's failed rewrite pending forever.
+    let rig = Rig::new("rewrite-pending-proj");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+    let proj = project("proj-pending", "[bundles]\n");
+
+    // A local skill adopted into the PROJECT's own store (the checkout's engine state).
+    let src = proj.0.join("deploy");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("SKILL.md"), b"# deploy\n").unwrap();
+    let playout = crate::sidecar::ensure_project_store(&rig.fs, &proj.0).unwrap();
+    let added = {
+        let mut pctx = rig.ctx_at(Some(&proj.0));
+        pctx.layout = playout.clone();
+        ops::add(&pctx, &src).unwrap()
+    };
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    // The catalog serves the governed copy (for the later converge).
+    let v = one_file(b"# deploy\n");
+    let dir = FakeDirectory::new(
+        vec![catalog_entry(&added.skill_id, "deploy", &v)],
+        Vec::new(),
+    );
+
+    // The PROJECT manifest is UNPARSEABLE: the rewrite half will fail; the publish must not.
+    std::fs::write(
+        proj.0.join(crate::manifest::MANIFEST_FILE),
+        "this is [[ not toml\n",
+    )
+    .unwrap();
+    let session_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(plane.clone()),
+        directory: Box::new(dir.clone()),
+        contribute: Box::new(OkPublish),
+        governance: Box::new(NoGovernance),
+    };
+    let cc = |_base: &str, _tok: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
+        Box::new(NoContribute)
+    };
+    let outcome = ops::publish(
+        &ctx,
+        &cc,
+        None,
+        Some(&session_connect),
+        None,
+        "deploy",
+        false,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let data = match outcome {
+        ops::PublishOutcome::Published(d) => d,
+        other => panic!("the publish LANDED: {other:?}"),
+    };
+    assert!(
+        data.rewrite_pending.is_some(),
+        "the failed rewrite rides the receipt"
+    );
+
+    // The manifest heals, still spelling the PATH line; the NEXT update converges the transfer
+    // from the PROJECT store, idempotently, disclosed.
+    std::fs::write(
+        proj.0.join(crate::manifest::MANIFEST_FILE),
+        "[bundles]\n\"./deploy\" = \"*\"\n",
+    )
+    .unwrap();
+    let out = ops::manifest_update(
+        &ctx,
+        &session_connect,
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    let line = out
+        .warnings
+        .iter()
+        .find(|w| w.starts_with("GOVERNANCE_CONVERGED"))
+        .unwrap_or_else(|| panic!("the converge line: {:?}", out.warnings));
+    assert!(line.contains(&format!("{HOST}/{WS_NAME}/deploy")), "{line}");
+    let text = std::fs::read_to_string(proj.0.join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(
+        text.contains(&format!("{HOST}/{WS_NAME}/deploy")),
+        "the canonical reference stands in the PROJECT file: {text}"
+    );
+    assert!(!text.contains("./deploy"), "the path line is gone: {text}");
+}
+
+/// A contribute fake for the `--propose` arm: the proposal LANDS remotely (NEEDS_REVIEW);
+/// `current` does not move, so the local sync stays GENESIS-observed.
+struct OkPropose;
+impl crate::plane::ContributeSource for OkPropose {
+    fn publish(
+        &self,
+        _b: topos_types::requests::PublishRequest,
+    ) -> Result<crate::plane::WriteReceipt, ClientError> {
+        unreachable!("this flow proposes")
+    }
+    fn propose(
+        &self,
+        b: topos_types::requests::ProposeRequest,
+    ) -> Result<crate::plane::WriteReceipt, ClientError> {
+        Ok(crate::plane::WriteReceipt {
+            receipt: Some(topos_types::Receipt {
+                schema_version: 1,
+                op_id: b.op_id.clone(),
+                command: "propose".to_owned(),
+                outcome: topos_types::TerminalOutcome::NeedsReview,
+                workspace_id: b.workspace_id,
+                skill_id: Some(b.skill_id),
+                version_id: None,
+                bundle_digest: None,
+                expected_generation: None,
+                current_generation: None,
+                created_at: "2026-07-30T00:00:00Z".to_owned(),
+                details: None,
+            }),
+            error: None,
+            wire_record: None,
+        })
+    }
+    fn revert(
+        &self,
+        _b: topos_types::requests::RevertRequest,
+    ) -> Result<crate::plane::WriteReceipt, ClientError> {
+        unreachable!("no revert in this flow")
+    }
+    fn review(
+        &self,
+        _b: topos_types::requests::ReviewRequest,
+    ) -> Result<crate::plane::WriteReceipt, ClientError> {
+        unreachable!("no review in this flow")
+    }
+}
+
+#[test]
+fn a_genesis_propose_pending_rewrite_still_converges() {
+    // A genesis `--propose` never moves `current`, so the local sync stays GENESIS-observed —
+    // the converge's safe condition is the single-catalog-home check (the landed proposal minted
+    // the catalog entry), never a blanket GENESIS refusal.
+    let rig = Rig::new("rewrite-pending-genesis");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+
+    let src = rig.work.0.join("deploy");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("SKILL.md"), b"# deploy\n").unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let added = ops::add(&ctx, &src).unwrap();
+
+    // The catalog holds the proposal's entry (the server-side half of the landed propose).
+    let v = one_file(b"# deploy\n");
+    let dir = FakeDirectory::new(
+        vec![catalog_entry(&added.skill_id, "deploy", &v)],
+        Vec::new(),
+    );
+
+    // The GLOBAL manifest is UNPARSEABLE: the rewrite half fails; the proposal still lands.
+    rig.write_global("this is [[ not toml\n");
+    let session_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(plane.clone()),
+        directory: Box::new(dir.clone()),
+        contribute: Box::new(OkPropose),
+        governance: Box::new(NoGovernance),
+    };
+    let cc = |_base: &str, _tok: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
+        Box::new(NoContribute)
+    };
+    let outcome = ops::publish(
+        &ctx,
+        &cc,
+        None,
+        Some(&session_connect),
+        None,
+        "deploy",
+        true,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let data = match outcome {
+        ops::PublishOutcome::Proposed(d) => d,
+        other => panic!("the genesis propose opens a proposal: {other:?}"),
+    };
+    assert!(
+        data.rewrite_pending.is_some(),
+        "the failed rewrite rides the proposal receipt"
+    );
+
+    // The manifest heals with the PATH line; the update converges the transfer despite the
+    // GENESIS-observed local sync.
+    let canonical_src = src.canonicalize().unwrap();
+    rig.write_global(&format!(
+        "[bundles]\n\"{}\" = \"*\"\n",
+        canonical_src.display()
+    ));
+    let out = ops::manifest_update(
+        &ctx,
+        &session_connect,
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    let line = out
+        .warnings
+        .iter()
+        .find(|w| w.starts_with("GOVERNANCE_CONVERGED"))
+        .unwrap_or_else(|| panic!("the converge line: {:?}", out.warnings));
+    assert!(line.contains(&format!("{HOST}/{WS_NAME}/deploy")), "{line}");
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(
+        text.contains(&format!("{HOST}/{WS_NAME}/deploy")),
+        "the canonical reference stands: {text}"
     );
 }
 

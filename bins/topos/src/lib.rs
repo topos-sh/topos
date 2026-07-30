@@ -25,6 +25,7 @@ pub(crate) mod ctx;
 pub(crate) mod doc;
 pub(crate) mod enroll;
 pub(crate) mod error;
+pub(crate) mod forge_trust;
 pub(crate) mod fs_seam;
 pub(crate) mod git_source;
 pub(crate) mod id;
@@ -52,6 +53,7 @@ pub(crate) mod sidecar;
 pub(crate) mod source;
 pub(crate) mod stat_cache;
 pub(crate) mod sync_status;
+pub(crate) mod visited_stores;
 
 /// Test-only public facade (feature `test-fixtures`) — lets an EXTERNAL integration crate drive the real
 /// pull engine over the real transport without reaching the `pub(crate)` internals. Never compiled into a

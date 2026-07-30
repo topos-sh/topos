@@ -1424,14 +1424,14 @@ export interface components {
         WireReach: {
             /**
              * Format: int64
-             * @description How many registered, non-revoked devices those people hold here.
-             */
-            devices: number;
-            /**
-             * Format: int64
              * @description How many people are entitled to the skill.
              */
             persons: number;
+            /**
+             * Format: int64
+             * @description How many live (active, unexpired) CLI sessions those people hold here.
+             */
+            sessions: number;
         };
         /**
          * @description `GET /v1/workspaces/{ws}/skills` response body — the workspace catalog (every skill holding a `current`),
@@ -2961,7 +2961,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The skill's audience (entitled members + their non-revoked devices). */
+            /** @description The skill's audience (entitled members + their live sessions). */
             200: {
                 headers: {
                     [name: string]: unknown;

@@ -1105,8 +1105,8 @@ pub struct WireSkillLog {
 pub struct WireReach {
     /// How many people are entitled to the skill.
     pub persons: u64,
-    /// How many registered, non-revoked devices those people hold here.
-    pub devices: u64,
+    /// How many live (active, unexpired) CLI sessions those people hold here.
+    pub sessions: u64,
 }
 
 #[cfg(test)]
