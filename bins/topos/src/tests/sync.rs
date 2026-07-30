@@ -2071,6 +2071,10 @@ impl FsOps for RecordingFs {
         self.record("exchange_dir", b);
         self.inner.exchange_dir(a, b)
     }
+    fn write_new(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        self.record("write_new", path);
+        self.inner.write_new(path, bytes)
+    }
     fn read_opt(&self, path: &Path) -> std::io::Result<Option<Vec<u8>>> {
         self.inner.read_opt(path)
     }

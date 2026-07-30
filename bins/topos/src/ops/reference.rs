@@ -13,10 +13,12 @@
 //! global file, whose absence means "one feed row per connected workspace" — so a bare `add -g X`
 //! of something the feed already delivers writes NOTHING and says so.
 //!
-//! One CONSENT gate lives here: a git source this machine has never used before is fetched
-//! read-only, described (what it holds, what would be written where), and applied only under
-//! `--yes`. Every other arm is a self-scoped file edit that applies immediately with an undo-led
-//! receipt.
+//! One CONSENT gate lives here: a git origin the target scope's own STORE does not yet track is
+//! fetched read-only, described (what it holds, what would be written where), and applied only
+//! under `--yes`. Trust is a store fact — a tracked import of the origin — never a file fact: a
+//! manifest row is demand anyone could have committed, so a row's existence never skips the
+//! member-listing describe (the describe names it instead). Every other arm is a self-scoped
+//! file edit that applies immediately with an undo-led receipt.
 
 use topos_types::results::{AddData, AddDescribeData};
 
@@ -469,7 +471,20 @@ fn add_forge(
         subdir: parsed.subdir_hint.clone(),
     };
     let source_label = format!("{host}/{owner}/{repo}");
-    let trusted = medit::forge_source_known(ctx, &source_label, parsed.subdir_hint.as_deref())?;
+    // The SCOPE's own store: a project row's import lands in (and is trusted from) the
+    // project's `.topos/` store, a global row in the home store — the same routing the
+    // reconcile's forge arms read.
+    let store_layout = match target.scope {
+        ManifestScope::Project => crate::sidecar::project_store_layout(&target.dir),
+        ManifestScope::Global => ctx.layout.clone(),
+    };
+    let sctx = super::pull::ctx_with_layout(ctx, &store_layout);
+    // FIRST TRUST is a STORE fact: the origin counts as known ONLY when the target scope's own
+    // store already tracks an import from it. A manifest ROW is demand, never consent — a
+    // VCS-delivered file must not skip the member-listing describe — and the predicate is
+    // evaluated HERE, before any write, so this add's own row can never satisfy the gate it is
+    // behind.
+    let trusted = !super::reconcile::tracked_repo_members(&sctx, &source_label).is_empty();
 
     // ONE fetch serves both the describe and the apply (read-only either way).
     let targz = git.fetch(&spec)?;
@@ -514,14 +529,31 @@ fn add_forge(
         (None, None) => EntryValue::Star,
     };
 
-    // FIRST TRUST: a source with no row in any local manifest and no tracked import here is
-    // described, never installed, until `--yes`.
+    // FIRST TRUST: an origin the scope's store does not track is described, never installed,
+    // until `--yes` — however many manifests spell its row.
     if !trusted && !yes {
         let mut yes_argv = vec!["topos".to_owned(), "add".to_owned(), raw.to_owned()];
         if global {
             yes_argv.push("-g".to_owned());
         }
         yes_argv.push("--yes".to_owned());
+        // The row may ALREADY be recorded (a cloned manifest; a prior add whose installs all
+        // failed) — said out loud, with what the consent covers: the row is standing demand,
+        // and applying is what fetches and installs the bytes it names.
+        let row_exists = medit::read_text(ctx, &target.path)
+            .ok()
+            .flatten()
+            .and_then(|text| {
+                crate::manifest::document::ManifestEditor::open(&text, target.scope).ok()
+            })
+            .is_some_and(|editor| editor.row(&reference).is_some());
+        let note = row_exists.then(|| {
+            format!(
+                "{} already records this row — it is demand, not consent; applying is what \
+                 fetches and installs the skills it names",
+                target.path.display()
+            )
+        });
         return Ok(AddRefOutcome::Described {
             data: AddDescribeData {
                 source: source_label,
@@ -529,34 +561,54 @@ fn add_forge(
                 manifest: target.path.display().to_string(),
                 reference,
                 value: value_spelling(&value),
+                note,
             },
             yes_argv,
         });
     }
 
     // ---- APPLY ----
+    // The DEMAND lands FIRST: with the row durably recorded, a member-install failure part-way
+    // leaves a CONVERGENT state — the manifest asks for exactly what the consent covered, and
+    // the next explicit update (or a re-run of this add) finishes the landing — instead of
+    // installed members no manifest row asks for.
+    let mut row_receipt = set_data(members.first().map_or(&repo, |m| m));
+    medit::write_row(ctx, &mut row_receipt, &target, &reference, &value)?;
+    // A project install writes through the project's own self-ignoring `.topos/` store; mint its
+    // shell before the first member lands.
+    if target.scope == ManifestScope::Project {
+        crate::sidecar::ensure_project_store(ctx.fs, &target.dir)?;
+    }
     let mut landed: Vec<AddData> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
+    let mut failed: Vec<(String, String)> = Vec::new();
     for member in &members {
         let opts = super::AddRemoteOpts {
             skill: Some(member.clone()),
             harness: None,
             global,
         };
-        match super::add::add_remote_fetched(ctx, &targz, &spec, &roots, &opts) {
+        match super::add::add_remote_fetched(&sctx, &targz, &spec, &roots, &opts) {
             Ok(d) => landed.push(d),
             // Already here: the row still records the demand; the receipt names what was skipped.
             Err(ClientError::AlreadyTracked { .. } | ClientError::AlreadyTrackedName { .. }) => {
                 skipped.push(member.clone());
             }
-            Err(e) => return Err(e),
+            // A per-member failure never unwinds the batch: the receipt names the partial
+            // landing, and the recorded row is what converges it.
+            Err(e) => failed.push((member.clone(), crate::render::safe_message(&e))),
         }
     }
     let mut data = match landed.first() {
         Some(d) => d.clone(),
         None => set_data(members.first().map_or(&repo, |m| m)),
     };
-    medit::write_row(ctx, &mut data, &target, &reference, &value)?;
+    data.manifest = row_receipt.manifest.clone();
+    data.reference = row_receipt.reference.clone();
+    data.undo = row_receipt.undo.clone();
+    if let Some(note) = row_receipt.note {
+        medit::push_note(&mut data, note);
+    }
     if members.len() > 1 {
         medit::push_note(
             &mut data,
@@ -571,6 +623,23 @@ fn add_forge(
         medit::push_note(
             &mut data,
             format!("already on this machine: {}", skipped.join(", ")),
+        );
+    }
+    if !failed.is_empty() {
+        let names: Vec<String> = failed.iter().map(|(n, e)| format!("{n} ({e})")).collect();
+        // With the origin tracked (any member landed, now or before), the ordinary explicit
+        // update converges the rest; with NOTHING tracked yet, the gate command is the retry.
+        let converge = if landed.is_empty() && skipped.is_empty() {
+            format!("re-run `topos add {raw} --yes` to retry")
+        } else {
+            "`topos update` completes the landing".to_owned()
+        };
+        medit::push_note(
+            &mut data,
+            format!(
+                "did not land: {} — the row records the demand; {converge}",
+                names.join("; ")
+            ),
         );
     }
     if pin.is_some() {

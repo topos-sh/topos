@@ -817,7 +817,7 @@ fn enrolled_publish(
             }
             pending
         }
-        None => build_publish_op(
+        None => match build_publish_op(
             ctx,
             &sp,
             id.as_str(),
@@ -828,7 +828,31 @@ fn enrolled_publish(
             &scanned,
             scanned.bundle_digest,
             message,
-        )?,
+        ) {
+            Ok(rec) => rec,
+            // NO-CHANGE means an earlier publish of these bytes already LANDED — the retry a
+            // failed local rewrite asks for resolves here, so the pending governance rewrite is
+            // re-attempted (idempotent: with no matching path line it is a no-op) BEFORE the
+            // typed refusal propagates.
+            Err(ClientError::NoChanges { skill }) => {
+                if let Some(l) = &lane {
+                    let dirs: Vec<std::path::PathBuf> = map
+                        .placements
+                        .iter()
+                        .map(std::path::PathBuf::from)
+                        .collect();
+                    let _ = super::rewrite_to_governed(
+                        outer_ctx,
+                        &lock.name,
+                        &l.host,
+                        &l.workspace_name,
+                        &dirs,
+                    );
+                }
+                return Err(ClientError::NoChanges { skill });
+            }
+            Err(e) => return Err(e),
+        },
     };
 
     let receipt = contribute::run_write(ctx, transport, &sp, &rec, None)?;
@@ -854,59 +878,101 @@ fn enrolled_publish(
             .iter()
             .map(std::path::PathBuf::from)
             .collect();
+        // THE REMOTE HALF HAS LANDED. From here, a LOCAL failure (the manifest rewrite, the
+        // cache seed, the origin note) must never fail the command — the receipt would deny a
+        // publish the plane holds, and a retry resolves no-change. The rewrite failure is
+        // warned, carried truthfully on the receipt (`rewrite_pending`), and converged
+        // idempotently by the next `update` or publish re-run.
         match &mut outcome {
             PublishOutcome::Published(data) => {
-                if let Some(rw) = super::rewrite_to_governed(
+                match super::rewrite_to_governed(
                     outer_ctx,
                     &lock.name,
                     &l.host,
                     &l.workspace_name,
                     &dirs,
-                )? {
-                    data.manifest = Some(rw.manifest);
-                    data.reference = Some(rw.canonical);
-                    data.converted_from = Some(rw.from);
-                    // Seed the offline cache with the governed fact (list/remove/the write lane
-                    // answer correctly BEFORE the next sweep) — ONLY when a manifest line now
-                    // actually references the bundle (`via_manifest` must never claim a line
-                    // that does not exist); best-effort, never a failed publish.
-                    let _ = crate::sync_status::merge_delivered(
-                        outer_ctx.fs,
-                        &outer_ctx.layout,
-                        &l.workspace_id,
-                        &l.host,
-                        &l.workspace_name,
-                        id.as_str(),
-                        crate::sync_status::DeliveredSkill {
-                            name: lock.name.clone(),
-                            review_required: false,
-                            served_version: rec.candidate_commit.clone(),
-                            withdrawn: false,
-                            via_channels: Vec::new(),
-                            via_manifest: true,
-                            assigned_by: None,
-                            picked: false,
-                        },
-                    );
+                ) {
+                    Ok(Some(rw)) => {
+                        data.manifest = Some(rw.manifest);
+                        data.reference = Some(rw.canonical);
+                        data.converted_from = Some(rw.from);
+                        // Seed the offline cache with the governed fact (list/remove/the write
+                        // lane answer correctly BEFORE the next sweep) — ONLY when a manifest
+                        // line now actually references the bundle (`via_manifest` must never
+                        // claim a line that does not exist); best-effort, never a failed publish.
+                        let _ = crate::sync_status::merge_delivered(
+                            outer_ctx.fs,
+                            &outer_ctx.layout,
+                            &l.workspace_id,
+                            &l.host,
+                            &l.workspace_name,
+                            id.as_str(),
+                            crate::sync_status::DeliveredSkill {
+                                name: lock.name.clone(),
+                                review_required: false,
+                                served_version: rec.candidate_commit.clone(),
+                                withdrawn: false,
+                                via_channels: Vec::new(),
+                                via_manifest: true,
+                                assigned_by: None,
+                                picked: false,
+                            },
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        data.rewrite_pending =
+                            Some(rewrite_pending_note(outer_ctx, &lock.name, &e));
+                    }
                 }
-                data.origin_note = origin_asymmetry_note(outer_ctx, &sp, &lock.name, l)?;
+                data.origin_note =
+                    origin_asymmetry_note(outer_ctx, &sp, &lock.name, l).unwrap_or_default();
             }
             PublishOutcome::Proposed(data) => {
-                if let Some(rw) = super::rewrite_to_governed(
+                match super::rewrite_to_governed(
                     outer_ctx,
                     &lock.name,
                     &l.host,
                     &l.workspace_name,
                     &dirs,
-                )? {
-                    data.manifest = Some(rw.manifest);
-                    data.reference = Some(rw.canonical);
-                    data.converted_from = Some(rw.from);
+                ) {
+                    Ok(Some(rw)) => {
+                        data.manifest = Some(rw.manifest);
+                        data.reference = Some(rw.canonical);
+                        data.converted_from = Some(rw.from);
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        data.rewrite_pending =
+                            Some(rewrite_pending_note(outer_ctx, &lock.name, &e));
+                    }
                 }
             }
         }
     }
     Ok(outcome)
+}
+
+/// The truthful landed-but-rewrite-pending receipt half: the warning is logged + printed to
+/// stderr, and the line says exactly what stands (the path line) and what converges it (the next
+/// update / publish re-run — both re-attempt the rewrite idempotently).
+fn rewrite_pending_note(ctx: &Ctx<'_>, skill_name: &str, e: &ClientError) -> String {
+    let _ = crate::logfile::append_error_event(
+        ctx.fs,
+        &ctx.layout.log_path(),
+        "publish",
+        e.code(),
+        &format!("governance rewrite {skill_name}: {}", e.detail()),
+        None,
+        ctx.clock.now_unix_millis(),
+    );
+    let safe = crate::render::safe_message(e);
+    eprintln!("topos publish: {skill_name}: the manifest rewrite did not land: {safe}");
+    format!(
+        "the publish landed, but the manifest's local-path line could not be rewritten to the \
+         governed reference ({safe}) — the next `topos update` (or re-running this publish) \
+         completes the transfer"
+    )
 }
 
 /// The GitHub-import asymmetry, disclosed: publishing an imported skill does NOT rewrite a
@@ -1224,6 +1290,7 @@ fn map_outcome(
                 converted_from: None,
                 invite_line,
                 origin_note: None,
+                rewrite_pending: None,
             }))
         }
         TerminalOutcome::NeedsReview => {
@@ -1250,6 +1317,7 @@ fn map_outcome(
                 manifest: None,
                 reference: None,
                 converted_from: None,
+                rewrite_pending: None,
             }))
         }
         TerminalOutcome::Conflict => Err(ClientError::Conflict {

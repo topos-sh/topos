@@ -2549,6 +2549,13 @@
             ],
             "description": "The canonical workspace reference the manifest now stores. **INFERRED** (additive-only)."
           },
+          "rewrite_pending": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The proposal OPENED but the local governance-transfer rewrite did NOT (a manifest\nread/write fault): the manifest still spells the local-path line; the next `update` (or a\nre-run) converges the rewrite idempotently. **INFERRED** (additive-only)."
+          },
           "title": {
             "type": "string"
           }
@@ -2700,6 +2707,13 @@
               "null"
             ],
             "description": "The canonical workspace reference the manifest now stores. **INFERRED** (additive-only)."
+          },
+          "rewrite_pending": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The publish LANDED but the local governance-transfer rewrite did NOT (a manifest\nread/write fault): the truthful receipt half — the manifest still spells the local-path\nline, and the next `update` (or a re-run of this publish, which resolves no-change)\nconverges the rewrite idempotently. **INFERRED** (additive-only)."
           },
           "skill_id": {
             "type": "string"

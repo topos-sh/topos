@@ -381,6 +381,30 @@ pub(crate) fn add_remote_fetched(
         let _ = ctx.fs.remove_dir_all(&stage_dir);
         return Err(e);
     }
+    // A PROJECT-scope import self-ignores exactly like the materializer's staged trees: the
+    // exact sentinel unless the bundle ships its own root ignore file (content, never
+    // overlaid). A shipped root ignore that does NOT self-ignore leaves the placement visible
+    // to git — disclosed on the receipt below, never edited.
+    let shipped_root_ignore = selected
+        .files
+        .iter()
+        .find(|f| f.path == crate::scan::IGNORE_FILE);
+    let mut git_visible = false;
+    if scope == SkillScope::Project {
+        match shipped_root_ignore {
+            None => {
+                if let Err(e) = ctx.fs.write_staged(
+                    &stage_dir.join(crate::scan::IGNORE_FILE),
+                    crate::scan::IGNORE_SENTINEL,
+                    false,
+                ) {
+                    let _ = ctx.fs.remove_dir_all(&stage_dir);
+                    return Err(ClientError::Io(format!("stage self-ignore: {e}")));
+                }
+            }
+            Some(f) => git_visible = !crate::materialize::ignores_all(&f.bytes),
+        }
+    }
     // An empty pre-existing dest is fine to fill (check_destination allowed it) but blocks the no-replace
     // rename — clear it first. A non-empty dest was already refused above.
     if ctx.fs.exists(&dest_dir) {
@@ -429,6 +453,13 @@ pub(crate) fn add_remote_fetched(
         }
     }
     data.origin = Some(origin);
+    if git_visible {
+        data.note = Some(format!(
+            "the bundle ships its own root .gitignore, which does not ignore the placement — \
+             {} is visible to git; commit or ignore it deliberately",
+            dest_dir.display()
+        ));
+    }
     Ok(data)
 }
 

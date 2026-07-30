@@ -249,7 +249,8 @@ export async function placeInDefault(db: ScratchDb, ws: string, bundleId: string
   );
 }
 
-/** Assign a channel to one person (`userId`) or to everyone (`null`). */
+/** Assign a channel to one person (`userId`) or to everyone (`null`). The provenance mirrors
+ * production: `self` iff the person placed it in their own name. */
 export async function assignChannelRow(
   db: ScratchDb,
   ws: string,
@@ -258,13 +259,14 @@ export async function assignChannelRow(
   createdBy = userId ?? "system",
 ): Promise<void> {
   await db.q(
-    `INSERT INTO web.assignment (workspace_id, user_id, channel_id, created_by)
-     VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
-    [ws, userId, channelId, createdBy],
+    `INSERT INTO web.assignment (workspace_id, user_id, channel_id, self, created_by)
+     VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
+    [ws, userId, channelId, userId !== null && userId === createdBy, createdBy],
   );
 }
 
-/** Assign a bundle to one person (`userId`) or to everyone (`null`). */
+/** Assign a bundle to one person (`userId`) or to everyone (`null`). The provenance mirrors
+ * production: `self` iff the person placed it in their own name. */
 export async function assignBundleRow(
   db: ScratchDb,
   ws: string,
@@ -273,9 +275,9 @@ export async function assignBundleRow(
   createdBy = userId ?? "system",
 ): Promise<void> {
   await db.q(
-    `INSERT INTO web.assignment (workspace_id, user_id, bundle_id, created_by)
-     VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
-    [ws, userId, bundleId, createdBy],
+    `INSERT INTO web.assignment (workspace_id, user_id, bundle_id, self, created_by)
+     VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
+    [ws, userId, bundleId, userId !== null && userId === createdBy, createdBy],
   );
 }
 

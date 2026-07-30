@@ -15,6 +15,13 @@
         "type": "string"
       }
     },
+    "note": {
+      "description": "An honesty line the describe leads with when the manifest ALREADY spells this row (a\ncloned file, a prior add whose installs failed): the row is demand, not consent — trust\nin a forge origin is a store fact, so the describe still gates, and applying is what\nfetches and installs the skills the row names. **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "reference": {
       "description": "The row key that would be written.",
       "type": "string"

@@ -511,6 +511,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "self": {
+          "name": "self",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
         "created_by": {
           "name": "created_by",
           "type": "text",
@@ -550,6 +556,12 @@
             },
             {
               "expression": "bundle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "self",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -600,6 +612,12 @@
             },
             {
               "expression": "channel_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "self",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -756,6 +774,10 @@
         "assignment_target_check": {
           "name": "assignment_target_check",
           "value": "(\"web\".\"assignment\".\"bundle_id\" is null) <> (\"web\".\"assignment\".\"channel_id\" is null)"
+        },
+        "assignment_self_check": {
+          "name": "assignment_self_check",
+          "value": "\"web\".\"assignment\".\"user_id\" is not null or not \"web\".\"assignment\".\"self\""
         }
       },
       "isRLSEnabled": false

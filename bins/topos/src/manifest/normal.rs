@@ -9,10 +9,12 @@
 //! `[bundles]` instead of a grouping section.
 //!
 //! Comments survive: the file's leading comment block stays at the top, a standalone comment
-//! above an entry travels with the entry, and a comment above a section header stays on that
-//! workspace's section. Values normalize too — a fields table carrying ONLY `version` collapses
-//! to the plain version string, and inline tables render single-line in canonical field order
-//! (version, path, harness, name, subdir, kind).
+//! above an entry travels with the entry, an inline comment AFTER a value (`"x" = "*"  # why`)
+//! stays on its line — through regrouping and through the version-table collapse alike — and a
+//! comment above a section header (or above/behind a `[defaults.<kind>]` field) stays with it.
+//! Values normalize too — a fields table carrying ONLY `version` collapses to the plain version
+//! string, and inline tables render single-line in canonical field order (version, path,
+//! harness, name, subdir, kind).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -38,22 +40,40 @@ pub(crate) fn fmt_normal(text: &str, scope: ManifestScope) -> Result<String, Man
 
     // Harvest the comments that must survive the rebuild.
     let mut entry_comments: HashMap<String, String> = HashMap::new();
+    let mut entry_suffixes: HashMap<String, String> = HashMap::new();
     let mut group_comments: HashMap<String, String> = HashMap::new();
     if let Some(Item::Table(bundles)) = doc.get("bundles") {
         collect_comments(
             bundles,
             &mut Vec::new(),
             &mut entry_comments,
+            &mut entry_suffixes,
             &mut group_comments,
         );
     }
     let mut defaults_comments: HashMap<String, String> = HashMap::new();
+    // Per-FIELD comments inside a `[defaults.<kind>]` section — `(kind, field) → (above, inline)`.
+    let mut defaults_field_comments: HashMap<(String, String), (String, String)> = HashMap::new();
     if let Some(Item::Table(d)) = doc.get("defaults") {
         for (k, item) in d.iter() {
             if let Item::Table(t) = item {
                 let c = decor_comment(t.decor());
                 if !c.is_empty() {
                     defaults_comments.insert(k.to_string(), c);
+                }
+                for (fk, fitem) in t.iter() {
+                    let above = t
+                        .key(fk)
+                        .map(|key| comment_block(raw_prefix(key.leaf_decor())))
+                        .unwrap_or_default();
+                    let inline = match fitem {
+                        Item::Value(v) => suffix_comment(v.decor()),
+                        _ => String::new(),
+                    };
+                    if !above.is_empty() || !inline.is_empty() {
+                        defaults_field_comments
+                            .insert((k.to_string(), fk.to_string()), (above, inline));
+                    }
                 }
             }
         }
@@ -111,7 +131,13 @@ pub(crate) fn fmt_normal(text: &str, scope: ManifestScope) -> Result<String, Man
             }
             first_block = false;
             for row in flat {
-                push_row(&mut bundles, &row.reference, row, &entry_comments);
+                push_row(
+                    &mut bundles,
+                    &row.reference,
+                    row,
+                    &entry_comments,
+                    &entry_suffixes,
+                );
             }
         }
         for (ws, rows) in &by_ws {
@@ -128,7 +154,7 @@ pub(crate) fn fmt_normal(text: &str, scope: ManifestScope) -> Result<String, Man
             first_block = false;
             for row in rows {
                 let tail = row.shape.section_tail().expect("workspace-shaped");
-                push_row(&mut section, &tail, row, &entry_comments);
+                push_row(&mut section, &tail, row, &entry_comments, &entry_suffixes);
             }
             bundles.insert(ws, Item::Table(section));
         }
@@ -158,9 +184,11 @@ pub(crate) fn fmt_normal(text: &str, scope: ManifestScope) -> Result<String, Man
                     a.push(x.as_str());
                 }
                 kt.insert("harness", Item::Value(Value::Array(a)));
+                attach_field_comments(&mut kt, "harness", kind, &defaults_field_comments);
             }
             if let Some(p) = &kd.path {
                 kt.insert("path", Item::Value(path_value(p)));
+                attach_field_comments(&mut kt, "path", kind, &defaults_field_comments);
             }
             defaults.insert(kind, Item::Table(kt));
         }
@@ -185,12 +213,48 @@ fn set_block_prefix(table: &mut Table, first: bool, comment: &str) {
     table.decor_mut().set_prefix(format!("{lead}{comment}"));
 }
 
-fn push_row(table: &mut Table, key: &str, row: &BundleRow, comments: &HashMap<String, String>) {
+fn push_row(
+    table: &mut Table,
+    key: &str,
+    row: &BundleRow,
+    comments: &HashMap<String, String>,
+    suffixes: &HashMap<String, String>,
+) {
     table.insert(key, normal_value_item(&row.value));
     if let Some(c) = comments.get(&row.reference)
         && let Some(mut km) = table.key_mut(key)
     {
         km.leaf_decor_mut().set_prefix(c.clone());
+    }
+    // The inline comment after the value stays on its line — including through the
+    // version-table collapse, whose rebuilt value it re-attaches to.
+    if let Some(s) = suffixes.get(&row.reference)
+        && let Some(Item::Value(v)) = table.get_mut(key)
+    {
+        v.decor_mut().set_suffix(s.clone());
+    }
+}
+
+/// Re-attach a `[defaults.<kind>]` field's harvested comments (above-line + inline) to the
+/// rebuilt field.
+fn attach_field_comments(
+    table: &mut Table,
+    field: &str,
+    kind: &str,
+    harvested: &HashMap<(String, String), (String, String)>,
+) {
+    let Some((above, inline)) = harvested.get(&(kind.to_string(), field.to_string())) else {
+        return;
+    };
+    if !above.is_empty()
+        && let Some(mut km) = table.key_mut(field)
+    {
+        km.leaf_decor_mut().set_prefix(above.clone());
+    }
+    if !inline.is_empty()
+        && let Some(Item::Value(v)) = table.get_mut(field)
+    {
+        v.decor_mut().set_suffix(inline.clone());
     }
 }
 
@@ -217,6 +281,7 @@ fn collect_comments(
     table: &Table,
     prefix: &mut Vec<String>,
     entries: &mut HashMap<String, String>,
+    suffixes: &mut HashMap<String, String>,
     groups: &mut HashMap<String, String>,
 ) {
     for (k, item) in table.iter() {
@@ -226,12 +291,16 @@ fn collect_comments(
             format!("{}/{k}", prefix.join("/"))
         };
         match item {
-            Item::Value(_) => {
+            Item::Value(v) => {
                 if let Some(key) = table.key(k) {
                     let c = comment_block(raw_prefix(key.leaf_decor()));
                     if !c.is_empty() {
-                        entries.insert(path, c);
+                        entries.insert(path.clone(), c);
                     }
+                }
+                let s = suffix_comment(v.decor());
+                if !s.is_empty() {
+                    suffixes.insert(path, s);
                 }
             }
             Item::Table(t) => {
@@ -240,7 +309,7 @@ fn collect_comments(
                     groups.insert(path.clone(), c);
                 }
                 prefix.push(k.to_string());
-                collect_comments(t, prefix, entries, groups);
+                collect_comments(t, prefix, entries, suffixes, groups);
                 prefix.pop();
             }
             _ => {}
@@ -283,6 +352,17 @@ fn raw_prefix(d: &Decor) -> &str {
 
 fn decor_comment(d: &Decor) -> String {
     comment_block(raw_prefix(d))
+}
+
+/// Normalize a value's SUFFIX decor to its inline comment, or empty: ` # why` — one space, then
+/// the comment verbatim. Deterministic and idempotent (re-collecting a re-attached suffix yields
+/// the same string).
+fn suffix_comment(d: &Decor) -> String {
+    let raw = d.suffix().and_then(|r| r.as_str()).unwrap_or("");
+    match raw.find('#') {
+        Some(i) => format!(" {}", raw[i..].trim_end()),
+        None => String::new(),
+    }
 }
 
 /// Normalize a decor prefix to its comment lines only: each line trimmed of leading
@@ -403,6 +483,43 @@ deploy = "*"
         let once = fmt_global(input);
         assert_eq!(once, expected);
         assert_eq!(fmt_global(&once), once, "comment handling is idempotent");
+    }
+
+    #[test]
+    fn value_suffix_comments_survive_the_rebuild() {
+        // Inline comments after a value — flat rows, sectioned rows, and the version-table
+        // collapse — all keep their line's comment.
+        let digest = "0123456789abcdef".repeat(4);
+        let input = format!(
+            "[bundles]\n\
+             \"github.com/o/r\" = \"*\" # tracked read-only\n\
+             \"topos.sh/acme/deploy\" = {{ version = \"{digest}\" }}   # pinned for the release\n"
+        );
+        let once = fmt_global(&input);
+        assert!(
+            once.contains("\"github.com/o/r\" = \"*\" # tracked read-only"),
+            "{once}"
+        );
+        // The single-field version table COLLAPSED — and the comment rode onto the collapsed value.
+        assert!(
+            once.contains(&format!("deploy = \"{digest}\" # pinned for the release")),
+            "{once}"
+        );
+        assert_eq!(fmt_global(&once), once, "suffix handling is idempotent");
+    }
+
+    #[test]
+    fn defaults_field_comments_survive_the_rebuild() {
+        let input = "[defaults.knowledge]\n\
+                     # where knowledge lands\n\
+                     path = { default = \"docs/ai/\" } # per-kind\n";
+        let once = fmt_global(input);
+        assert!(once.contains("# where knowledge lands"), "{once}");
+        assert!(
+            once.contains("path = { default = \"docs/ai/\" } # per-kind"),
+            "{once}"
+        );
+        assert_eq!(fmt_global(&once), once, "defaults comments are idempotent");
     }
 
     #[test]

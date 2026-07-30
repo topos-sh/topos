@@ -120,6 +120,7 @@ export async function createWorkspace(
         workspaceId,
         userId: null,
         channelId: defaultChannelId,
+        self: false,
         createdBy: actor.userId,
       });
       await auditInTx(tx, {

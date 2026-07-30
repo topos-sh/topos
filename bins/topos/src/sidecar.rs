@@ -273,8 +273,13 @@ pub(crate) fn ensure_project_store(
     let store_dir = project_dir.join(PROJECT_STORE_DIR);
     fs.create_dir_all(&store_dir)?;
     let ignore = store_dir.join(crate::scan::IGNORE_FILE);
-    if !fs.exists(&ignore) {
-        crate::atomic::atomic_write(fs, &ignore, PROJECT_STORE_IGNORE)?;
+    // TRUE exclusive create (`O_EXCL`), not check-then-write: a file already at the path — a
+    // hand-authored ignore, or a concurrent creator's — is NEVER overwritten, and two racing
+    // creators get exactly one winner (the loser's AlreadyExists is success: the file exists).
+    match fs.write_new(&ignore, PROJECT_STORE_IGNORE) {
+        Ok(()) => fs.fsync_dir(&store_dir)?,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e.into()),
     }
     fs.create_dir_all(layout.home())?;
     Ok(layout)
@@ -437,4 +442,53 @@ fn recover_published(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs_seam::RealFs;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "topos-sidecar-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The store's self-ignore is a TRUE exclusive create: a file already at the path — whatever
+    /// its bytes — is never overwritten, and a second creator (the race's loser) leaves the
+    /// winner's file byte-identical.
+    #[test]
+    fn ensure_project_store_never_overwrites_an_existing_ignore_file() {
+        let proj = scratch("exclusive");
+        let store_dir = proj.join(PROJECT_STORE_DIR);
+        std::fs::create_dir_all(&store_dir).unwrap();
+        let ignore = store_dir.join(crate::scan::IGNORE_FILE);
+        std::fs::write(&ignore, b"# hand-authored\nstate/\n").unwrap();
+
+        ensure_project_store(&RealFs, &proj).unwrap();
+        assert_eq!(
+            std::fs::read(&ignore).unwrap(),
+            b"# hand-authored\nstate/\n",
+            "an existing ignore file survives byte-identical"
+        );
+
+        // A fresh store mints the sentinel once; the second (raced/loser) call is a no-op success.
+        let proj2 = scratch("exclusive2");
+        ensure_project_store(&RealFs, &proj2).unwrap();
+        let ignore2 = proj2.join(PROJECT_STORE_DIR).join(crate::scan::IGNORE_FILE);
+        assert_eq!(std::fs::read(&ignore2).unwrap(), PROJECT_STORE_IGNORE);
+        ensure_project_store(&RealFs, &proj2).unwrap();
+        assert_eq!(std::fs::read(&ignore2).unwrap(), PROJECT_STORE_IGNORE);
+
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&proj2);
+    }
 }
