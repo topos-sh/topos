@@ -2554,7 +2554,14 @@ fn an_off_switch_over_a_draft_is_describe_first() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
     // CLEAN: the off switch is a reversible file edit — applies immediately.
-    let out = ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], false).unwrap();
+    let out = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        false,
+    )
+    .unwrap();
     match out {
         ops::RemoveOutcome::Applied(data) => {
             assert!(data.applied);
@@ -2571,7 +2578,14 @@ fn an_off_switch_over_a_draft_is_describe_first() {
 
     // DRAFTED: local edits make the same act loss-shaped — describe-first, applied under --yes.
     std::fs::write(placed.join("SKILL.md"), b"# my edit\n").unwrap();
-    let out = ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], false).unwrap();
+    let out = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        false,
+    )
+    .unwrap();
     match out {
         ops::RemoveOutcome::Described { data, yes_argv } => {
             let note = data.items[0].note.clone().unwrap_or_default();
@@ -2580,7 +2594,8 @@ fn an_off_switch_over_a_draft_is_describe_first() {
         }
         other => panic!("a drafted off switch describes first: {other:?}"),
     }
-    let out = ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], true).unwrap();
+    let out =
+        ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], None, true).unwrap();
     assert!(
         matches!(out, ops::RemoveOutcome::Applied(_)),
         "--yes applies the described act"
@@ -2608,6 +2623,7 @@ fn a_feed_drop_over_a_draft_is_describe_first() {
         &ctx,
         &connect(&plane, &dir),
         std::slice::from_ref(&token),
+        None,
         false,
     )
     .unwrap();
@@ -2625,6 +2641,7 @@ fn a_feed_drop_over_a_draft_is_describe_first() {
         &ctx,
         &connect(&plane, &dir),
         std::slice::from_ref(&token),
+        None,
         true,
     )
     .unwrap();
@@ -2638,7 +2655,7 @@ fn a_feed_drop_over_a_draft_is_describe_first() {
     rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
     sweep(&ctx, &plane, &dir);
     std::fs::write(placed.join("SKILL.md"), b"# deploy\n").unwrap();
-    let out = ops::remove_global(&ctx, &connect(&plane, &dir), &[token], false).unwrap();
+    let out = ops::remove_global(&ctx, &connect(&plane, &dir), &[token], None, false).unwrap();
     assert!(
         matches!(out, ops::RemoveOutcome::Applied(_)),
         "a clean feed drop applies immediately"
@@ -2688,7 +2705,14 @@ fn a_set_split_carries_the_lines_fields_onto_survivors() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
     // The describe discloses BOTH the split and the field carriage.
-    let out = ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], false).unwrap();
+    let out = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        false,
+    )
+    .unwrap();
     match out {
         ops::RemoveOutcome::Described { data, .. } => {
             let note = data.items[0].note.clone().unwrap_or_default();
@@ -2696,7 +2720,8 @@ fn a_set_split_carries_the_lines_fields_onto_survivors() {
         }
         other => panic!("a set split describes first: {other:?}"),
     }
-    let out = ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], true).unwrap();
+    let out =
+        ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], None, true).unwrap();
     assert!(matches!(out, ops::RemoveOutcome::Applied(_)));
     let text =
         std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
@@ -2784,7 +2809,14 @@ fn a_set_split_never_overwrites_a_survivors_explicit_row() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
     // The describe names which survivors get new rows and which keep their own.
-    let out = ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], false).unwrap();
+    let out = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        false,
+    )
+    .unwrap();
     match out {
         ops::RemoveOutcome::Described { data, .. } => {
             let note = data.items[0].note.clone().unwrap_or_default();
@@ -2796,7 +2828,8 @@ fn a_set_split_never_overwrites_a_survivors_explicit_row() {
         }
         other => panic!("a set split describes first: {other:?}"),
     }
-    let out = ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], true).unwrap();
+    let out =
+        ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], None, true).unwrap();
     assert!(matches!(out, ops::RemoveOutcome::Applied(_)));
     let text =
         std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
@@ -3144,6 +3177,100 @@ fn a_project_scope_pending_rewrite_converges_from_the_projects_own_store() {
         "the canonical reference stands in the PROJECT file: {text}"
     );
     assert!(!text.contains("./deploy"), "the path line is gone: {text}");
+}
+
+#[test]
+fn a_removal_that_lands_mid_publish_is_never_silently_undone() {
+    // LOCK, THEN RESOLVE. The rewrite's row is a decision read from a file, and it is only true of
+    // the file the writer lock guards — so the unlocked probe only picks WHICH file, and the row is
+    // re-resolved under the lock. A `topos remove` that completed in that window leaves the person
+    // with a state they chose: either serialization order they could have observed ends with the
+    // row gone, and "removed, then quietly re-added" is neither. The publish still LANDS remotely
+    // (the plane holds it); the receipt discloses that the local half wrote nothing.
+    let rig = Rig::new("rewrite-raced");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    plane.serves(Vec::new());
+
+    // A local skill adopted by path, and the manifest row that references it.
+    let src = rig.work.0.join("deploy");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("SKILL.md"), b"# deploy\n").unwrap();
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let added = ops::add(&ctx, &src).unwrap();
+    let v = one_file(b"# deploy\n");
+    let dir = FakeDirectory::new(
+        vec![catalog_entry(&added.skill_id, "deploy", &v)],
+        Vec::new(),
+    );
+    let canonical_src = src.canonicalize().unwrap();
+    let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
+    rig.write_global(&format!(
+        "[bundles]\n\"{}\" = \"*\"\n",
+        canonical_src.display()
+    ));
+
+    // The RACER: a concurrent removal completes between the probe that chose the file (read 1) and
+    // the re-resolve under the lock (read 2). topos's own writers serialize on that lock; this one
+    // stands for the removal that already finished before the lock was taken.
+    let racing = manifest.clone();
+    let fs = crate::fs_seam::HookFs::before_nth_read(&manifest, 2, move || {
+        std::fs::write(&racing, "[bundles]\n").unwrap();
+    });
+    let hooked = Ctx {
+        fs: &fs,
+        ..rig.ctx_at(Some(&rig.work.0))
+    };
+    let session_connect = |_s: &Session| ops::SessionTransports {
+        plane: Box::new(plane.clone()),
+        directory: Box::new(dir.clone()),
+        contribute: Box::new(OkPublish),
+        governance: Box::new(NoGovernance),
+    };
+    let cc = |_base: &str, _tok: Option<&str>| -> Box<dyn crate::plane::ContributeSource> {
+        Box::new(NoContribute)
+    };
+    let outcome = ops::publish(
+        &hooked,
+        &cc,
+        None,
+        Some(&session_connect),
+        None,
+        "deploy",
+        false,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let data = match outcome {
+        ops::PublishOutcome::Published(d) => d,
+        other => panic!("the publish LANDED: {other:?}"),
+    };
+    let skipped = data
+        .rewrite_skipped
+        .expect("the receipt discloses the transfer it did not make");
+    assert!(
+        skipped.contains(&manifest.display().to_string()),
+        "{skipped}"
+    );
+    assert!(
+        data.manifest.is_none() && data.reference.is_none() && data.converted_from.is_none(),
+        "the receipt never claims a rewrite that did not land"
+    );
+
+    // The removal STANDS: no canonical row was written back over it, and the path row it dropped
+    // stays dropped.
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    assert!(
+        !text.contains(&format!("{HOST}/{WS_NAME}/deploy")),
+        "no workspace row was written: {text}"
+    );
+    assert!(
+        !text.contains(&canonical_src.display().to_string()),
+        "the racer's removal stands: {text}"
+    );
 }
 
 /// A contribute fake for the `--propose` arm: the proposal LANDS remotely (NEEDS_REVIEW);
@@ -3783,7 +3910,7 @@ fn removing_two_members_of_one_set_leaves_neither() {
     let targets = vec!["alpha".to_owned(), "beta".to_owned()];
 
     // The describe reflects the COMBINED split: one line, both names, one survivor.
-    match ops::remove_global(&ctx, &connect(&plane, &dir), &targets, false).unwrap() {
+    match ops::remove_global(&ctx, &connect(&plane, &dir), &targets, None, false).unwrap() {
         ops::RemoveOutcome::Described { data, .. } => {
             assert_eq!(data.items.len(), 1, "one line split once: {:?}", data.items);
             let note = data.items[0].note.clone().unwrap_or_default();
@@ -3793,7 +3920,7 @@ fn removing_two_members_of_one_set_leaves_neither() {
         other => panic!("a set split describes first: {other:?}"),
     }
     assert!(matches!(
-        ops::remove_global(&ctx, &connect(&plane, &dir), &targets, true).unwrap(),
+        ops::remove_global(&ctx, &connect(&plane, &dir), &targets, None, true).unwrap(),
         ops::RemoveOutcome::Applied(_)
     ));
     let text =
@@ -3832,8 +3959,14 @@ fn a_bare_name_two_rows_answer_to_is_refused_not_guessed() {
         "[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n\"github.com/o/deploy\" = \"*\"\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let err =
-        ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], false).unwrap_err();
+    let err = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        None,
+        false,
+    )
+    .unwrap_err();
     assert_eq!(err.code(), "AMBIGUOUS_NAME", "{err:?}");
     let msg = err.to_string();
     assert!(msg.contains(&format!("{HOST}/{WS_NAME}/deploy")), "{msg}");
@@ -3846,7 +3979,7 @@ fn a_bare_name_two_rows_answer_to_is_refused_not_guessed() {
     // Spelled in full, exactly one row answers — and it applies.
     let one = format!("{HOST}/{WS_NAME}/deploy");
     assert!(matches!(
-        ops::remove_global(&ctx, &connect(&plane, &dir), &[one], true).unwrap(),
+        ops::remove_global(&ctx, &connect(&plane, &dir), &[one], None, true).unwrap(),
         ops::RemoveOutcome::Applied(_)
     ));
     let text =
@@ -4297,8 +4430,8 @@ fn a_bare_name_a_row_and_a_set_both_answer_to_is_refused_not_guessed() {
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
-    let err =
-        ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], true).unwrap_err();
+    let err = ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], None, true)
+        .unwrap_err();
     assert_eq!(err.code(), "AMBIGUOUS_NAME", "{err:?}");
     let msg = err.to_string();
     assert!(msg.contains("github.com/o/r/deploy"), "{msg}");
@@ -4308,7 +4441,7 @@ fn a_bare_name_a_row_and_a_set_both_answer_to_is_refused_not_guessed() {
     // end (a set member has no spelling of its own).
     let one = "github.com/o/r/deploy".to_owned();
     assert!(matches!(
-        ops::remove_global(&ctx, &connect(&plane, &dir), &[one], true).unwrap(),
+        ops::remove_global(&ctx, &connect(&plane, &dir), &[one], None, true).unwrap(),
         ops::RemoveOutcome::Applied(_)
     ));
     let text =
@@ -4342,13 +4475,194 @@ fn a_bare_name_two_sets_carry_is_refused_not_split_at_random() {
          \"{HOST}/{WS_NAME}/channels/platform\" = \"*\"\n"
     ));
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let err =
-        ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], true).unwrap_err();
+    let err = ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], None, true)
+        .unwrap_err();
     assert_eq!(err.code(), "AMBIGUOUS_NAME", "{err:?}");
     let msg = err.to_string();
     assert!(msg.contains("channels/backend"), "{msg}");
     assert!(msg.contains("channels/platform"), "{msg}");
+    // And the candidates are PASTE-READY. A set member has no spelling of its own, so listing the
+    // two references alone would be a dead end — each candidate is the EXACT `--via` invocation
+    // that selects that one line's rewrite.
+    assert!(
+        msg.contains(&format!(
+            "{HOST}/{WS_NAME}/deploy --via {HOST}/{WS_NAME}/channels/backend"
+        )),
+        "{msg}"
+    );
+    assert!(
+        msg.contains(&format!(
+            "{HOST}/{WS_NAME}/deploy --via {HOST}/{WS_NAME}/channels/platform"
+        )),
+        "{msg}"
+    );
     // Neither line was touched.
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(
+        text.contains("channels/backend") && text.contains("channels/platform"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_via_reference_splits_exactly_the_line_it_names() {
+    // The ANSWER the set-versus-set refusal offers. `--via` names the line, so the removal is a
+    // SELECTION, not a search: that one line's member-minus-one rewrite lands, and the other line
+    // — never the target — stands whole, still delivering what it carries.
+    let rig = Rig::new("via-picks");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let d = one_file(b"# deploy\n");
+    let b = one_file(b"# beta\n");
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &d)
+        .with_version("s_beta", &b);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(
+        vec![
+            catalog_entry("s_deploy", "deploy", &d),
+            catalog_entry("s_beta", "beta", &b),
+        ],
+        vec![
+            channel("backend", &[("s_deploy", "deploy"), ("s_beta", "beta")]),
+            channel("platform", &[("s_deploy", "deploy")]),
+        ],
+    );
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n\
+         \"{HOST}/{WS_NAME}/channels/platform\" = \"*\"\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let via = format!("{HOST}/{WS_NAME}/channels/backend");
+
+    // A split is GATED whichever way it was selected — it rewrites a curated line — so the bare
+    // run describes, and the re-run it prints carries the `--via` that made it unambiguous.
+    let out = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        Some(&via),
+        false,
+    )
+    .unwrap();
+    match out {
+        ops::RemoveOutcome::Described { yes_argv, .. } => {
+            assert!(yes_argv.iter().any(|a| a == "--via"), "{yes_argv:?}");
+            assert!(yes_argv.contains(&via), "{yes_argv:?}");
+        }
+        other => panic!("a set split describes first: {other:?}"),
+    }
+    // Nothing was written by the describe.
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    assert!(text.contains("channels/backend"), "{text}");
+
+    let out = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        Some(&via),
+        true,
+    )
+    .unwrap();
+    assert!(matches!(out, ops::RemoveOutcome::Applied(_)), "{out:?}");
+
+    let text =
+        std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
+    let doc = crate::manifest::document::parse_manifest(
+        &text,
+        crate::manifest::document::ManifestScope::Global,
+    )
+    .unwrap();
+    assert!(
+        !doc.rows
+            .iter()
+            .any(|r| r.reference.contains("channels/backend")),
+        "the NAMED line split: {text}"
+    );
+    assert!(
+        doc.rows
+            .iter()
+            .any(|r| r.reference == format!("{HOST}/{WS_NAME}/beta")),
+        "its surviving member got its own row: {text}"
+    );
+    assert!(
+        !doc.rows
+            .iter()
+            .any(|r| r.reference == format!("{HOST}/{WS_NAME}/deploy")),
+        "the removed member gets no row: {text}"
+    );
+    assert!(
+        doc.rows
+            .iter()
+            .any(|r| r.reference == format!("{HOST}/{WS_NAME}/channels/platform")),
+        "the line `--via` did NOT name is untouched: {text}"
+    );
+}
+
+#[test]
+fn a_via_that_names_no_line_or_no_member_refuses_typed() {
+    // `--via` is a selection, so each MISS is its own typed refusal — never a fall-through to the
+    // arms the flag does not select (a bare resolution would happily answer something else, and
+    // the person would watch a removal land somewhere they did not name).
+    let rig = Rig::new("via-misses");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let d = one_file(b"# deploy\n");
+    let o = one_file(b"# other\n");
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &d)
+        .with_version("s_other", &o);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(
+        vec![
+            catalog_entry("s_deploy", "deploy", &d),
+            catalog_entry("s_other", "other", &o),
+        ],
+        vec![
+            channel("backend", &[("s_deploy", "deploy")]),
+            channel("platform", &[("s_other", "other")]),
+        ],
+    );
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n\
+         \"{HOST}/{WS_NAME}/channels/platform\" = \"*\"\n"
+    ));
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let backend = format!("{HOST}/{WS_NAME}/channels/backend");
+
+    // (i) A line this file does not carry — named, so the refusal names it back.
+    let absent = format!("{HOST}/{WS_NAME}/channels/nosuch");
+    let err = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["deploy".into()],
+        Some(&absent),
+        true,
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "INVALID_ARGUMENT", "{err:?}");
+    assert!(err.to_string().contains(&absent), "{err}");
+
+    // (ii) A real line the token does not come from. `other` IS removable here — the platform
+    // line carries it — which is exactly why the flag must refuse rather than quietly split that
+    // other line; the refusal lists the named line's current members so the retry is obvious.
+    let err = ops::remove_global(
+        &ctx,
+        &connect(&plane, &dir),
+        &["other".into()],
+        Some(&backend),
+        true,
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "INVALID_ARGUMENT", "{err:?}");
+    let msg = err.to_string();
+    assert!(msg.contains("'other'"), "{msg}");
+    assert!(msg.contains(&backend), "{msg}");
+    assert!(msg.contains("current members: deploy"), "{msg}");
+
+    // Both misses wrote NOTHING.
     let text =
         std::fs::read_to_string(rig.layout().home().join(crate::manifest::MANIFEST_FILE)).unwrap();
     assert!(
@@ -4380,8 +4694,8 @@ fn a_bare_name_the_feed_and_a_repo_set_both_deliver_is_refused() {
         "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"github.com/o/r\" = \"*\"\n"
     ));
 
-    let err =
-        ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], true).unwrap_err();
+    let err = ops::remove_global(&ctx, &connect(&plane, &dir), &["deploy".into()], None, true)
+        .unwrap_err();
     assert_eq!(err.code(), "AMBIGUOUS_NAME", "{err:?}");
     let msg = err.to_string();
     assert!(msg.contains(&format!("{HOST}/{WS_NAME}/deploy")), "{msg}");
@@ -4433,8 +4747,8 @@ fn a_manifest_edited_between_the_decision_and_the_write_refuses() {
         fs: &fs,
         ..rig.ctx_at(Some(&rig.work.0))
     };
-    let err =
-        ops::remove_global(&ctx, &connect(&plane, &dir), &["alpha".into()], true).unwrap_err();
+    let err = ops::remove_global(&ctx, &connect(&plane, &dir), &["alpha".into()], None, true)
+        .unwrap_err();
     assert_eq!(err.code(), "MANIFEST_CHANGED", "{err:?}");
 
     // NOTHING was written: the racer's row stands, the set line stands, no split landed.
@@ -4449,9 +4763,62 @@ fn a_manifest_edited_between_the_decision_and_the_write_refuses() {
     // Re-run against the file as it now is: the split honours beta's own row and applies.
     let ctx = rig.ctx_at(Some(&rig.work.0));
     assert!(matches!(
-        ops::remove_global(&ctx, &connect(&plane, &dir), &["alpha".into()], true).unwrap(),
+        ops::remove_global(&ctx, &connect(&plane, &dir), &["alpha".into()], None, true).unwrap(),
         ops::RemoveOutcome::Applied(_)
     ));
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    assert!(!text.contains("channels/backend"), "the line split: {text}");
+    assert!(text.contains(&format!("{HOST}/{WS_NAME}/beta")), "{text}");
+}
+
+#[test]
+fn the_reproof_and_the_editor_read_one_document() {
+    // The STRUCTURAL half of the refusal above. The reproof is only worth anything if it holds for
+    // the EXACT document instance the write then emits — proving against one read and editing a
+    // second leaves a window where an outside edit is proven against but not edited (or edited but
+    // not proven against). So the apply path reads the manifest ONCE and hands that text to both.
+    // The witness is an absence: after the plan's read there is exactly one more, never a third.
+    let rig = Rig::new("one-read");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let a = one_file(b"# alpha\n");
+    let b = one_file(b"# beta\n");
+    let plane = FakePlane::new(log)
+        .with_version("s_a", &a)
+        .with_version("s_b", &b);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(
+        vec![
+            catalog_entry("s_a", "alpha", &a),
+            catalog_entry("s_b", "beta", &b),
+        ],
+        vec![channel("backend", &[("s_a", "alpha"), ("s_b", "beta")])],
+    );
+    let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n"
+    ));
+
+    // The tripwire sits on the read that would OPEN that window — the third. It never fires.
+    let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&fired);
+    let fs = crate::fs_seam::HookFs::before_nth_read(&manifest, 3, move || {
+        flag.store(true, Ordering::Relaxed);
+    });
+    let ctx = Ctx {
+        fs: &fs,
+        ..rig.ctx_at(Some(&rig.work.0))
+    };
+    let out =
+        ops::remove_global(&ctx, &connect(&plane, &dir), &["alpha".into()], None, true).unwrap();
+    assert!(matches!(out, ops::RemoveOutcome::Applied(_)), "{out:?}");
+    assert!(
+        !fired.load(Ordering::Relaxed),
+        "the apply path reads the manifest ONCE for the reproof AND the editor — a third read IS \
+         the window"
+    );
+
+    // And the split it proved is the split it wrote.
     let text = std::fs::read_to_string(&manifest).unwrap();
     assert!(!text.contains("channels/backend"), "the line split: {text}");
     assert!(text.contains(&format!("{HOST}/{WS_NAME}/beta")), "{text}");
@@ -4994,4 +5361,117 @@ fn a_pinned_whole_repo_row_keeps_its_pin_and_says_the_selection_did_not_fit() {
         crate::manifest::document::EntryValue::Pin("aaaaaaaaaaaa1".into()),
         "the pin is kept whole: {text}"
     );
+}
+
+// =================================================================================================
+// The pre-1.0 legacy handover: a home-map row pointing into a checkout retires ONLY once that
+// checkout's own store verifiably tracks it — and its state dir is PARKED, never deleted.
+// =================================================================================================
+
+/// Seed ONE skill into `layout`'s store: a `skills/<id>/` dir whose map records exactly
+/// `placement`, as a `native` row attributed to an agent — the shape the pre-per-scope blended map
+/// wrote for a copy that lives inside a project checkout.
+fn seed_store_row(layout: &Layout, id: &str, placement: &std::path::Path) {
+    use topos_types::persisted::{PlacementKind, PlacementMap, PlacementState, SwapCapability};
+    let sid = crate::id::SkillId::parse(id).unwrap();
+    std::fs::create_dir_all(layout.skill_dir(&sid)).unwrap();
+    crate::doc::write_map(
+        &RealFs,
+        &layout.published(&sid).map,
+        &PlacementMap {
+            schema_version: 2,
+            placements: vec![placement.to_string_lossy().into_owned()],
+            applied_commit: "0".repeat(64),
+            materialized_sha: "0".repeat(64),
+            pre_existing_sha: None,
+            swap_capability: SwapCapability::RenameDance,
+            placement_state: vec![PlacementState {
+                kind: PlacementKind::Native,
+                agent: Some("claude-code".to_owned()),
+                materialized_sha: None,
+                pre_existing_sha: None,
+                swap_capability: SwapCapability::RenameDance,
+            }],
+            harness: None,
+            harness_layer: None,
+            harness_slug: Some("claude-code".to_owned()),
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn an_unadopted_project_placement_never_retires_the_home_row() {
+    // CUSTODY FIRST. A home row pointing into the active checkout is legacy — but until the
+    // project's OWN store records that exact placement, retiring it would leave those bytes
+    // tracked by nobody. An empty (or not-yet-reconciled) project hands NOTHING over; the next
+    // sweep, after the project pass adopts, does.
+    let rig = Rig::new("handover-unadopted");
+    let proj = project("handover-unadopted-proj", "[bundles]\n");
+    let placed = proj.0.join(".claude/skills/legacy");
+    std::fs::create_dir_all(&placed).unwrap();
+    std::fs::write(placed.join("SKILL.md"), b"# legacy\n").unwrap();
+    seed_store_row(&rig.layout(), "s_legacy", &placed);
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    let mut warnings = Vec::new();
+    ops::handover_legacy_project_rows(&ctx, std::slice::from_ref(&proj.0), &mut warnings);
+
+    assert!(warnings.is_empty(), "nothing to disclose: {warnings:?}");
+    let sid = crate::id::SkillId::parse("s_legacy").unwrap();
+    let map = crate::doc::read_map(&rig.fs, &rig.layout().published(&sid).map)
+        .unwrap()
+        .expect("the home map is still there");
+    assert_eq!(map.placements.len(), 1, "the row stands: {map:?}");
+    assert!(
+        rig.layout().skill_dir(&sid).is_dir(),
+        "and so does its state dir"
+    );
+    assert!(
+        !rig.layout()
+            .skills_dir()
+            .join(".topos-handover-s_legacy")
+            .exists(),
+        "nothing was parked"
+    );
+}
+
+#[test]
+fn an_adopted_project_placement_hands_over_and_parks_the_home_store() {
+    // Custody established: the project store records that EXACT placement, so the home row lets
+    // go. What it leaves behind is not deleted — the embedded history and draft snapshots under it
+    // were never carried into the project's fresh baseline, so the dir is PARKED to a
+    // `.topos-handover-*` sibling and NAMED on a warning; a person deletes it deliberately.
+    let rig = Rig::new("handover-adopted");
+    let proj = project("handover-adopted-proj", "[bundles]\n");
+    let placed = proj.0.join(".claude/skills/legacy");
+    std::fs::create_dir_all(&placed).unwrap();
+    std::fs::write(placed.join("SKILL.md"), b"# legacy\n").unwrap();
+    seed_store_row(&rig.layout(), "s_legacy", &placed);
+    // The ADOPTION WITNESS: the checkout's own store tracks a skill recording the same path.
+    let playout = crate::sidecar::ensure_project_store(&rig.fs, &proj.0).unwrap();
+    seed_store_row(&playout, "s_proj", &placed);
+    let ctx = rig.ctx_at(Some(&proj.0));
+
+    let mut warnings = Vec::new();
+    ops::handover_legacy_project_rows(&ctx, std::slice::from_ref(&proj.0), &mut warnings);
+
+    let sid = crate::id::SkillId::parse("s_legacy").unwrap();
+    let parked = rig.layout().skills_dir().join(".topos-handover-s_legacy");
+    assert!(
+        !rig.layout().skill_dir(&sid).exists(),
+        "the home entry let go"
+    );
+    assert!(parked.is_dir(), "…by PARKING it: {}", parked.display());
+    let kept = crate::doc::read_map(&rig.fs, &parked.join("map.json"))
+        .unwrap()
+        .expect("the parked store's bytes are intact");
+    assert_eq!(kept.placements.len(), 1, "{kept:?}");
+    let line = warnings
+        .iter()
+        .find(|w| w.starts_with("STATE_HANDOVER"))
+        .unwrap_or_else(|| panic!("the disclosure line: {warnings:?}"));
+    assert!(line.contains(&parked.display().to_string()), "{line}");
+    // The bytes in the checkout were never the subject — they stay exactly where they are.
+    assert!(placed.join("SKILL.md").exists());
 }

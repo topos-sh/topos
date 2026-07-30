@@ -822,6 +822,13 @@ pub struct PublishData {
     /// converges the rewrite idempotently. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rewrite_pending: Option<String>,
+    /// The manifest's local-path line was REMOVED while this publish ran (a concurrent
+    /// `topos remove` completed between the describe and the locked rewrite): NO workspace row
+    /// was written — a completed removal is never silently undone. The publish stands
+    /// catalog-side; `topos add <reference>` records the demand deliberately. **INFERRED**
+    /// (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewrite_skipped: Option<String>,
 }
 
 /// The disclosure a `publish` attaches when it ADDED the skill to topos before shipping — the auto-add
@@ -888,6 +895,11 @@ pub struct ProposeData {
     /// re-run) converges the rewrite idempotently. **INFERRED** (additive-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rewrite_pending: Option<String>,
+    /// The manifest's local-path line was REMOVED while this propose ran (a concurrent
+    /// `topos remove`): NO workspace row was written — a completed removal is never silently
+    /// undone. **INFERRED** (additive-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewrite_skipped: Option<String>,
 }
 
 /// `revert` (a **forward** git-revert restoring older bytes as a new, higher-generation version —
@@ -1478,6 +1490,7 @@ mod tests {
             invite_line: None,
             origin_note: None,
             rewrite_pending: None,
+            rewrite_skipped: None,
         };
         let v = serde_json::to_value(&done).unwrap();
         assert_eq!(v["version_id"], "a".repeat(64));

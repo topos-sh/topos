@@ -1049,6 +1049,19 @@ pub(crate) struct GovernedRewrite {
     pub from: String,
 }
 
+/// What [`rewrite_to_governed`] concluded.
+pub(crate) enum GovernedOutcome {
+    /// The path line was rewritten to the canonical workspace reference.
+    Rewritten(GovernedRewrite),
+    /// A path line was found, but was GONE by the time the manifest's writer lock was held — a
+    /// concurrent `topos remove` completed in the window. NOTHING was written: a completed
+    /// removal is never silently undone (the publish stands catalog-side; the receipt disclosed
+    /// it with this manifest path).
+    RowRemoved { manifest: String },
+    /// No manifest references the bundle by path (an already-governed republish).
+    None,
+}
+
 /// The READ-ONLY probe behind [`rewrite_to_governed`] (the describe predicts with it): the nearest
 /// manifest whose LOCAL-PATH row resolves to one of the bundle's placement dirs, with the row's
 /// spelling. Mutates nothing.
@@ -1095,6 +1108,15 @@ pub(crate) fn find_path_line(
 /// act. The match is by RESOLVED PATH, never by name (two dirs may share a basename); an
 /// already-present canonical row keeps its own value.
 ///
+/// LOCK, THEN RESOLVE. The row this rewrite acts on is a decision read FROM a file, and it is
+/// only true of the file the writer lock now guards — so the probe that names the file runs
+/// first (a lock needs a path), the lock is taken, and the row is RE-RESOLVED under it. A row a
+/// concurrent `topos remove` dropped in that window answers [`GovernedOutcome::RowRemoved`]:
+/// no workspace row is written (either serialization order the person could have observed —
+/// remove-then-publish, publish-then-remove — ends with the row gone, and "removed, then quietly
+/// re-added" is neither). A re-resolve that lands in a DIFFERENT file re-locks against it,
+/// bounded.
+///
 /// # Errors
 /// A manifest read/write failure.
 pub(crate) fn rewrite_to_governed(
@@ -1103,36 +1125,56 @@ pub(crate) fn rewrite_to_governed(
     host: &str,
     workspace_name: &str,
     skill_dirs: &[std::path::PathBuf],
-) -> Result<Option<GovernedRewrite>, ClientError> {
+) -> Result<GovernedOutcome, ClientError> {
     let canonical = format!("{host}/{workspace_name}/{skill_name}");
-    let Some((path, from)) = find_path_line(ctx, skill_dirs)? else {
-        return Ok(None);
+    let Some((mut path, _)) = find_path_line(ctx, skill_dirs)? else {
+        return Ok(GovernedOutcome::None);
     };
-    let scope = if path.starts_with(ctx.layout.home()) {
-        ManifestScope::Global
-    } else {
-        ManifestScope::Project
-    };
-    // The governance rewrite is a read-modify-write of someone's manifest, so it takes the same
-    // writer lock as `add`/`remove` — a publish's transfer must not silently drop a row an agent
-    // added while the publish was in flight.
-    let _guard = medit::lock_manifest(ctx, &path)?;
-    let Some(text) = medit::read_text(ctx, &path)? else {
-        return Ok(None);
-    };
-    let mut editor = crate::manifest::document::ManifestEditor::open(&text, scope)
-        .map_err(|e| ClientError::Corrupt(format!("{}: {e}", path.display())))?;
-    let already_governed = editor.row(&canonical).is_some();
-    editor.remove_row(&from);
-    if !already_governed {
-        editor
-            .set_row(&canonical, &EntryValue::Star)
-            .map_err(|e| ClientError::InvalidArgument(e.message))?;
+    for _ in 0..4 {
+        // The governance rewrite is a read-modify-write of someone's manifest, so it takes the
+        // same writer lock as `add`/`remove` — a publish's transfer must not silently drop a row
+        // an agent added while the publish was in flight.
+        let _guard = medit::lock_manifest(ctx, &path)?;
+        // RE-RESOLVE under the lock: the unlocked probe above only chose which file to lock.
+        let found = find_path_line(ctx, skill_dirs)?;
+        let Some((found_path, from)) = found else {
+            // The row is gone — a completed concurrent removal. Write nothing.
+            return Ok(GovernedOutcome::RowRemoved {
+                manifest: path.display().to_string(),
+            });
+        };
+        if found_path != path {
+            // The row moved to a different file (removed here, spelled there) — lock THAT one.
+            path = found_path;
+            continue;
+        }
+        let scope = if path.starts_with(ctx.layout.home()) {
+            ManifestScope::Global
+        } else {
+            ManifestScope::Project
+        };
+        let Some(text) = medit::read_text(ctx, &path)? else {
+            return Ok(GovernedOutcome::RowRemoved {
+                manifest: path.display().to_string(),
+            });
+        };
+        let mut editor = crate::manifest::document::ManifestEditor::open(&text, scope)
+            .map_err(|e| ClientError::Corrupt(format!("{}: {e}", path.display())))?;
+        let already_governed = editor.row(&canonical).is_some();
+        editor.remove_row(&from);
+        if !already_governed {
+            editor
+                .set_row(&canonical, &EntryValue::Star)
+                .map_err(|e| ClientError::InvalidArgument(e.message))?;
+        }
+        editor.write(ctx.fs, &path)?;
+        return Ok(GovernedOutcome::Rewritten(GovernedRewrite {
+            manifest: path.display().to_string(),
+            canonical,
+            from,
+        }));
     }
-    editor.write(ctx.fs, &path)?;
-    Ok(Some(GovernedRewrite {
-        manifest: path.display().to_string(),
-        canonical,
-        from,
-    }))
+    // The row kept hopping between files while we chased the lock — leave the transfer pending
+    // (the next update converges it idempotently) rather than writing under the wrong lock.
+    Ok(GovernedOutcome::None)
 }

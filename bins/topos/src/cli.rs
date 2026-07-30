@@ -184,6 +184,11 @@ pub(crate) enum Command {
         /// Edit your machine-wide file (`~/.topos/topos.toml`) instead of this folder's.
         #[arg(long, short = 'g')]
         global: bool,
+        /// When more than one channel/repo line carries the skill, name WHICH line's rewrite you
+        /// mean (its reference, e.g. `@acme/channels/backend`) — the ambiguity refusal lists the
+        /// exact `--via` invocations.
+        #[arg(long, value_name = "REF")]
+        via: Option<String>,
         /// Confirm a removal that loses local work (unshared edits, or a local-only skill whose
         /// delete is permanent).
         #[arg(long)]

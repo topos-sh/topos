@@ -1167,7 +1167,12 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 finish_pull(json, cmd_name, result, connected, &diag)
             }
         }
-        Command::Remove { skill, global, yes } => {
+        Command::Remove {
+            skill,
+            global,
+            via,
+            yes,
+        } => {
             // A REFERENCE-SHAPED token the grammar refuses surfaces its typed refusal here too —
             // never retried through the tracked/untracked ladder (whose answers name the wrong fix).
             for t in &skill {
@@ -1187,18 +1192,45 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             // feed, or switch one feed-delivered bundle off here. It never touches the server —
             // what a workspace assigns you is managed on the web.
             if global {
-                let result = ops::remove_global(&ctx, &connect_session_transports, &skill, yes);
+                let result = ops::remove_global(
+                    &ctx,
+                    &connect_session_transports,
+                    &skill,
+                    via.as_deref(),
+                    yes,
+                );
                 return finish_remove(json, cmd_name, result, &diag);
             }
             // The PROJECT manifest arm first: a target naming a row in this folder's file (or a
             // member a channel/repo line brings) edits that file. The classic tracked/untracked
             // removal owns everything no manifest mentions.
-            match ops::remove_project(&ctx, &connect_session_transports, &skill, yes) {
+            match ops::remove_project(
+                &ctx,
+                &connect_session_transports,
+                &skill,
+                via.as_deref(),
+                yes,
+            ) {
                 Ok(Some(outcome)) => {
                     return finish_remove(json, cmd_name, Ok(outcome), &diag);
                 }
                 Ok(None) => {}
                 Err(e) => return emit_err(json, cmd_name, &e, &diag),
+            }
+            // `--via` selects a manifest set line; a token no manifest arm claimed has no line
+            // for it to select — refuse rather than routing the flag into the classic removal,
+            // which knows nothing of manifest lines.
+            if let Some(via) = &via {
+                return emit_err(
+                    json,
+                    cmd_name,
+                    &ClientError::InvalidArgument(format!(
+                        "--via {via} selects a channel/repo line in a manifest, and no manifest \
+                         line here carries the named target — `topos status` lists what each \
+                         file asks for"
+                    )),
+                    &diag,
+                );
             }
             let connectors = ops::RemoveConnectors {
                 directory: &connect_directory,

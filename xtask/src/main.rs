@@ -1018,6 +1018,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             ),
             origin_note: None,
             rewrite_pending: None,
+            rewrite_skipped: None,
         })
         .expect("PublishData serializes"),
         warnings: vec![],

@@ -892,7 +892,7 @@ fn enrolled_publish(
                     &l.workspace_name,
                     &dirs,
                 ) {
-                    Ok(Some(rw)) => {
+                    Ok(super::GovernedOutcome::Rewritten(rw)) => {
                         data.manifest = Some(rw.manifest);
                         data.reference = Some(rw.canonical);
                         data.converted_from = Some(rw.from);
@@ -919,7 +919,10 @@ fn enrolled_publish(
                             },
                         );
                     }
-                    Ok(None) => {}
+                    Ok(super::GovernedOutcome::RowRemoved { manifest }) => {
+                        data.rewrite_skipped = Some(rewrite_skipped_note(&lock.name, &manifest));
+                    }
+                    Ok(super::GovernedOutcome::None) => {}
                     Err(e) => {
                         data.rewrite_pending =
                             Some(rewrite_pending_note(outer_ctx, &lock.name, &e));
@@ -936,12 +939,15 @@ fn enrolled_publish(
                     &l.workspace_name,
                     &dirs,
                 ) {
-                    Ok(Some(rw)) => {
+                    Ok(super::GovernedOutcome::Rewritten(rw)) => {
                         data.manifest = Some(rw.manifest);
                         data.reference = Some(rw.canonical);
                         data.converted_from = Some(rw.from);
                     }
-                    Ok(None) => {}
+                    Ok(super::GovernedOutcome::RowRemoved { manifest }) => {
+                        data.rewrite_skipped = Some(rewrite_skipped_note(&lock.name, &manifest));
+                    }
+                    Ok(super::GovernedOutcome::None) => {}
                     Err(e) => {
                         data.rewrite_pending =
                             Some(rewrite_pending_note(outer_ctx, &lock.name, &e));
@@ -972,6 +978,17 @@ fn rewrite_pending_note(ctx: &Ctx<'_>, skill_name: &str, e: &ClientError) -> Str
         "the publish landed, but the manifest's local-path line could not be rewritten to the \
          governed reference ({safe}) — the next `topos update` (or re-running this publish) \
          completes the transfer"
+    )
+}
+
+/// The concurrent-removal receipt half: the path line this publish would have rewritten was
+/// removed (a concurrent `topos remove`) before the locked rewrite ran — nothing was written,
+/// because a completed removal is never silently undone.
+fn rewrite_skipped_note(skill_name: &str, manifest: &str) -> String {
+    format!(
+        "the manifest line for '{skill_name}' ({manifest}) was removed while the publish ran — \
+         no workspace row was written (a removal is never silently undone); the publish stands \
+         in the catalog, and `topos add` records the demand if you want it delivered here"
     )
 }
 
@@ -1291,6 +1308,7 @@ fn map_outcome(
                 invite_line,
                 origin_note: None,
                 rewrite_pending: None,
+                rewrite_skipped: None,
             }))
         }
         TerminalOutcome::NeedsReview => {
@@ -1318,6 +1336,7 @@ fn map_outcome(
                 reference: None,
                 converted_from: None,
                 rewrite_pending: None,
+                rewrite_skipped: None,
             }))
         }
         TerminalOutcome::Conflict => Err(ClientError::Conflict {

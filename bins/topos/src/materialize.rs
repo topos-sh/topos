@@ -32,6 +32,19 @@
 //! snapshot has captured yet), the caller-supplied [`MaterializeReq::snapshot`] seam commits those
 //! bytes into the sidecar store — never a lost byte. The per-skill writer flock (held by the caller,
 //! living OUTSIDE the swapped dirs) serializes topos writers across the whole sequence.
+//!
+//! ## The residual window a rename cannot close (documented, not hoped away)
+//!
+//! Parking a directory takes it out of every PATH, but POSIX cannot take it away from an
+//! already-open FILE DESCRIPTOR: a process that opened `SKILL.md` before the swap can keep writing
+//! the renamed inode for as long as it likes. So a park is never judged once and destroyed on that
+//! judgment — [`verify_parked_old`] re-reads the park until two CONSECUTIVE scans agree, accounts
+//! for every distinct content it saw (snapshot, baseline, target), and only then removes it; a park
+//! that keeps moving, or that cannot be accounted for, is preserved on disk (`.topos-kept-*`)
+//! rather than deleted. What remains is irreducible: a write that lands through an open fd BETWEEN
+//! the final verifying scan and the completion of the unlink walk can still die unexamined. No
+//! sequence of path syscalls closes that window; narrowing it to one scan-to-unlink beat — and
+//! preserving anything observed moving — is the honest limit.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -100,6 +113,17 @@ pub(crate) struct MaterializeReq<'a> {
     /// reconciles. A target already holding the bundle's bytes still heals in place. `None` (the
     /// default) keeps the strict arms: refuse/heal exactly as documented above.
     pub expected: Option<&'a [(usize, Option<String>)]>,
+    /// PROJECT scope only: the checkout every placement of this apply must provably resolve
+    /// inside. The plan already refused escaping roots ([`crate::placement::within_project`]), but
+    /// a record is a memory, not a permission — an ancestor can become a symlink between the plan
+    /// and this write — so the SAME containment proof is re-run here, at the write boundary:
+    /// once before any staging byte lands in the placement's parent, and again immediately before
+    /// the swap/rename that installs. The proof covers the STAGED path transitively: staging is a
+    /// sibling in the placement's REAL parent, so a placement that proves containment pins its
+    /// staging dir inside the checkout with it. A placement that no longer proves containment
+    /// REFUSES (typed, nothing destroyed, `applied` not advanced) — never redirected. `None` =
+    /// the person scope (home dirs carry no such rail).
+    pub project_root: Option<&'a Path>,
 }
 
 /// What the materializer actually did (so the engine can log / record the effective capability).
@@ -194,6 +218,10 @@ pub(crate) fn materialize(
             },
         };
         let placement_dir = PathBuf::from(&map.placements[i]);
+        // The containment rail, re-proven at the WRITE boundary (see [`MaterializeReq::project_root`]):
+        // resolve_target below creates + canonicalizes the parent, which is already a write into
+        // whatever the path resolves to — so the proof comes first.
+        prove_containment(req.project_root, &placement_dir)?;
         let kind = fs.path_kind(&placement_dir)?;
         let target = resolve_target(fs, &placement_dir, kind)?;
         let parent = target.parent.clone();
@@ -204,8 +232,20 @@ pub(crate) fn materialize(
             continue;
         }
 
-        // Clear any leftover litter from a prior crashed apply of THIS skill (under the caller's flock).
-        cleanup_litter(fs, &parent, req.skill_id)?;
+        // Clear any leftover litter from a prior crashed apply of THIS skill (under the caller's
+        // flock). The staging/graveyard names are PARKS a crashed run may have left mid-judgment —
+        // a crash after the swap but before `verify_parked_old` concluded strands the OLD tree
+        // (raced edits included) there — so they are JUDGED with the same park-then-verify rail,
+        // never deleted on their name alone; only the probe dirs (throwaway empties this
+        // materializer mints itself) are cleared blind.
+        cleanup_litter(
+            fs,
+            &parent,
+            req.skill_id,
+            &target_hex,
+            map.placement_state[i].materialized_sha.as_deref(),
+            req.snapshot,
+        )?;
 
         // The tree as the pre-swap scan below saw it — a STAT-only fingerprint, re-taken
         // immediately before the swap so the decision the scan made is re-proven against the bytes
@@ -327,6 +367,14 @@ pub(crate) fn materialize(
                     }
                 }
             }
+        }
+
+        // The containment proof AGAIN, immediately before the namespace op that installs the
+        // bytes — the staging build took real time, and an ancestor that became a symlink inside
+        // that window would route the rename through it.
+        if let Err(e) = prove_containment(req.project_root, &placement_dir) {
+            fs.remove_dir_all(&staging)?;
+            return Err(e);
         }
 
         // Place the bytes.
@@ -540,20 +588,76 @@ fn do_dance(
     Ok(graveyard)
 }
 
-/// PARK-THEN-VERIFY, the swap's own half: judge the OLD tree the swap parked, and only then drop
-/// it.
+/// What became of a judged park (see [`settle_park`]).
+enum ParkFate {
+    /// Every byte accounted for, two consecutive reads agreed — the park was removed.
+    Dropped,
+    /// The bytes could not be dropped (unreadable, unaccountable, or still moving) and the park
+    /// was renamed to a `.topos-kept-*` sibling no sweep touches.
+    Kept,
+    /// Same, but the rename ALSO failed — the park still sits under its original name. Nothing
+    /// was deleted; the caller decides whether that name being occupied is fatal.
+    Stuck,
+}
+
+/// PARK-THEN-VERIFY's judging half: account for every byte a parked tree holds, then drop it —
+/// and only on TWO CONSECUTIVE AGREEING READS, the second immediately before the removal.
 ///
-/// Every decision above the swap — heal, snapshot, never-clobber, the pre-mutation re-stat — was
-/// made against bytes still reachable by their path, so the last instant before the syscall is
-/// still a window. This read is not: the tree is parked, nobody can write it through the placement
-/// path any more, and what it holds is exactly what would have been lost.
+/// A rename takes the tree out of every PATH, but not away from an already-open file descriptor
+/// (see the module doc's residual-window section): a process that opened a file before the park
+/// can keep writing the renamed inode, so one scan is a judgment about bytes that may already be
+/// gone. The loop re-reads until the tree holds still across two scans, absorbing every distinct
+/// content it sees along the way:
 ///
-/// - bytes that ARE the target, or that equal this placement's recorded baseline, or that a
-///   snapshot above already captured → nothing of the person's is in them; drop;
-/// - anything else → snapshot it first (the callers that destroy always carry a snapshotter);
-/// - unaccountable with no snapshotter (a test seam, never a production path) → the park is RENAMED
-///   to a `.topos-kept-*` sibling no litter sweep touches and left on disk. No unsnapshotted byte
-///   dies, even when there is nowhere to put it.
+/// - bytes that ARE the target, or equal this placement's recorded baseline, or that a snapshot
+///   already captured (`captured` / an earlier loop pass) → accounted;
+/// - anything else → snapshotted right then (the callers that destroy carry a snapshotter);
+/// - unreadable, unaccountable with no snapshotter, or never settling within the bound → the park
+///   is preserved (renamed to a `.topos-kept-*` sibling), never deleted.
+fn settle_park(
+    fs: &dyn FsOps,
+    parked: &Path,
+    target_hex: &str,
+    baseline: Option<&str>,
+    captured: Option<&str>,
+    snapshot: Option<SnapshotFn<'_>>,
+) -> Result<ParkFate, ClientError> {
+    /// Two agreeing reads authorize the drop; a tree still moving after this many passes is
+    /// preserved instead (an fd-writer that active never settles inside one command).
+    const SETTLE_PASSES: usize = 4;
+    let mut prev: Option<String> = None;
+    let mut absorbed: Vec<String> = Vec::new();
+    for _ in 0..SETTLE_PASSES {
+        let Ok(scanned) = scan::scan(parked) else {
+            // An unreadable park is not a park we may delete.
+            return keep_parked(fs, parked);
+        };
+        let hex = to_hex(&scanned.bundle_digest);
+        let accounted = hex == target_hex
+            || baseline == Some(hex.as_str())
+            || captured == Some(hex.as_str())
+            || absorbed.iter().any(|a| a == &hex);
+        if !accounted {
+            match snapshot {
+                Some(snapshot) => {
+                    snapshot(&scanned)?;
+                    absorbed.push(hex.clone());
+                }
+                None => return keep_parked(fs, parked),
+            }
+        }
+        if prev.as_deref() == Some(hex.as_str()) {
+            fs.remove_dir_all(parked)?;
+            return Ok(ParkFate::Dropped);
+        }
+        prev = Some(hex);
+    }
+    keep_parked(fs, parked)
+}
+
+/// [`settle_park`] at the swap's own call site: whatever the fate, the apply proceeds — a Kept or
+/// Stuck park holds preserved bytes beside the placement (the next apply's litter judge re-reads
+/// a Stuck one), and the new bytes are already installed.
 fn verify_parked_old(
     fs: &dyn FsOps,
     parked: &Path,
@@ -562,38 +666,67 @@ fn verify_parked_old(
     captured: Option<&str>,
     snapshot: Option<SnapshotFn<'_>>,
 ) -> Result<(), ClientError> {
-    let Ok(scanned) = scan::scan(parked) else {
-        // An unreadable park is not a park we may delete.
-        return keep_parked(fs, parked);
-    };
-    let hex = to_hex(&scanned.bundle_digest);
-    if hex == target_hex || baseline == Some(hex.as_str()) || captured == Some(hex.as_str()) {
-        fs.remove_dir_all(parked)?;
-        return Ok(());
-    }
-    match snapshot {
-        Some(snapshot) => {
-            snapshot(&scanned)?;
-            fs.remove_dir_all(parked)?;
-            Ok(())
-        }
-        None => keep_parked(fs, parked),
-    }
+    settle_park(fs, parked, target_hex, baseline, captured, snapshot).map(|_| ())
 }
 
-/// Move a park out of the litter sweep's reach and leave it — the "we could not account for these
-/// bytes and have nowhere to put them" arm. Best-effort: a park that cannot be renamed simply
-/// stays where it is (still not deleted).
-fn keep_parked(fs: &dyn FsOps, parked: &Path) -> Result<(), ClientError> {
+/// Move a park out of every sweep's reach and leave it — the "we could not account for these
+/// bytes" arm. The kept name ladders past existing siblings (a prior kept park is never deleted
+/// to make room); a park that cannot be renamed at all stays where it is (still not deleted) and
+/// the caller learns it via [`ParkFate::Stuck`].
+fn keep_parked(fs: &dyn FsOps, parked: &Path) -> Result<ParkFate, ClientError> {
+    Ok(match preserve_park(fs, parked) {
+        Some(_) => ParkFate::Kept,
+        None => ParkFate::Stuck,
+    })
+}
+
+/// Rename a park to a `.topos-kept-*` sibling no sweep touches, laddering past existing kept
+/// siblings, and return the new path — `None` when it could not be moved (the park stays under
+/// its own name; NOTHING is deleted either way). The shared preserve primitive recovery and the
+/// litter judge use for bytes they cannot account for.
+pub(crate) fn preserve_park(fs: &dyn FsOps, parked: &Path) -> Option<PathBuf> {
     let name = parked
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "dir".to_owned());
-    let kept = parked.with_file_name(format!(".topos-kept-{name}"));
-    if !fs.exists(&kept) {
-        let _ = fs.rename(parked, &kept);
+    let mut kept = parked.with_file_name(format!(".topos-kept-{name}"));
+    let mut n = 1u32;
+    while fs.exists(&kept) {
+        n += 1;
+        if n > 64 {
+            return None;
+        }
+        kept = parked.with_file_name(format!(".topos-kept-{name}.{n}"));
     }
-    Ok(())
+    fs.rename(parked, &kept).ok().map(|()| kept)
+}
+
+/// The write-boundary containment proof (see [`MaterializeReq::project_root`]): a project-scope
+/// placement whose RECORDED path no longer provably resolves inside the checkout refuses, typed —
+/// nothing staged, nothing swapped, nothing destroyed.
+fn prove_containment(project_root: Option<&Path>, placement: &Path) -> Result<(), ClientError> {
+    let Some(root) = project_root else {
+        return Ok(());
+    };
+    if contained_in(root, placement) {
+        return Ok(());
+    }
+    Err(ClientError::PlacementUnsupported {
+        reason: crate::placement::escape_line("the placement", placement),
+    })
+}
+
+/// [`crate::placement::within_project`] with the one spelling wrinkle a RECORD can carry: a
+/// placement recorded in its CANONICAL form under a root held raw (macOS `/var` vs
+/// `/private/var`) fails the lexical prefix while the containment is real — so a miss retries
+/// against the canonicalized root before it counts. Both passes run the full proof (symlink-free
+/// components + canonical containment); nothing is weakened, only the prefix spelling is aligned.
+pub(crate) fn contained_in(root: &Path, candidate: &Path) -> bool {
+    if crate::placement::within_project(root, candidate) {
+        return true;
+    }
+    root.canonicalize()
+        .is_ok_and(|canon| canon != root && crate::placement::within_project(&canon, candidate))
 }
 
 /// Whether ignore-file BYTES ignore the whole directory they sit in — a line that is exactly `*`
@@ -616,7 +749,18 @@ fn build_staging(
     bundle: &RenderedBundle,
     self_ignore: bool,
 ) -> Result<(), ClientError> {
-    fs.remove_dir_all(staging)?;
+    // The staging name was cleared by the litter judge above (which refuses when a park occupying
+    // it cannot be accounted for) — never deleted blind here: a leftover at this name is a PARK
+    // from an interrupted run, and blind removal is exactly the loss the judge exists to prevent.
+    if fs.exists(staging) {
+        return Err(ClientError::PlacementUnsupported {
+            reason: format!(
+                "{} already exists and was not cleared by the litter judge; refusing to delete it \
+                 blind",
+                staging.display()
+            ),
+        });
+    }
     fs.create_dir_all(staging)?;
     let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
     dirs.insert(staging.to_path_buf());
@@ -671,6 +815,15 @@ fn build_staging(
 /// # Errors
 /// The rename failed, or 64 parks already sit beside the directory (a person's cleanup, not ours).
 pub(crate) fn park_aside(fs: &dyn FsOps, dir: &Path, tag: &str) -> Result<PathBuf, ClientError> {
+    let to = park_name(fs, dir, tag)?;
+    fs.rename(dir, &to)
+        .map_err(|e| ClientError::Io(format!("park {}: {e}", dir.display())))?;
+    Ok(to)
+}
+
+/// Choose the unique sibling name a park of `dir` would take (the ladder past existing parks) —
+/// split out of [`park_aside`] so a JOURNALED park can record the name durably BEFORE the rename.
+fn park_name(fs: &dyn FsOps, dir: &Path, tag: &str) -> Result<PathBuf, ClientError> {
     let name = dir
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -688,9 +841,34 @@ pub(crate) fn park_aside(fs: &dyn FsOps, dir: &Path, tag: &str) -> Result<PathBu
         }
         to = dir.with_file_name(format!(".topos-{tag}-{name}.{n}"));
     }
-    fs.rename(dir, &to)
-        .map_err(|e| ClientError::Io(format!("park {}: {e}", dir.display())))?;
     Ok(to)
+}
+
+/// [`park_aside`] with a PARK-JOURNAL entry written durably BEFORE the rename: a park under a
+/// unique name is invisible to every name-keyed sweep, so a crash between this rename and the
+/// caller's conclusion would otherwise strand the tree's only bytes undisclosed. The journal
+/// closes that: the next run's recovery ([`crate::sidecar::recover`]) restores the park to its
+/// original path, or preserves + discloses it. The caller SETTLES the entry
+/// ([`crate::sidecar::settle_park_journal`]) once the park is dropped or restored.
+///
+/// # Errors
+/// The journal write (fail-closed: an unjournalable park is not taken) or the rename.
+pub(crate) fn park_aside_journaled(
+    fs: &dyn FsOps,
+    layout: &crate::sidecar::Layout,
+    dir: &Path,
+    tag: &str,
+    restore: bool,
+) -> Result<PathBuf, ClientError> {
+    let to = park_name(fs, dir, tag)?;
+    crate::sidecar::journal_park(fs, layout, dir, &to, restore)?;
+    match fs.rename(dir, &to) {
+        Ok(()) => Ok(to),
+        Err(e) => {
+            crate::sidecar::settle_park_journal(fs, layout, &to);
+            Err(ClientError::Io(format!("park {}: {e}", dir.display())))
+        }
+    }
 }
 
 /// Put a parked tree back where it came from — the "this run may not have it" arm. Best-effort by
@@ -700,10 +878,43 @@ pub(crate) fn restore_parked(fs: &dyn FsOps, parked: &Path, orig: &Path) -> bool
     !fs.exists(orig) && fs.rename(parked, orig).is_ok()
 }
 
-/// Remove any leftover staging / graveyard / probe siblings of THIS skill (idempotent, NotFound-tolerant).
-fn cleanup_litter(fs: &dyn FsOps, parent: &Path, skill_id: &str) -> Result<(), ClientError> {
-    fs.remove_dir_all(&staging_path(parent, skill_id))?;
-    fs.remove_dir_all(&graveyard_path(parent, skill_id))?;
+/// Clear the leftover staging / graveyard / probe siblings of THIS skill (idempotent).
+///
+/// The probe dirs are throwaway empties this materializer mints — removed blind. The staging and
+/// graveyard names are PARKS: a crash between a prior run's swap and its `verify_parked_old`
+/// strands the OLD tree there, raced edits included, so each is JUDGED with the settle rail —
+/// accounted bytes drop, novel bytes are snapshotted (or the park is preserved as a
+/// `.topos-kept-*` sibling), and a park that can neither be accounted for nor moved aside REFUSES
+/// this placement rather than being deleted for occupying a name we need.
+fn cleanup_litter(
+    fs: &dyn FsOps,
+    parent: &Path,
+    skill_id: &str,
+    target_hex: &str,
+    baseline: Option<&str>,
+    snapshot: Option<SnapshotFn<'_>>,
+) -> Result<(), ClientError> {
+    for park in [
+        staging_path(parent, skill_id),
+        graveyard_path(parent, skill_id),
+    ] {
+        if !fs.exists(&park) {
+            continue;
+        }
+        match settle_park(fs, &park, target_hex, baseline, None, snapshot)? {
+            ParkFate::Dropped | ParkFate::Kept => {}
+            ParkFate::Stuck => {
+                return Err(ClientError::PlacementUnsupported {
+                    reason: format!(
+                        "{} holds bytes a prior interrupted run parked there that topos cannot \
+                         account for, and it could not be moved aside — inspect or move it by \
+                         hand before retrying",
+                        park.display()
+                    ),
+                });
+            }
+        }
+    }
     fs.remove_dir_all(&probe_path(parent, skill_id, 'a'))?;
     fs.remove_dir_all(&probe_path(parent, skill_id, 'b'))?;
     Ok(())
@@ -989,6 +1200,7 @@ mod tests {
             takeover: None,
             self_ignore: false,
             expected: None,
+            project_root: None,
         }
     }
 
@@ -1711,6 +1923,202 @@ mod tests {
                 "fail_at={fail_at}: re-run did not advance applied"
             );
         }
+    }
+
+    /// THE FD WINDOW (the module doc's residual): a rename takes a tree out of every path, but a
+    /// process that opened a file BEFORE the park can keep writing the renamed inode. The settle
+    /// rail must therefore re-read the park until two consecutive scans agree, absorbing every
+    /// distinct content it sees — a write landing between the judging scan and the removal is
+    /// captured, never destroyed. The snapshot closure plays the fd-writer here: it fires the
+    /// instant after the scan that judged the park, exactly where an open-fd write would land.
+    #[test]
+    fn a_park_written_through_an_open_fd_after_the_rename_is_absorbed_not_destroyed() {
+        let parent = Scratch::new("fd-settle");
+        let parked = parent.0.join(".topos-old-demo");
+        install_old(&parked); // novel relative to both target and baseline below
+        let fd_write: &[u8] = b"# written through a pre-park fd\n";
+        let mutated = RefCell::new(false);
+        let seen: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let snap = |s: &ScannedBundle| -> Result<(), ClientError> {
+            seen.borrow_mut().push(digest::to_hex(&s.bundle_digest));
+            if !*mutated.borrow() {
+                *mutated.borrow_mut() = true;
+                // The "fd write": lands AFTER scan(parked) judged the tree, BEFORE the removal.
+                std::fs::write(parked.join("SKILL.md"), fd_write).unwrap();
+            }
+            Ok(())
+        };
+        verify_parked_old(
+            &RealFs,
+            &parked,
+            &digest_hex(NEW),
+            Some(&"0".repeat(64)),
+            None,
+            Some(&snap),
+        )
+        .unwrap();
+        assert!(!parked.exists(), "the settled park was dropped in the end");
+        // BOTH contents were captured: the pre-write tree AND the tree the fd write produced.
+        let after_write = {
+            let mut files: Vec<(String, FileMode, Vec<u8>)> = OLD
+                .iter()
+                .map(|(p, m, b)| ((*p).to_owned(), *m, b.to_vec()))
+                .collect();
+            for f in &mut files {
+                if f.0 == "SKILL.md" {
+                    f.2 = fd_write.to_vec();
+                }
+            }
+            let entries: Vec<ManifestEntry> = files
+                .iter()
+                .map(|(p, m, b)| ManifestEntry {
+                    path: p.clone(),
+                    mode: *m,
+                    content_sha256: digest::sha256(b),
+                })
+                .collect();
+            digest::to_hex(&digest::bundle_digest(&entries).unwrap())
+        };
+        let seen = seen.borrow();
+        assert!(
+            seen.contains(&digest_hex(OLD)),
+            "pre-write tree captured: {seen:?}"
+        );
+        assert!(
+            seen.contains(&after_write),
+            "the fd write was captured too: {seen:?}"
+        );
+    }
+
+    /// With NO snapshotter, unaccountable bytes are PRESERVED — the park is renamed to a
+    /// `.topos-kept-*` sibling no sweep touches, never deleted.
+    #[test]
+    fn an_unaccountable_park_is_preserved_never_deleted() {
+        let parent = Scratch::new("keep");
+        let parked = parent.0.join(".topos-old-demo");
+        install_old(&parked);
+        verify_parked_old(&RealFs, &parked, &digest_hex(NEW), None, None, None).unwrap();
+        assert!(!parked.exists(), "the park left its original name");
+        let kept = parent.0.join(".topos-kept-.topos-old-demo");
+        assert_eq!(
+            dir_snapshot(&kept),
+            Some(expected(OLD)),
+            "the bytes sit whole under the kept name"
+        );
+    }
+
+    /// THE CRASH FINDING: an edit lands immediately before the swap, and the run dies before
+    /// `verify_parked_old` concludes (here: the snapshot fails — the same window a crash or an
+    /// fsync fault opens). The park then holds the ONLY copy of the raced edit — and the next
+    /// materialization's litter judge must absorb it, never delete it on its name.
+    #[test]
+    fn a_crash_before_park_verification_never_loses_an_edit_raced_in_before_the_swap() {
+        let parent = Scratch::new("crash-park");
+        let home = Scratch::new("crash-park-home");
+        if !swap_supported(&parent.0) {
+            eprintln!("skipping: temp FS lacks atomic dir exchange");
+            return;
+        }
+        let placement = parent.0.join("demo");
+        install_old(&placement);
+        let placement_canon = placement.canonicalize().unwrap();
+        let bundle = rendered(NEW);
+        let lock = lock_of("topos_crashp", NEW, &"1".repeat(64));
+        let sync = sync_at(2, 2, &"1".repeat(64), &digest_hex(NEW));
+        let prior = prior_map(
+            &[&placement],
+            &digest_hex(OLD),
+            SwapCapability::AtomicExchange,
+        );
+        let d = docs_under(&home.0, "topos_crashp");
+        // The RACE: the edit lands immediately before the exchange — after the pre-mutation
+        // re-stat, so the park (not the pre-swap scan) is the only thing that ever sees it.
+        let raced: &[u8] = b"# raced in just before the swap\n";
+        let racing = placement_canon.clone();
+        let fs = crate::fs_seam::HookFs::before_first_move_of(&placement_canon, move || {
+            std::fs::write(racing.join("SKILL.md"), raced).unwrap();
+        });
+        // The CRASH: the snapshot that would absorb the parked edit fails — verify never
+        // concludes, the run errors out, and the park stays behind.
+        let crashing = |_: &ScannedBundle| -> Result<(), ClientError> {
+            Err(ClientError::Io("injected crash".into()))
+        };
+        let mut r = req("topos_crashp", &[0], &bundle, &prior, &lock, &sync, &d.sp);
+        r.snapshot = Some(&crashing);
+        materialize(&fs, &r).unwrap_err();
+        let park = staging_path(placement_canon.parent().unwrap(), "topos_crashp");
+        assert_eq!(
+            std::fs::read(park.join("SKILL.md")).unwrap(),
+            raced,
+            "the park holds the raced edit's only copy"
+        );
+
+        // The NEXT materialization judges the park through the litter rail: the raced bytes are
+        // snapshotted (absorbed) before the name is reused — the old code deleted them blind.
+        let captured: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let absorbing = |s: &ScannedBundle| -> Result<(), ClientError> {
+            captured.borrow_mut().push(digest::to_hex(&s.bundle_digest));
+            Ok(())
+        };
+        let mut r2 = req("topos_crashp", &[0], &bundle, &prior, &lock, &sync, &d.sp);
+        r2.snapshot = Some(&absorbing);
+        materialize(&RealFs, &r2).unwrap();
+        let raced_digest = {
+            let mut files: Vec<(String, FileMode, Vec<u8>)> = OLD
+                .iter()
+                .map(|(p, m, b)| ((*p).to_owned(), *m, b.to_vec()))
+                .collect();
+            for f in &mut files {
+                if f.0 == "SKILL.md" {
+                    f.2 = raced.to_vec();
+                }
+            }
+            let entries: Vec<ManifestEntry> = files
+                .iter()
+                .map(|(p, m, b)| ManifestEntry {
+                    path: p.clone(),
+                    mode: *m,
+                    content_sha256: digest::sha256(b),
+                })
+                .collect();
+            digest::to_hex(&digest::bundle_digest(&entries).unwrap())
+        };
+        assert!(
+            captured.borrow().contains(&raced_digest),
+            "the litter judge absorbed the stranded edit: {:?}",
+            captured.borrow()
+        );
+        assert_eq!(dir_snapshot(&placement_canon), Some(expected(NEW)));
+        assert!(!park.exists(), "the judged park was then dropped");
+    }
+
+    /// The write-boundary containment rail (project scope): a `.claude` that became a symlink out
+    /// of the checkout AFTER planning refuses at materialize time — nothing is created or written
+    /// through the link.
+    #[test]
+    fn a_project_placement_whose_ancestor_became_a_symlink_refuses_at_the_write_boundary() {
+        let proj = Scratch::new("escape-proj");
+        let outside = Scratch::new("escape-outside");
+        std::os::unix::fs::symlink(&outside.0, proj.0.join(".claude")).unwrap();
+        let placement = proj.0.join(".claude").join("skills").join("demo");
+        let home = Scratch::new("escape-home");
+        let bundle = rendered(NEW);
+        let lock = lock_of("topos_esc", NEW, &"1".repeat(64));
+        let sync = sync_at(1, 1, &"1".repeat(64), &digest_hex(NEW));
+        let mut prior = prior_map(&[&placement], &"0".repeat(64), SwapCapability::Unsupported);
+        prior.placement_state[0].materialized_sha = None;
+        let d = docs_under(&home.0, "topos_esc");
+        let mut r = req("topos_esc", &[0], &bundle, &prior, &lock, &sync, &d.sp);
+        r.project_root = Some(&proj.0);
+        let err = materialize(&RealFs, &r).unwrap_err();
+        assert!(
+            err.to_string().contains("PLACEMENT_ESCAPES_PROJECT"),
+            "{err}"
+        );
+        assert!(
+            !outside.0.join("skills").exists(),
+            "nothing was created through the symlink"
+        );
     }
 
     /// The rename-dance fallback: faults leave old / new / (briefly) absent — never torn or mixed — and a

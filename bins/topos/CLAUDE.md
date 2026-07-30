@@ -225,7 +225,9 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   answers, several earn the `AMBIGUOUS_NAME` refusal listing the qualified references (a set member
   is qualified by its own reference AND the line it comes from, because two channels carrying one
   bundle are two different edits and splitting whichever expanded first leaves the other delivering
-  it). An EXACT spelling is always an answer, never an ambiguity, which is what keeps the refusal
+  it — the refusal lists the exact `--via` invocations, and `remove <name> --via <set-ref>` selects
+  WHICH line's member-minus-one rewrite is meant, the set-versus-set case no bare spelling can
+  resolve). An EXACT spelling is always an answer, never an ambiguity, which is what keeps the refusal
   actionable; one identity reached two ways (its own row and the feed that also delivers it) is ONE
   candidate. Its two-phase arms are LOSS (an affected bundle with unshared edits, or an unclassifiable
   scan — the guard fails TOWARD the gate, and it covers EVERY placement-retiring arm: the row drop, the
@@ -275,8 +277,12 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   The reconcile routes each item's engine run through its scope's layout —
   the same bundle followed at both scopes has two state trees, two drafts, two baselines, with no
   cross-scope anything — and recovery sweeps a project store lazily when a run visits its project.
-  Pre-1.0 handover: home-map rows pointing into a visited project are dropped (bytes in place,
-  agent-less rows and external imports excepted; a project-only home entry retires whole) and the
+  Pre-1.0 handover: home-map rows pointing into the ACTIVE project (the nearest, PARSED manifest's
+  dir only — a parse failure or an ancestor a nearer file shadows hands nothing over) are dropped
+  (bytes in place, agent-less rows and external imports excepted) ONLY once the project store
+  verifiably tracks the same placement — custody first, retirement second; a project-only home
+  entry retires by PARKING its state dir to a `.topos-handover-*` sibling (embedded history +
+  draft snapshots preserved, `STATE_HANDOVER` warning + log event, never deleted) and the
   project pass adopts what it finds — byte-identical copies in place, a divergent occupant
   namespaced beside, disclosed, never clobbered. The write verbs resolve names across the stores
   (`resolve_skill_stored`: home first, then the cwd chain's project stores), so a project-delivered
@@ -296,14 +302,32 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   the mutation — so the residual window it cannot close (between the stat and the syscall) is closed
   from the other side: **PARK-THEN-VERIFY** is the one primitive every destructive path uses now
   (`materialize::park_aside` / `restore_parked`). Checking harder never closes a window; a rename
-  has none. The swap PARKS the old tree (the exchange leaves it at the staging path, the
-  rename-dance at the graveyard) and the park is READ before it is dropped — bytes that are the
-  target, this placement's recorded baseline, or an already-taken snapshot go; anything else is
-  snapshotted first (and, with no snapshotter at all, moved to a `.topos-kept-*` sibling no litter
-  sweep touches). The retiring clean parks each placement aside and reads THAT tree — an
+  has none — but a rename cannot revoke an already-OPEN file descriptor either, so a park is
+  dropped only on TWO CONSECUTIVE AGREEING READS (the second immediately before the removal),
+  every distinct content seen along the way absorbed first; a park that keeps moving, or that
+  cannot be accounted for, is PRESERVED as a `.topos-kept-*` sibling no sweep touches (the
+  materializer's module doc names the irreducible scan-to-unlink residual honestly). The swap
+  PARKS the old tree (the exchange leaves it at the staging path, the rename-dance at the
+  graveyard) and the park is READ before it is dropped — bytes that are the target, this
+  placement's recorded baseline, or an already-taken snapshot go; anything else is snapshotted
+  first. Leftover staging/graveyard parks (a crash before the verify concluded) are JUDGED by the
+  same rail everywhere they are met — the next apply's litter judge absorbs novel bytes, and
+  command-start recovery preserves + logs what it cannot absorb — never deleted on the name
+  alone. Uniquely-named parks (`.topos-refresh-old-*`, `.topos-retiring-*`, a failed import's)
+  are JOURNALED (`state/park_journal.json`, written durably before the rename): recovery restores
+  a stranded park to its original path, or preserves + discloses it (a refresh's old sidecar
+  record is marked no-restore — a restored one could double-track the dir). The retiring clean
+  parks each placement aside and reads THAT tree — an
   unreadable park goes back and the clean refuses, never removes blind. A remote import parks the
-  destination before the landing rename: empty or byte-identical drops, anything else is restored
-  whole with the typed `PLACEMENT_OCCUPIED`. The forge refresh's stash IS its park (and the whole
+  destination before the landing rename: empty or byte-identical (re-proven at the drop) goes,
+  anything else is restored
+  whole with the typed `PLACEMENT_OCCUPIED`; a FAILED adopt after the landing rename parks the
+  destination the same way — dropped only when it still holds exactly the staged bytes, else
+  preserved for recovery to restore. Project-scope placements additionally re-prove the
+  containment rail AT THE WRITE BOUNDARY (`MaterializeReq::project_root` — before staging and
+  again immediately before the swap; the import destination and the project store's own create do
+  the same), because a record is a memory, not a permission. The forge refresh's stash IS its
+  park (and the whole
   replacement now runs under the skill's writer lock): each stashed dir is re-read, and a local edit
   that arrived after the classifying scan restores every stash and refuses, exactly like an edit
   found up front. The TWO DETECTORS are
@@ -341,7 +365,9 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   placement, and `rewrite_to_governed` flips the manifest's path line to the canonical workspace
   reference (`PublishData.manifest`/`reference`/`converted_from` disclose it; the PROPOSAL arm
   transfers too — delivery follows approval — and an imported bundle's receipt discloses that the
-  GitHub origin-pin line is NOT rewritten). `--to` accepts channel references (workspace-checked)
+  GitHub origin-pin line is NOT rewritten). The rewrite LOCKS the manifest, then RE-RESOLVES the
+  row under the lock — a path line a concurrent `topos remove` dropped in the window is never
+  re-added (`rewrite_skipped` discloses it; the publish stands catalog-side). `--to` accepts channel references (workspace-checked)
   and must name an EXISTING channel — verified on the describe and the apply alike, never a silent
   server-side mint (a nonexistent channel refuses toward web curation; the workspace slug gets the
   pointed near-miss); a curated `everyone` withholds a member's default placement, disclosed. A

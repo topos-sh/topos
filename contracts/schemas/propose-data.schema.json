@@ -71,6 +71,13 @@
         "null"
       ]
     },
+    "rewrite_skipped": {
+      "description": "The manifest's local-path line was REMOVED while this propose ran (a concurrent\n`topos remove`): NO workspace row was written — a completed removal is never silently\nundone. **INFERRED** (additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "title": {
       "type": "string"
     }

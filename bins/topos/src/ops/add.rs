@@ -364,6 +364,12 @@ pub(crate) fn add_remote_fetched(
     let dest_root =
         topos_harness::registry::skills_root(&slug, scope, &roots.home, roots.cwd.as_deref())
             .ok_or_else(|| ClientError::InvalidArgument(destination_hint(&slug, opts.global)))?;
+    // PROJECT containment, proven at the WRITE boundary (and re-proven immediately before the
+    // landing rename below): the registry hands back a path, but a pre-existing `.claude/skills`
+    // symlink aims that path exactly like a committed `path = "../.."` override — the same rail
+    // every project placement passes runs here, before the first byte lands, and the import is
+    // REFUSED, never redirected.
+    prove_import_containment(scope, roots, &dest_root)?;
 
     // 2. Extract + select the skill (all typed; a multi-skill repo self-corrects via `--skill`).
     let source_label = spec.label();
@@ -425,6 +431,16 @@ pub(crate) fn add_remote_fetched(
         let _ = ctx.fs.remove_dir_all(&stage_dir);
         return Err(e);
     }
+    // What THIS run staged, by digest — the only content the failed-adopt cleanup below may ever
+    // account a destination tree against.
+    let staged_digest = scan::scan(&stage_dir).ok().map(|s| s.bundle_digest);
+    // The containment proof AGAIN, immediately before the rename that lands the bytes — the
+    // extract + staging took real time, and an ancestor turned symlink inside that window would
+    // route the rename through it.
+    if let Err(e) = prove_import_containment(scope, roots, &dest_dir) {
+        let _ = ctx.fs.remove_dir_all(&stage_dir);
+        return Err(e);
+    }
     if let Err(e) = ctx.fs.rename_dir_noreplace(&stage_dir, &dest_dir) {
         let _ = ctx.fs.remove_dir_all(&stage_dir);
         return Err(ClientError::Io(format!(
@@ -435,7 +451,11 @@ pub(crate) fn add_remote_fetched(
     let mut data = match add_with_name(ctx, &dest_dir, Some(&selected.name)) {
         Ok(d) => d,
         Err(e) => {
-            let _ = ctx.fs.remove_dir_all(&dest_dir);
+            // The staged tree is LIVE at `dest_dir` now, and an edit can land there the instant
+            // the rename completes — so the error path never deletes the destination blind: it
+            // parks the dir (journaled), drops it only when it still holds exactly what this run
+            // staged, and preserves anything else for recovery to restore.
+            preserve_failed_adopt(ctx, &dest_dir, staged_digest);
             return Err(e);
         }
     };
@@ -718,6 +738,83 @@ fn retire_tracked(ctx: &Ctx<'_>, sid: &SkillId) -> Result<(), ClientError> {
     Ok(())
 }
 
+/// The PROJECT-scope containment proof a remote import's destination passes at the write
+/// boundary — the same rail every project placement root passes
+/// ([`crate::placement::within_project`]), run against the checkout the import lands in
+/// (`roots.cwd`). Person-scope (`--global`) imports land in home dirs and carry no such rail.
+///
+/// # Errors
+/// [`ClientError::PlacementUnsupported`] when the path does not provably resolve inside the
+/// checkout (a symlink component, or an ancestor that canonicalizes elsewhere).
+fn prove_import_containment(
+    scope: SkillScope,
+    roots: &super::DiscoveryRoots,
+    path: &Path,
+) -> Result<(), ClientError> {
+    if scope != SkillScope::Project {
+        return Ok(());
+    }
+    // A project-scope destination only resolves with a cwd (`skills_root` answered None without
+    // one), so a missing cwd here cannot vouch for anything — fail closed.
+    let contained = roots
+        .cwd
+        .as_deref()
+        .is_some_and(|cwd| crate::materialize::contained_in(cwd, path));
+    if contained {
+        return Ok(());
+    }
+    Err(ClientError::PlacementUnsupported {
+        reason: crate::placement::escape_line("the import destination", path),
+    })
+}
+
+/// The failed-adopt cleanup that can no longer destroy a raced edit: the destination is PARKED
+/// (journal first — a crash mid-cleanup must not strand it), read where nothing can still reach
+/// it by path, and dropped ONLY when two consecutive reads agree it holds exactly what this run
+/// staged. Anything else — an edit that landed after the rename, an unreadable tree, an unknown
+/// staged digest — keeps the park: the journal entry stands, and the next run's recovery restores
+/// the bytes to the destination (visible, untracked, never lost). Best-effort by contract: the
+/// adopt's own error is what propagates.
+fn preserve_failed_adopt(ctx: &Ctx<'_>, dest: &Path, staged_digest: Option<[u8; 32]>) {
+    if !ctx.fs.exists(dest) {
+        return;
+    }
+    let Ok(parked) =
+        crate::materialize::park_aside_journaled(ctx.fs, &ctx.layout, dest, "import-failed", true)
+    else {
+        return; // could not park: the dir stays whole at the destination — preserved in place
+    };
+    let mut prev: Option<[u8; 32]> = None;
+    let mut benign = false;
+    for _ in 0..4 {
+        let Ok(scanned) = scan::scan(&parked) else {
+            break; // unreadable = not ours to delete
+        };
+        if staged_digest != Some(scanned.bundle_digest) {
+            break; // novel bytes — keep the park whole
+        }
+        if prev == Some(scanned.bundle_digest) {
+            benign = true; // two consecutive agreeing reads of exactly the staged bytes
+            break;
+        }
+        prev = Some(scanned.bundle_digest);
+    }
+    if benign && ctx.fs.remove_dir_all(&parked).is_ok() {
+        crate::sidecar::settle_park_journal(ctx.fs, &ctx.layout, &parked);
+    } else {
+        let _ = logfile::append_event(
+            ctx.fs,
+            &ctx.layout.log_path(),
+            &serde_json::json!({
+                "action": "import_failed_park",
+                "destination": dest.to_string_lossy(),
+                "park": parked.to_string_lossy(),
+                "at": ctx.clock.now_unix_millis(),
+            }),
+        );
+    }
+}
+
 /// Verbatim guidance when a destination harness has no dir for the chosen scope.
 fn destination_hint(slug: &str, global: bool) -> String {
     if global {
@@ -778,16 +875,42 @@ fn park_and_verify_destination(
         return Ok(());
     }
     let parked = crate::materialize::park_aside(ctx.fs, dest, "import-old")?;
-    let empty = ctx
-        .fs
-        .read_dir(&parked)
-        .map(|v| v.is_empty())
-        .unwrap_or(false);
-    let identical = || match (scan::scan(&parked), scan::scan(staged)) {
-        (Ok(there), Ok(here)) => there.bundle_digest == here.bundle_digest,
-        _ => false,
-    };
-    if empty || identical() {
+    // Judged with the settle rail: a rename takes the tree out of every path but not away from an
+    // already-open fd, so the drop is authorized only by TWO CONSECUTIVE AGREEING READS of a
+    // disposable state — empty, or byte-identical to what this call is about to place — the
+    // second immediately before the removal. Anything else (including a tree that keeps moving)
+    // is put back whole.
+    let staged_digest = scan::scan(staged).ok().map(|s| s.bundle_digest);
+    let mut prev: Option<Option<[u8; 32]>> = None; // inner None = an empty directory
+    let mut disposable = false;
+    for _ in 0..4 {
+        let state: Option<[u8; 32]> = if ctx
+            .fs
+            .read_dir(&parked)
+            .map(|v| v.is_empty())
+            .unwrap_or(false)
+        {
+            None
+        } else {
+            match scan::scan(&parked) {
+                Ok(s) => Some(s.bundle_digest),
+                Err(_) => break, // unreadable = not ours to delete
+            }
+        };
+        let benign = match state {
+            None => true,
+            Some(d) => staged_digest == Some(d),
+        };
+        if !benign {
+            break;
+        }
+        if prev == Some(state) {
+            disposable = true;
+            break;
+        }
+        prev = Some(state);
+    }
+    if disposable {
         ctx.fs.remove_dir_all(&parked)?;
         return Ok(());
     }
