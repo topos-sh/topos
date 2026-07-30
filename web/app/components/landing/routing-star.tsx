@@ -21,8 +21,8 @@ const NODES: NodeDef[] = [
   { id: "maya", x: 75, y: 52, name: "maya", role: "@backend", harness: "Claude Code" },
   { id: "dev", x: 345, y: 52, name: "dev", role: "@backend", harness: "OpenClaw" },
   { id: "ana", x: 352, y: 214, name: "ana", role: "@frontend", harness: "Hermes" },
-  { id: "sam", x: 210, y: 326, name: "sam", role: "@support", harness: "Claude app" },
-  { id: "kim", x: 62, y: 214, name: "kim", role: "@marketing", harness: "Claude app" },
+  { id: "sam", x: 210, y: 326, name: "sam", role: "@support", harness: "OpenClaw" },
+  { id: "kim", x: 62, y: 214, name: "kim", role: "@marketing", harness: "Hermes" },
 ];
 const HUB = { x: 210, y: 184 };
 const SCENES = [

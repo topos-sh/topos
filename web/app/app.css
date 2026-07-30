@@ -77,6 +77,44 @@
   }
 }
 
+/* The landing loop's revealed elements — the chat's sent row, each scene's receipt. They REST
+   hidden and are played in by the Web Animations API when their scene reaches the viewport; the
+   resting state lives in CSS, not JavaScript, so the server's first paint is already correct.
+   Both fallbacks are declarative: a reader who asked for reduced motion sees the finished state,
+   and a scriptless page reveals them through the landing's own <noscript> rule. */
+.landing-reveal {
+  opacity: 0;
+}
+.landing-reveal[data-shown="true"] {
+  opacity: 1;
+}
+
+/* The review scene's approve button breathes until it is used — the one call-to-action pointer on
+   the page. The ring is the accent token at low alpha, never a new colour. */
+.landing-pulse {
+  animation: landing-pulse-ring 2s ease-out infinite;
+}
+@keyframes landing-pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-accent) 35%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 9px color-mix(in srgb, var(--color-accent) 0%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-accent) 0%, transparent);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .landing-reveal {
+    opacity: 1;
+  }
+  .landing-pulse {
+    animation: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 30%, transparent);
+  }
+}
+
 body {
   @apply bg-ground text-ink antialiased;
 }

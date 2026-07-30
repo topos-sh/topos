@@ -29,7 +29,7 @@ export const meta: MetaFunction<typeof loader> = ({ loaderData }) => {
       {
         name: "description",
         content:
-          "Topos syncs skills and context across your team’s agents, and anyone can contribute improvements back: one teammate’s fix upgrades everyone’s agents by their next session.",
+          "Topos syncs skills and context across your team’s agents, and anyone can contribute improvements back.",
       },
     ];
   }
