@@ -24,3 +24,13 @@ pub(crate) mod file;
 pub(crate) mod refs;
 pub(crate) mod resolve;
 pub(crate) mod walk;
+
+// The NEXT manifest format — `[bundles]` + `[defaults.<kind>]` ([`keys`] the joined-key
+// grammar; [`document`] parse + edit; [`normal`] the fmt normal form). The verb integration
+// consumes these next; until it lands they are allowed to sit unreferenced.
+#[allow(dead_code)]
+pub(crate) mod document;
+#[allow(dead_code)]
+pub(crate) mod keys;
+#[allow(dead_code)]
+pub(crate) mod normal;
