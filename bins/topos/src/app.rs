@@ -189,8 +189,14 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
     // Recovery runs at the start of every command (it also abandons an expired, never-redeemed
     // enrollment WAL against the real wall clock).
     let now_millis = i64::try_from(clock.now_unix_millis()).unwrap_or(i64::MAX);
-    if let Err(e) = recover(&fs, &layout, now_millis) {
+    let mut recovery_warnings = Vec::new();
+    if let Err(e) = recover(&fs, &layout, now_millis, &mut recovery_warnings) {
         return emit_err(json, cmd_name, &e, &diag);
+    }
+    // Recovery's typed disclosures (a refused park-journal entry) ride stderr — diagnostics,
+    // never the envelope, so `--json` stdout stays the one document.
+    for warning in &recovery_warnings {
+        eprintln!("topos: {warning}");
     }
 
     // The plane + follow-state sources — SESSIONS are the identity: the routed plane sends each

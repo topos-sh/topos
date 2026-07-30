@@ -2075,6 +2075,35 @@ impl FsOps for RecordingFs {
         self.record("write_new", path);
         self.inner.write_new(path, bytes)
     }
+    fn open_dir_handle(&self, dir: &Path) -> std::io::Result<crate::fs_seam::DirHandle> {
+        self.inner.open_dir_handle(dir)
+    }
+    fn rename_at(
+        &self,
+        h: &crate::fs_seam::DirHandle,
+        from: &str,
+        to: &str,
+    ) -> std::io::Result<()> {
+        self.record("rename_at", &h.path().join(to));
+        self.inner.rename_at(h, from, to)
+    }
+    fn rename_at_noreplace(
+        &self,
+        h: &crate::fs_seam::DirHandle,
+        from: &str,
+        to: &str,
+    ) -> std::io::Result<()> {
+        self.record("rename_at_noreplace", &h.path().join(to));
+        self.inner.rename_at_noreplace(h, from, to)
+    }
+    fn exchange_at(&self, h: &crate::fs_seam::DirHandle, a: &str, b: &str) -> std::io::Result<()> {
+        self.record("exchange_at", &h.path().join(b));
+        self.inner.exchange_at(h, a, b)
+    }
+    fn create_dir_nofollow(&self, base: &Path, dir: &Path) -> std::io::Result<()> {
+        self.record("create_dir_nofollow", dir);
+        self.inner.create_dir_nofollow(base, dir)
+    }
     fn read_opt(&self, path: &Path) -> std::io::Result<Option<Vec<u8>>> {
         self.inner.read_opt(path)
     }

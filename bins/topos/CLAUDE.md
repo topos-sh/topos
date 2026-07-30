@@ -27,7 +27,13 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   uses `rustix` (safe; no `unsafe`): `F_FULLFSYNC` on macOS, `flock` for the per-skill writer lock, a
   mode-preserving staged write, and a **namespace-atomic directory swap** (`RENAME_EXCHANGE` on Linux /
   `RENAME_SWAP` on macOS) — the primitive a byte-writing *update* uses to overwrite a harness dir. A
-  test-only `FaultFs` fails the Nth op for the crash gate. The **private-file primitives** (`write_private`
+  test-only `FaultFs` fails the Nth op for the crash gate. The **no-follow write boundary**: every
+  file open in the seam carries `O_NOFOLLOW`, `create_dir_nofollow` builds directories one
+  `lstat`-checked component at a time below a proven base, and a held **`DirHandle`** (dev+ino
+  captured at proof time, re-verified immediately before each op) anchors the landing
+  renames/exchanges (`rename_at`/`rename_at_noreplace`/`exchange_at`, `renameat` against the held
+  fd) — so a containment proof survives to the write it authorizes (residuals named in the module
+  doc). The **private-file primitives** (`write_private`
   0600-from-creation, `private_perms_ok`, `atomic_write_private`, the `read_doc_private`/`write_doc_private`
   pair) carry every secret: `identity/sessions.json` and the login WAL.
 - **Crash-safe docs** (`atomic`, `doc`) — atomic write (temp → fsync → rename → fsync-dir; never in
@@ -313,10 +319,18 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   first. Leftover staging/graveyard parks (a crash before the verify concluded) are JUDGED by the
   same rail everywhere they are met — the next apply's litter judge absorbs novel bytes, and
   command-start recovery preserves + logs what it cannot absorb — never deleted on the name
-  alone. Uniquely-named parks (`.topos-refresh-old-*`, `.topos-retiring-*`, a failed import's)
-  are JOURNALED (`state/park_journal.json`, written durably before the rename): recovery restores
+  alone. Uniquely-named parks (`.topos-refresh-old-*`, `.topos-retiring-*`, `.topos-handover-*`,
+  an import's destination/failed-adopt parks)
+  are JOURNALED (`state/park_journal.json`, written durably before the rename, every
+  read-modify-write under `locks/park-journal.lock`): recovery restores
   a stranded park to its original path, or preserves + discloses it (a refresh's old sidecar
-  record is marked no-restore — a restored one could double-track the dir). The retiring clean
+  record is marked no-restore — a restored one could double-track the dir). The journal is
+  UNTRUSTED INPUT — a project store's copy is repo content — so recovery acts on an entry only if
+  the park name is topos's own, both paths prove containment in that store's checkout, and the
+  restore target sits in a topos-managed namespace (`.topos/`, `.agents/skills`, a known
+  harness's project dir); anything else is refused in place, typed-warned + logged. Entries
+  carry an `owner` skill id, and recovery SKIPS an entry whose owning per-skill lock is held
+  (the liveness fence — never recover a live op's park). The retiring clean
   parks each placement aside and reads THAT tree — an
   unreadable park goes back and the clean refuses, never removes blind. A remote import parks the
   destination before the landing rename: empty or byte-identical (re-proven at the drop) goes,

@@ -1491,7 +1491,7 @@ mod tests {
         );
 
         // The fixture is potent: the sweep the fast path skips DOES mutate it (the WAL is reaped).
-        crate::sidecar::recover(&fs, &layout, i64::MAX).unwrap();
+        crate::sidecar::recover(&fs, &layout, i64::MAX, &mut Vec::new()).unwrap();
         assert_ne!(
             before,
             tree_bytes(&home.0),
