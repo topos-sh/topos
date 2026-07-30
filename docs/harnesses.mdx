@@ -54,7 +54,11 @@ the agent. The deliberate result is that a best-effort update almost never surfa
 session-start error.
 
 The sweep self-throttles (default 300 seconds), so a trigger can fire on every session event
-cheaply. It speaks only when there is something worth saying: skills actually changed, or
+cheaply. It also stays off the network it doesn't need: it talks to your workspaces and to nothing
+else, so a skill imported from a git repo moves only when you run `topos update` yourself, never
+because a session started.
+
+It speaks only when there is something worth saying: skills actually changed, or
 there is a fact you shouldn't miss — a workspace this machine can no longer reach, say, whose
 skills are now frozen in place. With neither, it prints nothing at all. When it does speak, it
 uses the narrowest shape the calling agent is known to accept, because some agents check hook
@@ -73,7 +77,7 @@ closed: if a config file's shape can't be proven, Topos reports it honestly and 
 
 ## Where the files land
 
-**For you** (skills from your profile), under `$HOME`:
+**For you** (the skills that follow you from machine to machine), under `$HOME`:
 
 - one copy in `~/.agents/skills/<name>` where a detected agent reads that shared convention,
 - plus one native copy per detected agent that doesn't.
@@ -84,9 +88,24 @@ closed: if a config file's shape can't be proven, Topos reports it honestly and 
 - the agent's own project directory otherwise (`.claude/skills`, `.factory/skills`, …),
 - `<project>/.claude/skills` as the default when nothing is detected.
 
-A `[placement]` entry in `topos.toml` overrides all of this with one project-relative
-directory. Project placements are kept out of commits by an appended `.git/info/exclude`
-line; committed ignore files are never touched. A directory is only chosen when it's free or
+A committed `topos.toml` can override that with one project-relative directory instead — per entry
+or for every skill the file asks for:
+
+```toml title="topos.toml"
+[bundles]
+"topos.sh/acme/code-review" = { version = "*", path = "prompts/skills" }
+
+[defaults.skill]
+path = ".agents/skills"
+```
+
+The value must stay inside the checkout: a file everyone commits can never aim managed bytes
+somewhere else on a contributor's disk, and one that tries is ignored with a warning.
+
+Delivered project folders keep **themselves** out of commits — each one carries a one-line
+`.gitignore` of its own, the way `node_modules` does. Nothing under `.git/` is written, and an
+ignore file you committed is never touched. Topos's own bookkeeping for the checkout lives in
+`<project>/.topos/`, which ignores itself whole. A directory is only chosen when it's free or
 already Topos-managed — a byte-identical occupant is adopted in place, never duplicated.
 
 ## The current state, honestly

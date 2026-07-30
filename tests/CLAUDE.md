@@ -11,9 +11,10 @@ front of an in-process vault (`topos_plane::router` — pure byte custody, the b
 workspace, signs people in with cookie sessions, and approves every CLI login at the real `/verify`
 ceremony (a plain signed-in accept) — the same HTTP a browser would send. SMTP stays UNSET (the
 whole logged-in loop must work with zero mail delivery). Per-crate unit + generative tests live in
-their crates — the manifest-layer resolution, the reference grammar, and the reconcile's per-kind
-arms are covered by `bins/topos`'s own suites (`src/tests/manifest_reconcile.rs` and friends) over
-fakes; this directory is for what only a cross-crate composed run can prove.
+their crates — the manifest grammar, the format-preserving editor's inverse property, per-scope
+resolution, and the reconcile's per-kind arms are covered by `bins/topos`'s own suites
+(`src/tests/manifest_reconcile.rs` and friends) over fakes; this directory is for what only a
+cross-crate composed run can prove.
 
 ## Layout (what actually exists)
 
@@ -60,8 +61,13 @@ fakes; this directory is for what only a cross-crate composed run can prove.
     (executable bit kept) into `<proj>/.claude/skills/`, self-ignoring (the placed dir's own
     sentinel ignore file; the engine state in the checkout's own `.topos/` store); v2 fast-forwards silently on the next sweep (login was the acceptance — no offer
     step); `protect` tightens to `reviewed` and the member's next publish DOWNGRADES to a proposal
-    the owner approves (the follower lands it); the `-g` profile lane delivers person-scope and
-    removes cleanly; the OWNER's remove-session arm (the real `/settings/sessions` POST) ends the
+    the owner approves (the receiver lands it); the PERSON-SCOPE lane runs on the FEED alone — no
+    `-g` act is needed for the home copy to land — and then the four `-g` arms in order: the
+    disclosed redundant `add` that writes no row, the `remove` whose file BIRTH materializes the
+    global manifest (header + this workspace's feed row) before landing the machine-local `off` row,
+    the next sweep cleaning the person-scope placement while the checkout's copy stays, and the
+    `add -g` that DELETES the off row (never stacking a positive) so the feed flows again; the
+    OWNER's remove-session arm (the real `/settings/sessions` POST) ends the
     lane — the member's next sweep prints ONE typed `SESSION_ENDED` line, marks the local row
     ended, freezes the bytes in place, and stays quiet on the sweep after;
   - `deny` answers the resumed login with one typed refusal, sweeps the WAL, mints nothing;
@@ -73,7 +79,7 @@ fakes; this directory is for what only a cross-crate composed run can prove.
   workspace-slug near-miss pointedly, and provably mints NO channel.
 - **`tests/uniform_e2e.rs`** — the NON-ORACLE discipline over real HTTP:
   - eight misses — a real-but-foreign workspace, a never-existed one, a wrong path, a garbage
-    credential; reads, the me describe, and a profile row-op write alike — answer ONE
+    credential; reads, the me describe, and a write to a RETIRED row-op path alike — answer ONE
     byte-identical uniform 404, and the prober's own lane is untouched;
   - the `session_approval` knob: a member's login is born PENDING (the granted poll says so);
     exactly TWO routes answer typed (`/me` and `/delivery` — `session_status: "pending"`, the

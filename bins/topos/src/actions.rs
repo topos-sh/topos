@@ -246,12 +246,15 @@ fn apply_described(argv: &[String]) -> Safety {
             Some(if has_flag(argv, "--propose") {
                 "opens a proposal visible to the whole workspace"
             } else {
-                "ships these bytes to the team — every follower receives them"
+                "ships these bytes to the team — everyone given this skill receives them"
             }),
         ),
         Some("revert") => (
             Some(true),
-            Some("moves the team's current for every follower (a forward move; nothing deleted)"),
+            Some(
+                "moves the team's current for everyone given this skill (a forward move; \
+                 nothing deleted)",
+            ),
         ),
         Some("review") => (Some(true), Some("settles the proposal for the whole team")),
         Some("protect") | Some("invite") => (Some(true), None),
@@ -270,15 +273,16 @@ fn apply_described(argv: &[String]) -> Safety {
             Some("discards your local edits (a snapshot is kept in the sidecar store)"),
         ),
         Some("update") => (Some(true), None),
-        // `remove --yes`: a followed skill's exclusion is a plane row; a local copy's delete is
-        // offline. The argv cannot tell them apart → network unknown.
+        // `remove --yes`: dropping a manifest row is offline, while an `off` row's resolution may
+        // read the feed. The argv cannot tell them apart → network unknown.
         Some("remove") => (
             None,
             Some(
-                "removes the skill from this machine (a followed skill keeps its canonical bytes)",
+                "removes the skill from this machine (a team-managed skill keeps its canonical \
+                 bytes)",
             ),
         ),
-        // `add -g` writes the server-stored profile — networked whatever the target. Otherwise
+        // `add -g` may resolve a workspace reference over the wire whatever the target. Otherwise
         // the FIRST non-flag token decides by shape: a WORKSPACE reference (`@ws/name`) resolves
         // the catalog and delivers over the wire; a PATH adopts offline; everything else (a bare
         // name, a canonical host ref, an `owner/repo` import) is unknowable from the argv alone,

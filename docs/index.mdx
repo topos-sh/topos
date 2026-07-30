@@ -36,8 +36,8 @@ topos login https://topos.sh/<your-workspace>
     version history, one current version for the team.
   </Step>
   <Step title="Everyone's agents receive it">
-    Every machine logged into the workspace gets it automatically. Nothing for teammates to
-    run, nothing to configure.
+    A new skill goes to the whole team, so every machine logged into the workspace gets it
+    automatically. Nothing for teammates to run, nothing to configure.
   </Step>
   <Step title="It stays current by itself">
     At the start of each agent session, the machine silently picks up whatever changed —
@@ -56,12 +56,14 @@ the [skills.sh](https://skills.sh) ecosystem already use. Nothing to convert: sh
 folders you have, and import public skill repos directly:
 
 ```bash
-topos add vercel-labs/skills -s find-skills
+topos add vercel-labs/skills/find-skills
 ```
 
-What Topos adds on top is **declarative**: a short `topos.toml` states what a project or a
-person should have, and every machine converges on it — a lockfile for agent skills, kept
-current automatically.
+What Topos adds on top is **declarative**: a short `topos.toml` states what everyone working in a
+project should have, and every machine converges on it — a lockfile for agent skills, kept current
+automatically. For what follows a *person* around, connecting is the whole statement: everything
+the team gave you arrives, and a page in the browser shows what you have, why, and an off switch
+for anything you don't want.
 
 ## Cloud or self-hosted
 

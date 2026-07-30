@@ -27,7 +27,7 @@
         "--yes"
       ],
       "mutates": true,
-      "risk_note": "removes the skill from this machine (a followed skill keeps its canonical bytes)"
+      "risk_note": "removes the skill from this machine (a team-managed skill keeps its canonical bytes)"
     }
   ]
 }

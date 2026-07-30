@@ -337,7 +337,7 @@ pub(crate) fn session_login_tty(data: &topos_types::results::LoginData) -> Strin
              approved (nothing lands until then).",
         ),
         _ => match data.delivered {
-            Some(0) => s.push_str(" — nothing in your profile delivers here yet."),
+            Some(0) => s.push_str(" — nothing is assigned to you here yet."),
             Some(n) => {
                 // Name what the acceptance brings (a long list stays readable: first five + a
                 // remainder count).
@@ -351,13 +351,13 @@ pub(crate) fn session_login_tty(data: &topos_types::results::LoginData) -> Strin
                 }
                 if names.is_empty() {
                     s.push_str(&format!(
-                        " — your profile delivers {n} skill{} here; updates arrive silently \
+                        " — it gives you {n} skill{}, delivered here; updates arrive silently \
                          (`topos update` any time).",
                         if n == 1 { "" } else { "s" }
                     ));
                 } else {
                     s.push_str(&format!(
-                        " — your profile delivers {n} skill{} here ({names}); updates arrive \
+                        " — it gives you {n} skill{} ({names}), delivered here; updates arrive \
                          silently (`topos update` any time).",
                         if n == 1 { "" } else { "s" }
                     ));
@@ -1680,12 +1680,12 @@ pub(crate) fn invite_describe_tty(
     }
     if let Some(skill) = &data.skill {
         s.push_str(&format!(
-            "\nLeads with the {skill} skill — accepting adds it to their profile."
+            "\nLeads with the {skill} skill — accepting assigns it to them."
         ));
     }
     if let Some(channel) = &data.channel {
         s.push_str(&format!(
-            "\nLeads with the {channel} channel — accepting adds it to their profile."
+            "\nLeads with the {channel} channel — accepting assigns it to them."
         ));
     }
     s.push_str(

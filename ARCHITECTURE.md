@@ -25,9 +25,10 @@ byte-exact digest, the consent rule, and the sync algorithm. Nothing proprietary
 
 **Distribute** — an author `publish`es a bundle; a teammate connects once with `topos login
 <workspace-address>` (one browser approval mints a workspace-scoped **session** — the acceptance event) and
-records demand with `add`: a line in the folder's committed `topos.toml` **manifest** (nearest manifest wins,
-walking up like git) or in their server-stored per-workspace **profile**. From then on every `update`
-reconciles what the manifests ask for against what the person's seats allow and lands the team's `current`
+is from then on given whatever the workspace assigns them. Demand has two unblended scopes: the nearest
+committed `topos.toml` **manifest** governs a checkout whole, and the person scope is whatever their
+workspaces give them (optionally overridden by a machine-local `~/.topos/topos.toml`). From then on every
+`update` reconciles each scope against what the person's seats allow and lands the team's `current`
 byte-exact (digest re-verified in), driven by a session-start hook — silently, npm-style, never over local
 edits. **Contribute** — anyone `publish --propose`s a candidate, a reviewer `review --approve`s it to
 `current` (PR-like), and `revert --to` rolls the team forward to older bytes.
@@ -99,8 +100,10 @@ its own Postgres schema, `web`: people (`user`, `session`, `account`), **seats**
 by `user.id`), **CLI sessions** (`cli_session` — user × workspace × installation, minted by the login flow)
 and the login-flow rows, invitations, the bundle catalog (each row carrying a `kind` tag — `skill` today —
 that clients display but never branch on), channels (named, curated sets of bundles; the default channel is
-every member's baseline), per-person **profiles** (include/exclude rows over that baseline — the person's
-server-stored manifest for the workspace, web-editable), upstream provenance for GitHub-imported bundles,
+every member's baseline), **assignments** (one positive row — a bundle or a channel aimed at a person or at
+everyone; a curator's act and a person's own "add to mine" mint the same row) and **declines** (the one
+negative — per person per bundle, keyed to bundle identity so it survives version and channel changes),
+both web-written, upstream provenance for GitHub-imported bundles,
 notices, proposals and comments, op receipts, and the audit trail. Every authorization is decided here:
 `app/lib/auth/guards.server.ts` mints **branded actors** (`requireSession → requireMember →
 requireWorkspaceOwner`/`requireReviewer`, and `requireSessionActor` for the session lane), and every function
@@ -133,8 +136,8 @@ loses access the instant the row commits. Ending is self-service from the client
 owner-service from the workspace sessions page — either way immediate.
 
 **Delivery and entitlement live app-side.** What a session should have is one predicate over the directory
-rows — the person's server-stored PROFILE (channel and skill includes minus excludes, the default channel
-included unless excluded), active bundles only — computed in `web`. Reads gate on *entitled ∧ has-a-current-pointer*; no object is
+rows — the person's **feed**: assignments minus declines over active bundles, the default channel's
+everyone-assignment being the workspace baseline — computed in `web`. The client never writes it. Reads gate on *entitled ∧ has-a-current-pointer*; no object is
 served by bare hash, and every not-entitled or not-found case returns the same **404**, so the read surface is
 no oracle for which skills exist. Only the byte and pointer ops of a publish-family verb (ingest, the
 `current` compare-and-set, revert, purge, the verified object reads) forward to the vault, over one allowlisted
@@ -163,7 +166,7 @@ integrity fault, never folded into the uniform 404.
 The system keeps its state in three places.
 
 - **The app's `web` schema** (Postgres) — identity and the whole directory: people, seats, CLI sessions,
-  invitations, the catalog, channels, profiles, upstream provenance, proposals, notices, receipts, and the
+  invitations, the catalog, channels, assignments and declines, upstream provenance, proposals, notices, receipts, and the
   audit trail. Reached only through the data-access layer, keyed by `user.id`.
 - **The vault's `plane` schema** (Postgres) — custody only: the content-addressed version index, the
   `current` pointer, and the upload/object-lifecycle bookkeeping. Raw SQL and raw git reads are private to

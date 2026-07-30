@@ -53,7 +53,7 @@ Every `--json` run prints one object on stdout (one line; pretty-printed here):
       "argv": ["topos", "publish", "api-notes", "-m", "Note the deprecation date", "--yes"],
       "mutates": true,
       "needs_network": true,
-      "risk_note": "ships these bytes to the team — every follower receives them"
+      "risk_note": "ships these bytes to the team — everyone given this skill receives them"
     }
   ]
 }
@@ -118,8 +118,9 @@ prints an undo-led receipt; read the undo, and tell the person what changed.
 | `publish` | Two-phase. The preview never adopts an untracked source |
 | `review <target> --approve\|--reject\|--withdraw` | The **verdict flag is the apply**; a target with no verdict is the preview. `--yes` means nothing here |
 | `revert`, `protect`, `invite <emails…>`, `update --reset`, `uninstall` | Two-phase |
-| `remove` | Two-phase **only when loss is real** — a draft ahead, or a permanent local delete |
-| `add`, `init`, `login`, `logout`, `update`, `list`, `diff`, `log`, `status`, `self-update` | Immediate, with receipt (`--yes` is an accepted no-op) |
+| `add` | Immediate — **except** a git source this machine has never used, which lists what it found and waits for `--yes`. Once a repo is in a local `topos.toml`, further adds from it are immediate |
+| `remove` | Two-phase when local work would be lost (a draft ahead, a permanent local delete) **or** when the row is a channel/repo line that would be rewritten to its members; immediate otherwise |
+| `init`, `fmt`, `login`, `logout`, `update`, `list`, `diff`, `log`, `status`, `self-update` | Immediate, with receipt (`--yes` is an accepted no-op) |
 
 The CLI's gate is the floor, not the ceiling. Two rules sit above it for you:
 
@@ -130,6 +131,22 @@ The CLI's gate is the floor, not the ceiling. Two rules sit above it for you:
   human. A piped or `--json` login never blocks and never opens a browser: it prints the
   URL, polls once, and exits `0` — that is success, not failure. Re-run `topos login --json`
   to poll again, or use `--wait <seconds>` to block deliberately, always capped.
+
+## What the CLI can and cannot change
+
+The CLI writes **files on this machine**. It never writes workspace-side state, which cleanly
+divides the requests you can act on from the ones you hand back to the human.
+
+| The human asks | Do this |
+|---|---|
+| "get us the team's deploy skill here" | `topos add deploy` — a line in this repo's `topos.toml` |
+| "keep that on my laptop wherever I work" | `topos add deploy -g` — a line in `~/.topos/topos.toml` |
+| "stop that one on this box" | `topos remove deploy -g` — writes an `off` line here only |
+| "turn that off for me everywhere" | Not a CLI act. Point them at **Your skills** in the browser, where the off switch covers every machine they log in |
+| "give this to the team" / "give it to Dana" | Not a CLI act either — assigning is a browser act. `topos publish` shares the bytes; `topos invite --skill`/`--channel` is the one exception, and only for someone being invited |
+
+So a request to change what a *person* or the *team* is given ends in a link, not a command. A
+request to change what *this machine or this repo* takes ends in a command.
 
 ## Budgets and pagination
 
@@ -151,12 +168,18 @@ lands in `~/.topos/log.jsonl` (`TOPOS_DEBUG=1` prints it to stderr).
 
 ```bash
 topos list --json
+topos status <skill> --json   # one skill in depth
 ```
 
-Rows carry a **source** (a workspace address means team-managed; `built-in`; an origin host;
-`local`) and a **status** (`current` / `behind` / `draft`). Check before treating a skill
-directory as hand-authored — editing a team-managed skill creates a draft, not a private
-fork. Drafts are safe: updates merge around them and never overwrite them.
+`list` rows carry a **source** (a workspace address means team-managed; `built-in`; an origin
+host; `local`) and a **status** (`current` / `behind` / `draft`). Check before treating a skill
+directory as hand-authored — editing a team-managed skill creates a draft, not a private fork.
+Drafts are safe: updates merge around them and never overwrite them.
+
+`status <skill>` is the deeper answer when you need to know *why* a copy is there: which file and
+line asked for it — or which workspace's set — and where its files sit. A skill can legitimately
+have two independent copies, one for the project and one for the person, with separate drafts;
+publish from inside the checkout you edited.
 
 ## Offering to share back
 

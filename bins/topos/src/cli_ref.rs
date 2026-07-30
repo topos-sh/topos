@@ -10,8 +10,8 @@
 
 /// The behavior verbs grouped by SCOPE — the KNOWN verb lists drive the grouping (not clap metadata),
 /// so the reference reads the way the tool is taught: self-scoped, then team-scoped, then maintenance.
-const SELF_SCOPED: [&str; 10] = [
-    "status", "login", "logout", "init", "add", "remove", "update", "list", "diff", "log",
+const SELF_SCOPED: [&str; 11] = [
+    "status", "login", "logout", "init", "fmt", "add", "remove", "update", "list", "diff", "log",
 ];
 const TEAM_SCOPED: [&str; 5] = ["publish", "review", "revert", "protect", "invite"];
 const MAINTENANCE: [&str; 3] = ["self-update", "auth", "uninstall"];

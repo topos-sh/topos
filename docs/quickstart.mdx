@@ -42,9 +42,10 @@ keep themselves current — no one runs anything to receive updates.
     topos login https://topos.sh/acme
     ```
 
-    Your browser opens — click **Approve**. That one click is the whole setup: the
-    workspace's skills land on this machine, and from now on updates apply silently at the
-    start of each agent session.
+    Your browser opens — click **Approve**. That one click is the whole setup: connecting adopts
+    everything the workspace has given you, and from now on updates apply silently at the start of
+    each agent session. There is no per-skill step to accept — your workspace's **Your skills**
+    page always shows what you have and why, with an off switch on every row.
   </Step>
   <Step title="Share a skill">
     Point `publish` at any skill folder you already have — for example one in your agent's
@@ -65,8 +66,9 @@ keep themselves current — no one runs anything to receive updates.
     team, and a page at `https://topos.sh/acme/skills/pr-describe`.
   </Step>
   <Step title="It reaches your team — automatically">
-    Nothing for teammates to run: every machine logged into the workspace receives the skill
-    at its next agent session (or right away with `topos update`). Bring someone new in:
+    A new skill lands in **`everyone`**, the channel the whole team has, so nothing is left for
+    teammates to run: their machines pick it up at the next agent session (or right away with
+    `topos update`). Bring someone new in:
 
     ```bash
     topos invite dana@acme.com --yes
@@ -83,6 +85,8 @@ keep themselves current — no one runs anything to receive updates.
   `topos publish pr-describe -m "Cover stacked PRs" --yes`.
 - **Pin skills to a repo.** `topos add pr-describe` inside a checkout writes `topos.toml`;
   commit it and everyone working in that repo gets the same set.
+- **Take one you weren't given.** **Your skills → Library** browses the whole catalog; **Add to
+  mine** puts a skill in your own set on every machine you log in.
 - **Check any time.** `topos status` — offline — lists every skill on this machine, its
   version, and where it comes from.
 

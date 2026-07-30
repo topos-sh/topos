@@ -5,11 +5,21 @@ docs holding identity / per-skill history / mappings), and the bundle scanner �
 fault-injectable fs/syscall seam. **bin:** a thin `clap` wiring; `--json` (no prompts) + a thin TTY
 renderer over the SAME typed outcomes (one value, two presentations).
 
-The client runs the **manifest architecture**: what a folder's agents should have IS its `topos.toml`
-manifest (nearest one wins, walking up like git), the person's server-stored PROFILE covers everywhere
-else, and a **session** (user × workspace × installation, minted by `topos login`) is the standing
-acceptance — delivery is silent from login on, npm-style. There is no subscribe verb, no per-skill
-consent step, and no device-link lane; `follow`/`unfollow`/`channel` are gone.
+The client runs the **manifest architecture** with UNBLENDED scopes. Two recipes, never mixed:
+
+- **PERSON** — the machine's own `~/.topos/topos.toml` when it exists (COMPLETE: only its rows
+  deliver), else the implicit recipe of one FEED row per connected workspace. The feed is a SERVER
+  fact — assignments minus declines, computed app-side and served whole by the delivery route — so
+  connecting adopts it and there is no client-side arithmetic over it.
+- **PROJECT** — the NEAREST `topos.toml` covering the working directory, taken WHOLE (walking up
+  only to FIND it; no merging with ancestors, no cross-scope shadowing). A repo fact, identical for
+  every contributor.
+
+A **session** (user × workspace × installation, minted by `topos login`) is the standing acceptance —
+delivery is silent from login on, npm-style. **The client writes NO server state:** the only
+negatives are the web decline (server-side, per person per bundle, the everywhere stance) and the
+`"off"` row (machine-local, global file only). There is no subscribe verb, no per-skill consent step,
+no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are gone.
 
 ## Implemented (the local core)
 
@@ -37,19 +47,39 @@ consent step, and no device-link lane; `follow`/`unfollow`/`channel` are gone.
   login receipt; `add`'s adopt receipt) and scrubbed (`uninstall --yes`), each row riding the payloads'
   additive `triggers` field honestly.
 
-- **The MANIFEST layer** (`manifest/{file,refs,resolve,walk}`, `ops/manifest_edit`) — a scope IS a
-  manifest. Resolution stacks four layers NEAREST-FIRST: the folder's `topos.toml` → each ancestor's →
-  every live session's server-stored profile (delivered ready-made) → the LOCAL personal manifest
-  (`~/.topos/topos.toml`). The nearest layer that names an item NAME wins whole; an `[exclude]` line is
-  the ONE negative state (subtracting a broader layer's delivery). The **reference grammar**
-  (`manifest/refs`) is shape-determined: a bare name (a connected catalog's skill, unique-across-catalogs),
-  `@<ws>/<name>` and `@<ws>/channels/<name>` (workspace-qualified; the CANONICAL host-qualified form
-  `host/ws/name` is what manifests store), `owner/repo` (GitHub import; pins are 7–40-hex commits),
-  `./path` (a local adopt; out-of-tree sources store the absolute path), with `*`/64-hex version pins as
-  entry values. The `#` sigil is banned and a bare `@name` is a typed refusal. `edit_target` picks the
-  manifest an `add`/`remove` edits: the nearest covering the cwd, else a fresh one at the enclosing git
-  root (npm-init precedent), else the cwd; `-g` (path refs) targets the personal manifest; `init` creates
-  the folder's manifest from the commented template.
+- **The MANIFEST format** (`manifest/{keys,document,normal,scopes}`) — one `[bundles]` namespace plus
+  `[defaults.<kind>]` sections. **THE JOIN RULE:** an entry's reference is its TOML key path under
+  `[bundles]`, segments joined with `/`, so a flat quoted key and a grouped section are the SAME entry
+  (two spellings of one reference in a file is a parse error; a `[bundles.…]` header is always
+  GROUPING, never an entry). Keys classify BY SHAPE alone (`manifest/keys`, no resolution order, no
+  fallbacks): `./x`/`../x`/`/abs`/`~/x` a local folder · `github.com|bitbucket.org/<owner>/<repo>` every
+  skill the repo holds · `…/<repo>/<skill>` one of them by leaf dir name · `<host>/<ws>` the workspace
+  FEED · `<host>/<ws>/<bundle>` one bundle · `<host>/<ws>/channels/<name>` a channel (`channels` is
+  RESERVED in position three; a 5+-segment forge key refuses toward the `subdir` field; `gitlab.com`
+  refuses plainly). Values type by shape too: `"*"`, a 64-hex version (workspace bundle), a 7–40-hex
+  commit (forge), `"off"` (the per-bundle switch — workspace bundles, GLOBAL file only), or an inline
+  table (`version`/`path`/`harness`/`name`/`subdir`/`kind`, legality per shape; `[defaults.<kind>]`
+  carries `harness`/`path` only). Feed rows are global-only as well — a project manifest is a repo
+  fact, so both refuse there toward channels. `parse_input` additionally accepts the CLI sugar (`@ws`,
+  `@ws/bundle`, `@ws/channels/x`, bare `owner/repo[/skill]`, pasted `https://` URLs incl.
+  `/tree/<ref>/<path>`, a trailing `@<pin>`) and resolves to the same shapes; manifests store only the
+  canonical joined form. The `#` sigil is a typed refusal. **The editor** (`document::ManifestEditor`)
+  is format-preserving over `toml_edit` with a property-tested INVERSE: set-then-remove restores the
+  bytes exactly (it never deletes an emptied section header), which is what makes `add`/`remove` exact
+  file inverses. **`fmt_normal`** (`manifest/normal`, the `topos fmt [-g]` verb over `ops/fmt`) renders
+  the deterministic, idempotent normal form — feed/local/forge rows flat and sorted, one
+  `[bundles."<host>/<ws>"]` section per workspace, defaults last, comments carried — with ONE TOML-forced
+  carve-out: a value and a table cannot share a key path, so a workspace carrying its feed row keeps its
+  explicit rows FLAT. **Scope discovery** (`manifest/scopes`, pure, no network) loads the two recipes and
+  partitions them into the plans the reconcile drives; each scope's delivered set is the union of its own
+  rows' resolutions minus its `"off"` switches, deduped by bundle identity (an explicit row's
+  version/fields beat a SET's delivery of the same identity; a row is meaningful or inert, never
+  harmful — `status` discloses the inert ones). `ops/manifest_edit` picks the file a verb edits (the
+  nearest covering the cwd, else a fresh one at the enclosing git root — the npm-init precedent; `-g` the
+  global file) and owns FILE BIRTH: any path topos creates is written MATERIALIZED first (the global file
+  gets the header plus one feed row per connected workspace, a project file the commented template), then
+  the requested edit runs; a hand-written file is never materialized, and a born file STAYS even when a
+  gate refuses the act that birthed it (the receipt says so). `init` creates a file without an edit.
 - **SESSIONS** (`sessions`, `ops/login`, `enroll`) — `topos login <address>` runs against
   `/v1/login/authorize|token` (the constant protocol card re-roots onto the declared API base,
   same-security only; the `0600` WAL holds the flow; re-invoking IS the resume). TWO SHAPES,
@@ -61,52 +91,69 @@ consent step, and no device-link lane; `follow`/`unfollow`/`channel` are gone.
   types the short code, which is what binds the approver to the asker when no local hand-off
   exists. A failed bind says so rather than degrading silently. The granted poll mints ONE
   **workspace-scoped bearer credential** persisted as a session row in `identity/sessions.json` (`0600`;
-  statuses `active`/`pending`/`ended`) — login IS the acceptance event (the receipt discloses what the
-  profile delivers; no offer step follows). Further workspaces are further logins; `logout
+  statuses `active`/`pending`/`ended`) — login IS the acceptance event (the receipt names what the
+  workspace GIVES this person and, when a global manifest exists, appends that workspace's feed row to
+  it; no offer step follows). Further workspaces are further logins; `logout
   [<ws>|--all]` runs the server-side self-end (`DELETE /v1/session` under that session's OWN credential;
   the uniform 404 = already ended) then deletes the local row — skills, drafts, and manifests stay. A
   session the server no longer answers (owner-ended, seat removed, workspace gone — indistinguishable)
   is marked `ended` locally by the sweep, prints its ONE typed `SESSION_ENDED` line, and freezes that
   workspace's items in place; `login` reconnects.
-- **The MANIFEST RECONCILE** (`ops/reconcile` — what `update` runs) — dial each live session's
+- **The RECONCILE** (`ops/reconcile` — what `update` runs) — dial each live session's
   `GET /v1/workspaces/{ws}/delivery` ONCE (a pending session skips quietly; NotFound = the ended-session
   line + local flip; ANY no-fresh-delivery fault (unreached · unsuccessful exchange · unreadable answer)
-  degrades that session's profile layer to the OFFLINE CACHE so the local
-  converge keeps working), build the layers for the cwd's scope chain, resolve, then reconcile each
-  resolved item BY KIND: profile items sync against the delivery's pre-resolved target (installed
-  SILENTLY under their catalog names — login was the acceptance); project/personal workspace refs
-  resolve through the ref's session (catalog index; channels expand via the channel index; a manifest
-  pin overrides the served current, falling back honestly when the pinned version is gone); GitHub refs
-  install at their pin and re-import on a pin bump (refusing over local edits); path refs are
-  adopt-in-place presence checks. Placement is PER-SCOPE (see below); after the fan-out,
-  `clean_undemanded` retires what no layer demands any more (a profile drop withdraws the person-scope
-  placements snapshot-first and resets to never-received; a project drop cleans the stale in-chain dirs)
-  and each session gets the applied report (`PUT …/report` — a complete snapshot per session). The
-  **delivery cache** (`state/sync_status.json`) records host/workspace_name per workspace +
-  name/review_required/served_version per skill, so `status`/`list` answer offline and `CacheFollow`
-  (the FollowSource over the cache) + `SessionRoutedPlane` (the PlaneSource routing each skill to its
-  session's lane) wire the composition root. Notices ACK by id after an interactive `update`; the quiet
-  hook fetches without acking.
+  degrades that workspace to the OFFLINE CACHE so the local converge keeps working), load the TWO scope
+  plans, then converge each scope on its own recipe. Within a scope the resolution order is explicit
+  THINGS, then SETS (channel, repo), then FEED rows — an explicit row's version/fields beat a set's
+  delivery of the same identity, and a set delivers its curator's current truth. Per row kind: a FEED
+  row expands to the delivery's pre-resolved targets (installed SILENTLY under their catalog names —
+  login was the acceptance, and a bundle the person DECLINED on the web is simply absent from it); a
+  workspace bundle or channel row resolves through that workspace's session (catalog index / channel
+  index; a row pin overrides the served current, falling back honestly when the pinned version is gone,
+  and a row naming a declined bundle still delivers with the decline disclosed — a file is a machine
+  fact, the decline is a server fact about the feed); a forge row installs at its pin and advances ONLY
+  on an explicit `update` (never on the quiet sweep — no session start dials a forge), receipted with
+  the commit motion and the member delta; a local-path row is an adopt-in-place presence check. A
+  manifest the grammar refuses FREEZES its whole scope — no delivery, no cleaning: a typo must keep
+  bytes, never drop them. Placement is PER-SCOPE (see below); after the fan-out `clean_undemanded`
+  retires what its scope no longer demands (snapshot-first, resetting to never-received) and each
+  session gets the applied report (`PUT …/report` — a complete snapshot per session). The **delivery
+  cache** (`state/sync_status.json`) records host/workspace_name per workspace + name/review_required/
+  served_version per skill PLUS each row's attribution and the caller's declines, so `status`/`list`
+  answer offline and `CacheFollow` (the FollowSource over the cache) + `SessionRoutedPlane` (the
+  PlaneSource routing each skill to its session's lane) wire the composition root. Notices ACK by id
+  after an interactive `update`; the quiet hook fetches without acking.
 - **The verbs** (`ops`) — `add <source> [-s <name>] [-a <slug>] [-g]`: ONE source-polymorphic positional —
   a workspace-shaped reference (`@ws/name`, `@ws/channels/x`, canonical `host/ws/name`, a bare catalog
-  name when sessions exist) edits the nearest manifest (or, `-g`, PUTs the server-stored profile route)
-  and DELIVERS in the same invocation; `add topos` is the built-in's restore; a PATH adopts a directory
-  in place (mint id+name, scan + import, stage + publish with one rename — all-or-nothing; the manifest
-  records the dir-relative `./path` line; recognize a Claude Code skill dir, tag it + arm the hook); a
-  bare NAME with no sessions resolves against `list`'s untracked discovery; a REMOTE
-  `owner/repo`/github URL is fetched + imported (`add_remote` over the injectable `GitTarballSource`,
-  `..`/symlink-safe, `origin.json` provenance adjunct) and recorded as a pinned GitHub ref.
-  `remove <targets…> [-g]` is `add`'s inverse: drop the manifest line, or record an EXCLUDE when a
-  broader layer still provides the name; `-g` DELETEs the profile row (the answer's `data.status` —
-  `removed`/`excluded`/`not_in_profile` — phrases the receipt); a tracked never-published local (or an
-  untracked agent-dir copy) keeps the two-phase permanent delete with the loss-guard describe;
-  `remove topos --yes` is the built-in's durable opt-out. `update [<target>…] [--quiet]` is the manifest
-  reconcile above (targeted forms narrow it; `--reset` keeps the loss-led two-phase discard;
-  `--goback`/`--onto-current` keep the per-skill engine). `list [--footprint] [--tracked] [--remote]`
-  (tracked bucket + untracked discovery across the baked ~73-harness registry; `--remote` reads each
-  session's catalog, session-routed). `diff`, `log` (the plane half rides the skill's session lane),
-  `init`, `status` (below), `uninstall [--yes]` (two-phase teardown: hook scrub + sidecar delete; the
-  sessions go with it; skill files stay).
+  name when sessions exist) records ONE row in the nearest manifest — or, `-g`, in the global file —
+  and DELIVERS in the same invocation; `add -g @ws` adopts a whole FEED (global only: a feed row is
+  personal by nature, so a project file refuses it toward channels); `add topos` is the built-in's
+  restore; a PATH adopts a directory in place (mint id+name, scan + import, stage + publish with one
+  rename — all-or-nothing; the manifest records the dir-relative `./path` row; recognize a Claude Code
+  skill dir, tag it + arm the hook); a bare NAME with no sessions resolves against `list`'s untracked
+  discovery; a FORGE reference is fetched read-only + imported (`add_remote` over the injectable
+  `GitTarballSource`, `..`/symlink-safe, `origin.json` provenance adjunct). Three `-g` arms are pure
+  disclosure rather than a write: an add the FEED already delivers writes nothing and says so; an add
+  over a standing `"off"` row DELETES the row (never a stacked positive); an explicit pin or field set
+  converts a feed-delivered bundle to machine-local control. FIRST TRUST is the one gate here — a forge
+  source with no row in any local manifest and no tracked import is DESCRIBED (source, discovered
+  members, the exact row and file) and applied only under `--yes`; a known source applies immediately
+  with an undo-led receipt. `remove <targets…> [-g]` is the EXACT FILE INVERSE (property-tested): drop
+  the row; or, `-g`, write `"off"` when the feed still provides the bundle, or drop a FEED row whole; a
+  set member's removal is the set-minus-one rewrite (that one line replaced by its current members),
+  offered as a describe because later curation stops arriving through this file. Its two-phase arms are
+  LOSS (a row whose bundle carries unshared edits, or an unclassifiable scan — the guard fails TOWARD
+  the gate) and the set split; everything else applies immediately, and the receipt offers the literal
+  inverse ONLY when it restores the whole prior state. A tracked never-published local (or an untracked
+  agent-dir copy) keeps the two-phase permanent delete; `remove topos --yes` is the built-in's durable
+  opt-out. `fmt [-g]` writes the normal form (validating the whole document first — it never launders a
+  malformed file). `update [<target>…] [--quiet]` is the reconcile above (targeted forms narrow it;
+  `--reset` keeps the loss-led two-phase discard; `--rebuild` absorbs drafts then re-projects every
+  managed folder; `--onto-current` keeps the per-skill engine's escape). `list [--footprint] [--tracked]
+  [--remote]` (tracked bucket + untracked discovery across the baked ~73-harness registry; `--remote`
+  reads each session's catalog, session-routed). `diff`, `log` (the plane half rides the skill's session
+  lane), `init`, `status` (below), `uninstall [--yes]` (two-phase teardown: hook scrub + sidecar delete;
+  the sessions go with it; skill files stay).
 - **The placement engine** (`placement`, `topos-harness::{coverage,registry}`) — WHERE a managed skill's
   bytes land, computed each sync FOR ITS SCOPE. **Person scope** (`plan_for_skill`/`plan_targets`) is
   shared-dir-first over the home: one `~/.agents/skills` copy where a detected harness is covered, plus a
@@ -115,7 +162,10 @@ consent step, and no device-link lane; `follow`/`unfollow`/`channel` are gone.
   (`under_project_manifest` — the mirror of the project plan's project-local rule). **Project scope**
   (`project_plan`) mirrors the policy ROOTED AT THE CHECKOUT: `<proj>/.agents/skills` for covered
   agents, the registry's project dirs for the rest, the Claude-Code-shaped `.claude/skills` default when
-  nothing is detected; a manifest `[placement]` override pins ONE project-relative dir; every landed
+  nothing is detected; a manifest `path` field pins ONE project-relative dir instead (the row's own
+  field beats `[defaults.<kind>].path` beats the registry mapping, and within each level a
+  harness-named key beats that level's `default`; a value that is not provably inside the checkout is
+  ignored with a warning — a committed file must never aim managed bytes elsewhere); every landed
   project dir SELF-IGNORES (the staged tree carries the exact sentinel `.gitignore` unless the bundle
   ships its own — the node_modules model; the scanner treats the byte-exact sentinel at the bundle
   root as topos metadata, so it never reads as an edit; no repository file is ever touched).
@@ -157,9 +207,9 @@ consent step, and no device-link lane; `follow`/`unfollow`/`channel` are gone.
   works offline. An `auto` item's bare sweep resolves unattended.
 - **The transport** (`plane_http`) — blocking `ureq` (rustls+ring). `UreqPlane` (conditional `current`
   GET, verified per-blob bundle fetch, delivery + report) and `UreqDeviceClient` (the directory reads,
-  the profile row ops `PUT/DELETE /v1/workspaces/{ws}/profile/{skills|channels}/…` with the
-  status-carrying DELETE, the contribute writes, invitations, notices, `DELETE /v1/session`, and the
-  creds-free login flow) — every credentialed call under the SESSION's workspace-scoped Bearer. The
+  the contribute writes, invitations, notices, `DELETE /v1/session`, and the creds-free login flow —
+  there is NO row-op call left: the retired `…/profile*` paths answer the uniform wire 404, and every
+  positive/negative stance is a web act) — every credentialed call under the SESSION's workspace-scoped Bearer. The
   composition root builds ONE transport set per session (`SessionTransports`
   {plane, directory, contribute, governance}); `SessionUniverse` assembles the resolver universe from
   each session's own reads; `resolve_session_lane` picks a verb's write lane (the delivered skill's
@@ -192,12 +242,17 @@ consent step, and no device-link lane; `follow`/`unfollow`/`channel` are gone.
   credential ("pending — awaiting owner approval" via the served `session_status`; the uniform 404 reads
   "no access — ended, removed, or gone"), hook health, and the reporting posture.
 - **The `status` verb + the bare `topos` orientation** (`ops/status`) — the offline trust rail,
-  resolved over THIS directory's manifest chain PLUS the person's profile layers (materialized from
-  the offline delivery cache) and the personal manifest: per bundle, the winning reference, ONE
-  source label, the scope, the channel attribution, and an HONEST state — `applied as of <last
-  sync>` with the version (the cache's stamp, never a live claim), local-edits, behind,
-  not-available/pending from the local session file, and recorded EXCLUDES as their own rows;
-  per-agent trigger state probed read-only, and the binary version. No network, no writes; it dispatches ahead of
+  SECTIONED per scope because scopes are unblended: the nearest project manifest, then the person
+  scope (the global manifest when it exists, else the implicit feed rows materialized from the offline
+  delivery cache), plus each connected workspace's REGIME. Per line: the winning reference, ONE source
+  label (which row — or which workspace's feed — asked), the delivery attribution (`assigned by
+  <name>` / `picked by you`), and an HONEST state — `applied as of <last sync>` with the version (the
+  cache's stamp, never a live claim), local-edits, behind, off, not-available/pending from the local
+  session file. What a row cannot carry rides `notes`: a global manifest that does not adopt a
+  workspace's assignments, rows that add nothing, `"off"` switches nobody assigns any more, set
+  collisions, declined-but-delivered bundles, cross-scope version splits. `status <bundle>` is the
+  deep single-bundle answer (the exact row and file, or the feed; where its files are). Also per-agent
+  trigger state probed read-only, and the binary version. No network, no writes; it dispatches ahead of
   the recovery sweep and leaves a pending-recovery sidecar byte-identical. A bare `topos` on a TTY
   renders the same snapshot (a fresh machine gets the welcome); piped bare invocations keep the usage
   error.

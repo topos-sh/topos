@@ -110,9 +110,11 @@ H1 and provenance quote — the page provides both). After changing the CLI, run
   never internal design vocabulary, and never a concept the reader can't act on.
 - **Written for people AND agents.** Commands copy-pasteable and complete, tables parseable,
   explicit over clever.
-- **Vocabulary**: workspace · seat · session · manifest · profile · channel · skill · version ·
-  `current` · draft · proposal · auto-update. Not: device, follow/unfollow, or "currency" (an
-  internal code spelling, never a product word).
+- **Vocabulary**: workspace · seat · session · manifest · channel · skill · version · `current` ·
+  draft · proposal · auto-update. For the delivery model: a workspace **gives** a person skills
+  (the `everyone` baseline, a channel, an assignment, their own pick) and they can turn one **off**.
+  Not: device, profile, include/exclude, follow/unfollow, or "currency" (internal code spellings,
+  never product words).
 - **Compression is a feature.** This is deliberately a small set of pages (~12). Deepen an
   existing page before adding a new one.
 

@@ -1,33 +1,34 @@
 ---
 title: Run it as a team
-description: Invite people, group skills into channels, see that updates landed, and set policy.
+description: Invite people, give each group the skills it needs, see that updates landed, and set policy.
 sidebar_label: Team & channels
 ---
 
-Get your teammates in, decide who reviews what, give each group the skills it needs, and
-confirm it all landed. All of it happens in one **workspace** — your team's member list,
-address, and catalog of skills.
+Get your teammates in, decide who reviews what, give each group the skills it needs, and confirm
+it all landed. All of it happens in one **workspace** — your team's member list, address, and
+catalog of skills.
 
 <Note>
   Agents distribute skills; **they don't manage people**. `topos invite` is the only roster
-  command in the CLI — roles, removal, and leaving are browser acts, deliberately.
+  command in the CLI — roles, removal, giving a skill to the team, and leaving are browser acts,
+  deliberately.
 </Note>
 
 ## Invite people
 
 ```bash
 topos invite dev@acme.com --yes
-topos invite dev@acme.com --channel backend --yes  # with a skill set
+topos invite dev@acme.com --channel backend --yes  # with a first destination
 ```
 
-Owner-only, and the server needs [mail configured](/docs/self-host#mail) — Topos Cloud has
-it. Each address gets a single-use link, valid 7 days (re-inviting sends a fresh one). The
-mail offers all three ways in: a browser click, a paste-block for their agent, and
-`topos login <invite-url>`. Accepting is bound to the invited address; someone without an
-account gets one minted on the spot.
+Owner-only, and the server needs [mail configured](/docs/self-host#mail) — Topos Cloud has it.
+Each address gets a single-use link, valid 7 days (re-inviting sends a fresh one). The mail offers
+all three ways in: a browser click, a paste-block for their agent, and `topos login <invite-url>`.
+Accepting is bound to the invited address; someone without an account gets one minted on the spot.
 
-Accepting makes them a **member** — raise roles afterwards on the Members page. Nothing
-lands on their machines until they run `topos login` there.
+Accepting makes them a **member** — raise roles afterwards on the Members page. `--skill` or
+`--channel` gives them that skill or set from their first day, credited to you. Nothing lands on
+their machines until they run `topos login` there.
 
 ## Roles
 
@@ -35,48 +36,94 @@ lands on their machines until they run `topos login` there.
 |---|---|
 | **member** | Use skills, publish to open skills, create channels |
 | **reviewer** | Approve/reject proposals, roll back, curate curated channels, see the whole fleet |
-| **owner** | Invite, set roles, remove people, loosen protection, delete, change settings |
+| **owner** | Invite, set roles, remove people, give skills to everyone, loosen protection, delete, change settings |
 
-The workspace always keeps an owner: the last one can't be demoted, removed, or leave —
-promote someone else first.
+The workspace always keeps an owner: the last one can't be demoted, removed, or leave — promote
+someone else first.
+
+## Giving people skills
+
+Everything a person's agents receive is something the workspace **gave** them, and there are three
+ways to give it.
+
+<Steps>
+  <Step title="The baseline — everyone, always">
+    The **`everyone`** channel is assigned to the whole team and stays that way. Whatever is
+    placed there reaches every member with no steps, and it's where a new skill lands by default.
+    It can't be deleted or unassigned.
+  </Step>
+  <Step title="Give one skill or channel to everyone">
+    On a skill's page, or a channel's, an owner's **Assign to everyone** puts it in every
+    member's set. **Remove from everyone** takes the offer back; copies already on a machine stay
+    until it updates. Both confirm in place before they act, because both reach people.
+  </Step>
+  <Step title="Let people take what they need">
+    Any member can open **Your skills → Library**, browse the catalog, and **Add to mine**. That
+    records the same kind of assignment, credited to them — which is why their own picks show up
+    in a group of their own.
+  </Step>
+</Steps>
+
+A person's **Your skills → Mine** page is the whole answer for them, grouped by what put each
+skill there: Baseline, Channels, Assigned to you, Picked by me. Every row says which, so nobody
+has to guess why a skill showed up.
+
+## Opting out is theirs, not yours
+
+Each row on that page has an off switch. Turning a skill off stops it arriving on **all** of that
+person's machines; the row stays visible and dimmed, marked *off — still in the team library*, and
+turning it back on is one click. Nothing is deleted — copies already on a machine leave at its next
+update.
+
+Two things worth knowing as a curator:
+
+- It is **per skill**. There is no way to switch off a whole channel — a channel is a set, and a
+  person opts out of the items they don't want.
+- It **survives**. The switch is keyed to the skill itself, so a new version, a rename, or moving
+  the skill between channels doesn't quietly turn it back on.
+
+Someone can also switch a skill off on **one machine** with `topos remove <skill> -g`, which
+touches only that machine's own file and says nothing about their others. And because a decision
+in the browser and the bytes on a disk are two different things, the Sessions page tags a copy
+that is still sitting on a machine after being switched off — *turned off* — until that machine
+reconciles and clears it.
 
 ## Channels — "this group needs this set"
 
-A **channel** is a named set of skills. Create one in the browser (**Channels → New
-channel**), fill it on its Skills tab — or at publish time:
+A **channel** is a named set of skills. Create one in the browser (**Channels → New channel**),
+fill it on its Skills tab — or at publish time:
 
 ```bash
 topos publish deploy --to backend --yes
 ```
 
-People carry a channel with one command:
+Then decide how it reaches people. An owner's **Assign to everyone** on the channel page gives it
+to the whole team; anyone else can take it with **Add to my skills** on the same page, which
+follows them to every machine they log in (and **Remove from my skills** gives it back). Or pin it
+where the work is:
 
 ```bash
-topos add @acme/channels/backend -g  # follows you to every machine
-topos add @acme/channels/backend     # or pinned into this repo
+topos add @acme/channels/backend     # into this repo's topos.toml, for everyone working in it
+topos add @acme/channels/backend -g  # or onto this one machine
 ```
 
-Channels reference, they don't own — a skill in three channels is one skill, delivered once.
-Any member may curate an open channel; make one curated (reviewers and owners only) with
+Channels reference, they don't own — a skill in three channels is one skill, delivered once. Any
+member may curate an open channel; make one curated (reviewers and owners only) with
 `topos protect backend --yes`. Use the plain channel name with `protect`.
-
-**`everyone`** is the built-in baseline: whatever is placed there reaches the whole team with
-no steps — it's where a new skill lands by default. Individuals can opt out of single items
-with `topos remove <skill> -g`; the channel itself can't be deleted.
 
 ## Did it land?
 
-**Settings → Sessions** answers "is everyone current — did the rollback reach?" Every
-logged-in machine is listed with its per-skill state (current or behind), when it last
-reported, and a freshness chip. Machines report when an agent runs, so an idle laptop reads
-*stale* — unconfirmed, not wrong. Owners can approve, reject, and remove sessions there;
-people end their own with `topos logout`.
+**Settings → Sessions** answers "is everyone current — did the rollback reach?" Every logged-in
+machine is listed with its per-skill state (current or behind), when it last reported, and a
+freshness chip. Machines report when an agent runs, so an idle laptop reads *stale* —
+unconfirmed, not wrong. Owners can approve, reject, and remove sessions there; people end their
+own with `topos logout`.
 
 ## Removing access
 
-- **Remove a member** (owner, Members page): their seat and their logins in this workspace
-  end together. Local copies stay theirs — removal stops future delivery; it never deletes
-  files on someone's machine.
+- **Remove a member** (owner, Members page): their seat and their logins in this workspace end
+  together. Local copies stay theirs — removal stops future delivery; it never deletes files on
+  someone's machine.
 - **Remove one machine** (owner, Settings → Sessions): ends exactly that login.
 - **Leave** (anyone, own seat): ends all of your own machines' access.
 
@@ -94,10 +141,17 @@ people end their own with `topos logout`.
 
 ## Who can see what
 
-A workspace's skill and channel pages answer **only for signed-in members** — anyone else
-gets a plain 404, so a URL can't leak what exists.
+A workspace's skill and channel pages answer **only for signed-in members** — anyone else gets a
+plain 404, so a URL can't leak what exists.
+
+The other direction matters more when you're asking someone to log a work laptop in, and it has its
+own page: **What the team can see**, linked from Your skills and from Settings → Sessions. It leads
+with what a workspace can *never* read — file contents, prompts, repository code, anything
+unpublished — then what it does read (which machines, which shared skills by name, which version,
+when each last reported), and then that reader's own rows as proof. Send people there instead of
+reassuring them.
 
 <Warning>
-  Don't hand a skill-page URL to someone outside the workspace as their way in — it 404s for
-  them. Send an invitation, or the workspace address for `topos login`.
+  Don't hand a skill-page URL to someone outside the workspace as their way in — it 404s for them.
+  Send an invitation, or the workspace address for `topos login`.
 </Warning>

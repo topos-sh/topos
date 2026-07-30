@@ -52,9 +52,12 @@ topos login https://topos.sh/acme    # your workspace address; approve in the br
 topos add pr-describe                # record it in this folder's manifest; delivered immediately
 ```
 
-What a folder's agents should have is its `topos.toml` **manifest** — `add`/`remove` edit the nearest one
-(created at the git root when none exists) and deliver immediately; `-g` edits your server-stored profile,
-which every machine you are logged into converges on. Login arms a session-start hook that runs
+You do not have to `add` what the team already gave you: logging in adopts everything the workspace
+assigns you — its shared baseline, any channel you carry, anything aimed at you — and keeps taking it.
+`add` is for the rest. What a folder's agents should have is its `topos.toml` **manifest** —
+`add`/`remove` edit the nearest one (created at the git root when none exists) and deliver immediately;
+`-g` edits this machine's own `~/.topos/topos.toml`, which takes explicit control of what follows you
+here. Login arms a session-start hook that runs
 `topos update`, so updates the team publishes land byte-exact at the start of each session — verified
 byte-for-byte against the plane's `current` pointer, and never over your local edits. In a checkout, managed
 copies land in the project's own agent dirs and keep themselves out of commits (each placed dir
@@ -95,17 +98,20 @@ set the install directory; `TOPOS_INSTALL_BASE_URL` points at a mirror or air-ga
 ## Commands
 
 The agent usually drives these non-interactively — `--json` emits a machine envelope and never prompts — but
-the same verbs work by hand. Every mutating verb is **two-phase**: a bare invocation *describes* what would
-change (nothing is written), and `--yes` applies it. The full, always-current reference — every flag,
-generated straight from the CLI — is in [`docs/cli.md`](docs/cli.md).
+the same verbs work by hand. One rule covers the gate: a verb that **reaches other people, discards local
+work, or trusts a new source** is two-phase — a bare invocation *describes* what would change (nothing is
+written) and `--yes` applies it. Everything else applies immediately and prints the command that undoes it.
+The full, always-current reference — every flag, generated straight from the CLI — is in
+[`docs/cli.md`](docs/cli.md).
 
 | Command | What it does |
 |---|---|
 | `login <address>` · `logout` | Log this machine into a workspace (one browser approval) · end the session. |
 | `init` | Create this folder's `topos.toml` manifest. |
-| `add <name>` / `add @<ws>/<name>` | Record a catalog skill in the nearest manifest (`-g`: your server-stored profile); delivered immediately. `@<ws>/channels/<name>` adds a channel, `owner/repo` imports from GitHub, `<dir>` adopts a local folder. |
-| `remove <name>` | The inverse — drop the line, or record an exclude when a broader layer still provides it. |
-| `update [<skill>]` | Reconcile this folder's manifests + your profile. The session-start hook runs this for you. (`pull` is a hidden alias.) |
+| `add <name>` / `add @<ws>/<name>` | Record a catalog skill in the nearest manifest (`-g`: this machine's own `~/.topos/topos.toml`); delivered immediately. `@<ws>/channels/<name>` adds a channel, `@<ws>` adopts a whole workspace's set, `owner/repo` imports from GitHub (gated once on first trust), `<dir>` adopts a local folder. |
+| `remove <name>` | The exact inverse — drop the same row; with `-g`, switch one skill off on this machine when the workspace still gives it to you. |
+| `update [<skill>]` | Reconcile this folder's manifest and everything your workspaces give you. The session-start hook runs this for you. (`pull` is a hidden alias.) |
+| `fmt` | Tidy a `topos.toml` into the standard layout — comments kept, meaning unchanged. |
 | `publish <skill>[@<digest>]` | Move `current` to your draft (or genesis-create a skill); a landed publish of a local folder transfers its governance to the workspace. The optional `@<digest>` pins the exact bytes. |
 | `publish --propose <skill>` | Open a proposal (a PR) without moving `current`. |
 | `review [<skill>@<hash> --approve\|--reject]` | The review inbox, or resolve a proposal. |

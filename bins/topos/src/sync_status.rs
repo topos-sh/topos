@@ -85,11 +85,10 @@ pub(crate) struct DeliveredSkill {
     /// `list --channel <name>`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub via_channels: Vec<String>,
-    /// Delivered through a MANIFEST channel reference (a project's or the personal manifest's
-    /// `[channels]` line), NOT the person's server-stored profile. These rows give the offline
-    /// surfaces (`remove`'s exclude arm, provenance reads) the channel-member fact; they are
-    /// EXCLUDED from everything profile-shaped — the offline profile layer, the profile-drop
-    /// cleaner, the followed count.
+    /// Delivered through a MANIFEST channel row, NOT the workspace's own feed. These rows give
+    /// the offline surfaces (`remove`'s set-split arm, provenance reads) the channel-member fact;
+    /// they are EXCLUDED from everything feed-shaped — the offline feed materialization, the
+    /// feed-drop cleaner, the delivered count.
     #[serde(default, skip_serializing_if = "is_false")]
     pub via_manifest: bool,
     /// The display name of the direct assignment's creator, when someone else aimed the bundle

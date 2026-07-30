@@ -30,7 +30,7 @@
       ],
       "mutates": true,
       "needs_network": true,
-      "risk_note": "ships these bytes to the team — every follower receives them"
+      "risk_note": "ships these bytes to the team — everyone given this skill receives them"
     }
   ]
 }

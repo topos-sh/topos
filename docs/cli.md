@@ -78,6 +78,19 @@ topos init [OPTIONS]
 | `-g, --global` | Write the machine-wide file (`~/.topos/topos.toml`) instead of this folder's |
 
 
+### `topos fmt`
+
+Tidy a `topos.toml`: group and sort its lines into the standard layout. Comments survive; meaning never changes. Formats this folder's file, or your machine-wide one with `-g`
+
+```
+topos fmt [OPTIONS]
+```
+
+| Argument / flag | What it does |
+|---|---|
+| `-g, --global` | Format `~/.topos/topos.toml` instead of this folder's file |
+
+
 ### `topos add`
 
 Get skills and keep them updated. The source can be a skill or channel from your workspace (`code-review`, `@acme/code-review`, `@acme/channels/backend`), a whole workspace's feed (`@acme`, with `-g`), a local folder (`./tools/my-skill`), or a public GitHub repo (`owner/repo` for every skill in it, `owner/repo/name` for one). Records one line in this folder's `topos.toml` — or in your machine's own file with `-g` — and installs right away. A GitHub source you have never used before shows what it found and waits for `--yes`. `add topos` restores the built-in topos skill
@@ -112,7 +125,7 @@ topos remove [OPTIONS] [SKILL]...
 
 ### `topos update`
 
-Fetch and apply the latest version of everything this folder and your profile ask for. Runs by itself at the start of each agent session; safe to run by hand any time. `topos update <skill>` updates one skill; `topos update <skill>@<version>` puts that version's bytes back on this machine only
+Fetch and apply the latest version of everything this folder's `topos.toml` asks for and everything your workspaces give you. Runs by itself at the start of each agent session; safe to run by hand any time. `topos update <skill>` updates one skill; `topos update <skill>@<version>` puts that version's bytes back on this machine only
 
 ```
 topos update [OPTIONS] [TARGETS]...

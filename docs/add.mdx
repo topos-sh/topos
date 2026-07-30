@@ -1,130 +1,271 @@
 ---
 title: Get skills
-description: Add skills from your workspace, a folder, or GitHub — for a project or for yourself — and stop cleanly.
+description: Connecting brings what your team gave you; add pins more to a project or to this machine, from a workspace, a folder, or GitHub.
 sidebar_label: Get skills
 ---
 
-Logging in already delivers your team's shared baseline — anything in the `everyone` channel
-arrives on its own. `topos add` is for the rest: pinning a set to a project, following a
-narrower channel, or pulling in a skill from outside.
+Most of the time you never run this. `topos login` connects the machine, and everything your team
+has given you is already there — with every later change arriving on its own. `topos add` is for
+the rest: pinning a set of skills to a repo so everyone working in it gets the same ones, or
+pulling in a skill from outside your workspace.
 
-## One command, three kinds of source
+## Connecting adopts what the team gave you
+
+The moment a login is approved, this machine takes everything currently assigned to you and keeps
+taking it. Four things put a skill in that set:
+
+| Where it comes from | Who put it there |
+|---|---|
+| The **baseline** — the `everyone` channel | Every member has it, always |
+| A **channel** you carry | A curator, or you |
+| **Assigned to you** | Someone aimed that skill or channel at you — an invitation's first-destination hint does this too |
+| **Picked by me** | You added it yourself from the library |
+
+Your workspace's **Your skills** page shows exactly these four groups, each row saying which one
+it is. Nothing to run, nothing to configure — the machine converges on it.
 
 ```bash
-topos add code-review             # from your workspace, by name
-topos add @acme/channels/backend  # a whole channel's set
-topos add ./tools/my-skill        # a local folder, offline
-topos add vercel-labs/skills      # a public GitHub repo
+topos status   # offline: every skill here, its version, and what asked for it
 ```
 
-The shape of what you type is the source: `@` introduces a workspace, a slash without `@` is
-GitHub, a path is a folder. A pasted skill-page URL works too, and `@acme/deploy@<version>`
-pins exact bytes. Every receipt names the file it edited and the exact undo command.
+## Turning one off
 
-## For this project, or for you
+Two switches, with deliberately different reach.
 
 <Tabs>
-  <Tab title="This project (default)">
-    ```bash
-    topos add code-review
-    ```
-
-    Records the skill in the repo's `topos.toml`. **Commit that file** — everyone who works
-    in the repo then gets the same skills, delivered to their agents automatically.
+  <Tab title="Everywhere (the browser)">
+    On **Your skills → Mine**, the toggle beside a skill turns it off for **you** — it stops
+    arriving on every machine you log in. The row stays visible and dimmed, marked *off — still
+    in the team library*, and turning it back on is one click. Nothing is deleted: copies already
+    on a machine leave at that machine's next update.
   </Tab>
-  <Tab title="For you (-g)">
+  <Tab title="This machine only (the terminal)">
     ```bash
-    topos add code-review -g
+    topos remove code-review -g   # off here
+    topos add code-review -g      # back on here
     ```
 
-    Adds it to your profile instead: it follows you to every machine you log in on. You can
-    edit the same list in the browser, under **Your skills**.
+    This edits your own `~/.topos/topos.toml` — dropping the line that asked for the skill, or
+    switching it `off` when the workspace still gives it to you. Either way it says nothing about
+    your other machines, and the receipt points at the browser toggle when you meant everywhere.
   </Tab>
 </Tabs>
 
-`topos.toml` is plain TOML, and editing it by hand is fully supported:
+<Note>
+  Only you can decide this. The CLI never writes team-side state — turning a skill off for
+  yourself is a browser act, and so is every act that reaches another person.
+</Note>
 
-```toml title="topos.toml"
-exclude = ["topos.sh/acme/noisy-skill"]  # don't deliver this one here
+## Add a set to a project
 
-[skills]
-"topos.sh/acme/code-review" = "*"            # the team's current version
-"topos.sh/acme/deploy" = "<64-hex version>"  # pinned to one version
-"github.com/vercel-labs/skills/skills/find-skills" = "e173b8c"  # pinned
-"./tools/my-skill" = "*"                     # a folder in this repo
-
-[channels]
-"topos.sh/acme/channels/backend" = "*"
+```bash
+topos add code-review                     # a skill from your workspace, by name
+topos add @acme/channels/backend          # a whole channel's set
+topos add ./tools/my-skill                # a folder in this repo, offline
+topos add vercel-labs/skills/find-skills  # one skill from a public GitHub repo
 ```
 
-When several files ask for the same skill, the nearest wins: this folder's `topos.toml`,
-then parent folders', then your profile. `topos status` names the exact line behind every
-skill on the machine.
+The shape of what you type is the source: `@` introduces a workspace, a slash without `@` is
+GitHub, a path is a folder. A pasted skill-page URL works too, and `@acme/deploy@<version>` pins
+exact bytes.
+
+Each of these records **one line** in the nearest `topos.toml` — this folder's, or a fresh one at
+the repo root when there isn't one yet — and delivers in the same command. **Commit that file**:
+everyone who works in the repo then gets the same skills, delivered to their agents
+automatically. Every receipt names the file it edited and the exact undo.
+
+## Add something just for this machine
+
+```bash
+topos add code-review -g
+```
+
+`-g` edits `~/.topos/topos.toml` — this machine's own list — instead of the project's. Most people
+never have that file, and don't need one: while it is absent, the machine behaves exactly as if it
+said "everything each connected workspace gives me".
+
+The first `-g` command writes the file out in full before making your edit — one line per
+workspace you're connected to — so you can see what you already had, spelled out, rather than a
+file that only mentions the one thing you just changed. From then on that file is the **complete**
+list for this machine: what it names is what you get.
+
+<Tip>
+  A `-g` add of something the team already gives you writes nothing and says so. There is no
+  point stacking a line on top of a line that already delivers.
+</Tip>
+
+## The file
+
+`topos.toml` is plain TOML with one `[bundles]` section, and editing it by hand is fully
+supported.
+
+```toml title="topos.toml — committed to the repo"
+[bundles]
+"topos.sh/acme/code-review" = "*"                            # the team's current version
+"topos.sh/acme/deploy" = "9f2c1d8e…"                         # pinned: one exact version
+"topos.sh/acme/channels/backend" = "*"                       # a whole channel
+"github.com/vercel-labs/skills/find-skills" = "e173b8c"      # pinned to a commit
+"./tools/my-skill" = "*"                                     # a folder in this repo
+```
+
+An entry's key is its **reference**, and the key path is joined with `/` — so the flat spelling
+above and the grouped one below are the same three Acme entries, and `topos fmt` moves freely
+between them:
+
+```toml title="the same entries, grouped"
+[bundles."topos.sh/acme"]
+code-review = "*"
+deploy = "9f2c1d8e…"
+"channels/backend" = "*"
+```
+
+Your own machine-wide file has two spellings the project file doesn't:
+
+```toml title="~/.topos/topos.toml — yours, never committed"
+[bundles]
+"topos.sh/acme" = "*"                  # everything Acme currently gives you
+"topos.sh/acme/noisy-skill" = "off"    # …except this one, on this machine
+"github.com/vercel-labs/skills" = "*"  # every skill that repo holds
+```
+
+A two-segment key like `"topos.sh/acme"` is that workspace's whole set — the live one, so a skill
+assigned to you tomorrow arrives without a file edit. `"off"` is the one negative a file can
+express, and it subtracts exactly one skill on this machine. Both are yours alone: a project file
+is a repo fact, identical for every contributor, so it refuses either one and says which spelling
+it wanted.
+
+### What a value can say
+
+| Value | Means |
+|---|---|
+| `"*"` | Track whatever the reference serves right now |
+| A 64-character hex string | One exact version of a workspace skill — those bytes and no others |
+| 7–40 hex characters | One commit of a git source |
+| `"off"` | Off on this machine (your own file, one workspace skill) |
+| An inline table | The same, plus placement — see below |
+
+The table form carries `version` alongside a few placement fields:
+
+```toml
+[bundles]
+# Land this one somewhere specific in the checkout.
+"topos.sh/acme/code-review" = { version = "*", path = ".agents/skills" }
+# A skill living at a literal path inside a bigger repo.
+"github.com/acme/monorepo/deploy" = { version = "*", subdir = "tools/skills/deploy" }
+
+# Or set a default for every skill this file asks for.
+[defaults.skill]
+path = ".agents/skills"
+```
+
+A `path` is project-relative and must stay inside the checkout — a committed file can never aim
+managed bytes somewhere else on a contributor's disk. Anything else the parser doesn't accept for
+that kind of reference refuses by naming what it does accept, so a typo can't silently drop a
+skill you thought you had.
+
+<Tip>
+  `topos fmt` (or `topos fmt -g`) tidies a file into the standard layout — grouped, sorted,
+  comments kept. It never changes what the file means.
+</Tip>
+
+## Two lists that never blend
+
+The nearest `topos.toml` above your working directory governs that checkout **whole**: no merging
+with a parent folder's file, and no arithmetic against what you get personally. A project's list
+and your own list are two independent answers to two different questions — "what should anyone
+working here have?" and "what should follow me around?"
+
+So a skill named by both is delivered twice: once into the project's agent directories, once into
+your home ones. They update independently and you can edit one without touching the other.
+`topos status <skill>` names which file and line — or which workspace's set — is behind each copy.
 
 ## Where the files land
 
-Skills are placed into the folders your agents actually read — `~/.claude/skills/<name>`,
-the shared `~/.agents/skills/<name>`, or the project's own agent directories. Inside a repo,
-one line in `.git/info/exclude` keeps placements out of commits; committed ignore files are
-never touched. The full directory table: [Supported agents](/docs/harnesses).
+Skills go into the folders your agents actually read — `~/.claude/skills/<name>`, the shared
+`~/.agents/skills/<name>`, or a project's own agent directories. The full table:
+[Supported agents](/docs/harnesses).
+
+Inside a repo, delivered folders keep **themselves** out of commits: each one carries a one-line
+`.gitignore` of its own, the way `node_modules` does. Topos writes nothing under `.git/` and never
+touches an ignore file you wrote. Its own bookkeeping for that checkout lives in
+`<project>/.topos/`, which also ignores itself.
 
 ## Updates apply themselves
 
-Logging in arms a session-start trigger: each time an agent starts, the machine silently
-catches up. By hand, any time:
+Logging in arms a session-start trigger, so each time an agent starts the machine quietly catches
+up. By hand, any time:
 
 ```bash
 topos update                        # everything
 topos update code-review            # one skill
-topos update code-review@<version>  # roll back this machine only
+topos update code-review@<version>  # put that version's bytes back, this machine only
+topos update --rebuild              # re-create every managed folder from topos's own store
 ```
 
-New files are verified against the workspace's records before anything lands, and **your
-local edits are never overwritten** — updates merge around them, and a genuine conflict is
-frozen with a named way out. Details:
-[Review, protect, roll back](/docs/review#your-edits-are-safe).
+New files are verified against the workspace's records before anything lands, and **your local
+edits are never overwritten** — updates merge around them, and a genuine conflict is frozen with a
+named way out. Details: [Review, protect, roll back](/docs/review#your-edits-are-safe).
+
+Two things deliberately do **not** move on their own: a pinned version never moves, and a git
+source moves only when you run `topos update` yourself. The quiet session-start sweep never
+contacts GitHub, so no agent session pays for a network round-trip to a forge; when you do run it,
+the receipt names the commit it moved to and which skills appeared or disappeared.
 
 ## Import from GitHub
 
 ```bash
-topos add vercel-labs/skills                 # a public repo
-topos add vercel-labs/skills -s find-skills  # one skill from a repo
-topos add owner/repo#v1.2.0                  # a tag, branch, or commit
+topos add vercel-labs/skills                 # every skill the repo holds
+topos add vercel-labs/skills/find-skills     # one of them
+topos add vercel-labs/skills@e173b8c         # frozen at a commit
 ```
 
-GitHub entries behave like lockfile lines: pinned to a commit, moving only when you bump the
-pin. Publish an imported skill to your workspace and the workspace starts watching the source
-repo — new upstream commits arrive as review proposals, never as silent changes. There is
-also a browser import with a preview at `<origin>/skills/import`.
+The first time you add from a repo, a bare run shows you what it found — the source, the skills in
+it, and the exact line it would write — and changes nothing. Read it, then apply with `--yes`.
+After that the source is trusted here and further adds from it land immediately with an undo-led
+receipt.
 
 <Warning>
-  A skill is instructions your agent will follow, and Topos verifies nothing about a
-  third-party repo's contents. Read what you import.
+  A skill is instructions your agent will follow, and Topos verifies nothing about a third-party
+  repo's contents. That first listing is there to be read.
 </Warning>
+
+Without a pin, a repo entry tracks its default branch. To freeze one, give a commit — or paste a
+GitHub URL that already names a tag or branch (`.../tree/v1.2.0/skills/deploy`) and the entry
+records the commit that tag resolved to, so the freeze can't drift under you.
+
+Publish an imported skill to your workspace and the workspace starts watching the source repo —
+new upstream commits arrive as review proposals, never as silent changes. There is also a browser
+import with a preview at `<origin>/skills/import`.
 
 ## Stop receiving
 
 ```bash
 topos remove code-review     # from this project
-topos remove code-review -g  # from your profile, every machine
+topos remove code-review -g  # from your own machine-wide list
 ```
 
-`remove` edits the same file `add` did and prints the undo. When something broader — a
-channel, the team baseline — still provides the skill, the receipt says an opt-out line was
-recorded here instead. It asks first only when local work would be lost.
+`remove` edits the same file `add` did and prints the undo — they are exact inverses. Two cases
+ask first instead of applying:
 
-Bigger exits: `topos logout` stops one workspace's delivery to this machine (skills and your
-edits stay); `topos uninstall --yes` removes topos entirely — without deleting a single
-skill file. And if the workspace removes a skill or your access, delivery just stops: your
-local copies and edits are always retained.
+- **Local work would be lost.** A skill you've edited but not shared is described first, so you
+  can see the draft before the copy leaves your agent directories. (Your edits are snapshotted,
+  never deleted.)
+- **The line covers a set.** Removing one skill out of a channel or a whole-repo entry means
+  replacing that one line with its current members — after which later additions by whoever
+  curates it stop arriving through this file. That trade is described first too.
+
+Bigger exits: `topos logout` stops one workspace's delivery to this machine (skills and your edits
+stay); `topos uninstall --yes` removes topos entirely — without deleting a single skill file. And
+if the workspace removes a skill or your access, delivery just stops: your local copies and edits
+are always retained.
 
 ## Check any time
 
 ```bash
 topos status         # every skill here, its version, and its source
+topos status deploy  # one skill in depth: the exact line behind it, and where its files are
 topos list           # inventory, plus untracked skills you could add
 topos list --remote  # what your workspaces offer
 ```
 
-`topos status` works offline and changes nothing — it names the exact line that asked for
-every skill on the machine.
+`topos status` works offline and changes nothing.
