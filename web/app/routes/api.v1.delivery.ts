@@ -5,8 +5,8 @@ import { requireSessionActor } from "@/lib/auth/guards.server";
 import { deliveryFor, emptyDeliveryFor } from "@/lib/db/queries.lane.server";
 
 /**
- * `GET /api/v1/workspaces/{ws}/delivery` — the person-layer answer for ONE session (the
- * profile's demand ∩ the seat's entitlement), assembled in ONE snapshot transaction. Per-
+ * `GET /api/v1/workspaces/{ws}/delivery` — the person-layer answer for ONE session (their
+ * FEED ∩ the seat's entitlement), assembled in ONE snapshot transaction. Per-
  * session, hot, never cacheable. One of the exactly TWO pending-tolerant routes: a PENDING
  * session answers the shape-complete EMPTY body with `session_status` "pending" — no data
  * flows over a pending session, but the client learns its standing instead of a phantom 404.

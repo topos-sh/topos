@@ -258,3 +258,39 @@ test("the status chips carry a focusable, hover/focus-only tooltip explainer", a
   await expect(trigger).toBeFocused();
   await expect(page.getByRole("tooltip").first()).toBeVisible();
 });
+
+test("a skill turned off on the web but still on a machine is disclosed, per session", async ({
+  page,
+}) => {
+  const ws = await theWorkspace();
+  const owner = (
+    await adminQuery<{ user_id: string }>(
+      `select user_id from web.seat where role = 'owner' limit 1`,
+    )
+  )[0]?.user_id as string;
+  // The gap the page has to be honest about: the decision is a row here, the bytes are still on
+  // the machine until it reconciles. The owner's fresh session reports handbook.
+  await adminQuery(
+    `insert into web.decline (workspace_id, user_id, bundle_id) values ($1, $2, $3)
+     on conflict do nothing`,
+    [ws.id, owner, SKILL_B.id],
+  );
+  try {
+    await gotoSettled(page, `/settings/sessions`);
+    // Both of the owner's sessions hold handbook, so both disclose the gap — the note is per
+    // MACHINE, computed from what that machine reported against its owner's stance.
+    const fresh = page.getByTestId(`sessions-session-${SESS_FRESH}`);
+    await expect(fresh.getByTestId("sessions-declined-note")).toContainText(SKILL_B.name);
+    const stale = page.getByTestId(`sessions-session-${SESS_STALE}`);
+    await expect(stale.getByTestId("sessions-declined-note")).toContainText(SKILL_B.name);
+    // release-guide was never declined, so the note names handbook alone.
+    await expect(fresh.getByTestId("sessions-declined-note")).not.toContainText(SKILL_A.name);
+  } finally {
+    await adminQuery(`delete from web.decline where user_id = $1 and bundle_id = $2`, [
+      owner,
+      SKILL_B.id,
+    ]);
+  }
+  await gotoSettled(page, `/settings/sessions`);
+  await expect(page.getByTestId("sessions-declined-note")).toHaveCount(0);
+});

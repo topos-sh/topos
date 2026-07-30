@@ -90,6 +90,17 @@ describe("the first-boot setup ceremony", () => {
       [ws?.id],
     );
     expect(channels).toEqual([{ name: "everyone", is_default: true }]);
+    // … AND with the baseline as a ROW: that channel assigned to everyone. Nothing treats the
+    // default channel as delivered by rule, so a workspace born without this row delivers
+    // nothing to anyone. No person has acted yet — the claim comes later — so 'system' is the
+    // author, the same attribution the birth audit row carries.
+    const baseline = await q<{ channel_id: string; created_by: string }>(
+      `SELECT channel_id, created_by FROM web.assignment
+       WHERE workspace_id = $1 AND user_id IS NULL`,
+      [ws?.id],
+    );
+    expect(baseline).toHaveLength(1);
+    expect(baseline[0]?.created_by).toBe("system");
   });
 
   it("claimableWorkspace hits only with the right code — every other probe is the uniform miss", async () => {

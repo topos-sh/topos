@@ -25,11 +25,11 @@ import { user, webSchema } from "./schema.auth";
  * The delivery model is DEMAND ∩ ENTITLEMENT:
  *   · Entitlement is the SEAT — a seat grants read access to the whole workspace catalog
  *     (git-clone-level trust). Channels are curated bundle SETS, never access control.
- *   · Demand is MANIFESTS. The person-side manifest is the per-(user, workspace) PROFILE
- *     (`profile_entry` rows — server-stored so it roams and is web-editable); project-side
- *     manifests are `topos.toml` files the client resolves — the server never learns project
- *     paths. The workspace's default channel is the implicit baseline of every profile;
- *     excludes are the ONE form of negative state.
+ *   · Demand, server-side, is the person's FEED: positive `assignment` rows (a bundle or a
+ *     channel, aimed at one person or at EVERYONE) minus their own `decline` rows. The
+ *     workspace baseline is the default channel assigned to everyone — an ordinary row, not a
+ *     special case. Project-side demand stays in `topos.toml` files the client resolves; the
+ *     server never learns project paths.
  *
  * Integrity posture:
  *   · Same-workspace coherence is FK-ENFORCED: bundle and channel expose (id, workspace_id)
@@ -480,12 +480,12 @@ export const versionUpstream = webSchema.table(
 
 /**
  * Every workspace is born with its default channel ('everyone', is_default = true — one per
- * workspace, partial-unique-enforced). The default channel is the BASELINE: implicit in every
- * member's profile (personal excludes can subtract individual bundles from it). A channel has
- * NO membership — people carry a channel by referencing it in their profile, projects by
- * referencing it in `topos.toml`. `mode` gates who edits its references (open = any member,
- * curated = reviewer+ — the curation gate). Deleting or renaming the default channel is
- * refused by the app ceremony.
+ * workspace, partial-unique-enforced) AND with that channel assigned to everyone: the BASELINE
+ * is an ordinary assignment row, not a rule written into the query. A channel has NO
+ * membership — people carry a channel because an assignment aims it at them (or at everyone),
+ * projects by referencing it in `topos.toml`. `mode` gates who edits its references (open =
+ * any member, curated = reviewer+ — the curation gate). Deleting or renaming the default
+ * channel is refused by the app ceremony.
  */
 export const channel = webSchema.table(
   "channel",
@@ -538,30 +538,37 @@ export const channelBundle = webSchema.table(
   ],
 );
 
-// ── Profiles — the person-side manifest (ONE per user × workspace, server-stored) ───────────
+// ── The feed — assignments (the one positive row) and declines (the one negative one) ───────
 
 /**
- * A PROFILE ENTRY is one line of the person's per-workspace manifest: an INCLUDE of a bundle
- * or a channel (a standing request — delivery = these ∩ the seat's entitlement), or an
- * EXCLUDE (the one negative state in the whole system: subtracts a bundle — or a whole
- * channel, including the implicit default — from this person's baseline). `pin` holds an
- * optional version digest on a bundle include (NULL = track `current` silently, the
- * workspace-ref default).
+ * An ASSIGNMENT says one thing should reach one audience: a bundle or a channel (exactly one,
+ * CHECK-enforced), aimed at ONE PERSON (`user_id`) or at EVERYONE in the workspace
+ * (`user_id IS NULL`). It is born two ways and the row is identical either way — a curator
+ * aims it at someone, or the person adds it to their own feed (`created_by = user_id`). There
+ * are no strengths and no pins: every assignment is declinable, and delivery always serves the
+ * workspace's `current`.
  *
- * Exactly one of bundle_id/channel_id is set (CHECK); partial uniques make one stance per
- * (person, thing) unrepresentable twice. Seat-anchored: losing the seat deletes the profile —
- * delivery authority ends with membership, and a re-invite starts clean.
+ * The workspace BASELINE is not a rule — it is the default channel assigned to everyone, one
+ * row minted with the workspace.
+ *
+ * Same-workspace coherence is composite-FK-pinned on both targets. The seat FK is MATCH
+ * SIMPLE by construction: it binds only when `user_id` is present, which is exactly the
+ * intent — losing a seat cascades that person's assignments away, while everyone-rows (a
+ * workspace-level fact) survive any roster change.
  */
-export const profileEntry = webSchema.table(
-  "profile_entry",
+export const assignment = webSchema.table(
+  "assignment",
   {
-    workspaceId: text("workspace_id").notNull(),
-    userId: text("user_id").notNull(),
-    mode: text("mode").notNull(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    /** NULL = everyone in the workspace. */
+    userId: text("user_id"),
     bundleId: text("bundle_id"),
     channelId: text("channel_id"),
-    /** Version-digest pin on a bundle include; NULL = track current. */
-    pin: text("pin"),
+    /** Who made it — an attribution snapshot (a `user.id`, or 'system' for a birth row); it
+     * carries no FK so an assignment outlives the account that placed it. */
+    createdBy: text("created_by").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .defaultNow()
@@ -569,37 +576,75 @@ export const profileEntry = webSchema.table(
       .notNull(),
   },
   (table) => [
-    uniqueIndex("profile_entry_bundle_once")
-      .on(table.userId, table.bundleId)
-      .where(sql`bundle_id is not null`),
-    uniqueIndex("profile_entry_channel_once")
-      .on(table.userId, table.channelId)
-      .where(sql`channel_id is not null`),
-    index("profile_entry_ws_user_idx").on(table.workspaceId, table.userId),
-    index("profile_entry_bundle_idx").on(table.bundleId),
-    check("profile_entry_mode_check", sql`${table.mode} in ('include', 'exclude')`),
+    // One assignment per (audience, target) — four partial uniques because a NULL audience is
+    // its own key: person-scoped and everyone-scoped rows never collide with each other.
+    uniqueIndex("assignment_person_bundle_once")
+      .on(table.workspaceId, table.userId, table.bundleId)
+      .where(sql`bundle_id is not null and user_id is not null`),
+    uniqueIndex("assignment_everyone_bundle_once")
+      .on(table.workspaceId, table.bundleId)
+      .where(sql`bundle_id is not null and user_id is null`),
+    uniqueIndex("assignment_person_channel_once")
+      .on(table.workspaceId, table.userId, table.channelId)
+      .where(sql`channel_id is not null and user_id is not null`),
+    uniqueIndex("assignment_everyone_channel_once")
+      .on(table.workspaceId, table.channelId)
+      .where(sql`channel_id is not null and user_id is null`),
+    index("assignment_ws_user_idx").on(table.workspaceId, table.userId),
+    index("assignment_bundle_idx").on(table.bundleId),
+    index("assignment_channel_idx").on(table.channelId),
     check(
-      "profile_entry_target_check",
+      "assignment_target_check",
       sql`(${table.bundleId} is null) <> (${table.channelId} is null)`,
     ),
-    check(
-      "profile_entry_pin_check",
-      sql`${table.pin} is null or (${table.bundleId} is not null and ${table.mode} = 'include')`,
-    ),
     foreignKey({
-      name: "profile_entry_seat_fk",
+      name: "assignment_seat_fk",
       columns: [table.workspaceId, table.userId],
       foreignColumns: [seat.workspaceId, seat.userId],
     }).onDelete("cascade"),
     foreignKey({
-      name: "profile_entry_bundle_fk",
+      name: "assignment_bundle_fk",
       columns: [table.bundleId, table.workspaceId],
       foreignColumns: [bundle.id, bundle.workspaceId],
     }).onDelete("cascade"),
     foreignKey({
-      name: "profile_entry_channel_fk",
+      name: "assignment_channel_fk",
       columns: [table.channelId, table.workspaceId],
       foreignColumns: [channel.id, channel.workspaceId],
+    }).onDelete("cascade"),
+  ],
+);
+
+/**
+ * A DECLINE is the whole negative half of the model: this person does not want this BUNDLE,
+ * whatever assigns it. Keyed to bundle IDENTITY, so it survives new versions, channel
+ * reshuffles, and a curator re-assigning the same thing. There is no channel-level decline —
+ * a set is declined one bundle at a time, which is what keeps "off" meaningful when the set's
+ * contents change.
+ *
+ * Seat-anchored like every standing row: losing the seat clears the stance, and a later
+ * re-invite starts clean.
+ */
+export const decline = webSchema.table(
+  "decline",
+  {
+    workspaceId: text("workspace_id").notNull(),
+    userId: text("user_id").notNull(),
+    bundleId: text("bundle_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    unique("decline_user_id_bundle_id_unique").on(table.userId, table.bundleId),
+    index("decline_ws_user_idx").on(table.workspaceId, table.userId),
+    foreignKey({
+      name: "decline_seat_fk",
+      columns: [table.workspaceId, table.userId],
+      foreignColumns: [seat.workspaceId, seat.userId],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "decline_bundle_fk",
+      columns: [table.bundleId, table.workspaceId],
+      foreignColumns: [bundle.id, bundle.workspaceId],
     }).onDelete("cascade"),
   ],
 );

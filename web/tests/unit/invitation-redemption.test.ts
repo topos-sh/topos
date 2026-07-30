@@ -147,13 +147,13 @@ describe("accept", () => {
     );
     expect(seat[0]?.role).toBe("member");
     expect(seat[0]?.invited_by).toBe(INVITER);
-    // The hint effect: the profile PREFILL (an include line), written AFTER the seat, same
-    // transaction.
+    // The hint effect: an ASSIGNMENT aimed at the newcomer, written AFTER the seat in the same
+    // transaction, attributed to the INVITER (they chose the first destination).
     const line = await db.q(
-      `SELECT mode FROM web.profile_entry WHERE user_id = 'u_accept' AND bundle_id = 's_deploy'`,
+      `SELECT created_by FROM web.assignment WHERE user_id = 'u_accept' AND bundle_id = 's_deploy'`,
       [],
     );
-    expect(line[0]?.mode).toBe("include");
+    expect(line[0]?.created_by).toBe(INVITER);
     // Consumed: the row flips accepted; the audit trail carries the act.
     const inv = await db.q(
       `SELECT status, accepted_by FROM web.invitation WHERE email = 'accept@x.test'`,
@@ -169,7 +169,7 @@ describe("accept", () => {
     expect(audit[0]?.n).toBe(1);
   });
 
-  it("a channel hint prefills the channel include", async () => {
+  it("a channel hint assigns the channel to the newcomer", async () => {
     const token = await invite("chan@x.test", { channelId: "c_eng" });
     await verifiedUser("u_chan", "chan@x.test");
     const { acceptInvitationByToken } = await import("@/lib/db/identity.server");
@@ -183,7 +183,7 @@ describe("accept", () => {
       expect(result.hint).toEqual({ kind: "channel", name: "eng" });
     }
     const line = await db.q(
-      `SELECT 1 FROM web.profile_entry WHERE channel_id = 'c_eng' AND user_id = 'u_chan' AND mode = 'include'`,
+      `SELECT 1 FROM web.assignment WHERE channel_id = 'c_eng' AND user_id = 'u_chan'`,
       [],
     );
     expect(line.length).toBe(1);
@@ -203,7 +203,7 @@ describe("accept", () => {
     if (result.outcome === "accepted") {
       expect(result.hint).toBeNull();
     }
-    const line = await db.q(`SELECT 1 FROM web.profile_entry WHERE user_id = 'u_hintgone'`, []);
+    const line = await db.q(`SELECT 1 FROM web.assignment WHERE user_id = 'u_hintgone'`, []);
     expect(line.length).toBe(0);
   });
 

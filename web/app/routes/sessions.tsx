@@ -490,6 +490,12 @@ function SessionCard({
           )}
         </div>
         <SkillStates skills={session.skills} />
+        {session.declinedButApplied.length > 0 && (
+          <p data-testid="sessions-declined-note" className="text-faint text-xs">
+            Turned off on the web but still on this machine: {session.declinedButApplied.join(", ")}{" "}
+            — it clears on the next update.
+          </p>
+        )}
       </div>
     </Card>
   );

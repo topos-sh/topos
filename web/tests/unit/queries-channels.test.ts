@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   asMember,
   asOwner,
+  assignChannelRow,
   bootWorkspace,
   createScratchDb,
   placeBundle,
@@ -15,11 +16,11 @@ import {
 
 /**
  * The CHANNELS DAL (queries.channels.server.ts) against a REAL scratch Postgres. A channel is a
- * named, curated SET of bundles — plain rows; the DEFAULT channel is the baseline implicit in
- * every member's profile (audience = every seat minus explicit profile exclude lines), the
- * existence ceremonies (create / rename / delete) are id-keyed owner transactions refusing the
- * default channel, and the viewer's own stance is a profile row (include lines carry a named
- * channel; an exclude line subtracts the default).
+ * named, curated SET of bundles — plain rows, no membership; a channel reaches people because
+ * an ASSIGNMENT aims it at them or at everyone (the DEFAULT channel is born with an
+ * everyone-assignment, which is what makes it the baseline — its audience is the whole
+ * roster). The existence ceremonies (create / rename / delete) are id-keyed owner transactions
+ * refusing the default channel.
  */
 
 let db: ScratchDb;
@@ -50,11 +51,7 @@ beforeAll(async () => {
   }
   engId = created.channelId;
   await placeBundle(db, wsId, engId, "s_tool");
-  await db.q(
-    `INSERT INTO web.profile_entry (channel_id, workspace_id, user_id, mode)
-     VALUES ($1, $2, 'u_ana', 'include')`,
-    [engId, wsId],
-  );
+  await assignChannelRow(db, wsId, engId, "u_ana");
 }, 60000);
 
 afterAll(async () => {
@@ -62,31 +59,38 @@ afterAll(async () => {
 });
 
 describe("channelsOf (the index read)", () => {
-  it("lists the default first, then name order, counting the implicit audience minus profile excludes", async () => {
+  it("lists the default first, then name order, counting who the set is assigned to", async () => {
     const queries = await q();
     const rows = await queries.channelsOf(asMember(wsId, "u_ana"));
+    // The default channel's everyone-assignment reaches every seat; `eng` reaches the one
+    // person who carries it.
     expect(rows.map((r) => [r.name, r.isDefault, r.skillCount, r.audienceCount])).toEqual([
       ["everyone", true, 1, 3],
       ["eng", false, 1, 1],
     ]);
 
-    // A profile EXCLUDE subtracts from the DEFAULT channel's derived audience only.
-    await db.q(
-      `INSERT INTO web.profile_entry (channel_id, workspace_id, user_id, mode)
-       SELECT id, workspace_id, 'u_bo', 'exclude' FROM web.channel WHERE is_default AND workspace_id = $1`,
-      [wsId],
-    );
-    const after = await queries.channelsOf(asMember(wsId, "u_ana"));
+    // A second person's assignment widens a named channel's audience by one …
+    await assignChannelRow(db, wsId, engId, "u_bo");
+    let after = await queries.channelsOf(asMember(wsId, "u_ana"));
     expect(after.map((r) => [r.name, r.audienceCount])).toEqual([
-      ["everyone", 2],
-      ["eng", 1],
+      ["everyone", 3],
+      ["eng", 2],
     ]);
-    await db.q(`DELETE FROM web.profile_entry WHERE user_id = 'u_bo'`);
+    // … and an EVERYONE assignment of it makes the audience the whole roster, person rows
+    // included or not.
+    await assignChannelRow(db, wsId, engId, null, "u_owner");
+    after = await queries.channelsOf(asMember(wsId, "u_ana"));
+    expect(after.map((r) => [r.name, r.audienceCount])).toEqual([
+      ["everyone", 3],
+      ["eng", 3],
+    ]);
+    await db.q(`DELETE FROM web.assignment WHERE channel_id = $1 AND user_id IS NULL`, [engId]);
+    await db.q(`DELETE FROM web.assignment WHERE channel_id = $1 AND user_id = 'u_bo'`, [engId]);
   });
 });
 
 describe("channelDetail (the one-channel read)", () => {
-  it("the DEFAULT channel: a derived audience and the viewer's exclude stance", async () => {
+  it("the DEFAULT channel: the whole roster, and every member sees it as theirs", async () => {
     const queries = await q();
     const detail = await queries.channelDetail(asMember(wsId, "u_ana"), "everyone");
     expect(detail).toMatchObject({
@@ -96,19 +100,12 @@ describe("channelDetail (the one-channel read)", () => {
       viewerIncluded: true,
     });
     expect(detail?.skills.map((s) => s.skillId)).toEqual(["s_doc"]);
-
-    await db.q(
-      `INSERT INTO web.profile_entry (channel_id, workspace_id, user_id, mode)
-       SELECT id, workspace_id, 'u_ana', 'exclude' FROM web.channel WHERE is_default AND workspace_id = $1`,
-      [wsId],
-    );
-    const excluded = await queries.channelDetail(asMember(wsId, "u_ana"), "everyone");
-    expect(excluded?.viewerIncluded).toBe(false);
-    expect(excluded?.audienceCount).toBe(2);
-    await db.q(`DELETE FROM web.profile_entry WHERE user_id = 'u_ana' AND mode = 'exclude'`);
+    // Nothing is per-person here: the baseline reads the same for someone who never acted.
+    const asBo = await queries.channelDetail(asMember(wsId, "u_bo"), "everyone");
+    expect(asBo?.viewerIncluded).toBe(true);
   });
 
-  it("a NAMED channel: profile include lines decide the viewer's stance", async () => {
+  it("a NAMED channel: an assignment decides whether the viewer carries it", async () => {
     const queries = await q();
     const asAna = await queries.channelDetail(asMember(wsId, "u_ana"), "eng");
     expect(asAna?.viewerIncluded).toBe(true);
@@ -117,6 +114,12 @@ describe("channelDetail (the one-channel read)", () => {
     ]);
     const asBo = await queries.channelDetail(asMember(wsId, "u_bo"), "eng");
     expect(asBo?.viewerIncluded).toBe(false);
+    // An everyone-assignment carries it to the same person with no row of their own.
+    await assignChannelRow(db, wsId, engId, null, "u_owner");
+    const widened = await queries.channelDetail(asMember(wsId, "u_bo"), "eng");
+    expect(widened?.viewerIncluded).toBe(true);
+    expect(widened?.audienceCount).toBe(3);
+    await db.q(`DELETE FROM web.assignment WHERE channel_id = $1 AND user_id IS NULL`, [engId]);
     expect(await queries.channelDetail(asMember(wsId, "u_ana"), "nope")).toBeUndefined();
   });
 });
@@ -196,9 +199,9 @@ describe("deleteChannel (id-keyed, owner)", () => {
     expect(
       await db.q(`SELECT 1 FROM web.channel_bundle WHERE channel_id = $1`, [engId]),
     ).toHaveLength(0);
-    expect(
-      await db.q(`SELECT 1 FROM web.profile_entry WHERE channel_id = $1`, [engId]),
-    ).toHaveLength(0);
+    expect(await db.q(`SELECT 1 FROM web.assignment WHERE channel_id = $1`, [engId])).toHaveLength(
+      0,
+    );
     // History is append-only and OUTLIVES the row it names.
     const audit = await db.q<{ kind: string }>(
       `SELECT kind FROM web.audit_event WHERE subject = $1 ORDER BY id`,
@@ -209,9 +212,9 @@ describe("deleteChannel (id-keyed, owner)", () => {
   });
 });
 
-describe("the viewer's own profile stance (the channel page's self-service arm)", () => {
-  it("removing the DEFAULT channel records the exclude line; including clears it", async () => {
-    const queries = await q();
+describe("the viewer's own channel assignment (the channel page's self-service arm)", () => {
+  it("carrying a named set is a self-assignment; the baseline refuses typed", async () => {
+    const feed = await import("@/lib/db/queries.feed.server");
     const ana = asMember(wsId, "u_ana", "member", "Ana");
     const everyone = (
       await db.q<{ id: string }>(
@@ -219,17 +222,27 @@ describe("the viewer's own profile stance (the channel page's self-service arm)"
         [wsId],
       )
     )[0]?.id as string;
-    expect(await queries.removeChannelFromProfile(ana, everyone)).toBe("removed");
+    // The baseline is assigned to everyone — no one person adds or drops it.
+    expect(await feed.assignChannelToSelf(ana, everyone)).toBe("baseline");
+    expect(await feed.unassignChannelFromSelf(ana, everyone)).toBe("baseline");
     expect(
-      await db.q(`SELECT 1 FROM web.profile_entry WHERE user_id = 'u_ana' AND mode = 'exclude'`),
-    ).toHaveLength(1);
-    // Idempotent: the exclude line upserts.
-    expect(await queries.removeChannelFromProfile(ana, everyone)).toBe("removed");
-    expect(await queries.includeChannelInProfile(ana, everyone)).toBe("included");
-    expect(
-      await db.q(`SELECT 1 FROM web.profile_entry WHERE user_id = 'u_ana' AND mode = 'exclude'`),
+      await db.q(`SELECT 1 FROM web.assignment WHERE user_id = 'u_ana' AND channel_id = $1`, [
+        everyone,
+      ]),
     ).toHaveLength(0);
-    expect(await queries.includeChannelInProfile(ana, "c_nope")).toBe("unknown_channel");
+
+    // A named set: carry, idempotent re-carry, drop, then drop-again reports honestly.
+    await seedChannel(db, wsId, "c_selfserve", "self-serve");
+    expect(await feed.assignChannelToSelf(ana, "c_selfserve")).toBe("assigned");
+    expect(await feed.assignChannelToSelf(ana, "c_selfserve")).toBe("assigned");
+    expect(
+      await db.q(`SELECT 1 FROM web.assignment WHERE user_id = 'u_ana' AND channel_id = $1`, [
+        "c_selfserve",
+      ]),
+    ).toHaveLength(1);
+    expect(await feed.unassignChannelFromSelf(ana, "c_selfserve")).toBe("unassigned");
+    expect(await feed.unassignChannelFromSelf(ana, "c_selfserve")).toBe("not_assigned");
+    expect(await feed.assignChannelToSelf(ana, "c_nope")).toBe("unknown_channel");
   });
 });
 

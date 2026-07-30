@@ -371,13 +371,13 @@ test("a skill-hinted invitation frames, subscribes, and lands on the skill", asy
     await context.close();
   }
 
-  // Seated + prefilled: the accept wrote the hinted skill into the new person's profile.
+  // Seated + assigned: the accept aimed the hinted skill at the new person.
   expect(await seatRole(email)).toBe("member");
-  const line = await adminQuery<{ mode: string }>(
-    `select p.mode from web.profile_entry p
-       join web."user" u on u.id = p.user_id
-     where u.email = $1 and p.bundle_id = $2`,
+  const line = await adminQuery<{ user_id: string }>(
+    `select a.user_id from web.assignment a
+       join web."user" u on u.id = a.user_id
+     where u.email = $1 and a.bundle_id = $2`,
     [email.toLowerCase(), bundleId],
   );
-  expect(line[0]?.mode).toBe("include");
+  expect(line).toHaveLength(1);
 });

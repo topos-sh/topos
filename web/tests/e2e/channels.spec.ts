@@ -33,8 +33,8 @@ test.beforeAll(async () => {
     [GUILD, RENAMED, DOOMED, CURATED],
   ]);
   await adminQuery(
-    `delete from web.profile_entry p using web."user" u
-     where u.id = p.user_id and u.email = $1`,
+    `delete from web.assignment a using web."user" u
+     where u.id = a.user_id and u.email = $1`,
     [MEMBER_EMAIL],
   );
   await ensureBundle({ id: SKILL_ID, name: SKILL_NAME });
@@ -51,9 +51,7 @@ test("the index lists everyone first; a member creates a channel and lands on it
   // content region: the left panel now lists channels too, so an unscoped listitem would double-match.
   const everyone = page.getByRole("main").getByRole("listitem").filter({ hasText: "everyone" });
   await expect(everyone).toBeVisible();
-  await expect(
-    everyone.getByText("the baseline — every member's profile starts with it"),
-  ).toBeVisible();
+  await expect(everyone.getByText("the baseline — assigned to everyone")).toBeVisible();
 
   // Member-level create on the relocated Rails-style form (the same grade as the CLI's
   // create-on-first-use placement); the sidebar's Channels `+ new` links here.
@@ -129,41 +127,59 @@ test("the channel face shows the four section tabs, Skills active; each tab navi
   await page.waitForURL((u) => u.pathname.endsWith(`/channels/${GUILD}`));
 });
 
-test("the default channel's stance is self-service on the face; Settings states it's structural", async ({
+test("the default channel is assigned to everyone; Settings states it's structural", async ({
   page,
 }) => {
-  // The stance arm acts on the SIGNED-IN OWNER's own profile (the suite's default identity).
   await theWorkspace();
   await gotoSettled(page, `/channels/everyone`);
   const stance = page.getByTestId("channel-stance");
+  // It reaches the viewer through the workspace's own everyone-assignment — no per-person row.
   await expect(stance.getByText("in your skills", { exact: true })).toBeVisible();
-
-  // REMOVE — the viewer's own stance, a plain one-click toggle (self-scoped, no ceremony).
-  // The baseline has no include line to delete, so the removal records the ONE exclude line.
-  await stance.getByRole("button", { name: "Remove from my skills" }).click();
-  await expect(stance.getByText("not in your skills", { exact: true })).toBeVisible();
-  const excluded = await adminQuery<{ n: string }>(
-    `select count(*)::text as n from web.profile_entry p
-     join web.channel c on c.id = p.channel_id
-     where c.is_default and p.mode = 'exclude'`,
+  await expect(stance.getByText("assigned to everyone")).toBeVisible();
+  // No one person carries or drops the baseline: its skills are turned off one at a time.
+  await expect(stance.getByRole("button", { name: "Remove from my skills" })).toHaveCount(0);
+  await expect(stance.getByText("Turn individual skills off on Your skills.")).toBeVisible();
+  const everyoneRow = await adminQuery<{ n: string }>(
+    `select count(*)::text as n from web.assignment a
+     join web.channel c on c.id = a.channel_id
+     where c.is_default and a.user_id is null`,
   );
-  expect(excluded[0]?.n).toBe("1");
-
-  // ADD BACK — clears the exclude; the baseline flows again on the next update.
-  await stance.getByRole("button", { name: "Add to my skills" }).click();
-  await expect(stance.getByText("in your skills", { exact: true })).toBeVisible();
-  const cleared = await adminQuery<{ n: string }>(
-    `select count(*)::text as n from web.profile_entry p
-     join web.channel c on c.id = p.channel_id
-     where c.is_default and p.mode = 'exclude'`,
-  );
-  expect(cleared[0]?.n).toBe("0");
+  expect(everyoneRow[0]?.n).toBe("1");
 
   // The everyone channel offers NO existence ceremonies — its Settings tab states it's structural.
   await gotoSettled(page, `/channels/everyone/settings`);
   await expect(page.getByText("The everyone channel is structural")).toBeVisible();
   await expect(page.getByRole("button", { name: "Rename channel" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Delete channel" })).toHaveCount(0);
+});
+
+test("a NAMED channel carries by assignment: add it, then take it back", async ({ page }) => {
+  await theWorkspace();
+  await gotoSettled(page, `/channels/${GUILD}`);
+  const stance = page.getByTestId("channel-stance");
+  await expect(stance.getByText("not in your skills", { exact: true })).toBeVisible();
+
+  // ADD — a self-assignment of the set (self-scoped, a plain one-click toggle, no ceremony).
+  await stance.getByRole("button", { name: "Add to my skills" }).click();
+  await expect(stance.getByText("in your skills", { exact: true })).toBeVisible();
+  const carried = await adminQuery<{ n: string }>(
+    `select count(*)::text as n from web.assignment a
+     join web.channel c on c.id = a.channel_id
+     where c.name = $1 and a.user_id is not null`,
+    [GUILD],
+  );
+  expect(carried[0]?.n).toBe("1");
+
+  // REMOVE — the row goes; nothing negative is recorded, because nothing was declined.
+  await stance.getByRole("button", { name: "Remove from my skills" }).click();
+  await expect(stance.getByText("not in your skills", { exact: true })).toBeVisible();
+  const dropped = await adminQuery<{ n: string }>(
+    `select count(*)::text as n from web.assignment a
+     join web.channel c on c.id = a.channel_id
+     where c.name = $1`,
+    [GUILD],
+  );
+  expect(dropped[0]?.n).toBe("0");
 });
 
 test("rename on the Settings tab is an in-place confirm: it lands the new URL, id unchanged", async ({

@@ -29,7 +29,7 @@ export function ChannelHeader({
       meta={
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <Chip tone={mode === "curated" ? "pending" : "neutral"}>{mode}</Chip>
-          {isDefault && <span>every member, minus profile excludes</span>}
+          {isDefault && <span>assigned to everyone</span>}
         </div>
       }
     />

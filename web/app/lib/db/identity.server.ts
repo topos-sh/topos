@@ -4,7 +4,15 @@ import { eq, sql } from "drizzle-orm";
 import { composition } from "@/composition.server";
 import { serverEnv } from "@/env.server";
 import { type Db, getDb, isUniqueViolation } from "./index.server";
-import { auditEvent, channel, cliSession, loginFlow, seat, workspace } from "./schema.app";
+import {
+  assignment,
+  auditEvent,
+  channel,
+  cliSession,
+  loginFlow,
+  seat,
+  workspace,
+} from "./schema.app";
 
 /**
  * The identity ceremonies' data layer: first-boot setup, the claim-code consume, the
@@ -149,11 +157,22 @@ export async function ensureSetup(
         displayName: name,
         claimCodeSha256: sql`${sha256OfText(code)}` as never,
       });
+      const defaultChannelId = mintChannelId();
       await tx.insert(channel).values({
-        id: mintChannelId(),
+        id: defaultChannelId,
         workspaceId,
         name: "everyone",
         isDefault: true,
+      });
+      // The BASELINE, as a row: the default channel assigned to everyone. Nothing anywhere
+      // treats the default channel as delivered by rule, so a workspace born without this row
+      // would deliver nothing to anyone. No person has acted yet (the claim comes later), so
+      // the attribution is the same 'system' the birth audit row carries.
+      await tx.insert(assignment).values({
+        workspaceId,
+        userId: null,
+        channelId: defaultChannelId,
+        createdBy: "system",
       });
       await auditInTx(tx, {
         workspaceId,
@@ -1587,9 +1606,11 @@ async function acceptInvitationTx(
         RETURNING user_id`,
   );
   const alreadyMember = seated.rows.length === 0;
-  // Hint effects — AFTER the seat row, same transaction: PREFILL the newcomer's profile. The
-  // hinted thing may have been deleted since the invite (the FK cleared the column) or
-  // archived; then nothing lands.
+  // Hint effects — AFTER the seat row, same transaction: the first destination becomes an
+  // ASSIGNMENT aimed at the newcomer, attributed to the inviter (they chose it). Any decline
+  // the person carried from an earlier stay is cleared, so an invitation that names a skill
+  // really does deliver it. The hinted thing may have been deleted since the invite (the FK
+  // cleared the column) or archived; then nothing lands.
   let hint: LoginGrantHint | null = null;
   if (inv.hintBundleId !== null) {
     const named = await tx.execute(
@@ -1600,10 +1621,14 @@ async function acceptInvitationTx(
     const row = named.rows[0] as { kind: string; name: string } | undefined;
     if (row) {
       await tx.execute(
-        sql`INSERT INTO web.profile_entry (workspace_id, user_id, mode, bundle_id)
-            VALUES (${inv.workspaceId}, ${account.userId}, 'include', ${inv.hintBundleId})
-            ON CONFLICT (user_id, bundle_id) WHERE bundle_id is not null
-            DO UPDATE SET mode = 'include', updated_at = now()`,
+        sql`INSERT INTO web.assignment (workspace_id, user_id, bundle_id, created_by)
+            VALUES (${inv.workspaceId}, ${account.userId}, ${inv.hintBundleId},
+                    ${inv.invitedBy ?? account.userId})
+            ON CONFLICT DO NOTHING`,
+      );
+      await tx.execute(
+        sql`DELETE FROM web.decline
+            WHERE user_id = ${account.userId} AND bundle_id = ${inv.hintBundleId}`,
       );
       hint = { kind: row.kind, name: row.name };
     }
@@ -1615,10 +1640,10 @@ async function acceptInvitationTx(
     const row = named.rows[0] as { name: string } | undefined;
     if (row) {
       await tx.execute(
-        sql`INSERT INTO web.profile_entry (workspace_id, user_id, mode, channel_id)
-            VALUES (${inv.workspaceId}, ${account.userId}, 'include', ${inv.hintChannelId})
-            ON CONFLICT (user_id, channel_id) WHERE channel_id is not null
-            DO UPDATE SET mode = 'include', updated_at = now()`,
+        sql`INSERT INTO web.assignment (workspace_id, user_id, channel_id, created_by)
+            VALUES (${inv.workspaceId}, ${account.userId}, ${inv.hintChannelId},
+                    ${inv.invitedBy ?? account.userId})
+            ON CONFLICT DO NOTHING`,
       );
       hint = { kind: "channel", name: row.name };
     }
@@ -1728,47 +1753,39 @@ export async function seatOf(
 // ── FENCE 3 — the last-owner lockout (role change · leave · seat removal) ───────────────────
 
 /**
- * The canonical PERSON-SIDE DEMAND fragment: what the person's profile requests —
- * ((the default channel, unless the profile excludes it) ∪ included channels ∪ included
- * bundles) − excluded bundles — active bundles only. This is the demand HALF of
- * demand ∩ entitlement: the seat itself is the entitlement (whole-catalog), so delivery =
- * this set, and callers add the has-current join as their surface needs. Kept HERE so the
- * delivery query and every reach count share one predicate. Params bind as values when
- * strings, or inline as SQL fragments (a correlated column reference, for set-level
- * consumers like the reach counts).
+ * The canonical FEED fragment — what the server says this person should have: everything
+ * assigned to them or to EVERYONE (bundles directly, and the members of assigned channels),
+ * active bundles only, minus the bundles they have declined. The workspace baseline needs no
+ * clause of its own: it is the default channel, assigned to everyone, like any other row.
+ *
+ * This is the demand HALF of demand ∩ entitlement — the seat itself is the entitlement
+ * (whole-catalog), so delivery = this set, and callers add the has-current join as their
+ * surface needs. Kept HERE so the delivery query and every reach count share one predicate.
+ * Params bind as values when strings, or inline as SQL fragments (a correlated column
+ * reference, for set-level consumers like the reach counts).
  */
-export const profileDemandSql = (
+export const feedDemandSql = (
   userId: string | ReturnType<typeof sql>,
   workspaceId: string | ReturnType<typeof sql>,
 ) => sql`
   SELECT DISTINCT src.bundle_id
   FROM (
-    SELECT cb.bundle_id
-    FROM web.channel c
-    JOIN web.channel_bundle cb ON cb.channel_id = c.id
-    WHERE c.workspace_id = ${workspaceId} AND c.is_default
-      AND NOT EXISTS (
-        SELECT 1 FROM web.profile_entry px
-        WHERE px.channel_id = c.id AND px.user_id = ${userId} AND px.mode = 'exclude'
-      )
+    SELECT a.bundle_id
+    FROM web.assignment a
+    WHERE a.workspace_id = ${workspaceId} AND a.bundle_id IS NOT NULL
+      AND (a.user_id = ${userId} OR a.user_id IS NULL)
     UNION
     SELECT cb.bundle_id
-    FROM web.profile_entry pe
-    JOIN web.channel_bundle cb ON cb.channel_id = pe.channel_id
-    WHERE pe.workspace_id = ${workspaceId} AND pe.user_id = ${userId}
-      AND pe.mode = 'include' AND pe.channel_id IS NOT NULL
-    UNION
-    SELECT pe.bundle_id
-    FROM web.profile_entry pe
-    WHERE pe.workspace_id = ${workspaceId} AND pe.user_id = ${userId}
-      AND pe.mode = 'include' AND pe.bundle_id IS NOT NULL
+    FROM web.assignment a
+    JOIN web.channel_bundle cb ON cb.channel_id = a.channel_id
+    WHERE a.workspace_id = ${workspaceId} AND a.channel_id IS NOT NULL
+      AND (a.user_id = ${userId} OR a.user_id IS NULL)
   ) src
   JOIN web.bundle b ON b.id = src.bundle_id AND b.workspace_id = ${workspaceId}
   WHERE b.status = 'active'
     AND NOT EXISTS (
-      SELECT 1 FROM web.profile_entry ex
-      WHERE ex.user_id = ${userId} AND ex.bundle_id = src.bundle_id
-        AND ex.mode = 'exclude'
+      SELECT 1 FROM web.decline d
+      WHERE d.user_id = ${userId} AND d.bundle_id = src.bundle_id
     )`;
 
 export type SeatMutationRefusal = "last_owner" | "missing";
