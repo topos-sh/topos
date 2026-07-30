@@ -230,29 +230,72 @@ fn the_session_manifest_hero_loop() {
         "the approved proposal landed"
     );
 
-    // ── the `-g` profile lane: include → person-scope delivery → remove ─────────────────────────
-    dev.add_reference("@acme/deploy", true, None)
-        .expect("profile include");
-    let (profile_pull, profile_warnings) = dev.update(&[], None).expect("the person-scope sweep");
+    // ── the `-g` lane: the FEED delivers person-scope by itself; the global file takes control ──
+    // No file, no `-g` act: the feed already landed the person-scope copy on the sweeps above
+    // (login was the acceptance — delivery is automatic).
+    let (feed_pull, feed_warnings) = dev.update(&[], None).expect("the person-scope sweep");
     let person_dir = person_scope_dir(&dev).unwrap_or_else(|| {
         panic!(
-            "the profile item lands in person scope; rows {:?} warnings {profile_warnings:?}",
-            profile_pull.skills
+            "the feed lands in person scope by itself; rows {:?} warnings {feed_warnings:?}",
+            feed_pull.skills
         )
     });
     assert!(person_dir.join("SKILL.md").is_file());
-    // The remove's next sweep CLEANS the undemanded person-scope placement (the project checkout's
-    // copy is that scope's business and stays).
-    dev.remove_global("@acme/deploy").expect("profile remove");
-    dev.update(&[], None).expect("the post-remove sweep");
+    // A bare `add -g` of a feed-delivered skill is the disclosed REDUNDANCY no-op: no row is
+    // written (a bare row would add nothing the feed does not already give).
+    let redundant = dev
+        .add_reference("@acme/deploy", true, None)
+        .expect("the redundant add answers, not errors");
+    assert!(
+        redundant.manifest.is_none(),
+        "no row is written for a feed-delivered bundle: {redundant:?}"
+    );
+    assert!(
+        redundant.note.is_some(),
+        "the no-op is disclosed: {redundant:?}"
+    );
+    // `remove -g` of the feed-delivered skill writes the machine-local OFF switch — file birth
+    // materializes the global manifest first (header + this workspace's feed row), then the off
+    // row lands beside it; the receipt names the web decline as the everywhere-path.
+    let (kind, note) = dev.remove_global("deploy").expect("the off switch");
+    assert_eq!(kind, "ManifestExcluded", "the off row is the one negative");
+    assert!(
+        note.as_deref()
+            .is_some_and(|n| n.contains("decline") || n.contains("web")),
+        "the everywhere-path is named: {note:?}"
+    );
+    let global_manifest = dev.root().join(".topos").join("topos.toml");
+    let file = std::fs::read_to_string(&global_manifest).expect("the born global manifest");
+    assert!(file.contains("= \"off\""), "the off row is spelled: {file}");
+    assert!(
+        file.contains("/acme\" = \"*\""),
+        "file birth materialized the feed row: {file}"
+    );
+    // The next sweep cleans the person-scope placement; the checkout's copy is that scope's
+    // business and stays.
+    dev.update(&[], None).expect("the post-off sweep");
     assert!(
         !person_dir.exists(),
-        "the profile drop cleans the person-scope placement"
+        "the off switch cleans the person-scope placement"
     );
     assert!(
         placed.join("SKILL.md").is_file(),
-        "the project checkout's copy is untouched by the profile drop"
+        "the project checkout's copy is untouched by the person-scope off"
     );
+    // `add -g` with the off row standing DELETES the switch (never a redundant positive), and
+    // the feed flows again on the next sweep.
+    let lifted = dev
+        .add_reference("@acme/deploy", true, None)
+        .expect("the off lift");
+    assert!(
+        lifted.note.is_some(),
+        "the lift is disclosed on the receipt: {lifted:?}"
+    );
+    let file = std::fs::read_to_string(&global_manifest).expect("the global manifest");
+    assert!(!file.contains("\"off\""), "the off row is gone: {file}");
+    dev.update(&[], None).expect("the post-lift sweep");
+    let person_dir = person_scope_dir(&dev).expect("the feed delivers again after the lift");
+    assert!(person_dir.join("SKILL.md").is_file());
 
     // ── the OWNER ends the dev session: one typed line, then a freeze — bytes stay ──────────────
     owner_session_arm(&owner, "remove-session", &dev_session_id);

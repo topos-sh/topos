@@ -13,11 +13,29 @@
       "format": "uint64",
       "minimum": 0
     },
+    "detail": {
+      "description": "The deep single-bundle answer (`topos status <bundle>`): where it comes from, spelled.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/StatusDetail"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "items": {
-      "description": "The resolved TRUST-RAIL table for the CURRENT directory: every bundle the manifests\ncovering it — and the person's profile layers — resolve to, nearest-first deduped, each\nwith its one source line and an honest state; recorded EXCLUDES appear as their own rows.",
+      "description": "The resolved table for the CURRENT directory: every bundle the scopes covering it — the\nnearest project manifest and the person scope (the global manifest, or each connected\nworkspace's feed) — resolve to, deduped per scope, each with its one source line and an\nhonest state; recorded `\"off\"` switches appear as their own rows.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/StatusItem"
+      }
+    },
+    "notes": {
+      "description": "The disclosure lines — plain sentences the table cannot carry per row: the loud\nno-feed-row note, redundant rows, inert `\"off\"` switches, set-collision winners,\ndeclined-but-delivered notes, cross-scope version splits. Rendered verbatim.",
+      "type": "array",
+      "items": {
+        "type": "string"
       }
     },
     "profile_skills": {
@@ -25,6 +43,13 @@
       "type": "integer",
       "format": "uint64",
       "minimum": 0
+    },
+    "regimes": {
+      "description": "Each connected workspace's REGIME on this machine: adopting its whole feed, explicit\nline-by-line control, or feed rows withheld by a hand-written global manifest.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/StatusRegime"
+      }
     },
     "server": {
       "description": "The server base URL the sessions dial, when logged in.",
@@ -62,12 +87,86 @@
     "profile_skills"
   ],
   "$defs": {
+    "StatusDetail": {
+      "description": "The deep answer for ONE bundle (`topos status <bundle>`). **INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "attribution": {
+          "description": "The delivery attribution (`assigned by <name>` / `picked by you`), when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "feed": {
+          "description": "The feed origin, when no row names it (`<host>/<workspace>` — the workspace whose feed\ndelivers it).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The bundle's name.",
+          "type": "string"
+        },
+        "pin": {
+          "description": "A row's version pin, when one is spelled.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "placements": {
+          "description": "The placement directories this machine holds for it.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "source_file": {
+          "description": "The manifest FILE whose row delivers it, when a row does (a path).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_key": {
+          "description": "The row's spelled KEY in that file (the joined reference).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "description": "The line's state (the same vocabulary as the table).",
+          "$ref": "#/$defs/StatusItemState"
+        },
+        "version": {
+          "description": "The applied version (64-hex), when applied locally.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "state"
+      ]
+    },
     "StatusItem": {
       "description": "One resolved line of the trust rail. Every \"why does this agent have X?\" is answered by\n`source` (which manifest line — or profile — asked for it); every \"why doesn't it?\" by\n`state` (an exclude renders as its own row). **INFERRED** (additive-only).",
       "type": "object",
       "properties": {
         "applied_as_of": {
           "description": "When the applied state was last confirmed against a delivery (RFC-3339 UTC) — the offline\ncache's honesty stamp: \"applied as of this sync\", never a live claim.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "attribution": {
+          "description": "The delivery attribution, when known (`assigned by <name>` / `picked by you`).",
           "type": [
             "string",
             "null"
@@ -148,6 +247,11 @@
           "const": "excluded"
         },
         {
+          "description": "A machine-local `\"off\"` row in the global manifest withholds this bundle from the feed\nhere (the everywhere-path is the web decline).",
+          "type": "string",
+          "const": "off"
+        },
+        {
           "description": "Referenced here but NOT deliverable with your current access — phrased from LOCAL\nknowledge only (no live session for its workspace); never from server confirmation.",
           "type": "string",
           "const": "not-available"
@@ -162,6 +266,29 @@
           "type": "string",
           "const": "unknown"
         }
+      ]
+    },
+    "StatusRegime": {
+      "description": "One workspace's regime line in a [`StatusData`]. **INFERRED** (additive-only).",
+      "type": "object",
+      "properties": {
+        "host": {
+          "description": "The server host.",
+          "type": "string"
+        },
+        "regime": {
+          "description": "The regime sentence (e.g. \"adopting all assigned, 2 off\" or \"explicit: 3 bundles; 1\nassigned not adopted here\").",
+          "type": "string"
+        },
+        "workspace": {
+          "description": "The workspace's address name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "workspace",
+        "regime"
       ]
     },
     "StatusSession": {

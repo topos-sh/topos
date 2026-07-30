@@ -538,6 +538,7 @@ pub(crate) fn go_back(
         merge: None,
         merge_preview: None,
         synced_placements: None,
+        scope: None,
     })
 }
 
@@ -1498,6 +1499,7 @@ fn state_row(name: &str, sync: &SyncState, action: PullAction) -> PullSkill {
         merge: None,
         merge_preview: None,
         synced_placements: None,
+        scope: None,
     }
 }
 
@@ -1514,6 +1516,7 @@ fn applied_row(name: &str, sync: &SyncState, _target: [u8; 32]) -> PullSkill {
         merge: None,
         merge_preview: None,
         synced_placements: None,
+        scope: None,
     }
 }
 
@@ -1530,6 +1533,7 @@ fn synced_row(name: &str, sync: &SyncState, n: u32) -> PullSkill {
         merge: None,
         merge_preview: None,
         synced_placements: Some(n),
+        scope: None,
     }
 }
 
@@ -1548,6 +1552,7 @@ fn offer_row(name: &str, sync: &SyncState, target: [u8; 32], target_digest_hex: 
         merge: None,
         merge_preview: None,
         synced_placements: None,
+        scope: None,
     }
 }
 
@@ -1572,5 +1577,6 @@ fn diverged_row(
         merge: None,
         merge_preview,
         synced_placements: None,
+        scope: None,
     }
 }

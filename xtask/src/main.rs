@@ -153,8 +153,16 @@ fn schemas() -> Vec<(&'static str, String)> {
             emit(schemars::schema_for!(topos_types::results::AddData)),
         ),
         (
+            "add-describe-data",
+            emit(schemars::schema_for!(topos_types::results::AddDescribeData)),
+        ),
+        (
             "init-data",
             emit(schemars::schema_for!(topos_types::results::InitData)),
+        ),
+        (
+            "fmt-data",
+            emit(schemars::schema_for!(topos_types::results::FmtData)),
         ),
         (
             "log-data",
@@ -444,6 +452,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             reference: None,
             undo: Vec::new(),
             governed_copy: None,
+            note: None,
         })
         .expect("AddData serializes"),
         warnings: vec![],
@@ -471,6 +480,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 merge: None,
                 merge_preview: None,
                 synced_placements: None,
+                scope: Some("person".to_owned()),
             }],
             proposals_awaiting: 0,
         })
@@ -509,6 +519,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 }),
                 merge_preview: None,
                 synced_placements: None,
+                scope: Some("person".to_owned()),
             }],
             proposals_awaiting: 0,
         })
@@ -549,6 +560,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 }),
                 merge_preview: None,
                 synced_placements: None,
+                scope: Some("person".to_owned()),
             }],
             proposals_awaiting: 0,
         })
@@ -720,10 +732,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
         }),
     };
 
-    // The per-device delivery answer (`GET /v1/workspaces/{ws}/delivery`): two entitled skills — one via
-    // `everyone` only (indirect), one via `ops` + `everyone` WITH a direct follow and `reviewed`
-    // protection — one detached skill frozen in place, one `verdict` notice carrying its reason, and one
-    // open proposal awaiting review.
+    // The per-session delivery answer (`GET /v1/workspaces/{ws}/delivery`): two entitled skills —
+    // one via `everyone` only (indirect), one via `ops` + `everyone` WITH a direct assignment and
+    // `reviewed` protection — one declined bundle (the caller's own web stance), one `verdict`
+    // notice carrying its reason, and one open proposal awaiting review.
     let delivery_ok = WireDelivery {
         schema_version: 1,
         workspace_id: "w_demo".to_owned(),
@@ -741,6 +753,8 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 via: WireVia {
                     channels: vec!["everyone".to_owned()],
                     direct: false,
+                    assigned_by: None,
+                    picked: None,
                 },
             },
             WireDeliverySkill {
@@ -756,11 +770,15 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 via: WireVia {
                     channels: vec!["ops".to_owned(), "everyone".to_owned()],
                     direct: true,
+                    assigned_by: Some("Alice Reviewer".to_owned()),
+                    picked: None,
                 },
             },
         ],
-        detached: vec!["s_legacy".to_owned()],
-        excluded: vec!["s_laptop_only".to_owned()],
+        declined: vec![topos_types::requests::WireDeclined {
+            skill_id: "s_legacy".to_owned(),
+            name: "legacy-notes".to_owned(),
+        }],
         notices: vec![WireNotice {
             id: "ntc_01".to_owned(),
             kind: "verdict".to_owned(),
@@ -776,23 +794,20 @@ fn fixtures() -> Vec<(&'static str, String)> {
         staleness_window_ms: 604_800_000,
         proposals_awaiting: 1,
         session_status: Some("active".to_owned()),
-        link_status: None,
     };
 
-    // The PENDING-link delivery: no data flows over a pending link — the server answers empty
-    // sets and a zero gauge with `link_status: "pending"`; the client's sweep skips the workspace
-    // quietly (a `status`-visible fact, not an error).
+    // The PENDING-session delivery: no data flows over a pending session — the server answers
+    // empty sets and a zero gauge with `session_status: "pending"`; the client's sweep skips the
+    // workspace quietly (a `status`-visible fact, not an error).
     let delivery_pending = WireDelivery {
         schema_version: 1,
         workspace_id: "w_demo".to_owned(),
         skills: vec![],
-        detached: vec![],
-        excluded: vec![],
+        declined: vec![],
         notices: vec![],
         staleness_window_ms: 604_800_000,
         proposals_awaiting: 0,
         session_status: Some("pending".to_owned()),
-        link_status: None,
     };
 
     // =============================================================================================
@@ -1054,6 +1069,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 merge: None,
                 merge_preview: None,
                 synced_placements: None,
+                scope: Some("person".to_owned()),
             }],
             proposals_awaiting: 1,
             notices: vec![WireNotice {
@@ -1107,6 +1123,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     conflicts: vec!["SKILL.md".to_owned()],
                 }),
                 synced_placements: None,
+                scope: Some("person".to_owned()),
             }],
             proposals_awaiting: 0,
             notices: Vec::new(),
@@ -1225,6 +1242,9 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 session_status: None,
             }],
             items: Vec::new(),
+            regimes: Vec::new(),
+            notes: Vec::new(),
+            detail: None,
             triggers: vec![
                 StatusTrigger {
                     agent: "claude-code".to_owned(),
@@ -1264,6 +1284,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
             session_status: "awaiting-approval".to_owned(),
             delivered: None,
             delivered_names: Vec::new(),
+            manifest_note: None,
             pending: Some(EnrollmentPending {
                 verification_uri: "https://topos.sh/verify".to_owned(),
                 user_code: "WXYZ-1234".to_owned(),
@@ -1303,6 +1324,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 "code-review".to_owned(),
                 "release-notes".to_owned(),
             ],
+            manifest_note: None,
             pending: None,
             currency: None,
             triggers: Vec::new(),

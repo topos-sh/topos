@@ -18,6 +18,7 @@ use topos_types::results::{EnrollmentPending, LoginData, LogoutData};
 use crate::ctx::Ctx;
 use crate::enroll;
 use crate::error::ClientError;
+use crate::manifest::document::{EntryValue, ManifestScope};
 use crate::plane::{DeliverySource, DeviceAuthPoll, LinkStatus};
 use crate::sessions::{self, SESSION_ACTIVE, SESSION_PENDING, Session};
 
@@ -271,6 +272,7 @@ fn pending_data(wal: &enroll::PendingEnrollment) -> LoginData {
         }),
         currency: None,
         triggers: Vec::new(),
+        manifest_note: None,
     }
 }
 
@@ -388,6 +390,11 @@ fn resume(
                 .as_ref()
                 .map(|s| s.skills.iter().map(|d| d.name.clone()).collect())
                 .unwrap_or_default();
+            // The machine's own recipe, when it exists: this workspace's feed row joins it, so the
+            // file keeps saying the whole truth about what lands here. No file = nothing to do
+            // (an absent file already behaves as one feed row per connected workspace), and no
+            // other workspace's rows are ever touched — a feed row someone deleted stays deleted.
+            let manifest_note = record_feed_row(ctx, &session.host, &session.workspace_name);
             Ok(LoginData {
                 workspace_id: session.workspace_id,
                 name: session.workspace_name,
@@ -400,8 +407,58 @@ fn resume(
                 pending: None,
                 currency,
                 triggers: Vec::new(),
+                manifest_note,
             })
         }
+    }
+}
+
+/// Append THIS workspace's feed row to the machine's own `topos.toml` — when one exists. A file
+/// that is absent is left absent (it already behaves exactly as one feed row per connected
+/// workspace, and login is not the moment to take over a person's file); an existing file gets
+/// exactly one row added, and nothing else in it is read as an instruction — a feed row someone
+/// deleted for another workspace stays deleted. Best-effort: a refusal is DISCLOSED on the
+/// receipt, never a failed login.
+fn record_feed_row(ctx: &Ctx<'_>, host: &str, workspace: &str) -> Option<String> {
+    let path = ctx.layout.home().join(crate::manifest::MANIFEST_FILE);
+    let bytes = ctx.fs.read_opt(&path).ok()??;
+    let text = String::from_utf8(bytes).ok()?;
+    let reference = format!("{host}/{workspace}");
+    let mut editor =
+        match crate::manifest::document::ManifestEditor::open(&text, ManifestScope::Global) {
+            Ok(e) => e,
+            Err(e) => {
+                return Some(format!(
+                    "{} could not be read ({e}) — it was left untouched; fix it and add \
+                     `\"{reference}\" = \"*\"` to take {workspace}'s whole feed",
+                    path.display()
+                ));
+            }
+        };
+    if editor.row(&reference).is_some() {
+        return Some(format!(
+            "{} already takes {workspace}'s feed — unchanged",
+            path.display()
+        ));
+    }
+    if let Err(e) = editor.set_row(&reference, &EntryValue::Star) {
+        return Some(format!(
+            "{} was left untouched ({e}) — add `\"{reference}\" = \"*\"` there to take \
+             {workspace}'s whole feed",
+            path.display()
+        ));
+    }
+    match editor.write(ctx.fs, &path) {
+        Ok(()) => Some(format!(
+            "added `\"{reference}\" = \"*\"` to {} — this machine takes whatever {workspace} \
+             gives you; delete that line to take it bundle by bundle",
+            path.display()
+        )),
+        Err(e) => Some(format!(
+            "{} could not be written ({}) — it was left untouched",
+            path.display(),
+            e.detail()
+        )),
     }
 }
 
@@ -672,6 +729,7 @@ mod tests {
                 notices: Vec::new(),
                 staleness_window_ms: 1000,
                 link_status: LinkStatus::Active,
+                declined: Vec::new(),
             })
         }
         fn report_applied(

@@ -22,6 +22,7 @@
         "action": "up_to_date",
         "applied": 12,
         "observed": 12,
+        "scope": "person",
         "skill": "deploy",
         "workspace_id": "w_acme"
       }

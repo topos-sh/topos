@@ -390,6 +390,7 @@ pub(crate) fn escape_recorded(
             merge: None,
             merge_preview: None,
             synced_placements: None,
+            scope: None,
         });
     };
     let store = Store::open(&sp.store)?;
@@ -1002,6 +1003,7 @@ fn merged_row(
         }),
         merge_preview: None,
         synced_placements: None,
+        scope: None,
     }
 }
 
@@ -1035,6 +1037,7 @@ fn conflicted_row(
         }),
         merge_preview: None,
         synced_placements: None,
+        scope: None,
     }
 }
 

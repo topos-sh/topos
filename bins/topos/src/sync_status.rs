@@ -54,6 +54,11 @@ pub(crate) struct WorkspaceSync {
     /// as the timestamps do; a full reconcile REPLACES this map, so a re-delivered skill self-heals.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub delivered: BTreeMap<String, DeliveredSkill>,
+    /// The caller's DECLINED bundles at the last delivery (skill id → catalog name) — what the
+    /// offline disclosures read ("declined on the web, delivered here by your manifest").
+    /// Replaced wholesale by each successful delivery.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub declined: BTreeMap<String, String>,
 }
 
 /// One skill's last-delivery cache entry (see [`WorkspaceSync::delivered`]). Written by the reconcile,
@@ -87,6 +92,13 @@ pub(crate) struct DeliveredSkill {
     /// cleaner, the followed count.
     #[serde(default, skip_serializing_if = "is_false")]
     pub via_manifest: bool,
+    /// The display name of the direct assignment's creator, when someone else aimed the bundle
+    /// at this person — offline attribution for `status` ("assigned by <name>").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_by: Option<String>,
+    /// `true` when the caller's own pick (a self-assignment) delivers it ("picked by you").
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub picked: bool,
 }
 
 /// serde skip helper — a `false` bool is the common case and stays out of the on-disk bytes.

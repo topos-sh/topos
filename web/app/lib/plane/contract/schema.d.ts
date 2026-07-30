@@ -1084,6 +1084,13 @@ export interface components {
             schema_version: number;
             scope: components["schemas"]["PointerScope"];
         };
+        /** @description One declined bundle in a [`WireDelivery`] — the caller's own web-recorded decline. */
+        WireDeclined: {
+            /** @description The bundle's catalog name (joined for narration). */
+            name: string;
+            /** @description The bundle's id. */
+            skill_id: string;
+        };
         /**
          * @description `GET /v1/workspaces/{ws}/delivery` response body — the update answer for ONE enrolled device: the
          *     entitled skills (what this device should have), the person's detached skills (freeze-in-place, never
@@ -1093,24 +1100,11 @@ export interface components {
          */
         WireDelivery: {
             /**
-             * @description The skill ids the person detached (unfollowed, or lapsed via a channel leave / removal) and that are
-             *     NOT currently re-entitled — every device freezes these in place, never cleaning them.
-             *     RETIRED on the session wire (a current server never sends it); defaulted for the transition.
+             * @description The caller's DECLINED bundles in this workspace (declined on the web — the everywhere
+             *     stance). A machine's own manifest row may still deliver one; the client reads this list
+             *     to disclose that honestly ("declined on the web, delivered here by your manifest").
              */
-            detached?: string[];
-            /**
-             * @description The skill ids THIS DEVICE excludes ("not on this device") — the third actor in the who-acts
-             *     split, alongside the person (`detached`) and upstream (absent from `skills` entirely). The copy
-             *     leaves this device; the person keeps receiving it on every other device; `follow` here lifts it.
-             *     Sent so the client narrates the true CAUSE instead of mistaking an exclusion written elsewhere
-             *     (the web, a second tool) for an upstream withdrawal.
-             */
-            excluded?: string[];
-            /**
-             * @description RETIRED spelling of [`Self::session_status`] (the device-link wire) — read as a fallback,
-             *     never produced by a current server.
-             */
-            link_status?: string | null;
+            declined?: components["schemas"]["WireDeclined"][];
             /** @description The unacked, person-scoped notices (verdicts, proposal closures, …). */
             notices: components["schemas"]["WireNotice"][];
             /**
@@ -1127,7 +1121,7 @@ export interface components {
              * @description THIS session's standing — `"active"` or `"pending"`. A `"pending"` delivery carries empty
              *     `skills` / `notices` and `proposals_awaiting: 0` — no data flows over a pending session;
              *     the client skips the workspace quietly and `topos status` shows the wait. Serde-defaulted
-             *     only so the retired `link_status` spelling still parses during the wire transition.
+             *     so a producer predating the field still parses (absent reads as active-equivalent).
              */
             session_status?: string | null;
             /** @description The entitled skills — everything this device should have (a possibly-empty list). */
@@ -1580,10 +1574,18 @@ export interface components {
          *     follows it directly (a direct follow survives every channel drop).
          */
         WireVia: {
+            /**
+             * @description The display name of the DIRECT assignment's creator, when someone else aimed the bundle
+             *     at this person (or at everyone) — the attribution a receipt or status line narrates.
+             *     Absent when the caller picked it themselves, or when only channels deliver it.
+             */
+            assigned_by?: string | null;
             /** @description The channels delivering the skill (names, sorted; `everyone` is present when it delivers). */
             channels: string[];
             /** @description Whether the person also follows the skill directly (independent of any channel). */
             direct: boolean;
+            /** @description `true` when the caller's OWN pick (a self-assignment) delivers it. */
+            picked?: boolean | null;
         };
     };
     responses: never;

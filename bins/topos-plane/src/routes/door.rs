@@ -9,7 +9,7 @@
 //! SESSION's workspace-scoped bearer credential), the session self-end, the
 //! publish/propose/revert/review writes, the current/version/object/catalog/proposals reads, the
 //! delivery + applied-state report, the describe reads (me / channels / reach / review inbox /
-//! log), and the row ops (the server-stored profile / channel curation / protection / notices-ack
+//! log), and the row ops (channel curation / protection / notices-ack
 //! / invitations).
 
 #![allow(dead_code)] // contract-only: referenced by the OpenAPI derive, routed by the web app.
@@ -73,79 +73,6 @@ pub(crate) fn get_channels() {}
     ),
 )]
 pub(crate) fn get_reach() {}
-
-#[utoipa::path(
-    put,
-    path = "/v1/workspaces/{ws}/profile/skills/{skill}",
-    tag = "rows",
-    params(
-        ("ws" = String, Path, description = "The workspace id."),
-        ("skill" = String, Path, description = "The skill's immutable id to include in the caller's server-stored profile (the `-g` manifest layer). An optional JSON body `{\"pin\": \"<64-hex>\"}` pins the version."),
-        ("Authorization" = String, Header, description = "`Bearer <session credential>`."),
-    ),
-    responses(
-        (status = 200, description = "The all-outcome envelope: the profile row is present (idempotent — re-including converges, a new pin replaces the old).", body = JsonEnvelope),
-        (status = 400, description = "Malformed pin.", body = JsonEnvelope),
-        (status = 404, description = "Missing/blank credential, an ended session, or an unknown skill (indistinguishable).", body = JsonEnvelope),
-        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
-        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
-    ),
-)]
-pub(crate) fn profile_include_skill() {}
-
-#[utoipa::path(
-    delete,
-    path = "/v1/workspaces/{ws}/profile/skills/{skill}",
-    tag = "rows",
-    params(
-        ("ws" = String, Path, description = "The workspace id."),
-        ("skill" = String, Path, description = "The skill's immutable id to drop from the caller's server-stored profile."),
-        ("Authorization" = String, Header, description = "`Bearer <session credential>`."),
-    ),
-    responses(
-        (status = 200, description = "The all-outcome envelope; `data.status` names HOW the removal settled — `removed` (the row is gone), `excluded` (the skill still arrives via a channel, so the profile records the negative stance instead), or `not_in_profile` (nothing to remove).", body = JsonEnvelope),
-        (status = 404, description = "Missing/blank credential, an ended session, or an unknown skill (indistinguishable).", body = JsonEnvelope),
-        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
-        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
-    ),
-)]
-pub(crate) fn profile_remove_skill() {}
-
-#[utoipa::path(
-    put,
-    path = "/v1/workspaces/{ws}/profile/channels/{ch}",
-    tag = "rows",
-    params(
-        ("ws" = String, Path, description = "The workspace id."),
-        ("ch" = String, Path, description = "The channel name to include in the caller's server-stored profile."),
-        ("Authorization" = String, Header, description = "`Bearer <session credential>`."),
-    ),
-    responses(
-        (status = 200, description = "The all-outcome envelope: the profile row is present (idempotent).", body = JsonEnvelope),
-        (status = 404, description = "Missing/blank credential, an ended session, or an unknown channel (indistinguishable).", body = JsonEnvelope),
-        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
-        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
-    ),
-)]
-pub(crate) fn profile_include_channel() {}
-
-#[utoipa::path(
-    delete,
-    path = "/v1/workspaces/{ws}/profile/channels/{ch}",
-    tag = "rows",
-    params(
-        ("ws" = String, Path, description = "The workspace id."),
-        ("ch" = String, Path, description = "The channel name to drop from the caller's server-stored profile."),
-        ("Authorization" = String, Header, description = "`Bearer <session credential>`."),
-    ),
-    responses(
-        (status = 200, description = "The all-outcome envelope; `data.status` mirrors the skill route's removal outcomes.", body = JsonEnvelope),
-        (status = 404, description = "Missing/blank credential, an ended session, or an unknown channel (indistinguishable).", body = JsonEnvelope),
-        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
-        (status = 500, description = "Integrity / internal store fault.", body = JsonEnvelope),
-    ),
-)]
-pub(crate) fn profile_remove_channel() {}
 
 #[utoipa::path(
     put,

@@ -1,20 +1,29 @@
-//! `init` — create THIS folder's `topos.toml` (the project manifest). Any folder, git or not;
-//! outside a shared repo the receipt notes the file won't travel. Idempotent: an existing manifest
-//! is a clean no-op receipt (`created: false`), never an error and never an overwrite.
+//! `init [-g]` — write a `topos.toml` you can then edit by hand.
+//!
+//! Without `-g` it creates THIS folder's project manifest from the commented template (the folder
+//! IS the scope — `init` never walks up; it is `add` with nothing in reach that prefers the git
+//! root). With `-g` it MATERIALIZES the machine-wide file: the header plus one feed row per
+//! connected workspace, spelling out what an absent file already means, so the next edit is a
+//! line-by-line one. Idempotent either way — an existing file is a clean no-op receipt
+//! (`created: false`), never an overwrite.
 
 use topos_types::results::InitData;
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
-use crate::manifest::file::{MANIFEST_FILE, ManifestEditor};
-use crate::manifest::walk;
+use crate::manifest::MANIFEST_FILE;
+use crate::manifest::document::{materialized_global, project_template};
 
-/// Create `topos.toml` in the CURRENT directory (the folder IS the scope — `init` never walks up;
-/// `add` with no manifest in reach is what prefers the git root).
+use super::manifest_edit as medit;
+
+/// Create the folder's `topos.toml`, or (with `global`) materialize `~/.topos/topos.toml`.
 ///
 /// # Errors
-/// [`ClientError::InvalidArgument`] when the working directory is unknown; an io failure.
-pub(crate) fn init(ctx: &Ctx<'_>) -> Result<InitData, ClientError> {
+/// [`ClientError::InvalidArgument`] when a project `init` has no working directory; an io failure.
+pub(crate) fn init(ctx: &Ctx<'_>, global: bool) -> Result<InitData, ClientError> {
+    if global {
+        return init_global(ctx);
+    }
     let cwd = ctx
         .roots
         .as_ref()
@@ -22,12 +31,12 @@ pub(crate) fn init(ctx: &Ctx<'_>) -> Result<InitData, ClientError> {
         .ok_or_else(|| {
             ClientError::InvalidArgument(
                 "cannot resolve the current directory — run `topos init` inside the folder the \
-                 manifest should govern"
+                 manifest should govern (or `topos init -g` for your machine-wide file)"
                     .into(),
             )
         })?;
     let path = cwd.join(MANIFEST_FILE);
-    let note = if walk::init_dir(ctx.fs, &cwd) == cwd && !ctx.fs.exists(&cwd.join(".git")) {
+    let note = if medit::init_dir(ctx.fs, &cwd) == cwd && !ctx.fs.exists(&cwd.join(".git")) {
         Some(
             "outside a git repository — this manifest stays local to this folder (it won't \
              travel with a repo)"
@@ -43,7 +52,48 @@ pub(crate) fn init(ctx: &Ctx<'_>) -> Result<InitData, ClientError> {
             note,
         });
     }
-    crate::atomic::atomic_write(ctx.fs, &path, ManifestEditor::init_template().as_bytes())?;
+    crate::atomic::atomic_write(ctx.fs, &path, project_template().as_bytes())?;
+    Ok(InitData {
+        manifest: path.display().to_string(),
+        created: true,
+        note,
+    })
+}
+
+/// The `-g` arm: materialize this machine's own recipe from what it is connected to.
+fn init_global(ctx: &Ctx<'_>) -> Result<InitData, ClientError> {
+    let path = ctx.layout.home().join(MANIFEST_FILE);
+    if ctx.fs.exists(&path) {
+        return Ok(InitData {
+            manifest: path.display().to_string(),
+            created: false,
+            note: Some(
+                "it already exists and was left untouched — `topos fmt -g` tidies it, and \
+                 `topos status` says what it currently asks for"
+                    .to_owned(),
+            ),
+        });
+    }
+    let connected = medit::connected_workspaces(ctx);
+    let note = if connected.is_empty() {
+        Some(
+            "no workspace is connected yet, so the file starts with just its header — \
+             `topos login <address>` connects one, and its feed row lands here"
+                .to_owned(),
+        )
+    } else {
+        Some(format!(
+            "materialized: one feed row per connected workspace ({}) — each tracks whatever that \
+             workspace serves you; delete a row to take that workspace line by line",
+            connected
+                .iter()
+                .map(|(_, w)| w.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    };
+    ctx.fs.create_dir_all(ctx.layout.home())?;
+    crate::atomic::atomic_write(ctx.fs, &path, materialized_global(&connected).as_bytes())?;
     Ok(InitData {
         manifest: path.display().to_string(),
         created: true,
@@ -102,23 +152,25 @@ mod tests {
         let repo = home.join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         with_ctx(&home, Some(&repo), |ctx| {
-            let first = init(ctx).unwrap();
+            let first = init(ctx, false).unwrap();
             assert!(first.created);
             assert!(first.note.is_none(), "inside a repo — no travel note");
             assert!(std::path::Path::new(&first.manifest).exists());
-            // The created file parses as an EMPTY manifest (the template is comments only).
-            let m =
-                crate::manifest::file::read_manifest(ctx.fs, std::path::Path::new(&first.manifest))
-                    .unwrap()
-                    .unwrap();
-            assert!(m.is_empty());
+            // The created file parses as an EMPTY project manifest (the template is comments only).
+            let text = std::fs::read_to_string(&first.manifest).unwrap();
+            let doc = crate::manifest::document::parse_manifest(
+                &text,
+                crate::manifest::document::ManifestScope::Project,
+            )
+            .unwrap();
+            assert!(doc.rows.is_empty() && doc.defaults.is_empty());
             // Idempotent — the second run is a no-op receipt, never an overwrite.
             std::fs::write(
                 &first.manifest,
-                "# hand-edited\n[skills]\n\"./a\" = \"*\"\n",
+                "# hand-edited\n[bundles]\n\"./a\" = \"*\"\n",
             )
             .unwrap();
-            let second = init(ctx).unwrap();
+            let second = init(ctx, false).unwrap();
             assert!(!second.created);
             let text = std::fs::read_to_string(&first.manifest).unwrap();
             assert!(text.contains("hand-edited"), "{text}");
@@ -131,7 +183,7 @@ mod tests {
         let stray = home.join("stray");
         std::fs::create_dir_all(&stray).unwrap();
         with_ctx(&home, Some(&stray), |ctx| {
-            let out = init(ctx).unwrap();
+            let out = init(ctx, false).unwrap();
             assert!(out.created);
             assert!(
                 out.note.as_deref().is_some_and(|n| n.contains("git")),
@@ -144,8 +196,35 @@ mod tests {
     fn init_without_a_working_directory_refuses_typed() {
         let home = scratch("nocwd");
         with_ctx(&home, None, |ctx| {
-            let err = init(ctx).unwrap_err();
+            let err = init(ctx, false).unwrap_err();
             assert_eq!(err.code(), "INVALID_ARGUMENT");
+        });
+    }
+
+    #[test]
+    fn init_g_materializes_the_machine_file_and_is_idempotent() {
+        let home = scratch("global");
+        with_ctx(&home, None, |ctx| {
+            // With no session, the file is born with just its header — and says so.
+            let first = init(ctx, true).unwrap();
+            assert!(first.created);
+            assert!(
+                first.note.as_deref().is_some_and(|n| n.contains("header")),
+                "{first:?}"
+            );
+            let text = std::fs::read_to_string(&first.manifest).unwrap();
+            assert!(text.contains("# topos.toml"), "{text}");
+            // Idempotent: the second run leaves the bytes alone and says so.
+            let second = init(ctx, true).unwrap();
+            assert!(!second.created);
+            assert!(
+                second
+                    .note
+                    .as_deref()
+                    .is_some_and(|n| n.contains("left untouched")),
+                "{second:?}"
+            );
+            assert_eq!(std::fs::read_to_string(&second.manifest).unwrap(), text);
         });
     }
 }

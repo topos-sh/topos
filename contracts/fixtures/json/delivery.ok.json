@@ -33,15 +33,16 @@
           "ops",
           "everyone"
         ],
-        "direct": true
+        "direct": true,
+        "assigned_by": "Alice Reviewer"
       }
     }
   ],
-  "detached": [
-    "s_legacy"
-  ],
-  "excluded": [
-    "s_laptop_only"
+  "declined": [
+    {
+      "skill_id": "s_legacy",
+      "name": "legacy-notes"
+    }
   ],
   "notices": [
     {

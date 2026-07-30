@@ -29,7 +29,7 @@ use topos_types::{
 #[openapi(
     info(
         title = "Topos product API (device lane)",
-        description = "The session lane the product app serves: the RFC-8628-shaped login flow (start/poll — approval promotes the flow code to the SESSION's workspace-scoped bearer credential), the session self-end, the publish/propose/revert/review writes, the current/version/object/catalog/proposals reads, the delivery + applied-state report, the describe reads, and the row ops (the server-stored profile / channel curation / protection / notices-ack / invitations). Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
+        description = "The session lane the product app serves: the RFC-8628-shaped login flow (start/poll — approval promotes the flow code to the SESSION's workspace-scoped bearer credential), the session self-end, the publish/propose/revert/review writes, the current/version/object/catalog/proposals reads, the delivery + applied-state report, the describe reads, and the row ops (channel curation / protection / notices-ack / invitations). Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
         version = "0.0.0",
         license(name = "Apache-2.0"),
     ),
@@ -53,10 +53,6 @@ use topos_types::{
         crate::routes::door::get_log,
         crate::routes::door::get_reach,
         // Row ops.
-        crate::routes::door::profile_include_skill,
-        crate::routes::door::profile_remove_skill,
-        crate::routes::door::profile_include_channel,
-        crate::routes::door::profile_remove_channel,
         crate::routes::door::channel_place,
         crate::routes::door::channel_unplace,
         crate::routes::door::set_skill_protection,
@@ -144,7 +140,6 @@ use topos_types::{
     tags(
         (name = "writes", description = "Session-credential writes (publish / propose / revert / review) and the member-lane row ops (channel curation / protection / notices-ack)."),
         (name = "reads", description = "Session-credential reads (current / bundles / versions / proposals / catalog / delivery / me / channels / log / reach) plus the body-light applied-state report."),
-        (name = "rows", description = "The server-stored profile row ops (the person's `-g` manifest layer)."),
         (name = "enrollment", description = "The RFC-8628-shaped login flow (start / poll; approval promotes the flow code to the SESSION's workspace-scoped bearer credential) and the session self-end."),
         (name = "governance", description = "The member-lane invitation (a roster write)."),
     ),

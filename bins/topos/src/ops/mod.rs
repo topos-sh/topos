@@ -23,6 +23,7 @@ mod builtin;
 mod connect;
 mod contribute;
 mod diff;
+mod fmt;
 mod init;
 mod invite;
 mod list;
@@ -63,6 +64,7 @@ pub(crate) use builtin::{
     ensure_with as builtin_ensure_with, marker_in_frontmatter as builtin_marker_in_frontmatter,
 };
 pub(crate) use diff::{DiffBudget, diff};
+pub(crate) use fmt::fmt_manifest;
 pub(crate) use init::init;
 pub(crate) use invite::{InviteConnectors, InviteOutcome, invite};
 #[cfg(test)]
@@ -71,10 +73,9 @@ pub(crate) use list::{DiscoveryRoots, ListFilter, ListOutcome, RemoteScope, list
 pub(crate) use login::{
     Handoff, LoginConnectors, login as session_login, logout as session_logout,
 };
-#[cfg(test)]
-pub(crate) use manifest_edit::note_added;
 pub(crate) use manifest_edit::{
-    note_added_path, note_added_remote, profile_provided_names, remove_from_manifests,
+    manifest_host, note_added_path, note_added_remote, reference_shaped, remove_global,
+    remove_project,
 };
 // The TTY-only enrollment row types are constructed in `list` and rendered by field access; the named
 // re-export exists for the renderer's tests, which build them by hand.
@@ -86,9 +87,6 @@ pub(crate) use publish::{PublishDescribeConnectors, PublishOutcome, publish, pub
 pub(crate) use protect::{ProtectConnectors, ProtectOutcome, protect};
 #[cfg(test)]
 pub(crate) use publish::ensure_tracked;
-// The `--to` existing-channel gate — unit-proven over the reconcile suite's directory fake.
-#[cfg(test)]
-pub(crate) use publish::check_channel_exists;
 pub(crate) use pull::{
     PullOutcome, PullScope, ReconcileOpts, ResetOutcome, TargetMode, pull, quiet_hook_lines,
     quiet_soft_failure, reset,
@@ -98,7 +96,7 @@ pub(crate) use reconcile::{
     manifest_update,
 };
 pub(crate) use reference::{
-    WriteLane, add_reference, find_path_line, remove_reference_global, resolve_session_lane,
+    AddRefOutcome, WriteLane, add_reference, find_path_line, resolve_session_lane,
     rewrite_to_governed,
 };
 // The withdrawal/exclusion clean is driven through `remove`/the reconcile; the direct re-export
@@ -226,26 +224,59 @@ fn resolve_skill_stored(
     name: &str,
     workspace: Option<&str>,
 ) -> Result<(crate::sidecar::Layout, SkillId, Lock), ClientError> {
-    let home_miss = match resolve_skill_in_workspace(ctx, name, workspace) {
-        Ok((id, lock)) => return Ok((ctx.layout.clone(), id, lock)),
-        Err(e @ ClientError::NoSuchSkill { .. }) => e,
+    // Home first — but a copy carrying a DRAFT outranks a clean twin: the feed routinely lands a
+    // clean person-scope copy of a bundle a checkout also delivers, and a publish run from
+    // inside that checkout must ship the EDITED copy, not the clean shadow.
+    let home_hit = match resolve_skill_in_workspace(ctx, name, workspace) {
+        Ok(pair) => Some(pair),
+        Err(ClientError::NoSuchSkill { .. }) => None,
         Err(e) => return Err(e),
     };
-    if let Some(roots) = &ctx.roots
+    let home_drafted = home_hit
+        .as_ref()
+        .is_some_and(|(id, _)| store_has_draft(ctx, id));
+    let mut project_fallback: Option<(crate::sidecar::Layout, SkillId, Lock)> = None;
+    if !home_drafted
+        && let Some(roots) = &ctx.roots
         && let Some(cwd) = roots.cwd.as_deref()
-        && let Ok(layers) = crate::manifest::walk::project_layers(ctx.fs, cwd, Some(&roots.home))
     {
-        for layer in &layers {
-            let Some(playout) = crate::sidecar::existing_project_store(ctx.fs, &layer.dir) else {
+        for dir in crate::manifest::scopes::manifest_dirs_up(ctx.fs, cwd, Some(&roots.home)) {
+            let Some(playout) = crate::sidecar::existing_project_store(ctx.fs, &dir) else {
                 continue;
             };
             let pctx = pull::ctx_with_layout(ctx, &playout);
             if let Ok((id, lock)) = resolve_skill_in_workspace(&pctx, name, workspace) {
-                return Ok((playout, id, lock));
+                if store_has_draft(&pctx, &id) {
+                    return Ok((playout, id, lock));
+                }
+                if project_fallback.is_none() {
+                    project_fallback = Some((playout, id, lock));
+                }
             }
         }
     }
-    Err(home_miss)
+    if let Some((id, lock)) = home_hit {
+        return Ok((ctx.layout.clone(), id, lock));
+    }
+    project_fallback.ok_or(ClientError::NoSuchSkill {
+        name: name.to_owned(),
+    })
+}
+
+/// Whether a store's copy of `sid` carries LOCAL EDITS (any scanned placement modified against
+/// its pristine version). Best-effort — an unreadable map or scan reads as "no draft" here; the
+/// verbs' own loss-guards re-check with fail-toward-the-gate semantics.
+fn store_has_draft(ctx: &Ctx<'_>, sid: &SkillId) -> bool {
+    let sp = ctx.layout.published(sid);
+    let Ok(Some(map)) = crate::doc::read_map(ctx.fs, &sp.map) else {
+        return false;
+    };
+    let Ok(scans) = crate::placement::scan_placements(ctx, &map) else {
+        return false;
+    };
+    scans
+        .iter()
+        .any(|s| matches!(s.status, crate::placement::ScanStatus::Modified { .. }))
 }
 
 /// The NAME a cwd-chain PROJECT store tracks for `source` when the home store does not — the

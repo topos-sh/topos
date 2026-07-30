@@ -84,6 +84,11 @@ pub struct PullSkill {
     /// `draft_synced` row's count). Absent when the run synced nothing. **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub synced_placements: Option<u32>,
+    /// The SCOPE this row reconciled in — `"person"` for the home dirs, or the project
+    /// directory's path for an in-checkout delivery. The receipt sections rows by it. Absent on
+    /// rows predating the field. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 /// The predicted verdict of a three-way merge that has NOT been run against the placements — a pure
@@ -514,6 +519,41 @@ pub struct AddData {
     /// **Additive.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub governed_copy: Option<GovernedCopy>,
+    /// A disclosure the receipt leads with when the edit was not the plain row write: a
+    /// redundant row NOT written (the feed already delivers it), an `"off"` switch deleted
+    /// instead of a row added, or a standing web decline this machine's row now overrides.
+    /// **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// The FIRST-TRUST describe a bare `add` of a NEW git source returns: the source, what was
+/// discovered in it, and exactly what would be written where — nothing has landed. `--yes`
+/// applies. **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct AddDescribeData {
+    /// The source being trusted for the first time (e.g. `github.com/<owner>/<repo>`).
+    pub source: String,
+    /// The skills discovered in it (leaf directory names).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
+    /// The manifest FILE the row would land in.
+    pub manifest: String,
+    /// The row key that would be written.
+    pub reference: String,
+    /// The row value that would be written (`"*"` or a commit pin).
+    pub value: String,
+}
+
+/// `fmt [-g]` — rewrite a manifest into the normal form. **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct FmtData {
+    /// The manifest's path.
+    pub manifest: String,
+    /// Whether the bytes changed (`false` = already normal).
+    pub changed: bool,
 }
 
 /// The dedup suggestion an [`AddData`] carries when a remote import's source is already governed
@@ -660,6 +700,12 @@ pub struct LoginData {
     /// The breadth arming sweep's outcomes (one row per other detected agent).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<BreadthTriggerReport>,
+    /// What the login did to this machine's own `topos.toml`, when one exists: the workspace's
+    /// feed row was appended (a file that is absent already behaves as if it held one), or the
+    /// honest reason it was left alone. Absent when there is no machine-wide file at all.
+    /// **Additive.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_note: Option<String>,
 }
 
 /// `logout [<workspace>|--all]` — end this installation's session(s). **INFERRED** (additive-only).
@@ -1198,11 +1244,69 @@ pub struct StatusData {
     /// logged into nothing).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<StatusSession>,
-    /// The resolved TRUST-RAIL table for the CURRENT directory: every bundle the manifests
-    /// covering it — and the person's profile layers — resolve to, nearest-first deduped, each
-    /// with its one source line and an honest state; recorded EXCLUDES appear as their own rows.
+    /// The resolved table for the CURRENT directory: every bundle the scopes covering it — the
+    /// nearest project manifest and the person scope (the global manifest, or each connected
+    /// workspace's feed) — resolve to, deduped per scope, each with its one source line and an
+    /// honest state; recorded `"off"` switches appear as their own rows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<StatusItem>,
+    /// Each connected workspace's REGIME on this machine: adopting its whole feed, explicit
+    /// line-by-line control, or feed rows withheld by a hand-written global manifest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regimes: Vec<StatusRegime>,
+    /// The disclosure lines — plain sentences the table cannot carry per row: the loud
+    /// no-feed-row note, redundant rows, inert `"off"` switches, set-collision winners,
+    /// declined-but-delivered notes, cross-scope version splits. Rendered verbatim.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    /// The deep single-bundle answer (`topos status <bundle>`): where it comes from, spelled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<StatusDetail>,
+}
+
+/// One workspace's regime line in a [`StatusData`]. **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct StatusRegime {
+    /// The server host.
+    pub host: String,
+    /// The workspace's address name.
+    pub workspace: String,
+    /// The regime sentence (e.g. "adopting all assigned, 2 off" or "explicit: 3 bundles; 1
+    /// assigned not adopted here").
+    pub regime: String,
+}
+
+/// The deep answer for ONE bundle (`topos status <bundle>`). **INFERRED** (additive-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "contract-derives", derive(schemars::JsonSchema))]
+pub struct StatusDetail {
+    /// The bundle's name.
+    pub name: String,
+    /// The manifest FILE whose row delivers it, when a row does (a path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_file: Option<String>,
+    /// The row's spelled KEY in that file (the joined reference).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_key: Option<String>,
+    /// The feed origin, when no row names it (`<host>/<workspace>` — the workspace whose feed
+    /// delivers it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed: Option<String>,
+    /// The delivery attribution (`assigned by <name>` / `picked by you`), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<String>,
+    /// The applied version (64-hex), when applied locally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// A row's version pin, when one is spelled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
+    /// The placement directories this machine holds for it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub placements: Vec<String>,
+    /// The line's state (the same vocabulary as the table).
+    pub state: StatusItemState,
 }
 
 /// One session in a [`StatusData`] — this installation logged into one workspace. **INFERRED**
@@ -1244,6 +1348,9 @@ pub struct StatusItem {
     /// baseline).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via: Option<String>,
+    /// The delivery attribution, when known (`assigned by <name>` / `picked by you`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<String>,
     /// The applied version (64-hex), when one is applied locally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
@@ -1274,6 +1381,9 @@ pub enum StatusItemState {
     LocalEdits,
     /// An exclude line withholds this name here (the row's `source` recorded it).
     Excluded,
+    /// A machine-local `"off"` row in the global manifest withholds this bundle from the feed
+    /// here (the everywhere-path is the web decline).
+    Off,
     /// Referenced here but NOT deliverable with your current access — phrased from LOCAL
     /// knowledge only (no live session for its workspace); never from server confirmation.
     NotAvailable,
@@ -1318,6 +1428,7 @@ mod tests {
                 merge: None,
                 merge_preview: None,
                 synced_placements: None,
+                scope: None,
             }],
             proposals_awaiting: 0,
             notices: Vec::new(),

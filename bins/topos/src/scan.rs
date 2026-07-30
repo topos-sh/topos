@@ -276,7 +276,7 @@ fn file_mode(meta: &std::fs::Metadata) -> FileMode {
 
 /// Extract a `name:` value from leading YAML frontmatter (`---` … `---`). A minimal line scan — no YAML
 /// dependency; an unquoted or single/double-quoted scalar is accepted. Returns `None` if absent.
-fn frontmatter_name(bytes: &[u8]) -> Option<String> {
+pub(crate) fn frontmatter_name(bytes: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(bytes).ok()?;
     let mut lines = text.lines();
     if lines.next()?.trim() != "---" {

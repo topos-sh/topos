@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Topos product API (device lane)",
-    "description": "The session lane the product app serves: the RFC-8628-shaped login flow (start/poll — approval promotes the flow code to the SESSION's workspace-scoped bearer credential), the session self-end, the publish/propose/revert/review writes, the current/version/object/catalog/proposals reads, the delivery + applied-state report, the describe reads, and the row ops (the server-stored profile / channel curation / protection / notices-ack / invitations). Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
+    "description": "The session lane the product app serves: the RFC-8628-shaped login flow (start/poll — approval promotes the flow code to the SESSION's workspace-scoped bearer credential), the session self-end, the publish/propose/revert/review writes, the current/version/object/catalog/proposals reads, the delivery + applied-state report, the describe reads, and the row ops (channel curation / protection / notices-ack / invitations). Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
     "license": {
       "name": "Apache-2.0"
     },
@@ -1146,328 +1146,6 @@
           },
           "404": {
             "description": "Missing/blank credential, unknown/revoked one, or non-member (indistinguishable).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited (Retry-After header).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Integrity / internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/workspaces/{ws}/profile/channels/{ch}": {
-      "put": {
-        "tags": [
-          "rows"
-        ],
-        "operationId": "profile_include_channel",
-        "parameters": [
-          {
-            "name": "ws",
-            "in": "path",
-            "description": "The workspace id.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "ch",
-            "in": "path",
-            "description": "The channel name to include in the caller's server-stored profile.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "Authorization",
-            "in": "header",
-            "description": "`Bearer <session credential>`.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The all-outcome envelope: the profile row is present (idempotent).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Missing/blank credential, an ended session, or an unknown channel (indistinguishable).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited (Retry-After header).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Integrity / internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "rows"
-        ],
-        "operationId": "profile_remove_channel",
-        "parameters": [
-          {
-            "name": "ws",
-            "in": "path",
-            "description": "The workspace id.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "ch",
-            "in": "path",
-            "description": "The channel name to drop from the caller's server-stored profile.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "Authorization",
-            "in": "header",
-            "description": "`Bearer <session credential>`.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The all-outcome envelope; `data.status` mirrors the skill route's removal outcomes.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Missing/blank credential, an ended session, or an unknown channel (indistinguishable).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited (Retry-After header).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Integrity / internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/workspaces/{ws}/profile/skills/{skill}": {
-      "put": {
-        "tags": [
-          "rows"
-        ],
-        "operationId": "profile_include_skill",
-        "parameters": [
-          {
-            "name": "ws",
-            "in": "path",
-            "description": "The workspace id.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "skill",
-            "in": "path",
-            "description": "The skill's immutable id to include in the caller's server-stored profile (the `-g` manifest layer). An optional JSON body `{\"pin\": \"<64-hex>\"}` pins the version.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "Authorization",
-            "in": "header",
-            "description": "`Bearer <session credential>`.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The all-outcome envelope: the profile row is present (idempotent — re-including converges, a new pin replaces the old).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed pin.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Missing/blank credential, an ended session, or an unknown skill (indistinguishable).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited (Retry-After header).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Integrity / internal store fault.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "rows"
-        ],
-        "operationId": "profile_remove_skill",
-        "parameters": [
-          {
-            "name": "ws",
-            "in": "path",
-            "description": "The workspace id.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "skill",
-            "in": "path",
-            "description": "The skill's immutable id to drop from the caller's server-stored profile.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "Authorization",
-            "in": "header",
-            "description": "`Bearer <session credential>`.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The all-outcome envelope; `data.status` names HOW the removal settled — `removed` (the row is gone), `excluded` (the skill still arrives via a channel, so the profile records the negative stance instead), or `not_in_profile` (nothing to remove).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Missing/blank credential, an ended session, or an unknown skill (indistinguishable).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3511,6 +3189,24 @@
           }
         }
       },
+      "WireDeclined": {
+        "type": "object",
+        "description": "One declined bundle in a [`WireDelivery`] — the caller's own web-recorded decline.",
+        "required": [
+          "skill_id",
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The bundle's catalog name (joined for narration)."
+          },
+          "skill_id": {
+            "type": "string",
+            "description": "The bundle's id."
+          }
+        }
+      },
       "WireDelivery": {
         "type": "object",
         "description": "`GET /v1/workspaces/{ws}/delivery` response body — the update answer for ONE enrolled device: the\nentitled skills (what this device should have), the person's detached skills (freeze-in-place, never\ncleaned), the unacked notices feed, and the open-proposal count across the entitled set. The\nsession-start hook fetches it once per workspace and reconciles the harness against it, silently. A\nversioned envelope.",
@@ -3522,26 +3218,12 @@
           "proposals_awaiting"
         ],
         "properties": {
-          "detached": {
+          "declined": {
             "type": "array",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/WireDeclined"
             },
-            "description": "The skill ids the person detached (unfollowed, or lapsed via a channel leave / removal) and that are\nNOT currently re-entitled — every device freezes these in place, never cleaning them.\nRETIRED on the session wire (a current server never sends it); defaulted for the transition."
-          },
-          "excluded": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "The skill ids THIS DEVICE excludes (\"not on this device\") — the third actor in the who-acts\nsplit, alongside the person (`detached`) and upstream (absent from `skills` entirely). The copy\nleaves this device; the person keeps receiving it on every other device; `follow` here lifts it.\nSent so the client narrates the true CAUSE instead of mistaking an exclusion written elsewhere\n(the web, a second tool) for an upstream withdrawal."
-          },
-          "link_status": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "RETIRED spelling of [`Self::session_status`] (the device-link wire) — read as a fallback,\nnever produced by a current server."
+            "description": "The caller's DECLINED bundles in this workspace (declined on the web — the everywhere\nstance). A machine's own manifest row may still deliver one; the client reads this list\nto disclose that honestly (\"declined on the web, delivered here by your manifest\")."
           },
           "notices": {
             "type": "array",
@@ -3567,7 +3249,7 @@
               "string",
               "null"
             ],
-            "description": "THIS session's standing — `\"active\"` or `\"pending\"`. A `\"pending\"` delivery carries empty\n`skills` / `notices` and `proposals_awaiting: 0` — no data flows over a pending session;\nthe client skips the workspace quietly and `topos status` shows the wait. Serde-defaulted\nonly so the retired `link_status` spelling still parses during the wire transition."
+            "description": "THIS session's standing — `\"active\"` or `\"pending\"`. A `\"pending\"` delivery carries empty\n`skills` / `notices` and `proposals_awaiting: 0` — no data flows over a pending session;\nthe client skips the workspace quietly and `topos status` shows the wait. Serde-defaulted\nso a producer predating the field still parses (absent reads as active-equivalent)."
           },
           "skills": {
             "type": "array",
@@ -4378,6 +4060,13 @@
           "direct"
         ],
         "properties": {
+          "assigned_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The display name of the DIRECT assignment's creator, when someone else aimed the bundle\nat this person (or at everyone) — the attribution a receipt or status line narrates.\nAbsent when the caller picked it themselves, or when only channels deliver it."
+          },
           "channels": {
             "type": "array",
             "items": {
@@ -4388,6 +4077,13 @@
           "direct": {
             "type": "boolean",
             "description": "Whether the person also follows the skill directly (independent of any channel)."
+          },
+          "picked": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true` when the caller's OWN pick (a self-assignment) delivers it."
           }
         }
       }
@@ -4401,10 +4097,6 @@
     {
       "name": "reads",
       "description": "Session-credential reads (current / bundles / versions / proposals / catalog / delivery / me / channels / log / reach) plus the body-light applied-state report."
-    },
-    {
-      "name": "rows",
-      "description": "The server-stored profile row ops (the person's `-g` manifest layer)."
     },
     {
       "name": "enrollment",

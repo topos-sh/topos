@@ -1,23 +1,17 @@
-//! `remove [SKILL]... [-a <agent>]...` — take skills off THIS machine.
+//! `remove [SKILL]...` — the CLASSIC removal: bytes this machine holds that NO manifest row asks
+//! for. The manifest arms run first (see [`super::manifest_edit`]); everything they do not claim
+//! lands here, and every shape here is a PERMANENT delete, so all of them are describe-first:
 //!
-//! Three shapes, all byte-honest about what survives:
-//! - a FOLLOWED skill → a per-device **exclusion** (`PUT exclusions/{skill}`): delivery stops on THIS
-//!   device, the person keeps following it (every other device still receives it), and the local copy is
-//!   kept as a frozen copy — the agent dirs are cleaned (any draft snapshotted first), never the sidecar
-//!   bytes. Nothing returns at the next sync; `topos add <name>` re-attaches. This is NOT a detach —
-//!   stopping a skill everywhere is `topos unfollow`. On a CLEAN followed skill the exclusion applies
-//!   immediately with an undo-led receipt (`--yes` an accepted no-op); with a DRAFT ahead (local
-//!   edits) the loss-guard holds the two-phase describe — the draft leaves every agent dir on apply,
-//!   so the disclosure comes first (a scan that cannot classify fails TOWARD the gate).
-//! - a TRACKED, never-published LOCAL skill → a **permanent** delete: no other copy exists, so the agent
-//!   dirs AND the sidecar entry go.
-//! - an UNTRACKED local copy sitting in an agent dir (`<name>@<agent>`, or `-a <agent>` scoped) → a
-//!   **permanent** delete of that directory (topos never adopted it — deleting it is the only removal).
+//! - a TRACKED, never-published LOCAL skill → the agent dirs AND the sidecar entry go (no other
+//!   copy exists).
+//! - an UNTRACKED local copy sitting in an agent dir (`<name>@<agent>`) → a permanent delete of
+//!   that directory (topos never adopted it — deleting it is the only removal there is).
+//! - the built-in `topos` skill → the durable device opt-out (`topos add topos` brings it back).
 //!
-//! Multi-skill positional; resolve ALL-OR-NONE (a batch either resolves every target or applies nothing).
-//! `-a/--agent` on a FOLLOWED skill is the PER-AGENT exclusion (placement policy — one shared
-//! implementation with `unfollow --agent`, see [`super::agent_scope`]); on untracked locals it keeps
-//! its classic discovery-scoping semantics, and a bare followed removal stays device-wide.
+//! A skill a workspace delivers is refused toward the DEMAND: what a folder takes is its
+//! `topos.toml` row, what this machine takes is the global file's, and what a workspace gives you
+//! is managed on the web. Multi-skill positional; resolve ALL-OR-NONE (a batch either resolves
+//! every target or applies nothing).
 
 use std::path::PathBuf;
 
@@ -236,8 +230,9 @@ fn classify(
     match resolve::resolve_one(universe, &parsed, resolve::KindScope::SKILLS)? {
         Some(Resolution::Resource { name, .. }) => Err(ClientError::InvalidArgument(format!(
             "'{name}' is delivered from a workspace — remove the DEMAND, not the copy: `topos \
-             remove {name}` in a folder records an exclude in its manifest; `topos remove -g \
-             {name}` edits your profile (stops it on every machine you log in)"
+             remove {name}` drops this folder's line for it; `topos remove -g {name}` edits your \
+             machine-wide file (switching it off here). What the workspace assigns you is managed \
+             on the web."
         ))),
         Some(Resolution::Workspace { workspace_name, .. }) => {
             Err(ClientError::InvalidArgument(format!(
@@ -263,8 +258,9 @@ fn tracked_or_followed(ctx: &Ctx<'_>, sid: SkillId, name: String) -> Result<Remo
     if super::followed_workspace(ctx, &skill_id).is_some() {
         return Err(ClientError::InvalidArgument(format!(
             "'{name}' is delivered from a workspace — remove the DEMAND, not the copy: `topos \
-             remove {name}` in a folder records an exclude in its manifest; `topos remove -g \
-             {name}` edits your profile (stops it on every machine you log in)"
+             remove {name}` drops this folder's line for it; `topos remove -g {name}` edits your \
+             machine-wide file (switching it off here). What the workspace assigns you is managed \
+             on the web."
         )));
     }
     // A purely-local skill — the placement dirs to delete come from its map.

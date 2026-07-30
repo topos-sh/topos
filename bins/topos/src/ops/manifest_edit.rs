@@ -1,13 +1,22 @@
-//! The MANIFEST half of `add` / `remove` / `init` — which `topos.toml` a verb edits, and the edit
-//! itself. A scope IS a manifest: `add` records what a folder's agents should have, `remove` is its
-//! inverse (recording an EXCLUDE line when a broader layer still provides the name — the one
-//! negative state), and every receipt NAMES the manifest edited, first line, with the inverse.
+//! The MANIFEST half of `add` / `remove` — which `topos.toml` a verb edits, how that file is
+//! BORN, and the row-level recording every receipt names.
 //!
-//! The manifest an edit lands in is the NEAREST `topos.toml` covering the working directory
-//! (walking up, like git discovering its repository); with none in reach the edit creates one at
-//! the enclosing git root (npm-init precedent — the manifest should travel with the repo), else the
-//! working directory itself. The `-g` path-ref arm targets the LOCAL PERSONAL manifest
-//! (`~/.topos/topos.toml`) instead — machine-local personal bundles with no workspace behind them.
+//! Two scopes, unblended. The GLOBAL file (`~/.topos/topos.toml`, the `-g` arm) is this machine's
+//! personal recipe: absent, it behaves exactly as if it held one feed row per connected
+//! workspace; present, it is the COMPLETE recipe. A PROJECT file is a repo fact — the NEAREST
+//! `topos.toml` covering the working directory, else a fresh one at the enclosing git root (the
+//! npm-init precedent: the file should travel with the repo).
+//!
+//! FILE BIRTH is one rule, everywhere: any path topos brings into existence is written
+//! MATERIALIZED first — the global file gets the header plus one feed row per connected
+//! workspace (spelling out what an absent file already means), a project file the commented
+//! template — and only THEN does the requested edit run. A file a person wrote by hand is never
+//! materialized. A born file STAYS even when a consent gate refuses the act that birthed it, and
+//! the receipt says so.
+//!
+//! `remove` is the strict inverse: it edits FILES ONLY (machine facts). What a workspace GIVES a
+//! person is a server fact, managed on the web — the CLI's one machine-local negative is the
+//! `"off"` row in the global file.
 
 use std::path::{Path, PathBuf};
 
@@ -15,181 +24,433 @@ use topos_types::results::{AddData, RemoveData, RemoveItem, RemoveKind};
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
-use crate::manifest::file::{MANIFEST_FILE, Manifest, ManifestEditor, read_manifest};
-use crate::manifest::walk;
+use crate::manifest::MANIFEST_FILE;
+use crate::manifest::document::{
+    EntryValue, ManifestEditor, ManifestError, ManifestScope, materialized_global, project_template,
+};
+use crate::manifest::keys::{self, KeyShape};
+use crate::manifest::scopes::{self, PlanRow, ScopePlan};
+use crate::sessions::{self, SESSION_ENDED, Session};
 
-/// Where a manifest edit lands: the file, the folder it governs, and whether the edit creates it.
-pub(crate) struct EditTarget {
-    pub path: PathBuf,
-    /// The folder the manifest governs (relative path entries resolve against it).
-    pub dir: PathBuf,
-    /// `true` when the file does not exist yet (the edit writes the init template first).
-    pub created: bool,
+use super::reconcile::SessionConnect;
+use super::remove::RemoveOutcome;
+
+// ---------------------------------------------------------------------------------------------
+// Sessions — what this installation is connected to
+// ---------------------------------------------------------------------------------------------
+
+/// The LIVE sessions (never an ended row).
+pub(super) fn live_sessions(ctx: &Ctx<'_>) -> Result<Vec<Session>, ClientError> {
+    Ok(sessions::read_sessions(ctx.fs, &ctx.layout)?
+        .sessions
+        .into_iter()
+        .filter(|s| s.status != SESSION_ENDED)
+        .collect())
 }
 
-/// Resolve the manifest an `add`/`remove` edits. `personal = true` (the `-g` path-ref arm) targets
-/// `~/.topos/topos.toml`; otherwise the NEAREST project manifest covering the cwd, else a fresh one
-/// at the enclosing git root (or the cwd itself). `None` when no working directory is known (no
-/// machine roots — e.g. `$HOME` unset): the caller skips the manifest edit honestly rather than
-/// guessing a folder.
-pub(crate) fn edit_target(
-    ctx: &Ctx<'_>,
-    personal: bool,
-) -> Result<Option<EditTarget>, ClientError> {
-    if personal {
-        let path = ctx.layout.home().join(MANIFEST_FILE);
-        return Ok(Some(EditTarget {
-            created: !ctx.fs.exists(&path),
-            dir: ctx.layout.home().to_path_buf(),
-            path,
-        }));
+/// Every connected `(host, workspace)` — the feed rows a global file is born with.
+pub(crate) fn connected_workspaces(ctx: &Ctx<'_>) -> Vec<(String, String)> {
+    live_sessions(ctx)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| (s.host, s.workspace_name))
+        .collect()
+}
+
+/// The ONE connected host the `@ws` sugar resolves at — `None` when zero or several are
+/// connected (several is never guessed; [`several_hosts`] refuses, naming them).
+pub(super) fn default_host(ctx: &Ctx<'_>) -> Option<String> {
+    let mut hosts: Vec<String> = live_sessions(ctx)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.host)
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+    match hosts.as_slice() {
+        [one] => Some(one.clone()),
+        _ => None,
     }
+}
+
+/// The host the `@ws` sugar resolves at, for the composition root's shape classification — the
+/// same answer the verbs use.
+pub(crate) fn manifest_host(ctx: &Ctx<'_>) -> Option<String> {
+    default_host(ctx)
+}
+
+/// Whether a token is REFERENCE-SHAPED — a `@`-led workspace sugar, or a `/`-joined key. Such a
+/// token that the grammar refuses surfaces ITS refusal; it is never retried as a filesystem path
+/// or a discovered name, whose answers would name the wrong fix.
+pub(crate) fn reference_shaped(token: &str) -> bool {
+    let token = token.trim();
+    if token.starts_with('@') || token.starts_with('#') {
+        return true;
+    }
+    // A path spelling is a path, not a reference (`./x`, `../x`, `~/x`, `/abs`).
+    if token.starts_with("./")
+        || token.starts_with("../")
+        || token.starts_with("~/")
+        || token.starts_with('/')
+    {
+        return false;
+    }
+    token.contains('/')
+}
+
+/// The typed refusal for an `@ws` sugar with more than one connected host — the sugar cannot
+/// pick, so the message names every host and the full spelling.
+pub(super) fn several_hosts(ctx: &Ctx<'_>, token: &str) -> Option<ClientError> {
+    let mut hosts: Vec<String> = live_sessions(ctx)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.host)
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+    (hosts.len() > 1).then(|| {
+        ClientError::InvalidArgument(format!(
+            "`{token}` names a workspace at your connected host, and this machine is connected to \
+             several ({}) — spell the reference in full (`<host>/<workspace>…`)",
+            hosts.join(", ")
+        ))
+    })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Where an edit lands
+// ---------------------------------------------------------------------------------------------
+
+/// The manifest an edit targets: the file, the folder it governs, and which scope it reads as.
+#[derive(Debug, Clone)]
+pub(crate) struct EditTarget {
+    pub path: PathBuf,
+    /// The folder the manifest governs (a relative path row resolves against it).
+    pub dir: PathBuf,
+    pub scope: ManifestScope,
+}
+
+/// The GLOBAL target — `~/.topos/topos.toml`, always resolvable (it lives in the sidecar, not the
+/// machine roots).
+pub(crate) fn global_target(ctx: &Ctx<'_>) -> EditTarget {
+    EditTarget {
+        path: ctx.layout.home().join(MANIFEST_FILE),
+        dir: ctx.layout.home().to_path_buf(),
+        scope: ManifestScope::Global,
+    }
+}
+
+/// The PROJECT target: the NEAREST `topos.toml` covering the working directory, else a fresh one
+/// at the enclosing git root (else the working directory itself). `None` when no working
+/// directory is known — the caller skips the edit honestly rather than guessing a folder.
+///
+/// # Errors
+/// An [`crate::fs_seam::FsOps`] read failure while walking.
+pub(crate) fn project_target(ctx: &Ctx<'_>) -> Result<Option<EditTarget>, ClientError> {
     let Some(roots) = &ctx.roots else {
         return Ok(None);
     };
     let Some(cwd) = roots.cwd.as_deref() else {
         return Ok(None);
     };
-    let layers = walk::project_layers(ctx.fs, cwd, Some(&roots.home))?;
-    if let Some(nearest) = layers.first() {
+    if let Some(dir) = scopes::nearest_manifest_dir(ctx.fs, cwd, Some(&roots.home)) {
         return Ok(Some(EditTarget {
-            path: nearest.dir.join(MANIFEST_FILE),
-            dir: nearest.dir.clone(),
-            created: false,
+            path: dir.join(MANIFEST_FILE),
+            dir,
+            scope: ManifestScope::Project,
         }));
     }
-    let dir = walk::init_dir(ctx.fs, cwd);
-    // The resolution walk STOPS below `$HOME` (a manifest there would shadow the personal
-    // layer), so a project edit must never land AT (or above) the home directory — the file
-    // would be dead on arrival, read by nothing. Route it to the personal manifest instead
-    // (the receipt names that file, so the routing is disclosed).
+    let dir = init_dir(ctx.fs, cwd);
+    // The project walk STOPS below `$HOME` (a manifest there would shadow the personal scope
+    // confusingly), so a project edit must never land AT or above the home directory — the file
+    // would be dead on arrival, read by nothing. Route it to the global file instead (the receipt
+    // names that path, so the routing is disclosed).
     //
-    // Both sides are canonicalized the SAME way before comparing (canonicalizing only one side
-    // makes a symlinked prefix — macOS `/var` → `/private/var` — a spurious match or mismatch),
-    // AND the route fires only when the walk from cwd would actually stop at $HOME (cwd is
-    // at/under home): when cwd sits ABOVE home, the manifest at `dir` is on the live upward path
-    // the walk reads, never dead — so it stays a project edit.
+    // Both sides are canonicalized the SAME way before comparing (canonicalizing only one makes a
+    // symlinked prefix — macOS `/var` → `/private/var` — a spurious match), AND the route fires
+    // only when the walk from cwd would actually stop at $HOME (cwd at/under home): with cwd
+    // ABOVE home, the file at `dir` is on the live upward path, never dead.
     let dir_c = canonical_or(&dir);
     let home_c = canonical_or(&roots.home);
     let cwd_c = canonical_or(cwd);
     let cwd_at_or_under_home = cwd_c == home_c || cwd_c.starts_with(&home_c);
     let edit_at_or_above_home = dir_c == home_c || home_c.starts_with(&dir_c);
     if cwd_at_or_under_home && edit_at_or_above_home {
-        let path = ctx.layout.home().join(MANIFEST_FILE);
-        return Ok(Some(EditTarget {
-            created: !ctx.fs.exists(&path),
-            dir: ctx.layout.home().to_path_buf(),
-            path,
-        }));
+        return Ok(Some(global_target(ctx)));
     }
     Ok(Some(EditTarget {
         path: dir.join(MANIFEST_FILE),
         dir,
-        created: true,
+        scope: ManifestScope::Project,
     }))
 }
 
+/// The target a scope flag selects (`-g` = the global file).
+///
+/// # Errors
+/// As [`project_target`].
+pub(crate) fn edit_target(ctx: &Ctx<'_>, global: bool) -> Result<Option<EditTarget>, ClientError> {
+    if global {
+        return Ok(Some(global_target(ctx)));
+    }
+    project_target(ctx)
+}
+
+/// The folder a fresh project manifest is created in when none is in reach: the enclosing git
+/// repository's root (npm-init precedent — the file travels with the repo), else the working
+/// directory itself.
+pub(crate) fn init_dir(fs: &dyn crate::fs_seam::FsOps, cwd: &Path) -> PathBuf {
+    let mut dir = Some(cwd.to_path_buf());
+    while let Some(d) = dir {
+        if fs.exists(&d.join(".git")) {
+            return d;
+        }
+        dir = d.parent().map(Path::to_path_buf);
+    }
+    cwd.to_path_buf()
+}
+
 /// A path's canonical form, best-effort: symlinks resolved when the path exists, else the path
-/// itself. Two paths must be canonicalized the SAME way before a `starts_with`/`==` comparison —
-/// canonicalizing only one side makes a symlinked prefix (macOS `/var` → `/private/var`) a
-/// spurious mismatch (or match), which is exactly how a project source under the manifest dir
-/// could wrongly record as an absolute reference.
+/// itself. Two paths must be canonicalized the SAME way before comparing — canonicalizing only
+/// one side makes a symlinked prefix (macOS `/var` → `/private/var`) a spurious mismatch.
 fn canonical_or(p: &Path) -> PathBuf {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// The manifest spelling of an adopted local path: relative to the manifest's folder when the
-/// source sits under it (`./tools/my-skill` — the committed, travels-with-the-repo form), else the
-/// absolute path (an out-of-tree source is machine-local by nature).
-pub(crate) fn path_reference(manifest_dir: &Path, source_abs: &Path) -> String {
-    match source_abs.strip_prefix(manifest_dir) {
-        Ok(rel) => format!("./{}", rel.display()),
-        Err(_) => source_abs.display().to_string(),
+// ---------------------------------------------------------------------------------------------
+// Reading + birthing a manifest
+// ---------------------------------------------------------------------------------------------
+
+fn corrupt(path: &Path, e: &ManifestError) -> ClientError {
+    ClientError::Corrupt(format!("{}: {e}", path.display()))
+}
+
+/// The file's text, or `None` when it does not exist.
+///
+/// # Errors
+/// A read failure, or non-UTF-8 bytes (a manifest is text by contract).
+pub(super) fn read_text(ctx: &Ctx<'_>, path: &Path) -> Result<Option<String>, ClientError> {
+    match ctx.fs.read_opt(path)? {
+        Some(bytes) => Ok(Some(String::from_utf8(bytes).map_err(|_| {
+            ClientError::Corrupt(format!("{}: not UTF-8", path.display()))
+        })?)),
+        None => Ok(None),
     }
 }
 
-/// Record an include line for a just-adopted skill and stamp the receipt: `data.manifest` names the
-/// file edited, `data.reference` the stored reference, `data.undo` the paste-ready inverse. An
-/// existing exclude of the same reference/name is LIFTED (adding back is the exclude's inverse).
-/// Best-effort by contract of the caller: the adoption already landed, so a manifest-write failure
-/// surfaces as the error it is (nothing is rolled back — the adopt is real either way).
+/// An opened manifest ready to edit — plus whether THIS call brought the file into existence.
+pub(super) struct Opened {
+    pub editor: ManifestEditor,
+    /// `Some(note)` when the file was born here: the disclosure the receipt leads with. A born
+    /// file stays even if the act that birthed it is then refused.
+    pub born: Option<String>,
+}
+
+/// Open the target for editing, BIRTHING the file first when it does not exist: the global file
+/// is born MATERIALIZED (the header + one feed row per connected workspace — exactly what an
+/// absent file already meant), a project file from the commented template. The birth is a real,
+/// committed write before the requested edit runs.
+///
+/// # Errors
+/// A filesystem failure, or [`ClientError::Corrupt`] when the existing file does not parse.
+pub(super) fn open_for_edit(ctx: &Ctx<'_>, target: &EditTarget) -> Result<Opened, ClientError> {
+    if let Some(text) = read_text(ctx, &target.path)? {
+        let editor =
+            ManifestEditor::open(&text, target.scope).map_err(|e| corrupt(&target.path, &e))?;
+        return Ok(Opened { editor, born: None });
+    }
+    let (seed, note) = match target.scope {
+        ManifestScope::Global => {
+            let connected = connected_workspaces(ctx);
+            let note = if connected.is_empty() {
+                format!(
+                    "created {} — no workspace is connected yet, so it starts with just its header",
+                    target.path.display()
+                )
+            } else {
+                format!(
+                    "created {} — materialized with one feed row per connected workspace ({})",
+                    target.path.display(),
+                    connected
+                        .iter()
+                        .map(|(_, w)| w.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            (materialized_global(&connected), note)
+        }
+        ManifestScope::Project => (
+            project_template(),
+            format!("created {}", target.path.display()),
+        ),
+    };
+    if let Some(parent) = target.path.parent() {
+        ctx.fs.create_dir_all(parent)?;
+    }
+    crate::atomic::atomic_write(ctx.fs, &target.path, seed.as_bytes())?;
+    let editor =
+        ManifestEditor::open(&seed, target.scope).map_err(|e| corrupt(&target.path, &e))?;
+    Ok(Opened {
+        editor,
+        born: Some(note),
+    })
+}
+
+/// The scope PLAN behind a target (what its rows currently demand). The global scope falls back
+/// to the IMPLICIT recipe when no file exists — one feed row per connected workspace — so a
+/// classification made before a file birth matches the file the birth writes.
+///
+/// # Errors
+/// As [`scopes::person_plan`] / [`scopes::nearest_project_plan`].
+pub(super) fn plan_for(ctx: &Ctx<'_>, target: &EditTarget) -> Result<ScopePlan, ClientError> {
+    match target.scope {
+        ManifestScope::Global => {
+            scopes::person_plan(ctx.fs, &ctx.layout, &connected_workspaces(ctx))
+        }
+        ManifestScope::Project => {
+            let Some(text) = read_text(ctx, &target.path)? else {
+                return Ok(ScopePlan::default());
+            };
+            let doc = crate::manifest::document::parse_manifest(&text, ManifestScope::Project)
+                .map_err(|e| corrupt(&target.path, &e))?;
+            Ok(ScopePlan::from_doc(&doc, Some(target.path.clone())))
+        }
+    }
+}
+
+/// Every manifest that governs anything here — the cwd chain's files (nearest first) plus the
+/// global file — as `(path, scope, rows)`. The read-only view the cross-scope hints, the
+/// first-trust check, and the governance rewrite share.
+///
+/// # Errors
+/// A read failure, or a manifest the grammar refuses (typed, naming the file).
+pub(super) fn local_rows(
+    ctx: &Ctx<'_>,
+) -> Result<Vec<(PathBuf, ManifestScope, Vec<PlanRow>)>, ClientError> {
+    let mut out = Vec::new();
+    if let Some(roots) = &ctx.roots
+        && let Some(cwd) = roots.cwd.as_deref()
+    {
+        for dir in scopes::manifest_dirs_up(ctx.fs, cwd, Some(&roots.home)) {
+            let path = dir.join(MANIFEST_FILE);
+            let Some(text) = read_text(ctx, &path)? else {
+                continue;
+            };
+            let doc = crate::manifest::document::parse_manifest(&text, ManifestScope::Project)
+                .map_err(|e| corrupt(&path, &e))?;
+            let plan = ScopePlan::from_doc(&doc, Some(path.clone()));
+            out.push((path, ManifestScope::Project, all_rows(&plan)));
+        }
+    }
+    let path = ctx.layout.home().join(MANIFEST_FILE);
+    if let Some(text) = read_text(ctx, &path)? {
+        let doc = crate::manifest::document::parse_manifest(&text, ManifestScope::Global)
+            .map_err(|e| corrupt(&path, &e))?;
+        let plan = ScopePlan::from_doc(&doc, Some(path.clone()));
+        out.push((path, ManifestScope::Global, all_rows(&plan)));
+    }
+    Ok(out)
+}
+
+/// Every explicit row of a plan (things, sets, and `"off"` switches — never the feeds, which are
+/// not rows a token can name).
+pub(super) fn all_rows(plan: &ScopePlan) -> Vec<PlanRow> {
+    plan.things
+        .iter()
+        .chain(plan.sets.iter())
+        .chain(plan.offs.iter())
+        .cloned()
+        .collect()
+}
+
+// ---------------------------------------------------------------------------------------------
+// The `add` receipt half — recording one row
+// ---------------------------------------------------------------------------------------------
+
+/// Append one disclosure to the receipt's note (several disclosures join with ` · `).
+pub(super) fn push_note(data: &mut AddData, line: impl Into<String>) {
+    let line = line.into();
+    data.note = Some(match data.note.take() {
+        Some(prev) => format!("{prev} · {line}"),
+        None => line,
+    });
+}
+
+/// The paste-ready inverse of an add: `topos remove [-g] <reference>`.
+pub(super) fn undo_add(reference: &str, global: bool) -> Vec<String> {
+    let mut argv = vec!["topos".to_owned(), "remove".to_owned()];
+    if global {
+        argv.push("-g".to_owned());
+    }
+    argv.push(reference.to_owned());
+    argv
+}
+
+/// Write ONE row into `target` (birthing the file first when it does not exist) and stamp the
+/// receipt: `data.manifest` names the file, `data.reference` the canonical key, `data.undo` the
+/// inverse, and `data.note` leads with the birth when this call created the file.
+///
+/// # Errors
+/// [`ClientError::InvalidArgument`] when the row is illegal for the file (the editor's own typed
+/// refusal — e.g. a feed row while its grouping section stands); a filesystem failure.
+pub(super) fn write_row(
+    ctx: &Ctx<'_>,
+    data: &mut AddData,
+    target: &EditTarget,
+    reference: &str,
+    value: &EntryValue,
+) -> Result<(), ClientError> {
+    let global = target.scope == ManifestScope::Global;
+    let Opened { mut editor, born } = open_for_edit(ctx, target)?;
+    editor
+        .set_row(reference, value)
+        .map_err(|e| ClientError::InvalidArgument(e.message))?;
+    editor.write(ctx.fs, &target.path)?;
+    if let Some(note) = born {
+        push_note(data, note);
+    }
+    data.manifest = Some(target.path.display().to_string());
+    data.reference = Some(reference.to_owned());
+    data.undo = undo_add(reference, global);
+    Ok(())
+}
+
+/// Record a workspace/forge/local reference in the manifest a scope flag selects. `pin` writes
+/// the explicit version row; `None` tracks what the reference currently serves.
+///
+/// # Errors
+/// As [`write_row`]; `Ok(())` with no target (no working directory) — the caller's adopt already
+/// landed, and guessing a folder would be worse than recording nothing.
 pub(crate) fn note_added(
     ctx: &Ctx<'_>,
     data: &mut AddData,
     reference: &str,
     pin: Option<&str>,
-    personal: bool,
+    global: bool,
 ) -> Result<(), ClientError> {
-    note_added_table(ctx, data, "skills", reference, pin, personal)
-}
-
-/// [`note_added`] with the include TABLE chosen (`skills` / `channels` — a channel reference
-/// records in its own table).
-pub(crate) fn note_added_table(
-    ctx: &Ctx<'_>,
-    data: &mut AddData,
-    table: &str,
-    reference: &str,
-    pin: Option<&str>,
-    personal: bool,
-) -> Result<(), ClientError> {
-    let Some(target) = edit_target(ctx, personal)? else {
+    let Some(target) = edit_target(ctx, global)? else {
         return Ok(());
     };
-    note_added_at(ctx, data, table, &target, reference, pin)
+    let value = match pin {
+        Some(p) => EntryValue::Pin(p.to_owned()),
+        None => EntryValue::Star,
+    };
+    write_row(ctx, data, &target, reference, &value)
 }
 
-/// [`note_added`] with the target already resolved (the path arm resolves it first to compute the
-/// dir-relative spelling).
-fn note_added_at(
-    ctx: &Ctx<'_>,
-    data: &mut AddData,
-    table: &str,
-    target: &EditTarget,
-    reference: &str,
-    pin: Option<&str>,
-) -> Result<(), ClientError> {
-    if target.created {
-        // Seed the fresh file with the init template's header so a created manifest self-describes
-        // (the personal manifest's `~/.topos/` may not exist yet on a fresh install).
-        if let Some(parent) = target.path.parent() {
-            ctx.fs.create_dir_all(parent)?;
-        }
-        crate::atomic::atomic_write(
-            ctx.fs,
-            &target.path,
-            ManifestEditor::init_template().as_bytes(),
-        )?;
-    }
-    let mut ed = ManifestEditor::open(ctx.fs, &target.path)?;
-    // Adding back lifts a standing exclude — by the full reference and by the bare name (both
-    // spellings claim the same name at resolution).
-    ed.remove_exclude(reference);
-    let name = crate::manifest::refs::parse_ref(reference)
-        .map(|p| p.item_name().to_owned())
-        .unwrap_or_else(|_| reference.to_owned());
-    ed.remove_exclude(&name);
-    ed.set_entry(table, reference, pin);
-    ed.write(ctx.fs, &target.path)?;
-    data.manifest = Some(target.path.display().to_string());
-    data.reference = Some(reference.to_owned());
-    data.undo = vec![
-        "topos".to_owned(),
-        "remove".to_owned(),
-        reference.to_owned(),
-    ];
-    Ok(())
-}
-
-/// Record a PATH-adopted skill in the right manifest: the project manifest with the dir-relative
-/// spelling when the source sits inside its folder (the committed, travels-with-the-repo form);
-/// else — an out-of-tree source, or an explicit `-g` — the LOCAL PERSONAL manifest with the
-/// absolute path (machine-local by nature; no workspace roams it).
+/// Record a PATH-adopted bundle: the project manifest with the dir-relative spelling when the
+/// source sits under its folder (the committed, travels-with-the-repo form); else — an
+/// out-of-tree source, or an explicit `-g` — the GLOBAL file with the absolute path (machine-local
+/// by nature).
+///
+/// # Errors
+/// As [`write_row`].
 pub(crate) fn note_added_path(
     ctx: &Ctx<'_>,
     data: &mut AddData,
     source: &Path,
-    personal: bool,
+    global: bool,
 ) -> Result<(), ClientError> {
     // Canonicalize best-effort (symlinks resolve; a vanished dir keeps the typed spelling).
     let source_abs = source.canonicalize().unwrap_or_else(|_| {
@@ -203,546 +464,836 @@ pub(crate) fn note_added_path(
                 .unwrap_or_else(|| source.to_path_buf())
         }
     });
-    if !personal && let Some(target) = edit_target(ctx, false)? {
-        // Compare BOTH paths canonically (the source is already canonicalized above): a source
-        // under the manifest's folder ALWAYS records the dir-relative `./path`, never an absolute
-        // one — the manifest dir is canonicalized here only to compute the reference spelling, the
-        // file itself still lands at `target.path`.
+    if !global && let Some(target) = project_target(ctx)? {
+        // Compare BOTH paths canonically: a source under the manifest's folder ALWAYS records the
+        // dir-relative `./path`, never an absolute one (the file itself still lands at
+        // `target.path` — the dir is canonicalized only to compute the spelling).
         let dir_c = canonical_or(&target.dir);
-        if source_abs.starts_with(&dir_c) {
+        if source_abs.starts_with(&dir_c) && target.scope == ManifestScope::Project {
             let reference = path_reference(&dir_c, &source_abs);
-            return note_added_at(ctx, data, "skills", &target, &reference, None);
+            return write_row(ctx, data, &target, &reference, &EntryValue::Star);
         }
     }
     let reference = source_abs.display().to_string();
-    note_added(ctx, data, &reference, None, true)
+    let target = global_target(ctx);
+    write_row(ctx, data, &target, &reference, &EntryValue::Star)
 }
 
-/// Record a REMOTE-imported skill: the canonical GitHub reference (host/owner/repo[/subdir]) —
-/// PINNED to the resolved commit when the archive disclosed one (lockfile logic: no governance
-/// rail sits behind an external origin). `-g` (a home-scoped landing) records in the personal
-/// manifest; a project landing records in the project manifest.
+/// The manifest spelling of an adopted local path: relative to the manifest's folder when the
+/// source sits under it (`./tools/my-skill`), else the absolute path.
+pub(crate) fn path_reference(manifest_dir: &Path, source_abs: &Path) -> String {
+    match source_abs.strip_prefix(manifest_dir) {
+        Ok(rel) => format!("./{}", rel.display()),
+        Err(_) => source_abs.display().to_string(),
+    }
+}
+
+/// Whether a string is commit-shaped (7–40 hex) — the only pin a forge row takes.
+pub(super) fn is_commit(s: &str) -> bool {
+    (7..=40).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Record a REMOTE-imported bundle: the forge key is the repo (`<host>/<owner>/<repo>`) for a
+/// repo-root import, else the discovered skill's LEAF directory name as the fourth segment (a
+/// literal in-repo path is never a key — it rides the `subdir` field). The row tracks the
+/// DEFAULT BRANCH unless the input carried an explicit ref: only a deliberately-referenced
+/// commit pins (a freeze the person asked for).
+///
+/// # Errors
+/// As [`write_row`].
 pub(crate) fn note_added_remote(
     ctx: &Ctx<'_>,
     data: &mut AddData,
-    personal: bool,
+    global: bool,
 ) -> Result<(), ClientError> {
     let Some(origin) = data.origin.clone() else {
         return Ok(());
     };
-    let reference = match origin.subdir.as_deref() {
-        Some(sub) if !sub.is_empty() => format!("{}/{sub}", origin.source),
-        _ => origin.source.clone(),
-    };
-    // A pin must be commit-shaped (7–40 hex) — the same rule the grammar applies to the entry value.
-    let pin = origin
-        .commit
+    let leaf = origin
+        .subdir
         .as_deref()
-        .filter(|c| (7..=40).contains(&c.len()) && c.bytes().all(|b| b.is_ascii_hexdigit()));
-    note_added(ctx, data, &reference, pin, personal)
+        .and_then(|s| s.trim_end_matches('/').rsplit('/').next())
+        .filter(|s| !s.is_empty());
+    let reference = match leaf {
+        Some(l) => format!("{}/{l}", origin.source),
+        None => origin.source.clone(),
+    };
+    // An explicit ref (a `#<ref>` shorthand or a `/tree/<ref>/` URL) is what pins; a bare add
+    // tracks the branch the repo serves.
+    let pin = match (&origin.git_ref, &origin.commit) {
+        (Some(_), Some(c)) if is_commit(c) => Some(c.as_str()),
+        _ => None,
+    };
+    note_added(ctx, data, &reference, pin, global)
 }
 
-/// One manifest layer as the `remove` arm reads it (path + parsed content), nearest first, the
-/// personal manifest LAST (the broadest local layer).
-pub(super) fn local_layers(ctx: &Ctx<'_>) -> Result<Vec<(PathBuf, Manifest)>, ClientError> {
-    let mut out = Vec::new();
-    if let Some(roots) = &ctx.roots
-        && let Some(cwd) = roots.cwd.as_deref()
-    {
-        for layer in walk::project_layers(ctx.fs, cwd, Some(&roots.home))? {
-            out.push((layer.dir.join(MANIFEST_FILE), layer.manifest));
-        }
-    }
-    let personal = ctx.layout.home().join(MANIFEST_FILE);
-    if let Some(m) = read_manifest(ctx.fs, &personal)? {
-        out.push((personal, m));
-    }
-    Ok(out)
-}
+// ---------------------------------------------------------------------------------------------
+// First trust — has this machine used this git source before?
+// ---------------------------------------------------------------------------------------------
 
-/// Whether `token` names `entry_ref` — by the exact reference, or by NAME (the last-segment
-/// dedupe key both `resolve_layers` and the exclude matching use). A token that parses in the
-/// reference grammar matches by ITS name too, so `remove @acme/x` claims the canonical
-/// `host/acme/x` line exactly as `remove x` does.
-fn token_matches(token: &str, entry_ref: &str) -> bool {
-    if token == entry_ref {
-        return true;
-    }
-    let entry_name = entry_ref.trim_end_matches('/').rsplit('/').next();
-    entry_name == Some(token) || entry_name.is_some_and(|n| n == token_name(token))
-}
-
-/// The token's last-segment NAME under the reference grammar (the token itself when it does not
-/// parse).
-fn token_name(token: &str) -> String {
-    crate::manifest::refs::parse_ref(token)
-        .map(|p| p.item_name().to_owned())
-        .unwrap_or_else(|_| token.to_owned())
-}
-
-/// The manifest arm of `topos remove`: when EVERY token names a manifest entry (or a name a broader
-/// local layer provides), edit the NEAREST manifest — delete its own include line, and record an
-/// EXCLUDE line when a broader layer still provides the name. Returns `None` when no token matches
-/// any manifest line (the caller falls through to the tracked/untracked removal). Immediate — a
-/// manifest edit is reversible (`--yes` an accepted no-op); the receipt names the manifest first.
+/// Whether this machine has used a git source before: a row naming that repo in ANY local
+/// manifest (the global file + every file on the cwd chain), or an import already tracked from
+/// it. A source with neither is a FIRST TRUST — described, never installed, until `--yes`.
 ///
 /// # Errors
-/// [`ClientError::InvalidArgument`] when SOME tokens match manifests and some do not (a mixed batch
-/// would half-apply); a manifest read/write failure.
-pub(crate) fn remove_from_manifests(
+/// A manifest read/parse failure (a file that cannot be read cannot vouch for a source).
+pub(super) fn forge_source_known(
     ctx: &Ctx<'_>,
-    tokens: &[String],
-    profile_provided: &[ProvidedName],
-) -> Result<Option<RemoveData>, ClientError> {
-    let layers = local_layers(ctx)?;
-    if tokens.is_empty() {
-        return Ok(None);
-    }
-    // Which tokens a local layer's include lines mention, and which a BROADER delivery provides —
-    // the person's profile, or a manifest channel's recorded expansion (the offline delivery
-    // cache carries both, channel rows marked `via_manifest`).
-    let mentioned = |token: &str| {
-        layers.iter().any(|(_, m)| {
-            m.skills
-                .iter()
-                .chain(m.channels.iter())
-                .any(|e| token_matches(token, &e.reference))
-        })
-    };
-    let provided = |token: &str| {
-        profile_provided
-            .iter()
-            .find(|p| p.name == token || p.canonical == token || p.name == token_name(token))
-    };
-    let hits: Vec<bool> = tokens
-        .iter()
-        .map(|t| mentioned(t) || provided(t).is_some())
-        .collect();
-    if hits.iter().all(|h| !h) {
-        return Ok(None);
-    }
-    if !hits.iter().all(|h| *h) {
-        return Err(ClientError::InvalidArgument(
-            "some targets are manifest entries and some are not — remove them in separate \
-             invocations"
-                .into(),
-        ));
-    }
-
-    // The NEAREST manifest takes the edit; with none in reach (a profile-provided name removed
-    // from a bare folder) one is created at the git root — the exclude needs a manifest to live in.
-    let (nearest_path, created) = match layers.first() {
-        Some((path, _)) => (path.clone(), false),
-        None => {
-            let Some(target) = edit_target(ctx, false)? else {
-                return Ok(None);
-            };
-            if target.created {
-                if let Some(parent) = target.path.parent() {
-                    ctx.fs.create_dir_all(parent)?;
-                }
-                crate::atomic::atomic_write(
-                    ctx.fs,
-                    &target.path,
-                    ManifestEditor::init_template().as_bytes(),
-                )?;
-            }
-            (target.path, true)
+    source: &str,
+    subdir: Option<&str>,
+) -> Result<bool, ClientError> {
+    for (_, _, rows) in local_rows(ctx)? {
+        let hit = rows.iter().any(|row| match &row.shape {
+            KeyShape::RepoSet { host, owner, repo } => format!("{host}/{owner}/{repo}") == source,
+            KeyShape::RepoSkill {
+                host, owner, repo, ..
+            } => format!("{host}/{owner}/{repo}") == source,
+            _ => false,
+        });
+        if hit {
+            return Ok(true);
         }
-    };
-    let mut ed = ManifestEditor::open(ctx.fs, &nearest_path)?;
-    let mut items = Vec::with_capacity(tokens.len());
-    let mut undo = Vec::new();
-    for token in tokens {
-        // The entry the token names, searched nearest-first (the nearest mention wins) — else the
-        // profile-provided pair.
-        let local = layers.iter().enumerate().find_map(|(i, (_, m))| {
-            m.skills
-                .iter()
-                .find(|e| token_matches(token, &e.reference))
-                .map(|e| (i, "skills", e.reference.clone()))
-                .or_else(|| {
-                    m.channels
-                        .iter()
-                        .find(|e| token_matches(token, &e.reference))
-                        .map(|e| (i, "channels", e.reference.clone()))
-                })
-        });
-        let (layer_idx, table, entry_ref, provided_by) = match local {
-            Some((i, table, entry_ref)) => (i, table, entry_ref, None),
-            None => {
-                let p = provided(token).expect("every token matched above");
-                (usize::MAX, "skills", p.canonical.clone(), Some(p))
-            }
-        };
-        let name = entry_ref
-            .trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap_or(entry_ref.as_str())
-            .to_owned();
-        // Does any BROADER layer than the nearest still provide the name — a broader local
-        // manifest, or the person's profile itself?
-        let broader_provides = layers.iter().skip(1).any(|(_, m)| {
-            m.skills
-                .iter()
-                .chain(m.channels.iter())
-                .any(|e| token_matches(&name, &e.reference))
-        }) || provided(&name).is_some();
-        let removed_here = provided_by.is_none()
-            && layer_idx == 0
-            && !created
-            && ed.remove_entry(table, &entry_ref);
-        let kind = if broader_provides || !removed_here {
-            // A broader layer provides it (or the nearest never carried the line): the one
-            // negative state — an exclude line in the nearest manifest.
-            ed.add_exclude(&entry_ref);
-            RemoveKind::ManifestExcluded
-        } else {
-            RemoveKind::ManifestRemoved
-        };
-        undo = vec!["topos".to_owned(), "add".to_owned(), entry_ref.clone()];
-        // The exclude note names WHAT still provides the name: the person's profile (with the
-        // everywhere-stopping inverse), or the channel a manifest carries (curation, not this
-        // machine, decides its member list).
-        let note = provided_by.map(|p| {
-            if p.via_manifest {
-                let channel = p
-                    .channels
-                    .first()
-                    .map_or_else(|| "a channel".to_owned(), |c| format!("channel '{c}'"));
-                format!(
-                    "{channel} still provides it — the exclude line withholds it here; its \
-                     member list is channel curation (edit on the web)"
-                )
-            } else {
-                format!(
-                    "your profile still delivers it elsewhere — `topos remove -g {entry_ref}` \
-                     stops it everywhere"
-                )
-            }
-        });
-        items.push(RemoveItem {
-            name,
-            kind,
-            manifest: Some(nearest_path.display().to_string()),
-            workspace_id: None,
-            agent_dirs: Vec::new(),
-            bytes_kept: true,
-            note,
-        });
     }
-    ed.write(ctx.fs, &nearest_path)?;
-    Ok(Some(RemoveData {
-        items,
-        applied: true,
-        undo,
-    }))
+    // A tracked import records its origin: the repo root, or the exact subdirectory a pasted URL
+    // named. (An import selected deeper by discovery is not matched here — the manifest row above
+    // is what a repeated add carries.)
+    if super::reconcile::find_tracked_github(ctx, source, "").is_some() {
+        return Ok(true);
+    }
+    if let Some(sub) = subdir
+        && super::reconcile::find_tracked_github(ctx, source, sub).is_some()
+    {
+        return Ok(true);
+    }
+    Ok(false)
 }
 
-/// A name a BROADER delivery than the local manifest lines provides — the person's profile, or a
-/// manifest channel's recorded expansion. What `remove`'s exclude semantics consult.
-pub(crate) struct ProvidedName {
-    /// The catalog name (the dedupe key).
+// ---------------------------------------------------------------------------------------------
+// What the FEED currently delivers (live, else the offline cache)
+// ---------------------------------------------------------------------------------------------
+
+/// One bundle a connected workspace's feed carries for this person — or DECLINES on the web.
+#[derive(Debug, Clone)]
+pub(super) struct FeedItem {
+    pub host: String,
+    pub workspace: String,
     pub name: String,
-    /// The canonical host-qualified reference (`host/ws/name`).
-    pub canonical: String,
-    /// Provided by a manifest `[channels]` line's expansion (not the person's profile).
-    pub via_manifest: bool,
-    /// The channels that deliver it (attribution for the receipt note).
-    pub channels: Vec<String>,
+    /// The person DECLINED this bundle on the web (it is not delivered; a machine's row may still
+    /// bring it here, and the receipt says so).
+    pub declined: bool,
 }
 
-/// The names a broader delivery currently provides, from the OFFLINE delivery cache — the
-/// person's profile rows plus the manifest-channel rows the reconcile recorded (`via_manifest`).
-pub(crate) fn profile_provided_names(ctx: &Ctx<'_>) -> Vec<ProvidedName> {
-    let status = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
+/// What the connected workspaces give this person right now: the LIVE delivery when a session
+/// answers, else that workspace's offline cache (never a claim the network was reached).
+pub(super) fn feed_items(ctx: &Ctx<'_>, connect: &SessionConnect<'_>) -> Vec<FeedItem> {
+    let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
     let mut out = Vec::new();
-    for entry in status.workspaces.values() {
-        let (Some(host), Some(ws)) = (entry.host.as_deref(), entry.workspace_name.as_deref())
-        else {
-            continue;
-        };
-        for ds in entry.delivered.values() {
-            if !ds.withdrawn && !ds.name.is_empty() {
-                out.push(ProvidedName {
-                    name: ds.name.clone(),
-                    canonical: format!("{host}/{ws}/{}", ds.name),
-                    via_manifest: ds.via_manifest,
-                    channels: ds.via_channels.clone(),
-                });
+    for session in live_sessions(ctx).unwrap_or_default() {
+        let live = connect(&session)
+            .plane
+            .fetch_delivery(&session.workspace_id)
+            .ok();
+        match live {
+            Some(snapshot) => {
+                for s in &snapshot.skills {
+                    out.push(FeedItem {
+                        host: session.host.clone(),
+                        workspace: session.workspace_name.clone(),
+                        name: s.name.clone(),
+                        declined: false,
+                    });
+                }
+                for (_, name) in &snapshot.declined {
+                    out.push(FeedItem {
+                        host: session.host.clone(),
+                        workspace: session.workspace_name.clone(),
+                        name: name.clone(),
+                        declined: true,
+                    });
+                }
+            }
+            None => {
+                let Some(entry) = cache.workspaces.get(&session.workspace_id) else {
+                    continue;
+                };
+                for ds in entry.delivered.values() {
+                    // A manifest-delivered row is this machine's own doing, never the feed's.
+                    if ds.withdrawn || ds.via_manifest || ds.name.is_empty() {
+                        continue;
+                    }
+                    out.push(FeedItem {
+                        host: session.host.clone(),
+                        workspace: session.workspace_name.clone(),
+                        name: ds.name.clone(),
+                        declined: false,
+                    });
+                }
+                for name in entry.declined.values() {
+                    out.push(FeedItem {
+                        host: session.host.clone(),
+                        workspace: session.workspace_name.clone(),
+                        name: name.clone(),
+                        declined: true,
+                    });
+                }
             }
         }
     }
     out
 }
 
+// ---------------------------------------------------------------------------------------------
+// `remove` — the strict file editors
+// ---------------------------------------------------------------------------------------------
+
+/// What a `remove` token resolved to in the target file.
+enum Arm {
+    /// The file spells this row — drop the line.
+    RowDrop { row: PlanRow, name: String },
+    /// The workspace FEED row (global file only) — stop adopting that feed here.
+    FeedDrop {
+        reference: String,
+        workspace: String,
+    },
+    /// No row, and the workspace's FEED delivers it — write the machine-local `"off"` switch.
+    OffWrite {
+        reference: String,
+        name: String,
+        workspace: String,
+    },
+    /// A SET row (a channel, a repo) delivers it — replace the set line with its current members
+    /// minus this one.
+    SetSplit {
+        set: PlanRow,
+        name: String,
+        members: Vec<String>,
+    },
+}
+
+impl Arm {
+    fn name(&self) -> &str {
+        match self {
+            Arm::RowDrop { name, .. } | Arm::OffWrite { name, .. } | Arm::SetSplit { name, .. } => {
+                name
+            }
+            Arm::FeedDrop { workspace, .. } => workspace,
+        }
+    }
+}
+
+/// `topos remove -g <token>…` — edit THIS MACHINE's global file: drop a row, drop a feed row, or
+/// write the `"off"` switch for something the feed delivers. Never touches the server: what a
+/// workspace gives a person is managed on the web.
+///
+/// # Errors
+/// [`ClientError::InvalidArgument`] for a token the file (and the feed) do not carry — with the
+/// cross-scope hint when the project manifest does; a filesystem failure.
+pub(crate) fn remove_global(
+    ctx: &Ctx<'_>,
+    connect: &SessionConnect<'_>,
+    tokens: &[String],
+    yes: bool,
+) -> Result<RemoveOutcome, ClientError> {
+    let target = global_target(ctx);
+    let arms = resolve_arms(ctx, connect, &target, tokens)?;
+    let mut resolved = Vec::with_capacity(tokens.len());
+    for (token, arm) in tokens.iter().zip(arms) {
+        match arm {
+            Some(a) => resolved.push(a),
+            None => return Err(miss(ctx, token, true)?),
+        }
+    }
+    apply_arms(ctx, &target, tokens, resolved, yes, true)
+}
+
+/// `topos remove <token>…` — edit THIS FOLDER's manifest. `Ok(None)` when no token names a
+/// manifest row (the caller falls through to the classic tracked/untracked removal).
+///
+/// # Errors
+/// [`ClientError::InvalidArgument`] on a mixed batch (some tokens are manifest rows, some are
+/// not), or when a token is a GLOBAL row spelled without `-g`; a filesystem failure.
+pub(crate) fn remove_project(
+    ctx: &Ctx<'_>,
+    connect: &SessionConnect<'_>,
+    tokens: &[String],
+    yes: bool,
+) -> Result<Option<RemoveOutcome>, ClientError> {
+    let Some(target) = project_target(ctx)? else {
+        return Ok(None);
+    };
+    if target.scope == ManifestScope::Global {
+        // The home-routing guard sent this edit to the global file — a bare `remove` there is
+        // still a file edit, but it must not silently claim a token the classic removal owns.
+        let arms = resolve_arms(ctx, connect, &target, tokens)?;
+        if arms.iter().all(Option::is_none) {
+            return Ok(None);
+        }
+    }
+    let arms = resolve_arms(ctx, connect, &target, tokens)?;
+    if arms.iter().all(Option::is_none) {
+        // Nothing here claims any token — but a GLOBAL row of that name is a near-miss worth
+        // naming rather than answering "no such skill" through the classic path.
+        for token in tokens {
+            if let Some(hint) = cross_scope_hint(ctx, token, false)? {
+                return Err(ClientError::InvalidArgument(hint));
+            }
+        }
+        return Ok(None);
+    }
+    if arms.iter().any(Option::is_none) {
+        return Err(ClientError::InvalidArgument(
+            "some targets are manifest rows and some are not — remove them in separate \
+             invocations"
+                .into(),
+        ));
+    }
+    let resolved: Vec<Arm> = arms.into_iter().flatten().collect();
+    apply_arms(ctx, &target, tokens, resolved, yes, false).map(Some)
+}
+
+/// Resolve every token against the target scope (all-or-none is the caller's discipline).
+fn resolve_arms(
+    ctx: &Ctx<'_>,
+    connect: &SessionConnect<'_>,
+    target: &EditTarget,
+    tokens: &[String],
+) -> Result<Vec<Option<Arm>>, ClientError> {
+    if tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+    let plan = plan_for(ctx, target)?;
+    let host = default_host(ctx);
+    // The feed + set expansions are read ONCE per invocation (each may dial).
+    let mut feeds: Option<Vec<FeedItem>> = None;
+    let mut sets: Option<Vec<(PlanRow, Vec<String>)>> = None;
+    let mut out = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        let canonical = keys::parse_input(token, host.as_deref())
+            .ok()
+            .map(|r| r.shape.canonical());
+        out.push(resolve_one(
+            ctx,
+            connect,
+            target,
+            &plan,
+            token,
+            canonical.as_deref(),
+            &mut feeds,
+            &mut sets,
+        )?);
+    }
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_one(
+    ctx: &Ctx<'_>,
+    connect: &SessionConnect<'_>,
+    target: &EditTarget,
+    plan: &ScopePlan,
+    token: &str,
+    canonical: Option<&str>,
+    feeds: &mut Option<Vec<FeedItem>>,
+    sets: &mut Option<Vec<(PlanRow, Vec<String>)>>,
+) -> Result<Option<Arm>, ClientError> {
+    // 1. A FEED row this file spells (global only).
+    if let Some(c) = canonical
+        && let Ok(KeyShape::Feed { host, workspace }) = keys::classify_key(c)
+        && plan.has_feed(&host, &workspace)
+    {
+        return Ok(Some(Arm::FeedDrop {
+            reference: c.to_owned(),
+            workspace,
+        }));
+    }
+    // 2. An explicit row, by canonical reference or by the name it delivers under.
+    if let Some(row) = all_rows(plan)
+        .into_iter()
+        .find(|r| row_matches(token, canonical, r))
+    {
+        if matches!(row.value, EntryValue::Off) {
+            return Err(ClientError::InvalidArgument(format!(
+                "'{token}' is already switched off on this machine — `topos add -g {}` turns it \
+                 back on",
+                row.reference
+            )));
+        }
+        let name = row.display_name();
+        return Ok(Some(Arm::RowDrop { row, name }));
+    }
+    // 3. No row — the workspace FEED delivers it: the one machine-local negative is the `"off"`
+    //    switch, and it lives in the global file only.
+    if target.scope == ManifestScope::Global {
+        let items = feeds.get_or_insert_with(|| feed_items(ctx, connect));
+        if let Some(item) = items
+            .iter()
+            .find(|i| !i.declined && feed_matches(token, canonical, i))
+            && plan.has_feed(&item.host, &item.workspace)
+        {
+            return Ok(Some(Arm::OffWrite {
+                reference: format!("{}/{}/{}", item.host, item.workspace, item.name),
+                name: item.name.clone(),
+                workspace: item.workspace.clone(),
+            }));
+        }
+    }
+    // 4. A SET row in this file delivers it — the removal is a rewrite of that line.
+    let expansions = sets.get_or_insert_with(|| expand_sets(ctx, connect, plan));
+    for (row, members) in expansions.iter() {
+        let want = member_of(row, canonical);
+        if let Some(member) = members
+            .iter()
+            .find(|m| m.as_str() == token || Some(m.as_str()) == want.as_deref())
+        {
+            return Ok(Some(Arm::SetSplit {
+                set: row.clone(),
+                name: member.clone(),
+                members: members.clone(),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// The member NAME a canonical token names inside `set`'s namespace (`host/ws/<name>` under a
+/// channel's workspace, `host/owner/repo/<leaf>` under a repo set), if it belongs there at all.
+fn member_of(set: &PlanRow, canonical: Option<&str>) -> Option<String> {
+    let c = canonical?;
+    let shape = keys::classify_key(c).ok()?;
+    match (&set.shape, &shape) {
+        (
+            KeyShape::Channel {
+                host: sh,
+                workspace: sw,
+                ..
+            },
+            KeyShape::WorkspaceBundle {
+                host,
+                workspace,
+                bundle,
+            },
+        ) if sh == host && sw == workspace => Some(bundle.clone()),
+        (
+            KeyShape::RepoSet {
+                host: sh,
+                owner: so,
+                repo: sr,
+            },
+            KeyShape::RepoSkill {
+                host,
+                owner,
+                repo,
+                skill,
+            },
+        ) if sh == host && so == owner && sr == repo => Some(skill.clone()),
+        _ => None,
+    }
+}
+
+/// Whether `token` names `row`: the exact canonical reference, the reference as typed, or the
+/// name the row delivers under (its `name` override, else the reference's leaf).
+fn row_matches(token: &str, canonical: Option<&str>, row: &PlanRow) -> bool {
+    row.reference == token
+        || canonical == Some(row.reference.as_str())
+        || row.display_name() == token
+        || row.shape.leaf_name() == token
+}
+
+/// Whether `token` names a feed-delivered bundle (by name, or by its canonical reference).
+fn feed_matches(token: &str, canonical: Option<&str>, item: &FeedItem) -> bool {
+    if item.name == token {
+        return true;
+    }
+    canonical.is_some_and(|c| c == format!("{}/{}/{}", item.host, item.workspace, item.name))
+}
+
+/// Expand each SET row of a plan into the member NAMES it currently delivers: a channel's
+/// members from the live channel index (else the offline cache's `via` attribution), a repo's
+/// from the imports this machine tracks with that origin.
+fn expand_sets(
+    ctx: &Ctx<'_>,
+    connect: &SessionConnect<'_>,
+    plan: &ScopePlan,
+) -> Vec<(PlanRow, Vec<String>)> {
+    let mut out = Vec::new();
+    for row in &plan.sets {
+        let members = match &row.shape {
+            KeyShape::Channel {
+                host,
+                workspace,
+                channel,
+            } => channel_members(ctx, connect, host, workspace, channel),
+            KeyShape::RepoSet { host, owner, repo } => {
+                tracked_from_origin(ctx, &format!("{host}/{owner}/{repo}"))
+            }
+            _ => Vec::new(),
+        };
+        out.push((row.clone(), members));
+    }
+    out
+}
+
+/// A channel's current members, live if a session answers, else from the delivery cache's `via`
+/// attribution (never a claim the network was reached).
+fn channel_members(
+    ctx: &Ctx<'_>,
+    connect: &SessionConnect<'_>,
+    host: &str,
+    workspace: &str,
+    channel: &str,
+) -> Vec<String> {
+    for session in live_sessions(ctx).unwrap_or_default() {
+        if session.host != host || session.workspace_name != workspace {
+            continue;
+        }
+        if let Ok(index) = connect(&session)
+            .directory
+            .channels_index(&session.workspace_id)
+            && let Some(entry) = index.channels.iter().find(|c| c.name == channel)
+        {
+            return entry.skills.iter().map(|s| s.name.clone()).collect();
+        }
+    }
+    let cache = crate::sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
+    let mut out = Vec::new();
+    for entry in cache.workspaces.values() {
+        if entry.host.as_deref() != Some(host) || entry.workspace_name.as_deref() != Some(workspace)
+        {
+            continue;
+        }
+        for ds in entry.delivered.values() {
+            if ds.via_channels.iter().any(|c| c == channel) && !ds.name.is_empty() {
+                out.push(ds.name.clone());
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The bundles this machine tracks that were imported from `origin_source` — a repo row's
+/// current members, read from the sidecar's recorded provenance.
+fn tracked_from_origin(ctx: &Ctx<'_>, origin_source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(entries) = ctx.fs.read_dir(&ctx.layout.skills_dir()) else {
+        return out;
+    };
+    for entry in entries {
+        let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Ok(sid) = crate::id::SkillId::parse(id) else {
+            continue;
+        };
+        let sp = ctx.layout.published(&sid);
+        let Ok(Some(origin)) = crate::doc::read_doc::<super::add::OriginDoc>(ctx.fs, &sp.origin)
+        else {
+            continue;
+        };
+        if origin.origin.source != origin_source {
+            continue;
+        }
+        if let Ok(Some(lock)) =
+            crate::doc::read_doc::<topos_types::persisted::Lock>(ctx.fs, &sp.lock)
+        {
+            out.push(lock.name);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The typed miss for a token no arm claims — with the CROSS-SCOPE hint when the other file
+/// carries it.
+fn miss(ctx: &Ctx<'_>, token: &str, global: bool) -> Result<ClientError, ClientError> {
+    if let Some(hint) = cross_scope_hint(ctx, token, global)? {
+        return Ok(ClientError::InvalidArgument(hint));
+    }
+    Ok(ClientError::InvalidArgument(format!(
+        "'{token}' is not in {} — `topos status` lists what each file asks for",
+        if global {
+            "your machine-wide manifest, and no connected workspace's feed delivers it".to_owned()
+        } else {
+            "this folder's manifest".to_owned()
+        }
+    )))
+}
+
+/// The other scope's row of that name, phrased as the way to remove it.
+fn cross_scope_hint(
+    ctx: &Ctx<'_>,
+    token: &str,
+    global: bool,
+) -> Result<Option<String>, ClientError> {
+    let host = default_host(ctx);
+    let canonical = keys::parse_input(token, host.as_deref())
+        .ok()
+        .map(|r| r.shape.canonical());
+    for (path, scope, rows) in local_rows(ctx)? {
+        let hit = rows
+            .iter()
+            .any(|r| row_matches(token, canonical.as_deref(), r));
+        if !hit {
+            continue;
+        }
+        return Ok(match (global, scope) {
+            (true, ManifestScope::Project) => Some(format!(
+                "'{token}' is not in your machine-wide manifest — it is in the project manifest at \
+                 {}; run `topos remove {token}` there, without `-g`",
+                path.display()
+            )),
+            (false, ManifestScope::Global) => Some(format!(
+                "'{token}' is not in this folder's manifest — it is in your machine-wide manifest \
+                 ({}); run `topos remove -g {token}`",
+                path.display()
+            )),
+            _ => None,
+        });
+    }
+    Ok(None)
+}
+
+// ---------------------------------------------------------------------------------------------
+// The loss guard — a row whose bundle carries local edits stays describe-first
+// ---------------------------------------------------------------------------------------------
+
+/// What a draft scan concluded about a bundle's working copies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DraftState {
+    /// No local edits anywhere (or nothing local at all).
+    Clean,
+    /// At least one copy carries local edits.
+    Draft,
+    /// A copy could not be classified — the guard fails TOWARD the gate.
+    Indeterminate,
+}
+
+/// Whether the bundle a row delivers carries local edits, over the store that owns it (the home
+/// store, or the project store of a checkout on the cwd chain).
+fn draft_state(ctx: &Ctx<'_>, name: &str) -> DraftState {
+    let (layout, sid, _lock) = match super::resolve_skill_stored(ctx, name, None) {
+        Ok(v) => v,
+        Err(ClientError::NoSuchSkill { .. }) => return DraftState::Clean,
+        // An ambiguous name (two stores hold it) cannot be classified — fail toward the gate.
+        Err(_) => return DraftState::Indeterminate,
+    };
+    let sctx = super::pull::ctx_with_layout(ctx, &layout);
+    let map = match crate::doc::read_map(sctx.fs, &layout.published(&sid).map) {
+        Ok(Some(m)) => m,
+        Ok(None) => return DraftState::Clean,
+        Err(_) => return DraftState::Indeterminate,
+    };
+    let Ok(scans) = crate::placement::scan_placements(&sctx, &map) else {
+        return DraftState::Indeterminate;
+    };
+    let mut state = DraftState::Clean;
+    for scan in &scans {
+        match scan.status {
+            crate::placement::ScanStatus::Modified { .. } => return DraftState::Draft,
+            crate::placement::ScanStatus::Unscannable => state = DraftState::Indeterminate,
+            _ => {}
+        }
+    }
+    state
+}
+
+// ---------------------------------------------------------------------------------------------
+// The apply half
+// ---------------------------------------------------------------------------------------------
+
+/// Describe or apply the resolved arms: a batch that mixes gated and ungated arms gates WHOLE.
+fn apply_arms(
+    ctx: &Ctx<'_>,
+    target: &EditTarget,
+    tokens: &[String],
+    arms: Vec<Arm>,
+    yes: bool,
+    global: bool,
+) -> Result<RemoveOutcome, ClientError> {
+    if arms.is_empty() {
+        return Err(ClientError::InvalidArgument(
+            "remove needs something to remove — a skill name, a reference, or `-g @<workspace>`"
+                .into(),
+        ));
+    }
+    // The gate: a file edit is reversible, so it applies immediately — EXCEPT where local work
+    // could be lost (a drafted bundle's row, or a copy that cannot be classified) or where the
+    // edit rewrites a curated line into its members (a set split changes what future curation
+    // reaches this file). A scan that cannot classify fails TOWARD the gate.
+    let mut gated = false;
+    let mut notes: Vec<Option<String>> = Vec::with_capacity(arms.len());
+    for arm in &arms {
+        let note = match arm {
+            Arm::RowDrop { name, .. } => match draft_state(ctx, name) {
+                DraftState::Draft => {
+                    gated = true;
+                    Some(format!(
+                        "'{name}' has local edits that are not shared — dropping the row takes it \
+                         out of this scope's agent dirs (the edits are snapshotted first, never \
+                         deleted)"
+                    ))
+                }
+                DraftState::Indeterminate => {
+                    gated = true;
+                    Some(format!(
+                        "'{name}''s files could not be read to check for local edits — describing \
+                         first rather than assuming there are none"
+                    ))
+                }
+                DraftState::Clean => None,
+            },
+            Arm::SetSplit { set, name, .. } => {
+                gated = true;
+                Some(format!(
+                    "'{name}' comes from the {} line `{}` — removing it replaces that one line \
+                     with its current members, so later additions by whoever curates it stop \
+                     arriving through this file",
+                    set.shape.noun(),
+                    set.reference
+                ))
+            }
+            Arm::FeedDrop { workspace, .. } => Some(format!(
+                "{workspace}'s feed no longer delivers here; its skills leave this machine at the \
+                 next update, and the rows you spelled yourself survive"
+            )),
+            Arm::OffWrite {
+                name, workspace, ..
+            } => Some(format!(
+                "'{name}' stays assigned to you in {workspace} — this switch is machine-local; \
+                 declining it on the web stops it everywhere"
+            )),
+        };
+        notes.push(note);
+    }
+
+    let items: Vec<RemoveItem> = arms
+        .iter()
+        .zip(notes.iter())
+        .map(|(arm, note)| RemoveItem {
+            name: arm.name().to_owned(),
+            kind: match arm {
+                Arm::OffWrite { .. } => RemoveKind::ManifestExcluded,
+                _ => RemoveKind::ManifestRemoved,
+            },
+            manifest: Some(target.path.display().to_string()),
+            workspace_id: None,
+            agent_dirs: Vec::new(),
+            bytes_kept: true,
+            note: note.clone(),
+        })
+        .collect();
+
+    if gated && !yes {
+        let mut yes_argv = vec!["topos".to_owned(), "remove".to_owned()];
+        if global {
+            yes_argv.push("-g".to_owned());
+        }
+        yes_argv.extend(tokens.iter().cloned());
+        yes_argv.push("--yes".to_owned());
+        return Ok(RemoveOutcome::Described {
+            data: RemoveData {
+                items,
+                applied: false,
+                undo: Vec::new(),
+            },
+            yes_argv,
+        });
+    }
+
+    // ---- APPLY ----
+    let Opened { mut editor, born } = open_for_edit(ctx, target)?;
+    for arm in &arms {
+        match arm {
+            Arm::RowDrop { row, .. } => {
+                editor.remove_row(&row.reference);
+            }
+            Arm::FeedDrop { reference, .. } => {
+                editor.remove_row(reference);
+            }
+            Arm::OffWrite { reference, .. } => {
+                editor
+                    .set_row(reference, &EntryValue::Off)
+                    .map_err(|e| ClientError::InvalidArgument(e.message))?;
+            }
+            Arm::SetSplit {
+                set, name, members, ..
+            } => {
+                editor.remove_row(&set.reference);
+                for member in members {
+                    if member == name {
+                        continue;
+                    }
+                    let Some(reference) = member_reference(set, member) else {
+                        continue;
+                    };
+                    editor
+                        .set_row(&reference, &EntryValue::Star)
+                        .map_err(|e| ClientError::InvalidArgument(e.message))?;
+                }
+            }
+        }
+    }
+    editor.write(ctx.fs, &target.path)?;
+
+    let mut items = items;
+    if let Some(note) = born
+        && let Some(first) = items.first_mut()
+    {
+        first.note = Some(match first.note.take() {
+            Some(prev) => format!("{note} · {prev}"),
+            None => note,
+        });
+    }
+    Ok(RemoveOutcome::Applied(RemoveData {
+        undo: undo_for(&arms, global),
+        items,
+        applied: true,
+    }))
+}
+
+/// One member's own row key inside a set's namespace.
+fn member_reference(set: &PlanRow, member: &str) -> Option<String> {
+    match &set.shape {
+        KeyShape::Channel {
+            host, workspace, ..
+        } => Some(format!("{host}/{workspace}/{member}")),
+        KeyShape::RepoSet { host, owner, repo } => Some(format!("{host}/{owner}/{repo}/{member}")),
+        _ => None,
+    }
+}
+
+/// The literal inverse — offered ONLY when it restores the whole prior state. A batch of one
+/// whose row carried nothing but a version pin re-adds exactly what left; a set split, a fields
+/// row the `add` grammar cannot respell, or a multi-target batch offers none (no undo beats a
+/// wrong one).
+fn undo_for(arms: &[Arm], global: bool) -> Vec<String> {
+    let [arm] = arms else {
+        return Vec::new();
+    };
+    let spelling = match arm {
+        Arm::RowDrop { row, .. } => match &row.value {
+            EntryValue::Star => row.reference.clone(),
+            EntryValue::Pin(p) => format!("{}@{p}", row.reference),
+            // Fields the `add` grammar cannot respell (a path, a harness list, a name override):
+            // the re-add would silently drop them.
+            EntryValue::Fields(_) | EntryValue::Off => return Vec::new(),
+        },
+        Arm::FeedDrop { reference, .. } | Arm::OffWrite { reference, .. } => reference.clone(),
+        Arm::SetSplit { .. } => return Vec::new(),
+    };
+    let mut argv = vec!["topos".to_owned(), "add".to_owned()];
+    if global {
+        argv.push("-g".to_owned());
+    }
+    argv.push(spelling);
+    argv
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ctx::AgentRoots;
-    use crate::fs_seam::RealFs;
-    use crate::ids::{RealClock, RealIds};
-    use crate::plane::{InertFollow, InertPlane};
-    use crate::sidecar::Layout;
-    use topos_harness::ClaudeCode;
-
-    fn scratch(tag: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static N: AtomicU32 = AtomicU32::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("topos-medit-{tag}-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    /// A ctx whose machine roots point at `home`/`cwd` (the manifest walk's inputs).
-    fn with_ctx<R>(home: &Path, cwd: Option<&Path>, f: impl FnOnce(&Ctx<'_>) -> R) -> R {
-        let fs = RealFs;
-        let ids = RealIds;
-        let clock = RealClock;
-        let plane = InertPlane;
-        let follow = InertFollow;
-        let harness = ClaudeCode::new(scratch("adapter"), &fs);
-        let ctx = Ctx {
-            fs: &fs,
-            ids: &ids,
-            clock: &clock,
-            device_id: String::new(),
-            layout: Layout::new(&home.join(".topos")),
-            harness: &harness,
-            plane: &plane,
-            follow: &follow,
-            roots: Some(AgentRoots {
-                home: home.to_path_buf(),
-                cwd: cwd.map(Path::to_path_buf),
-            }),
-        };
-        f(&ctx)
-    }
-
-    fn add_data() -> AddData {
-        AddData {
-            skill_id: "topos_x".into(),
-            name: "my-skill".into(),
-            version_id: "0".repeat(64),
-            bundle_digest: "0".repeat(64),
-            tracked: true,
-            harness: None,
-            harness_slug: None,
-            currency: None,
-            triggers: Vec::new(),
-            origin: None,
-            manifest: None,
-            reference: None,
-            undo: Vec::new(),
-            governed_copy: None,
-        }
-    }
-
-    #[test]
-    fn add_creates_the_manifest_at_the_git_root_and_remove_inverts_it() {
-        let home = scratch("add-rt");
-        let repo = home.join("repo");
-        let nested = repo.join("services/api");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-        std::fs::create_dir_all(&nested).unwrap();
-
-        with_ctx(&home, Some(&nested), |ctx| {
-            let mut data = add_data();
-            note_added(ctx, &mut data, "./tools/my-skill", None, false).unwrap();
-            // The manifest was created at the GIT ROOT (npm-init precedent), not the cwd.
-            let manifest = repo.join(MANIFEST_FILE);
-            assert_eq!(
-                data.manifest.as_deref(),
-                Some(&*manifest.display().to_string())
-            );
-            assert_eq!(data.reference.as_deref(), Some("./tools/my-skill"));
-            assert_eq!(data.undo, vec!["topos", "remove", "./tools/my-skill"]);
-            let m = read_manifest(ctx.fs, &manifest).unwrap().unwrap();
-            assert_eq!(m.skills.len(), 1);
-            assert_eq!(m.skills[0].reference, "./tools/my-skill");
-
-            // Remove edits the SAME (nearest) manifest and deletes the line.
-            let out = remove_from_manifests(ctx, &["./tools/my-skill".to_owned()], &[])
-                .unwrap()
-                .expect("the manifest arm claims it");
-            assert!(out.applied);
-            assert_eq!(out.items.len(), 1);
-            assert!(matches!(out.items[0].kind, RemoveKind::ManifestRemoved));
-            assert_eq!(
-                out.items[0].manifest.as_deref(),
-                Some(&*manifest.display().to_string())
-            );
-            assert_eq!(out.undo, vec!["topos", "add", "./tools/my-skill"]);
-            let m = read_manifest(ctx.fs, &manifest).unwrap().unwrap();
-            assert!(m.skills.is_empty() && m.exclude.is_empty());
-        });
-    }
-
-    #[test]
-    fn remove_by_bare_name_records_an_exclude_when_a_broader_layer_provides() {
-        let home = scratch("excl");
-        let repo = home.join("repo");
-        let nested = repo.join("api");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(
-            repo.join(MANIFEST_FILE),
-            "[skills]\n\"topos.sh/acme/noisy\" = \"*\"\n",
-        )
-        .unwrap();
-        std::fs::write(
-            nested.join(MANIFEST_FILE),
-            "[skills]\n\"topos.sh/acme/api\" = \"*\"\n",
-        )
-        .unwrap();
-
-        with_ctx(&home, Some(&nested), |ctx| {
-            // "noisy" is provided by the BROADER repo manifest; the nearest (api) manifest takes
-            // the exclude line — the one negative state.
-            let out = remove_from_manifests(ctx, &["noisy".to_owned()], &[])
-                .unwrap()
-                .expect("claimed");
-            assert!(matches!(out.items[0].kind, RemoveKind::ManifestExcluded));
-            let near = read_manifest(ctx.fs, &nested.join(MANIFEST_FILE))
-                .unwrap()
-                .unwrap();
-            assert_eq!(near.exclude, vec!["topos.sh/acme/noisy".to_owned()]);
-            // The broader line is untouched (the exclude shadows it; nothing else was edited).
-            let broad = read_manifest(ctx.fs, &repo.join(MANIFEST_FILE))
-                .unwrap()
-                .unwrap();
-            assert_eq!(broad.skills.len(), 1);
-
-            // Adding it back LIFTS the exclude (the inverse the receipt named).
-            let mut data = add_data();
-            note_added(ctx, &mut data, "topos.sh/acme/noisy", None, false).unwrap();
-            let near = read_manifest(ctx.fs, &nested.join(MANIFEST_FILE))
-                .unwrap()
-                .unwrap();
-            assert!(near.exclude.is_empty());
-            assert!(
-                near.skills
-                    .iter()
-                    .any(|e| e.reference == "topos.sh/acme/noisy")
-            );
-        });
-    }
-
-    #[test]
-    fn unmatched_tokens_fall_through_and_mixed_batches_refuse() {
-        let home = scratch("fall");
-        let cwd = home.join("proj");
-        std::fs::create_dir_all(&cwd).unwrap();
-        with_ctx(&home, Some(&cwd), |ctx| {
-            // No manifests at all → None (the classic removal path owns the token).
-            assert!(
-                remove_from_manifests(ctx, &["docs".to_owned()], &[])
-                    .unwrap()
-                    .is_none()
-            );
-        });
-        std::fs::write(cwd.join(MANIFEST_FILE), "[skills]\n\"./a\" = \"*\"\n").unwrap();
-        with_ctx(&home, Some(&cwd), |ctx| {
-            assert!(
-                remove_from_manifests(ctx, &["docs".to_owned()], &[])
-                    .unwrap()
-                    .is_none()
-            );
-            let err = remove_from_manifests(ctx, &["./a".to_owned(), "docs".to_owned()], &[])
-                .unwrap_err();
-            assert_eq!(err.code(), "INVALID_ARGUMENT");
-        });
-    }
-
-    #[test]
-    fn an_edit_at_the_home_directory_routes_to_the_personal_manifest() {
-        // The resolution walk stops BELOW $HOME, so a manifest written there would be dead on
-        // arrival — the edit routes to the personal manifest instead (disclosed by its path).
-        let home = scratch("home-route");
-        with_ctx(&home, Some(&home.clone()), |ctx| {
-            let target = edit_target(ctx, false).unwrap().expect("a target");
-            assert_eq!(target.path, ctx.layout.home().join(MANIFEST_FILE));
-            let mut data = add_data();
-            note_added(ctx, &mut data, "topos.sh/acme/deploy", None, false).unwrap();
-            assert!(
-                !home.join(MANIFEST_FILE).exists(),
-                "no dead $HOME/topos.toml is ever written"
-            );
-            let m = read_manifest(ctx.fs, &ctx.layout.home().join(MANIFEST_FILE))
-                .unwrap()
-                .unwrap();
-            assert_eq!(m.skills[0].reference, "topos.sh/acme/deploy");
-        });
-        // A git root AT $HOME (a dotfiles repo) routes the same way.
-        let home2 = scratch("home-git");
-        std::fs::create_dir_all(home2.join(".git")).unwrap();
-        let inside = home2.join("notes");
-        std::fs::create_dir_all(&inside).unwrap();
-        with_ctx(&home2, Some(&inside), |ctx| {
-            let target = edit_target(ctx, false).unwrap().expect("a target");
-            assert_eq!(target.path, ctx.layout.home().join(MANIFEST_FILE));
-        });
-    }
-
-    #[test]
-    fn a_path_add_stays_dir_relative_when_home_nests_under_the_project() {
-        // The Linux CI condition WITHOUT depending on symlink layout: the fake `$HOME` sits UNDER
-        // the project cwd (the composed-suite harness layout — `root/home` below `root`). The
-        // resolution walk from cwd never reaches that home, so the manifest at cwd is ALIVE — a
-        // path source under it must record `./deploy` in the PROJECT manifest, never the absolute
-        // path, and never route to the personal manifest. Before the fix, `$HOME.starts_with(dir)`
-        // fired here (cwd is an ancestor of the nested home) and the reference recorded absolute;
-        // this reproduces on any OS because both paths are consistent (no `/private` divergence to
-        // accidentally dodge the buggy branch).
-        let base = scratch("home-nested").canonicalize().unwrap();
-        let project = base.join("project");
-        let home = project.join("home"); // $HOME nested UNDER the project cwd
-        let src = project.join("deploy");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir_all(&src).unwrap();
-
-        with_ctx(&home, Some(&project), |ctx| {
-            let mut data = add_data();
-            note_added_path(ctx, &mut data, &src, false).unwrap();
-            assert_eq!(
-                data.reference.as_deref(),
-                Some("./deploy"),
-                "a source under the manifest dir records the dir-relative reference"
-            );
-            let manifest = project.join(MANIFEST_FILE);
-            assert_eq!(
-                data.manifest.as_deref(),
-                Some(&*manifest.display().to_string()),
-                "the project manifest at cwd takes the line, not the personal one"
-            );
-            let m = read_manifest(ctx.fs, &manifest).unwrap().unwrap();
-            assert_eq!(m.skills[0].reference, "./deploy");
-            assert!(
-                !ctx.layout.home().join(MANIFEST_FILE).exists(),
-                "the personal manifest is untouched"
-            );
-        });
-    }
-
-    #[test]
-    fn the_g_flag_targets_the_personal_manifest() {
-        let home = scratch("perso");
-        with_ctx(&home, None, |ctx| {
-            let mut data = add_data();
-            let abs = home.join("skills/my-skill").display().to_string();
-            note_added(ctx, &mut data, &abs, None, true).unwrap();
-            let personal = ctx.layout.home().join(MANIFEST_FILE);
-            assert_eq!(
-                data.manifest.as_deref(),
-                Some(&*personal.display().to_string())
-            );
-            let m = read_manifest(ctx.fs, &personal).unwrap().unwrap();
-            assert_eq!(m.skills.len(), 1);
-        });
-    }
 
     #[test]
     fn path_reference_is_relative_inside_the_manifest_dir_absolute_outside() {
@@ -758,27 +1309,84 @@ mod tests {
     }
 
     #[test]
-    fn no_machine_roots_skips_the_project_manifest_edit_honestly() {
-        let home = scratch("noroots");
-        let fs = RealFs;
-        let ids = RealIds;
-        let clock = RealClock;
-        let plane = InertPlane;
-        let follow = InertFollow;
-        let harness = ClaudeCode::new(scratch("adapter2"), &fs);
-        let ctx = Ctx {
-            fs: &fs,
-            ids: &ids,
-            clock: &clock,
-            device_id: String::new(),
-            layout: Layout::new(&home.join(".topos")),
-            harness: &harness,
-            plane: &plane,
-            follow: &follow,
-            roots: None,
+    fn only_a_commit_shaped_string_pins_a_forge_row() {
+        assert!(is_commit("8c1f0a2"));
+        assert!(is_commit(&"a".repeat(40)));
+        assert!(!is_commit("main"));
+        assert!(!is_commit("abc"));
+        assert!(!is_commit(&"a".repeat(41)));
+    }
+
+    #[test]
+    fn the_undo_is_withheld_where_it_cannot_restore_the_whole_row() {
+        let row = |value: EntryValue| PlanRow {
+            reference: "topos.sh/acme/deploy".into(),
+            shape: keys::classify_key("topos.sh/acme/deploy").unwrap(),
+            value,
         };
-        assert!(edit_target(&ctx, false).unwrap().is_none());
-        // The personal target resolves regardless (it lives in the sidecar, not the machine roots).
-        assert!(edit_target(&ctx, true).unwrap().is_some());
+        let star = Arm::RowDrop {
+            row: row(EntryValue::Star),
+            name: "deploy".into(),
+        };
+        assert_eq!(
+            undo_for(std::slice::from_ref(&star), false),
+            vec!["topos", "add", "topos.sh/acme/deploy"]
+        );
+        assert_eq!(
+            undo_for(std::slice::from_ref(&star), true),
+            vec!["topos", "add", "-g", "topos.sh/acme/deploy"]
+        );
+        let digest = "0123456789abcdef".repeat(4);
+        let pinned = Arm::RowDrop {
+            row: row(EntryValue::Pin(digest.clone())),
+            name: "deploy".into(),
+        };
+        assert_eq!(
+            undo_for(std::slice::from_ref(&pinned), false),
+            vec!["topos", "add", &format!("topos.sh/acme/deploy@{digest}")]
+        );
+        // A fields row cannot be respelled by `add` — no undo at all.
+        let fields = Arm::RowDrop {
+            row: row(EntryValue::Fields(crate::manifest::document::EntryFields {
+                harness: Some(vec!["claude-code".into()]),
+                ..Default::default()
+            })),
+            name: "deploy".into(),
+        };
+        assert!(undo_for(&[fields], false).is_empty());
+        // A batch of several offers none (a partial inverse would misstate what it restores).
+        assert!(
+            undo_for(
+                &[
+                    Arm::RowDrop {
+                        row: row(EntryValue::Star),
+                        name: "a".into()
+                    },
+                    Arm::RowDrop {
+                        row: row(EntryValue::Star),
+                        name: "b".into()
+                    },
+                ],
+                false
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_token_names_a_row_by_reference_or_by_the_name_it_delivers() {
+        let row = PlanRow {
+            reference: "topos.sh/acme/deploy".into(),
+            shape: keys::classify_key("topos.sh/acme/deploy").unwrap(),
+            value: EntryValue::Star,
+        };
+        assert!(row_matches("deploy", None, &row));
+        assert!(row_matches("topos.sh/acme/deploy", None, &row));
+        assert!(row_matches(
+            "@acme/deploy",
+            Some("topos.sh/acme/deploy"),
+            &row
+        ));
+        assert!(!row_matches("other", None, &row));
     }
 }

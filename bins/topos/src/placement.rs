@@ -598,7 +598,7 @@ pub(crate) fn safe_project_rel(raw: &str) -> bool {
 pub(crate) fn under_project_manifest(ctx: &Ctx<'_>, dir: &Path) -> bool {
     let mut cur = dir.parent();
     while let Some(d) = cur {
-        if ctx.fs.exists(&d.join(crate::manifest::file::MANIFEST_FILE)) {
+        if ctx.fs.exists(&d.join(crate::manifest::MANIFEST_FILE)) {
             return true;
         }
         cur = d.parent();

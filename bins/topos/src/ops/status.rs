@@ -1,62 +1,80 @@
-//! `status` — the one orientation read AND the trust rail: the sessions, the resolved table for
-//! "an agent here" (this folder's manifest chain + the person's profile layers from the offline
-//! delivery cache + the personal manifest), and the binary version — computed ENTIRELY from local
-//! state (no network, no writes). Per bundle: the version, ONE source (which manifest line — or
-//! profile — asked), and an honest state (applied-as-of-the-last-sync / local edits / behind /
-//! excluded / not available); recorded excludes render as their own rows. The per-agent trigger
-//! rows ride the same payload but are probed at the composition root (`ops::probe_detected` — the
-//! one layer holding the real config port + `$HOME`), mirroring how the arming sweep's receipts
-//! land.
+//! `status` — the offline orientation read AND the trust rail: the sessions, the resolved table
+//! for "an agent here", each connected workspace's REGIME, the disclosure NOTES, and — with a
+//! bundle argument — the deep single-bundle answer. Computed ENTIRELY from local state: the
+//! parsed manifests (`manifest::scopes`), the sessions file, the offline delivery cache
+//! (`sync_status`), and the per-scope sidecar stores. No network, no writes.
+//!
+//! SCOPES ARE UNBLENDED, so the table is SECTIONED, never merged: the NEAREST project manifest
+//! (taken whole), then the person scope — the global manifest when it exists (a COMPLETE recipe:
+//! only its rows deliver, and a workspace's feed flows iff a feed row says so), else the implicit
+//! recipe of one feed row per connected workspace. Within a scope the delivered set is the union
+//! of the rows (or the implicit feeds) minus the `"off"` switches, deduped by bundle identity —
+//! an explicit row beats any set's or any feed's delivery of the same bundle.
+//!
+//! Per line: the winning reference, ONE source (which manifest row — or which workspace's feed —
+//! asked), the delivery attribution (`assigned by <name>` / `picked by you`), and an honest state
+//! (applied-as-of-the-last-sync / local edits / behind / off / not available / unknown). What a
+//! row cannot carry rides `notes`: the loud "the global manifest does not adopt these
+//! assignments" line, rows that add nothing, `"off"` switches for bundles nobody assigns any
+//! more, set collisions, declined-but-delivered bundles, and cross-scope version splits.
 //!
 //! The bare `topos` invocation renders this same snapshot on a TTY, so a human's first keystroke
 //! answers "what is this, and where am I" without dialing anything.
 
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use topos_types::persisted::{Lock, SyncState};
-use topos_types::results::{StatusData, StatusItem, StatusItemState, StatusSession};
+use topos_types::results::{
+    StatusData, StatusDetail, StatusItem, StatusItemState, StatusRegime, StatusSession,
+};
 
 use crate::ctx::Ctx;
 use crate::error::ClientError;
-use crate::manifest::file::MANIFEST_FILE;
-use crate::manifest::refs::ParsedRef;
-use crate::manifest::resolve::{Layer, LayerSource, ResolvedScope, resolve_layers};
-use crate::manifest::walk;
+use crate::manifest::document::EntryValue;
+use crate::manifest::keys::{self, KeyShape};
+use crate::manifest::scopes::{self, ScopePlan};
+use crate::sessions::Sessions;
+use crate::sidecar::Layout;
 use crate::sync_status::{DeliveredSkill, SyncStatus, WorkspaceSync};
 use crate::{doc, placement, sessions, sync_status};
 
-/// The all-zero sentinel a first-receive baseline carries — a delivered skill whose sync doc
+/// The all-zero sentinel a first-receive baseline carries — a delivered bundle whose sync doc
 /// still holds it has never been applied here (the next `update` applies it).
 const ZERO_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
-/// Assemble the offline status snapshot. `triggers` stays empty here — the composition root fills
-/// it from the read-only probe (`ops::probe_detected`), the same layering the arming receipts use.
+/// Assemble the offline status snapshot. `bundle` is the deep single-bundle answer's token (a row
+/// reference, a leaf name, or a cached feed name); `None` is the bare table. `triggers` stays
+/// empty here — the composition root fills it from the read-only probe (`ops::probe_detected`),
+/// the same layering the arming receipts use.
 ///
 /// # Errors
-/// An io/doc failure reading the local session/manifest documents (the probes this op refuses to
-/// run cannot fail it; a missing doc is a plain "not connected", never an error).
-pub(crate) fn status_snapshot(ctx: &Ctx<'_>) -> Result<StatusData, ClientError> {
-    let all_sessions = sessions::read_sessions(ctx.fs, &ctx.layout)?;
-    let signed_in = all_sessions.live().count() > 0;
+/// A read failure or a manifest the grammar refuses (typed, naming the fix); a `bundle` token no
+/// scope delivers is the uniform [`ClientError::TargetNotFound`].
+pub(crate) fn status_snapshot(
+    ctx: &Ctx<'_>,
+    bundle: Option<&str>,
+) -> Result<StatusData, ClientError> {
+    let all = sessions::read_sessions(ctx.fs, &ctx.layout)?;
+    let signed_in = all.live().count() > 0;
     let cache = sync_status::read(ctx.fs, &ctx.layout).unwrap_or_default();
 
-    // The PROFILE-delivered set (the offline cache; manifest-channel rows are not the profile's).
-    // A delivery whose sidecar sync doc still holds the all-zero baseline has never been applied
-    // here. Any unreadable doc makes the count honestly absent, never a partial number.
-    let mut profile_skills = 0u64;
+    // What the workspaces ASSIGN this person (the delivery cache's feed rows — a manifest-driven
+    // row is demand, not an assignment), and how much of it has never been applied here. A
+    // delivery whose sidecar sync doc still holds the all-zero baseline has never been applied;
+    // any unreadable doc makes the count honestly absent, never a partial number.
+    let mut assigned = 0u64;
     let mut awaiting = Some(0u64);
     for entry in cache.workspaces.values() {
         for (skill_id, d) in &entry.delivered {
             if d.withdrawn || d.via_manifest {
                 continue;
             }
-            profile_skills += 1;
+            assigned += 1;
             let Ok(sid) = crate::id::SkillId::parse(skill_id) else {
                 awaiting = None;
                 continue;
             };
-            // Never applied = the sidecar still holds the all-zero baseline, OR nothing local
-            // exists at all (delivered per the cache; the next `update` lands it).
             match doc::read_doc::<SyncState>(ctx.fs, &ctx.layout.published(&sid).sync) {
                 Ok(Some(sync)) if sync.base_commit == ZERO_HEX => {
                     awaiting = awaiting.map(|n| n + 1);
@@ -69,7 +87,7 @@ pub(crate) fn status_snapshot(ctx: &Ctx<'_>) -> Result<StatusData, ClientError> 
     }
 
     // This installation's SESSIONS (one per logged-into workspace).
-    let session_rows: Vec<StatusSession> = all_sessions
+    let session_rows: Vec<StatusSession> = all
         .sessions
         .iter()
         .map(|s| StatusSession {
@@ -81,370 +99,836 @@ pub(crate) fn status_snapshot(ctx: &Ctx<'_>) -> Result<StatusData, ClientError> 
         })
         .collect();
 
+    let resolved = resolve(ctx, &all, &cache)?;
+    let mut items: Vec<StatusItem> = resolved.rows.iter().map(|r| r.item.clone()).collect();
+    let mut detail = None;
+    if let Some(token) = bundle {
+        let (one, matched) = deep_answer(&resolved.rows, &all, token)?;
+        detail = Some(one);
+        items = matched;
+    }
+
     Ok(StatusData {
         version: env!("CARGO_PKG_VERSION").to_owned(),
-        server: all_sessions.sessions.first().map(|s| s.base_url.clone()),
+        server: all.sessions.first().map(|s| s.base_url.clone()),
         signed_in,
-        profile_skills,
+        profile_skills: assigned,
         awaiting_first_sync: awaiting,
         triggers: Vec::new(),
-        items: trust_rail(ctx, &session_rows, &cache)?,
+        items,
+        regimes: resolved.regimes,
+        notes: resolved.notes,
+        detail,
         sessions: session_rows,
     })
 }
 
-/// The TRUST-RAIL table for the current directory, from LOCAL knowledge only (the project
-/// manifest chain + the PROFILE layers materialized from the offline delivery cache + the
-/// personal manifest + the stored sessions — never a network read): per resolved line, the
-/// winning reference, ONE source label, the scope, and an honest state; excludes as their own
-/// rows; a manifest channel's cached members itemized under it.
-fn trust_rail(
-    ctx: &Ctx<'_>,
-    session_rows: &[StatusSession],
-    cache: &SyncStatus,
-) -> Result<Vec<StatusItem>, ClientError> {
-    // The layers, nearest-first: this folder's chain → each session's profile (from the offline
-    // cache — the same stand-in the offline reconcile resolves with) → the personal manifest.
-    let mut layers: Vec<Layer> = Vec::new();
-    if let Some(roots) = &ctx.roots
-        && let Some(cwd) = roots.cwd.as_deref()
-    {
-        for l in walk::project_layers(ctx.fs, cwd, Some(&roots.home))? {
-            layers.push(Layer::project(l.dir, l.manifest));
+// =================================================================================================
+// The resolution — per scope, from the parsed recipes + the offline cache + the sidecar stores.
+// =================================================================================================
+
+/// One resolved line plus the provenance the deep answer spells out.
+struct Row {
+    item: StatusItem,
+    /// The manifest FILE whose row delivers it (absent on a feed-delivered line).
+    source_file: Option<String>,
+    /// That row's spelled key (the joined reference).
+    source_key: Option<String>,
+    /// `<host>/<workspace>` when a feed delivers it.
+    feed: Option<String>,
+    /// The row's version pin, when one is spelled.
+    pin: Option<String>,
+    /// The placement dirs this machine holds for it.
+    placements: Vec<String>,
+    /// A BUNDLE line (not a set header, a feed header, or an `"off"` switch) — what the adopted
+    /// count counts and what a cross-scope split compares.
+    bundle: bool,
+}
+
+/// The whole resolution: the table (project scope first, then person), the per-workspace regimes,
+/// and the disclosure notes in reading order.
+struct Resolved {
+    rows: Vec<Row>,
+    regimes: Vec<StatusRegime>,
+    notes: Vec<String>,
+}
+
+/// One scope's pass — its lines plus the notes only that pass can see.
+#[derive(Default)]
+struct ScopeOut {
+    rows: Vec<Row>,
+    /// Two SETS delivering one name at different versions — the winner named.
+    collisions: Vec<String>,
+    /// `"off"` switches whose bundle is not in the cached feed any more.
+    stale_offs: Vec<String>,
+}
+
+/// Resolve both scopes, the regimes, and the notes — the whole offline answer.
+fn resolve(ctx: &Ctx<'_>, all: &Sessions, cache: &SyncStatus) -> Result<Resolved, ClientError> {
+    let connected: Vec<(String, String)> = all
+        .live()
+        .map(|s| (s.host.clone(), s.workspace_name.clone()))
+        .collect();
+    let person_plan = scopes::person_plan(ctx.fs, &ctx.layout, &connected)?;
+    let project = match ctx.roots.as_ref().and_then(|r| {
+        r.cwd
+            .as_deref()
+            .map(|cwd| (cwd.to_path_buf(), r.home.clone()))
+    }) {
+        Some((cwd, home)) => scopes::nearest_project_plan(ctx.fs, &cwd, Some(&home))?,
+        None => None,
+    };
+
+    // The NEAREST project manifest, whole — over the project's OWN store (never minted here).
+    let mut project_out = ScopeOut::default();
+    if let Some((dir, plan)) = &project {
+        let layout = crate::sidecar::existing_project_store(ctx.fs, dir);
+        project_out = scope_rows(ctx, plan, false, layout.as_ref(), cache, all);
+    }
+    let person_out = scope_rows(ctx, &person_plan, true, Some(&ctx.layout), cache, all);
+
+    // The REGIMES — one sentence per connected workspace, over the person plan.
+    let mut regimes = Vec::new();
+    for (host, ws) in &connected {
+        let unadopted = assigned_not_adopted(&person_plan, cache, host, ws);
+        if let Some(regime) = person_plan.regime(host, ws, unadopted) {
+            regimes.push(StatusRegime {
+                host: host.clone(),
+                workspace: ws.clone(),
+                regime,
+            });
         }
     }
-    for sess in session_rows {
-        let Some(entry) = cache.workspaces.get(&sess.workspace_id) else {
-            continue;
-        };
-        let delivered: Vec<(String, String, Option<String>)> = entry
-            .delivered
-            .values()
-            .filter(|d| !d.withdrawn && !d.via_manifest && !d.name.is_empty())
-            .map(|d| {
-                (
-                    d.name.clone(),
-                    format!("{}/{}/{}", sess.host, sess.name, d.name),
-                    None,
-                )
-            })
-            .collect();
-        if !delivered.is_empty() {
-            layers.push(Layer::profile(
-                sess.host.clone(),
-                sess.name.clone(),
-                delivered,
+
+    // The NOTES, in reading order: the loud one first, then the inert rows, then the frictions.
+    let mut notes = Vec::new();
+    if person_plan.file_backed() {
+        let adopts = person_out.rows.iter().filter(|r| r.bundle).count();
+        for (host, ws) in &connected {
+            if person_plan.has_feed(host, ws) {
+                continue;
+            }
+            let unadopted = assigned_not_adopted(&person_plan, cache, host, ws);
+            if unadopted == 0 {
+                continue;
+            }
+            notes.push(format!(
+                "global manifest adopts {adopts} bundles; {unadopted} assigned bundles are not \
+                 adopted here (no feed row) — `topos add -g @{ws}` restores them"
             ));
         }
     }
-    if let Some(personal) =
-        crate::manifest::file::read_manifest(ctx.fs, &ctx.layout.home().join(MANIFEST_FILE))?
-    {
-        layers.push(Layer::personal(personal));
-    }
-    if layers.is_empty() {
-        return Ok(Vec::new());
-    }
-    let resolution = resolve_layers(&layers);
-    let mut items = Vec::with_capacity(resolution.items.len() + resolution.excluded.len());
-    // Direct items claim their names; EXCLUDES are checked per channel member with the
-    // layer-ordered rule (`exclude_wins`) — a broader exclude never hides a nearer channel's
-    // member from the rail.
-    let mut claimed: std::collections::HashSet<String> =
-        resolution.items.iter().map(|i| i.name.clone()).collect();
-    for item in resolution.items {
-        let mut via = None;
-        let (state, version, applied_as_of) = match &item.parsed {
-            // A local folder: its presence IS the delivery (adopted in place; the folder itself
-            // is the source of truth, so there is no upstream to be behind or ahead of).
-            ParsedRef::LocalPath { raw } => {
-                let base = match &item.source {
-                    LayerSource::Project { dir } => dir.clone(),
-                    _ => ctx.layout.home().to_path_buf(),
-                };
-                let dir = if Path::new(raw).is_absolute() {
-                    std::path::PathBuf::from(raw)
-                } else {
-                    base.join(raw.trim_start_matches("./"))
-                };
-                if ctx.fs.exists(&dir) {
-                    (StatusItemState::Applied, None, None)
-                } else {
-                    (StatusItemState::Unknown, None, None)
-                }
-            }
-            // A workspace skill reference (or a profile item): the offline delivery cache + the
-            // sidecar answer applied/edits/behind honestly ("applied as of the last sync");
-            // without a cache row, the LOCAL session file phrases the line.
-            ParsedRef::Skill {
-                host,
-                workspace,
-                name,
-                ..
-            } => match cache_lookup(cache, host.as_deref(), Some(workspace), name) {
-                Some(hit) => {
-                    via = hit.ds.via_channels.first().cloned();
-                    applied_state(ctx, &hit)
-                }
-                None => (
-                    session_fallback(session_rows, host.as_deref(), Some(workspace)),
-                    None,
-                    None,
-                ),
-            },
-            // A bare name: any workspace's cached delivery answers it.
-            ParsedRef::Bare { name, .. } => match cache_lookup(cache, None, None, name) {
-                Some(hit) => {
-                    via = hit.ds.via_channels.first().cloned();
-                    applied_state(ctx, &hit)
-                }
-                None => (session_fallback(session_rows, None, None), None, None),
-            },
-            // A channel reference: the row itself reads from the session; its cached MEMBERS
-            // (the reconcile records them `via_manifest`) itemize right below.
-            ParsedRef::Channel {
-                host,
-                workspace,
-                name,
-            } => {
-                for (sess, entry) in
-                    cache_workspaces(cache, session_rows, host.as_deref(), workspace)
-                {
-                    for (skill_id, ds) in &entry.delivered {
-                        if ds.withdrawn
-                            || !ds.via_manifest
-                            || !ds.via_channels.iter().any(|c| c == name)
-                            || resolution.excluded.iter().any(|ex| {
-                                ex.name == ds.name
-                                    && crate::manifest::resolve::exclude_wins(
-                                        ex.layer_index,
-                                        item.layer_index,
-                                    )
-                            })
-                            || !claimed.insert(ds.name.clone())
-                        {
-                            continue;
-                        }
-                        let hit = CacheHit {
-                            ws_entry: entry,
-                            skill_id,
-                            ds,
-                        };
-                        let (state, version, applied_as_of) = applied_state(ctx, &hit);
-                        items.push(StatusItem {
-                            name: ds.name.clone(),
-                            reference: format!("{}/{}/{}", sess.host, sess.name, ds.name),
-                            source: item.source.label(),
-                            scope: scope_label(&item.scope),
-                            via: Some(name.clone()),
-                            version,
-                            applied_as_of,
-                            state,
-                            shadows: Vec::new(),
-                        });
-                    }
-                }
-                (
-                    session_fallback(session_rows, host.as_deref(), Some(workspace)),
-                    None,
-                    None,
-                )
-            }
-            // An external GitHub origin: the sidecar's origin record answers offline.
-            ParsedRef::GitHub {
-                owner,
-                repo,
-                subdir,
-                ..
-            } => {
-                let origin_source = format!("github.com/{owner}/{repo}");
-                match super::reconcile::find_tracked_github(ctx, &origin_source, subdir) {
-                    Some((_, lock, origin)) => {
-                        let recorded = origin.commit.as_deref().unwrap_or_default();
-                        let pin_ok = item
-                            .pin
-                            .as_deref()
-                            .is_none_or(|p| super::reconcile::commit_matches(recorded, p));
-                        if pin_ok {
-                            (StatusItemState::Applied, Some(lock.base_commit), None)
-                        } else {
-                            // The pin moved past the installed commit — the next update lands it.
-                            (StatusItemState::Behind, Some(lock.base_commit), None)
-                        }
-                    }
-                    None => (StatusItemState::Unknown, None, None),
-                }
-            }
+    // A bare `"*"` row for a bundle the flowing feed already delivers states nothing new.
+    for row in &person_plan.things {
+        let KeyShape::WorkspaceBundle {
+            host,
+            workspace,
+            bundle,
+        } = &row.shape
+        else {
+            continue;
         };
-        items.push(StatusItem {
-            name: item.name,
-            reference: item.reference,
-            source: item.source.label(),
-            scope: scope_label(&item.scope),
-            via,
-            version,
-            applied_as_of,
-            state,
-            shadows: item.shadowed_from.iter().map(LayerSource::label).collect(),
-        });
+        if matches!(row.value, EntryValue::Star)
+            && person_plan.has_feed(host, workspace)
+            && feed_delivers(cache, host, workspace, bundle)
+        {
+            notes.push(format!(
+                "{} adds nothing — the feed already delivers it",
+                row.reference
+            ));
+        }
     }
-    // Recorded EXCLUDES render as their own rows — the "why not?" half of the rail. An exclude
-    // a NEARER channel member shadowed (its name claimed above) does not render: the member's
-    // own row already tells the delivered story, and one name must never read as both applied
-    // and excluded.
-    for ex in resolution.excluded {
-        if claimed.contains(&ex.name) {
+    notes.extend(person_out.stale_offs.iter().cloned());
+    notes.extend(project_out.stale_offs.iter().cloned());
+    notes.extend(person_out.collisions.iter().cloned());
+    notes.extend(project_out.collisions.iter().cloned());
+    // Declined on the web, delivered here anyway: the file outranks the person's own web choice.
+    for entry in cache.workspaces.values() {
+        let (Some(host), Some(ws)) = (&entry.host, &entry.workspace_name) else {
+            continue;
+        };
+        for name in entry.declined.values() {
+            if person_plan.explicit_claims(host, ws, name) {
+                notes.push(format!(
+                    "{name}: declined on the web, delivered here by your global manifest"
+                ));
+            }
+        }
+    }
+    // The same bundle at BOTH scopes on different versions — nothing blends, so both copies land.
+    let claude = claude_code_detected(ctx);
+    for prow in project_out.rows.iter().filter(|r| r.bundle) {
+        let Some(person) = person_out
+            .rows
+            .iter()
+            .find(|r| r.bundle && r.item.name == prow.item.name)
+        else {
+            continue;
+        };
+        let here = prow.pin.clone().or_else(|| prow.item.version.clone());
+        let there = person.pin.clone().or_else(|| person.item.version.clone());
+        if let (Some(a), Some(b)) = (here, there)
+            && a != b
+        {
+            let mut note = format!(
+                "{}: project pins {}, person delivers {} — the project copy is projected in-repo",
+                prow.item.name,
+                short(&a),
+                short(&b)
+            );
+            if claude {
+                note.push_str(
+                    "; Claude Code resolves personal skills ahead of project ones, so the \
+                     personal copy may win anyway",
+                );
+            }
+            notes.push(note);
+        }
+    }
+
+    let mut rows = project_out.rows;
+    rows.extend(person_out.rows);
+    Ok(Resolved {
+        rows,
+        regimes,
+        notes,
+    })
+}
+
+/// One scope's lines, in reading order: the explicit THING rows, each SET row with its cached
+/// members itemized under it, the flowing FEEDS, then the `"off"` switches. Deduped by bundle
+/// identity as it goes — the first statement to claim an identity wins, and things are read
+/// before sets and feeds, which IS the "an explicit row beats a set" rule.
+fn scope_rows(
+    ctx: &Ctx<'_>,
+    plan: &ScopePlan,
+    person: bool,
+    layout: Option<&Layout>,
+    cache: &SyncStatus,
+    all: &Sessions,
+) -> ScopeOut {
+    let scope = if person { "person" } else { "project" };
+    let file = plan.file.as_deref().map(|p| pretty(ctx, p));
+    let base = plan
+        .file
+        .as_deref()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf);
+    let mut out = ScopeOut::default();
+    let mut claimed: BTreeSet<String> = BTreeSet::new();
+    let mut by_name: BTreeMap<String, (String, String)> = BTreeMap::new();
+    let mut index: Option<BTreeMap<String, String>> = None;
+
+    // 1. The explicit THING rows — one bundle each, the row's own fields winning.
+    for row in &plan.things {
+        let identity = row.shape.canonical();
+        if !claimed.insert(identity.clone()) {
             continue;
         }
-        let scope = match &ex.by {
-            LayerSource::Project { .. } => "project",
-            LayerSource::Profile { .. } | LayerSource::Personal => "person",
+        let name = row.display_name();
+        let mut via = None;
+        let mut attribution = None;
+        let applied = match &row.shape {
+            KeyShape::WorkspaceBundle {
+                host,
+                workspace,
+                bundle,
+            } => match cache_lookup(cache, host, workspace, bundle) {
+                Some(hit) => {
+                    via = hit.ds.via_channels.first().cloned();
+                    attribution = attribution_of(hit.ds);
+                    applied_for_id(
+                        ctx,
+                        layout,
+                        hit.skill_id,
+                        &hit.ds.served_version,
+                        hit.entry.last_delivery_at,
+                    )
+                }
+                None => stored_by_name(ctx, layout, &mut index, &name)
+                    .unwrap_or_else(|| Applied::plain(session_state(all, host, workspace))),
+            },
+            // A local folder: its presence IS the delivery (adopted in place — there is no
+            // upstream to be behind or ahead of).
+            KeyShape::LocalPath { raw } => {
+                if ctx.fs.exists(&local_dir(ctx, base.as_deref(), raw)) {
+                    stored_by_name(ctx, layout, &mut index, &name)
+                        .unwrap_or_else(|| Applied::plain(StatusItemState::Applied))
+                } else {
+                    Applied::plain(StatusItemState::Unknown)
+                }
+            }
+            // A repo skill: only this scope's store can answer it offline.
+            _ => stored_by_name(ctx, layout, &mut index, &name).unwrap_or_else(Applied::unknown),
         };
-        items.push(StatusItem {
-            name: ex.name.clone(),
-            reference: ex.name,
-            source: ex.by.label(),
-            scope: scope.to_owned(),
-            via: None,
-            version: None,
-            applied_as_of: None,
-            state: StatusItemState::Excluded,
-            shadows: ex.shadowed_from.iter().map(LayerSource::label).collect(),
+        out.rows.push(Row {
+            item: StatusItem {
+                name,
+                reference: identity,
+                source: file.clone().unwrap_or_default(),
+                scope: scope.to_owned(),
+                via,
+                attribution,
+                version: applied.version,
+                applied_as_of: applied.as_of,
+                state: applied.state,
+                shadows: Vec::new(),
+            },
+            source_file: file.clone(),
+            source_key: Some(row.reference.clone()),
+            feed: None,
+            pin: row.pin(),
+            placements: applied.placements,
+            bundle: true,
         });
     }
-    let _ = claimed;
-    Ok(items)
+
+    // 2. The SET rows — the line itself, then the members the last delivery cached under it.
+    for row in &plan.sets {
+        let identity = row.shape.canonical();
+        let state = match &row.shape {
+            KeyShape::Channel {
+                host, workspace, ..
+            } => session_state(all, host, workspace),
+            _ => StatusItemState::Unknown,
+        };
+        out.rows.push(Row {
+            item: StatusItem {
+                name: row.display_name(),
+                reference: identity.clone(),
+                source: file.clone().unwrap_or_default(),
+                scope: scope.to_owned(),
+                via: None,
+                attribution: None,
+                version: None,
+                applied_as_of: None,
+                state,
+                shadows: Vec::new(),
+            },
+            source_file: file.clone(),
+            source_key: Some(row.reference.clone()),
+            feed: None,
+            pin: row.pin(),
+            placements: Vec::new(),
+            bundle: false,
+        });
+        let KeyShape::Channel {
+            host,
+            workspace,
+            channel,
+        } = &row.shape
+        else {
+            continue;
+        };
+        let Some(entry) = ws_entry(cache, host, workspace) else {
+            continue;
+        };
+        for (skill_id, ds) in &entry.delivered {
+            if ds.withdrawn
+                || ds.name.is_empty()
+                || !ds.via_channels.iter().any(|c| c == channel)
+                || plan.off_for(host, workspace, &ds.name).is_some()
+                || plan.explicit_claims(host, workspace, &ds.name)
+            {
+                continue;
+            }
+            let member = format!("{host}/{workspace}/{}", ds.name);
+            if !claimed.insert(member.clone()) {
+                continue;
+            }
+            collide(
+                &mut by_name,
+                &mut out.collisions,
+                &ds.name,
+                &identity,
+                &ds.served_version,
+            );
+            let applied = applied_for_id(
+                ctx,
+                layout,
+                skill_id,
+                &ds.served_version,
+                entry.last_delivery_at,
+            );
+            out.rows.push(Row {
+                item: StatusItem {
+                    name: ds.name.clone(),
+                    reference: member,
+                    source: file.clone().unwrap_or_default(),
+                    scope: scope.to_owned(),
+                    via: Some(channel.clone()),
+                    attribution: attribution_of(ds),
+                    version: applied.version,
+                    applied_as_of: applied.as_of,
+                    state: applied.state,
+                    shadows: Vec::new(),
+                },
+                source_file: file.clone(),
+                source_key: Some(row.reference.clone()),
+                feed: None,
+                pin: None,
+                placements: applied.placements,
+                bundle: true,
+            });
+        }
+    }
+
+    // 3. The FEEDS that flow here (the global file's feed rows, or the implicit recipe's).
+    for (host, workspace) in &plan.feeds {
+        let feed = format!("{host}/{workspace}");
+        let Some(entry) = ws_entry(cache, host, workspace) else {
+            // A feed with nothing cached yet: ONE honest line for the workspace itself.
+            out.rows.push(Row {
+                item: StatusItem {
+                    name: workspace.clone(),
+                    reference: feed.clone(),
+                    source: format!("the {feed} feed"),
+                    scope: scope.to_owned(),
+                    via: None,
+                    attribution: None,
+                    version: None,
+                    applied_as_of: None,
+                    state: session_state(all, host, workspace),
+                    shadows: Vec::new(),
+                },
+                source_file: file.clone(),
+                source_key: file.as_ref().map(|_| feed.clone()),
+                feed: Some(feed.clone()),
+                pin: None,
+                placements: Vec::new(),
+                bundle: false,
+            });
+            continue;
+        };
+        for (skill_id, ds) in &entry.delivered {
+            if ds.withdrawn
+                || ds.via_manifest
+                || ds.name.is_empty()
+                || plan.off_for(host, workspace, &ds.name).is_some()
+                || plan.explicit_claims(host, workspace, &ds.name)
+            {
+                continue;
+            }
+            let identity = format!("{feed}/{}", ds.name);
+            if !claimed.insert(identity.clone()) {
+                continue;
+            }
+            collide(
+                &mut by_name,
+                &mut out.collisions,
+                &ds.name,
+                &feed,
+                &ds.served_version,
+            );
+            let applied = applied_for_id(
+                ctx,
+                layout,
+                skill_id,
+                &ds.served_version,
+                entry.last_delivery_at,
+            );
+            out.rows.push(Row {
+                item: StatusItem {
+                    name: ds.name.clone(),
+                    reference: identity,
+                    source: format!("the {feed} feed"),
+                    scope: scope.to_owned(),
+                    via: ds.via_channels.first().cloned(),
+                    attribution: attribution_of(ds),
+                    version: applied.version,
+                    applied_as_of: applied.as_of,
+                    state: applied.state,
+                    shadows: Vec::new(),
+                },
+                source_file: None,
+                source_key: None,
+                feed: Some(feed.clone()),
+                pin: None,
+                placements: applied.placements,
+                bundle: true,
+            });
+        }
+    }
+
+    // 4. The `"off"` switches — their own rows (the file says them), and a note when the bundle
+    // one withholds is not assigned to this person any more.
+    for row in &plan.offs {
+        let KeyShape::WorkspaceBundle {
+            host,
+            workspace,
+            bundle,
+        } = &row.shape
+        else {
+            continue;
+        };
+        if !feed_delivers(cache, host, workspace, bundle) {
+            out.stale_offs
+                .push(format!("off — not currently assigned: {}", row.reference));
+        }
+        let identity = row.shape.canonical();
+        if !claimed.insert(identity.clone()) {
+            continue;
+        }
+        out.rows.push(Row {
+            item: StatusItem {
+                name: row.display_name(),
+                reference: identity,
+                source: file.clone().unwrap_or_default(),
+                scope: scope.to_owned(),
+                via: None,
+                attribution: None,
+                version: None,
+                applied_as_of: None,
+                state: StatusItemState::Off,
+                shadows: Vec::new(),
+            },
+            source_file: file.clone(),
+            source_key: Some(row.reference.clone()),
+            feed: None,
+            pin: None,
+            placements: Vec::new(),
+            bundle: false,
+        });
+    }
+    out
 }
 
-fn scope_label(scope: &ResolvedScope) -> String {
-    match scope {
-        ResolvedScope::Project { .. } => "project".to_owned(),
-        ResolvedScope::Person => "person".to_owned(),
+/// The deep single-bundle answer: the token resolved against the SAME lines the table renders (a
+/// row reference, a leaf name, or a cached feed name; `@ws/…` and the canonical spellings ride
+/// [`keys::parse_input`] with the one connected host as the default). The NEAREST scope's line
+/// spells the detail; every matching line rides `items`.
+fn deep_answer(
+    rows: &[Row],
+    all: &Sessions,
+    token: &str,
+) -> Result<(StatusDetail, Vec<StatusItem>), ClientError> {
+    let hosts: BTreeSet<&str> = all.live().map(|s| s.host.as_str()).collect();
+    let default_host = if hosts.len() == 1 {
+        hosts.iter().copied().next()
+    } else {
+        None
+    };
+    let canonical = keys::parse_input(token, default_host)
+        .ok()
+        .map(|r| r.shape.canonical());
+    let matched: Vec<&Row> = rows
+        .iter()
+        .filter(|r| canonical.as_deref() == Some(r.item.reference.as_str()) || r.item.name == token)
+        .collect();
+    let Some(first) = matched.first() else {
+        return Err(ClientError::TargetNotFound {
+            target: token.to_owned(),
+        });
+    };
+    let detail = StatusDetail {
+        name: first.item.name.clone(),
+        source_file: first.source_file.clone(),
+        source_key: first.source_key.clone(),
+        feed: first.feed.clone(),
+        attribution: first.item.attribution.clone(),
+        version: first.item.version.clone(),
+        pin: first.pin.clone(),
+        placements: first.placements.clone(),
+        state: first.item.state,
+    };
+    Ok((
+        detail,
+        matched.into_iter().map(|r| r.item.clone()).collect(),
+    ))
+}
+
+// =================================================================================================
+// The offline readers — the delivery cache, the per-scope stores, the sessions file.
+// =================================================================================================
+
+/// The honest local state of one bundle, read from one scope's store alone.
+struct Applied {
+    state: StatusItemState,
+    version: Option<String>,
+    as_of: Option<String>,
+    placements: Vec<String>,
+}
+
+impl Applied {
+    fn plain(state: StatusItemState) -> Self {
+        Applied {
+            state,
+            version: None,
+            as_of: None,
+            placements: Vec::new(),
+        }
+    }
+
+    fn unknown() -> Self {
+        Applied::plain(StatusItemState::Unknown)
     }
 }
 
-/// One cached delivery a trust-rail line resolves against.
+/// The APPLIED state for one bundle in one scope's store: never applied → `Unknown` ("not applied
+/// here yet"); a scanned draft → `LocalEdits`; a served version past the applied one → `Behind`;
+/// else `Applied`, stamped "as of" the cache's last delivery — an offline fact, never a live
+/// claim. Any unreadable doc degrades to `Unknown`.
+fn applied_for_id(
+    ctx: &Ctx<'_>,
+    layout: Option<&Layout>,
+    skill_id: &str,
+    served_version: &str,
+    last_delivery_at: Option<i64>,
+) -> Applied {
+    let Some(layout) = layout else {
+        return Applied::unknown();
+    };
+    let Ok(sid) = crate::id::SkillId::parse(skill_id) else {
+        return Applied::unknown();
+    };
+    if !ctx.fs.exists(&layout.skill_dir(&sid)) {
+        return Applied::unknown();
+    }
+    let sp = layout.published(&sid);
+    let Ok(Some(sync)) = doc::read_doc::<SyncState>(ctx.fs, &sp.sync) else {
+        return Applied::unknown();
+    };
+    if sync.base_commit == ZERO_HEX {
+        return Applied::unknown();
+    }
+    let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &sp.lock) else {
+        return Applied::unknown();
+    };
+    let version = Some(lock.base_commit.clone());
+    let mut placements = Vec::new();
+    let mut edited = false;
+    if let Ok(Some(map)) = doc::read_map(ctx.fs, &sp.map) {
+        placements.clone_from(&map.placements);
+        let scoped = super::pull::ctx_with_layout(ctx, layout);
+        if let Ok(scans) = placement::scan_placements(&scoped, &map) {
+            edited = scans
+                .iter()
+                .any(|s| matches!(s.status, placement::ScanStatus::Modified { .. }));
+        }
+    }
+    if edited {
+        return Applied {
+            state: StatusItemState::LocalEdits,
+            version,
+            as_of: None,
+            placements,
+        };
+    }
+    if !served_version.is_empty() && served_version != lock.base_commit {
+        return Applied {
+            state: StatusItemState::Behind,
+            version,
+            as_of: None,
+            placements,
+        };
+    }
+    Applied {
+        state: StatusItemState::Applied,
+        version,
+        as_of: last_delivery_at.map(super::connect::fmt_rfc3339_millis),
+        placements,
+    }
+}
+
+/// The scope store's `name → skill id` index, built once per scope on first need — the offline
+/// answer for a row the delivery cache does not name (a repo skill, a local folder, a bundle
+/// applied before the cache was written).
+fn store_index(ctx: &Ctx<'_>, layout: &Layout) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let Ok(entries) = ctx.fs.read_dir(&layout.skills_dir()) else {
+        return out;
+    };
+    for entry in entries {
+        let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Ok(sid) = crate::id::SkillId::parse(id) else {
+            continue;
+        };
+        let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &layout.published(&sid).lock) else {
+            continue;
+        };
+        out.insert(lock.name, id.to_owned());
+    }
+    out
+}
+
+/// The stored state for a NAME in this scope, when the store holds one (the index is built at most
+/// once per scope). No served version is known this way, so a stored copy never reads `behind` —
+/// only applied, edited, or unknown.
+fn stored_by_name(
+    ctx: &Ctx<'_>,
+    layout: Option<&Layout>,
+    index: &mut Option<BTreeMap<String, String>>,
+    name: &str,
+) -> Option<Applied> {
+    let layout = layout?;
+    let id = index
+        .get_or_insert_with(|| store_index(ctx, layout))
+        .get(name)?
+        .clone();
+    Some(applied_for_id(ctx, Some(layout), &id, "", None))
+}
+
+/// One cached delivery a line resolves against.
 struct CacheHit<'a> {
-    ws_entry: &'a WorkspaceSync,
+    entry: &'a WorkspaceSync,
     skill_id: &'a str,
     ds: &'a DeliveredSkill,
 }
 
-/// Find the cached delivery for `name`, narrowed by the spelled host/workspace when present.
+/// The cache entry of one workspace, by its manifest-grammar address.
+fn ws_entry<'a>(cache: &'a SyncStatus, host: &str, workspace: &str) -> Option<&'a WorkspaceSync> {
+    cache
+        .workspaces
+        .values()
+        .find(|e| e.host.as_deref() == Some(host) && e.workspace_name.as_deref() == Some(workspace))
+}
+
+/// The cached delivery of `<host>/<workspace>/<name>`, whatever asked for it.
 fn cache_lookup<'a>(
     cache: &'a SyncStatus,
-    host: Option<&str>,
-    ws_name: Option<&str>,
+    host: &str,
+    workspace: &str,
     name: &str,
 ) -> Option<CacheHit<'a>> {
-    for entry in cache.workspaces.values() {
-        let host_ok = host.is_none_or(|h| entry.host.as_deref() == Some(h));
-        let ws_ok = ws_name.is_none_or(|w| entry.workspace_name.as_deref() == Some(w));
-        if !host_ok || !ws_ok {
-            continue;
-        }
-        if let Some((skill_id, ds)) = entry
-            .delivered
-            .iter()
-            .find(|(_, d)| !d.withdrawn && d.name == name)
-        {
-            return Some(CacheHit {
-                ws_entry: entry,
-                skill_id,
-                ds,
-            });
-        }
-    }
-    None
-}
-
-/// The `(session, cache entry)` pairs a channel reference's workspace resolves to.
-fn cache_workspaces<'a>(
-    cache: &'a SyncStatus,
-    session_rows: &'a [StatusSession],
-    host: Option<&str>,
-    ws_name: &str,
-) -> Vec<(&'a StatusSession, &'a WorkspaceSync)> {
-    session_rows
+    let entry = ws_entry(cache, host, workspace)?;
+    let (skill_id, ds) = entry
+        .delivered
         .iter()
-        .filter(|s| host.is_none_or(|h| s.host == h) && s.name == ws_name)
-        .filter_map(|s| cache.workspaces.get(&s.workspace_id).map(|e| (s, e)))
-        .collect()
+        .find(|(_, d)| !d.withdrawn && d.name == name)?;
+    Some(CacheHit {
+        entry,
+        skill_id,
+        ds,
+    })
 }
 
-/// The honest APPLIED state for one cached delivery, from the sidecar alone: never applied →
-/// `Unknown` ("not applied here yet"); a scanned draft → `LocalEdits`; the cached served version
-/// past the applied one → `Behind`; else `Applied` stamped "as of" the cache's last delivery
-/// time — an offline fact, never a live claim. Any unreadable doc degrades to `Unknown`.
-fn applied_state(
-    ctx: &Ctx<'_>,
-    hit: &CacheHit<'_>,
-) -> (StatusItemState, Option<String>, Option<String>) {
-    let unknown = (StatusItemState::Unknown, None, None);
-    let Ok(sid) = crate::id::SkillId::parse(hit.skill_id) else {
-        return unknown;
-    };
-    if !ctx.fs.exists(&ctx.layout.skill_dir(&sid)) {
-        return unknown;
-    }
-    let sp = ctx.layout.published(&sid);
-    let Ok(Some(sync)) = doc::read_doc::<SyncState>(ctx.fs, &sp.sync) else {
-        return unknown;
-    };
-    if sync.base_commit == ZERO_HEX {
-        return unknown;
-    }
-    let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &sp.lock) else {
-        return unknown;
-    };
-    let version = Some(lock.base_commit.clone());
-    if let Ok(Some(map)) = doc::read_map(ctx.fs, &sp.map)
-        && let Ok(scans) = placement::scan_placements(ctx, &map)
-        && scans
-            .iter()
-            .any(|s| matches!(s.status, placement::ScanStatus::Modified { .. }))
-    {
-        return (StatusItemState::LocalEdits, version, None);
-    }
-    if !hit.ds.served_version.is_empty() && hit.ds.served_version != lock.base_commit {
-        return (StatusItemState::Behind, version, None);
-    }
-    let as_of = hit
-        .ws_entry
-        .last_delivery_at
-        .map(super::connect::fmt_rfc3339_millis);
-    (StatusItemState::Applied, version, as_of)
+/// Whether the workspace's last delivery ASSIGNED this bundle to the person (a feed row — a
+/// manifest-driven delivery is demand, not an assignment).
+fn feed_delivers(cache: &SyncStatus, host: &str, workspace: &str, bundle: &str) -> bool {
+    ws_entry(cache, host, workspace).is_some_and(|e| {
+        e.delivered
+            .values()
+            .any(|d| !d.withdrawn && !d.via_manifest && d.name == bundle)
+    })
 }
 
-/// The honest line for a workspace ref with NO cached delivery — phrased from the LOCAL session
-/// file, never a server answer.
-fn session_fallback(
-    session_rows: &[StatusSession],
-    host: Option<&str>,
-    ws_name: Option<&str>,
-) -> StatusItemState {
-    let Some(ws) = ws_name else {
-        // A bare name with no cache row: whether a live session could deliver it is the
-        // reconcile's answer.
-        return StatusItemState::Unknown;
+/// The assigned bundles of one workspace a FILE-backed person plan does not adopt: its feed does
+/// not flow here, and no explicit row claims them.
+fn assigned_not_adopted(
+    plan: &ScopePlan,
+    cache: &SyncStatus,
+    host: &str,
+    workspace: &str,
+) -> usize {
+    if plan.has_feed(host, workspace) {
+        return 0;
+    }
+    let Some(entry) = ws_entry(cache, host, workspace) else {
+        return 0;
     };
-    match session_rows
-        .iter()
-        .find(|s| host.is_none_or(|h| s.host == h) && s.name == ws)
-    {
+    entry
+        .delivered
+        .values()
+        .filter(|d| {
+            !d.withdrawn
+                && !d.via_manifest
+                && !d.name.is_empty()
+                && !plan.explicit_claims(host, workspace, &d.name)
+        })
+        .count()
+}
+
+/// The delivery attribution, when the cache carries one.
+fn attribution_of(ds: &DeliveredSkill) -> Option<String> {
+    if let Some(who) = &ds.assigned_by {
+        return Some(format!("assigned by {who}"));
+    }
+    ds.picked.then(|| "picked by you".to_owned())
+}
+
+/// The honest line for a workspace reference with NO cached delivery — phrased from the LOCAL
+/// sessions file, never a server answer.
+fn session_state(all: &Sessions, host: &str, workspace: &str) -> StatusItemState {
+    match all.find_on_host(host, workspace) {
         None => StatusItemState::NotAvailable,
-        Some(s) if s.session_status.as_deref() == Some("pending") => {
-            StatusItemState::PendingSession
-        }
-        Some(s) if s.session_status.as_deref() == Some("ended") => StatusItemState::NotAvailable,
+        Some(s) if s.status == sessions::SESSION_PENDING => StatusItemState::PendingSession,
+        Some(s) if s.status == sessions::SESSION_ENDED => StatusItemState::NotAvailable,
         // Connected but never delivered here — the next `update` answers.
         Some(_) => StatusItemState::Unknown,
     }
 }
 
+/// Record one SET/feed delivery of `name`; a second set delivering the same name at a DIFFERENT
+/// version is a real collision on disk — name the winner rather than let one copy vanish quietly.
+fn collide(
+    by_name: &mut BTreeMap<String, (String, String)>,
+    notes: &mut Vec<String>,
+    name: &str,
+    reference: &str,
+    version: &str,
+) {
+    match by_name.get(name) {
+        Some((winner, won_at)) => {
+            if !version.is_empty() && !won_at.is_empty() && won_at != version {
+                notes.push(format!(
+                    "{name}: `{winner}` and `{reference}` both deliver it — `{winner}` wins here"
+                ));
+            }
+        }
+        None => {
+            by_name.insert(name.to_owned(), (reference.to_owned(), version.to_owned()));
+        }
+    }
+}
+
+/// A local-folder row's directory: absolute as spelled, `~/…` against the machine home, else
+/// relative to the manifest's own folder.
+fn local_dir(ctx: &Ctx<'_>, base: Option<&Path>, raw: &str) -> PathBuf {
+    if let Some(rest) = raw.strip_prefix("~/")
+        && let Some(roots) = &ctx.roots
+    {
+        return roots.home.join(rest);
+    }
+    if Path::new(raw).is_absolute() {
+        return PathBuf::from(raw);
+    }
+    match base {
+        Some(b) => b.join(raw.trim_start_matches("./")),
+        None => PathBuf::from(raw),
+    }
+}
+
+/// A path as a person reads it — the machine home abbreviated to `~`.
+fn pretty(ctx: &Ctx<'_>, path: &Path) -> String {
+    if let Some(roots) = &ctx.roots
+        && let Ok(rest) = path.strip_prefix(&roots.home)
+    {
+        return format!("~/{}", rest.display());
+    }
+    path.display().to_string()
+}
+
+/// Whether Claude Code is detected on this machine — its own precedence resolves personal skills
+/// over project ones, which a cross-scope version split must disclose. A read-only probe.
+fn claude_code_detected(ctx: &Ctx<'_>) -> bool {
+    ctx.roots.as_ref().is_some_and(|r| {
+        topos_harness::registry::detected_harnesses(&r.home, r.cwd.as_deref())
+            .iter()
+            .any(|h| h.slug == "claude-code")
+    })
+}
+
+/// A version/commit as a note spells it.
+fn short(hex: &str) -> &str {
+    hex.get(..12).unwrap_or(hex)
+}
+
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::*;
@@ -452,11 +936,13 @@ mod tests {
     use crate::enroll;
     use crate::fs_seam::RealFs;
     use crate::ids::{RealClock, RealIds};
+    use crate::manifest::MANIFEST_FILE;
     use crate::plane::{InertFollow, InertPlane};
     use crate::sidecar::Layout;
     use topos_types::PERSISTED_SCHEMA_VERSION;
 
-    /// A self-cleaning temp `~/.topos` home (RAII).
+    /// A self-cleaning temp MACHINE home (RAII): `<home>/.topos` is the sidecar, `<home>` the
+    /// root the manifest walk and the placement probes resolve against.
     struct TempHome(PathBuf);
     impl TempHome {
         fn new() -> Self {
@@ -467,6 +953,65 @@ mod tests {
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)
         }
+
+        fn layout(&self) -> Layout {
+            Layout::new(&self.0.join(".topos"))
+        }
+
+        /// Write the GLOBAL manifest (`~/.topos/topos.toml`).
+        fn global(&self, text: &str) {
+            let dir = self.0.join(".topos");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(MANIFEST_FILE), text).unwrap();
+        }
+
+        /// A session for `<host>/<ws>`.
+        fn session(&self, host: &str, ws_id: &str, ws: &str, status: &str) {
+            crate::sessions::upsert_session(
+                &RealFs,
+                &self.layout(),
+                crate::sessions::Session {
+                    host: host.to_owned(),
+                    base_url: format!("https://{host}/api"),
+                    workspace_id: ws_id.to_owned(),
+                    workspace_name: ws.to_owned(),
+                    display_name: ws.to_uppercase(),
+                    session_id: format!("sn_{ws}"),
+                    credential: "c".to_owned(),
+                    status: status.to_owned(),
+                    logged_in_at: 1,
+                },
+            )
+            .unwrap();
+        }
+
+        /// Record one workspace's last delivery in the offline cache.
+        fn cache(
+            &self,
+            ws_id: &str,
+            host: &str,
+            ws: &str,
+            delivered: Vec<(String, DeliveredSkill)>,
+            declined: Vec<(String, String)>,
+        ) {
+            crate::sync_status::record(
+                &RealFs,
+                &self.layout(),
+                &[(
+                    ws_id.to_owned(),
+                    WorkspaceSync {
+                        host: Some(host.to_owned()),
+                        workspace_name: Some(ws.to_owned()),
+                        last_delivery_at: Some(1_700_000_000_000),
+                        last_report_at: None,
+                        staleness_window_ms: 0,
+                        delivered: delivered.into_iter().collect(),
+                        declined: declined.into_iter().collect(),
+                    },
+                )],
+            )
+            .unwrap();
+        }
     }
     impl Drop for TempHome {
         fn drop(&mut self) {
@@ -474,26 +1019,30 @@ mod tests {
         }
     }
 
-    fn snapshot(home: &TempHome) -> StatusData {
-        let fs = RealFs;
-        let harness = topos_harness::ClaudeCode::new(home.0.join(".claude"), &fs);
-        let ctx = Ctx {
-            fs: &fs,
-            ids: &RealIds,
-            clock: &RealClock,
-            device_id: String::new(),
-            layout: Layout::new(&home.0),
-            harness: &harness,
-            plane: &InertPlane,
-            follow: &InertFollow,
-            roots: None,
-        };
-        status_snapshot(&ctx).expect("status snapshot")
+    /// A cached FEED row (assigned to the person; never manifest-driven). `by = None` reads as the
+    /// person's own pick.
+    fn assigned(name: &str, by: Option<&str>) -> (String, DeliveredSkill) {
+        let tag = name.chars().next().unwrap_or('x');
+        (
+            format!("topos_{}", std::iter::repeat_n(tag, 32).collect::<String>()),
+            DeliveredSkill {
+                name: name.to_owned(),
+                review_required: false,
+                served_version: "d".repeat(64),
+                withdrawn: false,
+                via_channels: vec!["everyone".to_owned()],
+                via_manifest: false,
+                assigned_by: by.map(str::to_owned),
+                picked: by.is_none(),
+            },
+        )
     }
 
-    /// A snapshot with machine roots (the trust-rail walk needs a cwd) — `home.0` doubles as the
-    /// user home; the sidecar sits beside it.
-    fn snapshot_at(home: &TempHome, cwd: &std::path::Path) -> StatusData {
+    fn snapshot_at(home: &TempHome, cwd: &Path) -> StatusData {
+        run(home, cwd, None).expect("status snapshot")
+    }
+
+    fn run(home: &TempHome, cwd: &Path, bundle: Option<&str>) -> Result<StatusData, ClientError> {
         let fs = RealFs;
         let harness = topos_harness::ClaudeCode::new(home.0.join(".claude"), &fs);
         let ctx = Ctx {
@@ -501,7 +1050,7 @@ mod tests {
             ids: &RealIds,
             clock: &RealClock,
             device_id: String::new(),
-            layout: Layout::new(&home.0.join(".topos")),
+            layout: home.layout(),
             harness: &harness,
             plane: &InertPlane,
             follow: &InertFollow,
@@ -510,161 +1059,363 @@ mod tests {
                 cwd: Some(cwd.to_path_buf()),
             }),
         };
-        status_snapshot(&ctx).expect("status snapshot")
+        status_snapshot(&ctx, bundle)
     }
 
+    /// NO global file: the machine behaves exactly as if one feed row per connected workspace were
+    /// written — the cached assignments itemize, attributed, sourced to the feed itself.
     #[test]
-    fn the_trust_rail_resolves_local_manifests_and_sessions_offline() {
-        let home = TempHome::new();
-        let repo = home.0.join("repo");
-        std::fs::create_dir_all(repo.join("tools/my-skill")).unwrap();
-        std::fs::write(
-            repo.join(MANIFEST_FILE),
-            "exclude = [\"noisy\"]\n[skills]\n\"./tools/my-skill\" = \"*\"\n\"topos.sh/acme/deploy\" = \"*\"\n\"topos.example.com/eng/api\" = \"*\"\n",
-        )
-        .unwrap();
-        // One session: acme on topos.sh, PENDING. eng@topos.example.com has none.
-        let fs = RealFs;
-        let layout = Layout::new(&home.0.join(".topos"));
-        crate::sessions::upsert_session(
-            &fs,
-            &layout,
-            crate::sessions::Session {
-                host: "topos.sh".to_owned(),
-                base_url: "https://topos.sh/api".to_owned(),
-                workspace_id: "w_acme".to_owned(),
-                workspace_name: "acme".to_owned(),
-                display_name: "Acme".to_owned(),
-                session_id: "sn_1".to_owned(),
-                credential: "c".to_owned(),
-                status: crate::sessions::SESSION_PENDING.to_owned(),
-                logged_in_at: 1,
-            },
-        )
-        .unwrap();
-
-        let d = snapshot_at(&home, &repo);
-        // Sessions render with their non-active status.
-        assert_eq!(d.sessions.len(), 1);
-        assert_eq!(d.sessions[0].host, "topos.sh");
-        assert_eq!(d.sessions[0].session_status.as_deref(), Some("pending"));
-        // The table: three resolved lines + the EXCLUDE row, each with its one source + an
-        // honest state.
-        let by_name = |n: &str| d.items.iter().find(|i| i.name == n).unwrap();
-        let local = by_name("my-skill");
-        assert!(matches!(local.state, StatusItemState::Applied));
-        assert_eq!(local.scope, "project");
-        assert!(local.source.ends_with("topos.toml"), "{}", local.source);
-        // A workspace ref whose session is PENDING says so; one with NO session is the honest
-        // not-available line — phrased from local knowledge, nothing dialed.
-        assert!(matches!(
-            by_name("deploy").state,
-            StatusItemState::PendingSession
-        ));
-        assert!(matches!(
-            by_name("api").state,
-            StatusItemState::NotAvailable
-        ));
-        // The recorded exclude appears as its own row, attributed to the layer that wrote it.
-        let excluded = by_name("noisy");
-        assert!(matches!(excluded.state, StatusItemState::Excluded));
-        assert!(
-            excluded.source.ends_with("topos.toml"),
-            "{}",
-            excluded.source
-        );
-    }
-
-    #[test]
-    fn a_cached_delivery_reads_applied_as_of_the_last_sync_and_the_profile_is_itemized() {
+    fn the_implicit_recipe_itemizes_each_workspace_feed() {
         let home = TempHome::new();
         let cwd = home.0.join("plain");
         std::fs::create_dir_all(&cwd).unwrap();
-        let fs = RealFs;
-        let layout = Layout::new(&home.0.join(".topos"));
-        crate::sessions::upsert_session(
-            &fs,
-            &layout,
-            crate::sessions::Session {
-                host: "topos.sh".to_owned(),
-                base_url: "https://topos.sh/api".to_owned(),
-                workspace_id: "w_acme".to_owned(),
-                workspace_name: "acme".to_owned(),
-                display_name: "Acme".to_owned(),
-                session_id: "sn_1".to_owned(),
-                credential: "c".to_owned(),
-                status: crate::sessions::SESSION_ACTIVE.to_owned(),
-                logged_in_at: 1,
-            },
-        )
-        .unwrap();
-        // The offline cache records one profile-delivered skill (never applied on this machine:
-        // no sidecar dir) and one manifest-channel row (excluded from profile surfaces).
-        let mut delivered = std::collections::BTreeMap::new();
-        delivered.insert(
-            "topos_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
-            crate::sync_status::DeliveredSkill {
-                name: "deploy".to_owned(),
-                review_required: false,
-                served_version: "d".repeat(64),
-                withdrawn: false,
-                via_channels: vec!["everyone".to_owned()],
-                via_manifest: false,
-            },
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
         );
-        delivered.insert(
-            "topos_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
-            crate::sync_status::DeliveredSkill {
-                name: "chan-member".to_owned(),
-                review_required: false,
-                served_version: "e".repeat(64),
-                withdrawn: false,
-                via_channels: vec!["backend".to_owned()],
-                via_manifest: true,
-            },
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("deploy", Some("Dana")), assigned("notes", None)],
+            Vec::new(),
         );
-        crate::sync_status::record(
-            &fs,
-            &layout,
-            &[(
-                "w_acme".to_owned(),
-                crate::sync_status::WorkspaceSync {
-                    host: Some("topos.sh".to_owned()),
-                    workspace_name: Some("acme".to_owned()),
-                    last_delivery_at: Some(1_700_000_000_000),
-                    last_report_at: None,
-                    staleness_window_ms: 0,
-                    delivered,
-                },
-            )],
-        )
-        .unwrap();
 
         let d = snapshot_at(&home, &cwd);
-        // The person layer is ITEMIZED: the profile row appears with its source + via channel.
-        let row = d
+        let row = |n: &str| d.items.iter().find(|i| i.name == n).expect("a row");
+        assert_eq!(row("deploy").source, "the topos.sh/acme feed");
+        assert_eq!(row("deploy").scope, "person");
+        assert_eq!(row("deploy").reference, "topos.sh/acme/deploy");
+        assert_eq!(
+            row("deploy").attribution.as_deref(),
+            Some("assigned by Dana")
+        );
+        assert_eq!(row("notes").attribution.as_deref(), Some("picked by you"));
+        assert_eq!(row("deploy").via.as_deref(), Some("everyone"));
+        // Never applied here (no store): the honest not-applied-yet state, no false claim.
+        assert!(matches!(row("deploy").state, StatusItemState::Unknown));
+        assert_eq!(d.profile_skills, 2);
+        assert_eq!(d.awaiting_first_sync, Some(2));
+        // The implicit recipe adopts everything the workspace assigns; nothing to disclose.
+        assert_eq!(d.regimes.len(), 1);
+        assert_eq!(d.regimes[0].regime, "adopting all assigned");
+        assert!(d.notes.is_empty(), "{:?}", d.notes);
+    }
+
+    /// A global file is COMPLETE: with no feed row the assignments do NOT flow — only the file's
+    /// own rows deliver, and the withheld ones are disclosed loudly, with the way back.
+    #[test]
+    fn a_file_backed_plan_withholds_the_feed_and_says_so() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![
+                assigned("deploy", Some("Dana")),
+                assigned("notes", None),
+                assigned("triage", None),
+            ],
+            Vec::new(),
+        );
+        home.global("[bundles]\n\"topos.sh/acme/deploy\" = \"*\"\n");
+
+        let d = snapshot_at(&home, &cwd);
+        // The file's own row delivers, sourced to the file — the other assignments do not flow.
+        let deploy = d.items.iter().find(|i| i.name == "deploy").expect("a row");
+        assert!(deploy.source.ends_with("topos.toml"), "{}", deploy.source);
+        assert_eq!(deploy.attribution.as_deref(), Some("assigned by Dana"));
+        assert!(!d.items.iter().any(|i| i.name == "notes"));
+        assert!(!d.items.iter().any(|i| i.name == "triage"));
+        // The LOUD line names both counts and the exact way back.
+        let loud = d
+            .notes
+            .iter()
+            .find(|n| n.contains("not adopted here"))
+            .expect("the loud note");
+        assert!(loud.contains("global manifest adopts 1 bundles"), "{loud}");
+        assert!(loud.contains("2 assigned bundles"), "{loud}");
+        assert!(loud.contains("`topos add -g @acme`"), "{loud}");
+        // The regime says the same thing in one phrase.
+        assert_eq!(
+            d.regimes[0].regime,
+            "explicit: 1 bundles; 2 assigned not adopted here"
+        );
+    }
+
+    /// `"off"` is a statement like any other: it renders as its own row. An off switch for a
+    /// bundle nobody assigns any more is inert — that gets a note, never a silent line.
+    #[test]
+    fn off_rows_render_and_a_stale_one_is_disclosed() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("noisy", None), assigned("deploy", None)],
+            Vec::new(),
+        );
+        home.global(
+            "[bundles]\n\
+             \"topos.sh/acme\" = \"*\"\n\
+             \"topos.sh/acme/noisy\" = \"off\"\n\
+             \"topos.sh/acme/gone\" = \"off\"\n",
+        );
+
+        let d = snapshot_at(&home, &cwd);
+        let noisy = d
             .items
             .iter()
-            .find(|i| i.name == "deploy")
-            .expect("the profile layer itemizes");
-        assert_eq!(row.source, "your profile @ topos.sh/acme");
-        assert_eq!(row.via.as_deref(), Some("everyone"));
-        assert_eq!(row.scope, "person");
-        // Never applied here (no sidecar): the honest not-applied-yet state, no false claim.
-        assert!(matches!(row.state, StatusItemState::Unknown));
-        // The manifest-channel row is NOT a profile item (no manifest here asks for it).
-        assert!(!d.items.iter().any(|i| i.name == "chan-member"));
-        assert_eq!(d.profile_skills, 1);
-        assert_eq!(d.awaiting_first_sync, Some(1));
+            .find(|i| i.name == "noisy")
+            .expect("the off row");
+        assert!(matches!(noisy.state, StatusItemState::Off));
+        // The off bundle is withheld from the feed's itemization (one row, not two).
+        assert_eq!(d.items.iter().filter(|i| i.name == "noisy").count(), 1);
+        // The still-assigned bundle keeps flowing.
+        assert!(d.items.iter().any(|i| i.name == "deploy"));
+        // The stale switch is called out by reference; the live one needs no note.
+        assert!(
+            d.notes
+                .iter()
+                .any(|n| n == "off — not currently assigned: topos.sh/acme/gone"),
+            "{:?}",
+            d.notes
+        );
+        assert!(!d.notes.iter().any(|n| n.contains("acme/noisy")));
+        assert_eq!(d.regimes[0].regime, "adopting all assigned, 2 off");
+    }
+
+    /// A bare `"*"` row for a bundle the flowing feed already delivers is harmless — and inert.
+    #[test]
+    fn a_redundant_row_is_named_as_adding_nothing() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("deploy", None)],
+            Vec::new(),
+        );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n\"topos.sh/acme/deploy\" = \"*\"\n");
+
+        let d = snapshot_at(&home, &cwd);
+        assert!(
+            d.notes
+                .iter()
+                .any(|n| n == "topos.sh/acme/deploy adds nothing — the feed already delivers it"),
+            "{:?}",
+            d.notes
+        );
+        // Deduped by identity: the explicit row wins, the feed does not repeat it.
+        assert_eq!(d.items.iter().filter(|i| i.name == "deploy").count(), 1);
+    }
+
+    /// Declined on the web, delivered here anyway: the file outranks the person's own web choice,
+    /// so the disagreement is stated rather than left a mystery.
+    #[test]
+    fn a_declined_bundle_a_row_still_delivers_is_disclosed() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("deploy", None)],
+            vec![(
+                "topos_zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz".to_owned(),
+                "legacy".to_owned(),
+            )],
+        );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n\"topos.sh/acme/legacy\" = \"*\"\n");
+
+        let d = snapshot_at(&home, &cwd);
+        assert!(
+            d.notes
+                .iter()
+                .any(|n| n
+                    == "legacy: declined on the web, delivered here by your global manifest"),
+            "{:?}",
+            d.notes
+        );
+    }
+
+    /// The regime sentence per workspace phrases BOTH shapes from the same plan.
+    #[test]
+    fn regimes_phrase_the_adopting_and_the_explicit_shapes() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.session(
+            "topos.sh",
+            "w_beta",
+            "beta",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("deploy", None)],
+            Vec::new(),
+        );
+        home.cache(
+            "w_beta",
+            "topos.sh",
+            "beta",
+            vec![assigned("triage", None), assigned("notes", None)],
+            Vec::new(),
+        );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n\"topos.sh/beta/triage\" = \"*\"\n");
+
+        let d = snapshot_at(&home, &cwd);
+        let regime = |ws: &str| {
+            d.regimes
+                .iter()
+                .find(|r| r.workspace == ws)
+                .map(|r| r.regime.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(regime("acme"), "adopting all assigned");
+        assert_eq!(
+            regime("beta"),
+            "explicit: 1 bundles; 1 assigned not adopted here"
+        );
+    }
+
+    /// The NEAREST project manifest governs its subtree WHOLE — an ancestor's rows never blend in.
+    #[test]
+    fn only_the_nearest_project_manifest_governs_the_project_scope() {
+        let home = TempHome::new();
+        let repo = home.0.join("repo");
+        let nested = repo.join("services/api");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            repo.join(MANIFEST_FILE),
+            "[bundles]\n\"topos.sh/acme/repo-wide\" = \"*\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            nested.join(MANIFEST_FILE),
+            "[bundles]\n\"topos.sh/acme/api-only\" = \"*\"\n",
+        )
+        .unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+
+        let d = snapshot_at(&home, &nested);
+        let project: Vec<&StatusItem> = d.items.iter().filter(|i| i.scope == "project").collect();
+        assert_eq!(project.len(), 1, "{project:?}");
+        assert_eq!(project[0].name, "api-only");
+        assert!(
+            project[0].source.ends_with("services/api/topos.toml"),
+            "{}",
+            project[0].source
+        );
+        // Connected but never delivered here — the honest local answer, nothing dialed.
+        assert!(matches!(project[0].state, StatusItemState::Unknown));
+    }
+
+    /// `status <bundle>` names WHERE it comes from: a row spells its file and its key; a feed
+    /// delivery spells the feed and who aimed it. A token nothing delivers refuses uniformly.
+    #[test]
+    fn the_deep_answer_names_the_row_or_the_feed() {
+        let home = TempHome::new();
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        home.session(
+            "topos.sh",
+            "w_acme",
+            "acme",
+            crate::sessions::SESSION_ACTIVE,
+        );
+        home.cache(
+            "w_acme",
+            "topos.sh",
+            "acme",
+            vec![assigned("deploy", Some("Dana")), assigned("notes", None)],
+            Vec::new(),
+        );
+        home.global("[bundles]\n\"topos.sh/acme\" = \"*\"\n\"topos.sh/acme/deploy\" = \"*\"\n");
+
+        // The row-delivered bundle: the file + the spelled key.
+        let d = run(&home, &cwd, Some("deploy")).expect("the deep answer");
+        let detail = d.detail.expect("a detail");
+        assert_eq!(detail.name, "deploy");
+        assert!(
+            detail
+                .source_file
+                .as_deref()
+                .is_some_and(|f| f.ends_with("topos.toml")),
+            "{:?}",
+            detail.source_file
+        );
+        assert_eq!(detail.source_key.as_deref(), Some("topos.sh/acme/deploy"));
+        assert_eq!(detail.feed, None);
+        assert_eq!(detail.attribution.as_deref(), Some("assigned by Dana"));
+        // The table narrows to the answered bundle.
+        assert_eq!(d.items.len(), 1);
+        assert_eq!(d.items[0].name, "deploy");
+
+        // The feed-delivered one: the feed, not a file. The `@ws/name` spelling resolves too.
+        let d = run(&home, &cwd, Some("@acme/notes")).expect("the deep answer");
+        let detail = d.detail.expect("a detail");
+        assert_eq!(detail.name, "notes");
+        assert_eq!(detail.source_file, None);
+        assert_eq!(detail.source_key, None);
+        assert_eq!(detail.feed.as_deref(), Some("topos.sh/acme"));
+        assert_eq!(detail.attribution.as_deref(), Some("picked by you"));
+
+        // A token no scope delivers is the uniform not-found.
+        let err = run(&home, &cwd, Some("nowhere")).expect_err("an unknown token");
+        assert!(matches!(err, ClientError::TargetNotFound { .. }), "{err:?}");
     }
 
     /// Every file under `dir`, as `relative path → bytes` — the byte-identity oracle.
-    fn tree_bytes(dir: &PathBuf) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
-        fn walk(
-            root: &PathBuf,
-            dir: &PathBuf,
-            out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
-        ) {
+    fn tree_bytes(dir: &PathBuf) -> BTreeMap<PathBuf, Vec<u8>> {
+        fn walk(root: &PathBuf, dir: &PathBuf, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
             let Ok(entries) = std::fs::read_dir(dir) else {
                 return;
             };
@@ -678,7 +1429,7 @@ mod tests {
                 }
             }
         }
-        let mut out = std::collections::BTreeMap::new();
+        let mut out = BTreeMap::new();
         walk(dir, dir, &mut out);
         out
     }
@@ -730,7 +1481,7 @@ mod tests {
             follow: &InertFollow,
             roots: None,
         };
-        let data = status_snapshot(&ctx).expect("status snapshot");
+        let data = status_snapshot(&ctx, None).expect("status snapshot");
         assert!(data.sessions.is_empty());
         let _ = crate::ops::probe_detected(&home.0, None, &harness, &fs);
         assert_eq!(
@@ -751,12 +1502,16 @@ mod tests {
     #[test]
     fn a_fresh_install_reads_not_connected_with_nothing_delivered() {
         let home = TempHome::new();
-        let data = snapshot(&home);
+        let cwd = home.0.join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let data = snapshot_at(&home, &cwd);
         assert!(data.sessions.is_empty() && !data.signed_in);
         assert_eq!(data.server, None);
         assert_eq!(data.profile_skills, 0);
         assert_eq!(data.awaiting_first_sync, Some(0));
         assert_eq!(data.version, env!("CARGO_PKG_VERSION"));
         assert!(data.triggers.is_empty());
+        assert!(data.items.is_empty() && data.regimes.is_empty() && data.notes.is_empty());
+        assert!(data.detail.is_none());
     }
 }

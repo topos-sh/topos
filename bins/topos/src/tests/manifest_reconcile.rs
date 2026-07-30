@@ -1,8 +1,11 @@
-//! The MANIFEST reconcile over fakes (no HTTP): profile items land in the home dirs silently
-//! (login was the acceptance — no offer step), project `topos.toml` refs land INSIDE the checkout
-//! (self-ignoring, with state in the project's own store), nearest-wins routes a name to the project scope, a manifest pin
-//! overrides the served version, an ended session freezes-and-prints-once, and a profile drop
-//! cleans the person-scope placements while the sidecar keeps every byte.
+//! The RECONCILE over fakes (no HTTP): two UNBLENDED scopes, each converged on its own recipe.
+//!
+//! The implicit person recipe adopts every connected workspace's feed; a global FILE is complete
+//! (only its rows deliver, and it says so loudly when a workspace's feed is left out); an `"off"`
+//! row withholds exactly its bundle; an explicit row's pin beats the feed's and a set's version of
+//! the same identity; the NEAREST project file governs whole; the same bundle at both scopes lands
+//! twice with two stores; git rows move only on an explicit update; a dropped row cleans
+//! snapshot-first; and `--rebuild` absorbs before it drops.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -102,7 +105,7 @@ fn no_trigger() -> TriggerReport {
 }
 
 /// The rig: a fake $HOME (with `.claude/` so claude-code detects), a sidecar under `<home>/.topos`,
-/// and a work dir. The cwd each test chooses (a project checkout, or the bare home).
+/// and a work dir. The cwd each test chooses (a project checkout, or the bare work dir).
 struct Rig {
     home: Scratch,
     work: Scratch,
@@ -167,6 +170,20 @@ impl Rig {
         )
         .unwrap();
     }
+    /// Write the GLOBAL manifest (`~/.topos/topos.toml`) — the person scope's complete recipe.
+    fn write_global(&self, body: &str) {
+        let home = self.layout().home().to_path_buf();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join(crate::manifest::MANIFEST_FILE), body).unwrap();
+    }
+}
+
+/// A project checkout carrying `body` as its `topos.toml`.
+fn project(tag: &str, body: &str) -> Scratch {
+    let proj = Scratch::new(tag);
+    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), body).unwrap();
+    proj
 }
 
 /// A version whose bytes reproduce a REAL commit id (the engine re-verifies on apply).
@@ -211,6 +228,11 @@ fn mk_version(files: &[(&str, FileMode, &[u8])]) -> Version {
     }
 }
 
+/// A one-file skill bundle (the common fixture).
+fn one_file(body: &[u8]) -> Version {
+    mk_version(&[("SKILL.md", FileMode::Regular, body)])
+}
+
 /// Every file under a dir as sorted `(rel-path, bytes)` rows — the byte-destruction witness.
 fn snapshot_dir(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
     fn walk(base: &std::path::Path, d: &std::path::Path, out: &mut Vec<(String, Vec<u8>)>) {
@@ -230,6 +252,17 @@ fn snapshot_dir(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
     walk(dir, dir, &mut out);
     out.sort();
     out
+}
+
+/// How many versions a store holds — the snapshot-first witness (base + each absorbed draft).
+fn store_versions(layout: &Layout, skill_id: &str) -> usize {
+    let sid = crate::id::SkillId::parse(skill_id).unwrap();
+    let sp = layout.published(&sid);
+    topos_gitstore::Store::open(&sp.store)
+        .unwrap()
+        .list_versions()
+        .unwrap()
+        .len()
 }
 
 type CallLog = Arc<Mutex<Vec<String>>>;
@@ -259,6 +292,13 @@ impl FakePlane {
     fn serve(&self, snap: DeliverySnapshot) {
         *self.delivery.lock().unwrap() = Ok(snap);
     }
+    /// Serve exactly these bundles (the common case).
+    fn serves(&self, skills: Vec<DeliverySkill>) {
+        self.serve(DeliverySnapshot {
+            skills,
+            ..empty_snapshot()
+        });
+    }
     fn serve_not_found(&self) {
         *self.delivery.lock().unwrap() = Err("nf");
     }
@@ -286,6 +326,7 @@ fn empty_snapshot() -> DeliverySnapshot {
         notices: Vec::new(),
         staleness_window_ms: 604_800_000,
         link_status: LinkStatus::Active,
+        declined: Vec::new(),
     }
 }
 fn delivered(skill_id: &str, name: &str, v: &Version) -> DeliverySkill {
@@ -297,6 +338,8 @@ fn delivered(skill_id: &str, name: &str, v: &Version) -> DeliverySkill {
         generation: 1,
         bundle_digest: v.digest,
         via_channels: vec!["everyone".into()],
+        assigned_by: None,
+        picked: false,
     }
 }
 impl PlaneSource for FakePlane {
@@ -344,14 +387,11 @@ impl DeliverySource for FakePlane {
     }
 }
 
-/// The per-session directory fake: the catalog + channel indexes + a recording profile lane;
-/// everything else unreachable.
+/// The per-session directory fake: the catalog + channel indexes; everything else unreachable.
 #[derive(Clone)]
 struct FakeDirectory {
     skills: Vec<WireSkillIndexEntry>,
     channels: Vec<WireChannelEntry>,
-    calls: CallLog,
-    removal: crate::plane::ProfileRemoval,
     /// When set, the index reads fail (a transport fault) — the freeze suites flip it.
     unavailable: Arc<Mutex<bool>>,
 }
@@ -361,8 +401,6 @@ impl FakeDirectory {
         Self {
             skills,
             channels,
-            calls: Arc::new(Mutex::new(Vec::new())),
-            removal: crate::plane::ProfileRemoval::Removed,
             unavailable: Arc::new(Mutex::new(false)),
         }
     }
@@ -433,47 +471,6 @@ impl DirectorySource for FakeDirectory {
     fn ack_notices(&self, _ws: &str, _ids: &[String]) -> Result<(), ClientError> {
         unreachable!()
     }
-    fn profile_include_skill(
-        &self,
-        _ws: &str,
-        skill_id: &str,
-        pin: Option<&str>,
-    ) -> Result<(), ClientError> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(format!("include {skill_id} pin={}", pin.unwrap_or("*")));
-        Ok(())
-    }
-    fn profile_remove_skill(
-        &self,
-        _ws: &str,
-        skill_id: &str,
-    ) -> Result<crate::plane::ProfileRemoval, ClientError> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(format!("remove {skill_id}"));
-        Ok(self.removal)
-    }
-    fn profile_include_channel(&self, _ws: &str, channel: &str) -> Result<(), ClientError> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(format!("include-channel {channel}"));
-        Ok(())
-    }
-    fn profile_remove_channel(
-        &self,
-        _ws: &str,
-        channel: &str,
-    ) -> Result<crate::plane::ProfileRemoval, ClientError> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(format!("remove-channel {channel}"));
-        Ok(self.removal)
-    }
 }
 
 /// Write lanes the reconcile suites never exercise.
@@ -527,32 +524,41 @@ fn connect<'a>(
     }
 }
 
+/// The bare sweep (no forge lane — the background posture).
+fn sweep(ctx: &Ctx<'_>, plane: &FakePlane, dir: &FakeDirectory) -> ops::PullOutcome {
+    ops::manifest_update(
+        ctx,
+        &connect(plane, dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap()
+}
+
 // =================================================================================================
-// The tests.
+// The person scope: the implicit recipe, and the complete file.
 // =================================================================================================
 
 #[test]
-fn profile_items_install_silently_and_the_cache_records_the_session() {
-    let rig = Rig::new("profile");
+fn the_implicit_recipe_adopts_every_connected_feed() {
+    let rig = Rig::new("implicit");
     rig.seed_session();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
+    let v = one_file(b"# deploy\n");
     let plane = FakePlane::new(log.clone()).with_version("s_deploy", &v);
+    let mut ds = delivered("s_deploy", "deploy", &v);
+    ds.assigned_by = Some("Ada".into());
     plane.serve(DeliverySnapshot {
-        skills: vec![delivered("s_deploy", "deploy", &v)],
+        skills: vec![ds],
+        declined: vec![("s_old".into(), "retired".into())],
         ..empty_snapshot()
     });
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
+    let out = sweep(&ctx, &plane, &dir);
 
-    // Installed SILENTLY (no offer — login was the acceptance), into the HOME shared dir.
+    // No global file: the machine behaves exactly as if it held one feed row per connected
+    // workspace — installed silently (the login was the acceptance), into the home dirs.
     let row = out
         .data
         .skills
@@ -560,43 +566,207 @@ fn profile_items_install_silently_and_the_cache_records_the_session() {
         .find(|s| s.skill == "deploy")
         .unwrap();
     assert_eq!(row.action, PullAction::FastForwarded, "{:?}", out.warnings);
-    // claude-code is not shared-dir covered, so the person scope lands the NATIVE placement
-    // (the active adapter's skills root in this rig).
-    let placed = rig.work.0.join("skills/deploy/SKILL.md");
-    assert!(placed.exists(), "profile items land in the home-scope dirs");
-    // The applied report went out; the offline cache carries the session identity + name.
+    assert_eq!(row.scope.as_deref(), Some("person"));
+    assert!(rig.work.0.join("skills/deploy/SKILL.md").exists());
+    // The applied report went out; the offline cache carries the identity, the attribution, and
+    // the caller's declines.
     assert!(log.lock().unwrap().iter().any(|l| l == "report 1"));
     let status = sync_status::read(&rig.fs, &rig.layout()).unwrap();
     let ws = &status.workspaces[WS];
     assert_eq!(ws.host.as_deref(), Some(HOST));
     assert_eq!(ws.workspace_name.as_deref(), Some(WS_NAME));
     assert_eq!(ws.delivered["s_deploy"].name, "deploy");
+    assert_eq!(ws.delivered["s_deploy"].assigned_by.as_deref(), Some("Ada"));
+    assert!(!ws.delivered["s_deploy"].via_manifest);
+    assert_eq!(
+        ws.declined.get("s_old").map(String::as_str),
+        Some("retired")
+    );
+    // Nothing is loud: the implicit recipe adopts everything, so there is nothing to disclose.
+    assert!(
+        !out.warnings
+            .iter()
+            .any(|w| w.starts_with("GLOBAL_MANIFEST")),
+        "{:?}",
+        out.warnings
+    );
 }
+
+#[test]
+fn a_global_file_withholds_the_feed_and_says_so_loudly() {
+    let rig = Rig::new("filewithholds");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let deploy = one_file(b"# deploy\n");
+    let other = one_file(b"# other\n");
+    // The file names ONE bundle and no feed row — it is a complete recipe, so the rest of what the
+    // workspace assigns does not flow here.
+    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/other\" = \"*\"\n"));
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &deploy)
+        .with_version("s_other", &other);
+    plane.serves(vec![
+        delivered("s_deploy", "deploy", &deploy),
+        delivered("s_other", "other", &other),
+    ]);
+    let dir = FakeDirectory::new(
+        vec![
+            catalog_entry("s_deploy", "deploy", &deploy),
+            catalog_entry("s_other", "other", &other),
+        ],
+        Vec::new(),
+    );
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+
+    assert!(
+        rig.work.0.join("skills/other/SKILL.md").exists(),
+        "the file's own row delivers: {:?}",
+        out.warnings
+    );
+    assert!(
+        !rig.work.0.join("skills/deploy").exists(),
+        "no feed row, no feed"
+    );
+    let loud = out
+        .warnings
+        .iter()
+        .find(|w| w.starts_with("GLOBAL_MANIFEST"))
+        .expect("the loud line");
+    assert!(loud.contains(&format!("{HOST}/{WS_NAME}")), "{loud}");
+    assert!(loud.contains("no feed row"), "{loud}");
+    assert!(loud.contains("adopts 1 bundles"), "{loud}");
+    assert!(
+        loud.contains("1 assigned bundles are not adopted"),
+        "{loud}"
+    );
+    assert!(loud.contains(&format!("topos add -g @{WS_NAME}")), "{loud}");
+}
+
+#[test]
+fn an_off_row_withholds_exactly_its_bundle_from_a_flowing_feed() {
+    let rig = Rig::new("offrow");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let deploy = one_file(b"# deploy\n");
+    let noisy = one_file(b"# noisy\n");
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/noisy\" = \"off\"\n"
+    ));
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &deploy)
+        .with_version("s_noisy", &noisy);
+    plane.serves(vec![
+        delivered("s_deploy", "deploy", &deploy),
+        delivered("s_noisy", "noisy", &noisy),
+    ]);
+    let dir = FakeDirectory::new(
+        vec![
+            catalog_entry("s_deploy", "deploy", &deploy),
+            catalog_entry("s_noisy", "noisy", &noisy),
+        ],
+        Vec::new(),
+    );
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(
+        rig.work.0.join("skills/deploy/SKILL.md").exists(),
+        "the feed flows: {:?}",
+        out.warnings
+    );
+    assert!(
+        !rig.work.0.join("skills/noisy").exists(),
+        "the one switch is the one exception"
+    );
+    // A flowing feed is not a withheld one — no loud line here.
+    assert!(
+        !out.warnings
+            .iter()
+            .any(|w| w.starts_with("GLOBAL_MANIFEST")),
+        "{:?}",
+        out.warnings
+    );
+}
+
+#[test]
+fn an_explicit_pinned_row_beats_the_feeds_version() {
+    let rig = Rig::new("pinbeats");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let old = one_file(b"# v1\n");
+    let new = one_file(b"# v2\n");
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/deploy\" = \"{}\"\n",
+        topos_core::digest::to_hex(&old.id)
+    ));
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &old)
+        .with_version("s_deploy", &new);
+    plane.serves(vec![delivered("s_deploy", "deploy", &new)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &new)], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert_eq!(
+        std::fs::read_to_string(rig.work.0.join("skills/deploy/SKILL.md")).unwrap(),
+        "# v1\n",
+        "the row's pin lands, not the feed's current"
+    );
+    assert_eq!(
+        out.data
+            .skills
+            .iter()
+            .filter(|s| s.skill == "deploy")
+            .count(),
+        1,
+        "one identity, one delivery per scope"
+    );
+}
+
+#[test]
+fn a_declined_bundle_a_row_still_delivers_is_disclosed() {
+    let rig = Rig::new("declined");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"));
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serve(DeliverySnapshot {
+        skills: Vec::new(),
+        declined: vec![("s_deploy".into(), "deploy".into())],
+        ..empty_snapshot()
+    });
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(rig.work.0.join("skills/deploy/SKILL.md").exists());
+    let line = out
+        .warnings
+        .iter()
+        .find(|w| w.starts_with("DECLINED_OVERRIDE"))
+        .expect("the honest note");
+    assert!(line.contains("declined on the web"), "{line}");
+}
+
+// =================================================================================================
+// The project scope: nearest wins whole, and the two scopes never blend.
+// =================================================================================================
 
 #[test]
 fn a_project_manifest_lands_in_the_checkout_self_ignoring() {
     let rig = Rig::new("project");
     rig.seed_session();
-    let proj = Scratch::new("proj");
-    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
-    std::fs::write(
-        proj.0.join("topos.toml"),
-        format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
-    )
-    .unwrap();
+    let proj = project(
+        "proj",
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+    );
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
+    let v = one_file(b"# deploy\n");
     let plane = FakePlane::new(log).with_version("s_deploy", &v);
-    // The profile delivers NOTHING — the demand is the project manifest's.
+    // The feed delivers NOTHING — the demand is the project file's.
     let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
     let ctx = rig.ctx_at(Some(&proj.0));
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
+    let out = sweep(&ctx, &plane, &dir);
 
     let row = out
         .data
@@ -605,12 +775,12 @@ fn a_project_manifest_lands_in_the_checkout_self_ignoring() {
         .find(|s| s.skill == "deploy")
         .unwrap();
     assert_eq!(row.action, PullAction::FastForwarded, "{:?}", out.warnings);
-    // The bytes live INSIDE the checkout (claude-code's project dir), not the home-scope dirs.
+    assert_eq!(row.scope.as_deref(), Some(&*proj.0.display().to_string()));
+    // The bytes live INSIDE the checkout, not the home-scope dirs.
     let placed = proj.0.join(".claude/skills/deploy");
     assert!(placed.join("SKILL.md").exists());
     assert!(!rig.work.0.join("skills/deploy").exists());
-    // The placed dir SELF-IGNORES (the node_modules model): the exact sentinel at its root, and
-    // NOTHING written under `.git/` — the repository-bookkeeping era is over.
+    // The placed dir SELF-IGNORES (the node_modules model), and NOTHING under `.git/` was written.
     assert_eq!(
         std::fs::read(placed.join(".gitignore")).unwrap(),
         crate::scan::IGNORE_SENTINEL
@@ -622,8 +792,7 @@ fn a_project_manifest_lands_in_the_checkout_self_ignoring() {
             .is_none(),
         "nothing under .git/ was written"
     );
-    // The engine state lives in the PROJECT's own store, not the home sidecar — and the store
-    // ignores itself whole (venv-style).
+    // The engine state lives in the PROJECT's own store, and the store ignores itself whole.
     let sid = crate::id::SkillId::parse("s_deploy").unwrap();
     assert!(!rig.layout().skill_dir(&sid).exists());
     let playout =
@@ -633,14 +802,8 @@ fn a_project_manifest_lands_in_the_checkout_self_ignoring() {
         std::fs::read(proj.0.join(".topos/.gitignore")).unwrap(),
         b"*\n"
     );
-    // A second sweep is a clean no-op: the sentinel never reads as an edit, nothing re-swaps.
-    let out2 = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
+    // A second sweep is a clean no-op: the sentinel never reads as an edit.
+    let out2 = sweep(&ctx, &plane, &dir);
     assert!(out2.warnings.is_empty(), "{:?}", out2.warnings);
     let row2 = out2
         .data
@@ -652,52 +815,87 @@ fn a_project_manifest_lands_in_the_checkout_self_ignoring() {
 }
 
 #[test]
-fn the_same_bundle_at_both_scopes_keeps_independent_state() {
-    let rig = Rig::new("twoscope");
+fn the_nearest_project_file_governs_whole() {
+    let rig = Rig::new("nearest");
     rig.seed_session();
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
-    let plane = FakePlane::new(log).with_version("s_deploy", &v);
-    plane.serve(DeliverySnapshot {
-        skills: vec![delivered("s_deploy", "deploy", &v)],
-        ..empty_snapshot()
-    });
-    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
-
-    // Person scope first (swept OUTSIDE any project): the home store + the home-scope placement.
-    let ctx_home = rig.ctx_at(Some(&rig.work.0));
-    ops::manifest_update(
-        &ctx_home,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    let person_copy = rig.work.0.join("skills/deploy");
-    assert!(person_copy.join("SKILL.md").exists());
-
-    // The same bundle demanded by a PROJECT manifest: its own store, its own placement.
-    let proj = Scratch::new("proj-two");
-    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    let repo = project(
+        "proj-outer",
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/repo-wide\" = \"*\"\n"),
+    );
+    let nested = repo.0.join("services/api");
+    std::fs::create_dir_all(&nested).unwrap();
     std::fs::write(
-        proj.0.join("topos.toml"),
-        format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+        nested.join(crate::manifest::MANIFEST_FILE),
+        format!("[bundles]\n\"{HOST}/{WS_NAME}/api-only\" = \"*\"\n"),
     )
     .unwrap();
-    let ctx_proj = rig.ctx_at(Some(&proj.0));
-    let out = ops::manifest_update(
-        &ctx_proj,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let wide = one_file(b"# repo-wide\n");
+    let api = one_file(b"# api-only\n");
+    let plane = FakePlane::new(log)
+        .with_version("s_wide", &wide)
+        .with_version("s_api", &api);
+    let dir = FakeDirectory::new(
+        vec![
+            catalog_entry("s_wide", "repo-wide", &wide),
+            catalog_entry("s_api", "api-only", &api),
+        ],
+        Vec::new(),
+    );
+    let ctx = rig.ctx_at(Some(&nested));
+    let out = sweep(&ctx, &plane, &dir);
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
-    let project_copy = proj.0.join(".claude/skills/deploy");
-    assert!(project_copy.join("SKILL.md").exists());
+    assert!(
+        nested.join(".claude/skills/api-only/SKILL.md").exists(),
+        "the nearest file governs"
+    );
+    assert!(
+        !repo.0.join(".claude/skills/repo-wide").exists(),
+        "the ancestor's rows never blend in from below"
+    );
+    assert!(
+        !out.data.skills.iter().any(|s| s.skill == "repo-wide"),
+        "{:?}",
+        out.data.skills
+    );
+}
 
-    // TWO state trees: the home store and the project store each hold the bundle, and each map
-    // records ONLY its own scope's placements.
+#[test]
+fn the_same_bundle_at_both_scopes_lands_twice() {
+    let rig = Rig::new("unblended");
+    rig.seed_session();
+    let proj = project(
+        "proj-two",
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    // The feed delivers it too — no shadowing: each scope takes what its own recipe says.
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let ctx = rig.ctx_at(Some(&proj.0));
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+
+    let person_copy = rig.work.0.join("skills/deploy");
+    let project_copy = proj.0.join(".claude/skills/deploy");
+    assert!(person_copy.join("SKILL.md").exists(), "the feed's copy");
+    assert!(project_copy.join("SKILL.md").exists(), "the project's copy");
+    // TWO rows, one per scope label.
+    let mut scopes: Vec<&str> = out
+        .data
+        .skills
+        .iter()
+        .filter(|s| s.skill == "deploy")
+        .filter_map(|s| s.scope.as_deref())
+        .collect();
+    scopes.sort_unstable();
+    let proj_label = proj.0.display().to_string();
+    let mut want = vec!["person", proj_label.as_str()];
+    want.sort_unstable();
+    assert_eq!(scopes, want, "{:?}", out.data.skills);
+    // TWO state trees, each recording only its own scope's placements.
     let sid = crate::id::SkillId::parse("s_deploy").unwrap();
     let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0).unwrap();
     assert!(rig.layout().skill_dir(&sid).exists());
@@ -710,7 +908,7 @@ fn the_same_bundle_at_both_scopes_keeps_independent_state() {
             .placements
             .iter()
             .all(|p| !std::path::Path::new(p).starts_with(&proj.0)),
-        "home maps record only home placements: {:?}",
+        "{:?}",
         home_map.placements
     );
     let proj_map = crate::doc::read_map(&rig.fs, &playout.published(&sid).map)
@@ -721,25 +919,17 @@ fn the_same_bundle_at_both_scopes_keeps_independent_state() {
             .placements
             .iter()
             .all(|p| std::path::Path::new(p).starts_with(&proj.0)),
-        "project maps record only that project's placements: {:?}",
+        "{:?}",
         proj_map.placements
     );
 
-    // A draft in the PROJECT copy stays that scope's business: the person copy is untouched by
-    // the project sweep, and the project draft survives it (drafts are per bundle+scope).
+    // A draft in the PROJECT copy stays that scope's business.
     std::fs::write(project_copy.join("SKILL.md"), b"# project edit\n").unwrap();
-    let out = ops::manifest_update(
-        &ctx_proj,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
+    let out = sweep(&ctx, &plane, &dir);
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     assert_eq!(
         std::fs::read(project_copy.join("SKILL.md")).unwrap(),
-        b"# project edit\n",
-        "the project draft survives its sweep"
+        b"# project edit\n"
     );
     assert_eq!(
         std::fs::read(person_copy.join("SKILL.md")).unwrap(),
@@ -748,199 +938,495 @@ fn the_same_bundle_at_both_scopes_keeps_independent_state() {
     );
 }
 
-/// Reproduce the OLD blended layout (one home map carrying a project placement), then prove the
-/// handover: the home row is dropped, the home state dir retires (project-only), and the project
-/// pass ADOPTS the byte-identical copy in place — no second copy, no byte moved.
 #[test]
-fn legacy_home_rows_hand_over_to_the_project_store() {
-    let rig = Rig::new("handover");
+fn a_channel_expands_and_an_explicit_row_of_the_same_identity_wins() {
+    let rig = Rig::new("channel");
+    let old = one_file(b"# v1\n");
+    let new = one_file(b"# v2\n");
+    let other = one_file(b"# other\n");
     rig.seed_session();
-    let proj = Scratch::new("proj-ho");
-    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
-    std::fs::write(
-        proj.0.join("topos.toml"),
-        format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
-    )
-    .unwrap();
+    let proj = project(
+        "proj-ch",
+        &format!(
+            "[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n\
+             \"{HOST}/{WS_NAME}/deploy\" = \"{}\"\n",
+            topos_core::digest::to_hex(&old.id)
+        ),
+    );
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
-    let plane = FakePlane::new(log).with_version("s_deploy", &v);
-    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &old)
+        .with_version("s_deploy", &new)
+        .with_version("s_other", &other);
+    let dir = FakeDirectory::new(
+        vec![
+            catalog_entry("s_deploy", "deploy", &new),
+            catalog_entry("s_other", "other", &other),
+        ],
+        vec![WireChannelEntry {
+            name: "backend".into(),
+            mode: "open".into(),
+            builtin: false,
+            included: true,
+            skills: vec![
+                WireChannelSkill {
+                    skill_id: "s_deploy".into(),
+                    name: "deploy".into(),
+                },
+                WireChannelSkill {
+                    skill_id: "s_other".into(),
+                    name: "other".into(),
+                },
+            ],
+        }],
+    );
     let ctx = rig.ctx_at(Some(&proj.0));
-    ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-
-    // Transplant the project store's state into the HOME store — exactly the old world's shape:
-    // a home map whose placement rows point INTO the checkout.
-    let sid = crate::id::SkillId::parse("s_deploy").unwrap();
-    let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0).unwrap();
-    std::fs::create_dir_all(rig.layout().skills_dir()).unwrap();
-    std::fs::rename(playout.skill_dir(&sid), rig.layout().skill_dir(&sid)).unwrap();
-    std::fs::remove_dir_all(proj.0.join(".topos")).unwrap();
-
-    let placed = proj.0.join(".claude/skills/deploy");
-    let before = std::fs::read(placed.join("SKILL.md")).unwrap();
-
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
+    let out = sweep(&ctx, &plane, &dir);
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
-    // The home store retired the project-only entry; the project store owns the scope again.
-    assert!(!rig.layout().skill_dir(&sid).exists());
-    let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0).unwrap();
-    assert!(playout.skill_dir(&sid).exists());
-    // The SAME dir was adopted in place — byte-identical, and no namespaced sibling appeared.
-    assert_eq!(std::fs::read(placed.join("SKILL.md")).unwrap(), before);
-    assert!(!proj.0.join(".claude/skills/deploy-eng").exists());
-    let map = crate::doc::read_map(&rig.fs, &playout.published(&sid).map)
-        .unwrap()
-        .unwrap();
-    assert_eq!(map.placements, vec![placed.display().to_string()]);
-}
-
-/// The handover with a DIVERGENT legacy occupant: the edited dir is never clobbered (byte-for-byte
-/// intact), the delivery lands NAMESPACED beside it, and the sweep says so.
-#[test]
-fn a_divergent_legacy_occupant_is_never_clobbered_and_lands_namespaced() {
-    let rig = Rig::new("handover-edit");
-    rig.seed_session();
-    let proj = Scratch::new("proj-hoe");
-    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
-    std::fs::write(
-        proj.0.join("topos.toml"),
-        format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
-    )
-    .unwrap();
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
-    let plane = FakePlane::new(log).with_version("s_deploy", &v);
-    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
-    let ctx = rig.ctx_at(Some(&proj.0));
-    ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-
-    let sid = crate::id::SkillId::parse("s_deploy").unwrap();
-    let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0).unwrap();
-    std::fs::create_dir_all(rig.layout().skills_dir()).unwrap();
-    std::fs::rename(playout.skill_dir(&sid), rig.layout().skill_dir(&sid)).unwrap();
-    std::fs::remove_dir_all(proj.0.join(".topos")).unwrap();
-
-    // The legacy occupant carries LOCAL EDITS — not the served bytes.
-    let placed = proj.0.join(".claude/skills/deploy");
-    std::fs::write(placed.join("SKILL.md"), b"# my edits\n").unwrap();
-    let edited = snapshot_dir(&placed);
-
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    // The edited dir is byte-for-byte intact — never clobbered, never adopted.
-    assert_eq!(snapshot_dir(&placed), edited);
-    // The delivery landed beside it, namespaced by the workspace slug, and the sweep disclosed it.
-    let beside = proj.0.join(".claude/skills/deploy-eng");
-    assert!(
-        beside.join("SKILL.md").exists(),
-        "the delivery lands namespaced: {:?}",
-        out.warnings
+    // The channel delivered its other member …
+    assert!(proj.0.join(".claude/skills/other/SKILL.md").exists());
+    // … and the explicit row's PIN decided the shared identity, not the channel's current.
+    assert_eq!(
+        std::fs::read_to_string(proj.0.join(".claude/skills/deploy/SKILL.md")).unwrap(),
+        "# v1\n"
     );
-    assert!(
-        out.warnings.iter().any(|w| w.starts_with("NAMESPACED")),
-        "{:?}",
-        out.warnings
-    );
-}
-
-#[test]
-fn nearest_wins_routes_a_profile_name_into_the_project() {
-    let rig = Rig::new("nearest");
-    rig.seed_session();
-    let proj = Scratch::new("proj-nw");
-    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
-    std::fs::write(
-        proj.0.join("topos.toml"),
-        format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
-    )
-    .unwrap();
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
-    let plane = FakePlane::new(log).with_version("s_deploy", &v);
-    // The profile ALSO delivers the same name — the nearer project line wins the scope.
-    plane.serve(DeliverySnapshot {
-        skills: vec![delivered("s_deploy", "deploy", &v)],
-        ..empty_snapshot()
-    });
-    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
-    let ctx = rig.ctx_at(Some(&proj.0));
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
     assert_eq!(
         out.data
             .skills
             .iter()
             .filter(|s| s.skill == "deploy")
             .count(),
-        1,
-        "one name, one reconcile"
+        1
     );
-    assert!(proj.0.join(".claude/skills/deploy/SKILL.md").exists());
-    assert!(!rig.work.0.join("skills/deploy").exists());
 }
 
 #[test]
-fn a_manifest_pin_overrides_the_served_version() {
-    let rig = Rig::new("pin");
-    rig.seed_session();
-    let proj = Scratch::new("proj-pin");
-    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
-    let old = mk_version(&[("SKILL.md", FileMode::Regular, b"# v1\n" as &[u8])]);
-    let new = mk_version(&[("SKILL.md", FileMode::Regular, b"# v2\n" as &[u8])]);
-    std::fs::write(
-        proj.0.join("topos.toml"),
-        format!(
-            "[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"{}\"\n",
-            topos_core::digest::to_hex(&old.id)
-        ),
-    )
-    .unwrap();
+fn a_workspace_row_without_a_session_is_an_honest_local_line() {
+    let rig = Rig::new("nosession");
+    // NO session at all — the file references a workspace this install never logged into.
+    let proj = project(
+        "proj-ns",
+        "[bundles]\n\"elsewhere.dev/ops/deploy\" = \"*\"\n",
+    );
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let plane = FakePlane::new(log)
-        .with_version("s_deploy", &old)
-        .with_version("s_deploy", &new);
-    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &new)], Vec::new());
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
     let ctx = rig.ctx_at(Some(&proj.0));
+    let out = sweep(&ctx, &plane, &dir);
+    let w = out
+        .warnings
+        .iter()
+        .find(|w| w.starts_with("NOT_AVAILABLE"))
+        .expect("the honest line");
+    assert!(w.contains("topos login elsewhere.dev/ops"), "{w}");
+}
+
+#[test]
+fn an_unparsable_manifest_freezes_its_scope() {
+    let rig = Rig::new("badfile");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    let placed = rig.work.0.join("skills/deploy");
+    assert!(placed.exists());
+
+    // A typo the grammar refuses: the scope delivers nothing AND cleans nothing — the failure mode
+    // of a mistake must be keeping bytes.
+    rig.write_global("[bundles]\n\"not a reference\" = \"*\"\n");
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.starts_with("MANIFEST_INVALID")),
+        "{:?}",
+        out.warnings
+    );
+    assert!(placed.exists(), "a frozen scope never cleans");
+}
+
+// =================================================================================================
+// The forge arms.
+// =================================================================================================
+
+/// Build a real `.tar.gz` with a `TOP/` prefix over `(repo-relative path, bytes)` entries.
+fn build_repo_targz(top: &str, entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut tar = tar::Builder::new(gz);
+    for (name, bytes) in entries {
+        let mut h = tar::Header::new_ustar();
+        h.set_entry_type(tar::EntryType::Regular);
+        h.set_size(bytes.len() as u64);
+        h.set_mode(0o644);
+        h.set_mtime(0);
+        tar.append_data(&mut h, format!("{top}/{name}"), *bytes)
+            .unwrap();
+    }
+    tar.into_inner().unwrap().finish().unwrap()
+}
+
+/// The forge fake: ONE archive at a time, and a fetch counter (the "never dialed" witness).
+#[derive(Clone)]
+struct FakeGit {
+    archive: Arc<Mutex<Vec<u8>>>,
+    fetches: Arc<Mutex<u32>>,
+}
+impl FakeGit {
+    fn new(targz: Vec<u8>) -> Self {
+        Self {
+            archive: Arc::new(Mutex::new(targz)),
+            fetches: Arc::new(Mutex::new(0)),
+        }
+    }
+    fn serve(&self, targz: Vec<u8>) {
+        *self.archive.lock().unwrap() = targz;
+    }
+    fn fetches(&self) -> u32 {
+        *self.fetches.lock().unwrap()
+    }
+}
+impl crate::git_source::GitTarballSource for FakeGit {
+    fn fetch(&self, _spec: &crate::source::RemoteSpec) -> Result<Vec<u8>, ClientError> {
+        *self.fetches.lock().unwrap() += 1;
+        Ok(self.archive.lock().unwrap().clone())
+    }
+}
+
+#[test]
+fn a_star_repo_row_moves_only_on_an_explicit_update() {
+    let rig = Rig::new("repo");
+    // No session: a pure forge recipe.
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let git = FakeGit::new(build_repo_targz(
+        "o-r-aaaaaaaaaaaa1",
+        &[
+            ("skills/alpha/SKILL.md", b"# alpha v1\n"),
+            ("skills/beta/SKILL.md", b"# beta v1\n"),
+        ],
+    ));
+
+    // The first EXPLICIT update installs every skill the repo holds.
     let out = ops::manifest_update(
         &ctx,
         &connect(&plane, &dir),
-        None,
+        Some(&git as &dyn crate::git_source::GitTarballSource),
         &ops::ManifestUpdateOpts::default(),
     )
     .unwrap();
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
-    let placed = std::fs::read_to_string(proj.0.join(".claude/skills/deploy/SKILL.md")).unwrap();
-    assert_eq!(placed, "# v1\n", "the pin's bytes land, not current's");
+    let alpha = rig.home.0.join(".claude/skills/alpha/SKILL.md");
+    let beta = rig.home.0.join(".claude/skills/beta/SKILL.md");
+    assert!(alpha.exists() && beta.exists(), "{:?}", out.data.skills);
+    let after_install = git.fetches();
+    assert_eq!(after_install, 1, "one fetch per repo per sweep");
+
+    // The BACKGROUND sweep passes no forge lane: tracked members converge in place, and the forge
+    // is never dialed — a session start must never depend on github.
+    git.serve(build_repo_targz(
+        "o-r-bbbbbbbbbbbb2",
+        &[
+            ("skills/alpha/SKILL.md", b"# alpha v2\n"),
+            ("skills/beta/SKILL.md", b"# beta v1\n"),
+            ("skills/gamma/SKILL.md", b"# gamma v1\n"),
+        ],
+    ));
+    let quiet = sweep(&ctx, &plane, &dir);
+    assert_eq!(git.fetches(), after_install, "the quiet sweep never dials");
+    assert_eq!(
+        std::fs::read_to_string(&alpha).unwrap(),
+        "# alpha v1\n",
+        "no forge lane, no move"
+    );
+    assert!(
+        quiet
+            .data
+            .skills
+            .iter()
+            .any(|s| s.skill == "alpha" && s.action == PullAction::UpToDate),
+        "{:?}",
+        quiet.data.skills
+    );
+
+    // The EXPLICIT update moves it — and says exactly what moved.
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        Some(&git as &dyn crate::git_source::GitTarballSource),
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    let line = out
+        .warnings
+        .iter()
+        .find(|w| w.starts_with("GIT_UPDATED"))
+        .unwrap_or_else(|| panic!("the moved-source line: {:?}", out.warnings));
+    assert!(line.contains("github.com/o/r"), "{line}");
+    assert!(
+        line.contains("aaaaaaaaaaaa"),
+        "names the old commit: {line}"
+    );
+    assert!(
+        line.contains("bbbbbbbbbbbb"),
+        "names the new commit: {line}"
+    );
+    assert!(line.contains("+gamma"), "names the new member: {line}");
+    assert!(line.contains("~alpha"), "names the carried member: {line}");
+    assert_eq!(
+        std::fs::read_to_string(&alpha).unwrap(),
+        "# alpha v2\n",
+        "the explicit update lands the new bytes"
+    );
+    assert!(rig.home.0.join(".claude/skills/gamma/SKILL.md").exists());
 }
+
+#[test]
+fn an_untracked_repo_row_says_it_needs_the_network() {
+    let rig = Rig::new("repo-offline");
+    rig.write_global("[bundles]\n\"github.com/o/r\" = \"*\"\n");
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let plane = FakePlane::new(log);
+    let dir = FakeDirectory::new(Vec::new(), Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.starts_with("NOT_INSTALLED") && w.contains("network required")),
+        "{:?}",
+        out.warnings
+    );
+}
+
+// =================================================================================================
+// Cleaning.
+// =================================================================================================
+
+#[test]
+fn a_dropped_feed_row_cleans_the_person_placements_snapshot_first() {
+    let rig = Rig::new("feeddrop");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    rig.write_global(&format!("[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n"));
+    sweep(&ctx, &plane, &dir);
+    let placed = rig.work.0.join("skills/deploy");
+    assert!(placed.join("SKILL.md").exists());
+    let before = store_versions(&rig.layout(), "s_deploy");
+
+    // An edit rides along, then the feed row goes: the edit is ABSORBED before the dir is removed.
+    std::fs::write(placed.join("SKILL.md"), b"# my edit\n").unwrap();
+    rig.write_global("[bundles]\n");
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(
+        out.data
+            .skills
+            .iter()
+            .any(|s| s.skill == "deploy" && s.action == PullAction::Withdrawn),
+        "{:?}",
+        out.data.skills
+    );
+    assert!(!placed.exists(), "the person-scope copy is retired");
+    assert!(
+        store_versions(&rig.layout(), "s_deploy") > before,
+        "the edit was snapshotted into the store first"
+    );
+    let sid = crate::id::SkillId::parse("s_deploy").unwrap();
+    assert!(
+        rig.layout().skill_dir(&sid).exists(),
+        "every sidecar byte stays"
+    );
+
+    // Idempotent: the sweep after has nothing left to retire.
+    let out2 = sweep(&ctx, &plane, &dir);
+    assert!(
+        !out2
+            .data
+            .skills
+            .iter()
+            .any(|s| s.action == PullAction::Withdrawn),
+        "{:?}",
+        out2.data.skills
+    );
+}
+
+#[test]
+fn a_new_off_row_cleans_its_bundles_placements_and_keeps_the_bytes() {
+    let rig = Rig::new("offclean");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# noisy\n");
+    let plane = FakePlane::new(log).with_version("s_noisy", &v);
+    plane.serves(vec![delivered("s_noisy", "noisy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_noisy", "noisy", &v)], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    let placed = rig.work.0.join("skills/noisy");
+    assert!(placed.exists());
+
+    rig.write_global(&format!(
+        "[bundles]\n\"{HOST}/{WS_NAME}\" = \"*\"\n\"{HOST}/{WS_NAME}/noisy\" = \"off\"\n"
+    ));
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(!placed.exists(), "the switch retires the copy");
+    let sid = crate::id::SkillId::parse("s_noisy").unwrap();
+    assert!(
+        rig.layout().skill_dir(&sid).exists(),
+        "an off switch keeps the bytes: {:?}",
+        out.warnings
+    );
+}
+
+#[test]
+fn a_dropped_project_row_cleans_inside_the_checkout() {
+    let rig = Rig::new("projdrop");
+    rig.seed_session();
+    let proj = project(
+        "proj-drop",
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let ctx = rig.ctx_at(Some(&proj.0));
+    sweep(&ctx, &plane, &dir);
+    let placed = proj.0.join(".claude/skills/deploy");
+    assert!(placed.exists());
+
+    std::fs::write(proj.0.join(crate::manifest::MANIFEST_FILE), "[bundles]\n").unwrap();
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(
+        !placed.exists(),
+        "the dropped row retires the in-checkout copy: {:?}",
+        out.warnings
+    );
+    // The project's own store still holds the bundle's bytes.
+    let sid = crate::id::SkillId::parse("s_deploy").unwrap();
+    let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0).unwrap();
+    assert!(playout.skill_dir(&sid).exists());
+}
+
+#[test]
+fn an_offline_sweep_freezes_and_never_cleans() {
+    let rig = Rig::new("offline");
+    rig.seed_session();
+    let proj = project(
+        "proj-off",
+        &format!("[bundles]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n"),
+    );
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    let dir = FakeDirectory::new(
+        vec![catalog_entry("s_deploy", "deploy", &v)],
+        vec![WireChannelEntry {
+            name: "backend".into(),
+            mode: "open".into(),
+            builtin: false,
+            included: true,
+            skills: vec![WireChannelSkill {
+                skill_id: "s_deploy".into(),
+                name: "deploy".into(),
+            }],
+        }],
+    );
+    let ctx = rig.ctx_at(Some(&proj.0));
+    sweep(&ctx, &plane, &dir);
+    let placed = proj.0.join(".claude/skills/deploy");
+    assert!(placed.exists());
+
+    // The whole plane is down (the session-start hook's world): NOTHING may be deleted.
+    plane.serve_unreachable();
+    dir.set_unavailable(true);
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(placed.exists(), "an offline sweep freezes, never cleans");
+    assert!(
+        !out.data
+            .skills
+            .iter()
+            .any(|s| s.action == PullAction::Withdrawn),
+        "{:?}",
+        out.data.skills
+    );
+
+    // Back online with the index still failing: the unknowable member set stays frozen.
+    plane.serve(empty_snapshot());
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(
+        placed.exists(),
+        "a transient index failure freezes the members: {:?}",
+        out.warnings
+    );
+
+    // Fully back: the member is still delivered.
+    dir.set_unavailable(false);
+    let out = sweep(&ctx, &plane, &dir);
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert!(placed.exists());
+}
+
+// =================================================================================================
+// `--rebuild`.
+// =================================================================================================
+
+#[test]
+fn rebuild_absorbs_the_edit_before_it_re_projects() {
+    let rig = Rig::new("rebuild");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(vec![delivered("s_deploy", "deploy", &v)]);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let ctx = rig.ctx_at(Some(&rig.work.0));
+    sweep(&ctx, &plane, &dir);
+    let placed = rig.work.0.join("skills/deploy");
+    assert!(placed.join("SKILL.md").exists());
+    let before = store_versions(&rig.layout(), "s_deploy");
+
+    // A local edit, plus a stray file the served version never had.
+    std::fs::write(placed.join("SKILL.md"), b"# hand-edited\n").unwrap();
+    std::fs::write(placed.join("stray.md"), b"junk\n").unwrap();
+
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts {
+            rebuild: true,
+            ..ops::ManifestUpdateOpts::default()
+        },
+    )
+    .unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    // ABSORBED first: the edit is in the store, so nothing was lost to the repair.
+    assert!(
+        store_versions(&rig.layout(), "s_deploy") > before,
+        "the edit was snapshotted before the dir was dropped"
+    );
+    // Then RE-PROJECTED, pristine: the served bytes, and no stray file.
+    assert_eq!(
+        snapshot_dir(&placed),
+        vec![("SKILL.md".to_owned(), b"# deploy\n".to_vec())],
+        "the copy is re-materialized from the store"
+    );
+}
+
+// =================================================================================================
+// The session-level facts: the ended freeze, and the quiet hook's staleness line.
+// =================================================================================================
 
 #[test]
 fn an_ended_session_freezes_and_prints_once() {
@@ -951,13 +1437,7 @@ fn an_ended_session_freezes_and_prints_once() {
     plane.serve_not_found();
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
+    let out = sweep(&ctx, &plane, &dir);
     assert!(
         out.warnings.iter().any(|w| w.starts_with("SESSION_ENDED")),
         "{:?}",
@@ -967,23 +1447,9 @@ fn an_ended_session_freezes_and_prints_once() {
     let all = sessions::read_sessions(&rig.fs, &rig.layout()).unwrap();
     assert_eq!(all.sessions[0].status, SESSION_ENDED);
     // The second run skips the ended session — the line printed once.
-    let out2 = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
+    let out2 = sweep(&ctx, &plane, &dir);
     assert!(out2.warnings.is_empty(), "{:?}", out2.warnings);
 }
-
-// -------------------------------------------------------------------------------------------------
-// The quiet hook's OTHER fact: no-fresh-delivery-AND-stale (whichever of the three faults caused
-// it — the line names the real one). Unlike the freeze line it is conditional on
-// the freshness cache, which is keyed by workspace ID — while the line a person reads must name the
-// workspace the way they know it. Both halves are asserted together below (the ID and the NAME
-// differ in this rig on purpose: an id-only or name-only carrier fails one assertion or the other).
-// -------------------------------------------------------------------------------------------------
 
 /// The rig's fixed wall clock, as the millis the freshness cache stamps.
 fn rig_now(rig: &Rig) -> i64 {
@@ -1002,13 +1468,7 @@ fn an_unreachable_and_stale_workspace_warns_by_name() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
     // One good sweep stamps the freshness row — under the workspace ID, with the served window.
-    ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
+    sweep(&ctx, &plane, &dir);
     let status = sync_status::read(&rig.fs, &rig.layout()).unwrap();
     assert_eq!(status.workspaces[WS].last_delivery_at, Some(rig_now(&rig)));
     assert_eq!(status.workspaces[WS].staleness_window_ms, 604_800_000);
@@ -1019,13 +1479,7 @@ fn an_unreachable_and_stale_workspace_warns_by_name() {
 
     // Now the server is gone.
     plane.serve_unreachable();
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
+    let out = sweep(&ctx, &plane, &dir);
     assert_eq!(out.unreachable.len(), 1);
     assert_eq!(out.unreachable[0].workspace_id, WS);
     assert_eq!(out.unreachable[0].workspace_name, WS_NAME);
@@ -1056,25 +1510,14 @@ fn an_answering_server_never_gets_blamed_on_the_network() {
     let plane = FakePlane::new(log);
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let sweep = || {
-        ops::manifest_update(
-            &ctx,
-            &connect(&plane, &dir),
-            None,
-            &ops::ManifestUpdateOpts::default(),
-        )
-        .unwrap()
-    };
     // One good sweep stamps the freshness row the staleness check reads.
-    sweep();
+    sweep(&ctx, &plane, &dir);
     let stale_now = rig_now(&rig) + 8 * DAY_MS;
 
     // The plane ANSWERED with a failure status. The nudge is just as true — but the network is fine.
     plane.serve_unavailable();
-    let out = sweep();
+    let out = sweep(&ctx, &plane, &dir);
     assert_eq!(out.unreachable.len(), 1);
-    assert_eq!(out.unreachable[0].workspace_id, WS);
-    assert_eq!(out.unreachable[0].workspace_name, WS_NAME);
     assert!(
         out.warnings
             .iter()
@@ -1089,13 +1532,9 @@ fn an_answering_server_never_gets_blamed_on_the_network() {
         vec![unavailable_line.clone()]
     );
 
-    // The OTHER half of the same variant: the answer got cut off part-way. Nothing here says the
-    // server failed — so the clause must be true without claiming it did.
+    // The OTHER half of the same variant: the answer got cut off part-way.
     plane.serve_truncated();
-    let out = sweep();
-    assert_eq!(out.unreachable.len(), 1);
-    assert_eq!(out.unreachable[0].workspace_id, WS);
-    assert_eq!(out.unreachable[0].workspace_name, WS_NAME);
+    let out = sweep(&ctx, &plane, &dir);
     assert_eq!(
         ops::quiet_hook_lines(&rig.fs, &rig.layout(), stale_now, &out),
         vec![unavailable_line],
@@ -1105,10 +1544,7 @@ fn an_answering_server_never_gets_blamed_on_the_network() {
     // The plane ANSWERED unreadably. Pointing a person at their network here sends them the wrong
     // way entirely — the signal is about the bytes.
     plane.serve_malformed();
-    let out = sweep();
-    assert_eq!(out.unreachable.len(), 1);
-    assert_eq!(out.unreachable[0].workspace_id, WS);
-    assert_eq!(out.unreachable[0].workspace_name, WS_NAME);
+    let out = sweep(&ctx, &plane, &dir);
     assert!(
         out.warnings.iter().any(|w| w.starts_with("WIRE_INVALID")),
         "the MALFORMED arm ran, not the transport one: {:?}",
@@ -1140,14 +1576,8 @@ fn a_never_delivered_workspace_stays_silent_while_unreachable() {
     let ctx = rig.ctx_at(Some(&rig.work.0));
 
     // Unreachable from the very first sweep: nothing was ever delivered, so there is no freshness
-    // row — and nothing to be stale FROM. Warning here would train people to ignore the line.
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
+    // row — and nothing to be stale FROM.
+    let out = sweep(&ctx, &plane, &dir);
     assert_eq!(out.unreachable.len(), 1);
     assert!(
         ops::quiet_hook_lines(&rig.fs, &rig.layout(), i64::MAX, &out).is_empty(),
@@ -1167,13 +1597,7 @@ fn a_zero_staleness_window_never_warns() {
     });
     let dir = FakeDirectory::new(Vec::new(), Vec::new());
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
+    sweep(&ctx, &plane, &dir);
     assert_eq!(
         sync_status::read(&rig.fs, &rig.layout())
             .unwrap()
@@ -1183,13 +1607,7 @@ fn a_zero_staleness_window_never_warns() {
     );
 
     plane.serve_unreachable();
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
+    let out = sweep(&ctx, &plane, &dir);
     assert_eq!(out.unreachable.len(), 1);
     assert!(
         ops::quiet_hook_lines(&rig.fs, &rig.layout(), i64::MAX, &out).is_empty(),
@@ -1197,929 +1615,62 @@ fn a_zero_staleness_window_never_warns() {
     );
 }
 
-#[test]
-fn a_profile_drop_cleans_the_home_placements_and_keeps_the_sidecar() {
-    let rig = Rig::new("drop");
-    rig.seed_session();
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
-    let plane = FakePlane::new(log).with_version("s_deploy", &v);
-    plane.serve(DeliverySnapshot {
-        skills: vec![delivered("s_deploy", "deploy", &v)],
-        ..empty_snapshot()
-    });
-    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
-    let ctx = rig.ctx_at(Some(&rig.work.0));
-    ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    let placed = rig.work.0.join("skills/deploy");
-    assert!(placed.exists());
-
-    // The profile stops delivering it (removed on the web, or the entitlement ended).
-    plane.serve(empty_snapshot());
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    let row = out
-        .data
-        .skills
-        .iter()
-        .find(|s| s.skill == "deploy")
-        .unwrap();
-    assert_eq!(row.action, PullAction::Withdrawn);
-    assert!(!placed.exists(), "the person-scope copy is cleaned");
-    // Every sidecar byte stays (the store keeps the version; nothing is lost).
-    let sid = crate::id::SkillId::parse("s_deploy").unwrap();
-    assert!(rig.layout().skill_dir(&sid).exists());
-    // A re-delivery reinstalls (the never-received reset).
-    plane.serve(DeliverySnapshot {
-        skills: vec![delivered("s_deploy", "deploy", &v)],
-        ..empty_snapshot()
-    });
-    let out3 = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    let row3 = out3
-        .data
-        .skills
-        .iter()
-        .find(|s| s.skill == "deploy")
-        .unwrap();
-    assert_eq!(
-        row3.action,
-        PullAction::FastForwarded,
-        "{:?}",
-        out3.warnings
-    );
-    assert!(placed.exists(), "re-delivery reinstalls");
-}
-
-#[test]
-fn a_channel_reference_expands_against_the_session() {
-    let rig = Rig::new("channel");
-    rig.seed_session();
-    let proj = Scratch::new("proj-ch");
-    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
-    std::fs::write(
-        proj.0.join("topos.toml"),
-        format!("[channels]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n"),
-    )
-    .unwrap();
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
-    let plane = FakePlane::new(log).with_version("s_deploy", &v);
-    let dir = FakeDirectory::new(
-        vec![catalog_entry("s_deploy", "deploy", &v)],
-        vec![WireChannelEntry {
-            name: "backend".into(),
-            mode: "open".into(),
-            builtin: false,
-            included: true,
-            skills: vec![WireChannelSkill {
-                skill_id: "s_deploy".into(),
-                name: "deploy".into(),
-            }],
-        }],
-    );
-    let ctx = rig.ctx_at(Some(&proj.0));
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
-    assert!(proj.0.join(".claude/skills/deploy/SKILL.md").exists());
-}
-
-#[test]
-fn a_workspace_ref_without_a_session_is_an_honest_local_line() {
-    let rig = Rig::new("nosession");
-    // NO session at all — the manifest references a workspace this install never logged into.
-    let proj = Scratch::new("proj-ns");
-    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
-    std::fs::write(
-        proj.0.join("topos.toml"),
-        "[skills]\n\"elsewhere.dev/ops/deploy\" = \"*\"\n",
-    )
-    .unwrap();
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let plane = FakePlane::new(log);
-    let dir = FakeDirectory::new(Vec::new(), Vec::new());
-    let ctx = rig.ctx_at(Some(&proj.0));
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    let w = out
-        .warnings
-        .iter()
-        .find(|w| w.starts_with("NOT_AVAILABLE"))
-        .expect("the honest line");
-    assert!(w.contains("topos login elsewhere.dev/ops"), "{w}");
-    assert!(w.contains("topos.toml"), "names the manifest: {w}");
-}
-
-#[test]
-fn add_reference_records_the_manifest_line_and_delivers_now() {
-    let rig = Rig::new("addref");
-    rig.seed_session();
-    let proj = Scratch::new("proj-add");
-    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
-    let plane = FakePlane::new(log).with_version("s_deploy", &v);
-    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
-    let ctx = rig.ctx_at(Some(&proj.0));
-    let data = ops::add_reference(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        "acme.test/eng/deploy",
-        false,
-    )
-    .unwrap();
-    // The receipt names the manifest FIRST, the canonical stored reference, and the inverse.
-    let manifest = proj.0.join("topos.toml");
-    assert_eq!(
-        data.manifest.as_deref(),
-        Some(&*manifest.display().to_string())
-    );
-    assert_eq!(data.reference.as_deref(), Some("acme.test/eng/deploy"));
-    assert_eq!(data.undo, vec!["topos", "remove", "acme.test/eng/deploy"]);
-    let m = crate::manifest::file::read_manifest(&rig.fs, &manifest)
-        .unwrap()
-        .unwrap();
-    assert_eq!(m.skills[0].reference, "acme.test/eng/deploy");
-    // `add` chooses; the same sweep delivers — bytes are in the checkout NOW.
-    assert!(proj.0.join(".claude/skills/deploy/SKILL.md").exists());
-
-    // A name in NO connected catalog refuses without an existence claim — ONE template, never
-    // the context sentence nested inside the fixed uniform-miss wrapper.
-    let err =
-        ops::add_reference(&ctx, &connect(&plane, &dir), None, "@eng/nonesuch", false).unwrap_err();
-    assert_eq!(err.code(), "NOT_FOUND");
-    assert!(
-        err.to_string()
-            .contains("not visible with your current access"),
-        "{err}"
-    );
-    assert!(
-        !err.to_string().contains("was not found, or is not visible"),
-        "the two miss templates must never nest: {err}"
-    );
-    // A workspace this installation is not logged into names the login, from local knowledge.
-    let err =
-        ops::add_reference(&ctx, &connect(&plane, &dir), None, "@ops/deploy", false).unwrap_err();
-    assert!(err.to_string().contains("topos login ops"), "{err}");
-}
-
-#[test]
-fn add_reference_global_edits_the_server_profile() {
-    let rig = Rig::new("addg");
-    rig.seed_session();
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
-    let plane = FakePlane::new(log).with_version("s_deploy", &v);
-    plane.serve(DeliverySnapshot {
-        skills: vec![delivered("s_deploy", "deploy", &v)],
-        ..empty_snapshot()
-    });
-    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
-    let ctx = rig.ctx_at(Some(&rig.work.0));
-    // A BARE catalog name resolves against the connected workspaces (unique match).
-    let data = ops::add_reference(&ctx, &connect(&plane, &dir), None, "deploy", true).unwrap();
-    assert_eq!(
-        data.manifest.as_deref(),
-        Some("your profile @ acme.test/eng")
-    );
-    assert_eq!(
-        data.undo,
-        vec!["topos", "remove", "-g", "acme.test/eng/deploy"]
-    );
-    assert!(
-        dir.calls
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|c| c == "include s_deploy pin=*"),
-        "{:?}",
-        dir.calls.lock().unwrap()
-    );
-}
-
-#[test]
-fn remove_reference_global_names_how_the_removal_settled() {
-    let rig = Rig::new("rmg");
-    rig.seed_session();
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
-    let plane = FakePlane::new(log).with_version("s_deploy", &v);
-    let mut dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
-    dir.removal = crate::plane::ProfileRemoval::Excluded;
-    let ctx = rig.ctx_at(Some(&rig.work.0));
-    let out =
-        ops::remove_reference_global(&ctx, &connect(&plane, &dir), "acme.test/eng/deploy").unwrap();
-    assert!(matches!(
-        out.items[0].kind,
-        topos_types::results::RemoveKind::ManifestExcluded
-    ));
-    assert!(
-        out.items[0]
-            .note
-            .as_deref()
-            .is_some_and(|n| n.contains("exclude line")),
-        "{:?}",
-        out.items[0].note
-    );
-    assert_eq!(out.undo, vec!["topos", "add", "-g", "acme.test/eng/deploy"]);
-}
-
-#[test]
-fn publish_transfer_rewrites_the_path_line_to_the_governed_reference() {
-    let rig = Rig::new("transfer");
-    let proj = Scratch::new("proj-tr");
-    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
-    std::fs::write(
-        proj.0.join("topos.toml"),
-        "[skills]\n\"./tools/my-skill\" = \"*\"\n",
-    )
-    .unwrap();
-    let ctx = rig.ctx_at(Some(&proj.0));
-    let skill_dir = proj.0.join("tools/my-skill");
-    std::fs::create_dir_all(&skill_dir).unwrap();
-    // A DIFFERENT dir sharing the basename must never be rewritten (match is by resolved path).
-    let decoy = Scratch::new("decoy-tr");
-    let miss =
-        ops::rewrite_to_governed(&ctx, "my-skill", HOST, WS_NAME, &[decoy.0.join("my-skill")])
-            .unwrap();
-    assert!(miss.is_none(), "a same-name foreign dir never matches");
-    let dirs = vec![skill_dir];
-    let rw = ops::rewrite_to_governed(&ctx, "my-skill", HOST, WS_NAME, &dirs)
-        .unwrap()
-        .expect("the path line is rewritten");
-    assert_eq!(rw.canonical, format!("{HOST}/{WS_NAME}/my-skill"));
-    assert_eq!(rw.from, "./tools/my-skill");
-    let m = crate::manifest::file::read_manifest(&rig.fs, &proj.0.join("topos.toml"))
-        .unwrap()
-        .unwrap();
-    assert_eq!(m.skills.len(), 1);
-    assert_eq!(m.skills[0].reference, format!("{HOST}/{WS_NAME}/my-skill"));
-    // A second publish finds no path line — the transfer is one-shot.
-    assert!(
-        ops::rewrite_to_governed(&ctx, "my-skill", HOST, WS_NAME, &dirs)
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[test]
-fn publish_transfer_keeps_an_existing_governed_pin() {
-    let rig = Rig::new("transfer-pin");
-    let proj = Scratch::new("proj-pin");
-    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
-    let pin = "c".repeat(64);
-    std::fs::write(
-        proj.0.join("topos.toml"),
-        format!(
-            "[skills]\n\"./tools/my-skill\" = \"*\"\n\"{HOST}/{WS_NAME}/my-skill\" = \"{pin}\"\n"
-        ),
-    )
-    .unwrap();
-    let ctx = rig.ctx_at(Some(&proj.0));
-    let skill_dir = proj.0.join("tools/my-skill");
-    std::fs::create_dir_all(&skill_dir).unwrap();
-    let rw = ops::rewrite_to_governed(&ctx, "my-skill", HOST, WS_NAME, &[skill_dir])
-        .unwrap()
-        .expect("the path line is removed");
-    assert_eq!(rw.from, "./tools/my-skill");
-    let m = crate::manifest::file::read_manifest(&rig.fs, &proj.0.join("topos.toml"))
-        .unwrap()
-        .unwrap();
-    assert_eq!(m.skills.len(), 1, "the governed entry survives alone");
-    assert_eq!(m.skills[0].reference, format!("{HOST}/{WS_NAME}/my-skill"));
-    assert_eq!(
-        m.skills[0].pin.as_deref(),
-        Some(pin.as_str()),
-        "the standing pin is never clobbered"
-    );
-}
-
-#[test]
-fn a_remote_add_gets_the_governed_copy_suggestion_from_the_catalog_upstream_fields() {
-    use crate::source::{GitHost, RemoteSpec};
-
-    let rig = Rig::new("dedup");
-    rig.seed_session();
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let plane = FakePlane::new(log);
-    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
-    // The catalog's one entry carries the ADDITIVE upstream provenance the suggestion matches on.
-    let mut entry = catalog_entry("s_deploy", "deploy", &v);
-    entry.upstream_host = Some("github.com".into());
-    entry.upstream_repo = Some("owner/dedup".into());
-    entry.upstream_path = Some("skills/deploy".into());
-    let dir = FakeDirectory::new(vec![entry], Vec::new());
-    let ctx = rig.ctx_at(None);
-    let spec = |subdir: Option<&str>, repo: &str| RemoteSpec {
-        host: GitHost::GitHub,
-        owner: "owner".into(),
-        repo: repo.into(),
-        git_ref: None,
-        subdir: subdir.map(str::to_owned),
-    };
-
-    // The exact subdir → the path-exact suggestion, spelled as the paste-ready workspace ref.
-    let got = ops::governed_copy_suggestion(
-        &ctx,
-        &connect(&plane, &dir),
-        &spec(Some("skills/deploy"), "dedup"),
-        None,
-    )
-    .expect("a governed copy is suggested");
-    assert_eq!(got.workspace, WS_NAME);
-    assert_eq!(got.name, "deploy");
-    assert_eq!(got.reference, "acme.test/eng/deploy");
-    assert!(got.same_path);
-
-    // The same repository at another path still gets named — honestly, as a sibling.
-    let sibling =
-        ops::governed_copy_suggestion(&ctx, &connect(&plane, &dir), &spec(None, "dedup"), None)
-            .expect("the same-repo sibling is suggested");
-    assert!(!sibling.same_path);
-    assert_eq!(sibling.reference, "acme.test/eng/deploy");
-
-    // A bare `add owner/repo` whose import RESOLVED to the governed subdir (a --skill pick or a
-    // multi-skill repo) is path-exact by the recorded origin, not the spec's spelling.
-    let resolved = ops::governed_copy_suggestion(
-        &ctx,
-        &connect(&plane, &dir),
-        &spec(None, "dedup"),
-        Some("skills/deploy"),
-    )
-    .expect("the resolved-subdir import matches path-exactly");
-    assert!(resolved.same_path);
-
-    // A repo nobody governs answers nothing (the import proceeds with no notice).
-    assert!(
-        ops::governed_copy_suggestion(&ctx, &connect(&plane, &dir), &spec(None, "other"), None)
-            .is_none()
-    );
-
-    // An ENDED session's catalog is never consulted — with the one session ended, no suggestion.
-    sessions::set_session_status(&rig.fs, &rig.layout(), HOST, WS, SESSION_ENDED).unwrap();
-    assert!(
-        ops::governed_copy_suggestion(
-            &ctx,
-            &connect(&plane, &dir),
-            &spec(Some("skills/deploy"), "dedup"),
-            None
-        )
-        .is_none()
-    );
-}
-
 // =================================================================================================
-// Excludes vs channel expansion + the channel-member freeze suites.
+// Targeted updates.
 // =================================================================================================
 
-/// A project with one channel line delivering `deploy`, plus the fakes serving it.
-fn channel_project(tag: &str) -> (Rig, Scratch, FakePlane, FakeDirectory, Version) {
-    let rig = Rig::new(tag);
+#[test]
+fn a_targeted_update_narrows_the_sweep_and_names_a_miss() {
+    let rig = Rig::new("targeted");
     rig.seed_session();
-    let proj = Scratch::new(&format!("proj-{tag}"));
-    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
-    std::fs::write(
-        proj.0.join("topos.toml"),
-        format!("[channels]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n"),
-    )
-    .unwrap();
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
-    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    let deploy = one_file(b"# deploy\n");
+    let other = one_file(b"# other\n");
+    let plane = FakePlane::new(log)
+        .with_version("s_deploy", &deploy)
+        .with_version("s_other", &other);
+    plane.serves(vec![
+        delivered("s_deploy", "deploy", &deploy),
+        delivered("s_other", "other", &other),
+    ]);
     let dir = FakeDirectory::new(
-        vec![catalog_entry("s_deploy", "deploy", &v)],
-        vec![WireChannelEntry {
-            name: "backend".into(),
-            mode: "open".into(),
-            builtin: false,
-            included: true,
-            skills: vec![WireChannelSkill {
-                skill_id: "s_deploy".into(),
-                name: "deploy".into(),
-            }],
-        }],
-    );
-    (rig, proj, plane, dir, v)
-}
-
-#[test]
-fn an_exclude_line_withholds_a_channel_member() {
-    let (rig, proj, plane, dir, _v) = channel_project("chexcl");
-    // The manifest carries the channel AND an exclude of one member — the exclude wins.
-    std::fs::write(
-        proj.0.join("topos.toml"),
-        format!(
-            "exclude = [\"deploy\"]\n[channels]\n\"{HOST}/{WS_NAME}/channels/backend\" = \"*\"\n"
-        ),
-    )
-    .unwrap();
-    let ctx = rig.ctx_at(Some(&proj.0));
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
-    assert!(
-        !proj.0.join(".claude/skills/deploy").exists(),
-        "an excluded member never lands, however the channel expands"
-    );
-    assert!(
-        !out.data.skills.iter().any(|s| s.skill == "deploy"),
-        "no row for a withheld name"
-    );
-}
-
-#[test]
-fn remove_of_a_channel_member_records_an_exclude_and_the_sweep_round_trips() {
-    let (rig, proj, plane, dir, _v) = channel_project("chrm");
-    let ctx = rig.ctx_at(Some(&proj.0));
-    ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    let placed = proj.0.join(".claude/skills/deploy");
-    assert!(placed.exists());
-
-    // `remove deploy` claims the manifest arm (the channel provides it — the recorded
-    // `via_manifest` cache row is the offline fact): an exclude line, never a tracked-delete.
-    let provided = ops::profile_provided_names(&ctx);
-    assert!(
-        provided
-            .iter()
-            .any(|p| p.name == "deploy" && p.via_manifest),
-        "the cache records the channel-member provenance"
-    );
-    let out = ops::remove_from_manifests(&ctx, &["deploy".to_owned()], &provided)
-        .unwrap()
-        .expect("the manifest arm claims a channel-delivered name");
-    assert!(matches!(
-        out.items[0].kind,
-        topos_types::results::RemoveKind::ManifestExcluded
-    ));
-    assert!(
-        out.items[0]
-            .note
-            .as_deref()
-            .is_some_and(|n| n.contains("channel 'backend'")),
-        "{:?}",
-        out.items[0].note
-    );
-    let m = crate::manifest::file::read_manifest(&rig.fs, &proj.0.join("topos.toml"))
-        .unwrap()
-        .unwrap();
-    assert_eq!(m.exclude.len(), 1);
-
-    // The next sweep withholds the member AND cleans its in-checkout dir — no re-install loop.
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
-    assert!(!placed.exists(), "the exclusion retires the placement");
-
-    // Adding it back lifts the exclude; the same sweep re-delivers.
-    let mut data = topos_types::results::AddData {
-        skill_id: String::new(),
-        name: String::new(),
-        version_id: "0".repeat(64),
-        bundle_digest: "0".repeat(64),
-        tracked: true,
-        harness: None,
-        harness_slug: None,
-        currency: None,
-        triggers: Vec::new(),
-        origin: None,
-        manifest: None,
-        reference: None,
-        undo: Vec::new(),
-        governed_copy: None,
-    };
-    ops::note_added(
-        &ctx,
-        &mut data,
-        &format!("{HOST}/{WS_NAME}/deploy"),
-        None,
-        false,
-    )
-    .unwrap();
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
-    assert!(
-        placed.exists(),
-        "add-back lifts the exclude and re-delivers"
-    );
-}
-
-#[test]
-fn an_offline_sweep_freezes_channel_delivered_project_skills() {
-    let (rig, proj, plane, dir, _v) = channel_project("choffline");
-    let ctx = rig.ctx_at(Some(&proj.0));
-    ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    let placed = proj.0.join(".claude/skills/deploy");
-    assert!(placed.exists());
-
-    // The whole plane is down (the session-start hook's world): NOTHING may be deleted.
-    plane.serve_unreachable();
-    dir.set_unavailable(true);
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    assert!(placed.exists(), "an offline sweep freezes, never cleans");
-    assert!(
-        !out.data
-            .skills
-            .iter()
-            .any(|s| s.action == PullAction::Withdrawn),
-        "{:?}",
-        out.data.skills
-    );
-    // Back online: the member is still delivered (the cache rows survived the outage too).
-    plane.serve(empty_snapshot());
-    dir.set_unavailable(false);
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
-    assert!(placed.exists());
-}
-
-#[test]
-fn an_ended_session_freezes_channel_delivered_project_skills() {
-    let (rig, proj, plane, dir, _v) = channel_project("chended");
-    let ctx = rig.ctx_at(Some(&proj.0));
-    ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    let placed = proj.0.join(".claude/skills/deploy");
-    assert!(placed.exists());
-
-    // The session ends server-side (uniform 404): the freeze covers the channel's members.
-    plane.serve_not_found();
-    ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    assert!(
-        placed.exists(),
-        "an ended session freezes the member in place"
-    );
-    // And the NEXT sweep (the session now locally ended) still leaves it alone.
-    ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    assert!(placed.exists());
-}
-
-#[test]
-fn publish_to_takes_an_existing_channel_never_a_silent_mint() {
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let plane = FakePlane::new(log);
-    let dir = FakeDirectory::new(
+        vec![
+            catalog_entry("s_deploy", "deploy", &deploy),
+            catalog_entry("s_other", "other", &other),
+        ],
         Vec::new(),
-        vec![WireChannelEntry {
-            name: "backend".into(),
-            mode: "open".into(),
-            builtin: false,
-            included: true,
-            skills: Vec::new(),
-        }],
     );
-    let mk_lane = || ops::WriteLane {
-        host: HOST.into(),
-        workspace_name: WS_NAME.into(),
-        workspace_id: WS.into(),
-        base_url: format!("https://{HOST}/api"),
-        transports: ops::SessionTransports {
-            plane: Box::new(plane.clone()),
-            directory: Box::new(dir.clone()),
-            contribute: Box::new(NoContribute),
-            governance: Box::new(NoGovernance),
-        },
-    };
-    let lane = mk_lane();
-    // An existing channel passes; no `--to` passes trivially.
-    ops::check_channel_exists(&*lane.transports.directory, &lane, Some("backend")).unwrap();
-    ops::check_channel_exists(&*lane.transports.directory, &lane, None).unwrap();
-    // A nonexistent channel refuses typed, naming the create path — NEVER a silent mint.
-    let err =
-        ops::check_channel_exists(&*lane.transports.directory, &lane, Some("acme")).unwrap_err();
-    assert_eq!(err.code(), "NOT_FOUND", "{err}");
-    assert!(
-        err.to_string().contains("create 'acme' on the web"),
-        "{err}"
-    );
-    assert!(err.to_string().contains("nothing was published"), "{err}");
-    // The value equal to the WORKSPACE slug gets the pointed fix.
-    let err =
-        ops::check_channel_exists(&*lane.transports.directory, &lane, Some(WS_NAME)).unwrap_err();
-    assert_eq!(err.code(), "INVALID_ARGUMENT", "{err}");
-    assert!(
-        err.to_string()
-            .contains("names the workspace, not a channel"),
-        "{err}"
-    );
-    // An unreadable index refuses retryable rather than risk a silent server-side create.
-    dir.set_unavailable(true);
-    let err =
-        ops::check_channel_exists(&*lane.transports.directory, &lane, Some("backend")).unwrap_err();
-    assert_eq!(err.code(), "PLANE_ERROR", "{err}");
-}
-
-#[test]
-fn an_unreadable_catalog_answers_retryable_never_a_false_miss() {
-    // A transient catalog-read failure must NOT race into "not in any connected workspace's
-    // catalog" — the deterministic answer is a retryable transport error naming the unread
-    // catalogs, for `add` and `remove -g` alike.
-    let rig = Rig::new("flaky-read");
-    rig.seed_session();
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let plane = FakePlane::new(log);
-    let dir = FakeDirectory::new(Vec::new(), Vec::new());
-    dir.set_unavailable(true);
     let ctx = rig.ctx_at(Some(&rig.work.0));
-    let err = ops::add_reference(&ctx, &connect(&plane, &dir), None, "deploy", false).unwrap_err();
-    assert_eq!(err.code(), "PLANE_ERROR", "{err}");
-    assert_eq!(
-        err.outcome(),
-        topos_types::TerminalOutcome::RetryableFailure
-    );
-    assert!(err.to_string().contains("could not be read"), "{err}");
-    let err = ops::remove_reference_global(&ctx, &connect(&plane, &dir), "deploy").unwrap_err();
-    assert_eq!(err.code(), "PLANE_ERROR", "{err}");
-    // Reachable again: the genuine miss keeps the single-template NOT_FOUND.
-    dir.set_unavailable(false);
-    let err = ops::add_reference(&ctx, &connect(&plane, &dir), None, "deploy", false).unwrap_err();
-    assert_eq!(err.code(), "NOT_FOUND", "{err}");
-}
-
-#[test]
-fn a_transient_channel_index_failure_never_deletes() {
-    let (rig, proj, plane, dir, _v) = channel_project("chflaky");
-    let ctx = rig.ctx_at(Some(&proj.0));
-    ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    let placed = proj.0.join(".claude/skills/deploy");
-    assert!(placed.exists());
-
-    // Delivery answers fine but the channel index read fails (a transient 500).
-    plane.serve(empty_snapshot());
-    dir.set_unavailable(true);
     let out = ops::manifest_update(
         &ctx,
         &connect(&plane, &dir),
         None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    assert!(
-        placed.exists(),
-        "a transient index failure freezes the members: {:?}",
-        out.warnings
-    );
-}
-
-#[test]
-fn a_broader_exclude_never_suppresses_a_nearer_channel_member() {
-    // Nearest wins per NAME: a PERSONAL-manifest exclude (the broadest local layer) must not
-    // withhold a member a NEARER project channel delivers — the project's demand wins whole.
-    let (rig, proj, plane, dir, _v) = channel_project("chnear");
-    std::fs::create_dir_all(rig.layout().home()).unwrap();
-    std::fs::write(
-        rig.layout().home().join("topos.toml"),
-        "exclude = [\"deploy\"]\n",
-    )
-    .unwrap();
-    let ctx = rig.ctx_at(Some(&proj.0));
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
+        &ops::ManifestUpdateOpts {
+            targets: vec!["deploy".to_owned()],
+            ..ops::ManifestUpdateOpts::default()
+        },
     )
     .unwrap();
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert!(rig.work.0.join("skills/deploy/SKILL.md").exists());
     assert!(
-        proj.0.join(".claude/skills/deploy/SKILL.md").exists(),
-        "the nearer project channel's member is delivered; the broader exclude is shadowed"
+        !rig.work.0.join("skills/other").exists(),
+        "a targeted update touches only what was named"
     );
-}
 
-#[test]
-fn a_dropped_personal_line_cleans_the_written_home_placement() {
-    // A DIRECT personal-manifest reference delivers to the home scope; removing the line must
-    // retire the placement topos WROTE (snapshot-first, sidecar kept) — not leave it forever.
-    let rig = Rig::new("perso-drop");
-    rig.seed_session();
-    std::fs::create_dir_all(rig.layout().home()).unwrap();
-    std::fs::write(
-        rig.layout().home().join("topos.toml"),
-        format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
-    )
-    .unwrap();
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
-    let plane = FakePlane::new(log).with_version("s_deploy", &v);
-    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
-    let ctx = rig.ctx_at(Some(&rig.work.0));
-    ops::manifest_update(
+    // A target nothing answers refuses typed, naming the way back.
+    let refused = ops::manifest_update(
         &ctx,
         &connect(&plane, &dir),
         None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    let placed = rig.work.0.join("skills/deploy");
-    assert!(placed.exists(), "the personal line delivered to home scope");
-
-    // Drop the line; the next sweep cleans the WRITTEN placement and keeps the sidecar.
-    std::fs::write(rig.layout().home().join("topos.toml"), "").unwrap();
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    assert!(
-        out.data
-            .skills
-            .iter()
-            .any(|s| s.skill == "deploy" && s.action == PullAction::Withdrawn),
-        "{:?}",
-        out.data.skills
+        &ops::ManifestUpdateOpts {
+            targets: vec!["nonesuch".to_owned()],
+            ..ops::ManifestUpdateOpts::default()
+        },
     );
-    assert!(!placed.exists(), "the written home placement is retired");
-    let sid = crate::id::SkillId::parse("s_deploy").unwrap();
-    assert!(
-        rig.layout().skill_dir(&sid).exists(),
-        "every sidecar byte stays"
-    );
-    // The row lapsed with the clean — the sweep after is quiet.
-    let out2 = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    assert!(
-        !out2
-            .data
-            .skills
-            .iter()
-            .any(|s| s.action == PullAction::Withdrawn),
-        "{:?}",
-        out2.data.skills
-    );
-}
-
-#[test]
-fn a_project_exclude_freezes_the_home_placement_it_shadows() {
-    // A PERSONAL-manifest line delivers to the home scope; a PROJECT's exclude of the same name
-    // is scope-LOCAL — sweeping inside that project must withhold delivery there but never
-    // delete the home placement the personal line still demands everywhere else.
-    let rig = Rig::new("excl-freeze");
-    rig.seed_session();
-    std::fs::create_dir_all(rig.layout().home()).unwrap();
-    std::fs::write(
-        rig.layout().home().join("topos.toml"),
-        format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
-    )
-    .unwrap();
-    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
-    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
-    let plane = FakePlane::new(log).with_version("s_deploy", &v);
-    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
-    let ctx = rig.ctx_at(Some(&rig.work.0));
-    ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    let placed = rig.work.0.join("skills/deploy");
-    assert!(placed.exists());
-
-    // A project that EXCLUDES the name: sweeping inside it delivers nothing there and leaves
-    // the home placement whole.
-    let proj = Scratch::new("proj-excl-freeze");
-    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
-    std::fs::write(proj.0.join("topos.toml"), "exclude = [\"deploy\"]\n").unwrap();
-    let ctx_in = rig.ctx_at(Some(&proj.0));
-    let out = ops::manifest_update(
-        &ctx_in,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    assert!(
-        !out.data
-            .skills
-            .iter()
-            .any(|s| s.action == PullAction::Withdrawn),
-        "{:?}",
-        out.data.skills
-    );
-    assert!(
-        placed.exists(),
-        "a scope-local exclude never deletes the home placement"
-    );
-
-    // The provenance row SURVIVED the excluded sweep (mentioned names carry forward), so a
-    // LATER drop of the personal line still finds it — and cleans the placement.
-    std::fs::write(rig.layout().home().join("topos.toml"), "").unwrap();
-    let out = ops::manifest_update(
-        &ctx,
-        &connect(&plane, &dir),
-        None,
-        &ops::ManifestUpdateOpts::default(),
-    )
-    .unwrap();
-    assert!(
-        out.data
-            .skills
-            .iter()
-            .any(|s| s.skill == "deploy" && s.action == PullAction::Withdrawn),
-        "{:?}",
-        out.data.skills
-    );
-    assert!(
-        !placed.exists(),
-        "the later line drop still retires the placement"
-    );
+    let Err(err) = refused else {
+        panic!("an unmatched target must refuse");
+    };
+    assert_eq!(err.code(), "INVALID_ARGUMENT", "{err}");
+    assert!(err.to_string().contains("connected feeds"), "{err}");
 }

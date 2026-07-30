@@ -456,6 +456,8 @@ describe("the session-approval knob", () => {
     const empty = await lane.emptyDeliveryFor(pendingActor);
     expect(empty.session_status).toBe("pending");
     expect(empty.skills).toEqual([]);
+    // Shape-complete: the declined list is present (and empty) even over a pending session.
+    expect(empty.declined).toEqual([]);
     // An owner approves on the sessions page; the session then resolves active.
     expect(await identity.approveSession({ userId: owner, display: "O" }, wsId, sessionId)).toBe(
       "approved",
@@ -639,7 +641,9 @@ describe("the feed (assignments − declines) + delivery", () => {
     delivery = await lane.deliveryFor(actor);
     expect(delivery.skills.map((s) => s.skill_id).sort()).toEqual(["s_everyone", "s_named"]);
     const named = delivery.skills.find((s) => s.skill_id === "s_named");
-    expect(named?.via).toEqual({ channels: ["named-channel"], direct: true });
+    // Their own add is a self-pick: the direct assignment rides with the `picked` fact (and
+    // no `assigned_by` — their own act attributes to nobody else).
+    expect(named?.via).toEqual({ channels: ["named-channel"], direct: true, picked: true });
 
     // The person's own view: their rows, each labelled by audience and by who placed it.
     const view = await feed.feedOf(actor);
@@ -777,9 +781,68 @@ describe("the feed (assignments − declines) + delivery", () => {
     });
     expect(typeof skill?.version_id).toBe("string");
     expect(typeof skill?.updated_at).toBe("number");
+    // Channel-carried only: the optional attribution facts are OMITTED — the keys do not
+    // exist, rather than riding as null/false (the wire's omit-when-absent rule).
+    expect(Object.keys(skill?.via ?? {}).sort()).toEqual(["channels", "direct"]);
+    expect(delivery.declined).toEqual([]);
     expect(Array.isArray(delivery.notices)).toBe(true);
     expect(typeof delivery.proposals_awaiting).toBe("number");
     expect(delivery.staleness_window_ms).toBe(604800000);
+  });
+
+  it("via attribution: assigned_by names the aimer, picked marks a self-pick, declined lists the stance", async () => {
+    const feed = await import("@/lib/db/queries.feed.server");
+    const lane = await import("@/lib/db/queries.lane.server");
+    // TWO distinct owners, deterministically: the claim winner (display "Claimer A"/"B") aims
+    // the everyone-row, the second owner ("Second Owner") the person-row — so the preference
+    // assertion below really distinguishes the two creators.
+    const owner = (
+      await q(`SELECT user_id FROM web.seat WHERE role = 'owner' AND user_id <> 'u_second'`)
+    )[0]?.user_id as string;
+    const ownerActor = { userId: owner, display: "O", workspaceId: wsId, role: "owner" } as never;
+    const secondActor = {
+      userId: "u_second",
+      display: "S",
+      workspaceId: wsId,
+      role: "owner",
+    } as never;
+    const sessionRow = await q(`SELECT id FROM web.cli_session WHERE user_id = 'u_ent'`);
+    const actor = sessionActorFor("u_ent", sessionRow[0]?.id as string, "member");
+
+    // PICKED: s_named carries the caller's own direct assignment (addToMine, earlier) — the
+    // self-pick fact rides, and assigned_by does not (their own act attributes to nobody else).
+    let delivery = await lane.deliveryFor(actor);
+    const named = delivery.skills.find((s) => s.skill_id === "s_named");
+    expect(named?.via.picked).toBe(true);
+    expect("assigned_by" in (named?.via ?? {})).toBe(false);
+
+    // ASSIGNED_BY: another member aims a bundle at the caller — the creator's display rides.
+    await seedBundle("s_aimed", "curator-aimed");
+    expect(await feed.assignBundle(ownerActor, "s_aimed", { everyone: true })).toBe("assigned");
+    expect(await feed.assignBundle(secondActor, "s_aimed", { userId: "u_ent" })).toBe("assigned");
+    delivery = await lane.deliveryFor(actor);
+    const aimed = delivery.skills.find((s) => s.skill_id === "s_aimed");
+    // The person-targeted row (Second Owner's) outranks the everyone one (the claim winner's);
+    // the display follows the one rule — profile name, else email.
+    expect(aimed?.via.assigned_by).toBe("Second Owner");
+    expect("picked" in (aimed?.via ?? {})).toBe(false);
+    expect(aimed?.via.direct).toBe(true);
+
+    // DECLINED: the standing stance is served with delivery — identity + name, and the bundle
+    // itself leaves the skills list.
+    expect(await feed.declineBundle(actor, "s_aimed")).toBe("declined");
+    delivery = await lane.deliveryFor(actor);
+    expect(delivery.skills.map((s) => s.skill_id)).not.toContain("s_aimed");
+    expect(delivery.declined).toEqual([{ skill_id: "s_aimed", name: "curator-aimed" }]);
+
+    // Clean the stance and the aim so the later suites see the state they expect.
+    expect(await feed.undeclineBundle(actor, "s_aimed")).toBe("cleared");
+    expect(await feed.unassign(secondActor, { bundleId: "s_aimed" }, { userId: "u_ent" })).toBe(
+      "unassigned",
+    );
+    expect(await feed.unassign(ownerActor, { bundleId: "s_aimed" }, { everyone: true })).toBe(
+      "unassigned",
+    );
   });
 
   it("the applied report is a complete snapshot: absent bundles drop their rows", async () => {
