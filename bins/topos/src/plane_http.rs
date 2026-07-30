@@ -286,6 +286,8 @@ impl crate::plane::DeliverySource for UreqPlane {
                 name: ds.name,
                 generation: ds.generation,
                 via_channels: ds.via.channels,
+                assigned_by: ds.via.assigned_by,
+                picked: ds.via.picked.unwrap_or(false),
             });
         }
         Ok(crate::plane::DeliverySnapshot {
@@ -294,6 +296,11 @@ impl crate::plane::DeliverySource for UreqPlane {
             notices: wire.notices,
             staleness_window_ms: wire.staleness_window_ms,
             link_status,
+            declined: wire
+                .declined
+                .into_iter()
+                .map(|d| (d.skill_id, d.name))
+                .collect(),
         })
     }
 
@@ -1052,67 +1059,6 @@ impl UreqDeviceClient {
     }
 }
 
-impl UreqDeviceClient {
-    /// A row DELETE whose OK envelope's `data.status` names HOW the removal settled (the profile
-    /// routes: `removed` / `excluded` / `not_in_profile`) — the receipt phrases the inverse from
-    /// it. Everything else mirrors [`Self::row_op`].
-    fn row_op_status(
-        &self,
-        method: RowMethod,
-        workspace_id: &str,
-        path: &str,
-        what: &str,
-        target: &str,
-    ) -> Result<crate::plane::ProfileRemoval, ClientError> {
-        let credential = self.credential_for(workspace_id)?;
-        let url = format!("{}{path}", self.base_url);
-        let auth = format!("Bearer {credential}");
-        let resp = match method {
-            RowMethod::Delete => self
-                .agent
-                .delete(&url)
-                .header("authorization", &auth)
-                .call()
-                .map_err(|e| ClientError::Plane(format!("{what}: {e}")))?,
-            RowMethod::Put | RowMethod::Post => {
-                return Err(ClientError::Corrupt(format!(
-                    "{what}: status row ops are DELETE-shaped"
-                )));
-            }
-        };
-        let status = resp.status().as_u16();
-        match classify(status) {
-            HttpClass::Ok => {
-                let bytes = read_body(resp).map_err(plane_err)?;
-                map_row_envelope(&bytes)?;
-                let settled = serde_json::from_slice::<JsonEnvelope>(&bytes)
-                    .ok()
-                    .and_then(|env| {
-                        env.data
-                            .get("status")
-                            .and_then(|s| s.as_str())
-                            .map(str::to_owned)
-                    });
-                Ok(match settled.as_deref() {
-                    Some("excluded") => crate::plane::ProfileRemoval::Excluded,
-                    Some("not_in_profile") => crate::plane::ProfileRemoval::NotInProfile,
-                    _ => crate::plane::ProfileRemoval::Removed,
-                })
-            }
-            HttpClass::NotFound => Err(ClientError::TargetNotFound {
-                target: target.to_owned(),
-            }),
-            HttpClass::NotModified | HttpClass::Other => {
-                Err(if (400..500).contains(&status) && status != 429 {
-                    ClientError::PlaneRejected(status)
-                } else {
-                    ClientError::Plane(format!("{what}: HTTP {status}"))
-                })
-            }
-        }
-    }
-}
-
 /// Map a directory row-op 2xx body — the standard all-outcome **200 envelope** — LENIENTLY: a body
 /// that is not an envelope (or is empty) still counts as success (the status said the row landed;
 /// the envelope is the richer shape, not a requirement), `ok: true` is success, and `ok: false` is
@@ -1223,72 +1169,6 @@ impl DirectorySource for UreqDeviceClient {
             &format!("/v1/workspaces/{workspace_id}/skills/{skill_id}/reach"),
             "reach",
             skill_id,
-        )
-    }
-
-    fn profile_include_skill(
-        &self,
-        workspace_id: &str,
-        skill_id: &str,
-        pin: Option<&str>,
-    ) -> Result<(), ClientError> {
-        ensure_safe_ids_client(skill_id, workspace_id)?;
-        let body = pin.map(|p| serde_json::json!({ "pin": p }));
-        self.row_op(
-            RowMethod::Put,
-            workspace_id,
-            &format!("/v1/workspaces/{workspace_id}/profile/skills/{skill_id}"),
-            body.as_ref(),
-            "profile include",
-            skill_id,
-        )
-    }
-
-    fn profile_remove_skill(
-        &self,
-        workspace_id: &str,
-        skill_id: &str,
-    ) -> Result<crate::plane::ProfileRemoval, ClientError> {
-        ensure_safe_ids_client(skill_id, workspace_id)?;
-        self.row_op_status(
-            RowMethod::Delete,
-            workspace_id,
-            &format!("/v1/workspaces/{workspace_id}/profile/skills/{skill_id}"),
-            "profile remove",
-            skill_id,
-        )
-    }
-
-    fn profile_include_channel(
-        &self,
-        workspace_id: &str,
-        channel: &str,
-    ) -> Result<(), ClientError> {
-        ensure_safe_ids_client("profile", workspace_id)?;
-        ensure_url_safe_channel(channel)?;
-        self.row_op(
-            RowMethod::Put,
-            workspace_id,
-            &format!("/v1/workspaces/{workspace_id}/profile/channels/{channel}"),
-            None,
-            "profile include",
-            channel,
-        )
-    }
-
-    fn profile_remove_channel(
-        &self,
-        workspace_id: &str,
-        channel: &str,
-    ) -> Result<crate::plane::ProfileRemoval, ClientError> {
-        ensure_safe_ids_client("profile", workspace_id)?;
-        ensure_url_safe_channel(channel)?;
-        self.row_op_status(
-            RowMethod::Delete,
-            workspace_id,
-            &format!("/v1/workspaces/{workspace_id}/profile/channels/{channel}"),
-            "profile remove",
-            channel,
         )
     }
 

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FmtData",
+  "description": "`fmt [-g]` — rewrite a manifest into the normal form. **INFERRED** (additive-only).",
+  "type": "object",
+  "properties": {
+    "changed": {
+      "description": "Whether the bytes changed (`false` = already normal).",
+      "type": "boolean"
+    },
+    "manifest": {
+      "description": "The manifest's path.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "manifest",
+    "changed"
+  ]
+}

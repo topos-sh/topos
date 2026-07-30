@@ -53,9 +53,15 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     // ---- Self-scoped (affect only you) ----
     /// See what topos manages on this machine: each skill with its version and where it comes
-    /// from, your workspace logins, and whether auto-update is armed. Works offline and changes
-    /// nothing. A bare `topos` on a terminal shows the same thing.
-    Status,
+    /// from — per scope (this folder's `topos.toml`, and your own machine-wide set) — plus your
+    /// workspace logins and whether auto-update is armed. `topos status <skill>` answers one
+    /// skill in depth: which file and line (or which workspace's feed) delivers it, and where
+    /// its files are. Works offline and changes nothing. A bare `topos` on a terminal shows the
+    /// same thing.
+    Status {
+        /// One skill to answer in depth. Omitted, the full table.
+        bundle: Option<String>,
+    },
     /// Fetch and apply the latest version of everything this folder and your profile ask for.
     /// Runs by itself at the start of each agent session; safe to run by hand any time.
     /// `topos update <skill>` updates one skill; `topos update <skill>@<version>` puts that
@@ -92,6 +98,11 @@ pub(crate) enum Command {
         /// unrecognized name — gets the conservative document every agent's schema accepts.
         #[arg(long, value_name = "HARNESS", hide = true)]
         hook: Option<String>,
+        /// Rebuild every managed skill folder from topos's own store: your unshared edits are
+        /// saved first, then each folder is re-created fresh. Fixes a folder someone deleted or
+        /// broke by hand.
+        #[arg(long)]
+        rebuild: bool,
     },
     /// Connect this machine to a workspace. Opens your browser for a one-click approval; from
     /// then on, the workspace's skills arrive and stay updated by themselves. The address is
@@ -119,15 +130,31 @@ pub(crate) enum Command {
     },
     /// Create a `topos.toml` in this folder. The file lists the skills everyone working in this
     /// project should have — commit it, and teammates' agents pick up the same set by
-    /// themselves. If the file already exists, nothing changes.
-    Init,
-    /// Get a skill and keep it updated. The source can be a skill or channel from your
-    /// workspace (`code-review`, `@acme/code-review`, `@acme/channels/backend`), a local folder
-    /// (`./tools/my-skill`), or a public GitHub repo (`owner/repo`, pinned to a commit).
-    /// Records it in this folder's `topos.toml` — or in your personal profile with `-g` — and
-    /// installs it right away. `add topos` restores the built-in topos skill.
+    /// themselves. With `-g`, writes your machine's own `~/.topos/topos.toml` instead, spelling
+    /// out what each connected workspace already delivers so you can edit it line by line. If
+    /// the file already exists, nothing changes.
+    Init {
+        /// Write the machine-wide file (`~/.topos/topos.toml`) instead of this folder's.
+        #[arg(long, short = 'g')]
+        global: bool,
+    },
+    /// Tidy a `topos.toml`: group and sort its lines into the standard layout. Comments
+    /// survive; meaning never changes. Formats this folder's file, or your machine-wide one
+    /// with `-g`.
+    Fmt {
+        /// Format `~/.topos/topos.toml` instead of this folder's file.
+        #[arg(long, short = 'g')]
+        global: bool,
+    },
+    /// Get skills and keep them updated. The source can be a skill or channel from your
+    /// workspace (`code-review`, `@acme/code-review`, `@acme/channels/backend`), a whole
+    /// workspace's feed (`@acme`, with `-g`), a local folder (`./tools/my-skill`), or a public
+    /// GitHub repo (`owner/repo` for every skill in it, `owner/repo/name` for one). Records one
+    /// line in this folder's `topos.toml` — or in your machine's own file with `-g` — and
+    /// installs right away. A GitHub source you have never used before shows what it found and
+    /// waits for `--yes`. `add topos` restores the built-in topos skill.
     Add {
-        /// What to add: a workspace skill or channel, a local folder, or a GitHub repo.
+        /// What to add: a workspace skill, channel, or feed; a local folder; or a GitHub repo.
         source: String,
         /// When a GitHub repo holds several skills, pick which one(s) (repeatable; `'*'` = all).
         #[arg(long, short = 's', value_name = "NAME")]
@@ -136,22 +163,22 @@ pub(crate) enum Command {
         /// `'*'` = all). Default: the agent detected here.
         #[arg(long, short = 'a', value_name = "SLUG")]
         agent: Vec<String>,
-        /// Add it for you rather than for this project: the skill then follows you to every
-        /// machine you log in on, instead of living in this folder's `topos.toml`.
+        /// Add it machine-wide (your `~/.topos/topos.toml`) instead of to this folder's file.
         #[arg(long, short = 'g')]
         global: bool,
-        /// Accepted everywhere; `add` applies immediately, so this changes nothing.
+        /// Confirm adding from a GitHub source this machine has never used before (everything
+        /// else applies immediately, and `--yes` changes nothing there).
         #[arg(long)]
         yes: bool,
     },
     /// Stop getting skills here — the inverse of `add`. Edits the same `topos.toml` (or your
-    /// profile with `-g`) and prints exactly what changed and how to undo it. Asks first only
-    /// when removing would lose local work.
+    /// machine-wide file with `-g`: dropping a line, or switching one feed-delivered skill
+    /// "off" on this machine) and prints exactly what changed and how to undo it. Asks first
+    /// only when removing would lose local work or rewrite a whole channel/repo line.
     Remove {
-        /// The skill(s) to remove.
+        /// The skill(s) to remove — or `@<workspace>` with `-g` to stop adopting its feed here.
         skill: Vec<String>,
-        /// Remove from your personal profile instead — delivery stops on every machine you log
-        /// in on.
+        /// Edit your machine-wide file (`~/.topos/topos.toml`) instead of this folder's.
         #[arg(long, short = 'g')]
         global: bool,
         /// Confirm a removal that loses local work (unshared edits, or a local-only skill whose
@@ -359,10 +386,11 @@ impl Command {
     /// The verb name carried in the `--json` envelope + receipt.
     pub(crate) fn name(&self) -> &'static str {
         match self {
-            Command::Status => "status",
+            Command::Status { .. } => "status",
             Command::Login { .. } => "login",
             Command::Logout { .. } => "logout",
-            Command::Init => "init",
+            Command::Init { .. } => "init",
+            Command::Fmt { .. } => "fmt",
             // `pull` is a hidden alias of `update` — the envelope always reads "update".
             Command::Update { .. } => "update",
             Command::Add { .. } => "add",
@@ -399,7 +427,7 @@ mod tests {
     fn status_parses_and_the_subcommand_is_optional() {
         // `topos status` is the explicit orientation verb.
         let out = Cli::try_parse_from(["topos", "status"]).unwrap();
-        assert!(matches!(out.command, Some(Command::Status)));
+        assert!(matches!(out.command, Some(Command::Status { .. })));
         assert_eq!(out.command.unwrap().name(), "status");
         // A bare `topos` parses (no subcommand) — the composition root decides between the TTY
         // orientation render and the scripted usage error.
@@ -412,7 +440,7 @@ mod tests {
     #[test]
     fn init_parses_and_names_itself() {
         let out = Cli::try_parse_from(["topos", "init"]).unwrap();
-        assert!(matches!(out.command, Some(Command::Init)));
+        assert!(matches!(out.command, Some(Command::Init { .. })));
         assert_eq!(out.command.unwrap().name(), "init");
     }
 

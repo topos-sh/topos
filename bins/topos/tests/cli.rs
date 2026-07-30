@@ -131,12 +131,19 @@ fn json_envelope_apply_receipt_on_ungated_arms_describe_on_gated() {
         .map(|t| t.as_str().expect("argv token").to_owned())
         .collect();
     assert_eq!(undo[..2], ["topos".to_owned(), "remove".to_owned()]);
-    let path_token = undo[2].clone();
+    let path_token = undo
+        .last()
+        .expect("the row reference ends the argv")
+        .clone();
 
     // UNGATED (the manifest-line remove): dropping the line is immediate and reversible — the
     // bare run APPLIES with the receipt document (not a `describe` wrapper), `bytes_kept` (the
-    // tracked bytes stay in the sidecar), and the undo-led next action (`add` the path back).
-    let (ok, v) = run(&home, &["--json", "remove", &path_token]);
+    // tracked bytes stay in the sidecar), and the undo-led next action (`add` the row back).
+    // The receipt's own undo argv IS the invocation (an out-of-tree path records in the
+    // machine-wide file, so the inverse carries `-g`).
+    let mut remove_argv: Vec<&str> = vec!["--json"];
+    remove_argv.extend(undo.iter().skip(1).map(String::as_str));
+    let (ok, v) = run(&home, &remove_argv);
     assert!(ok, "the manifest-line remove applies: {v}");
     assert_eq!(v["command"], "remove");
     assert!(v["data"].get("describe").is_none(), "an apply receipt: {v}");
@@ -144,10 +151,21 @@ fn json_envelope_apply_receipt_on_ungated_arms_describe_on_gated() {
     assert_eq!(v["data"]["items"][0]["kind"], "manifest-removed");
     assert_eq!(v["data"]["items"][0]["bytes_kept"], true);
     assert_eq!(v["next_actions"][0]["code"], "UNDO");
+    let undo_back: Vec<&str> = v["next_actions"][0]["argv"]
+        .as_array()
+        .expect("the undo argv")
+        .iter()
+        .map(|t| t.as_str().unwrap_or_default())
+        .collect();
     assert_eq!(
-        v["next_actions"][0]["argv"].as_array().map(Vec::len),
-        Some(3),
-        "the undo is the `add <path>` inverse: {v}"
+        &undo_back[..2],
+        ["topos", "add"],
+        "the inverse is an add: {v}"
+    );
+    assert_eq!(
+        undo_back.last(),
+        Some(&path_token.as_str()),
+        "the inverse re-adds the same row: {v}"
     );
 
     // GATED (a local-only `remove` — the permanent delete of the only copy): the bare run answers
@@ -508,7 +526,8 @@ fn reference_shaped_grammar_refusals_never_reach_the_path_arms() {
     // the discovery arm's NO_UNTRACKED_SKILL wrong-fix answer.
     let home = scratch("grammar");
     for (arg, teaches) in [
-        ("@x", "@<workspace>/<skill>"),
+        // A malformed @-sugar (charset) teaches the three valid shapes.
+        ("@Acme/Deploy", "@<workspace>/<bundle>"),
         ("#backend", "channels"),
         ("@acme/deploy@abc1234", "64-character"),
         ("topos.example.com/eng/deploy@abc1234", "64-character"),

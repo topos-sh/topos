@@ -145,14 +145,20 @@ fn normalize_channel_target(
     lane: Option<&super::WriteLane>,
 ) -> Result<Option<String>, ClientError> {
     let Some(raw) = channel else { return Ok(None) };
-    if let Ok(crate::manifest::refs::ParsedRef::Channel {
-        host,
-        workspace,
-        name,
-    }) = crate::manifest::refs::parse_ref(raw)
+    // The `@ws/…` sugar resolves at the lane's host (the workspace this publish signs in).
+    let default_host = lane.map(|l| l.host.as_str());
+    if let Ok(crate::manifest::keys::InputRef {
+        shape:
+            crate::manifest::keys::KeyShape::Channel {
+                host,
+                workspace,
+                channel: name,
+            },
+        ..
+    }) = crate::manifest::keys::parse_input(raw, default_host)
     {
         if let Some(l) = lane {
-            let host_ok = host.as_deref().is_none_or(|h| h == l.host);
+            let host_ok = host == l.host;
             if !host_ok || workspace != l.workspace_name {
                 return Err(ClientError::InvalidArgument(format!(
                     "`--to {raw}` names a channel in another workspace — this publish lands in \
@@ -878,6 +884,8 @@ fn enrolled_publish(
                             withdrawn: false,
                             via_channels: Vec::new(),
                             via_manifest: true,
+                            assigned_by: None,
+                            picked: false,
                         },
                     );
                 }
@@ -914,13 +922,21 @@ fn origin_asymmetry_note(
     let Some(origin) = doc::read_doc::<add::OriginDoc>(ctx.fs, &sp.origin)? else {
         return Ok(None);
     };
-    let origin_ref = match origin.origin.subdir.as_deref() {
-        Some(sub) if !sub.is_empty() => format!("{}/{sub}", origin.origin.source),
-        _ => origin.origin.source.clone(),
+    // The forge key a manifest would carry for this import: the repo, or its discovered skill's
+    // LEAF directory name as the fourth segment (never the literal in-repo path).
+    let origin_ref = match origin
+        .origin
+        .subdir
+        .as_deref()
+        .and_then(|s| s.trim_end_matches('/').rsplit('/').next())
+        .filter(|s| !s.is_empty())
+    {
+        Some(leaf) => format!("{}/{leaf}", origin.origin.source),
+        None => origin.origin.source.clone(),
     };
-    let tracked = super::manifest_edit::local_layers(ctx)?
+    let tracked = super::manifest_edit::local_rows(ctx)?
         .into_iter()
-        .any(|(_, m)| m.skills.iter().any(|e| e.reference == origin_ref));
+        .any(|(_, _, rows)| rows.iter().any(|r| r.reference == origin_ref));
     Ok(tracked.then(|| {
         format!(
             "a manifest still tracks the GitHub origin pin ({origin_ref}) — that line is not \

@@ -397,6 +397,14 @@ pub struct WireVia {
     pub channels: Vec<String>,
     /// Whether the person also follows the skill directly (independent of any channel).
     pub direct: bool,
+    /// The display name of the DIRECT assignment's creator, when someone else aimed the bundle
+    /// at this person (or at everyone) — the attribution a receipt or status line narrates.
+    /// Absent when the caller picked it themselves, or when only channels deliver it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_by: Option<String>,
+    /// `true` when the caller's OWN pick (a self-assignment) delivers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picked: Option<bool>,
 }
 
 /// One skill THIS device should have, in the delivery answer: the catalog identity, the pinned `current`
@@ -497,18 +505,11 @@ pub struct WireDelivery {
     pub workspace_id: String,
     /// The entitled skills — everything this device should have (a possibly-empty list).
     pub skills: Vec<WireDeliverySkill>,
-    /// The skill ids the person detached (unfollowed, or lapsed via a channel leave / removal) and that are
-    /// NOT currently re-entitled — every device freezes these in place, never cleaning them.
-    /// RETIRED on the session wire (a current server never sends it); defaulted for the transition.
+    /// The caller's DECLINED bundles in this workspace (declined on the web — the everywhere
+    /// stance). A machine's own manifest row may still deliver one; the client reads this list
+    /// to disclose that honestly ("declined on the web, delivered here by your manifest").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub detached: Vec<String>,
-    /// The skill ids THIS DEVICE excludes ("not on this device") — the third actor in the who-acts
-    /// split, alongside the person (`detached`) and upstream (absent from `skills` entirely). The copy
-    /// leaves this device; the person keeps receiving it on every other device; `follow` here lifts it.
-    /// Sent so the client narrates the true CAUSE instead of mistaking an exclusion written elsewhere
-    /// (the web, a second tool) for an upstream withdrawal.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub excluded: Vec<String>,
+    pub declined: Vec<WireDeclined>,
     /// The unacked, person-scoped notices (verdicts, proposal closures, …).
     pub notices: Vec<WireNotice>,
     /// The count of OPEN, non-stale proposals across the entitled skills (the review-inbox pressure gauge).
@@ -522,24 +523,31 @@ pub struct WireDelivery {
     /// THIS session's standing — `"active"` or `"pending"`. A `"pending"` delivery carries empty
     /// `skills` / `notices` and `proposals_awaiting: 0` — no data flows over a pending session;
     /// the client skips the workspace quietly and `topos status` shows the wait. Serde-defaulted
-    /// only so the retired `link_status` spelling still parses during the wire transition.
+    /// so a producer predating the field still parses (absent reads as active-equivalent).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_status: Option<String>,
-    /// RETIRED spelling of [`Self::session_status`] (the device-link wire) — read as a fallback,
-    /// never produced by a current server.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub link_status: Option<String>,
 }
 
 impl WireDelivery {
-    /// The effective session standing: `session_status`, else the retired `link_status` spelling,
-    /// else active (a producer predating both serves only active-equivalent access).
+    /// The effective session standing (`session_status`; absent = a producer that serves only
+    /// active-equivalent access).
     #[must_use]
     pub fn effective_status(&self) -> Option<&str> {
-        self.session_status
-            .as_deref()
-            .or(self.link_status.as_deref())
+        self.session_status.as_deref()
     }
+}
+
+/// One declined bundle in a [`WireDelivery`] — the caller's own web-recorded decline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct WireDeclined {
+    /// The bundle's id.
+    pub skill_id: String,
+    /// The bundle's catalog name (joined for narration).
+    pub name: String,
 }
 
 /// The default bundle kind — the fallback when a producer predating the catalog `kind` omits it
@@ -1325,10 +1333,14 @@ mod tests {
                 via: WireVia {
                     channels: vec!["everyone".to_owned()],
                     direct: true,
+                    assigned_by: Some("Alice".to_owned()),
+                    picked: None,
                 },
             }],
-            detached: vec!["s_old".to_owned()],
-            excluded: Vec::new(),
+            declined: vec![WireDeclined {
+                skill_id: "s_old".to_owned(),
+                name: "old-skill".to_owned(),
+            }],
             notices: vec![WireNotice {
                 id: "ntc_1".to_owned(),
                 kind: "verdict".to_owned(),
@@ -1344,17 +1356,21 @@ mod tests {
             proposals_awaiting: 2,
             staleness_window_ms: 604_800_000,
             session_status: Some("active".to_owned()),
-            link_status: None,
         };
         let v = serde_json::to_value(&delivery).unwrap();
         assert_eq!(v["schema_version"], 1);
         assert_eq!(v["workspace_id"], "w_demo");
         assert_eq!(v["skills"][0]["skill_id"], "s_prdescribe");
         assert_eq!(v["skills"][0]["protection"], "reviewed");
-        // `via` carries the channels + direct flag under snake_case.
+        // `via` carries the channels + direct flag under snake_case, plus the attribution pair
+        // (absent halves omit — never null).
         assert_eq!(v["skills"][0]["via"]["channels"][0], "everyone");
         assert_eq!(v["skills"][0]["via"]["direct"], true);
-        assert_eq!(v["detached"][0], "s_old");
+        assert_eq!(v["skills"][0]["via"]["assigned_by"], "Alice");
+        assert!(v["skills"][0]["via"].get("picked").is_none());
+        // The declined list rides id + name pairs.
+        assert_eq!(v["declined"][0]["skill_id"], "s_old");
+        assert_eq!(v["declined"][0]["name"], "old-skill");
         assert_eq!(v["notices"][0]["kind"], "verdict");
         assert_eq!(v["notices"][0]["reason"], "looks good");
         // Absent optional notice fields omit (skip_serializing_if) — never serialized as null.
@@ -1362,43 +1378,27 @@ mod tests {
         assert!(v["notices"][0].get("message").is_none());
         // The ONE staleness clock rides every delivery.
         assert_eq!(v["staleness_window_ms"], 604_800_000_u64);
-        // The session status rides every delivery; the legacy link_status spelling omits when
-        // absent (never serialized as null).
         assert_eq!(v["session_status"], "active");
-        assert!(v.get("link_status").is_none());
         let back: WireDelivery = serde_json::from_value(v).unwrap();
         assert_eq!(back.skills.len(), 1);
         assert_eq!(back.skills[0].via.channels, vec!["everyone".to_owned()]);
         assert_eq!(back.proposals_awaiting, 2);
-        // A PENDING delivery (no data flows over a pending link) still round-trips — empty sets,
-        // a zero gauge, and the pending status the client's sweep skips on.
+        // A PENDING delivery (no data flows over a pending session) still round-trips — empty
+        // sets, a zero gauge, and the pending status the client's sweep skips on; the absent
+        // `declined` defaults empty.
         let pending: WireDelivery = serde_json::from_value(serde_json::json!({
             "schema_version": 1,
             "workspace_id": "w_demo",
             "skills": [],
-            "detached": [],
             "notices": [],
             "proposals_awaiting": 0,
             "staleness_window_ms": 604800000,
-            "link_status": "pending",
+            "session_status": "pending",
         }))
         .unwrap();
         assert!(pending.skills.is_empty() && pending.notices.is_empty());
-        // The retired `link_status` spelling still parses (the transition fallback) …
+        assert!(pending.declined.is_empty());
         assert_eq!(pending.effective_status(), Some("pending"));
-        // … and the SESSION spelling wins when both are present.
-        let session: WireDelivery = serde_json::from_value(serde_json::json!({
-            "schema_version": 1,
-            "workspace_id": "w_demo",
-            "skills": [],
-            "notices": [],
-            "proposals_awaiting": 0,
-            "staleness_window_ms": 604800000,
-            "session_status": "active",
-        }))
-        .unwrap();
-        assert_eq!(session.effective_status(), Some("active"));
-        assert!(session.detached.is_empty(), "defaulted on the session wire");
     }
 
     #[test]

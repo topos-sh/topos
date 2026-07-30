@@ -1,36 +1,28 @@
-//! The MANIFEST model — the demand side of "demand ∩ entitlement".
+//! The MANIFEST model — the demand side of delivery.
 //!
-//! A scope IS a manifest. Four layers, resolved nearest-first:
+//! The server knows what a person is GIVEN (their feed: assignments minus declines, computed
+//! server-side and served whole by the delivery route). A file knows what a folder TAKES:
 //!
-//! 1. this folder's `topos.toml` (committed; travels with the repo),
-//! 2. ancestor folders' `topos.toml` (monorepo nesting; walking up from cwd, nearest wins),
-//! 3. per-workspace PROFILES — the person's manifest for each workspace, stored ON THE SERVER
-//!    (they roam and are web-editable; the delivery answer is the profile already resolved
-//!    server-side, so the client treats each session's delivery as one ready-made layer),
-//! 4. the local personal manifest (`~/.topos/topos.toml`) — machine-local personal bundles.
+//! - the GLOBAL manifest (`~/.topos/topos.toml`) is the machine's personal recipe. Absent, the
+//!   machine behaves exactly as if the file held one feed row per connected workspace; present,
+//!   it is COMPLETE — only its rows deliver, and the feed flows iff a feed row says so.
+//! - a PROJECT manifest (`<dir>/topos.toml`) is a repo fact, identical for every contributor.
+//!   The NEAREST file covering the working directory wins WHOLE (walking up like git; no
+//!   merging across ancestors).
 //!
-//! Manifest entries are REFERENCES ([`refs`]) with optional version pins; `*` = track `current`
-//! silently. Negative state exists in exactly ONE form: an `exclude` entry in a manifest —
-//! removing an item a broader layer provides records an exclude in your layer, and a nearer
-//! layer's mention (include or exclude) shadows every broader one. There is no other negative
-//! state anywhere.
+//! Every statement is positive; the only negatives are the web decline (server-side) and the
+//! `"off"` row value (machine-local, global file only). Scopes are UNBLENDED — no cross-scope
+//! shadowing or layer arithmetic.
 //!
-//! The submodules: [`refs`] — the shape-determined reference grammar; [`file`] — the
-//! `topos.toml` read/edit (format-preserving, comments survive); [`walk`] — layer discovery
-//! from a working directory; [`resolve`] — the nearest-wins combination the verbs and the
-//! reconcile run.
+//! The submodules: [`keys`] — the joined-key reference grammar (`[bundles]` key shapes + the
+//! CLI input sugar); [`document`] — the `topos.toml` parse + the format-preserving editor +
+//! file birth; [`normal`] — the `fmt` normal form; [`scopes`] — scope discovery + the
+//! partitioned plans the reconcile drives.
 
-pub(crate) mod file;
-pub(crate) mod refs;
-pub(crate) mod resolve;
-pub(crate) mod walk;
-
-// The NEXT manifest format — `[bundles]` + `[defaults.<kind>]` ([`keys`] the joined-key
-// grammar; [`document`] parse + edit; [`normal`] the fmt normal form). The verb integration
-// consumes these next; until it lands they are allowed to sit unreferenced.
-#[allow(dead_code)]
 pub(crate) mod document;
-#[allow(dead_code)]
 pub(crate) mod keys;
-#[allow(dead_code)]
 pub(crate) mod normal;
+pub(crate) mod scopes;
+
+/// The manifest's one filename, at a project root (or any nested folder) and in `~/.topos/`.
+pub(crate) const MANIFEST_FILE: &str = "topos.toml";

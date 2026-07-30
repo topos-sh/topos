@@ -1,30 +1,33 @@
-//! The MANIFEST reconcile — `update` on the manifest-layer model: **an agent gets demand ∩
-//! entitlement**. Resolve every manifest covering the working directory (this folder's
-//! `topos.toml` chain → each logged-in session's server-stored profile, delivered as a ready-made
-//! layer → the local personal manifest), nearest-first with excludes, then converge the machine on
-//! the winning set:
+//! The RECONCILE — what `update` runs. Two UNBLENDED scopes, each converged on its own recipe:
 //!
-//! - **profile items** ride each session's ONE delivery answer (the server already intersected
-//!   demand with entitlement and expanded channels) and land in the HOME harness dirs;
-//! - **project items** (a folder's `topos.toml`) resolve through the session the reference's
-//!   host/workspace names — the catalog read supplies the current pointer — and materialize
-//!   INSIDE the project (its harness dirs, each landed dir carrying the self-ignore sentinel so
-//!   delivered bytes stay out of commits), with their engine state in the project's OWN store
-//!   (`<project>/.topos/state/<user>/` — per-scope independence: two scopes, two state trees);
-//! - **external GitHub refs** install at their PINNED commit (lockfile logic — no governance rail
-//!   behind them); **local path refs** are adopt-in-place facts (presence is the delivery).
+//! - the **person scope** — the global manifest (`~/.topos/topos.toml`) when the file exists, else
+//!   the implicit recipe (one feed row per connected workspace). A file is COMPLETE: only its rows
+//!   deliver, and a workspace's feed flows iff a feed row says so. Bytes land in the home harness
+//!   dirs, state in `~/.topos/`.
+//! - the **project scope** — the NEAREST `topos.toml` walking up from the working directory, taken
+//!   WHOLE (no ancestor merging). Bytes land inside the checkout (each dir self-ignoring), state in
+//!   the project's own store.
 //!
-//! Delivery is silent, npm-style — login was the acceptance event, so nothing here asks. The
-//! reconcile also maintains the OFFLINE DELIVERY CACHE (`state/sync_status.json`): per session the
-//! delivered set with names + protection, which `status`/`list` read without a network call and
-//! the cache-backed follow seam ([`CacheFollow`]) is built over.
+//! There is no cross-scope shadowing or subtraction: each scope's delivered set is the union of its
+//! rows' resolutions (or its feeds), minus its `"off"` switches, deduped by bundle identity — so the
+//! same bundle demanded at both scopes lands twice, with two state trees and no interaction. Within
+//! a scope the order is explicit THINGS, then SETS (a channel, a repo), then the feeds: an explicit
+//! row's version and fields beat any set's delivery of the same identity, and a set delivers its
+//! curator's current truth.
 //!
-//! Non-oracle discipline: the server answers uniformly (the same 404 for "doesn't exist" / "not a
-//! member"); every honest status line here is phrased from LOCAL knowledge — which manifest asked,
-//! which session is missing — never from a server confirmation.
+//! Delivery is silent — the login was the acceptance — and every honest line here is phrased from
+//! LOCAL knowledge (which file asked; which login is missing), never from a server confirmation: the
+//! plane answers uniformly, so a miss can never be read as an existence claim. A manifest the grammar
+//! refuses FREEZES its whole scope (no delivery, no cleaning): the failure mode of a typo must be
+//! keeping bytes, never dropping them.
+//!
+//! The sweep also maintains the OFFLINE DELIVERY CACHE (`state/sync_status.json`): per workspace what
+//! the plane last served (with the attribution each row carries and the caller's declines), which
+//! `status`/`list` read without a network call and [`CacheFollow`] is built over.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use topos_core::digest::to_hex;
 use topos_gitstore::Store;
@@ -37,15 +40,11 @@ use topos_types::{CurrentRecord, PointerScope, WIRE_SCHEMA_VERSION, WireCurrentR
 use crate::ctx::Ctx;
 use crate::error::ClientError;
 use crate::id::SkillId;
-use crate::manifest::file::MANIFEST_FILE;
-use crate::manifest::refs::ParsedRef;
-use crate::manifest::resolve::{
-    Layer, LayerSource, Resolution, ResolvedItem, ResolvedScope, exclude_wins, resolve_layers,
-};
-use crate::manifest::walk;
+use crate::manifest::keys::KeyShape;
+use crate::manifest::scopes::{self, PlanRow, ResolvedScope, ScopePlan};
 use crate::plane::{
-    DeliverySnapshot, DirectorySource, FollowContext, FollowMode, FollowSource, LinkStatus,
-    PlaneError, PlaneSource, ReconcileTransport,
+    DeliverySkill, DeliverySnapshot, DirectorySource, FollowContext, FollowMode, FollowSource,
+    LinkStatus, PlaneError, PlaneSource, ReconcileTransport,
 };
 use crate::sessions::{self, SESSION_ACTIVE, SESSION_ENDED, SESSION_PENDING, Session};
 use crate::sync_status::{self, DeliveredSkill, WorkspaceSync};
@@ -69,7 +68,7 @@ pub(crate) struct SessionTransports {
 /// Builds the transports for ONE session (per-workspace credentials — the session model).
 pub(crate) type SessionConnect<'a> = dyn Fn(&Session) -> SessionTransports + 'a;
 
-/// How a manifest reconcile behaves.
+/// How a reconcile behaves.
 #[derive(Default)]
 pub(crate) struct ManifestUpdateOpts {
     /// Targeted names/references (`topos update <name>…`); empty = the full sweep.
@@ -77,23 +76,27 @@ pub(crate) struct ManifestUpdateOpts {
     /// Ack the delivered notices (the interactive / `--json` update); the quiet hook fetches
     /// WITHOUT acking, so nothing is marked read that no one narrated.
     pub ack_notices: bool,
+    /// `--rebuild`: absorb every edited copy into its store, drop the recorded placement dirs, and
+    /// let the ordinary sweep re-project them from the store. The absorb-then-drop ORDER is the
+    /// whole guarantee — a rebuild must never be a way to lose an edit.
+    pub rebuild: bool,
 }
 
 /// One session's runtime state for this sweep.
 struct SessionRun {
     session: Session,
     transports: SessionTransports,
-    /// The delivery answer (`None` = no fresh delivery this run, whatever the fault — the profile
-    /// layer is cache-fed and the engine converges from the local store).
+    /// The delivery answer (`None` = no fresh delivery this run, whatever the fault — the feed is
+    /// cache-fed and the engine converges from the local store).
     snapshot: Option<DeliverySnapshot>,
-    /// Lazily fetched catalog (project-ref resolution). `Some(None)` = fetch failed this run.
-    /// `Rc`, so the per-item reads share ONE fetch instead of deep-cloning the index each time.
-    skills_index: std::cell::RefCell<Option<Option<std::rc::Rc<WireSkillIndex>>>>,
-    channels_index: std::cell::RefCell<Option<Option<std::rc::Rc<WireChannelIndex>>>>,
+    /// Lazily fetched catalog (row resolution). `Some(None)` = fetch failed this run. `Rc`, so the
+    /// per-row reads share ONE fetch instead of deep-cloning the index each time.
+    skills_index: std::cell::RefCell<Option<Option<Rc<WireSkillIndex>>>>,
+    channels_index: std::cell::RefCell<Option<Option<Rc<WireChannelIndex>>>>,
 }
 
-/// The offline-degraded run: no snapshot, so the profile layer is fed from the local delivery cache
-/// and the converge still runs. Every no-fresh-delivery arm builds exactly this.
+/// The offline-degraded run: no snapshot, so the feed is fed from the local delivery cache and the
+/// converge still runs. Every no-fresh-delivery arm builds exactly this.
 fn offline_run(s: &Session, transports: SessionTransports) -> SessionRun {
     SessionRun {
         session: s.clone(),
@@ -117,7 +120,7 @@ fn stale_signal(s: &Session, reason: StaleReason) -> UnreachableWorkspace {
 
 impl SessionRun {
     /// The catalog, fetched once per run (a failure caches as `None` — one warning, not N).
-    fn catalog(&self, warnings: &mut Vec<String>) -> Option<std::rc::Rc<WireSkillIndex>> {
+    fn catalog(&self, warnings: &mut Vec<String>) -> Option<Rc<WireSkillIndex>> {
         let mut slot = self.skills_index.borrow_mut();
         if slot.is_none() {
             let fetched = match self
@@ -125,7 +128,7 @@ impl SessionRun {
                 .directory
                 .skills_index(&self.session.workspace_id)
             {
-                Ok(ix) => Some(std::rc::Rc::new(ix)),
+                Ok(ix) => Some(Rc::new(ix)),
                 Err(e) => {
                     warnings.push(format!(
                         "CATALOG_UNAVAILABLE {}: {}",
@@ -140,7 +143,7 @@ impl SessionRun {
         slot.as_ref().and_then(Clone::clone)
     }
 
-    fn channels(&self, warnings: &mut Vec<String>) -> Option<std::rc::Rc<WireChannelIndex>> {
+    fn channels(&self, warnings: &mut Vec<String>) -> Option<Rc<WireChannelIndex>> {
         let mut slot = self.channels_index.borrow_mut();
         if slot.is_none() {
             let fetched = match self
@@ -148,7 +151,7 @@ impl SessionRun {
                 .directory
                 .channels_index(&self.session.workspace_id)
             {
-                Ok(ix) => Some(std::rc::Rc::new(ix)),
+                Ok(ix) => Some(Rc::new(ix)),
                 Err(e) => {
                     warnings.push(format!(
                         "CHANNELS_UNAVAILABLE {}: {}",
@@ -165,8 +168,8 @@ impl SessionRun {
 }
 
 /// A follow seam materialized from the CURRENT deliveries + the offline cache — what the engine's
-/// person-scope plan reads for workspace provenance. Replaces the retired subscription file: the
-/// delivered set IS the standing state, and demand lives in manifests.
+/// person-scope plan reads for workspace provenance. The delivered set IS the standing state; demand
+/// lives in the manifests.
 pub(crate) struct CacheFollow {
     entries: Vec<(String, FollowContext)>,
 }
@@ -210,13 +213,13 @@ impl FollowSource for CacheFollow {
     }
 }
 
-/// The SESSION-ROUTED plane — the app ctx's `PlaneSource` when the installation runs on
-/// sessions: each per-skill read routes to the session lane of the workspace the skill belongs to
-/// (the offline delivery cache supplies the map; `bind_skill` teaches new pairs mid-run). A skill
-/// no session covers answers "not served", exactly like the retired inert source.
+/// The SESSION-ROUTED plane — the app ctx's `PlaneSource` when the installation runs on sessions:
+/// each per-skill read routes to the session lane of the workspace the skill belongs to (the offline
+/// delivery cache supplies the map; `bind_skill` teaches new pairs mid-run). A skill no session
+/// covers answers "not served", exactly like the inert source.
 pub(crate) struct SessionRoutedPlane {
     lanes: Vec<(String, Box<dyn ReconcileTransport>)>,
-    skill_ws: std::cell::RefCell<std::collections::HashMap<String, String>>,
+    skill_ws: std::cell::RefCell<HashMap<String, String>>,
 }
 
 impl SessionRoutedPlane {
@@ -235,7 +238,7 @@ impl SessionRoutedPlane {
                 lanes.push((s.workspace_id.clone(), connect(s).plane));
             }
         }
-        let mut skill_ws = std::collections::HashMap::new();
+        let mut skill_ws = HashMap::new();
         if let Ok(status) = sync_status::read(fs, layout) {
             for (ws, entry) in &status.workspaces {
                 for skill_id in entry.delivered.keys() {
@@ -304,33 +307,179 @@ impl PlaneSource for SessionRoutedPlane {
     }
 }
 
-/// The manifest reconcile (see the module doc). Returns the same [`PullOutcome`] shape the hook
-/// and the `update` finishers already consume — `access_gone` carries sessions that answered the
-/// uniform 404 (ended server-side), `unreachable` the sessions that got no fresh delivery for any
-/// other reason — the server unreached, the exchange unsuccessful, or the answer unreadable — each
-/// tagged with which, since only the first is the network's doing.
+// =================================================================================================
+// The sweep's accumulating state.
+// =================================================================================================
+
+/// Everything one sweep accumulates across its scopes.
+#[derive(Default)]
+struct Sweep {
+    rows: Vec<PullSkill>,
+    warnings: Vec<String>,
+    /// `(scope label, bundle identity)` already reconciled — the ONE dedupe key. Scopes are
+    /// unblended, so the same identity may appear once per scope.
+    synced: HashSet<(String, String)>,
+    /// Bundle ids an EXPLICIT row delivered (any scope) — what the declined-override line reads.
+    explicit: HashSet<String>,
+    /// `(workspace id, skill id, cache row)` per delivery this sweep recorded through a manifest row.
+    delivered: Vec<(String, String, DeliveredSkill)>,
+    /// `(workspace id, channel)` expansions that FAILED this run — their members freeze, and their
+    /// cache rows must survive the sweep that could not see the member list.
+    failed_channels: HashSet<(String, String)>,
+    /// Project dirs owning a failed expansion — the cleaner freezes everything under them.
+    unexpanded: Vec<PathBuf>,
+    /// Per scope label, every NAME its rows MENTION — delivered or not. A name a row still names is
+    /// never cleaned, so a transient failure can not read as a drop.
+    mentioned: BTreeMap<String, HashSet<String>>,
+}
+
+impl Sweep {
+    /// Claim an identity for a scope. `false` = something already reconciled it there.
+    fn claim(&mut self, label: &str, identity: &str) -> bool {
+        self.synced.insert((label.to_owned(), identity.to_owned()))
+    }
+
+    fn claimed(&self, label: &str, identity: &str) -> bool {
+        self.synced
+            .contains(&(label.to_owned(), identity.to_owned()))
+    }
+
+    /// The identities this scope reconciled.
+    fn synced_in(&self, label: &str) -> HashSet<&str> {
+        self.synced
+            .iter()
+            .filter(|(l, _)| l == label)
+            .map(|(_, id)| id.as_str())
+            .collect()
+    }
+
+    fn mention(&mut self, label: &str, name: &str) {
+        self.mentioned
+            .entry(label.to_owned())
+            .or_default()
+            .insert(name.to_owned());
+    }
+
+    /// Every name ANY scope of this sweep mentions.
+    fn mentioned_anywhere(&self) -> HashSet<&str> {
+        self.mentioned
+            .values()
+            .flat_map(|s| s.iter().map(String::as_str))
+            .collect()
+    }
+
+    fn push(&mut self, row: PullSkill) {
+        self.rows.push(row);
+    }
+
+    /// Record one failed set expansion: its members are unknowable this run, so nothing under the
+    /// owning project dir may be treated as undemanded. `workspace_id` is the SESSION's opaque id
+    /// (two servers may both hold an `acme` — the name alone would freeze the wrong one); `None`
+    /// when no session resolves the reference at all (nothing dials for it, so no cache row is
+    /// written either — only the dir freeze matters there).
+    fn note_set_failure(&mut self, workspace_id: Option<&str>, set: &str, scope: &ResolvedScope) {
+        if let Some(ws) = workspace_id {
+            self.failed_channels.insert((ws.to_owned(), set.to_owned()));
+        }
+        if let ResolvedScope::Project { dir } = scope {
+            self.unexpanded.push(dir.clone());
+        }
+    }
+}
+
+/// The shared seams every arm reads — grouped so the per-arm signatures stay legible.
+struct Env<'a> {
+    ctx: &'a Ctx<'a>,
+    runs: &'a [SessionRun],
+    follow: &'a CacheFollow,
+    /// The forge lane. `None` on the background sweep: git rows move only on an explicit update.
+    git: Option<&'a dyn crate::git_source::GitTarballSource>,
+    prior: &'a sync_status::SyncStatus,
+    /// One tarball per repo per sweep (a repo named by both a set and a skill row fetches once).
+    repos: std::cell::RefCell<Vec<(String, Rc<Vec<u8>>)>>,
+}
+
+/// One scope under reconciliation: its recipe, where its bytes go, and what receipts call it.
+struct ScopeCtx<'a> {
+    scope: ResolvedScope,
+    label: String,
+    plan: &'a ScopePlan,
+}
+
+/// What `update <target>…` narrowed the sweep to (empty = everything).
+struct Targets {
+    wanted: Vec<String>,
+    matched: HashSet<String>,
+}
+
+impl Targets {
+    fn new(raw: &[String]) -> Self {
+        Self {
+            wanted: raw.to_vec(),
+            matched: HashSet::new(),
+        }
+    }
+
+    /// Whether the sweep covers something spelled any of `candidates` — always true for the bare
+    /// full sweep. Records the hit, so an unmatched target can be named at the end.
+    fn hit(&mut self, candidates: &[&str]) -> bool {
+        if self.wanted.is_empty() {
+            return true;
+        }
+        let mut found = false;
+        for c in candidates {
+            if self.wanted.iter().any(|w| w == c) {
+                self.matched.insert((*c).to_owned());
+                found = true;
+            }
+        }
+        found
+    }
+
+    /// The first target nothing in the sweep answered.
+    fn unmatched(&self) -> Option<&str> {
+        self.wanted
+            .iter()
+            .find(|w| !self.matched.contains(*w))
+            .map(String::as_str)
+    }
+}
+
+// =================================================================================================
+// The entry point.
+// =================================================================================================
+
+/// The reconcile (see the module doc). Returns the [`PullOutcome`] shape the hook and the `update`
+/// finishers consume — `access_gone` carries the sessions that answered the uniform 404 (ended
+/// server-side), `unreachable` the sessions that got no fresh delivery for any other reason — the
+/// server unreached, the exchange unsuccessful, or the answer unreadable — each tagged with which,
+/// since only the first is the network's doing.
+///
+/// # Errors
+/// A session-file read failure, or an unmatched `update <target>` (the typed refusal names the fix).
 pub(crate) fn manifest_update(
     ctx: &Ctx<'_>,
     connect: &SessionConnect<'_>,
     git: Option<&dyn crate::git_source::GitTarballSource>,
     opts: &ManifestUpdateOpts,
 ) -> Result<PullOutcome, ClientError> {
-    let mut warnings: Vec<String> = Vec::new();
+    let mut sweep = Sweep::default();
     let mut access_gone: Vec<String> = Vec::new();
     let mut unreachable: Vec<UnreachableWorkspace> = Vec::new();
-    let mut rows: Vec<PullSkill> = Vec::new();
     let mut notices = Vec::new();
     let mut proposals_awaiting: u32 = 0;
 
     let prior_sync = match sync_status::read(ctx.fs, &ctx.layout) {
         Ok(s) => s,
         Err(e) => {
-            warnings.push(format!("SYNC_STATUS_UNREADABLE: {}", e.detail()));
+            sweep
+                .warnings
+                .push(format!("SYNC_STATUS_UNREADABLE: {}", e.detail()));
             sync_status::SyncStatus::default()
         }
     };
 
-    // ---- 1. Dial each live session's delivery (the person layers). ----
+    // ---- 1. Dial each live session's delivery. ----
     let all_sessions = sessions::read_sessions(ctx.fs, &ctx.layout)?;
     let mut runs: Vec<SessionRun> = Vec::new();
     for s in &all_sessions.sessions {
@@ -374,7 +523,7 @@ pub(crate) fn manifest_update(
                 // The whole session answered the uniform 404: revoked, the seat removed, or the
                 // workspace gone — indistinguishable by design. Mark it ended locally so the line
                 // prints once; every copy stays in place (bytes are yours; `login` re-connects).
-                warnings.push(format!(
+                sweep.warnings.push(format!(
                     "SESSION_ENDED {}: this session no longer has access (ended, removed, or \
                      gone); its skills stay in place — reconnect with `topos login {}/{}`",
                     s.workspace_name, s.host, s.workspace_name
@@ -388,104 +537,80 @@ pub(crate) fn manifest_update(
                     SESSION_ENDED,
                 );
             }
-            // The three no-fresh-delivery faults degrade IDENTICALLY: the profile layer falls back
-            // to the OFFLINE CACHE below, so a dead network keeps the local converge working (and
-            // the hook never wedges a session start); dropping the layer would let the cleaner
-            // treat its items as undemanded. They differ ONLY in what the person is told — the
-            // staleness nudge is true of all three, but blaming the network for a 500 or for
-            // garbled bytes would send someone the wrong way.
+            // The three no-fresh-delivery faults degrade IDENTICALLY: the feed falls back to the
+            // OFFLINE CACHE below, so a dead network keeps the local converge working (and the hook
+            // never wedges a session start); dropping the scope's demand would let the cleaner treat
+            // its items as undemanded. They differ ONLY in what the person is told — the staleness
+            // nudge is true of all three, but blaming the network for a 500 or for garbled bytes
+            // would send someone the wrong way.
             Err(PlaneError::Unreachable(m)) => {
-                warnings.push(format!("PLANE_UNAVAILABLE {}: {m}", s.workspace_name));
+                sweep
+                    .warnings
+                    .push(format!("PLANE_UNAVAILABLE {}: {m}", s.workspace_name));
                 unreachable.push(stale_signal(s, StaleReason::Unreachable));
                 runs.push(offline_run(s, transports));
             }
             Err(PlaneError::Unavailable(m)) => {
-                warnings.push(format!("PLANE_UNAVAILABLE {}: {m}", s.workspace_name));
+                sweep
+                    .warnings
+                    .push(format!("PLANE_UNAVAILABLE {}: {m}", s.workspace_name));
                 unreachable.push(stale_signal(s, StaleReason::Unavailable));
                 runs.push(offline_run(s, transports));
             }
             Err(PlaneError::Malformed(m)) => {
-                warnings.push(format!("WIRE_INVALID {}: {m}", s.workspace_name));
+                sweep
+                    .warnings
+                    .push(format!("WIRE_INVALID {}: {m}", s.workspace_name));
                 unreachable.push(stale_signal(s, StaleReason::Malformed));
                 runs.push(offline_run(s, transports));
             }
         }
     }
 
-    // ---- 2. Build the layer chain and resolve. ----
-    let mut layers: Vec<Layer> = Vec::new();
-    let mut project_dirs: Vec<PathBuf> = Vec::new();
-    let mut project_manifests: Vec<(PathBuf, crate::manifest::file::Manifest)> = Vec::new();
-    if let Some(roots) = &ctx.roots
-        && let Some(cwd) = roots.cwd.as_deref()
-    {
-        for l in walk::project_layers(ctx.fs, cwd, Some(&roots.home))? {
-            project_dirs.push(l.dir.clone());
-            project_manifests.push((l.dir.clone(), l.manifest.clone()));
-            layers.push(Layer::project(l.dir, l.manifest));
+    // ---- 2. Build the two scope plans. A file the grammar refuses freezes its scope WHOLE. ----
+    let connected: Vec<(String, String)> = runs
+        .iter()
+        .map(|r| (r.session.host.clone(), r.session.workspace_name.clone()))
+        .collect();
+    let person: Option<ScopePlan> = match scopes::person_plan(ctx.fs, &ctx.layout, &connected) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            sweep
+                .warnings
+                .push(format!("MANIFEST_INVALID {}", e.detail()));
+            None
+        }
+    };
+    let cwd = ctx.roots.as_ref().and_then(|r| r.cwd.clone());
+    let home = ctx.roots.as_ref().map(|r| r.home.clone());
+    let mut project: Option<(PathBuf, ScopePlan)> = None;
+    let mut project_frozen = false;
+    if let Some(cwd) = &cwd {
+        match scopes::nearest_project_plan(ctx.fs, cwd, home.as_deref()) {
+            Ok(found) => project = found,
+            Err(e) => {
+                sweep
+                    .warnings
+                    .push(format!("MANIFEST_INVALID {}", e.detail()));
+                project_frozen = true;
+            }
         }
     }
-    for run in &runs {
-        let delivered: Vec<(String, String, Option<String>)> = match &run.snapshot {
-            Some(snap) => snap
-                .skills
-                .iter()
-                .map(|ds| {
-                    (
-                        ds.name.clone(),
-                        format!(
-                            "{}/{}/{}",
-                            run.session.host, run.session.workspace_name, ds.name
-                        ),
-                        None,
-                    )
-                })
-                .collect(),
-            // Unreachable: the cached delivered set stands in, so resolution (and the local
-            // converge) keep working offline. Manifest-channel rows are NOT profile items —
-            // their demand is the manifest's own channel line, resolved in its own layer.
-            None => prior_sync
-                .workspaces
-                .get(&run.session.workspace_id)
-                .map(|e| {
-                    e.delivered
-                        .iter()
-                        .filter(|(_, ds)| !ds.withdrawn && !ds.name.is_empty() && !ds.via_manifest)
-                        .map(|(_, ds)| {
-                            (
-                                ds.name.clone(),
-                                format!(
-                                    "{}/{}/{}",
-                                    run.session.host, run.session.workspace_name, ds.name
-                                ),
-                                None,
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-        };
-        layers.push(Layer::profile(
-            run.session.host.clone(),
-            run.session.workspace_name.clone(),
-            delivered,
-        ));
-    }
-    if let Some(personal) =
-        crate::manifest::file::read_manifest(ctx.fs, &ctx.layout.home().join(MANIFEST_FILE))?
-    {
-        layers.push(Layer::personal(personal));
-    }
+    // Every manifest dir up the chain — NOT a resolution input (nearest wins whole); the store
+    // surfaces (lazy recovery, the pre-1.0 handover) still visit each one.
+    let manifest_dirs: Vec<PathBuf> = match &cwd {
+        Some(cwd) => scopes::manifest_dirs_up(ctx.fs, cwd, home.as_deref()),
+        None => Vec::new(),
+    };
 
     // Recovery is LAZY for project stores, mirroring manifest discovery: a store is swept exactly
-    // when a run visits its project (no machine-wide registry). The home store's own recovery
-    // already ran at command start.
+    // when a run visits its project. The home store's own recovery already ran at command start.
     let now_millis = i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX);
-    for pd in &project_dirs {
+    for pd in &manifest_dirs {
         if let Some(playout) = sidecar::existing_project_store(ctx.fs, pd)
             && let Err(e) = sidecar::recover(ctx.fs, &playout, now_millis)
         {
-            warnings.push(format!(
+            sweep.warnings.push(format!(
                 "STORE_RECOVERY_FAILED {}: {}",
                 pd.display(),
                 e.detail()
@@ -494,18 +619,8 @@ pub(crate) fn manifest_update(
     }
     // Pre-1.0 handover: HOME-store map rows that point into a project this run processes are the
     // OLD blended model's leftovers — dropped here (bytes stay in place) so the project-scope pass
-    // below adopts what it finds through the ordinary byte-identical adopt-in-place.
-    handover_legacy_project_rows(ctx, &project_dirs, &mut warnings);
-
-    let resolution = resolve_layers(&layers);
-    for issue in &resolution.issues {
-        warnings.push(format!(
-            "MANIFEST_ISSUE {}: \"{}\" — {}",
-            issue.source.label(),
-            issue.reference,
-            issue.message
-        ));
-    }
+    // adopts what it finds through the ordinary byte-identical adopt-in-place.
+    handover_legacy_project_rows(ctx, &manifest_dirs, &mut sweep.warnings);
 
     // The follow seam for this run: current deliveries first, the cache behind them.
     let mut follow = CacheFollow::load(ctx.fs, &ctx.layout);
@@ -527,94 +642,71 @@ pub(crate) fn manifest_update(
         }
     }
 
-    // ---- 3. Reconcile each resolved item. ----
-    let mut synced_ids: HashSet<String> = HashSet::new();
-    let mut synced_names: HashSet<String> = HashSet::new();
-    // Channel-expansion bookkeeping: which (workspace-id, channel) pairs FAILED to expand this
-    // run (their members are unknowable — nothing of theirs may be cleaned), which project dirs
-    // own such a failed item, and which member deliveries DID land (recorded into the delivery
-    // cache marked `via_manifest`, so offline surfaces know a manifest channel provides them).
-    // EXCLUDES are enforced per member at expansion time (`exclude_wins` — nearer-or-equal
-    // wins), never as a global pre-seed: a broader personal exclude must not suppress a nearer
-    // project channel's member.
-    let mut failed_channels: HashSet<(String, String)> = HashSet::new();
-    let mut unexpanded_channel_dirs: Vec<PathBuf> = Vec::new();
-    let mut channel_delivered: Vec<(String, String, DeliveredSkill)> = Vec::new();
-    let target_names: Vec<String> = opts
-        .targets
-        .iter()
-        .map(|t| {
-            crate::manifest::refs::parse_ref(t)
-                .map(|p| p.item_name().to_owned())
-                .unwrap_or_else(|_| t.clone())
-        })
-        .collect();
-    let mut matched_targets: HashSet<String> = HashSet::new();
-    for item in &resolution.items {
-        if !target_names.is_empty() {
-            if !target_names.iter().any(|t| t == &item.name) {
-                continue;
-            }
-            matched_targets.insert(item.name.clone());
-        }
-        reconcile_item(
-            ctx,
-            &runs,
-            &follow,
-            &project_manifests,
-            git,
-            item,
-            &mut rows,
-            &mut warnings,
-            &mut synced_ids,
-            &mut synced_names,
-            &mut ChannelBook {
-                failed: &mut failed_channels,
-                unexpanded_dirs: &mut unexpanded_channel_dirs,
-                delivered: &mut channel_delivered,
-                excluded: &resolution.excluded,
-            },
-        );
-    }
-    if !target_names.is_empty() {
-        for t in &target_names {
-            if !matched_targets.contains(t) {
-                return Err(ClientError::InvalidArgument(format!(
-                    "'{t}' is not in any manifest covering this directory or your profiles — \
-                     `topos status` shows the resolved set; `topos add` records new demand"
-                )));
-            }
+    let env = Env {
+        ctx,
+        runs: &runs,
+        follow: &follow,
+        git,
+        prior: &prior_sync,
+        repos: std::cell::RefCell::new(Vec::new()),
+    };
+
+    // ---- 3. `--rebuild`, BEFORE the fan-out: absorb, then drop, then let the sweep re-project. ----
+    if opts.rebuild {
+        rebuild_store(ctx, &ctx.layout, &mut sweep.warnings);
+        if let Some((dir, _)) = &project
+            && let Some(playout) = sidecar::existing_project_store(ctx.fs, dir)
+        {
+            let pctx = super::pull::ctx_with_layout(ctx, &playout);
+            rebuild_store(&pctx, &playout, &mut sweep.warnings);
         }
     }
 
-    // ---- 4. Clean what is no longer demanded (the targeted form never cleans). ----
-    if target_names.is_empty() {
+    // ---- 4. Reconcile each scope, unblended. ----
+    let mut targets = Targets::new(&opts.targets);
+    if let Some((dir, plan)) = &project {
+        let sc = ScopeCtx {
+            scope: ResolvedScope::Project { dir: dir.clone() },
+            label: ResolvedScope::Project { dir: dir.clone() }.label(),
+            plan,
+        };
+        reconcile_scope(&env, &sc, &mut targets, &mut sweep);
+    }
+    if let Some(plan) = &person {
+        let sc = ScopeCtx {
+            scope: ResolvedScope::Person,
+            label: ResolvedScope::Person.label(),
+            plan,
+        };
+        reconcile_scope(&env, &sc, &mut targets, &mut sweep);
+    }
+    if let Some(t) = targets.unmatched() {
+        return Err(ClientError::InvalidArgument(format!(
+            "'{t}' is not in any manifest covering this directory or your connected feeds — \
+             `topos status` shows the resolved set; `topos add` records new demand"
+        )));
+    }
+
+    // ---- 5. Disclosures the table cannot carry per row. ----
+    disclose(&env, person.as_ref(), &mut sweep);
+
+    // ---- 6. Clean what nothing demands any more (the targeted form never cleans). ----
+    if opts.targets.is_empty() {
         clean_undemanded(
-            ctx,
-            &runs,
-            &prior_sync,
-            &resolution,
-            &project_dirs,
-            &synced_ids,
-            &unexpanded_channel_dirs,
-            &failed_channels,
-            &mut rows,
-            &mut warnings,
+            &env,
+            person.as_ref(),
+            project.as_ref(),
+            project_frozen,
+            &mut sweep,
         );
     }
 
-    // Names the CURRENT resolution still MENTIONS (an item line — synced or not — or an
-    // exclude): their `via_manifest` cache rows must SURVIVE a sweep that did not re-record
-    // them, or a later drop of the line would find no row to clean by.
-    let mentioned_names: HashSet<String> = resolution
-        .items
-        .iter()
-        .map(|i| i.name.clone())
-        .chain(resolution.excluded.iter().map(|e| e.name.clone()))
-        .collect();
-
-    // ---- 5. Report applied state + refresh the delivery cache, per session. ----
-    let now_millis = i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX);
+    // ---- 7. Report applied state + refresh the delivery cache, per session. ----
+    let mentioned = sweep
+        .mentioned_anywhere()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<HashSet<String>>();
     let mut sync_updates: Vec<(String, WorkspaceSync)> = Vec::new();
     for run in &runs {
         let Some(snap) = &run.snapshot else {
@@ -637,10 +729,12 @@ pub(crate) fn manifest_update(
                         | PlaneError::Unavailable(m)
                         | PlaneError::Malformed(m) => m,
                     };
-                    warnings.push(format!("REPORT_FAILED {}: {m}", run.session.workspace_name));
+                    sweep
+                        .warnings
+                        .push(format!("REPORT_FAILED {}: {m}", run.session.workspace_name));
                 }
             },
-            Err(e) => warnings.push(format!(
+            Err(e) => sweep.warnings.push(format!(
                 "REPORT_FAILED {}: {}",
                 run.session.workspace_name,
                 e.detail()
@@ -657,38 +751,45 @@ pub(crate) fn manifest_update(
                     withdrawn: false,
                     via_channels: ds.via_channels.clone(),
                     via_manifest: false,
+                    assigned_by: ds.assigned_by.clone(),
+                    picked: ds.picked,
                 },
             );
         }
-        // Channel-EXPANDED deliveries this run (manifest `[channels]` lines) ride the same cache,
-        // marked `via_manifest` — the profile row wins a collision (its provenance is broader).
-        for (ws, skill_id, ds) in &channel_delivered {
+        // Manifest-ROW deliveries this run ride the same cache, marked `via_manifest` — the feed's
+        // own row wins a collision (its provenance is broader).
+        for (ws, skill_id, ds) in &sweep.delivered {
             if *ws == run.session.workspace_id {
                 delivered_cache
                     .entry(skill_id.clone())
                     .or_insert_with(|| ds.clone());
             }
         }
-        // A channel that FAILED to expand this run froze its members' placements, and a name
-        // the resolution still MENTIONS (an excluded-here line, an item that failed to sync)
-        // was not re-recorded either: keep both kinds' prior cache rows — the provenance must
-        // survive the same sweep the bytes do, or a LATER drop of the line would find no row
-        // for the cleaner to discover. (A line removed from every covering manifest is neither
-        // — its row lapses here, right after its clean.)
+        // A channel that FAILED to expand this run froze its members' placements, and a name the
+        // recipes still MENTION was not re-recorded either: keep both kinds' prior cache rows — the
+        // provenance must survive the same sweep the bytes do, or a LATER drop of the row would find
+        // nothing for the cleaner to discover.
         if let Some(prior) = prior_sync.workspaces.get(&run.session.workspace_id) {
             for (skill_id, ds) in &prior.delivered {
                 if ds.via_manifest
                     && !ds.withdrawn
                     && !delivered_cache.contains_key(skill_id)
-                    && (mentioned_names.contains(&ds.name)
+                    && (mentioned.contains(&ds.name)
                         || ds.via_channels.iter().any(|c| {
-                            failed_channels.contains(&(run.session.workspace_id.clone(), c.clone()))
+                            sweep
+                                .failed_channels
+                                .contains(&(run.session.workspace_id.clone(), c.clone()))
                         }))
                 {
                     delivered_cache.insert(skill_id.clone(), ds.clone());
                 }
             }
         }
+        let declined: BTreeMap<String, String> = snap
+            .declined
+            .iter()
+            .map(|(id, name)| (id.clone(), name.clone()))
+            .collect();
         sync_updates.push((
             run.session.workspace_id.clone(),
             WorkspaceSync {
@@ -705,6 +806,7 @@ pub(crate) fn manifest_update(
                 },
                 staleness_window_ms: snap.staleness_window_ms,
                 delivered: delivered_cache,
+                declined,
             },
         ));
         // Notices, LAST per workspace (the ack marks read-state only after the reconcile ran).
@@ -722,14 +824,18 @@ pub(crate) fn manifest_update(
                         | PlaneError::Unavailable(m)
                         | PlaneError::Malformed(m) => m,
                     };
-                    warnings.push(format!("ACK_FAILED {}: {m}", run.session.workspace_name));
+                    sweep
+                        .warnings
+                        .push(format!("ACK_FAILED {}: {m}", run.session.workspace_name));
                 }
             }
             notices.extend(snap.notices.iter().cloned());
         }
     }
     if let Err(e) = sync_status::record(ctx.fs, &ctx.layout, &sync_updates) {
-        warnings.push(format!("SYNC_STATUS_WRITE_FAILED: {}", e.detail()));
+        sweep
+            .warnings
+            .push(format!("SYNC_STATUS_WRITE_FAILED: {}", e.detail()));
     }
     let sync = sync_updates
         .into_iter()
@@ -743,377 +849,342 @@ pub(crate) fn manifest_update(
 
     Ok(PullOutcome {
         data: PullData {
-            skills: rows,
+            skills: sweep.rows,
             proposals_awaiting,
             notices,
             sync,
         },
-        warnings,
+        warnings: sweep.warnings,
         access_gone,
         unreachable,
     })
 }
 
-/// The channel-expansion bookkeeping one sweep accumulates (see `manifest_update`).
-struct ChannelBook<'a> {
-    /// `(workspace-id, channel)` pairs that FAILED to expand this run.
-    failed: &'a mut HashSet<(String, String)>,
-    /// Project dirs owning a failed channel item — the cleaner freezes under them.
-    unexpanded_dirs: &'a mut Vec<PathBuf>,
-    /// `(workspace-id, skill-id, cache-row)` per member a channel expansion claimed.
-    delivered: &'a mut Vec<(String, String, DeliveredSkill)>,
-    /// The resolution's exclude rows — the per-member `exclude_wins` check reads them.
-    excluded: &'a [crate::manifest::resolve::ExcludedItem],
-}
+// =================================================================================================
+// The per-scope fan-out.
+// =================================================================================================
 
-impl ChannelBook<'_> {
-    /// Record one failed expansion: its members are unknowable this run, so nothing under the
-    /// owning project dir may be treated as undemanded. `workspace_id` is the SESSION's opaque
-    /// id (two servers may both hold an `acme` — the name alone would freeze the wrong one);
-    /// `None` when no session resolves the reference at all (nothing dials for it, so no cache
-    /// entry is written either — only the dir freeze matters there).
-    fn note_failure(&mut self, workspace_id: Option<&str>, channel: &str, scope: &ResolvedScope) {
-        if let Some(ws) = workspace_id {
-            self.failed.insert((ws.to_owned(), channel.to_owned()));
-        }
-        if let ResolvedScope::Project { dir } = scope {
-            self.unexpanded_dirs.push(dir.clone());
+/// Reconcile ONE scope's whole recipe, in the order that decides collisions: explicit THINGS first
+/// (their version and fields are the last word on their identity), then SETS, then — person scope
+/// only — the feeds.
+fn reconcile_scope<'a>(env: &Env<'a>, sc: &ScopeCtx<'_>, targets: &mut Targets, sweep: &mut Sweep) {
+    for row in &sc.plan.things {
+        reconcile_thing(env, sc, row, targets, sweep);
+    }
+    for row in &sc.plan.sets {
+        reconcile_set(env, sc, row, targets, sweep);
+    }
+    if matches!(sc.scope, ResolvedScope::Person) {
+        for (host, workspace) in &sc.plan.feeds {
+            reconcile_feed(env, sc, host, workspace, targets, sweep);
         }
     }
 }
 
-/// Reconcile ONE resolved manifest line (per kind + scope). Failures are isolated per item —
-/// warnings, never an aborted sweep.
-#[allow(clippy::too_many_arguments)]
-fn reconcile_item(
-    ctx: &Ctx<'_>,
-    runs: &[SessionRun],
-    follow: &CacheFollow,
-    project_manifests: &[(PathBuf, crate::manifest::file::Manifest)],
-    git: Option<&dyn crate::git_source::GitTarballSource>,
-    item: &ResolvedItem,
-    rows: &mut Vec<PullSkill>,
-    warnings: &mut Vec<String>,
-    synced_ids: &mut HashSet<String>,
-    synced_names: &mut HashSet<String>,
-    channels: &mut ChannelBook<'_>,
+/// One explicit THING row: a workspace bundle, one repo skill, or a local folder.
+fn reconcile_thing<'a>(
+    env: &Env<'a>,
+    sc: &ScopeCtx<'_>,
+    row: &PlanRow,
+    targets: &mut Targets,
+    sweep: &mut Sweep,
 ) {
-    if !synced_names.insert(item.name.clone()) {
-        return; // a channel expansion already claimed the name this run
+    let display = row.display_name();
+    if !targets.hit(&[
+        display.as_str(),
+        row.shape.leaf_name(),
+        row.reference.as_str(),
+    ]) {
+        return;
     }
-    match (&item.source, &item.parsed) {
-        // A profile item: the session's delivery already resolved it.
-        (LayerSource::Profile { host, workspace }, _) => {
-            let Some(run) = runs
-                .iter()
-                .find(|r| &r.session.host == host && &r.session.workspace_name == workspace)
-            else {
-                return; // the layer came from the cache of an unreachable session — nothing to dial
-            };
-            match &run.snapshot {
-                Some(snap) => {
-                    if let Some(ds) = snap.skills.iter().find(|s| s.name == item.name) {
-                        sync_workspace_skill(
-                            ctx,
-                            run,
-                            follow,
-                            &CatalogTarget {
-                                skill_id: ds.skill_id.clone(),
-                                name: ds.name.clone(),
-                                version_id: to_hex(&ds.version_id),
-                                generation: ds.generation,
-                                bundle_digest: Some(ds.bundle_digest),
-                                review_required: ds.review_required,
-                            },
-                            item.pin.as_deref(),
-                            &item.scope,
-                            None,
-                            rows,
-                            warnings,
-                            synced_ids,
-                        );
-                    }
-                }
-                None => {
-                    // Unreachable: converge the cached skill from the LOCAL store (the engine's
-                    // offline arm) — the id comes from the cache-fed follow seam.
-                    if let Some((skill_id, fc)) = follow
-                        .entries
-                        .iter()
-                        .find(|(id, fc)| {
-                            fc.workspace_id == run.session.workspace_id
-                                && skill_name_of(ctx, id).as_deref() == Some(&item.name)
-                        })
-                        .map(|(id, fc)| (id.clone(), fc.clone()))
-                        && let Ok(sid) = SkillId::parse(&skill_id)
-                    {
-                        let run_ctx = super::pull::ctx_with_plane_and_follow(
-                            ctx,
-                            run.transports.plane.as_plane(),
-                            follow,
-                        );
-                        match sync_engine::sync_one_with(
-                            &run_ctx,
-                            &sid,
-                            &fc,
-                            Invocation::Sweep,
-                            None,
-                        ) {
-                            Ok(mut row) => {
-                                row.workspace_id = Some(run.session.workspace_id.clone());
-                                if row.action == PullAction::DraftSynced {
-                                    warnings
-                                        .push(draft_synced_line(&item.name, row.synced_placements));
-                                }
-                                synced_ids.insert(skill_id);
-                                rows.push(row);
-                            }
-                            Err(e) => note_item_failure(ctx, warnings, &item.name, &e),
-                        }
-                    }
-                }
-            }
-        }
-        // A workspace skill reference in a project / personal manifest.
-        (
-            _,
-            ParsedRef::Skill {
-                host,
-                workspace,
-                name,
-                ..
-            },
-        ) => {
-            let Some(run) = find_run(runs, host.as_deref(), workspace) else {
-                warnings.push(not_connected_line(item, host.as_deref(), workspace));
+    sweep.mention(&sc.label, &display);
+    match &row.shape {
+        KeyShape::WorkspaceBundle {
+            host,
+            workspace,
+            bundle,
+        } => {
+            let Some(run) = find_run(env.runs, Some(host), workspace) else {
+                sweep
+                    .warnings
+                    .push(not_connected_line(&row.reference, host, workspace));
                 return;
             };
-            let Some(catalog) = run.catalog(warnings) else {
+            let Some(catalog) = run.catalog(&mut sweep.warnings) else {
                 return;
             };
-            let Some(entry) = catalog.skills.iter().find(|e| &e.name == name) else {
-                warnings.push(format!(
+            let Some(entry) = catalog.skills.iter().find(|e| &e.name == bundle) else {
+                sweep.warnings.push(format!(
                     "NOT_AVAILABLE {}: \"{}\" — not in {}'s catalog, or not visible with your \
                      current access",
-                    item.source.label(),
-                    item.reference,
-                    run.session.workspace_name
+                    sc.label, row.reference, run.session.workspace_name
                 ));
                 return;
             };
-            // A manifest-line delivery records its provenance in the cache too (marked
-            // `via_manifest`) — the offline surfaces (`list`'s workspace grouping, `remove`'s
-            // exclude arm, the publish lane) know which workspace governs the name.
-            channels.delivered.push((
+            let target = CatalogTarget::from_entry(entry);
+            let override_dir = row_override(sc, row, entry.kind.as_str(), env, sweep);
+            sweep.explicit.insert(target.skill_id.clone());
+            // A manifest-row delivery records its provenance in the cache too (marked
+            // `via_manifest`), so the offline surfaces know which workspace governs the name.
+            sweep.delivered.push((
                 run.session.workspace_id.clone(),
-                entry.skill_id.clone(),
+                target.skill_id.clone(),
                 DeliveredSkill {
-                    name: entry.name.clone(),
+                    name: target.name.clone(),
                     review_required: false,
-                    served_version: entry.version_id.clone(),
+                    served_version: target.version_id.clone(),
                     withdrawn: false,
                     via_channels: Vec::new(),
                     via_manifest: true,
+                    assigned_by: None,
+                    picked: false,
                 },
             ));
-            sync_workspace_skill(
-                ctx,
-                run,
-                follow,
-                &CatalogTarget::from_entry(entry),
-                item.pin.as_deref(),
-                &item.scope,
-                placement_override(project_manifests, item, warnings),
-                rows,
-                warnings,
-                synced_ids,
-            );
+            let st = SyncTarget {
+                target,
+                pin: row.pin(),
+                display: display.clone(),
+                override_dir,
+            };
+            sync_workspace_skill(env, sc, run, &st, sweep);
         }
-        // A channel reference: expand against the session's channel index. EVERY failure to
-        // expand is booked — the cleaner must not treat the unknowable member set as undemanded.
-        (
-            _,
-            ParsedRef::Channel {
-                host,
-                workspace,
-                name,
-            },
-        ) => {
-            let Some(run) = find_run(runs, host.as_deref(), workspace) else {
-                channels.note_failure(None, name, &item.scope);
-                warnings.push(not_connected_line(item, host.as_deref(), workspace));
+        KeyShape::RepoSkill {
+            host,
+            owner,
+            repo,
+            skill,
+        } => reconcile_repo_skill(env, sc, row, host, owner, repo, skill, sweep),
+        KeyShape::LocalPath { raw } => {
+            let dir = local_dir(env.ctx, sc, raw);
+            if env.ctx.fs.exists(&dir) {
+                sweep.push(plain_row(&display, PullAction::UpToDate, None, &sc.label));
+            } else {
+                sweep.warnings.push(format!(
+                    "PATH_MISSING {}: \"{raw}\" — the folder is gone; `topos remove {raw}` drops \
+                     the row",
+                    sc.label
+                ));
+            }
+        }
+        // A feed or channel never lands in `things`; a repo set never does either.
+        _ => {}
+    }
+}
+
+/// One SET row: a workspace channel, or a whole repo.
+fn reconcile_set<'a>(
+    env: &Env<'a>,
+    sc: &ScopeCtx<'_>,
+    row: &PlanRow,
+    targets: &mut Targets,
+    sweep: &mut Sweep,
+) {
+    match &row.shape {
+        KeyShape::Channel {
+            host,
+            workspace,
+            channel,
+        } => {
+            let set_selected = targets.hit(&[
+                row.reference.as_str(),
+                channel.as_str(),
+                row.display_name().as_str(),
+            ]);
+            let Some(run) = find_run(env.runs, Some(host), workspace) else {
+                sweep.note_set_failure(None, channel, &sc.scope);
+                sweep
+                    .warnings
+                    .push(not_connected_line(&row.reference, host, workspace));
                 return;
             };
-            let Some(index) = run.channels(warnings) else {
-                channels.note_failure(Some(&run.session.workspace_id), name, &item.scope);
+            let Some(index) = run.channels(&mut sweep.warnings) else {
+                sweep.note_set_failure(Some(&run.session.workspace_id), channel, &sc.scope);
                 return;
             };
-            let Some(ch) = index.channels.iter().find(|c| &c.name == name) else {
-                channels.note_failure(Some(&run.session.workspace_id), name, &item.scope);
-                warnings.push(format!(
+            let Some(ch) = index.channels.iter().find(|c| &c.name == channel) else {
+                sweep.note_set_failure(Some(&run.session.workspace_id), channel, &sc.scope);
+                sweep.warnings.push(format!(
                     "NOT_AVAILABLE {}: \"{}\" — no such channel in {}, or not visible with your \
                      current access",
-                    item.source.label(),
-                    item.reference,
-                    run.session.workspace_name
+                    sc.label, row.reference, run.session.workspace_name
                 ));
                 return;
             };
-            let Some(catalog) = run.catalog(warnings) else {
-                channels.note_failure(Some(&run.session.workspace_id), name, &item.scope);
+            let Some(catalog) = run.catalog(&mut sweep.warnings) else {
+                sweep.note_set_failure(Some(&run.session.workspace_id), channel, &sc.scope);
                 return;
             };
-            for cs in &ch.skills {
-                // An exclude withholds a member only from a NEARER-OR-EQUAL layer (the same
-                // per-name rule the direct entries resolve by) — a broader personal exclude
-                // never suppresses a nearer project channel's member. A withheld member is not
-                // claimed either, so the cleaner retires its placements.
-                if channels
-                    .excluded
-                    .iter()
-                    .any(|ex| ex.name == cs.name && exclude_wins(ex.layer_index, item.layer_index))
+            let members: Vec<String> = ch.skills.iter().map(|s| s.skill_id.clone()).collect();
+            for member in &members {
+                let Some(entry) = catalog.skills.iter().find(|e| &e.skill_id == member) else {
+                    continue; // archived / no current — nothing to deliver
+                };
+                // An explicit row of the SAME scope owns the identity: its version and fields win,
+                // and the set adds nothing.
+                if sc.plan.explicit_claims(host, workspace, &entry.name) {
+                    continue;
+                }
+                if !set_selected && !targets.hit(&[entry.name.as_str()]) {
+                    continue;
+                }
+                sweep.mention(&sc.label, &entry.name);
+                if sweep.claimed(&sc.label, &entry.skill_id) {
+                    continue;
+                }
+                let target = CatalogTarget::from_entry(entry);
+                // Book the provenance BEFORE the sync (a per-item failure does not unmake the fact
+                // that this channel provides the name).
+                sweep.delivered.push((
+                    run.session.workspace_id.clone(),
+                    target.skill_id.clone(),
+                    DeliveredSkill {
+                        name: target.name.clone(),
+                        review_required: false,
+                        served_version: target.version_id.clone(),
+                        withdrawn: false,
+                        via_channels: vec![channel.clone()],
+                        via_manifest: true,
+                        assigned_by: None,
+                        picked: false,
+                    },
+                ));
+                let display = target.name.clone();
+                let override_dir = row_override(sc, row, entry.kind.as_str(), env, sweep);
+                let st = SyncTarget {
+                    target,
+                    pin: None,
+                    display,
+                    override_dir,
+                };
+                sync_workspace_skill(env, sc, run, &st, sweep);
+            }
+        }
+        KeyShape::RepoSet { host, owner, repo } => {
+            reconcile_repo_set(env, sc, row, host, owner, repo, targets, sweep);
+        }
+        _ => {}
+    }
+}
+
+/// One workspace FEED (person scope only): everything the workspace currently gives this person,
+/// minus what an `"off"` switch withholds and what an explicit row already claimed.
+fn reconcile_feed<'a>(
+    env: &Env<'a>,
+    sc: &ScopeCtx<'_>,
+    host: &str,
+    workspace: &str,
+    targets: &mut Targets,
+    sweep: &mut Sweep,
+) {
+    let address = format!("{host}/{workspace}");
+    let feed_selected = targets.hit(&[workspace, address.as_str()]);
+    let Some(run) = find_run(env.runs, Some(host), workspace) else {
+        sweep.warnings.push(format!(
+            "NOT_AVAILABLE {}: the feed of {address} is adopted here, but this installation is not \
+             logged into it (run `topos login {address}`)",
+            sc.label
+        ));
+        return;
+    };
+    match &run.snapshot {
+        Some(snap) => {
+            let served: Vec<DeliverySkill> = snap.skills.clone();
+            for ds in &served {
+                if sc.plan.off_for(host, workspace, &ds.name).is_some()
+                    || sc.plan.explicit_claims(host, workspace, &ds.name)
                 {
                     continue;
                 }
-                if !synced_names.insert(cs.name.clone()) {
-                    continue; // a nearer line already claimed this name
+                if !feed_selected && !targets.hit(&[ds.name.as_str()]) {
+                    continue;
                 }
-                let Some(entry) = catalog.skills.iter().find(|e| e.skill_id == cs.skill_id) else {
-                    continue; // archived / no current — skipped per the resolution rule
-                };
-                // Book the provenance BEFORE the sync (a per-item failure does not unmake the
-                // fact that this channel provides the name).
-                channels.delivered.push((
-                    run.session.workspace_id.clone(),
-                    entry.skill_id.clone(),
-                    DeliveredSkill {
-                        name: entry.name.clone(),
-                        review_required: false,
-                        served_version: entry.version_id.clone(),
-                        withdrawn: false,
-                        via_channels: vec![name.clone()],
-                        via_manifest: true,
+                sweep.mention(&sc.label, &ds.name);
+                if sweep.claimed(&sc.label, &ds.skill_id) {
+                    continue;
+                }
+                let st = SyncTarget {
+                    target: CatalogTarget {
+                        skill_id: ds.skill_id.clone(),
+                        name: ds.name.clone(),
+                        version_id: to_hex(&ds.version_id),
+                        generation: ds.generation,
+                        bundle_digest: Some(ds.bundle_digest),
+                        review_required: ds.review_required,
                     },
-                ));
-                sync_workspace_skill(
-                    ctx,
-                    run,
-                    follow,
-                    &CatalogTarget::from_entry(entry),
-                    None,
-                    &item.scope,
-                    placement_override(project_manifests, item, warnings),
-                    rows,
-                    warnings,
-                    synced_ids,
-                );
+                    pin: None,
+                    display: ds.name.clone(),
+                    override_dir: None,
+                };
+                sync_workspace_skill(env, sc, run, &st, sweep);
             }
         }
-        // A bare catalog name (hand-written): unique across the connected workspaces or an error.
-        (_, ParsedRef::Bare { name, .. }) => {
-            let mut hits: Vec<(&SessionRun, WireSkillIndexEntry)> = Vec::new();
-            for run in runs {
-                if let Some(catalog) = run.catalog(warnings)
-                    && let Some(e) = catalog.skills.iter().find(|e| &e.name == name)
+        None => {
+            // No fresh delivery: converge what the cache says this workspace last served, from the
+            // LOCAL store. Nothing is dialed; nothing is cleaned.
+            let Some(prior) = env.prior.workspaces.get(&run.session.workspace_id) else {
+                return;
+            };
+            let cached: Vec<(String, DeliveredSkill)> = prior
+                .delivered
+                .iter()
+                .filter(|(_, ds)| !ds.withdrawn && !ds.via_manifest && !ds.name.is_empty())
+                .map(|(id, ds)| (id.clone(), ds.clone()))
+                .collect();
+            for (skill_id, ds) in &cached {
+                if sc.plan.off_for(host, workspace, &ds.name).is_some()
+                    || sc.plan.explicit_claims(host, workspace, &ds.name)
                 {
-                    hits.push((run, e.clone()));
+                    continue;
                 }
-            }
-            match hits.as_slice() {
-                [] => warnings.push(format!(
-                    "NOT_AVAILABLE {}: \"{name}\" — not in any connected workspace's catalog, or \
-                     not visible with your current access",
-                    item.source.label()
-                )),
-                [(run, entry)] => {
-                    channels.delivered.push((
-                        run.session.workspace_id.clone(),
-                        entry.skill_id.clone(),
-                        DeliveredSkill {
-                            name: entry.name.clone(),
-                            review_required: false,
-                            served_version: entry.version_id.clone(),
-                            withdrawn: false,
-                            via_channels: Vec::new(),
-                            via_manifest: true,
-                        },
-                    ));
-                    sync_workspace_skill(
-                        ctx,
-                        run,
-                        follow,
-                        &CatalogTarget::from_entry(entry),
-                        item.pin.as_deref(),
-                        &item.scope,
-                        placement_override(project_manifests, item, warnings),
-                        rows,
-                        warnings,
-                        synced_ids,
-                    );
+                if !feed_selected && !targets.hit(&[ds.name.as_str()]) {
+                    continue;
                 }
-                several => {
-                    let candidates: Vec<String> = several
-                        .iter()
-                        .map(|(r, _)| {
-                            format!("{}/{}/{name}", r.session.host, r.session.workspace_name)
-                        })
-                        .collect();
-                    warnings.push(format!(
-                        "AMBIGUOUS {}: \"{name}\" is in several workspaces — spell one of: {}",
-                        item.source.label(),
-                        candidates.join(", ")
-                    ));
+                sweep.mention(&sc.label, &ds.name);
+                if !sweep.claim(&sc.label, skill_id) {
+                    continue;
                 }
-            }
-        }
-        // An external GitHub origin: install at the pinned commit; verify a tracked one's pin.
-        (
-            _,
-            ParsedRef::GitHub {
-                owner,
-                repo,
-                subdir,
-                ..
-            },
-        ) => {
-            reconcile_github(ctx, git, item, owner, repo, subdir, rows, warnings);
-        }
-        // A local folder: presence IS the delivery (adopted in place; `add`/`publish` manage it).
-        (_, ParsedRef::LocalPath { raw }) => {
-            let base = match &item.source {
-                LayerSource::Project { dir } => dir.clone(),
-                _ => ctx.layout.home().to_path_buf(),
-            };
-            let dir = if Path::new(raw).is_absolute() {
-                PathBuf::from(raw)
-            } else {
-                base.join(raw.trim_start_matches("./"))
-            };
-            if ctx.fs.exists(&dir) {
-                rows.push(PullSkill {
-                    skill: item.name.clone(),
-                    workspace_id: None,
-                    observed: 0,
-                    applied: 0,
-                    action: PullAction::UpToDate,
-                    offer: None,
-                    conflict: None,
-                    merge: None,
-                    merge_preview: None,
-                    synced_placements: None,
-                });
-            } else {
-                warnings.push(format!(
-                    "PATH_MISSING {}: \"{raw}\" — the folder is gone; `topos remove {raw}` drops \
-                     the line",
-                    item.source.label()
-                ));
+                let Ok(sid) = SkillId::parse(skill_id) else {
+                    continue;
+                };
+                if !env.ctx.fs.exists(&env.ctx.layout.skill_dir(&sid)) {
+                    continue;
+                }
+                let fc = FollowContext {
+                    workspace_id: run.session.workspace_id.clone(),
+                    mode: FollowMode::Auto,
+                    review_required: ds.review_required,
+                    following: true,
+                    agents: Vec::new(),
+                    excluded_agents: Vec::new(),
+                };
+                let run_ctx = super::pull::ctx_with_plane_and_follow(
+                    env.ctx,
+                    run.transports.plane.as_plane(),
+                    env.follow,
+                );
+                match sync_engine::sync_one_with(&run_ctx, &sid, &fc, Invocation::Sweep, None) {
+                    Ok(mut row) => {
+                        row.workspace_id = Some(run.session.workspace_id.clone());
+                        row.scope = Some(sc.label.clone());
+                        if row.action == PullAction::DraftSynced {
+                            sweep
+                                .warnings
+                                .push(draft_synced_line(&ds.name, row.synced_placements));
+                        }
+                        sweep.push(row);
+                    }
+                    Err(e) => note_item_failure(env.ctx, &mut sweep.warnings, &ds.name, &e),
+                }
             }
         }
     }
 }
 
-/// The one target shape both the delivery and the catalog resolve to.
+// =================================================================================================
+// The workspace-bundle sync (the one path every workspace row and feed item takes).
+// =================================================================================================
+
+/// The one target shape the delivery and the catalog both resolve to.
 struct CatalogTarget {
     skill_id: String,
     name: String,
@@ -1136,35 +1207,44 @@ impl CatalogTarget {
     }
 }
 
-/// Sync ONE workspace bundle toward its served (or pinned) version, at the resolved scope.
-#[allow(clippy::too_many_arguments)]
-fn sync_workspace_skill(
-    ctx: &Ctx<'_>,
-    run: &SessionRun,
-    follow: &CacheFollow,
-    target: &CatalogTarget,
-    pin: Option<&str>,
-    scope: &ResolvedScope,
+/// One bundle to converge, with everything the row said about how it should land.
+struct SyncTarget {
+    target: CatalogTarget,
+    /// The row's version pin — it overrides the served current.
+    pin: Option<String>,
+    /// The placement directory's display name (the row's `name` field, else the catalog name).
+    display: String,
+    /// The project-relative placement override the row (or its kind default) resolved to.
     override_dir: Option<String>,
-    rows: &mut Vec<PullSkill>,
-    warnings: &mut Vec<String>,
-    synced_ids: &mut HashSet<String>,
+}
+
+/// Sync ONE workspace bundle toward its served (or pinned) version, at the resolved scope.
+fn sync_workspace_skill<'a>(
+    env: &Env<'a>,
+    sc: &ScopeCtx<'_>,
+    run: &'a SessionRun,
+    st: &SyncTarget,
+    sweep: &mut Sweep,
 ) {
+    let ctx = env.ctx;
+    let target = &st.target;
     let Ok(sid) = SkillId::parse(&target.skill_id) else {
-        warnings.push(format!(
+        sweep.warnings.push(format!(
             "BAD_ID {}: served an invalid skill id",
             target.name
         ));
         return;
     };
-    if !synced_ids.insert(target.skill_id.clone()) {
-        return; // already reconciled this run under another line
+    if !sweep.claim(&sc.label, &target.skill_id) {
+        return; // already reconciled in this scope under another row
     }
-    // The manifest pin overrides the served version (the engine fetches by version id, so an
-    // older pin resolves as long as the plane still serves its bytes).
-    let version_id = pin
+    // The row's pin overrides the served version (the engine fetches by version id, so an older pin
+    // resolves as long as the plane still serves its bytes).
+    let version_id = st
+        .pin
+        .as_deref()
         .filter(|p| *p != target.version_id)
-        .map_or_else(|| target.version_id.clone(), |p| p.to_owned());
+        .map_or_else(|| target.version_id.clone(), str::to_owned);
     let record = WireCurrentRecord {
         schema_version: WIRE_SCHEMA_VERSION,
         scope: PointerScope {
@@ -1184,12 +1264,11 @@ fn sync_workspace_skill(
         agents: Vec::new(),
         excluded_agents: Vec::new(),
     };
-    // The scope decides BOTH the placement plan and the STORE the engine runs against: person →
-    // the home layout + home engine; project → the project's own store
-    // (`<project>/.topos/state/<user>/`) + in-checkout dirs. Per-scope state is the independence
-    // guarantee — the same bundle followed at both scopes has two state trees, two drafts, two
-    // baselines, with no cross-scope anything.
-    let project_dir = match scope {
+    // The scope decides BOTH the placement plan and the STORE the engine runs against: person → the
+    // home layout + home engine; project → the project's own store (`<project>/.topos/state/<user>/`)
+    // + in-checkout dirs. Per-scope state is the independence guarantee — the same bundle at both
+    // scopes has two state trees, two drafts, two baselines, with no cross-scope anything.
+    let project_dir = match &sc.scope {
         ResolvedScope::Project { dir } => Some(dir.clone()),
         ResolvedScope::Person => None,
     };
@@ -1197,43 +1276,54 @@ fn sync_workspace_skill(
         Some(dir) => match sidecar::ensure_project_store(ctx.fs, dir) {
             Ok(layout) => layout,
             Err(e) => {
-                note_item_failure(ctx, warnings, &target.name, &e);
+                note_item_failure(ctx, &mut sweep.warnings, &target.name, &e);
                 return;
             }
         },
         None => ctx.layout.clone(),
     };
     let naming_slug = run.session.workspace_name.clone();
-    // The incoming version's digest arms adopt-in-place: a by-name project dir already holding a
-    // byte-identical copy (the handed-over old-world placement, a teammate's committed copy)
-    // BECOMES the placement instead of a namespaced sibling.
+    let display = st.display.clone();
+    let override_dir = st.override_dir.clone();
+    // The incoming version's digest arms adopt-in-place: a by-name dir already holding a
+    // byte-identical copy (a handed-over old-world placement, a teammate's committed copy) BECOMES
+    // the placement instead of a namespaced sibling.
     let adopt_digest = target.bundle_digest;
-    let plan_fn =
-        |ctx: &Ctx<'_>, skill_id: &str, lock: &Lock, map: &PlacementMap| match &project_dir {
+    let plan_fn = |ctx: &Ctx<'_>, skill_id: &str, lock: &Lock, map: &PlacementMap| {
+        // The row's `name` is what the directory is called; everything else about the bundle keeps
+        // its catalog identity.
+        let mut named = lock.clone();
+        named.name = display.clone();
+        match &project_dir {
             Some(dir) => placement::project_plan(
                 ctx,
                 dir,
                 skill_id,
                 topos_harness::PlacementNaming {
-                    name: Some(&lock.name),
+                    name: Some(&named.name),
                     workspace_slug: Some(&naming_slug),
                 },
                 override_dir.as_deref(),
                 Some(map),
                 adopt_digest,
             ),
-            None => placement::plan_for_skill(ctx, skill_id, lock, map),
-        };
-    // Every engine step below runs against the SCOPE's store: same fs/clock/ids, the scope's
-    // layout, and this session's plane + the run's follow seam.
-    let run_ctx =
-        super::pull::ctx_with_store(ctx, &store_layout, run.transports.plane.as_plane(), follow);
+            None => placement::plan_for_skill(ctx, skill_id, &named, map),
+        }
+    };
+    // Every engine step below runs against the SCOPE's store: same fs/clock/ids, the scope's layout,
+    // and this session's plane + the run's follow seam.
+    let run_ctx = super::pull::ctx_with_store(
+        ctx,
+        &store_layout,
+        run.transports.plane.as_plane(),
+        env.follow,
+    );
     // A brand-new arrival lays the never-received baseline first (scope-planned).
     if !run_ctx.fs.exists(&run_ctx.layout.skill_dir(&sid)) {
         let baseline_lock = Lock {
-            schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
+            schema_version: PERSISTED_SCHEMA_VERSION,
             skill_id: target.skill_id.clone(),
-            name: target.name.clone(),
+            name: st.display.clone(),
             base_commit: String::new(),
             bundle_digest: String::new(),
             files: Vec::new(),
@@ -1244,7 +1334,7 @@ fn sync_workspace_skill(
             applied_commit: String::new(),
             materialized_sha: String::new(),
             pre_existing_sha: None,
-            swap_capability: topos_types::persisted::SwapCapability::Unsupported,
+            swap_capability: SwapCapability::Unsupported,
             placement_state: Vec::new(),
             harness: None,
             harness_layer: None,
@@ -1254,11 +1344,11 @@ fn sync_workspace_skill(
         if let Err(e) = lay_baseline_with_plan(
             &run_ctx,
             &sid,
-            target.name.clone(),
+            st.display.clone(),
             &plan,
             target.bundle_digest.as_ref(),
         ) {
-            note_item_failure(ctx, warnings, &target.name, &e);
+            note_item_failure(ctx, &mut sweep.warnings, &target.name, &e);
             return;
         }
     }
@@ -1276,19 +1366,73 @@ fn sync_workspace_skill(
     ) {
         Ok(mut row) => {
             row.workspace_id = Some(run.session.workspace_id.clone());
+            row.scope = Some(sc.label.clone());
             // The settled-draft fan-out's receipt line rides the warning channel — quiet, factual.
             if row.action == PullAction::DraftSynced {
-                warnings.push(draft_synced_line(&target.name, row.synced_placements));
+                sweep
+                    .warnings
+                    .push(draft_synced_line(&target.name, row.synced_placements));
             }
             // Disclose a delivery the naming ladder had to place BESIDE a same-named occupant the
-            // record does not own (the never-clobber outcome, e.g. a divergent pre-existing copy).
-            if let ResolvedScope::Project { .. } = scope {
-                disclose_namespaced(&run_ctx, &sid, &target.name, warnings);
+            // record does not own (the never-clobber outcome).
+            if let ResolvedScope::Project { .. } = sc.scope {
+                disclose_namespaced(&run_ctx, &sid, &st.display, &mut sweep.warnings);
             }
-            rows.push(row);
+            sweep.push(row);
         }
-        Err(e) => note_item_failure(ctx, warnings, &target.name, &e),
+        Err(e) => note_item_failure(ctx, &mut sweep.warnings, &target.name, &e),
     }
+}
+
+/// The project-relative placement override a row resolves to: the row's own `path` beats the
+/// `[defaults.<kind>]` path beats nothing (the registry mapping), and within each level the
+/// harness-named key beats that level's `default`. PROJECT scope only — a person-scope delivery
+/// lands through the home placement engine, which has no override seam.
+///
+/// The value must be a RELATIVE path that stays inside the project: a committed manifest must never
+/// be able to aim managed bytes outside its own checkout, so a hostile/mistaken value is ignored with
+/// a warning and the default placement engages.
+fn row_override(
+    sc: &ScopeCtx<'_>,
+    row: &PlanRow,
+    kind: &str,
+    env: &Env<'_>,
+    sweep: &mut Sweep,
+) -> Option<String> {
+    if !matches!(sc.scope, ResolvedScope::Project { .. }) {
+        return None;
+    }
+    let fields = row.fields();
+    let slug = env.ctx.harness.id().slug();
+    let raw = scopes::path_override(fields.path.as_ref(), &sc.plan.defaults, kind, slug)?;
+    if placement::safe_project_rel(&raw) {
+        Some(raw)
+    } else {
+        sweep.warnings.push(format!(
+            "PLACEMENT_OVERRIDE_IGNORED {}: the `path` value {raw:?} must be a relative path inside \
+             the project (no `..`, not absolute) — using the default placement",
+            row.display_name()
+        ));
+        None
+    }
+}
+
+/// Where a local-folder row points: relative to the project dir at project scope, to the sidecar
+/// home at person scope; `~/` resolves against the machine home when one is known.
+fn local_dir(ctx: &Ctx<'_>, sc: &ScopeCtx<'_>, raw: &str) -> PathBuf {
+    if let Some(rest) = raw.strip_prefix("~/")
+        && let Some(roots) = &ctx.roots
+    {
+        return roots.home.join(rest);
+    }
+    if Path::new(raw).is_absolute() {
+        return PathBuf::from(raw);
+    }
+    let base = match &sc.scope {
+        ResolvedScope::Project { dir } => dir.clone(),
+        ResolvedScope::Person => ctx.layout.home().to_path_buf(),
+    };
+    base.join(raw.trim_start_matches("./"))
 }
 
 /// The one receipt line a settled-draft fan-out earns (the sweep stays otherwise silent about it).
@@ -1337,127 +1481,251 @@ fn disclose_namespaced(ctx: &Ctx<'_>, sid: &SkillId, name: &str, warnings: &mut 
     }
 }
 
-/// Reconcile a GitHub reference: absent → fetch + adopt at the pinned commit; tracked + same pin
-/// → verified no-op; tracked + a DIFFERENT pin → refuse to touch local edits, else re-import at
-/// the new pin (external bytes have no governance rail — the pin IS the version surface).
+// =================================================================================================
+// The forge arms — git rows move ONLY on an explicit update.
+// =================================================================================================
+
+/// A whole repo: every skill it holds. `"*"` tracks the repo's default branch (one fetch per sweep,
+/// compared against the recorded commit); a pinned row NEVER moves — a tracked import whose recorded
+/// commit prefix-matches the pin is up to date, and a pin that MOVED re-imports at the new pin.
 #[allow(clippy::too_many_arguments)]
-fn reconcile_github(
-    ctx: &Ctx<'_>,
-    git: Option<&dyn crate::git_source::GitTarballSource>,
-    item: &ResolvedItem,
+fn reconcile_repo_set(
+    env: &Env<'_>,
+    sc: &ScopeCtx<'_>,
+    row: &PlanRow,
+    host: &str,
     owner: &str,
     repo: &str,
-    subdir: &str,
-    rows: &mut Vec<PullSkill>,
-    warnings: &mut Vec<String>,
+    targets: &mut Targets,
+    sweep: &mut Sweep,
 ) {
-    let origin_source = format!("github.com/{owner}/{repo}");
-    // A tracked skill with this origin (name-first, then any-origin-match).
-    let tracked = find_tracked_github(ctx, &origin_source, subdir);
-    match tracked {
-        Some((sid, lock, origin)) => {
-            let recorded = origin.commit.as_deref().unwrap_or_default();
-            let pin_ok = item
-                .pin
-                .as_deref()
-                .is_none_or(|p| commit_matches(recorded, p));
-            if pin_ok {
-                rows.push(PullSkill {
-                    skill: lock.name,
-                    workspace_id: None,
-                    observed: 0,
-                    applied: 0,
-                    action: PullAction::UpToDate,
-                    offer: None,
-                    conflict: None,
-                    merge: None,
-                    merge_preview: None,
-                    synced_placements: None,
-                });
-                return;
-            }
-            // The pin moved (a teammate bumped topos.toml): re-import at the pinned commit.
-            let Some(git) = git else {
-                return; // offline caller — the stale copy stands; the next online sweep refreshes
-            };
-            match refresh_github(ctx, git, &sid, item, owner, repo, subdir) {
-                Ok(row) => rows.push(row),
-                Err(e) => note_item_failure(ctx, warnings, &item.name, &e),
-            }
+    let origin = format!("{host}/{owner}/{repo}");
+    let set_selected = targets.hit(&[row.reference.as_str(), repo, row.display_name().as_str()]);
+    let tracked = tracked_repo_members(env.ctx, &origin);
+    for (_, lock, _) in &tracked {
+        sweep.mention(&sc.label, &lock.name);
+    }
+    let pin = row.pin();
+
+    // A pinned row that every tracked member already satisfies is settled — no forge call, ever.
+    let pin_satisfied = pin.as_ref().is_some_and(|p| {
+        !tracked.is_empty()
+            && tracked
+                .iter()
+                .all(|(_, _, o)| commit_matches(o.commit.as_deref().unwrap_or_default(), p))
+    });
+
+    let Some(git) = env.git.filter(|_| !pin_satisfied) else {
+        // Offline (or settled): tracked members converge in place; an untracked repo says so.
+        if tracked.is_empty() {
+            sweep.warnings.push(format!(
+                "NOT_INSTALLED {}: \"{}\" — an external source this machine has not fetched yet \
+                 (network required)",
+                sc.label, row.reference
+            ));
+            return;
         }
-        None => {
-            let Some(git) = git else {
-                warnings.push(format!(
-                    "NOT_INSTALLED {}: \"{}\" — an external skill this machine has not fetched \
-                     yet (network required)",
-                    item.source.label(),
-                    item.reference
-                ));
-                return;
-            };
-            let Some(roots) = discovery_roots(ctx, item) else {
-                return;
-            };
-            let spec = crate::source::RemoteSpec {
-                host: crate::source::GitHost::GitHub,
-                owner: owner.to_owned(),
-                repo: repo.to_owned(),
-                git_ref: item.pin.clone(),
-                subdir: (!subdir.is_empty()).then(|| subdir.to_owned()),
-            };
-            let global = matches!(item.scope, ResolvedScope::Person);
-            match super::add_remote(
-                ctx,
-                git,
-                &spec,
-                &roots,
-                &super::AddRemoteOpts {
-                    skill: None,
-                    harness: None,
-                    global,
-                },
-            ) {
-                Ok(_) => rows.push(PullSkill {
-                    skill: item.name.clone(),
-                    workspace_id: None,
-                    observed: 0,
-                    applied: 0,
-                    action: PullAction::FastForwarded,
-                    offer: None,
-                    conflict: None,
-                    merge: None,
-                    merge_preview: None,
-                    synced_placements: None,
-                }),
-                Err(e) => note_item_failure(ctx, warnings, &item.name, &e),
+        for (_, lock, _) in &tracked {
+            if !set_selected && !targets.hit(&[lock.name.as_str()]) {
+                continue;
             }
+            sweep.push(plain_row(&lock.name, PullAction::UpToDate, None, &sc.label));
         }
+        return;
+    };
+
+    let spec = crate::source::RemoteSpec {
+        host: crate::source::GitHost::GitHub,
+        owner: owner.to_owned(),
+        repo: repo.to_owned(),
+        git_ref: pin.clone(),
+        subdir: None,
+    };
+    let targz = match fetch_repo(env, git, &spec) {
+        Ok(t) => t,
+        Err(e) => {
+            note_item_failure(env.ctx, &mut sweep.warnings, &row.reference, &e);
+            return;
+        }
+    };
+    let tree = match crate::git_source::extract_tree(&targz) {
+        Ok(t) => t,
+        Err(e) => {
+            note_item_failure(env.ctx, &mut sweep.warnings, &row.reference, &e);
+            return;
+        }
+    };
+    let resolved = tree.commit.clone().unwrap_or_default();
+    let recorded = tracked
+        .first()
+        .and_then(|(_, _, o)| o.commit.clone())
+        .unwrap_or_default();
+    let discovered = tree.skill_names(None, repo);
+    for name in &discovered {
+        sweep.mention(&sc.label, name);
+    }
+    // The repo has not moved: every tracked member is exactly what the row asks for.
+    if !tracked.is_empty() && !resolved.is_empty() && commit_matches(&recorded, &resolved) {
+        for (_, lock, _) in &tracked {
+            if !set_selected && !targets.hit(&[lock.name.as_str()]) {
+                continue;
+            }
+            sweep.push(plain_row(&lock.name, PullAction::UpToDate, None, &sc.label));
+        }
+        return;
+    }
+    if !recorded.is_empty() && !resolved.is_empty() {
+        sweep.warnings.push(git_updated_line(
+            &origin,
+            &recorded,
+            &resolved,
+            &tracked,
+            &discovered,
+        ));
+    }
+    for name in &discovered {
+        if !set_selected && !targets.hit(&[name.as_str()]) {
+            continue;
+        }
+        let member = tracked
+            .iter()
+            .find(|(_, lock, o)| lock.name == *name || subdir_leaf(o).as_deref() == Some(name));
+        install_or_refresh_repo_skill(env, sc, &spec, &targz, name, member, sweep);
     }
 }
 
-/// Re-import a tracked external skill at a NEW pinned commit: local edits refuse (never
-/// overwritten by an import), a clean copy is snapshot-verified, the sidecar record replaced
-/// wholesale, and the fresh import lands through the ordinary adopt.
-fn refresh_github(
-    ctx: &Ctx<'_>,
-    git: &dyn crate::git_source::GitTarballSource,
-    sid: &SkillId,
-    item: &ResolvedItem,
+/// ONE skill inside a repo, by its leaf directory name (or the literal `subdir` the row spells).
+#[allow(clippy::too_many_arguments)]
+fn reconcile_repo_skill(
+    env: &Env<'_>,
+    sc: &ScopeCtx<'_>,
+    row: &PlanRow,
+    host: &str,
     owner: &str,
     repo: &str,
-    subdir: &str,
-) -> Result<PullSkill, ClientError> {
+    skill: &str,
+    sweep: &mut Sweep,
+) {
+    let origin = format!("{host}/{owner}/{repo}");
+    let fields = row.fields();
+    let tracked = find_tracked_repo_skill(env.ctx, &origin, skill);
+    let pin = row.pin();
+    let pin_satisfied = match (&pin, &tracked) {
+        (Some(p), Some((_, _, o))) => commit_matches(o.commit.as_deref().unwrap_or_default(), p),
+        _ => false,
+    };
+    let Some(git) = env.git.filter(|_| !pin_satisfied) else {
+        match &tracked {
+            Some((_, lock, _)) => {
+                sweep.push(plain_row(&lock.name, PullAction::UpToDate, None, &sc.label));
+            }
+            None => sweep.warnings.push(format!(
+                "NOT_INSTALLED {}: \"{}\" — an external skill this machine has not fetched yet \
+                 (network required)",
+                sc.label, row.reference
+            )),
+        }
+        return;
+    };
+    let spec = crate::source::RemoteSpec {
+        host: crate::source::GitHost::GitHub,
+        owner: owner.to_owned(),
+        repo: repo.to_owned(),
+        git_ref: pin.clone(),
+        // A literal in-repo path is the escape hatch a row spells explicitly; without one the leaf
+        // NAME selects the skill.
+        subdir: fields.subdir.clone(),
+    };
+    let targz = match fetch_repo(env, git, &spec) {
+        Ok(t) => t,
+        Err(e) => {
+            note_item_failure(env.ctx, &mut sweep.warnings, &row.reference, &e);
+            return;
+        }
+    };
+    // A tracked member at the same commit is settled: nothing moves without a real change.
+    if let Some((_, lock, o)) = &tracked
+        && let Ok(tree) = crate::git_source::extract_tree(&targz)
+    {
+        let resolved = tree.commit.clone().unwrap_or_default();
+        let recorded = o.commit.clone().unwrap_or_default();
+        if !resolved.is_empty() && commit_matches(&recorded, &resolved) {
+            sweep.push(plain_row(&lock.name, PullAction::UpToDate, None, &sc.label));
+            return;
+        }
+        if !recorded.is_empty() && !resolved.is_empty() {
+            sweep.warnings.push(format!(
+                "GIT_UPDATED {origin}: {} -> {}; skills: ~{}",
+                short_commit(&recorded),
+                short_commit(&resolved),
+                lock.name
+            ));
+        }
+    }
+    install_or_refresh_repo_skill(env, sc, &spec, &targz, skill, tracked.as_ref(), sweep);
+}
+
+/// Install one repo skill, or re-import a tracked one at the new commit. The row's demand already
+/// exists — the reconcile NEVER writes a manifest line of its own.
+fn install_or_refresh_repo_skill(
+    env: &Env<'_>,
+    sc: &ScopeCtx<'_>,
+    spec: &crate::source::RemoteSpec,
+    targz: &[u8],
+    name: &str,
+    tracked: Option<&(SkillId, Lock, topos_types::results::SkillOrigin)>,
+    sweep: &mut Sweep,
+) {
+    let ctx = env.ctx;
+    let Some(roots) = discovery_roots(ctx, &sc.scope) else {
+        return;
+    };
+    let opts = super::AddRemoteOpts {
+        // A row that spells a literal `subdir` has already narrowed the archive; otherwise the leaf
+        // name picks the skill out of a multi-skill repo.
+        skill: spec.subdir.is_none().then(|| name.to_owned()),
+        harness: None,
+        global: matches!(sc.scope, ResolvedScope::Person),
+    };
+    let outcome = match tracked {
+        Some((sid, _, _)) => refresh_repo_skill(ctx, targz, spec, &opts, &roots, sid),
+        None => super::add_remote_fetched(ctx, targz, spec, &roots, &opts).map(|d| d.name),
+    };
+    match outcome {
+        Ok(landed) => sweep.push(plain_row(
+            &landed,
+            PullAction::FastForwarded,
+            None,
+            &sc.label,
+        )),
+        Err(e) => note_item_failure(ctx, &mut sweep.warnings, name, &e),
+    }
+}
+
+/// Re-import a tracked external skill at a NEW commit: local edits refuse (never overwritten by an
+/// import), a clean copy is snapshot-verified, the sidecar record replaced wholesale, and the fresh
+/// import lands through the ordinary adopt.
+fn refresh_repo_skill(
+    ctx: &Ctx<'_>,
+    targz: &[u8],
+    spec: &crate::source::RemoteSpec,
+    opts: &super::AddRemoteOpts,
+    roots: &super::DiscoveryRoots,
+    sid: &SkillId,
+) -> Result<String, ClientError> {
     let sp = ctx.layout.published(sid);
     let map: PlacementMap = sync_engine::read_map_required(ctx, &sp)?;
+    let lock: Lock = doc::read_doc::<Lock>(ctx.fs, &sp.lock)?
+        .ok_or_else(|| ClientError::Corrupt(format!("{}: lock.json missing", sid.as_str())))?;
     let scans = placement::scan_placements(ctx, &map)?;
     if scans
         .iter()
         .any(|s| matches!(s.status, placement::ScanStatus::Modified { .. }))
     {
         return Err(ClientError::InvalidArgument(format!(
-            "'{}' has local edits ahead of its pinned import — publish them (or `topos update {} \
-             --reset`) before the pin refresh",
-            item.name, item.name
+            "'{name}' has local edits ahead of its imported version — publish them (or `topos \
+             update {name} --reset`) before the source refresh",
+            name = lock.name
         )));
     }
     if scans
@@ -1465,40 +1733,31 @@ fn refresh_github(
         .any(|s| matches!(s.status, placement::ScanStatus::Unscannable))
     {
         return Err(ClientError::PlacementUnsupported {
-            reason: "a placement of this external skill cannot be read; refusing the pin refresh"
+            reason: "a placement of this external skill cannot be read; refusing the refresh"
                 .into(),
         });
     }
-    let Some(roots) = discovery_roots(ctx, item) else {
-        return Err(ClientError::InvalidArgument(
-            "cannot re-import without $HOME set".into(),
-        ));
-    };
-    let spec = crate::source::RemoteSpec {
-        host: crate::source::GitHost::GitHub,
-        owner: owner.to_owned(),
-        repo: repo.to_owned(),
-        git_ref: item.pin.clone(),
-        subdir: (!subdir.is_empty()).then(|| subdir.to_owned()),
-    };
-    // PREFETCH the new pin's archive and prove it extracts + selects BEFORE any old byte is
-    // deleted — a transient fetch failure or a bad archive must leave the old install whole.
-    let targz = git.fetch(&spec)?;
+    // Prove the archive extracts + selects BEFORE any old byte is deleted — a bad archive must leave
+    // the old install whole.
     {
-        let repo_tree = crate::git_source::extract_tree(&targz)?;
-        repo_tree.select(spec.subdir.as_deref(), None, &spec.repo, &spec.label())?;
+        let repo_tree = crate::git_source::extract_tree(targz)?;
+        repo_tree.select(
+            spec.subdir.as_deref(),
+            opts.skill.as_deref(),
+            &spec.repo,
+            &spec.label(),
+        )?;
     }
-    // Clean re-import: STASH the recorded placements (clean copies of the OLD pin) and the
-    // sidecar record aside — sibling renames, same filesystem — then adopt afresh at the new pin.
-    // The install can still fail past the prefetch (an occupied destination, an io fault); a
-    // failure RESTORES the stashes, so the valid old import is never lost to a refused new one.
-    // External origins carry no local history worth preserving past their pin (the lockfile
-    // model: bytes follow the pin) — a SUCCESSFUL swap deletes the stashes.
-    let mut stashed: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
-    let restore = |fs: &dyn crate::fs_seam::FsOps,
-                   stashed: &[(std::path::PathBuf, std::path::PathBuf)]| {
-        // Best-effort, newest-first; a restore failure leaves the stash sibling on disk rather
-        // than deleting anything.
+    // Clean re-import: STASH the recorded placements (clean copies of the OLD commit) and the
+    // sidecar record aside — sibling renames, same filesystem — then adopt afresh. The install can
+    // still fail past the prefetch (an occupied destination, an io fault); a failure RESTORES the
+    // stashes, so the valid old import is never lost to a refused new one. External sources carry no
+    // local history worth preserving past their commit (bytes follow the source), so a SUCCESSFUL
+    // swap deletes the stashes.
+    let mut stashed: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let restore = |fs: &dyn crate::fs_seam::FsOps, stashed: &[(PathBuf, PathBuf)]| {
+        // Best-effort, newest-first; a restore failure leaves the stash sibling on disk rather than
+        // deleting anything.
         for (orig, stash) in stashed.iter().rev() {
             if !fs.exists(orig) {
                 let _ = fs.rename(stash, orig);
@@ -1507,7 +1766,7 @@ fn refresh_github(
     };
     let stash_dir = |fs: &dyn crate::fs_seam::FsOps,
                      from: &Path,
-                     stashed: &mut Vec<(std::path::PathBuf, std::path::PathBuf)>|
+                     stashed: &mut Vec<(PathBuf, PathBuf)>|
      -> Result<(), ClientError> {
         let name = from
             .file_name()
@@ -1521,7 +1780,8 @@ fn refresh_github(
             n += 1;
             if n > 64 {
                 return Err(ClientError::Io(format!(
-                    "stash {}: too many stale refresh backups beside it — clean the `.topos-refresh-old-*` siblings first",
+                    "stash {}: too many stale refresh backups beside it — clean the \
+                     `.topos-refresh-old-*` siblings first",
                     from.display()
                 )));
             }
@@ -1551,49 +1811,85 @@ fn refresh_github(
         restore(ctx.fs, &stashed);
         return Err(e);
     }
-    let global = matches!(item.scope, ResolvedScope::Person);
-    let installed = super::add_remote_fetched(
-        ctx,
-        &targz,
-        &spec,
-        &roots,
-        &super::AddRemoteOpts {
-            skill: None,
-            harness: None,
-            global,
-        },
-    );
-    let data = match installed {
+    match super::add_remote_fetched(ctx, targz, spec, roots, opts) {
         Ok(d) => {
             for (_, stash) in &stashed {
                 let _ = ctx.fs.remove_dir_all(stash);
             }
-            d
+            Ok(d.name)
         }
         Err(e) => {
             restore(ctx.fs, &stashed);
-            return Err(e);
+            Err(e)
         }
-    };
-    Ok(PullSkill {
-        skill: data.name,
-        workspace_id: None,
-        observed: 0,
-        applied: 0,
-        action: PullAction::FastForwarded,
-        offer: None,
-        conflict: None,
-        merge: None,
-        merge_preview: None,
-        synced_placements: None,
-    })
+    }
 }
 
-/// The discovery roots an external install resolves its destination against — project scope roots
-/// at the demanding checkout (the import lands in-project), person scope at the machine cwd.
-fn discovery_roots(ctx: &Ctx<'_>, item: &ResolvedItem) -> Option<super::DiscoveryRoots> {
+/// One tarball per `(origin, ref)` per sweep — a repo named by both a set row and a skill row is
+/// fetched once.
+fn fetch_repo(
+    env: &Env<'_>,
+    git: &dyn crate::git_source::GitTarballSource,
+    spec: &crate::source::RemoteSpec,
+) -> Result<Rc<Vec<u8>>, ClientError> {
+    let key = format!(
+        "{}#{}",
+        spec.origin(),
+        spec.git_ref.as_deref().unwrap_or("")
+    );
+    if let Some((_, bytes)) = env.repos.borrow().iter().find(|(k, _)| *k == key) {
+        return Ok(Rc::clone(bytes));
+    }
+    let bytes = Rc::new(git.fetch(spec)?);
+    env.repos.borrow_mut().push((key, Rc::clone(&bytes)));
+    Ok(bytes)
+}
+
+/// The ONE receipt line a moved git source earns: what it was, what it is, and which members that
+/// moved — a source that silently swaps bytes under an agent is exactly what this line prevents.
+fn git_updated_line(
+    origin: &str,
+    old: &str,
+    new: &str,
+    tracked: &[(SkillId, Lock, topos_types::results::SkillOrigin)],
+    discovered: &[String],
+) -> String {
+    let had: Vec<&str> = tracked.iter().map(|(_, l, _)| l.name.as_str()).collect();
+    let mut parts: Vec<String> = Vec::new();
+    for name in discovered {
+        if had.contains(&name.as_str()) {
+            parts.push(format!("~{name}"));
+        } else {
+            parts.push(format!("+{name}"));
+        }
+    }
+    for name in &had {
+        if !discovered.iter().any(|d| d == name) {
+            parts.push(format!("-{name}"));
+        }
+    }
+    let mut line = format!(
+        "GIT_UPDATED {origin}: {} -> {}",
+        short_commit(old),
+        short_commit(new)
+    );
+    if !parts.is_empty() {
+        line.push_str("; skills: ");
+        line.push_str(&parts.join(" "));
+    }
+    line
+}
+
+/// A commit's first 12 characters — enough to recognize, short enough to read.
+fn short_commit(c: &str) -> &str {
+    &c[..c.len().min(12)]
+}
+
+/// The discovery roots an external install resolves its destination against — project scope roots at
+/// the demanding checkout (the import lands in-project), person scope at the machine cwd.
+fn discovery_roots(ctx: &Ctx<'_>, scope: &ResolvedScope) -> Option<super::DiscoveryRoots> {
     let roots = ctx.roots.as_ref()?;
-    let cwd = match &item.scope {
+    let cwd = match scope {
         ResolvedScope::Project { dir } => Some(dir.clone()),
         ResolvedScope::Person => roots.cwd.clone(),
     };
@@ -1603,14 +1899,16 @@ fn discovery_roots(ctx: &Ctx<'_>, item: &ResolvedItem) -> Option<super::Discover
     })
 }
 
-/// Find a tracked skill imported from `origin_source` (+ subdir), by walking the sidecar's origin
-/// docs. Best-effort: unreadable entries are skipped.
-pub(crate) fn find_tracked_github(
+/// Every tracked skill imported from `origin_source`, by walking the sidecar's origin docs.
+/// Best-effort: unreadable entries are skipped.
+fn tracked_repo_members(
     ctx: &Ctx<'_>,
     origin_source: &str,
-    subdir: &str,
-) -> Option<(SkillId, Lock, topos_types::results::SkillOrigin)> {
-    let entries = ctx.fs.read_dir(&ctx.layout.skills_dir()).ok()?;
+) -> Vec<(SkillId, Lock, topos_types::results::SkillOrigin)> {
+    let mut out = Vec::new();
+    let Ok(entries) = ctx.fs.read_dir(&ctx.layout.skills_dir()) else {
+        return out;
+    };
     for entry in entries {
         let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
             continue;
@@ -1622,83 +1920,529 @@ pub(crate) fn find_tracked_github(
         let Ok(Some(origin)) = doc::read_doc::<super::add::OriginDoc>(ctx.fs, &sp.origin) else {
             continue;
         };
-        let subdir_matches = match &origin.origin.subdir {
-            Some(s) => s == subdir,
-            None => subdir.is_empty(),
-        };
-        if origin.origin.source == origin_source && subdir_matches {
-            let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &sp.lock) else {
-                continue;
-            };
-            return Some((sid, lock, origin.origin));
+        if origin.origin.source != origin_source {
+            continue;
         }
+        let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &sp.lock) else {
+            continue;
+        };
+        out.push((sid, lock, origin.origin));
     }
-    None
+    out.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+    out
 }
 
-/// Whether a recorded commit satisfies a manifest pin (git-style prefix match, either direction).
+/// The tracked import of ONE repo skill, matched by its leaf name (the reference's identity) or by
+/// the recorded in-repo path's leaf.
+fn find_tracked_repo_skill(
+    ctx: &Ctx<'_>,
+    origin_source: &str,
+    leaf: &str,
+) -> Option<(SkillId, Lock, topos_types::results::SkillOrigin)> {
+    tracked_repo_members(ctx, origin_source)
+        .into_iter()
+        .find(|(_, lock, o)| lock.name == leaf || subdir_leaf(o).as_deref() == Some(leaf))
+}
+
+/// The last segment of a recorded in-repo path (`skills/alpha` → `alpha`).
+fn subdir_leaf(origin: &topos_types::results::SkillOrigin) -> Option<String> {
+    origin
+        .subdir
+        .as_deref()
+        .and_then(|s| s.rsplit('/').next())
+        .map(str::to_owned)
+}
+
+/// Find a tracked skill imported from `origin_source` (+ subdir), by walking the sidecar's origin
+/// docs. Best-effort: unreadable entries are skipped.
+pub(crate) fn find_tracked_github(
+    ctx: &Ctx<'_>,
+    origin_source: &str,
+    subdir: &str,
+) -> Option<(SkillId, Lock, topos_types::results::SkillOrigin)> {
+    tracked_repo_members(ctx, origin_source)
+        .into_iter()
+        .find(|(_, _, o)| match &o.subdir {
+            Some(s) => s == subdir,
+            None => subdir.is_empty(),
+        })
+}
+
+/// Whether a recorded commit satisfies a pin (git-style prefix match, either direction).
 pub(crate) fn commit_matches(recorded: &str, pin: &str) -> bool {
     !recorded.is_empty() && (recorded.starts_with(pin) || pin.starts_with(recorded))
 }
 
-/// The explicit `[placement]` override for `item` from its OWN project manifest: a per-reference
-/// pin first, else the per-kind (`skill`) pin. Project layers only. The value must be a RELATIVE
-/// path that stays inside the project (no `..`, not absolute) — a committed manifest must never be
-/// able to aim managed bytes outside its own checkout; a hostile/mistaken value is ignored with a
-/// warning and the default placement engages.
-fn placement_override(
-    project_manifests: &[(PathBuf, crate::manifest::file::Manifest)],
-    item: &ResolvedItem,
-    warnings: &mut Vec<String>,
-) -> Option<String> {
-    let LayerSource::Project { dir } = &item.source else {
-        return None;
-    };
-    let (_, manifest) = project_manifests.iter().find(|(d, _)| d == dir)?;
-    let raw = manifest
-        .placement
-        .iter()
-        .find(|(r, _)| {
-            r == &item.reference
-                || crate::manifest::refs::parse_ref(r)
-                    .map(|p| p.item_name() == item.name)
-                    .unwrap_or(false)
-        })
-        .map(|(_, d)| d.clone())
-        .or_else(|| {
-            manifest
-                .placement_kind
+// =================================================================================================
+// Disclosures.
+// =================================================================================================
+
+/// The lines a table cannot carry per row: the LOUD note when a hand-written global manifest
+/// withholds a connected workspace's feed, and the honest note when a row delivers a bundle the
+/// person declined on the web.
+fn disclose(env: &Env<'_>, person: Option<&ScopePlan>, sweep: &mut Sweep) {
+    let adopted = sweep
+        .synced_in(&ResolvedScope::Person.label())
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<HashSet<String>>();
+    if let Some(plan) = person.filter(|p| p.file_backed()) {
+        let total = adopted.len();
+        for run in env.runs {
+            let Some(snap) = &run.snapshot else { continue };
+            if plan.has_feed(&run.session.host, &run.session.workspace_name) {
+                continue;
+            }
+            let unadopted = snap
+                .skills
                 .iter()
-                .find(|(k, _)| k == "skill")
-                .map(|(_, d)| d.clone())
-        })?;
-    if crate::placement::safe_project_rel(&raw) {
-        Some(raw)
-    } else {
-        warnings.push(format!(
-            "PLACEMENT_OVERRIDE_IGNORED {}: the [placement] value {raw:?} must be a relative path inside the project (no `..`, not absolute) — using the default placement",
-            item.name
-        ));
-        None
+                .filter(|ds| !adopted.contains(&ds.skill_id))
+                .count();
+            if unadopted == 0 {
+                continue;
+            }
+            sweep.warnings.push(format!(
+                "GLOBAL_MANIFEST {}/{}: global manifest adopts {total} bundles; {unadopted} \
+                 assigned bundles are not adopted here (no feed row) — `topos add -g @{}` restores \
+                 them",
+                run.session.host, run.session.workspace_name, run.session.workspace_name
+            ));
+        }
     }
+    // A decline is the everywhere stance; a machine's own row still wins locally — say so rather
+    // than let the two disagree silently.
+    for run in env.runs {
+        let Some(snap) = &run.snapshot else { continue };
+        for (skill_id, name) in &snap.declined {
+            if sweep.explicit.contains(skill_id) {
+                sweep.warnings.push(format!(
+                    "DECLINED_OVERRIDE {name}: declined on the web, delivered here by your manifest"
+                ));
+            }
+        }
+    }
+}
+
+// =================================================================================================
+// Cleaning.
+// =================================================================================================
+
+/// Retire what nothing demands any more, per scope:
+///
+/// - PERSON scope: a cached delivery today's recipe no longer adopts — a dropped row, a withdrawn
+///   feed item, a new `"off"` switch, a removed feed row, a file that withholds the whole feed. A
+///   feed WITHDRAWAL resets to never-received (a later re-delivery reinstalls); every other cause is
+///   this machine's own choice, so the placements go and the sidecar bytes stay.
+/// - PROJECT scope: ONLY the NEAREST project's own store is cleaned, against ITS plan — an
+///   ancestor's store is never cleaned from below, because that file governs its own subtree.
+///
+/// Frozen throughout: a scope whose manifest failed to parse, a workspace with no fresh delivery, the
+/// members of a set that failed to expand, and every name a row still mentions.
+fn clean_undemanded(
+    env: &Env<'_>,
+    person: Option<&ScopePlan>,
+    project: Option<&(PathBuf, ScopePlan)>,
+    project_frozen: bool,
+    sweep: &mut Sweep,
+) {
+    let ctx = env.ctx;
+    let mentioned: HashSet<String> = sweep
+        .mentioned_anywhere()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+
+    // ---- Person scope. ----
+    if let Some(plan) = person {
+        let label = ResolvedScope::Person.label();
+        let adopted: HashSet<String> = sweep
+            .synced_in(&label)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        for run in env.runs {
+            if run.snapshot.is_none() {
+                continue; // no fresh delivery: everything freezes
+            }
+            let Some(prior) = env.prior.workspaces.get(&run.session.workspace_id) else {
+                continue;
+            };
+            let host = run.session.host.clone();
+            let ws = run.session.workspace_name.clone();
+            let rows: Vec<(String, DeliveredSkill)> = prior
+                .delivered
+                .iter()
+                .map(|(id, ds)| (id.clone(), ds.clone()))
+                .collect();
+            for (skill_id, cached) in &rows {
+                if cached.withdrawn
+                    || adopted.contains(skill_id)
+                    || mentioned.contains(&cached.name)
+                    || cached.via_channels.iter().any(|c| {
+                        sweep
+                            .failed_channels
+                            .contains(&(run.session.workspace_id.clone(), c.clone()))
+                    })
+                {
+                    continue;
+                }
+                let Ok(sid) = SkillId::parse(skill_id) else {
+                    continue;
+                };
+                if !ctx.fs.exists(&ctx.layout.skill_dir(&sid)) {
+                    continue;
+                }
+                // WHY it left decides how much goes: this machine's own choice keeps the bytes; a
+                // feed withdrawal resets, so a re-delivery installs afresh instead of reading as
+                // already-current.
+                let switched_off = plan.off_for(&host, &ws, &cached.name).is_some();
+                let withheld = plan.file_backed() && !plan.has_feed(&host, &ws);
+                let by_choice = switched_off || withheld || cached.via_manifest;
+                let cleaned = if by_choice {
+                    clean_written_home_placements(ctx, &sid)
+                } else {
+                    withdraw_person_scope(ctx, &sid).map(Some)
+                };
+                match cleaned {
+                    Ok(Some(name)) => sweep.push(plain_row(
+                        &name,
+                        PullAction::Withdrawn,
+                        Some(run.session.workspace_id.clone()),
+                        &label,
+                    )),
+                    Ok(None) => {}
+                    Err(e) => note_item_failure(ctx, &mut sweep.warnings, skill_id, &e),
+                }
+            }
+        }
+    }
+
+    // ---- Project scope: the NEAREST file's own store, against its own plan. ----
+    if project_frozen {
+        return;
+    }
+    let Some((pd, _plan)) = project else { return };
+    let label = ResolvedScope::Project { dir: pd.clone() }.label();
+    let demanded: HashSet<String> = sweep.mentioned.get(&label).cloned().unwrap_or_default();
+    let adopted: HashSet<String> = sweep
+        .synced_in(&label)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    // A project without a store has nothing recorded to clean; the probe never mints one.
+    let Some(playout) = sidecar::existing_project_store(ctx.fs, pd) else {
+        return;
+    };
+    let pctx = super::pull::ctx_with_layout(ctx, &playout);
+    let Ok(entries) = pctx.fs.read_dir(&playout.skills_dir()) else {
+        return;
+    };
+    for entry in entries {
+        let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if adopted.contains(id) {
+            continue; // reconciled this run — demanded by construction
+        }
+        let Ok(sid) = SkillId::parse(id) else {
+            continue;
+        };
+        let sp = playout.published(&sid);
+        let Ok(Some(lock)) = doc::read_doc::<Lock>(pctx.fs, &sp.lock) else {
+            continue;
+        };
+        let Ok(Some(map)) = doc::read_map(pctx.fs, &sp.map) else {
+            continue;
+        };
+        let stale: Vec<usize> = map
+            .placements
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                // A failed set expansion freezes everything under its project dir — a member's dir
+                // must survive the sweep that could not see the member list.
+                if sweep
+                    .unexpanded
+                    .iter()
+                    .any(|sd| Path::new(p).starts_with(sd))
+                {
+                    return false;
+                }
+                Path::new(p).starts_with(pd) && !demanded.contains(&lock.name)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if stale.is_empty() {
+            continue;
+        }
+        let cleaned = crate::sidecar::lock_skill(pctx.fs, &pctx.layout, &sid)
+            .and_then(|_guard| clean_placements(&pctx, &sid, &lock, &map, &stale));
+        if let Err(e) = cleaned {
+            note_item_failure(ctx, &mut sweep.warnings, &lock.name, &e);
+        }
+    }
+}
+
+/// A row-dropped bundle's home-side clean: exactly the NON-project placements topos itself WROTE
+/// (`materialized_sha` present — an adopted-in-place source dir, which topos never wrote, is never
+/// deleted), snapshot-first; the sync doc is NOT reset (a project manifest may still demand the
+/// bundle — that checkout reconciles lazily when visited). `Ok(Some(name))` when something was
+/// actually cleaned.
+fn clean_written_home_placements(
+    ctx: &Ctx<'_>,
+    sid: &SkillId,
+) -> Result<Option<String>, ClientError> {
+    let sp = ctx.layout.published(sid);
+    let _guard = crate::sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
+    let lock: Option<Lock> = doc::read_doc(ctx.fs, &sp.lock)?;
+    let map: Option<PlacementMap> = doc::read_map(ctx.fs, &sp.map)?;
+    let (Some(lock), Some(map)) = (lock, map) else {
+        return Ok(None);
+    };
+    let targets: Vec<usize> = map
+        .placements
+        .iter()
+        .zip(&map.placement_state)
+        .enumerate()
+        .filter(|(_, (p, st))| {
+            st.materialized_sha.is_some() && !is_project_placement(ctx, Path::new(p))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    clean_placements(ctx, sid, &lock, &map, &targets)?;
+    Ok(Some(lock.name))
+}
+
+/// A feed-withdrawn bundle leaves the PERSON scope: snapshot every edited copy, clean the placements
+/// that are NOT inside some project checkout (a project manifest may still demand it there — that
+/// checkout reconciles lazily when visited), keep every sidecar byte, and reset the sync doc to
+/// never-received so a later re-delivery reinstalls. Returns the catalog name.
+fn withdraw_person_scope(ctx: &Ctx<'_>, sid: &SkillId) -> Result<String, ClientError> {
+    let sp = ctx.layout.published(sid);
+    let name;
+    {
+        // The guard is scoped: `reset_to_never_received` below takes the SAME per-skill flock on a
+        // fresh fd, which would deadlock against a still-held one.
+        let _guard = crate::sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
+        let lock: Option<Lock> = doc::read_doc(ctx.fs, &sp.lock)?;
+        let map: Option<PlacementMap> = doc::read_map(ctx.fs, &sp.map)?;
+        name = lock
+            .as_ref()
+            .map_or_else(|| sid.as_str().to_owned(), |l| l.name.clone());
+        if let (Some(lock), Some(map)) = (lock.as_ref(), map.as_ref()) {
+            let person: Vec<usize> = map
+                .placements
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| !is_project_placement(ctx, Path::new(p)))
+                .map(|(i, _)| i)
+                .collect();
+            clean_placements(ctx, sid, lock, map, &person)?;
+        }
+    }
+    let sync: Option<SyncState> = doc::read_doc(ctx.fs, &sp.sync)?;
+    super::pull::reset_to_never_received(ctx, sid, sync.as_ref())?;
+    Ok(name)
+}
+
+/// Whether a placement dir belongs to some PROJECT checkout — an ancestor holds a `topos.toml` (the
+/// manifest travels with the repo; its placements are that scope's business). The ONE heuristic,
+/// shared with the person plan's prior-stability rule.
+fn is_project_placement(ctx: &Ctx<'_>, dir: &Path) -> bool {
+    crate::placement::under_project_manifest(ctx, dir)
+}
+
+/// Snapshot-first clean of exactly `indices` placements: every distinct edited copy is committed into
+/// the sidecar store BEFORE any dir is removed; Foreign dirs are never touched; the cleaned dirs
+/// leave the placement record (demand ended — the explicit act was the manifest edit). Fails closed
+/// on an unscannable placement.
+fn clean_placements(
+    ctx: &Ctx<'_>,
+    sid: &SkillId,
+    lock: &Lock,
+    map: &PlacementMap,
+    indices: &[usize],
+) -> Result<(), ClientError> {
+    if indices.is_empty() {
+        return Ok(());
+    }
+    let scans = placement::scan_placements(ctx, map)?;
+    if indices
+        .iter()
+        .any(|&i| matches!(scans[i].status, placement::ScanStatus::Unscannable))
+    {
+        return Err(ClientError::PlacementUnsupported {
+            reason: "a placement cannot be read; refusing to remove it — inspect or move the \
+                     directory by hand"
+                .into(),
+        });
+    }
+    for (idx, _) in placement::distinct_modified(&scans) {
+        if let placement::ScanStatus::Modified { scanned } = &scans[idx].status {
+            sync_engine::snapshot_draft(ctx, &ctx.layout.published(sid), lock, scanned)?;
+        }
+    }
+    let mut removed: HashSet<usize> = HashSet::new();
+    for &i in indices {
+        if matches!(scans[i].status, placement::ScanStatus::Foreign) {
+            continue; // never ours to delete
+        }
+        let p = &scans[i].dir;
+        if ctx.fs.exists(p) {
+            ctx.fs.remove_dir_all(p)?;
+        }
+        removed.insert(i);
+    }
+    if removed.is_empty() {
+        return Ok(());
+    }
+    let mut next = map.clone();
+    let keep: Vec<bool> = (0..map.placements.len())
+        .map(|i| !removed.contains(&i))
+        .collect();
+    let mut it = keep.iter();
+    next.placements.retain(|_| *it.next().unwrap_or(&true));
+    let mut it = keep.iter();
+    next.placement_state.retain(|_| *it.next().unwrap_or(&true));
+    doc::write_map(ctx.fs, &ctx.layout.published(sid).map, &next)
+}
+
+// =================================================================================================
+// `--rebuild`.
+// =================================================================================================
+
+/// Rebuild ONE store: for every bundle it tracks, ABSORB each distinct edited copy into the store,
+/// then drop the recorded placement dirs and reset the bundle to never-received, so the ordinary
+/// sweep re-projects it pristine. The order is the whole guarantee — a rebuild is a repair, and a
+/// repair that can lose an edit is not one. A bundle whose placements cannot be read is left exactly
+/// as it is, with a line saying so.
+fn rebuild_store(ctx: &Ctx<'_>, layout: &crate::sidecar::Layout, warnings: &mut Vec<String>) {
+    let Ok(entries) = ctx.fs.read_dir(&layout.skills_dir()) else {
+        return;
+    };
+    for entry in entries {
+        let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Ok(sid) = SkillId::parse(id) else {
+            continue;
+        };
+        if let Err(e) = rebuild_skill(ctx, &sid) {
+            warnings.push(format!(
+                "REBUILD_SKIPPED {id}: {}",
+                crate::render::safe_message(&e)
+            ));
+        }
+    }
+}
+
+/// [`rebuild_store`] for one bundle (see its doc for the ordering rule).
+fn rebuild_skill(ctx: &Ctx<'_>, sid: &SkillId) -> Result<(), ClientError> {
+    let sp = ctx.layout.published(sid);
+    {
+        let _guard = crate::sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
+        let lock: Option<Lock> = doc::read_doc(ctx.fs, &sp.lock)?;
+        let map: Option<PlacementMap> = doc::read_map(ctx.fs, &sp.map)?;
+        let (Some(lock), Some(map)) = (lock, map) else {
+            return Ok(());
+        };
+        if map.placements.is_empty() {
+            return Ok(());
+        }
+        let all: Vec<usize> = (0..map.placements.len()).collect();
+        clean_placements(ctx, sid, &lock, &map, &all)?;
+    }
+    let sync: Option<SyncState> = doc::read_doc(ctx.fs, &sp.sync)?;
+    super::pull::reset_to_never_received(ctx, sid, sync.as_ref())
+}
+
+// =================================================================================================
+// Small shared helpers.
+// =================================================================================================
+
+/// A row that reports state without an engine run (a settled forge import, a present local folder,
+/// a retired placement).
+fn plain_row(
+    name: &str,
+    action: PullAction,
+    workspace_id: Option<String>,
+    scope: &str,
+) -> PullSkill {
+    PullSkill {
+        skill: name.to_owned(),
+        workspace_id,
+        observed: 0,
+        applied: 0,
+        action,
+        offer: None,
+        conflict: None,
+        merge: None,
+        merge_preview: None,
+        synced_placements: None,
+        scope: Some(scope.to_owned()),
+    }
+}
+
+/// The session a `(host, workspace)` reference resolves through.
+fn find_run<'a>(
+    runs: &'a [SessionRun],
+    host: Option<&str>,
+    workspace: &str,
+) -> Option<&'a SessionRun> {
+    match host {
+        Some(h) => runs
+            .iter()
+            .find(|r| r.session.host == h && r.session.workspace_name == workspace),
+        None => runs.iter().find(|r| r.session.workspace_name == workspace),
+    }
+}
+
+/// The honest "not available" line for a workspace reference with no session — phrased from LOCAL
+/// knowledge (which recipe asked; which login is missing), never a server answer.
+fn not_connected_line(reference: &str, host: &str, workspace: &str) -> String {
+    format!(
+        "NOT_AVAILABLE {reference}: referenced here, but this installation is not logged into \
+         {host}/{workspace} (run `topos login {host}/{workspace}`)"
+    )
+}
+
+/// Disclose one isolated per-item failure (stderr + diagnostics log + a stable warning).
+fn note_item_failure(ctx: &Ctx<'_>, warnings: &mut Vec<String>, name: &str, e: &ClientError) {
+    let _ = crate::logfile::append_error_event(
+        ctx.fs,
+        &ctx.layout.log_path(),
+        "update",
+        e.code(),
+        &format!("item {name}: {}", e.detail()),
+        None,
+        ctx.clock.now_unix_millis(),
+    );
+    eprintln!("topos update: {name}: {}", crate::render::safe_message(e));
+    warnings.push(format!(
+        "{} {name}: {}",
+        e.code(),
+        crate::render::safe_message(e)
+    ));
 }
 
 /// Pre-1.0 old-state handover (no compatibility machinery): before per-scope stores, ONE home map
 /// blended home and project placements. A home-store row that points INTO a project directory this
 /// run processes is legacy — dropped from the home map with its BYTES LEFT IN PLACE, so the
 /// project-scope pass adopts what it finds (byte-identical copies adopt in place; a divergent
-/// occupant is never clobbered and the delivery lands namespaced beside it, disclosed). Two kinds
-/// of rows are NOT handed over:
+/// occupant is never clobbered and the delivery lands namespaced beside it, disclosed). Two kinds of
+/// rows are NOT handed over:
 ///
 /// - agent-less native rows (kind `native`, no agent) — the user's own chosen locations (an
 ///   adopt-in-place working copy, an explicit placement pin), which the person-scope record keeps
 ///   managing;
-/// - rows of a skill imported from an external origin (`origin.json` present) — external refs keep
-///   their home-store custody for now.
+/// - rows of a skill imported from an external source (`origin.json` present) — those keep their home
+///   custody for now.
 ///
-/// A skill whose home map ends EMPTY after the drop was project-only: its home state dir is
-/// retired whole (the same delete the tracked remove runs) — the project store carries the scope's
-/// state from here on.
+/// A skill whose home map ends EMPTY after the drop was project-only: its home state dir is retired
+/// whole — the project store carries the scope's state from here on.
 fn handover_legacy_project_rows(
     ctx: &Ctx<'_>,
     project_dirs: &[PathBuf],
@@ -1765,376 +2509,6 @@ fn handover_legacy_project_rows(
     }
 }
 
-/// Clean what nothing demands any more:
-/// - a PROFILE-dropped skill (in the prior cache, absent from today's delivery, resolved by no
-///   manifest): snapshot any draft, clean its NON-project placements, reset to never-received;
-/// - a PROJECT-dropped skill (rows in a visited project's OWN store that today's resolution did
-///   not manage there): snapshot-first clean of exactly those dirs — EXCEPT under a project dir
-///   whose channel item failed to expand this run (`unexpanded`): the member set is unknowable
-///   there, so an offline sweep, an ended session, or a transient index failure freezes instead
-///   of deleting.
-#[allow(clippy::too_many_arguments)]
-fn clean_undemanded(
-    ctx: &Ctx<'_>,
-    runs: &[SessionRun],
-    prior_sync: &sync_status::SyncStatus,
-    resolution: &Resolution,
-    project_dirs: &[PathBuf],
-    synced_ids: &HashSet<String>,
-    unexpanded: &[PathBuf],
-    failed_channels: &HashSet<(String, String)>,
-    rows: &mut Vec<PullSkill>,
-    warnings: &mut Vec<String>,
-) {
-    // MANIFEST-dropped (a `via_manifest` cache row nothing re-recorded this run — its line or
-    // channel membership ended): clean the HOME-scope placements topos itself WROTE
-    // (materialized; an adopted-in-place source dir is never deleted), snapshot-first, no
-    // never-received reset (project placements clean through the project arm; the row lapses at
-    // this sweep's cache write). A member of a channel that FAILED to expand stays frozen — and
-    // so is any name the CURRENT resolution still MENTIONS (a resolved item that merely failed
-    // to sync this run, or an EXCLUDE: a project's exclusion is scope-local, while the home
-    // placement belongs to layers that may still demand it from another directory).
-    let mentioned_names: HashSet<&str> = resolution
-        .items
-        .iter()
-        .map(|i| i.name.as_str())
-        .chain(resolution.excluded.iter().map(|e| e.name.as_str()))
-        .collect();
-    for run in runs {
-        if run.snapshot.is_none() {
-            continue; // offline: everything freezes
-        }
-        let Some(prior) = prior_sync.workspaces.get(&run.session.workspace_id) else {
-            continue;
-        };
-        for (skill_id, cached) in &prior.delivered {
-            if !cached.via_manifest
-                || cached.withdrawn
-                || synced_ids.contains(skill_id)
-                || mentioned_names.contains(cached.name.as_str())
-                || cached.via_channels.iter().any(|c| {
-                    failed_channels.contains(&(run.session.workspace_id.clone(), c.clone()))
-                })
-            {
-                continue;
-            }
-            let Ok(sid) = SkillId::parse(skill_id) else {
-                continue;
-            };
-            if !ctx.fs.exists(&ctx.layout.skill_dir(&sid)) {
-                continue;
-            }
-            match clean_written_home_placements(ctx, &sid) {
-                Ok(Some(name)) => rows.push(PullSkill {
-                    skill: name,
-                    workspace_id: Some(run.session.workspace_id.clone()),
-                    observed: 0,
-                    applied: 0,
-                    action: PullAction::Withdrawn,
-                    offer: None,
-                    conflict: None,
-                    merge: None,
-                    merge_preview: None,
-                    synced_placements: None,
-                }),
-                Ok(None) => {}
-                Err(e) => note_item_failure(ctx, warnings, skill_id, &e),
-            }
-        }
-    }
-
-    // Profile-dropped: prior cache vs today's delivery. Manifest rows were handled above.
-    for run in runs {
-        let Some(snap) = &run.snapshot else { continue };
-        let now: HashSet<&str> = snap.skills.iter().map(|s| s.skill_id.as_str()).collect();
-        let Some(prior) = prior_sync.workspaces.get(&run.session.workspace_id) else {
-            continue;
-        };
-        for (skill_id, cached) in &prior.delivered {
-            if cached.withdrawn
-                || cached.via_manifest
-                || now.contains(skill_id.as_str())
-                || synced_ids.contains(skill_id)
-            {
-                continue;
-            }
-            let Ok(sid) = SkillId::parse(skill_id) else {
-                continue;
-            };
-            if !ctx.fs.exists(&ctx.layout.skill_dir(&sid)) {
-                continue;
-            }
-            match withdraw_person_scope(ctx, &sid) {
-                Ok(name) => rows.push(PullSkill {
-                    skill: name,
-                    workspace_id: Some(run.session.workspace_id.clone()),
-                    observed: 0,
-                    applied: 0,
-                    action: PullAction::Withdrawn,
-                    offer: None,
-                    conflict: None,
-                    merge: None,
-                    merge_preview: None,
-                    synced_placements: None,
-                }),
-                Err(e) => note_item_failure(ctx, warnings, skill_id, &e),
-            }
-        }
-    }
-
-    // Project-dropped: each visited project's OWN store is read for placements today's resolution
-    // did not manage there (per-scope stores — the home map no longer records project placements).
-    if project_dirs.is_empty() {
-        return;
-    }
-    let resolved_project_names: HashSet<(&Path, &str)> = resolution
-        .items
-        .iter()
-        .filter_map(|i| match &i.scope {
-            ResolvedScope::Project { dir } => Some((dir.as_path(), i.name.as_str())),
-            ResolvedScope::Person => None,
-        })
-        .collect();
-    for pd in project_dirs {
-        // A project without a store has nothing recorded to clean; the probe never mints one.
-        let Some(playout) = sidecar::existing_project_store(ctx.fs, pd) else {
-            continue;
-        };
-        let pctx = super::pull::ctx_with_layout(ctx, &playout);
-        let Ok(entries) = pctx.fs.read_dir(&playout.skills_dir()) else {
-            continue;
-        };
-        for entry in entries {
-            let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            // A skill THIS run reconciled is demanded by construction (incl. the channel-expanded
-            // items, which carry the channel's name in the resolution, not their own).
-            if synced_ids.contains(id) {
-                continue;
-            }
-            let Ok(sid) = SkillId::parse(id) else {
-                continue;
-            };
-            let sp = playout.published(&sid);
-            let Ok(Some(lock)) = doc::read_doc::<Lock>(pctx.fs, &sp.lock) else {
-                continue;
-            };
-            let Ok(Some(map)) = doc::read_map(pctx.fs, &sp.map) else {
-                continue;
-            };
-            let stale: Vec<usize> = map
-                .placements
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| {
-                    // A failed channel expansion freezes everything under its project dir — a
-                    // member's dir must survive the sweep that could not see the member list.
-                    if unexpanded.iter().any(|sd| Path::new(p).starts_with(sd)) {
-                        return false;
-                    }
-                    Path::new(p).starts_with(pd)
-                        && !resolved_project_names.contains(&(pd.as_path(), lock.name.as_str()))
-                })
-                .map(|(i, _)| i)
-                .collect();
-            if stale.is_empty() {
-                continue;
-            }
-            let cleaned = crate::sidecar::lock_skill(pctx.fs, &pctx.layout, &sid)
-                .and_then(|_guard| clean_placements(&pctx, &sid, &lock, &map, &stale));
-            if let Err(e) = cleaned {
-                note_item_failure(ctx, warnings, &lock.name, &e);
-            }
-        }
-    }
-}
-
-/// A MANIFEST-dropped skill's home-side clean: exactly the NON-project placements topos itself
-/// WROTE (`materialized_sha` present — an adopted-in-place source dir, which topos never wrote,
-/// is never deleted), snapshot-first; the sync doc is NOT reset (a project manifest may still
-/// demand the bundle — that checkout reconciles lazily when visited). `Ok(Some(name))` when
-/// something was actually cleaned.
-fn clean_written_home_placements(
-    ctx: &Ctx<'_>,
-    sid: &SkillId,
-) -> Result<Option<String>, ClientError> {
-    let sp = ctx.layout.published(sid);
-    let _guard = crate::sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
-    let lock: Option<Lock> = doc::read_doc(ctx.fs, &sp.lock)?;
-    let map: Option<PlacementMap> = doc::read_map(ctx.fs, &sp.map)?;
-    let (Some(lock), Some(map)) = (lock, map) else {
-        return Ok(None);
-    };
-    let targets: Vec<usize> = map
-        .placements
-        .iter()
-        .zip(&map.placement_state)
-        .enumerate()
-        .filter(|(_, (p, st))| {
-            st.materialized_sha.is_some() && !is_project_placement(ctx, Path::new(p))
-        })
-        .map(|(i, _)| i)
-        .collect();
-    if targets.is_empty() {
-        return Ok(None);
-    }
-    clean_placements(ctx, sid, &lock, &map, &targets)?;
-    Ok(Some(lock.name))
-}
-
-/// A profile-dropped skill leaves the PERSON scope: snapshot every edited copy, clean the
-/// placements that are NOT inside some project checkout (a project manifest may still demand it
-/// there — that checkout reconciles lazily when visited), keep every sidecar byte, and reset the
-/// sync doc to never-received so a later re-delivery reinstalls. Returns the catalog name.
-fn withdraw_person_scope(ctx: &Ctx<'_>, sid: &SkillId) -> Result<String, ClientError> {
-    let sp = ctx.layout.published(sid);
-    let name;
-    {
-        // The guard is scoped: `reset_to_never_received` below takes the SAME per-skill flock on
-        // a fresh fd, which would deadlock against a still-held one.
-        let _guard = crate::sidecar::lock_skill(ctx.fs, &ctx.layout, sid)?;
-        let lock: Option<Lock> = doc::read_doc(ctx.fs, &sp.lock)?;
-        let map: Option<PlacementMap> = doc::read_map(ctx.fs, &sp.map)?;
-        name = lock
-            .as_ref()
-            .map_or_else(|| sid.as_str().to_owned(), |l| l.name.clone());
-        if let (Some(lock), Some(map)) = (lock.as_ref(), map.as_ref()) {
-            let person: Vec<usize> = map
-                .placements
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| !is_project_placement(ctx, Path::new(p)))
-                .map(|(i, _)| i)
-                .collect();
-            clean_placements(ctx, sid, lock, map, &person)?;
-        }
-    }
-    let sync: Option<SyncState> = doc::read_doc(ctx.fs, &sp.sync)?;
-    super::pull::reset_to_never_received(ctx, sid, sync.as_ref())?;
-    Ok(name)
-}
-
-/// Whether a placement dir belongs to some PROJECT checkout — an ancestor holds a `topos.toml`
-/// (the manifest travels with the repo; its placements are that scope's business). The ONE
-/// heuristic, shared with the person plan's prior-stability rule.
-fn is_project_placement(ctx: &Ctx<'_>, dir: &Path) -> bool {
-    crate::placement::under_project_manifest(ctx, dir)
-}
-
-/// Snapshot-first clean of exactly `indices` placements: every distinct edited copy is committed
-/// into the sidecar store BEFORE any dir is removed; Foreign dirs are never touched; the cleaned
-/// dirs leave the placement record (demand ended — the explicit act was the manifest/profile
-/// edit). Fails closed on an unscannable placement.
-fn clean_placements(
-    ctx: &Ctx<'_>,
-    sid: &SkillId,
-    lock: &Lock,
-    map: &PlacementMap,
-    indices: &[usize],
-) -> Result<(), ClientError> {
-    if indices.is_empty() {
-        return Ok(());
-    }
-    let scans = placement::scan_placements(ctx, map)?;
-    if indices
-        .iter()
-        .any(|&i| matches!(scans[i].status, placement::ScanStatus::Unscannable))
-    {
-        return Err(ClientError::PlacementUnsupported {
-            reason: "a placement cannot be read; refusing to remove it — inspect or move the \
-                     directory by hand"
-                .into(),
-        });
-    }
-    for (idx, _) in placement::distinct_modified(&scans) {
-        if let placement::ScanStatus::Modified { scanned } = &scans[idx].status {
-            sync_engine::snapshot_draft(ctx, &ctx.layout.published(sid), lock, scanned)?;
-        }
-    }
-    let mut removed: HashSet<usize> = HashSet::new();
-    for &i in indices {
-        if matches!(scans[i].status, placement::ScanStatus::Foreign) {
-            continue; // never ours to delete
-        }
-        let p = &scans[i].dir;
-        if ctx.fs.exists(p) {
-            ctx.fs.remove_dir_all(p)?;
-        }
-        removed.insert(i);
-    }
-    if removed.is_empty() {
-        return Ok(());
-    }
-    let mut next = map.clone();
-    let keep: Vec<bool> = (0..map.placements.len())
-        .map(|i| !removed.contains(&i))
-        .collect();
-    let mut it = keep.iter();
-    next.placements.retain(|_| *it.next().unwrap_or(&true));
-    let mut it = keep.iter();
-    next.placement_state.retain(|_| *it.next().unwrap_or(&true));
-    doc::write_map(ctx.fs, &ctx.layout.published(sid).map, &next)
-}
-
-/// The session a `(host, workspace)` reference resolves through: an exact `(host, ws)` match when
-/// the host is spelled; a host-less `@ws/…` matches by workspace name alone.
-fn find_run<'a>(
-    runs: &'a [SessionRun],
-    host: Option<&str>,
-    workspace: &str,
-) -> Option<&'a SessionRun> {
-    match host {
-        Some(h) => runs
-            .iter()
-            .find(|r| r.session.host == h && r.session.workspace_name == workspace),
-        None => runs.iter().find(|r| r.session.workspace_name == workspace),
-    }
-}
-
-/// The honest "not available" line for a workspace ref with no session — phrased from LOCAL
-/// knowledge (which manifest asked; which login is missing), never a server answer.
-fn not_connected_line(item: &ResolvedItem, host: Option<&str>, workspace: &str) -> String {
-    let address = match host {
-        Some(h) => format!("{h}/{workspace}"),
-        None => workspace.to_owned(),
-    };
-    format!(
-        "NOT_AVAILABLE {}: \"{}\" — referenced here, but this installation is not logged into \
-         {address} (run `topos login {address}`)",
-        item.source.label(),
-        item.reference
-    )
-}
-
-/// A skill's catalog name from its sidecar lock (offline).
-fn skill_name_of(ctx: &Ctx<'_>, skill_id: &str) -> Option<String> {
-    let sid = SkillId::parse(skill_id).ok()?;
-    doc::read_doc::<Lock>(ctx.fs, &ctx.layout.published(&sid).lock)
-        .ok()
-        .flatten()
-        .map(|l| l.name)
-}
-
-/// Disclose one isolated per-item failure (stderr + diagnostics log + a stable warning).
-fn note_item_failure(ctx: &Ctx<'_>, warnings: &mut Vec<String>, name: &str, e: &ClientError) {
-    let _ = crate::logfile::append_error_event(
-        ctx.fs,
-        &ctx.layout.log_path(),
-        "update",
-        e.code(),
-        &format!("item {name}: {}", e.detail()),
-        None,
-        ctx.clock.now_unix_millis(),
-    );
-    eprintln!("topos update: {name}: {}", crate::render::safe_message(e));
-    warnings.push(format!(
-        "{} {name}: {}",
-        e.code(),
-        crate::render::safe_message(e)
-    ));
-}
-
 /// Upcast helpers — `Box<dyn ReconcileTransport>` to its two supertrait views.
 trait TransportViews {
     fn as_plane(&self) -> &dyn PlaneSource;
@@ -2151,8 +2525,7 @@ impl TransportViews for Box<dyn ReconcileTransport> {
 }
 
 // =================================================================================================
-// The never-received baseline (moved here from the retired follow verb — the reconcile's scaffold
-// for a brand-new arrival's first receive).
+// The never-received baseline — the sidecar scaffold a brand-new arrival's first receive lands into.
 // =================================================================================================
 
 /// The all-zero sentinel a first-receive baseline carries.
@@ -2160,13 +2533,12 @@ const ZERO_HEX: &str = "00000000000000000000000000000000000000000000000000000000
 /// The genesis generation sentinel.
 const GENESIS: u64 = 0;
 
-// =================================================================================================
-// The never-received baseline — the sidecar scaffold a brand-new arrival's first receive lands into.
-// =================================================================================================
-
-/// [`lay_first_receive_baseline`] with the placement plan already computed — the manifest
-/// reconcile's entry for PROJECT-scope arrivals (their targets root at the demanding checkout,
-/// not the home harness dirs).
+/// Lay the never-received baseline with the placement plan already computed — the reconcile's entry
+/// for arrivals at either scope (a project arrival's targets root at the demanding checkout, not the
+/// home harness dirs).
+///
+/// # Errors
+/// A store / io failure; a raced concurrent baseline is not an error (theirs is kept).
 pub(crate) fn lay_baseline_with_plan(
     ctx: &Ctx<'_>,
     skill_id: &crate::id::SkillId,

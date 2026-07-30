@@ -366,6 +366,10 @@ pub(crate) fn session_login_tty(data: &topos_types::results::LoginData) -> Strin
             None => s.push('.'),
         },
     }
+    // What the login did to this machine's own recipe (only when a file exists to change).
+    if let Some(note) = &data.manifest_note {
+        s.push_str(&format!("\nmanifest: {note}"));
+    }
     s.push_str(&format!(
         "\nUndo: topos logout{}",
         if data.name.is_empty() {
@@ -410,26 +414,46 @@ pub(crate) fn init_tty(data: &topos_types::results::InitData) -> String {
 
 pub(crate) fn add_tty(data: &AddData) -> String {
     let mut out = String::new();
-    // The MANIFEST edited comes FIRST (the trust rail's first half: which manifest line asked for
+    // The MANIFEST edited comes FIRST (the trust rail's first half: which file's line asked for
     // it), with the paste-ready inverse.
     if let (Some(manifest), Some(reference)) = (&data.manifest, &data.reference) {
         out.push_str(&format!(
-            "{manifest}: added \"{reference}\" (undo: {})\n",
+            "{manifest}: added \"{reference}\"{}\n",
             if data.undo.is_empty() {
-                format!("topos remove {reference}")
+                String::new()
             } else {
-                data.undo.join(" ")
+                format!(" (undo: {})", data.undo.join(" "))
             }
         ));
     }
-    // A CHANNEL reference has no bytes of its own (no skill id — the members deliver): the
-    // "Adopted @ <version>" line would be a fabrication, so the receipt states the expansion.
+    // The disclosure a plain row write did not carry: a file born by this act, a row NOT written
+    // (the feed already delivers it), an `off` switch deleted instead, a standing web decline.
+    if let Some(note) = &data.note {
+        out.push_str(&format!("note: {note}\n"));
+    }
+    // A SET reference (a channel, a feed, a whole repo) has no bytes of its own — the "Adopted @
+    // <version>" line would be a fabrication, so the receipt states what the row expands to.
     if data.skill_id.is_empty() {
-        out.push_str(&format!(
-            "Added the '{}' channel — its skills deliver with `topos update` (and just did, \
-             where reachable).",
-            data.name
-        ));
+        let sentence = match data
+            .reference
+            .as_deref()
+            .and_then(|r| crate::manifest::keys::classify_key(r).ok())
+        {
+            Some(crate::manifest::keys::KeyShape::Feed { workspace, .. }) => format!(
+                "This machine now takes whatever {workspace} gives you — `topos update` delivers \
+                 it."
+            ),
+            Some(crate::manifest::keys::KeyShape::RepoSet { .. }) => format!(
+                "Added the '{}' repository — its skills deliver with `topos update`.",
+                data.name
+            ),
+            _ => format!(
+                "Added the '{}' channel — its skills deliver with `topos update` (and just did, \
+                 where reachable).",
+                data.name
+            ),
+        };
+        out.push_str(&sentence);
         return out.trim_end().to_owned();
     }
     out.push_str(&format!(
@@ -502,6 +526,46 @@ pub(crate) fn add_tty(data: &AddData) -> String {
         ));
     }
     out
+}
+
+/// The FIRST-TRUST describe of a git source this machine has never used: what the source holds,
+/// what would be written where, and the one command that applies it. Nothing has landed.
+pub(crate) fn add_describe_tty(
+    data: &topos_types::results::AddDescribeData,
+    yes_argv: &[String],
+) -> String {
+    let mut s = format!(
+        "{} is new to this machine — nothing has been downloaded into your agents yet.\n",
+        data.source
+    );
+    if data.members.is_empty() {
+        s.push_str("It holds no skills topos can see.\n");
+    } else {
+        s.push_str(&format!(
+            "It holds {} skill{}: {}\n",
+            data.members.len(),
+            if data.members.len() == 1 { "" } else { "s" },
+            data.members.join(", ")
+        ));
+    }
+    s.push_str(&format!(
+        "Would write to {}:\n  \"{}\" = \"{}\"\n",
+        data.manifest, data.reference, data.value
+    ));
+    s.push_str(&format!(
+        "Nothing has changed yet — apply with:\n  {}",
+        argv_line(yes_argv)
+    ));
+    s
+}
+
+/// The `fmt` receipt — one line: what moved, or that nothing had to.
+pub(crate) fn fmt_tty(data: &topos_types::results::FmtData) -> String {
+    if data.changed {
+        format!("Formatted {}", data.manifest)
+    } else {
+        format!("{} already formatted", data.manifest)
+    }
 }
 
 /// The breadth arming sweep's receipt lines — one per OTHER detected agent, honest per row (an
@@ -1197,8 +1261,11 @@ pub(crate) fn uninstall_applied_tty(d: &crate::ops::UninstallApplied) -> String 
 
 /// The applied logout's TTY.
 /// `auth status`'s TTY — whoami, per-workspace health, hook health, reporting posture.
-/// The `status` snapshot's TTY — the one orientation read: version, enrollment/sign-in, follows +
-/// pending offers, and the per-agent trigger rows. Entirely from the offline snapshot.
+/// The `status` snapshot's TTY — the one orientation read: version, sign-in, the sessions, the
+/// resolved table SECTIONED PER SCOPE (scopes are unblended, so each gets its own heading and its
+/// own source line), each connected workspace's regime, the disclosure notes verbatim, the
+/// per-agent trigger rows, and — for `topos status <bundle>` — the deep answer's short paragraph.
+/// Entirely from the offline snapshot.
 pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
     let mut s = format!("topos {}", d.version);
     match &d.server {
@@ -1235,67 +1302,49 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
             }
         }
     }
-    // The TRUST RAIL: what the manifests covering THIS directory — and the person's profile
-    // layers — resolve to: per line, the one source that asked, the applied version with its
-    // as-of stamp, and an honest state (phrased from local knowledge only). Excludes render as
-    // their own rows.
-    if !d.items.is_empty() {
-        s.push_str("\nresolved here (manifests + your profile):");
-        for item in &d.items {
-            use topos_types::results::StatusItemState;
-            if matches!(item.state, StatusItemState::Excluded) {
-                s.push_str(&format!("\n  {} — excluded by {}", item.name, item.source));
-                for shadow in &item.shadows {
-                    s.push_str(&format!("\n    withholds the mention from {shadow}"));
-                }
-                continue;
-            }
-            let state = match item.state {
-                StatusItemState::Applied => match &item.applied_as_of {
-                    Some(ts) => format!("applied as of {ts}"),
-                    None => "applied".to_owned(),
-                },
-                StatusItemState::Behind => {
-                    "behind (`topos update` lands the newer version)".to_owned()
-                }
-                StatusItemState::LocalEdits => {
-                    "local edits ahead of the applied version".to_owned()
-                }
-                StatusItemState::NotAvailable => {
-                    "not available with your current access".to_owned()
-                }
-                StatusItemState::PendingSession => "awaiting session approval".to_owned(),
-                StatusItemState::Excluded => unreachable!("handled above"),
-                StatusItemState::Unknown => {
-                    "not applied here yet (`topos update` applies it)".to_owned()
-                }
-            };
-            let version = item
-                .version
-                .as_deref()
-                .map(|v| format!(" @ {}", short(v)))
-                .unwrap_or_default();
-            let via = item
-                .via
-                .as_deref()
-                .map(|c| format!(" · via channel '{c}'"))
-                .unwrap_or_default();
-            s.push_str(&format!(
-                "\n  {}{version} — {state} · {}{via} ({})",
-                item.name, item.source, item.scope
-            ));
-            for shadow in &item.shadows {
-                s.push_str(&format!("\n    shadows {shadow}"));
-            }
+    // THE TABLE, one section per SCOPE — this folder's manifest first, then the person's own
+    // recipe. Per line: the one source that asked, the applied version with its as-of stamp, the
+    // attribution, and an honest state (phrased from local knowledge only).
+    let project: Vec<&topos_types::results::StatusItem> =
+        d.items.iter().filter(|i| i.scope == "project").collect();
+    let person: Vec<&topos_types::results::StatusItem> =
+        d.items.iter().filter(|i| i.scope != "project").collect();
+    if !project.is_empty() {
+        s.push_str(&format!(
+            "\nThis folder — {}",
+            status_manifest_of(&project).unwrap_or_else(|| "topos.toml".to_owned())
+        ));
+        for item in &project {
+            s.push_str(&status_line(item));
+        }
+    }
+    if !person.is_empty() || !d.regimes.is_empty() {
+        match status_manifest_of(&person) {
+            Some(file) => s.push_str(&format!("\nYou — {file}")),
+            None => s.push_str("\nYou — your connected workspaces' feeds"),
+        }
+        for item in &person {
+            s.push_str(&status_line(item));
+        }
+        // One regime line per connected workspace: what this machine takes from it.
+        for r in &d.regimes {
+            s.push_str(&format!("\n  {}/{} — {}", r.host, r.workspace, r.regime));
+        }
+    }
+    // The disclosure sentences the table cannot carry per row — rendered VERBATIM.
+    if !d.notes.is_empty() {
+        s.push_str("\nnotes:");
+        for note in &d.notes {
+            s.push_str(&format!("\n  {note}"));
         }
     }
     s.push_str(&format!(
-        "\nyour profile delivers: {} {}",
+        "\nassigned to you: {} {}",
         d.profile_skills,
         if d.profile_skills == 1 {
-            "skill"
+            "bundle"
         } else {
-            "skills"
+            "bundles"
         }
     ));
     if let Some(p) = d.awaiting_first_sync
@@ -1320,6 +1369,100 @@ pub(crate) fn status_tty(d: &topos_types::results::StatusData) -> String {
             }
         }
     }
+    // `topos status <bundle>` — the deep answer, as a short paragraph under the table.
+    if let Some(detail) = &d.detail {
+        s.push_str(&status_detail_tty(detail));
+    }
+    s
+}
+
+/// The manifest FILE a scope's lines name, when one does — the section heading's second half (a
+/// scope with only feed-delivered lines has no file, and says so instead).
+fn status_manifest_of(items: &[&topos_types::results::StatusItem]) -> Option<String> {
+    items
+        .iter()
+        .find(|i| i.source.ends_with("topos.toml"))
+        .map(|i| i.source.clone())
+}
+
+/// One table line: the bundle, its applied version, the honest state, the one source that asked,
+/// and — when the delivery knows them — the channel and who aimed it here.
+fn status_line(item: &topos_types::results::StatusItem) -> String {
+    use topos_types::results::StatusItemState;
+    let state = match item.state {
+        StatusItemState::Applied => match &item.applied_as_of {
+            Some(ts) => format!("applied as of {ts}"),
+            None => "applied".to_owned(),
+        },
+        StatusItemState::Behind => "behind (`topos update` lands the newer version)".to_owned(),
+        StatusItemState::LocalEdits => "local edits ahead of the applied version".to_owned(),
+        StatusItemState::Excluded => format!("excluded by {}", item.source),
+        StatusItemState::Off => "off — withheld here by your global manifest".to_owned(),
+        StatusItemState::NotAvailable => "not available with your current access".to_owned(),
+        StatusItemState::PendingSession => "awaiting session approval".to_owned(),
+        StatusItemState::Unknown => "not applied here yet (`topos update` applies it)".to_owned(),
+    };
+    let version = item
+        .version
+        .as_deref()
+        .map(|v| format!(" @ {}", short(v)))
+        .unwrap_or_default();
+    let via = item
+        .via
+        .as_deref()
+        .map(|c| format!(" · via channel '{c}'"))
+        .unwrap_or_default();
+    let attribution = item
+        .attribution
+        .as_deref()
+        .map(|a| format!(" · {a}"))
+        .unwrap_or_default();
+    let mut line = format!(
+        "\n  {}{version} — {state} · {}{via}{attribution}",
+        item.name, item.source
+    );
+    for shadow in &item.shadows {
+        line.push_str(&format!("\n    shadows {shadow}"));
+    }
+    line
+}
+
+/// `topos status <bundle>` — where this one bundle comes from, spelled out: the row (file + key)
+/// or the feed (+ who aimed it), the version and any pin, where its bytes are, and its state.
+fn status_detail_tty(detail: &topos_types::results::StatusDetail) -> String {
+    use topos_types::results::StatusItemState;
+    let mut s = format!("\n\n{}", detail.name);
+    match (&detail.source_file, &detail.source_key, &detail.feed) {
+        (Some(file), Some(key), _) => s.push_str(&format!("\n  from {file}, line key {key}")),
+        (Some(file), None, _) => s.push_str(&format!("\n  from {file}")),
+        (None, _, Some(feed)) => s.push_str(&format!("\n  from the {feed} feed")),
+        (None, _, None) => s.push_str("\n  from this machine"),
+    }
+    if let Some(a) = &detail.attribution {
+        s.push_str(&format!(" — {a}"));
+    }
+    match (&detail.version, &detail.pin) {
+        (Some(v), Some(p)) => {
+            s.push_str(&format!("\n  version {} (pinned {})", short(v), short(p)))
+        }
+        (Some(v), None) => s.push_str(&format!("\n  version {}", short(v))),
+        (None, Some(p)) => s.push_str(&format!("\n  pinned {} (not applied here)", short(p))),
+        (None, None) => {}
+    }
+    if !detail.placements.is_empty() {
+        s.push_str(&format!("\n  placed in {}", detail.placements.join(", ")));
+    }
+    let state = match detail.state {
+        StatusItemState::Applied => "applied",
+        StatusItemState::Behind => "behind — `topos update` lands the newer version",
+        StatusItemState::LocalEdits => "local edits ahead of the applied version",
+        StatusItemState::Excluded => "excluded here",
+        StatusItemState::Off => "off — withheld here by your global manifest",
+        StatusItemState::NotAvailable => "not available with your current access",
+        StatusItemState::PendingSession => "awaiting session approval",
+        StatusItemState::Unknown => "not applied here yet (`topos update` applies it)",
+    };
+    s.push_str(&format!("\n  {state}"));
     s
 }
 
@@ -2189,6 +2332,7 @@ mod tests {
             merge: None,
             merge_preview: None,
             synced_placements: None,
+            scope: None,
         }
     }
 
@@ -2774,7 +2918,8 @@ mod tests {
     #[test]
     fn status_tty_renders_both_connection_faces() {
         use topos_types::results::{
-            StatusData, StatusItem, StatusItemState, StatusSession, StatusTrigger,
+            StatusData, StatusDetail, StatusItem, StatusItemState, StatusRegime, StatusSession,
+            StatusTrigger,
         };
         let connected = StatusData {
             version: "0.1.0".to_owned(),
@@ -2791,11 +2936,24 @@ mod tests {
             }],
             items: vec![
                 StatusItem {
+                    name: "api-only".to_owned(),
+                    reference: "topos.sh/demo/api-only".to_owned(),
+                    source: "/repo/topos.toml".to_owned(),
+                    scope: "project".to_owned(),
+                    via: None,
+                    attribution: None,
+                    version: None,
+                    applied_as_of: None,
+                    state: StatusItemState::Unknown,
+                    shadows: Vec::new(),
+                },
+                StatusItem {
                     name: "deploy".to_owned(),
                     reference: "topos.sh/demo/deploy".to_owned(),
-                    source: "your profile @ topos.sh/demo".to_owned(),
+                    source: "the topos.sh/demo feed".to_owned(),
                     scope: "person".to_owned(),
                     via: Some("everyone".to_owned()),
+                    attribution: Some("assigned by Dana".to_owned()),
                     version: Some("a".repeat(64)),
                     applied_as_of: Some("2026-07-24T00:00:00Z".to_owned()),
                     state: StatusItemState::Applied,
@@ -2803,16 +2961,24 @@ mod tests {
                 },
                 StatusItem {
                     name: "noisy".to_owned(),
-                    reference: "noisy".to_owned(),
-                    source: "/repo/topos.toml".to_owned(),
-                    scope: "project".to_owned(),
+                    reference: "topos.sh/demo/noisy".to_owned(),
+                    source: "~/.topos/topos.toml".to_owned(),
+                    scope: "person".to_owned(),
                     via: None,
+                    attribution: None,
                     version: None,
                     applied_as_of: None,
-                    state: StatusItemState::Excluded,
-                    shadows: vec!["your profile @ topos.sh/demo".to_owned()],
+                    state: StatusItemState::Off,
+                    shadows: Vec::new(),
                 },
             ],
+            regimes: vec![StatusRegime {
+                host: "topos.sh".to_owned(),
+                workspace: "demo".to_owned(),
+                regime: "adopting all assigned, 1 off".to_owned(),
+            }],
+            notes: vec!["off — not currently assigned: topos.sh/demo/gone".to_owned()],
+            detail: None,
             triggers: vec![
                 StatusTrigger {
                     agent: "claude-code".to_owned(),
@@ -2833,23 +2999,29 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("topos.sh/demo (Demo)"), "{text}");
-        // The trust rail: the applied row carries its version, the as-of stamp, the ONE source,
-        // and the channel attribution; the exclude renders as its own legible row.
+        // The table is SECTIONED per scope — each heading names the recipe that scope reads.
+        assert!(text.contains("This folder — /repo/topos.toml"), "{text}");
+        assert!(text.contains("You — ~/.topos/topos.toml"), "{text}");
+        // The applied row carries its version, the as-of stamp, the ONE source, the channel, and
+        // who aimed it here; an `off` switch reads as its own row.
         assert!(
             text.contains("applied as of 2026-07-24T00:00:00Z"),
             "{text}"
         );
-        assert!(text.contains("your profile @ topos.sh/demo"), "{text}");
+        assert!(text.contains("the topos.sh/demo feed"), "{text}");
         assert!(text.contains("via channel 'everyone'"), "{text}");
+        assert!(text.contains("assigned by Dana"), "{text}");
+        assert!(text.contains("noisy — off — withheld here"), "{text}");
+        // The regime line and the notes ride verbatim.
         assert!(
-            text.contains("noisy — excluded by /repo/topos.toml"),
+            text.contains("topos.sh/demo — adopting all assigned, 1 off"),
             "{text}"
         );
         assert!(
-            text.contains("withholds the mention from your profile @ topos.sh/demo"),
+            text.contains("off — not currently assigned: topos.sh/demo/gone"),
             "{text}"
         );
-        assert!(text.contains("your profile delivers: 2 skills"), "{text}");
+        assert!(text.contains("assigned to you: 2 bundles"), "{text}");
         assert!(text.contains("1 not applied here yet"), "{text}");
         assert!(text.contains("claude-code: armed"), "{text}");
         assert!(
@@ -2858,8 +3030,36 @@ mod tests {
         );
         // The dead vocabulary stays dead on this surface.
         assert!(!text.contains("following:"), "{text}");
+        assert!(!text.contains("your profile"), "{text}");
         assert!(!text.contains("auth login"), "{text}");
         assert!(!text.contains("not yet reconciled"), "{text}");
+
+        // `status <bundle>`: the deep answer spells the file, the key, and the state.
+        let deep = StatusData {
+            detail: Some(StatusDetail {
+                name: "deploy".to_owned(),
+                source_file: Some("~/.topos/topos.toml".to_owned()),
+                source_key: Some("topos.sh/demo/deploy".to_owned()),
+                feed: None,
+                attribution: Some("assigned by Dana".to_owned()),
+                version: Some("a".repeat(64)),
+                pin: None,
+                placements: vec!["/home/dev/.claude/skills/deploy".to_owned()],
+                state: StatusItemState::Applied,
+            }),
+            ..connected.clone()
+        };
+        let text = status_tty(&deep);
+        assert!(
+            text.contains("from ~/.topos/topos.toml, line key topos.sh/demo/deploy"),
+            "{text}"
+        );
+        assert!(text.contains("— assigned by Dana"), "{text}");
+        assert!(text.contains("version aaaaaaaaaaaa"), "{text}");
+        assert!(
+            text.contains("placed in /home/dev/.claude/skills/deploy"),
+            "{text}"
+        );
 
         // The unconnected face states the fix in prose (join by address, or create a workspace).
         let fresh = StatusData {
@@ -2869,6 +3069,9 @@ mod tests {
             awaiting_first_sync: Some(0),
             sessions: Vec::new(),
             items: Vec::new(),
+            regimes: Vec::new(),
+            notes: Vec::new(),
+            detail: None,
             triggers: Vec::new(),
             ..connected
         };
@@ -2876,7 +3079,7 @@ mod tests {
         assert!(text.contains("not connected"), "{text}");
         assert!(text.contains("`topos login <workspace-address>`"), "{text}");
         assert!(text.contains("https://topos.sh"), "{text}");
-        assert!(text.contains("your profile delivers: 0 skills"), "{text}");
+        assert!(text.contains("assigned to you: 0 bundles"), "{text}");
 
         // The bare-`topos` welcome stays three lines: what topos is + the two ways in.
         let welcome = welcome_tty(&fresh);

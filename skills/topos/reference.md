@@ -27,7 +27,15 @@ These act on this machine only.
 
 ### `topos status`
 
-See what topos manages on this machine: each skill with its version and where it comes from, your workspace logins, and whether auto-update is armed. Works offline and changes nothing. A bare `topos` on a terminal shows the same thing
+See what topos manages on this machine: each skill with its version and where it comes from — per scope (this folder's `topos.toml`, and your own machine-wide set) — plus your workspace logins and whether auto-update is armed. `topos status <skill>` answers one skill in depth: which file and line (or which workspace's feed) delivers it, and where its files are. Works offline and changes nothing. A bare `topos` on a terminal shows the same thing
+
+```
+topos status [BUNDLE]
+```
+
+| Argument / flag | What it does |
+|---|---|
+| `[BUNDLE]` | One skill to answer in depth. Omitted, the full table |
 
 
 ### `topos login`
@@ -59,12 +67,20 @@ topos logout [OPTIONS]
 
 ### `topos init`
 
-Create a `topos.toml` in this folder. The file lists the skills everyone working in this project should have — commit it, and teammates' agents pick up the same set by themselves. If the file already exists, nothing changes
+Create a `topos.toml` in this folder. The file lists the skills everyone working in this project should have — commit it, and teammates' agents pick up the same set by themselves. With `-g`, writes your machine's own `~/.topos/topos.toml` instead, spelling out what each connected workspace already delivers so you can edit it line by line. If the file already exists, nothing changes
+
+```
+topos init [OPTIONS]
+```
+
+| Argument / flag | What it does |
+|---|---|
+| `-g, --global` | Write the machine-wide file (`~/.topos/topos.toml`) instead of this folder's |
 
 
 ### `topos add`
 
-Get a skill and keep it updated. The source can be a skill or channel from your workspace (`code-review`, `@acme/code-review`, `@acme/channels/backend`), a local folder (`./tools/my-skill`), or a public GitHub repo (`owner/repo`, pinned to a commit). Records it in this folder's `topos.toml` — or in your personal profile with `-g` — and installs it right away. `add topos` restores the built-in topos skill
+Get skills and keep them updated. The source can be a skill or channel from your workspace (`code-review`, `@acme/code-review`, `@acme/channels/backend`), a whole workspace's feed (`@acme`, with `-g`), a local folder (`./tools/my-skill`), or a public GitHub repo (`owner/repo` for every skill in it, `owner/repo/name` for one). Records one line in this folder's `topos.toml` — or in your machine's own file with `-g` — and installs right away. A GitHub source you have never used before shows what it found and waits for `--yes`. `add topos` restores the built-in topos skill
 
 ```
 topos add [OPTIONS] <SOURCE>
@@ -72,16 +88,16 @@ topos add [OPTIONS] <SOURCE>
 
 | Argument / flag | What it does |
 |---|---|
-| `<SOURCE>` | What to add: a workspace skill or channel, a local folder, or a GitHub repo |
+| `<SOURCE>` | What to add: a workspace skill, channel, or feed; a local folder; or a GitHub repo |
 | `-s, --skill <NAME>` | When a GitHub repo holds several skills, pick which one(s) (repeatable; `'*'` = all) |
 | `-a, --agent <SLUG>` | Which agent to install a GitHub import for (a slug like `cursor`; repeatable; `'*'` = all). Default: the agent detected here |
-| `-g, --global` | Add it for you rather than for this project: the skill then follows you to every machine you log in on, instead of living in this folder's `topos.toml` |
-| `--yes` | Accepted everywhere; `add` applies immediately, so this changes nothing |
+| `-g, --global` | Add it machine-wide (your `~/.topos/topos.toml`) instead of to this folder's file |
+| `--yes` | Confirm adding from a GitHub source this machine has never used before (everything else applies immediately, and `--yes` changes nothing there) |
 
 
 ### `topos remove`
 
-Stop getting skills here — the inverse of `add`. Edits the same `topos.toml` (or your profile with `-g`) and prints exactly what changed and how to undo it. Asks first only when removing would lose local work
+Stop getting skills here — the inverse of `add`. Edits the same `topos.toml` (or your machine-wide file with `-g`: dropping a line, or switching one feed-delivered skill "off" on this machine) and prints exactly what changed and how to undo it. Asks first only when removing would lose local work or rewrite a whole channel/repo line
 
 ```
 topos remove [OPTIONS] [SKILL]...
@@ -89,8 +105,8 @@ topos remove [OPTIONS] [SKILL]...
 
 | Argument / flag | What it does |
 |---|---|
-| `[SKILL]...` | The skill(s) to remove |
-| `-g, --global` | Remove from your personal profile instead — delivery stops on every machine you log in on |
+| `[SKILL]...` | The skill(s) to remove — or `@<workspace>` with `-g` to stop adopting its feed here |
+| `-g, --global` | Edit your machine-wide file (`~/.topos/topos.toml`) instead of this folder's |
 | `--yes` | Confirm a removal that loses local work (unshared edits, or a local-only skill whose delete is permanent) |
 
 
@@ -110,6 +126,7 @@ topos update [OPTIONS] [TARGETS]...
 | `--onto-current` | Resolve a conflicted skill by keeping your bytes exactly as they are, skipping the merge with the team's changes (what the merge would have brought is shown first). Takes exactly one skill |
 | `--quiet` | Print nothing on stdout — the mode the session-start hook uses. Errors still go to stderr with a non-zero exit |
 | `--ttl <SECONDS>` | With `--quiet`: skip the run entirely when one already completed within this many seconds, so hooks can fire often at no cost. `0` disables the throttle. Default 300; `TOPOS_UPDATE_TTL` changes the default |
+| `--rebuild` | Rebuild every managed skill folder from topos's own store: your unshared edits are saved first, then each folder is re-created fresh. Fixes a folder someone deleted or broke by hand |
 
 
 ### `topos list`

@@ -58,6 +58,13 @@
     "name": {
       "type": "string"
     },
+    "note": {
+      "description": "A disclosure the receipt leads with when the edit was not the plain row write: a\nredundant row NOT written (the feed already delivers it), an `\"off\"` switch deleted\ninstead of a row added, or a standing web decline this machine's row now overrides.\n**Additive.**",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "origin": {
       "description": "Where the skill was imported FROM, when `add` fetched it from a remote source. `None` for a\nlocally-adopted skill (a path or a discovered name).",
       "anyOf": [

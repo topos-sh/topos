@@ -337,6 +337,13 @@
             }
           ]
         },
+        "scope": {
+          "description": "The SCOPE this row reconciled in — `\"person\"` for the home dirs, or the project\ndirectory's path for an in-checkout delivery. The receipt sections rows by it. Absent on\nrows predating the field. **INFERRED** (additive).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "skill": {
           "type": "string"
         },

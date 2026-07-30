@@ -270,6 +270,9 @@ pub(crate) fn add_with_name(
         reference: None,
         undo: Vec::new(),
         governed_copy: None,
+        // Set by the manifest half when the edit was not the plain row write (a file born here, a
+        // redundant row withheld, an `off` switch deleted, a standing web decline).
+        note: None,
     })
 }
 

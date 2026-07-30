@@ -80,10 +80,11 @@ fn good_delivery() -> WireDelivery {
             via: WireVia {
                 channels: vec!["everyone".into()],
                 direct: false,
+                assigned_by: None,
+                picked: None,
             },
         }],
-        detached: vec![],
-        excluded: Vec::new(),
+        declined: Vec::new(),
         notices: vec![WireNotice {
             id: "n_1".into(),
             kind: "verdict".into(),
@@ -99,7 +100,6 @@ fn good_delivery() -> WireDelivery {
         proposals_awaiting: 1,
         staleness_window_ms: 604_800_000,
         session_status: Some("active".into()),
-        link_status: None,
     }
 }
 
@@ -128,20 +128,15 @@ fn delivery_accepts_valid_and_rejects_bad_version_and_schema_version() {
         "schema_version != 1 must be rejected (const)"
     );
 
-    // The SESSION wire: `session_status` carries the standing; the retired `link_status`
-    // spelling is a parse-only fallback — BOTH are optional on the schema (an older producer
-    // omits both, which reads as active-equivalent access).
-    let mut session_only = good.clone();
-    session_only.as_object_mut().unwrap().remove("link_status");
+    // `session_status` is OPTIONAL on the schema — a producer that omits it serves only
+    // active-equivalent access, and the body must still validate. The `declined` list is
+    // optional too (absent defaults empty).
+    let mut minimal = good.clone();
+    minimal.as_object_mut().unwrap().remove("session_status");
+    minimal.as_object_mut().unwrap().remove("declined");
     assert!(
-        v.is_valid(&session_only),
-        "a session-wire delivery (no link_status) must validate"
-    );
-    let mut neither = session_only.clone();
-    neither.as_object_mut().unwrap().remove("session_status");
-    assert!(
-        v.is_valid(&neither),
-        "a legacy delivery omitting both status spellings must validate (defaulted)"
+        v.is_valid(&minimal),
+        "a delivery omitting session_status and declined must validate (defaulted)"
     );
 
     // An unknown extra field is ACCEPTED — schemars sets no `additionalProperties: false`, so the wire

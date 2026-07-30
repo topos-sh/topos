@@ -76,8 +76,19 @@ export interface DeliverySkill {
   bundle_digest: string;
   generation: number;
   updated_at: number;
-  /** Why the feed carries it: which assigned channels hold it, and/or a direct assignment. */
-  via: { channels: string[]; direct: boolean };
+  /** Why the feed carries it: which assigned channels hold it, and/or a direct assignment.
+   * The two OPTIONAL facts attribute DIRECT bundle assignments only (channel-carried delivery
+   * keeps its `channels` attribution and gets neither): `assigned_by` is the display of the
+   * assignment's creator when someone ELSE aimed it here (person-targeted preferred over the
+   * everyone row), and `picked` marks the caller's own self-assignment. Both are OMITTED when
+   * absent — never null, never false. */
+  via: { channels: string[]; direct: boolean; assigned_by?: string; picked?: true };
+}
+
+/** One declined bundle of the caller's — identity + name, so a client can narrate the stance. */
+export interface DeliveryDecline {
+  skill_id: string;
+  name: string;
 }
 
 export interface DeliveryNotice {
@@ -100,6 +111,8 @@ export interface DeliveryBody {
   /** The session's status; "pending" delivers NOTHING (the empty body below). */
   session_status: "active" | "pending";
   skills: DeliverySkill[];
+  /** The caller's standing declines (live bundles only), name-sorted — always present. */
+  declined: DeliveryDecline[];
   notices: DeliveryNotice[];
   proposals_awaiting: number;
   staleness_window_ms: number;
@@ -121,6 +134,7 @@ export async function emptyDeliveryFor(actor: SessionActor): Promise<DeliveryBod
     workspace_id: actor.workspaceId,
     session_status: "pending",
     skills: [],
+    declined: [],
     notices: [],
     proposals_awaiting: 0,
     staleness_window_ms: wsRows[0]?.stalenessWindowMs ?? 604800000,
@@ -135,8 +149,8 @@ function isoSeconds(date: Date): string {
 /**
  * The person-layer answer for ONE session: their FEED (everything assigned to them or to
  * everyone, minus their declines), active + current-holding only, with `via` attribution, the
- * resolved protection, plus the unacked notices, the open-proposal count over the same set,
- * and the ONE staleness clock. Every delivered skill is served at the workspace's `current` —
+ * resolved protection, plus the caller's standing declines by name, the unacked notices, the
+ * open-proposal count over the same set, and the ONE staleness clock. Every delivered skill is served at the workspace's `current` —
  * the server holds no version pins; a machine that wants an older version pins it locally.
  */
 export async function deliveryFor(actor: FeedActor): Promise<DeliveryBody> {
@@ -162,7 +176,27 @@ export async function deliveryFor(actor: FeedActor): Promise<DeliveryBody> {
                  SELECT 1 FROM web.assignment da
                  WHERE da.workspace_id = ${ws} AND da.bundle_id = b.id
                    AND (da.user_id = ${actor.userId} OR da.user_id IS NULL)
-               ) AS direct
+               ) AS direct,
+               -- Who aimed a direct bundle assignment here, when it was someone ELSE: the
+               -- person-targeted row outranks the everyone one, newest as the tiebreak. The
+               -- display COALESCEs to 'former member' inside the subquery so a gone creator
+               -- account still reads as an attribution, not as "no assignment".
+               (
+                 SELECT COALESCE(NULLIF(btrim(u.name), ''), u.email, 'former member')
+                 FROM web.assignment aa
+                 LEFT JOIN web."user" u ON u.id = aa.created_by
+                 WHERE aa.workspace_id = ${ws} AND aa.bundle_id = b.id
+                   AND (aa.user_id = ${actor.userId} OR aa.user_id IS NULL)
+                   AND aa.created_by <> ${actor.userId}
+                 ORDER BY (aa.user_id IS NOT NULL) DESC, aa.created_at DESC
+                 LIMIT 1
+               ) AS assigned_by,
+               -- The caller's own pick: a direct bundle assignment they aimed at themselves.
+               EXISTS (
+                 SELECT 1 FROM web.assignment pa
+                 WHERE pa.workspace_id = ${ws} AND pa.bundle_id = b.id
+                   AND pa.user_id = ${actor.userId} AND pa.created_by = ${actor.userId}
+               ) AS picked
         FROM (${feedDemandSql(actor.userId, ws)}) e
         JOIN web.bundle b ON b.id = e.bundle_id
         JOIN web.workspace w ON w.id = ${ws}
@@ -183,8 +217,32 @@ export async function deliveryFor(actor: FeedActor): Promise<DeliveryBody> {
         bundle_digest: (r.current_digest as string | null) ?? "",
         generation: Number(r.generation),
         updated_at: Number(r.updated_at),
-        via: { channels: r.via_channels as string[], direct: r.direct as boolean },
+        via: {
+          channels: r.via_channels as string[],
+          direct: r.direct as boolean,
+          // Optional attribution facts — OMITTED when absent, never null/false on the wire.
+          ...(r.assigned_by === null ? {} : { assigned_by: r.assigned_by as string }),
+          ...(r.picked === true ? { picked: true as const } : {}),
+        },
       }));
+
+      // The caller's standing declines — live bundles only, name-sorted for determinism. The
+      // stance is served WITH delivery so a client can narrate "off by your choice" without a
+      // second call.
+      const declineRows = await tx.execute(sql`
+        SELECT b.id AS skill_id, b.name
+        FROM web.decline d
+        JOIN web.bundle b ON b.id = d.bundle_id AND b.workspace_id = ${ws}
+        WHERE d.workspace_id = ${ws} AND d.user_id = ${actor.userId}
+          AND b.status <> 'deleted'
+        ORDER BY b.name
+      `);
+      const declined: DeliveryDecline[] = (declineRows.rows as Record<string, unknown>[]).map(
+        (r) => ({
+          skill_id: r.skill_id as string,
+          name: r.name as string,
+        }),
+      );
 
       const noticeRows = await tx.execute(sql`
         SELECT n.id, n.kind, n.payload, n.created_at, b.name AS live_name
@@ -242,6 +300,7 @@ export async function deliveryFor(actor: FeedActor): Promise<DeliveryBody> {
         workspace_id: ws,
         session_status: "active",
         skills,
+        declined,
         notices,
         proposals_awaiting: proposalsAwaiting,
         staleness_window_ms: wsRows[0]?.stalenessWindowMs ?? 604800000,

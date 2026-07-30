@@ -189,7 +189,7 @@ async function expectUniform404(res: Response): Promise<void> {
 
 interface DeliveredSkill {
   skill_id: string;
-  via: { channels: string[]; direct: boolean };
+  via: { channels: string[]; direct: boolean; assigned_by?: string; picked?: true };
 }
 
 /** The caller's delivered skills, through the REAL delivery route. */
@@ -864,6 +864,8 @@ describe("delivery", () => {
       via: { channels: ["eng"], direct: false },
     });
     expect(typeof skills[0]?.updated_at).toBe("number");
+    // The caller's standing declines ride the body — always present, empty here.
+    expect(body.declined).toEqual([]);
     const notices = body.notices as Record<string, unknown>[];
     expect(notices).toHaveLength(1);
     expect(notices[0]).toMatchObject({
@@ -895,13 +897,23 @@ describe("delivery", () => {
     await declineRow(db, wsId, "u_mem", "s_beta");
     expect(await deliveredSkillIds(CREDS.mem)).toEqual(["s_alpha"]);
 
-    // A decline holds even against a direct assignment to this person …
+    // A decline holds even against a direct assignment to this person — and while it stands,
+    // the body's `declined` list names the bundle so a client can narrate the stance.
     await assignBundleRow(db, wsId, "s_beta", "u_mem");
     expect(await deliveredSkillIds(CREDS.mem)).toEqual(["s_alpha"]);
-    // … and clearing it lets the assignment through, now flagged direct AND via the baseline.
+    const withStance = await drive(
+      deliveryLoader,
+      req("GET", `/api/v1/workspaces/${wsId}/delivery`, { cred: CREDS.mem }),
+      { ws: wsId },
+    );
+    expect(((await withStance.json()) as { declined: unknown }).declined).toEqual([
+      { skill_id: "s_beta", name: "beta" },
+    ]);
+    // … and clearing it lets the assignment through, now flagged direct AND via the baseline —
+    // the person's own row (created_by = themselves), so the self-pick fact rides.
     await db.q(`DELETE FROM web.decline WHERE user_id = 'u_mem' AND bundle_id = 's_beta'`);
     const both = await deliveredSkill(CREDS.mem, "s_beta");
-    expect(both?.via).toEqual({ channels: ["everyone"], direct: true });
+    expect(both?.via).toEqual({ channels: ["everyone"], direct: true, picked: true });
 
     // Restore the fixture for the suites that follow.
     await db.q(`DELETE FROM web.assignment WHERE user_id = 'u_mem' AND bundle_id = 's_beta'`);
@@ -912,7 +924,9 @@ describe("delivery", () => {
   it("an EVERYONE assignment of a bundle delivers with no channel behind it", async () => {
     await assignBundleRow(db, wsId, "s_beta", null, "u_owner");
     const served = await deliveredSkill(CREDS.mem, "s_beta");
-    expect(served?.via).toEqual({ channels: [], direct: true });
+    // Someone ELSE aimed it here, so the creator's display rides — and no `picked`, which
+    // marks only the caller's own row.
+    expect(served?.via).toEqual({ channels: [], direct: true, assigned_by: "Owner" });
     // It reaches the owner too — one row, whole roster.
     expect(await deliveredSkillIds(CREDS.owner)).toContain("s_beta");
     await db.q(`DELETE FROM web.assignment WHERE bundle_id = 's_beta' AND user_id IS NULL`);

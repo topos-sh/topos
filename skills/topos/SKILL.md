@@ -8,8 +8,10 @@ metadata:
 # topos — shared skills for every agent on the team
 
 A team publishes skills to a workspace; every logged-in machine converges on the team's current
-version automatically. What a folder's agents should have is its `topos.toml` manifest (nearest
-one wins, walking up like git); your server-stored profile covers you everywhere else. Skills
+version automatically. What a folder's agents should have is its `topos.toml` manifest (the
+nearest file wins, whole, walking up like git); machine-wide, your workspace FEED — everything
+assigned to you or to everyone, minus what you declined — arrives by itself, and an optional
+`~/.topos/topos.toml` takes explicit line-by-line control of it. Skills
 next to this file may be topos-managed copies: they update on their own, and your edits to them
 are drafts you can share back.
 
@@ -51,9 +53,10 @@ fork. `topos list --remote` adds the connected catalogs this folder does not use
 ## Staying current
 
 A session-start trigger runs `topos update --quiet`; `topos update` is the same sweep on
-demand, `topos update <skill>` targets one. The sweep resolves this folder's manifest chain
-plus your profile and converges every placement. Updates never destroy drafts — they merge
-around them; a conflict freezes the copy with a marked way out.
+demand, `topos update <skill>` targets one. The sweep resolves this folder's manifest and your
+machine-wide recipe (your feeds, or your global manifest) and converges every placement.
+Updates never destroy drafts — they merge around them; a conflict freezes the copy with a
+marked way out.
 
 ## Adding skills (the manifest is the demand)
 
@@ -61,14 +64,16 @@ around them; a conflict freezes the copy with a marked way out.
 topos add <name>                  # a connected catalog's skill, by bare name when unique
 topos add @<workspace>/<name>     # the same, workspace-qualified; pins with @<digest>
 topos add @<workspace>/channels/<name>   # a whole channel
-topos add owner/repo              # import from GitHub (pin rides the manifest)
+topos add owner/repo              # every skill in a GitHub repo, tracking its default branch
+topos add owner/repo/<name>       # one skill from a repo; @<commit> pins
 topos add ./dir                   # adopt a local folder in place
-topos remove <name>               # the inverse — drops the line, or records an exclude
+topos remove <name>               # the inverse — drops the line
 ```
 
 `add`/`remove` edit the NEAREST `topos.toml` (created at the git root when none exists) and
-deliver immediately; `-g` targets your server-stored profile instead — every machine you are
-logged into converges on it. In a checkout, managed copies land in the project's own agent
+deliver immediately; `-g` edits your machine-wide `~/.topos/topos.toml` instead (`add -g
+@<workspace>` adopts a whole feed; `remove -g <name>` drops a line or switches one
+feed-delivered skill off on this machine). In a checkout, managed copies land in the project's own agent
 dirs and keep themselves out of commits (each placed dir carries its own ignore file).
 
 ## Sharing an improvement back (do this — it is the point)

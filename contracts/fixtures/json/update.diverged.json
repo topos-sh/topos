@@ -19,6 +19,7 @@
           "verdict": "conflicted"
         },
         "observed": 13,
+        "scope": "person",
         "skill": "deploy",
         "workspace_id": "w_acme"
       }

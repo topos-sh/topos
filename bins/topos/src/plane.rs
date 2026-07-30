@@ -214,6 +214,11 @@ pub(crate) struct DeliverySkill {
     pub bundle_digest: [u8; 32],
     /// The channels delivering the skill (the `via` attribution a describe narrates).
     pub via_channels: Vec<String>,
+    /// The display name of the direct assignment's creator, when someone else aimed the bundle
+    /// at this person (attribution for status/receipt lines).
+    pub assigned_by: Option<String>,
+    /// `true` when the caller's own pick (a self-assignment) delivers it.
+    pub picked: bool,
 }
 
 /// The per-workspace delivery snapshot: what to have, and what the PERSON detached (freeze in
@@ -233,6 +238,9 @@ pub(crate) struct DeliverySnapshot {
     /// THIS device's link to the workspace. PENDING carries empty sets and a zero gauge (no data
     /// flows over a pending link) — the reconcile skips the workspace quietly.
     pub link_status: LinkStatus,
+    /// The caller's DECLINED bundles in this workspace — `(skill_id, name)` pairs the client's
+    /// disclosures read (a machine's manifest row may still deliver one; the receipt says so).
+    pub declined: Vec<(String, String)>,
 }
 
 /// The delivery + fleet transport, per enrolled workspace. The production impl rides the workspace
@@ -397,87 +405,6 @@ pub(crate) trait DirectorySource {
     /// As [`me`](Self::me).
     #[allow(dead_code)]
     fn ack_notices(&self, workspace_id: &str, ids: &[String]) -> Result<(), ClientError>;
-
-    /// `PUT /v1/workspaces/{ws}/profile/skills/{skill}` — include a bundle in the caller's OWN
-    /// per-workspace profile (`add -g`; an optional pin rides the body; an exclude line on the
-    /// same bundle flips to include). `{skill}` is the immutable id. Idempotent. Defaulted so
-    /// read-only fakes need no arm.
-    ///
-    /// # Errors
-    /// As [`me`](Self::me).
-    fn profile_include_skill(
-        &self,
-        workspace_id: &str,
-        skill_id: &str,
-        pin: Option<&str>,
-    ) -> Result<(), ClientError> {
-        let _ = (workspace_id, skill_id, pin);
-        Err(ClientError::Plane(
-            "this transport serves no profile".into(),
-        ))
-    }
-
-    /// `DELETE /v1/workspaces/{ws}/profile/skills/{skill}` — remove the include line (`remove
-    /// -g`); when a broader layer (an included channel, the baseline) still provides the bundle,
-    /// the server records an EXCLUDE line instead — the answer says which happened, so the
-    /// receipt can name the inverse.
-    ///
-    /// # Errors
-    /// As [`me`](Self::me).
-    fn profile_remove_skill(
-        &self,
-        workspace_id: &str,
-        skill_id: &str,
-    ) -> Result<ProfileRemoval, ClientError> {
-        let _ = (workspace_id, skill_id);
-        Err(ClientError::Plane(
-            "this transport serves no profile".into(),
-        ))
-    }
-
-    /// `PUT /v1/workspaces/{ws}/profile/channels/{channel}` — include a CHANNEL in the caller's
-    /// profile (`add -g @ws/channels/x`; on the default channel this clears an exclude). The
-    /// channel rides by NAME.
-    ///
-    /// # Errors
-    /// As [`me`](Self::me).
-    fn profile_include_channel(
-        &self,
-        workspace_id: &str,
-        channel: &str,
-    ) -> Result<(), ClientError> {
-        let _ = (workspace_id, channel);
-        Err(ClientError::Plane(
-            "this transport serves no profile".into(),
-        ))
-    }
-
-    /// `DELETE /v1/workspaces/{ws}/profile/channels/{channel}` — drop a channel from the
-    /// caller's profile (on the default channel this records the exclude line).
-    ///
-    /// # Errors
-    /// As [`me`](Self::me).
-    fn profile_remove_channel(
-        &self,
-        workspace_id: &str,
-        channel: &str,
-    ) -> Result<ProfileRemoval, ClientError> {
-        let _ = (workspace_id, channel);
-        Err(ClientError::Plane(
-            "this transport serves no profile".into(),
-        ))
-    }
-}
-
-/// How a profile removal settled server-side — the receipt names the inverse from this.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProfileRemoval {
-    /// The include line was removed (nothing broader provides the bundle).
-    Removed,
-    /// A broader layer still provides it — the server recorded an EXCLUDE line instead.
-    Excluded,
-    /// Nothing to remove (it was never in the profile) — an honest no-op.
-    NotInProfile,
 }
 
 // ---------------------------------------------------------------------------------------------

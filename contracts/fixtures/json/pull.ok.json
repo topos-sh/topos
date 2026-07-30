@@ -9,6 +9,7 @@
         "action": "up_to_date",
         "applied": 42,
         "observed": 42,
+        "scope": "person",
         "skill": "pr-describe",
         "workspace_id": "w_acme"
       }

@@ -444,32 +444,43 @@ pub(crate) fn parse_input(token: &str, default_host: Option<&str>) -> Result<Inp
         .or_else(|| token.strip_prefix("http://"))
         .unwrap_or(token);
 
-    // `@workspace[/…]` — a workspace at the connected host, always.
+    // The `#` sigil is never a reference — the one channel spelling is the path segment.
+    if token.starts_with('#') {
+        return Err(err(
+            "the `#` sigil is not a reference — a channel is `@<workspace>/channels/<name>`",
+        ));
+    }
+
+    // `@workspace[/…]` — a workspace at the connected host, always. The SHAPE (and its pin
+    // rules) are decided before the host resolves, so a malformed pin teaches its own rule even
+    // on a machine with no connected host.
     if let Some(rest) = token.strip_prefix('@') {
         let (rest, pin) = split_pin(rest);
-        let need_host = |spelled: &str| -> Result<String, KeyError> {
-            default_host.map(str::to_string).ok_or_else(|| {
-                err(format!(
-                    "`@{rest}` names a workspace at your connected host, and none is connected \
-                     here — spell it in full: `<host>/{spelled}`",
-                ))
-            })
-        };
-        let shape = match rest.split('/').collect::<Vec<_>>().as_slice() {
-            [ws] if is_name(ws) => KeyShape::Feed {
-                host: need_host(ws)?,
-                workspace: (*ws).to_string(),
-            },
-            [ws, "channels", name] if is_name(ws) && is_name(name) => KeyShape::Channel {
-                host: need_host(&format!("{ws}/channels/{name}"))?,
-                workspace: (*ws).to_string(),
-                channel: (*name).to_string(),
-            },
-            [ws, name] if is_name(ws) && is_name(name) => KeyShape::WorkspaceBundle {
-                host: need_host(&format!("{ws}/{name}"))?,
-                workspace: (*ws).to_string(),
-                bundle: (*name).to_string(),
-            },
+        let placeholder = default_host.unwrap_or_default();
+        let (shape, spelled) = match rest.split('/').collect::<Vec<_>>().as_slice() {
+            [ws] if is_name(ws) => (
+                KeyShape::Feed {
+                    host: placeholder.to_string(),
+                    workspace: (*ws).to_string(),
+                },
+                (*ws).to_string(),
+            ),
+            [ws, "channels", name] if is_name(ws) && is_name(name) => (
+                KeyShape::Channel {
+                    host: placeholder.to_string(),
+                    workspace: (*ws).to_string(),
+                    channel: (*name).to_string(),
+                },
+                format!("{ws}/channels/{name}"),
+            ),
+            [ws, name] if is_name(ws) && is_name(name) => (
+                KeyShape::WorkspaceBundle {
+                    host: placeholder.to_string(),
+                    workspace: (*ws).to_string(),
+                    bundle: (*name).to_string(),
+                },
+                format!("{ws}/{name}"),
+            ),
             _ => {
                 return Err(err(format!(
                     "`@{rest}` is not a reference — `@<workspace>` (its feed), \
@@ -479,6 +490,12 @@ pub(crate) fn parse_input(token: &str, default_host: Option<&str>) -> Result<Inp
             }
         };
         check_pin(&shape, pin.as_deref())?;
+        if default_host.is_none() {
+            return Err(err(format!(
+                "`@{rest}` names a workspace at your connected host, and none is connected \
+                 here — spell it in full: `<host>/{spelled}`",
+            )));
+        }
         return Ok(InputRef::plain(shape, pin));
     }
 

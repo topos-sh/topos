@@ -65,7 +65,7 @@ fn version_check_applies(command: &Command) -> bool {
             | Command::Uninstall { .. }
             | Command::Update { quiet: true, .. }
             // `status` promises "offline, nothing dialed" — the passive probe would break it.
-            | Command::Status
+            | Command::Status { .. }
     )
 }
 
@@ -84,7 +84,7 @@ fn run_bare(json: bool, workspace: Option<String>) -> ExitCode {
         let _ = err.print();
         return ExitCode::from(2);
     }
-    run_command(false, workspace, Command::Status, true)
+    run_command(false, workspace, Command::Status { bundle: None }, true)
 }
 
 /// Parse-free dispatch: wire the real seams, run recovery, dispatch the verb, emit the outcome.
@@ -156,7 +156,8 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
     // expired enrollment WAL, removes torn staging, repairs logs). Its finisher likewise never
     // appends to the diagnostics log — a status run leaves the sidecar byte-identical, proven by
     // `ops::status`'s pending-recovery-fixture test.
-    if let Command::Status = &command {
+    if let Command::Status { bundle } = &command {
+        let bundle = bundle.clone();
         let inert_plane = crate::plane::InertPlane;
         let inert_follow = crate::plane::InertFollow;
         let ctx = Ctx {
@@ -176,7 +177,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
         // The snapshot from local state; the trigger rows from the read-only probe at this root
         // (the one layer holding the real config port + $HOME) — the same layering the arming
         // receipts use, minus every write.
-        let result = ops::status_snapshot(&ctx).map(|mut data| {
+        let result = ops::status_snapshot(&ctx, bundle.as_deref()).map(|mut data| {
             if let Some(r) = &ctx.roots {
                 data.triggers =
                     ops::probe_detected(&r.home, r.cwd.as_deref(), harness.as_ref(), &fs);
@@ -329,9 +330,24 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
 
     match command {
         // Dispatched BEFORE state recovery above — the read-only promise admits no sweep write.
-        Command::Status => unreachable!("status dispatches before state recovery"),
-        // `init` — create this folder's `topos.toml` (idempotent; a no-op receipt when it exists).
-        Command::Init => finish(json, cmd_name, ops::init(&ctx), render::init_tty, &diag),
+        Command::Status { .. } => unreachable!("status dispatches before state recovery"),
+        // `init` — create this folder's `topos.toml`, or (with `-g`) materialize the global
+        // manifest (idempotent; a no-op receipt when the file exists).
+        Command::Init { global } => finish(
+            json,
+            cmd_name,
+            ops::init(&ctx, global),
+            render::init_tty,
+            &diag,
+        ),
+        // `fmt [-g]` — rewrite the target manifest into the normal form (atomic write on change).
+        Command::Fmt { global } => finish(
+            json,
+            cmd_name,
+            ops::fmt_manifest(&ctx, global),
+            render::fmt_tty,
+            &diag,
+        ),
         // `login <address>` — mint ONE workspace-scoped session (the gh-style browser approval;
         // re-invoking resumes). The same blocking idiom as `follow`: a TTY (or `--wait`) run
         // re-polls until the approval settles; piped/`--json` without `--wait` never hangs.
@@ -495,6 +511,9 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 );
                 return finish_add_many(json, cmd_name, result, &diag);
             }
+            // The reference arm owns a bare `add <ref>`; the `-s`/`-a` selectors stay with the
+            // import path below, which places per (skill × harness).
+            let no_selectors = skill.is_empty() && agent.is_empty();
             let single_skill = skill.into_iter().next();
             let single_agent = agent.into_iter().next();
             // The BUILT-IN's restore: `add topos` clears the durable `remove topos` opt-out and
@@ -515,45 +534,86 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                     &diag,
                 );
             }
-            // WORKSPACE references first (the shape-determined grammar): `@ws/name`, the
-            // canonical `host/ws/name`, `@ws/channels/x` — and a BARE name when this
-            // installation runs on sessions (the connected catalogs are its universe; with no
-            // session a bare name keeps the local untracked-discovery adopt below — an empty
-            // universe, not a fallback ladder).
-            let has_sessions = crate::sessions::read_sessions(&fs, &ctx.layout)
-                .map(|s| s.sessions.iter().any(|x| x.status != "ended"))
-                .unwrap_or(false);
-            match crate::manifest::refs::parse_ref(&source) {
-                Ok(parsed) => {
-                    use crate::manifest::refs::ParsedRef;
-                    let workspace_shaped =
-                        matches!(parsed, ParsedRef::Skill { .. } | ParsedRef::Channel { .. })
-                            || (matches!(parsed, ParsedRef::Bare { .. }) && has_sessions);
-                    if workspace_shaped {
-                        let git = crate::plane_http::UreqGitSource::new();
-                        let result = ops::add_reference(
-                            &ctx,
-                            &connect_session_transports,
-                            Some(&git),
-                            &source,
-                            global,
-                        );
-                        return finish(json, cmd_name, result, render::add_tty, &diag);
-                    }
-                }
-                // A REFERENCE-SHAPED token the grammar refused (`@x`, `#chan`, a malformed pin,
-                // a host-led near-miss) surfaces its typed refusal — it is never retried as a
-                // filesystem path or a discovered name, whose answers would name the wrong fix.
-                Err(e) if crate::manifest::refs::reference_shaped(&source) => {
-                    return finish(
-                        json,
-                        cmd_name,
-                        Err(ClientError::InvalidArgument(e.message)),
-                        render::add_tty,
-                        &diag,
+            // REFERENCES first, read by SHAPE (the joined-key grammar): a workspace bundle
+            // (`@ws/name`, the canonical `host/ws/name`), a channel (`@ws/channels/x`), a
+            // workspace FEED (`@ws`, `-g`), or a git source (`owner/repo[/skill]`, a github URL).
+            // Each records ONE manifest row; a first-trust git source describes before it
+            // installs. The `-s`/`-a` selectors stay with the multi-import path below, which
+            // places per (skill × harness).
+            // A `/`-containing token that names a REAL directory here is a local adopt, whatever
+            // the grammar would read it as — the bytes in front of you win over a shorthand.
+            let looks_local = matches!(
+                crate::source::classify(&source),
+                crate::source::SourceSpec::LocalPath(ref p) if p.exists()
+            );
+            let reference_arm = no_selectors && !looks_local;
+            match crate::manifest::keys::parse_input(&source, ops::manifest_host(&ctx).as_deref()) {
+                Ok(parsed)
+                    if reference_arm
+                        && !matches!(
+                            parsed.shape,
+                            crate::manifest::keys::KeyShape::LocalPath { .. }
+                        ) =>
+                {
+                    let git = crate::plane_http::UreqGitSource::new();
+                    let result = ops::add_reference(
+                        &ctx,
+                        &connect_session_transports,
+                        Some(&git),
+                        &source,
+                        global,
+                        yes,
                     );
+                    let result = result.map(|outcome| match outcome {
+                        // The breadth arming sweep + the built-in ride an APPLIED add exactly as
+                        // they ride an adopt receipt (the same trigger-arming moment).
+                        ops::AddRefOutcome::Applied(mut data) => {
+                            if data.currency.is_some() {
+                                data.triggers = breadth_arm(&ctx.roots, harness.as_ref(), &fs);
+                                if let Err(e) = ops::ensure_builtin(&ctx) {
+                                    let _ = diag.note(cmd_name, &e);
+                                }
+                            }
+                            ops::AddRefOutcome::Applied(data)
+                        }
+                        described => described,
+                    });
+                    return finish_add_reference(json, cmd_name, result, &diag);
                 }
-                Err(_) => {}
+                // A REFERENCE-SHAPED token the grammar refused (`@x`, a malformed pin, a
+                // host-led near-miss, a too-deep forge key) surfaces its typed refusal — it is
+                // never retried as a filesystem path or a discovered name, whose answers would
+                // name the wrong fix. ONE upgrade: a well-formed `@…` sugar on a machine with NO
+                // live session refuses toward `topos login` with the concrete address — the
+                // structural fix, not just the spell-it-in-full teaching.
+                Err(e) if !looks_local && ops::reference_shaped(&source) => {
+                    let no_sessions = crate::sessions::read_sessions(&fs, &ctx.layout)
+                        .map(|s| !s.sessions.iter().any(|x| x.status != "ended"))
+                        .unwrap_or(true);
+                    let ws = source
+                        .strip_prefix('@')
+                        .and_then(|r| r.split('/').next())
+                        .unwrap_or_default();
+                    let name_shaped = !ws.is_empty()
+                        && ws
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+                    let err = if no_sessions
+                        && name_shaped
+                        && e.message.contains("none is connected")
+                    {
+                        ClientError::SessionRequired {
+                            address: ws.to_owned(),
+                            message: format!(
+                                "`{source}` names a workspace this machine is not connected to —                                  run `topos login {ws}` first"
+                            ),
+                        }
+                    } else {
+                        ClientError::InvalidArgument(e.message)
+                    };
+                    return finish(json, cmd_name, Err(err), render::add_tty, &diag);
+                }
+                _ => {}
             }
             // keep-as-yours: a bare NAME that resolves to a RETAINED withdrawn/detached copy re-forks it
             // into a new LOCAL skill, two-phase (bare describes the fork; `--yes` applies). A non-retained
@@ -922,6 +982,7 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             quiet,
             ttl,
             hook,
+            rebuild,
         } => {
             // `--reset` is its own two-phase discard verb (loss-led describe / `--yes` apply); it
             // does not flow through the reconcile and is never a `--quiet` hook shape.
@@ -1006,14 +1067,19 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                         .into(),
                 ))
             } else {
-                let git = crate::plane_http::UreqGitSource::new();
+                // The background sweep NEVER contacts a forge: `--quiet` passes no git source
+                // (git rows move only on an explicit update), and the reconcile's forge arms
+                // degrade honestly without one.
+                let git = (!quiet).then(crate::plane_http::UreqGitSource::new);
                 ops::manifest_update(
                     &ctx,
                     &connect_session_transports,
-                    Some(&git),
+                    git.as_ref()
+                        .map(|g| g as &dyn crate::git_source::GitTarballSource),
                     &ops::ManifestUpdateOpts {
                         targets,
                         ack_notices: !quiet,
+                        rebuild,
                     },
                 )
             };
@@ -1077,27 +1143,12 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
             }
         }
         Command::Remove { skill, global, yes } => {
-            // `remove -g <ref>` — the PROFILE-side inverse: the server removes the include line
-            // (or records the exclude when a broader layer still provides it), and the sweep
-            // cleans what the drop ended.
-            if global {
-                if skill.len() != 1 {
-                    let e = ClientError::InvalidArgument(
-                        "`remove -g` takes exactly one reference (`topos remove -g @<workspace>/<skill>`)"
-                            .into(),
-                    );
-                    return emit_err(json, cmd_name, &e, &diag);
-                }
-                let result =
-                    ops::remove_reference_global(&ctx, &connect_session_transports, &skill[0])
-                        .map(ops::RemoveOutcome::Applied);
-                return finish_remove(json, cmd_name, result, &diag);
-            }
             // A REFERENCE-SHAPED token the grammar refuses surfaces its typed refusal here too —
             // never retried through the tracked/untracked ladder (whose answers name the wrong fix).
             for t in &skill {
-                if let Err(e) = crate::manifest::refs::parse_ref(t)
-                    && crate::manifest::refs::reference_shaped(t)
+                if ops::reference_shaped(t)
+                    && let Err(e) =
+                        crate::manifest::keys::parse_input(t, ops::manifest_host(&ctx).as_deref())
                 {
                     return emit_err(
                         json,
@@ -1107,26 +1158,22 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                     );
                 }
             }
-            // The MANIFEST arm first: a target naming a manifest line — or a name the person's
-            // PROFILE delivers (the broader layer) — edits the NEAREST manifest (delete the
-            // include, or record the one negative state — an exclude). Immediate and reversible,
-            // so `--yes` is an accepted no-op; the classic tracked/untracked removal owns
-            // everything the manifests don't mention.
-            {
-                let provided = ops::profile_provided_names(&ctx);
-                match ops::remove_from_manifests(&ctx, &skill, &provided) {
-                    Ok(Some(data)) => {
-                        let _ = yes;
-                        return finish_remove(
-                            json,
-                            cmd_name,
-                            Ok(ops::RemoveOutcome::Applied(data)),
-                            &diag,
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(e) => return emit_err(json, cmd_name, &e, &diag),
+            // `remove -g` edits THIS MACHINE's own file: drop a row, stop adopting a workspace's
+            // feed, or switch one feed-delivered bundle off here. It never touches the server —
+            // what a workspace assigns you is managed on the web.
+            if global {
+                let result = ops::remove_global(&ctx, &connect_session_transports, &skill, yes);
+                return finish_remove(json, cmd_name, result, &diag);
+            }
+            // The PROJECT manifest arm first: a target naming a row in this folder's file (or a
+            // member a channel/repo line brings) edits that file. The classic tracked/untracked
+            // removal owns everything no manifest mentions.
+            match ops::remove_project(&ctx, &connect_session_transports, &skill, yes) {
+                Ok(Some(outcome)) => {
+                    return finish_remove(json, cmd_name, Ok(outcome), &diag);
                 }
+                Ok(None) => {}
+                Err(e) => return emit_err(json, cmd_name, &e, &diag),
             }
             let connectors = ops::RemoveConnectors {
                 directory: &connect_directory,
@@ -1728,6 +1775,41 @@ fn finish_keep_as_yours(
             }
             ExitCode::SUCCESS
         }
+    }
+}
+
+/// `add <reference>`'s finisher — the applied row receipt, or the FIRST-TRUST describe of a git
+/// source this machine has never used (with its `--yes` argv).
+fn finish_add_reference(
+    json: bool,
+    command: &str,
+    result: Result<ops::AddRefOutcome, ClientError>,
+    diag: &Diag<'_>,
+) -> ExitCode {
+    match result {
+        Ok(ops::AddRefOutcome::Applied(data)) => {
+            if json {
+                let value = serde_json::to_value(&data).unwrap_or_default();
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::undo_next_actions(&data.undo);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::add_tty(&data));
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(ops::AddRefOutcome::Described { data, yes_argv }) => {
+            if json {
+                let value = serde_json::json!({ "describe": data });
+                let mut envelope = render::ok_envelope(command, value);
+                envelope.next_actions = render::describe_next_actions(vec![yes_argv.clone()]);
+                println!("{}", render::to_json(&envelope));
+            } else {
+                println!("{}", render::add_describe_tty(&data, &yes_argv));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => emit_err(json, command, &e, diag),
     }
 }
 

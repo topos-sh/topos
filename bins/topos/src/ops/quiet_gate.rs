@@ -267,6 +267,7 @@ mod tests {
             merge: None,
             merge_preview: None,
             synced_placements: None,
+            scope: None,
         }
     }
 

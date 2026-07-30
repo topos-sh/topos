@@ -261,7 +261,9 @@ impl SessionInstall {
 
     // ---- manifests + reconcile ----------------------------------------------------------------
 
-    /// `topos add <reference>` (a workspace/catalog/channel reference; `global` = `-g`).
+    /// `topos add <reference> --yes` (a workspace/catalog/channel/feed reference; `global` =
+    /// `-g`). The suites drive the APPLIED arm; a first-trust describe surfacing here is a
+    /// failure (workspace references never gate).
     pub fn add_reference(
         &self,
         reference: &str,
@@ -270,7 +272,14 @@ impl SessionInstall {
     ) -> Result<AddData, String> {
         self.with_ctx(cwd, |ctx| {
             let connect = connect_session();
-            ops::add_reference(ctx, &connect, None, reference, global).map_err(err_str)
+            match ops::add_reference(ctx, &connect, None, reference, global, true)
+                .map_err(err_str)?
+            {
+                ops::AddRefOutcome::Applied(data) => Ok(*data),
+                ops::AddRefOutcome::Described { data, .. } => {
+                    Err(format!("unexpected first-trust describe: {data:?}"))
+                }
+            }
         })
     }
 
@@ -283,27 +292,32 @@ impl SessionInstall {
         })
     }
 
-    /// `topos remove <targets…>` — the manifest arm; `Ok(true)` when it claimed the tokens.
+    /// `topos remove <targets…> --yes` — the manifest arm; `Ok(true)` when it claimed the tokens.
     pub fn remove(&self, targets: &[&str], cwd: Option<&Path>) -> Result<bool, String> {
         self.with_ctx(cwd, |ctx| {
-            let provided = ops::profile_provided_names(ctx);
+            let connect = connect_session();
             let owned: Vec<String> = targets.iter().map(|t| (*t).to_owned()).collect();
-            ops::remove_from_manifests(ctx, &owned, &provided)
+            ops::remove_project(ctx, &connect, &owned, true)
                 .map(|r| r.is_some())
                 .map_err(err_str)
         })
     }
 
-    /// `topos remove -g <reference>` — `(kind, note)` from the receipt.
+    /// `topos remove -g <reference> --yes` — `(kind, note)` from the applied receipt.
     pub fn remove_global(&self, reference: &str) -> Result<(String, Option<String>), String> {
         self.with_ctx(None, |ctx| {
             let connect = connect_session();
-            ops::remove_reference_global(ctx, &connect, reference)
-                .map(|d| {
+            match ops::remove_global(ctx, &connect, &[reference.to_owned()], true)
+                .map_err(err_str)?
+            {
+                ops::RemoveOutcome::Applied(d) => {
                     let item = d.items.into_iter().next().expect("one item");
-                    (format!("{:?}", item.kind), item.note)
-                })
-                .map_err(err_str)
+                    Ok((format!("{:?}", item.kind), item.note))
+                }
+                ops::RemoveOutcome::Described { data, .. } => {
+                    Err(format!("unexpected describe under --yes: {:?}", data.items))
+                }
+            }
         })
     }
 
@@ -322,6 +336,7 @@ impl SessionInstall {
                 &ops::ManifestUpdateOpts {
                     targets: targets.iter().map(|t| (*t).to_owned()).collect(),
                     ack_notices: true,
+                    rebuild: false,
                 },
             )
             .map(|out| (out.data, out.warnings))
@@ -331,7 +346,7 @@ impl SessionInstall {
 
     /// `topos status` — the offline trust rail, from `cwd`.
     pub fn status(&self, cwd: Option<&Path>) -> Result<StatusData, String> {
-        self.with_ctx(cwd, |ctx| ops::status_snapshot(ctx).map_err(err_str))
+        self.with_ctx(cwd, |ctx| ops::status_snapshot(ctx, None).map_err(err_str))
     }
 
     // ---- governance ---------------------------------------------------------------------------
