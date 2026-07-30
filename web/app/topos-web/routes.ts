@@ -174,6 +174,9 @@ function memberWorkspaceChildren(
     // The person's own feed ("Your skills"): what is assigned to them, and the switches that
     // add one to their own feed or turn one off.
     route("profile", file("profile.tsx")),
+    // The disclosure page: what this workspace can and cannot read from a member's machines,
+    // limits first, with that member's own reported rows as the proof.
+    route("visibility", file("visibility.tsx")),
     // Add-from-GitHub: server-side fetch → preview → publish WITH upstream provenance.
     route("skills/import", file("skill-import.tsx")),
     route("members", file("workspace-members.tsx")),

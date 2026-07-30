@@ -161,6 +161,8 @@ const REGISTRY: Record<string, CrumbBuilder> = {
   },
 
   // Workspace nav.
+  "routes/profile": () => [{ label: "Your skills" }],
+  "routes/visibility": () => [{ label: "What the team can see" }],
   "routes/workspace-members": () => [{ label: "Members" }],
   "routes/workspace-settings": () => [{ label: "Settings" }],
   "routes/sessions": () => [{ label: "Settings", sub: "settings" }, { label: "Sessions" }],

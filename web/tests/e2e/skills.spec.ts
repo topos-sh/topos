@@ -95,6 +95,50 @@ test("the skill page opens on the Current tab: file listing, doc preview, and th
   await expect(tabs.getByRole("link", { name: "History" })).toBeVisible();
 });
 
+test("the Current tab discloses where the skill goes, and the owner's assign-to-everyone arm", async ({
+  page,
+}) => {
+  await theWorkspace();
+  await adminQuery(`delete from web.assignment where bundle_id = $1 and user_id is null`, [
+    SKILL_ID,
+  ]);
+  await gotoSettled(page, `/skills/${SKILL}`);
+
+  // Read-only disclosure: no channel carries it yet, and this browser's machine holds nothing.
+  await expect(page.getByTestId("skill-channels")).toContainText("In no channel.");
+  await expect(page.getByTestId("skill-your-sessions")).toContainText(
+    "None of your machines has reported holding this skill.",
+  );
+
+  // The owner arm is a two-step in-place confirm — arming writes nothing.
+  const arm = page.getByTestId("skill-everyone-arm");
+  await arm.getByRole("button", { name: "Assign to everyone" }).click();
+  await expect(arm.getByRole("button", { name: "Assign to everyone — confirm?" })).toBeVisible();
+  expect(
+    await adminQuery(`select 1 from web.assignment where bundle_id = $1 and user_id is null`, [
+      SKILL_ID,
+    ]),
+  ).toHaveLength(0);
+
+  await arm.getByRole("button", { name: "Assign to everyone — confirm?" }).click();
+  await expect(page.getByTestId("skill-channels")).toContainText("assigned to everyone");
+  expect(
+    await adminQuery(`select 1 from web.assignment where bundle_id = $1 and user_id is null`, [
+      SKILL_ID,
+    ]),
+  ).toHaveLength(1);
+
+  // Withdrawing takes back the offer; the page says the delivered copies stay put.
+  await arm.getByRole("button", { name: "Remove from everyone" }).click();
+  await arm.getByRole("button", { name: "Remove from everyone — confirm?" }).click();
+  await expect(arm.getByRole("button", { name: "Assign to everyone" })).toBeVisible();
+  expect(
+    await adminQuery(`select 1 from web.assignment where bundle_id = $1 and user_id is null`, [
+      SKILL_ID,
+    ]),
+  ).toHaveLength(0);
+});
+
 test("the Proposals tab lists the open candidate with a Review link", async ({ page }) => {
   await theWorkspace();
   await gotoSettled(page, `/skills/${SKILL}`);

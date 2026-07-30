@@ -2,10 +2,15 @@
 
 > **The MANIFEST architecture is the model here:** sessions (user × workspace × installation,
 > workspace-scoped bearer credentials, the gh-style `/api/v1/login/*` flow, the Sessions
-> settings tab + account Your-sessions page) replaced device + device-link; per-person PROFILES
-> (include/exclude rows, the default channel as the implicit baseline,
-> `/api/v1/workspaces/{ws}/profile*` + the `/profile` editor page) replaced
-> subscriptions/channel-membership/opt-outs/exclusions; channels are pure curated bundle sets;
+> settings tab + account Your-sessions page) replaced device + device-link; ASSIGNMENTS +
+> DECLINES (one positive row — bundle-or-channel × person-or-everyone, born identically from a
+> curator's aim and a person's own click, the workspace baseline being the default channel
+> assigned to everyone; one negative row, per person per bundle, keyed to bundle identity)
+> replaced profile include/exclude rows — no route writes a feed, so the retired
+> `/api/v1/workspaces/{ws}/profile*` paths answer the uniform wire 404, and the `/profile` page
+> is the person-facing view of it (Mine, grouped by what puts each thing there · Library, the
+> catalog with one act) beside `/visibility`, the disclosure of what a workspace reads from a
+> member's machines; channels are pure curated bundle sets;
 > UPSTREAM provenance (bundle_upstream + version_upstream, the `skills/import` add-from-GitHub
 > flow, the skill-settings Upstream panel, and the always-propose upstream checker) is live —
 > member-triggered fetches wear a per-user belt + a process-wide concurrency cap, and manual
@@ -19,7 +24,7 @@ app is its one caller.
 
 **The session lane terminates here.** Every `/api/v1/…` path is answered in this tier — there is no
 splat forwarder to the vault. The reads and row ops (delivery · the fleet report · me/channels/reach ·
-the server-stored profile · curation · protection · notices ack · invitations) are Drizzle queries
+curation · protection · notices ack · invitations) are Drizzle queries
 against this app's OWN `web` schema, behind the session guard (the presented `Authorization: Bearer`
 resolved credential → live `web.cli_session` row → person's seat, the hash computed IN Postgres, so
 this tier holds zero crypto). A **session** is user × workspace × installation — minted by the login
@@ -48,8 +53,9 @@ profile row, notice, and audit row references a `user.id`. The whole directory l
 the Better Auth tables (`user`/`session`/`account`/`verification`), **seats** (workspace membership +
 role), **`cli_session`** rows + the login-flow rows, invitations, the bundle catalog (each row carrying
 a `kind` tag — `'skill'` today — displayed, never branched on), channels (pure curated bundle sets,
-incl. the implicit default `everyone`), the per-person **`profile_entry`** rows (include/exclude; the
-one delivery predicate), upstream provenance (`bundle_upstream`/`version_upstream`), notices with
+incl. the implicit default `everyone`), the **`assignment`** and **`decline`** rows (the whole
+delivery predicate: assigned to you or to everyone, minus what you declined, over active bundles),
+upstream provenance (`bundle_upstream`/`version_upstream`), notices with
 read-state, proposals + comments, op receipts, and the `audit_event` trail. The DATA ACCESS LAYER (`app/lib/db/queries*.server.ts`) is the one sanctioned
 door to `web` AND the read-only `plane` custody mirror; every function REQUIRES a branded actor as its
 first argument, and mutating ops emit their audit row in the SAME transaction. ONE named exception:
@@ -137,7 +143,8 @@ transaction, FOR UPDATE-fenced or single-statement-atomic, audit row inside):
   on the invited address → one mailbox round-trip first; already a member → redirect into the
   workspace (nothing consumed). ACCEPT is ONE FOR-UPDATE-fenced transaction beside
   `bindInvitedSeats`: consume the token, write the seat, apply the hint effects AFTER the seat
-  (a `profile_entry` include row), audit — the hint lands in the person's PROFILE; nothing
+  (an `assignment` row attributed to the inviter), audit — the hint lands among the person's
+  assignments; nothing
   lands on any machine from a web accept. DECLINE is recorded (the members page shows it;
   re-invitable) and deliberately session-less (token possession is the proof). Every dead token —
   invalid, expired, revoked, used — renders ONE constant page naming neither workspace nor email,
@@ -191,7 +198,9 @@ what a ceremony adds is CONFIRMATION of intent, proportional to its reach — th
   resource's exact CURRENT name — `requireTypedName` against the name the server re-reads, never a
   form-supplied expected value (`<ConfirmNameField>` is the visible half).
 - **Acts with cross-person reach** that aren't type-the-name gated (remove member, role change, leave,
-  revert, rename, archive/unarchive) wear the ONE shared in-place confirm (`<ConfirmButton>`): the
+  revert, rename, archive/unarchive, and the owner's assign-a-skill-or-channel-to-everyone arm on the
+  skill and channel faces — withdrawing included) wear the ONE shared in-place confirm
+  (`<ConfirmButton>`): the
   action control arms in place to a "— confirm?" + Cancel pair — deliberately NOT a modal — and
   disarms on its own (focus leaves, ~8 s timeout, or the submit going pending). Arming performs
   nothing; only the armed submit posts.
@@ -300,7 +309,13 @@ origin. All of it is public and sessionless, origin-rooted in BOTH tenancy modes
 top-level static segment (registered in `app/topos-web/segments.ts`), so no workspace slug can take
 it.
 
-**The signed-in surface:** a workspace dashboard, the skill browser, the rendered review UI (unified diff +
+**The signed-in surface:** a workspace dashboard, the skill browser, the person's **assignments** page
+(`/profile` — MINE, grouped by what puts each thing there: the baseline, each carried channel, what a
+curator aimed at you, your own picks, every row carrying its attribution and its off switch, a declined
+row staying visible and dimmed; and LIBRARY, the catalog whose one act is adding a skill to your own
+feed, which also clears a standing decline) beside the **visibility** page (`/visibility` — what a
+workspace can never read from a machine, then what it does, then the reader's own reported rows as the
+proof), the rendered review UI (unified diff +
 Approve/Reject + comments + one-click revert), the verification page, the create/join flows, and the ADMIN
 surfaces — the roster page in full (invite / role change / remove / self-serve leave, sole-owner-fenced),
 the skill lifecycle ceremonies (archive / unarchive / delete / purge / rename-with-redirect —

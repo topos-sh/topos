@@ -80,6 +80,229 @@ export async function feedOf(actor: FeedActor): Promise<FeedView> {
   return { assignments, declines: declined };
 }
 
+// ── The grouped read behind the assignments page ─────────────────────────────────────────────
+
+/**
+ * Who put a thing in this person's feed. It is the assignment's own shape, read out loud: an
+ * everyone-row reaches the whole workspace, a person-row placed by the person themselves is
+ * their own pick, and a person-row placed by someone else names that someone.
+ */
+export type FeedAttribution =
+  | { by: "everyone" }
+  | { by: "you" }
+  | { by: "person"; display: string };
+
+/** A bundle as the assignments page draws it: identity, the version the workspace serves, and
+ * whether this person has switched it off (a declined row stays on the page, dimmed). */
+export interface AssignedBundle {
+  bundleId: string;
+  name: string;
+  displayName: string | null;
+  /** The workspace's `current`, or null while nothing has been published to the name. */
+  versionId: string | null;
+  declined: boolean;
+}
+
+/** One assigned channel and the bundles it carries TODAY (the set is re-read, never frozen). */
+export interface AssignedChannel {
+  channelId: string;
+  name: string;
+  isDefault: boolean;
+  attribution: FeedAttribution;
+  bundles: AssignedBundle[];
+}
+
+/**
+ * Everything effectively this person's, grouped by WHAT PUTS IT THERE — the shape the page
+ * reads back to them. A bundle two things carry appears under both; that is the truth, and it
+ * is what makes "turn this off" (one negative row, holding against all of them) legible.
+ */
+export interface AssignedView {
+  /** The workspace baseline: the default channel, when an assignment reaches this person with
+   * it. Null on a workspace whose baseline row was withdrawn. */
+  baseline: AssignedChannel | null;
+  /** Every other assigned channel, name-sorted. */
+  channels: AssignedChannel[];
+  /** Bundles aimed straight at this person — by a curator, or at everyone. */
+  assigned: (AssignedBundle & { attribution: FeedAttribution })[];
+  /** Bundles this person added themselves: theirs to take back, unlike everything above. */
+  picked: AssignedBundle[];
+}
+
+/** The raw assignment row this read groups, channel identity and attribution joined in. */
+interface RawAssignment {
+  user_id: string | null;
+  created_by: string;
+  bundle_id: string | null;
+  channel_id: string | null;
+  channel_name: string | null;
+  is_default: boolean | null;
+  created_by_display: string | null;
+}
+
+/** One bundle's display facts — the same three columns both bundle reads below select. */
+interface RawBundle {
+  id: string;
+  name: string;
+  display_name: string | null;
+  version_id: string | null;
+}
+
+export async function assignedView(actor: FeedActor): Promise<AssignedView> {
+  const ws = actor.workspaceId;
+  const db = getDb();
+  const [assignmentRows, declineRows] = await Promise.all([
+    db.execute(sql`
+      SELECT a.user_id, a.created_by, a.bundle_id, a.channel_id,
+             c.name AS channel_name, c.is_default,
+             -- The display rule (app/lib/person-display.ts): a blank name falls back to email.
+             COALESCE(NULLIF(btrim(u.name), ''), u.email) AS created_by_display
+      FROM web.assignment a
+      LEFT JOIN web.channel c ON c.id = a.channel_id AND c.workspace_id = ${ws}
+      LEFT JOIN web."user" u ON u.id = a.created_by
+      WHERE a.workspace_id = ${ws} AND (a.user_id = ${actor.userId} OR a.user_id IS NULL)
+      ORDER BY c.name NULLS LAST
+    `),
+    db.execute(sql`
+      SELECT bundle_id FROM web.decline
+      WHERE workspace_id = ${ws} AND user_id = ${actor.userId}
+    `),
+  ]);
+  const declined = new Set((declineRows.rows as { bundle_id: string }[]).map((r) => r.bundle_id));
+  const raws = assignmentRows.rows as unknown as RawAssignment[];
+
+  const attributionOf = (r: RawAssignment): FeedAttribution => {
+    if (r.user_id === null) {
+      return { by: "everyone" };
+    }
+    if (r.created_by === actor.userId) {
+      return { by: "you" };
+    }
+    // A curator whose account is gone still placed the row; the display degrades, never the fact.
+    return { by: "person", display: r.created_by_display ?? "former member" };
+  };
+
+  // Channels first. The same channel can be assigned twice (to everyone AND to this person);
+  // the WIDER row wins the attribution, because that is the one that would survive an unpick.
+  const channels = new Map<string, Omit<AssignedChannel, "bundles">>();
+  for (const r of raws) {
+    if (r.channel_id === null) {
+      continue;
+    }
+    const attribution = attributionOf(r);
+    const held = channels.get(r.channel_id);
+    if (
+      held !== undefined &&
+      !(attribution.by === "everyone" && held.attribution.by !== "everyone")
+    ) {
+      continue;
+    }
+    channels.set(r.channel_id, {
+      channelId: r.channel_id,
+      name: r.channel_name ?? r.channel_id,
+      isDefault: r.is_default ?? false,
+      attribution,
+    });
+  }
+
+  const directRows = raws.filter((r) => r.bundle_id !== null);
+  const channelIds = [...channels.keys()];
+  const directIds = [...new Set(directRows.map((r) => r.bundle_id as string))];
+
+  const [channelBundleRows, directBundleRows] = await Promise.all([
+    channelIds.length === 0
+      ? Promise.resolve({ rows: [] })
+      : db.execute(sql`
+          SELECT cb.channel_id, b.id, b.name, b.display_name, cp.version_id
+          FROM web.channel_bundle cb
+          JOIN web.bundle b
+            ON b.id = cb.bundle_id AND b.workspace_id = ${ws} AND b.status = 'active'
+          LEFT JOIN plane.current_pointer cp
+            ON cp.workspace_id = ${ws} AND cp.bundle_id = b.id
+          WHERE cb.workspace_id = ${ws} AND cb.channel_id = ANY(${pgTextArray(channelIds)})
+          ORDER BY b.name
+        `),
+    directIds.length === 0
+      ? Promise.resolve({ rows: [] })
+      : db.execute(sql`
+          SELECT b.id, b.name, b.display_name, cp.version_id
+          FROM web.bundle b
+          LEFT JOIN plane.current_pointer cp
+            ON cp.workspace_id = ${ws} AND cp.bundle_id = b.id
+          WHERE b.workspace_id = ${ws} AND b.status = 'active'
+            AND b.id = ANY(${pgTextArray(directIds)})
+          ORDER BY b.name
+        `),
+  ]);
+
+  const toBundle = (r: RawBundle): AssignedBundle => ({
+    bundleId: r.id,
+    name: r.name,
+    displayName: r.display_name,
+    versionId: r.version_id,
+    declined: declined.has(r.id),
+  });
+
+  const byChannel = new Map<string, AssignedBundle[]>();
+  for (const raw of channelBundleRows.rows as unknown as (RawBundle & { channel_id: string })[]) {
+    const list = byChannel.get(raw.channel_id) ?? [];
+    list.push(toBundle(raw));
+    byChannel.set(raw.channel_id, list);
+  }
+  const directById = new Map(
+    (directBundleRows.rows as unknown as RawBundle[]).map((r) => [r.id, toBundle(r)]),
+  );
+
+  const assembled: AssignedChannel[] = [...channels.values()]
+    .map((c) => ({ ...c, bundles: byChannel.get(c.channelId) ?? [] }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const assigned: (AssignedBundle & { attribution: FeedAttribution })[] = [];
+  const picked: AssignedBundle[] = [];
+  for (const r of directRows) {
+    const bundleRow = directById.get(r.bundle_id as string);
+    // An archived or deleted bundle keeps its assignment row but has left the library: the feed
+    // stops carrying it (feedDemandSql agrees), so the page must not draw it either.
+    if (bundleRow === undefined) {
+      continue;
+    }
+    if (r.user_id === actor.userId && r.created_by === actor.userId) {
+      picked.push(bundleRow);
+    } else {
+      assigned.push({ ...bundleRow, attribution: attributionOf(r) });
+    }
+  }
+
+  return {
+    baseline: assembled.find((c) => c.isDefault) ?? null,
+    channels: assembled.filter((c) => !c.isDefault),
+    assigned,
+    picked,
+  };
+}
+
+/**
+ * Whether the WORKSPACE-WIDE assignment exists on a target — the one fact the curator arm on a
+ * channel or skill page is a toggle over. It is a plain row probe, so a member reads the same
+ * answer an owner does; only the arm that flips it is gated.
+ */
+export async function assignedToEveryone(
+  actor: FeedActor,
+  target: { bundleId: string } | { channelId: string },
+): Promise<boolean> {
+  const ws = actor.workspaceId;
+  const match =
+    "bundleId" in target
+      ? sql`a.bundle_id = ${target.bundleId}`
+      : sql`a.channel_id = ${target.channelId}`;
+  const rows = await getDb().execute(sql`
+    SELECT 1 FROM web.assignment a
+    WHERE a.workspace_id = ${ws} AND a.user_id IS NULL AND ${match}
+    LIMIT 1
+  `);
+  return rows.rows.length > 0;
+}
+
 // ── The person's own acts (self-scoped; no role gate, no audit — nobody else is touched) ────
 
 export type AddToMineOutcome = "added" | "unknown_skill" | "skill_not_active";
@@ -388,6 +611,18 @@ export async function unassign(
 // ── Shared helpers ───────────────────────────────────────────────────────────────────────────
 
 type Tx = Parameters<Parameters<ReturnType<typeof getDb>["transaction"]>[0]>[0];
+
+/** A REAL `text[]` value — an `ARRAY[...]` constructor with every element its own bind
+ * parameter, so no hand-rolled literal ever has to escape a value. (A bare JS array in a
+ * template renders as a parenthesised list, which is not an array at all.) */
+function pgTextArray(values: string[]) {
+  return values.length === 0
+    ? sql`ARRAY[]::text[]`
+    : sql`ARRAY[${sql.join(
+        values.map((v) => sql`${v}`),
+        sql`, `,
+      )}]::text[]`;
+}
 
 /** The id-keyed channel resolve every feed op runs — workspace-scoped, default flag included. */
 async function channelRowInTx(tx: Tx, ws: string, channelId: string) {

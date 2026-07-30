@@ -221,7 +221,12 @@ export async function workspaceSessions(actor: MemberActor): Promise<WorkspaceSe
     JOIN web.bundle b ON b.id = st.bundle_id AND b.workspace_id = ${ws}
     JOIN web.decline d ON d.workspace_id = ${ws} AND d.user_id = cs.user_id
                       AND d.bundle_id = st.bundle_id
-    WHERE cs.workspace_id = ${ws} AND st.session_id = ANY(${sessionIds}::text[])
+    WHERE cs.workspace_id = ${ws} AND st.session_id IN (${sql.join(
+      // Every id its own bind parameter: a bare JS array in a template renders as a
+      // parenthesised list, which is not an array value and is refused by the server.
+      sessionIds.map((id) => sql`${id}`),
+      sql`, `,
+    )})
     ORDER BY b.name
   `);
   const declinedBySession = new Map<string, string[]>();
@@ -280,6 +285,120 @@ export async function workspaceSessions(actor: MemberActor): Promise<WorkspaceSe
     sessionMaxAgeMs,
     wholeWorkspace,
   };
+}
+
+// ── The person's own machines (the skill page's applied state, the visibility page's proof) ──
+
+/** One of the viewer's own sessions holding a named bundle. */
+export interface AppliedOnSession {
+  sessionId: string;
+  /** The installation's own name — what the machine called itself when it logged in. */
+  displayName: string;
+  appliedVersionId: string;
+  /** Whether that version is the workspace's `current`. */
+  current: boolean;
+  reportedAtMs: number;
+}
+
+/**
+ * Which of the VIEWER'S OWN sessions hold one bundle, and at which version. Person-scoped by
+ * construction (the actor's own user id) — a skill page tells you about your machines, never
+ * anyone else's; the workspace-wide view is the Sessions page, whose role scoping is its own.
+ */
+export async function yourSessionsApplying(
+  actor: MemberActor,
+  bundleId: string,
+): Promise<AppliedOnSession[]> {
+  const rows = await getDb().execute(sql`
+    SELECT cs.id, cs.display_name, st.applied_version_id, cp.version_id AS current_version_id,
+           (extract(epoch from st.reported_at) * 1000)::bigint AS reported_ms
+    FROM web.session_bundle_state st
+    JOIN web.cli_session cs ON cs.id = st.session_id
+    LEFT JOIN plane.current_pointer cp
+      ON cp.workspace_id = ${actor.workspaceId} AND cp.bundle_id = st.bundle_id
+    WHERE cs.workspace_id = ${actor.workspaceId} AND cs.user_id = ${actor.userId}
+      AND st.bundle_id = ${bundleId}
+    ORDER BY cs.display_name, cs.id
+  `);
+  return (
+    rows.rows as unknown as {
+      id: string;
+      display_name: string;
+      applied_version_id: string;
+      current_version_id: string | null;
+      reported_ms: string;
+    }[]
+  ).map((r) => ({
+    sessionId: r.id,
+    displayName: r.display_name,
+    appliedVersionId: r.applied_version_id,
+    current: r.current_version_id !== null && r.current_version_id === r.applied_version_id,
+    reportedAtMs: Number(r.reported_ms),
+  }));
+}
+
+/** One of the viewer's sessions as the visibility page lists it — exactly the fields the
+ * workspace can read about that machine, and nothing beside them. */
+export interface VisibleSession {
+  sessionId: string;
+  displayName: string;
+  /** The last report's time (epoch-ms), or null when the machine has never synced. */
+  lastSeenAtMs: number | null;
+  skills: { name: string; appliedVersionId: string }[];
+}
+
+/**
+ * The viewer's OWN sessions and the per-bundle state they report — the visibility page's
+ * evidence. It deliberately selects the same four things the page's prose promises (the
+ * machine's name, the bundle's name, the version, the last report), so the list IS the
+ * disclosure rather than an illustration of it.
+ */
+export async function visibleSessionsOf(actor: MemberActor): Promise<VisibleSession[]> {
+  const sessionRows = await getDb().execute(sql`
+    SELECT cs.id, cs.display_name,
+           (extract(epoch from cs.last_seen_at) * 1000)::bigint AS last_seen_ms
+    FROM web.cli_session cs
+    WHERE cs.workspace_id = ${actor.workspaceId} AND cs.user_id = ${actor.userId}
+    ORDER BY cs.display_name, cs.id
+  `);
+  const sessions = sessionRows.rows as unknown as {
+    id: string;
+    display_name: string;
+    last_seen_ms: string | null;
+  }[];
+  if (sessions.length === 0) {
+    return [];
+  }
+  const stateRows = await getDb()
+    .select({
+      sessionId: sessionBundleState.sessionId,
+      name: bundle.name,
+      appliedVersionId: sessionBundleState.appliedVersionId,
+    })
+    .from(sessionBundleState)
+    .innerJoin(
+      bundle,
+      and(eq(bundle.id, sessionBundleState.bundleId), eq(bundle.workspaceId, actor.workspaceId)),
+    )
+    .where(
+      inArray(
+        sessionBundleState.sessionId,
+        sessions.map((s) => s.id),
+      ),
+    )
+    .orderBy(asc(sessionBundleState.sessionId), asc(bundle.name));
+  const bySession = new Map<string, { name: string; appliedVersionId: string }[]>();
+  for (const row of stateRows) {
+    const list = bySession.get(row.sessionId) ?? [];
+    list.push({ name: row.name, appliedVersionId: row.appliedVersionId });
+    bySession.set(row.sessionId, list);
+  }
+  return sessions.map((s) => ({
+    sessionId: s.id,
+    displayName: s.display_name,
+    lastSeenAtMs: s.last_seen_ms === null ? null : Number(s.last_seen_ms),
+    skills: bySession.get(s.id) ?? [],
+  }));
 }
 
 /** ACTIVE sessions in this workspace — the onboarding checklist's probe. */
