@@ -193,6 +193,16 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                     // distinguishable in the `--json` rows.
                     Ok(mut row) => {
                         row.workspace_id = Some(follow.workspace_id.clone());
+                        // The settled-draft fan-out's one receipt line — quiet, factual.
+                        if row.action == topos_types::results::PullAction::DraftSynced {
+                            let n = row.synced_placements.unwrap_or(0);
+                            warnings.push(format!(
+                                "DRAFT_SYNCED {skill}: synced your edits of {skill} to {n} other \
+                                 agent folder{s}",
+                                skill = row.skill,
+                                s = if n == 1 { "" } else { "s" }
+                            ));
+                        }
                         skills.push(row);
                     }
                     // A hard per-skill failure (corrupt docs, store/io) must not abort the whole sweep —
@@ -373,6 +383,7 @@ pub(crate) fn reset_to_never_received(
                 base_commit: ZERO_HEX.to_owned(),
                 work_hash: ZERO_HEX.to_owned(),
                 held: false,
+                draft_observed: None,
             },
         )?;
     }
@@ -539,6 +550,44 @@ pub(super) fn ctx_with_plane_and_follow<'a>(
         clock: ctx.clock,
         device_id: ctx.device_id.clone(),
         layout: ctx.layout.clone(),
+        harness: ctx.harness,
+        plane,
+        follow,
+        roots: ctx.roots.clone(),
+    }
+}
+
+/// A shallow copy of `ctx` running against a different STORE layout (a project's own store) —
+/// every other seam shared. The layout IS the scope: the whole engine (locks, recovery, doc IO,
+/// the sync machine) runs unchanged against whichever store the ctx carries.
+pub(super) fn ctx_with_layout<'a>(ctx: &'a Ctx<'a>, layout: &crate::sidecar::Layout) -> Ctx<'a> {
+    Ctx {
+        fs: ctx.fs,
+        ids: ctx.ids,
+        clock: ctx.clock,
+        device_id: ctx.device_id.clone(),
+        layout: layout.clone(),
+        harness: ctx.harness,
+        plane: ctx.plane,
+        follow: ctx.follow,
+        roots: ctx.roots.clone(),
+    }
+}
+
+/// [`ctx_with_plane_and_follow`] against an explicit STORE layout — the reconcile's per-item entry
+/// (the scope's store + the item's session lane + the run's follow seam, in one hop).
+pub(super) fn ctx_with_store<'a>(
+    ctx: &'a Ctx<'a>,
+    layout: &crate::sidecar::Layout,
+    plane: &'a dyn PlaneSource,
+    follow: &'a dyn FollowSource,
+) -> Ctx<'a> {
+    Ctx {
+        fs: ctx.fs,
+        ids: ctx.ids,
+        clock: ctx.clock,
+        device_id: ctx.device_id.clone(),
+        layout: layout.clone(),
         harness: ctx.harness,
         plane,
         follow,

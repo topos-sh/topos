@@ -408,6 +408,8 @@ fn ensure_inner(
             // silent sweep (Freeze) never targets such a dir and passes no takeover.
             takeover: (posture == ForeignPosture::AdoptMarked)
                 .then_some(&is_downloaded_copy as &dyn Fn(&std::path::Path) -> bool),
+            self_ignore: ctx.layout.is_project_scope(),
+            expected: None,
         },
     )?;
     Ok(BuiltinSync { changed: true })
@@ -457,6 +459,7 @@ fn create_builtin(ctx: &Ctx<'_>, sid: &SkillId, bundle: &ScannedBundle) -> Resul
             base_commit: version_hex.clone(),
             work_hash: digest_hex.clone(),
             held: false,
+            draft_observed: None,
         },
     )?;
     doc::write_map(

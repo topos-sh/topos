@@ -127,8 +127,9 @@ pub(crate) fn stamp_sweep(fs: &dyn FsOps, layout: &Layout, now_ms: i64) {
 }
 
 /// Whether the sweep CHANGED placement bytes in some agent dir — installed new bytes
-/// (fast-forward), landed a merge or a conflict tree, or cleaned a withdrawn skill's dirs. Offers,
-/// holds, freezes, and up-to-date rows change nothing on disk.
+/// (fast-forward), landed a merge or a conflict tree, cleaned a withdrawn skill's dirs, or copied
+/// a settled draft onto sibling folders. Offers, holds, freezes, and up-to-date rows change
+/// nothing on disk.
 pub(crate) fn sweep_changed_bytes(data: &PullData) -> bool {
     data.skills.iter().any(|s| {
         matches!(
@@ -137,6 +138,7 @@ pub(crate) fn sweep_changed_bytes(data: &PullData) -> bool {
                 | PullAction::Merged
                 | PullAction::Conflicted
                 | PullAction::Withdrawn
+                | PullAction::DraftSynced
         )
     })
 }
@@ -264,6 +266,7 @@ mod tests {
             conflict: None,
             merge: None,
             merge_preview: None,
+            synced_placements: None,
         }
     }
 
@@ -388,6 +391,7 @@ mod tests {
             (PullAction::Withdrawn, true),
             (PullAction::Detached, false),
             (PullAction::Excluded, false),
+            (PullAction::DraftSynced, true),
         ] {
             let data = PullData {
                 skills: vec![skill_row(action)],

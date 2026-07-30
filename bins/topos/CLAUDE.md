@@ -116,17 +116,40 @@ consent step, and no device-link lane; `follow`/`unfollow`/`channel` are gone.
   (`project_plan`) mirrors the policy ROOTED AT THE CHECKOUT: `<proj>/.agents/skills` for covered
   agents, the registry's project dirs for the rest, the Claude-Code-shaped `.claude/skills` default when
   nothing is detected; a manifest `[placement]` override pins ONE project-relative dir; every landed
-  project dir gets its `.git/info/exclude` line (idempotent; worktree gitdir/commondir resolved).
+  project dir SELF-IGNORES (the staged tree carries the exact sentinel `.gitignore` unless the bundle
+  ships its own — the node_modules model; the scanner treats the byte-exact sentinel at the bundle
+  root as topos metadata, so it never reads as an edit; no repository file is ever touched).
   Placements are reconciled each sync (new targets appended and converged from the LOCAL store; a
   record leaves only through an explicit act; detection loss freezes, never deletes). `map.json` is
   schema v2 (per-placement `placement_state` rows).
+- **The PER-SCOPE stores** (`sidecar`) — ONE `Layout` shape serves both scopes: the person scope's
+  `~/.topos/`, and each project's OWN store at `<project>/.topos/state/<user>/` (per-user because
+  checkouts are shared; `.topos/` ignores itself whole, venv-style, via an exclusive-create
+  `.gitignore` of `*`). The reconcile routes each item's engine run through its scope's layout —
+  the same bundle followed at both scopes has two state trees, two drafts, two baselines, with no
+  cross-scope anything — and recovery sweeps a project store lazily when a run visits its project.
+  Pre-1.0 handover: home-map rows pointing into a visited project are dropped (bytes in place,
+  agent-less rows and external imports excepted; a project-only home entry retires whole) and the
+  project pass adopts what it finds — byte-identical copies in place, a divergent occupant
+  namespaced beside, disclosed, never clobbered. The write verbs resolve names across the stores
+  (`resolve_skill_stored`: home first, then the cwd chain's project stores), so a project-delivered
+  draft still publishes from inside its checkout.
 - **The pull/apply sync engine** (`ops/sync_engine`, `materialize`, `plane`) — the `checkForUpdates →
   plan → apply` machine over the kernel's four-state transition, now PLAN-THREADED: `sync_one_planned`
   takes an optional `PlanFn` so the reconcile drives per-scope placement through the ONE engine (no
   fork). The served record IS the sync target (adopted in ANY direction); draft snapshot-on-touch;
   fetch + re-verify (digest == tree == `commit_id`); crash-safe dir-swap materialization into every
-  managed placement; draft-anywhere (one edited copy IS the draft; several divergent copies freeze
-  typed with `update --reset` the way out); the ancestor backfill shallow-stops at purged history.
+  managed placement; the ancestor backfill shallow-stops at purged history. The TWO DETECTORS are
+  split: DRAFT reads each copy against the pristine version (one distinct edited content per
+  bundle+scope is THE draft), CONFLICT reads the edited copies against each other — competitors
+  ONLY when neither's bytes equal the other's RECORDED baseline (a copy at a sibling's baseline is
+  stale behind its draft, a sync target); only true competitors freeze typed with `update --reset`
+  the way out. The SETTLED-DRAFT fan-out: a draft unchanged across two runs (`sync.json`'s
+  `draft_observed` observation) is copied onto the bundle's other placements in its scope — an
+  ordinary atomic swap per stale/clean sibling, each landing recorded as that placement's NEW
+  baseline (a later edit there is a fresh draft, never a false competitor), the swap re-stat
+  SKIPPING a dir whose bytes moved in the window; disclosed as one `draft_synced` receipt line, and
+  it counts as a changed sweep for the hook.
 - **The author-merge resolution** (`ops/merge_resolve`) — resolves a DIVERGED draft behind the
   `DivergedWitness` capability token (followers never reach merge code). Kernel-planned diff3; a clean
   merge lands a publishable draft-on-current; a conflict writes the complete marker tree + the durable

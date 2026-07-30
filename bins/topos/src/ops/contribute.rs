@@ -433,6 +433,7 @@ pub(crate) fn apply_publish_ok(
             base_commit: rec.candidate_commit.clone(),
             work_hash: published_digest_hex,
             held: false,
+            draft_observed: None,
         };
         materialize::commit_docs(ctx.fs, sp, &next_map, &next_lock, &next_sync)?;
     } else {
@@ -448,6 +449,7 @@ pub(crate) fn apply_publish_ok(
             base_commit: sync.base_commit.clone(),
             work_hash: sync.work_hash.clone(),
             held: sync.held,
+            draft_observed: None,
         };
         doc::write_doc(ctx.fs, &sp.sync, &next_sync)?;
     }
@@ -488,6 +490,7 @@ pub(crate) fn apply_light_advance(
         base_commit: sync.base_commit,
         work_hash: sync.work_hash,
         held: sync.held,
+        draft_observed: None,
     };
     doc::write_doc(ctx.fs, &sp.sync, &next_sync)?;
     Ok(new_gen)

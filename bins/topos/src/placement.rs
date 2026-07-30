@@ -257,8 +257,8 @@ pub(crate) fn plan_targets(
 
 /// The PROJECT-scope placement plan — where a project manifest's bundles land INSIDE the checkout
 /// (a project-scope bundle materializes in the project itself, so every agent visiting the
-/// checkout reads the same bytes): its harness dirs, never committed (the reconcile keeps them
-/// out via `.git/info/exclude`). Mirrors the shared-dir-first
+/// checkout reads the same bytes): its harness dirs, never committed (each landed dir carries the
+/// self-ignore sentinel — see [`crate::scan::IGNORE_SENTINEL`]). Mirrors the shared-dir-first
 /// policy ROOTED AT THE PROJECT: one `<project>/.agents/skills` copy for the covered detected
 /// agents, plus a native project dir per detected-but-uncovered harness that has one; with nothing
 /// detected, the active adapter's project dir (else `<project>/.claude/skills`). An explicit
@@ -643,7 +643,7 @@ fn canonical_or_parent(p: &Path) -> Option<PathBuf> {
 /// would own one path. Best-effort over the sidecar walk (naming-choice moments are rare, so the
 /// cost is fine): an absent sidecar records nothing; an unreadable entry is skipped — the
 /// materializer's never-clobber backstop stays the hard rail behind this planning-time hygiene.
-fn recorded_by_another_skill(ctx: &Ctx<'_>, skill_id: &str, dir: &Path) -> bool {
+pub(crate) fn recorded_by_another_skill(ctx: &Ctx<'_>, skill_id: &str, dir: &Path) -> bool {
     if !ctx.fs.exists(&ctx.layout.skills_dir()) {
         return false;
     }
@@ -965,12 +965,115 @@ pub(crate) fn distinct_modified(scans: &[PlacementScan]) -> Vec<(usize, String)>
     seen
 }
 
-/// The dir the single-work-tree surfaces (diff / publish / merge) read: the ONE modified copy when
-/// exactly one exists (the draft), else the first materialized placement. MORE than one distinct
-/// modified copy is the typed freeze — nothing to read until reconciled.
+// ---------------------------------------------------------------------------------------------
+// The two detectors, split.
+//
+// DRAFT: a placement's bytes vs the PRISTINE version (its recorded materialized sha; the lock
+// digest decides clean-vs-draft for the kernel) — any difference is edits, and ONE distinct edited
+// content per bundle+scope is THE draft.
+//
+// CONFLICT: placements vs EACH OTHER. Two placements whose contents differ are competitors ONLY
+// when neither's bytes equal the other's RECORDED BASELINE. A copy sitting at a sibling's recorded
+// baseline is merely STALE BEHIND that sibling's draft — a sync target, never a competitor — so
+// the draft resolves to the advanced copy. Only true competitors produce the typed freeze.
+// ---------------------------------------------------------------------------------------------
+
+/// One MODIFIED placement's row for the conflict detector: where it is, what it holds, and what
+/// its record says was last placed there.
+#[derive(Debug, Clone)]
+pub(crate) struct DraftRow {
+    /// The placement index (into the map's rows).
+    pub idx: usize,
+    /// sha256 hex of the copy's current bytes.
+    pub content: String,
+    /// The placement's recorded baseline (its `materialized_sha`), if any.
+    pub baseline: Option<String>,
+}
+
+/// What the modified copies of one bundle+scope amount to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DraftVerdict {
+    /// No edited copy at all.
+    NoDraft,
+    /// Exactly one ADVANCED content — THE draft. `stale` lists the modified copies sitting behind
+    /// it (each at some draft copy's recorded baseline): sync targets, never competitors.
+    One { idx: usize, stale: Vec<usize> },
+    /// Two or more contents that are true competitors (none explains another as its baseline) —
+    /// the typed freeze, one representative index per distinct content.
+    Competitors(Vec<usize>),
+}
+
+/// The pure conflict/draft classifier over the modified rows (table-tested below). A row is STALE
+/// BEHIND when another modified row with different content records this row's content as its
+/// baseline; the non-stale rows are the candidate drafts. One distinct candidate content wins as
+/// THE draft; several are competitors; a degenerate mutual cycle (each sitting at the other's
+/// baseline) fails TOWARD the freeze.
+pub(crate) fn resolve_draft_rows(rows: &[DraftRow]) -> DraftVerdict {
+    if rows.is_empty() {
+        return DraftVerdict::NoDraft;
+    }
+    let stale = |j: &DraftRow| {
+        rows.iter()
+            .any(|i| i.content != j.content && i.baseline.as_deref() == Some(j.content.as_str()))
+    };
+    // One representative row per distinct CANDIDATE content, in placement order.
+    let mut candidates: Vec<&DraftRow> = Vec::new();
+    for r in rows {
+        if !stale(r) && !candidates.iter().any(|c| c.content == r.content) {
+            candidates.push(r);
+        }
+    }
+    match candidates.as_slice() {
+        // A mutual cycle staled every row: nothing explains the divergence — freeze, listing one
+        // representative per distinct content.
+        [] => {
+            let mut reps: Vec<&DraftRow> = Vec::new();
+            for r in rows {
+                if !reps.iter().any(|c| c.content == r.content) {
+                    reps.push(r);
+                }
+            }
+            DraftVerdict::Competitors(reps.iter().map(|r| r.idx).collect())
+        }
+        [winner] => DraftVerdict::One {
+            idx: winner.idx,
+            stale: rows
+                .iter()
+                .filter(|r| r.content != winner.content)
+                .map(|r| r.idx)
+                .collect(),
+        },
+        several => DraftVerdict::Competitors(several.iter().map(|r| r.idx).collect()),
+    }
+}
+
+/// Classify the scans' modified copies against the map's recorded baselines (the I/O-shaped entry
+/// over [`resolve_draft_rows`]).
+pub(crate) fn classify_draft(scans: &[PlacementScan], map: &PlacementMap) -> DraftVerdict {
+    let rows: Vec<DraftRow> = scans
+        .iter()
+        .filter_map(|s| match &s.status {
+            ScanStatus::Modified { scanned } => Some(DraftRow {
+                idx: s.idx,
+                content: topos_core::digest::to_hex(&scanned.bundle_digest),
+                baseline: map
+                    .placement_state
+                    .get(s.idx)
+                    .and_then(|st| st.materialized_sha.clone()),
+            }),
+            _ => None,
+        })
+        .collect();
+    resolve_draft_rows(&rows)
+}
+
+/// The dir the single-work-tree surfaces (diff / publish / merge) read: the ONE advanced modified
+/// copy when the classifier resolves a draft (a copy sitting at a sibling's recorded baseline is
+/// stale behind it, never a competitor), else the first materialized placement. TRUE competitors
+/// are the typed freeze — nothing to read until reconciled.
 ///
 /// # Errors
-/// [`ClientError::PlacementsDiverged`] on several distinct modified copies;
+/// [`ClientError::PlacementsDiverged`] on true competitors;
 /// [`ClientError::Corrupt`] when the map records no placement at all.
 pub(crate) fn work_tree_dir(
     ctx: &Ctx<'_>,
@@ -978,12 +1081,12 @@ pub(crate) fn work_tree_dir(
     map: &PlacementMap,
 ) -> Result<PathBuf, ClientError> {
     let scans = scan_placements(ctx, map)?;
-    let modified = distinct_modified(&scans);
-    if modified.len() > 1 {
-        return Err(placements_diverged(skill_name, &scans));
-    }
-    if let Some((idx, _)) = modified.first() {
-        return Ok(scans[*idx].dir.clone());
+    match classify_draft(&scans, map) {
+        DraftVerdict::Competitors(indices) => {
+            return Err(placements_diverged(skill_name, &scans, &indices));
+        }
+        DraftVerdict::One { idx, .. } => return Ok(scans[idx].dir.clone()),
+        DraftVerdict::NoDraft => {}
     }
     // No draft: the first placement that holds our bytes, else the first recorded placement (the
     // classic read surface for an absent working tree — callers report their own absence).
@@ -996,11 +1099,16 @@ pub(crate) fn work_tree_dir(
         .ok_or_else(|| ClientError::Corrupt("placement map has no placement".into()))
 }
 
-/// The typed multi-draft freeze, with its per-path disclosure (every modified copy named).
-pub(crate) fn placements_diverged(skill_name: &str, scans: &[PlacementScan]) -> ClientError {
+/// The typed competitor freeze, with its per-path disclosure: exactly the TRUE competitors are
+/// named (a copy merely stale behind the draft is a sync target, not part of the freeze).
+pub(crate) fn placements_diverged(
+    skill_name: &str,
+    scans: &[PlacementScan],
+    competitor_indices: &[usize],
+) -> ClientError {
     let paths: Vec<String> = scans
         .iter()
-        .filter(|s| matches!(s.status, ScanStatus::Modified { .. }))
+        .filter(|s| competitor_indices.contains(&s.idx))
         .map(|s| s.dir.display().to_string())
         .collect();
     ClientError::PlacementsDiverged {
@@ -1116,6 +1224,87 @@ mod tests {
         assert!(st.materialized_sha.is_none());
         assert!(st.pre_existing_sha.is_none(), "no adoption record migrates");
         assert_eq!(st.swap_capability, SwapCapability::Unsupported);
+    }
+
+    /// The conflict detector's whole decision table, over pure rows: content-equal copies are one
+    /// draft; a copy at a sibling's recorded baseline is stale behind it (draft = the advanced
+    /// one); true divergence freezes; three-placement mixes resolve per the same rules.
+    #[test]
+    fn the_draft_and_conflict_detectors_split_by_baseline() {
+        let row = |idx: usize, content: &str, baseline: Option<&str>| DraftRow {
+            idx,
+            content: content.to_owned(),
+            baseline: baseline.map(str::to_owned),
+        };
+        let cases: Vec<(&str, Vec<DraftRow>, DraftVerdict)> = vec![
+            ("no modified copy", vec![], DraftVerdict::NoDraft),
+            (
+                "one edited copy is the draft",
+                vec![row(0, "d1", Some("base"))],
+                DraftVerdict::One {
+                    idx: 0,
+                    stale: vec![],
+                },
+            ),
+            (
+                "content-equal edited copies are one draft",
+                vec![row(0, "d1", Some("base")), row(2, "d1", Some("base"))],
+                DraftVerdict::One {
+                    idx: 0,
+                    stale: vec![],
+                },
+            ),
+            (
+                "a copy at the sibling's baseline is stale behind, not a competitor",
+                vec![row(0, "d2", Some("d1")), row(1, "d1", Some("base"))],
+                DraftVerdict::One {
+                    idx: 0,
+                    stale: vec![1],
+                },
+            ),
+            (
+                "true divergence (neither equals the other's baseline) freezes",
+                vec![row(0, "d1", Some("base")), row(1, "d2", Some("base"))],
+                DraftVerdict::Competitors(vec![0, 1]),
+            ),
+            (
+                "three placements: an advanced draft, its base copy, a content twin",
+                vec![
+                    row(0, "d1", Some("base")),
+                    row(1, "d2", Some("d1")),
+                    row(2, "d1", Some("base")),
+                ],
+                DraftVerdict::One {
+                    idx: 1,
+                    stale: vec![0, 2],
+                },
+            ),
+            (
+                "three placements: two true competitors still freeze past a stale copy",
+                vec![
+                    row(0, "d2", Some("d1")),
+                    row(1, "d1", Some("base")),
+                    row(2, "d3", Some("base")),
+                ],
+                DraftVerdict::Competitors(vec![0, 2]),
+            ),
+            (
+                "a mutual baseline cycle fails toward the freeze",
+                vec![row(0, "d1", Some("d2")), row(1, "d2", Some("d1"))],
+                DraftVerdict::Competitors(vec![0, 1]),
+            ),
+            (
+                "a copy with no recorded baseline can still be the draft",
+                vec![row(0, "d2", None), row(1, "d1", Some("d2"))],
+                DraftVerdict::One {
+                    idx: 1,
+                    stale: vec![0],
+                },
+            ),
+        ];
+        for (what, rows, want) in cases {
+            assert_eq!(resolve_draft_rows(&rows), want, "{what}");
+        }
     }
 
     /// The same-dir plan (a still-valid reservation) keeps the slot verbatim — the reset fires

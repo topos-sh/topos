@@ -19,6 +19,17 @@ use topos_core::digest::{self, FileMode, ManifestEntry};
 use crate::error::ClientError;
 use crate::stat_cache::{FileStat, StatKey};
 
+/// The self-ignore file a PROJECT-scope placement dir carries at its root, so delivered bytes stay
+/// out of the checkout's commits without any repository bookkeeping (the node_modules model: the
+/// directory ignores itself). ONE owner: the materializer stages it, and [`walk_files`] here treats
+/// the EXACT sentinel bytes at the bundle root as topos metadata — excluded from drift
+/// fingerprints, publish scans, and draft detection alike, so the injected file can never read as
+/// an edit. Any other `.gitignore` (different bytes, or below the root) is ordinary bundle content.
+pub(crate) const IGNORE_FILE: &str = ".gitignore";
+/// The sentinel's exact bytes. Byte-exact matching is the rule: a user's own root `.gitignore`
+/// stays content, and the scanner never guesses.
+pub(crate) const IGNORE_SENTINEL: &[u8] = b"# topos: delivered bytes, not committed\n*\n";
+
 /// One scanned file: its bundle-relative forward-slash path, mode, and raw bytes.
 #[derive(Debug, Clone)]
 pub(crate) struct ScannedFile {
@@ -218,6 +229,16 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<WalkedFile>) -> Result<(), Clien
         if name == ".DS_Store" {
             continue;
         }
+        // The self-ignore sentinel at the BUNDLE ROOT is topos metadata, not content — but ONLY
+        // the exact bytes (size-gated so the byte compare reads at most one tiny file; a read
+        // failure keeps it as content, and the byte-reading scan reports that failure loudly).
+        if prefix.is_empty()
+            && name == IGNORE_FILE
+            && meta.len() == IGNORE_SENTINEL.len() as u64
+            && std::fs::read(&path).is_ok_and(|b| b == IGNORE_SENTINEL)
+        {
+            continue;
+        }
         let mode = file_mode(&meta);
         out.push(WalkedFile {
             path: join(prefix, &name),
@@ -408,6 +429,43 @@ mod tests {
         let shrunk = drift_digest(&dir, Some(&grown.files), Some(i64::MAX)).unwrap();
         assert_eq!(shrunk.bundle_digest, base.bundle_digest);
         assert!(!shrunk.files.contains_key("extra.md"));
+    }
+
+    /// The EXACT self-ignore sentinel at the bundle root is topos metadata: both entry points skip
+    /// it, so an injected ignore file never moves a digest or reads as a draft.
+    #[test]
+    fn the_root_sentinel_is_skipped_by_both_entry_points() {
+        let dir = scratch("sentinel");
+        write(&dir, "SKILL.md", b"body\n");
+        let bare = scan(&dir).unwrap();
+
+        write(&dir, IGNORE_FILE, IGNORE_SENTINEL);
+        let with = scan(&dir).unwrap();
+        assert_eq!(with.bundle_digest, bare.bundle_digest);
+        assert!(!with.files.iter().any(|f| f.path == IGNORE_FILE));
+        let drift = drift_digest(&dir, None, None).unwrap();
+        assert_eq!(drift.bundle_digest, bare.bundle_digest);
+        assert!(!drift.files.contains_key(IGNORE_FILE));
+    }
+
+    /// A root `.gitignore` with ANY other bytes — and a nested one with the exact sentinel bytes —
+    /// are ordinary bundle content: only the byte-exact sentinel at the root is metadata.
+    #[test]
+    fn a_non_sentinel_or_nested_gitignore_stays_content() {
+        let dir = scratch("gi-content");
+        write(&dir, "SKILL.md", b"body\n");
+        let bare = scan(&dir).unwrap();
+
+        write(&dir, IGNORE_FILE, b"*.log\n");
+        let user = scan(&dir).unwrap();
+        assert_ne!(user.bundle_digest, bare.bundle_digest);
+        assert!(user.files.iter().any(|f| f.path == IGNORE_FILE));
+
+        std::fs::remove_file(dir.join(IGNORE_FILE)).unwrap();
+        write(&dir, "ref/.gitignore", IGNORE_SENTINEL);
+        let nested = scan(&dir).unwrap();
+        assert_ne!(nested.bundle_digest, bare.bundle_digest);
+        assert!(nested.files.iter().any(|f| f.path == "ref/.gitignore"));
     }
 
     /// A malformed cached sha is treated as a miss (re-hashed), never trusted.

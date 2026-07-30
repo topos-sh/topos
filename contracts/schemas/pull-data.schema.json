@@ -250,6 +250,11 @@
           "const": "conflicted"
         },
         {
+          "description": "State ③ — a SETTLED local draft (unchanged across two runs) was copied onto this bundle's\nother agent folders in its scope; their recorded baselines advance to the draft, and the\ndraft copy itself is untouched.",
+          "type": "string",
+          "const": "draft_synced"
+        },
+        {
           "description": "A transient local hold (e.g. a local go-back is pinned).",
           "type": "string",
           "const": "held"
@@ -334,6 +339,15 @@
         },
         "skill": {
           "type": "string"
+        },
+        "synced_placements": {
+          "description": "How many OTHER agent folders a settled local draft was copied onto this run (a\n`draft_synced` row's count). Absent when the run synced nothing. **INFERRED** (additive).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
         },
         "workspace_id": {
           "description": "The workspace this followed skill lives in, or `None` for a targeted go-back / local-only pull that\nhas no follow entry. A pulled skill is normally followed (so `Some`), but `pull <skill>@<hash>` on an\nunfollowed copy has none — `Option` keeps that honest and stays symmetric with [`SkillEntry`]. Names\nthe workspace so a session-start sweep does not show two same-named skills indistinguishably.",

@@ -57,8 +57,8 @@ fakes; this directory is for what only a cross-crate composed run can prove.
     landed genesis publish runs the **governance transfer** (the line rewritten to the canonical
     workspace reference, disclosed on the receipt); a second person's `add @acme/deploy` in a git
     checkout writes the project manifest AND delivers in the same invocation — byte-exact
-    (executable bit kept) into `<proj>/.claude/skills/`, git-excluded via `.git/info/exclude`
-    (idempotent); v2 fast-forwards silently on the next sweep (login was the acceptance — no offer
+    (executable bit kept) into `<proj>/.claude/skills/`, self-ignoring (the placed dir's own
+    sentinel ignore file; the engine state in the checkout's own `.topos/` store); v2 fast-forwards silently on the next sweep (login was the acceptance — no offer
     step); `protect` tightens to `reviewed` and the member's next publish DOWNGRADES to a proposal
     the owner approves (the follower lands it); the `-g` profile lane delivers person-scope and
     removes cleanly; the OWNER's remove-session arm (the real `/settings/sessions` POST) ends the

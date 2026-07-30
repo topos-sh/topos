@@ -470,6 +470,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 conflict: None,
                 merge: None,
                 merge_preview: None,
+                synced_placements: None,
             }],
             proposals_awaiting: 0,
         })
@@ -507,6 +508,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     drop_diff: None,
                 }),
                 merge_preview: None,
+                synced_placements: None,
             }],
             proposals_awaiting: 0,
         })
@@ -546,6 +548,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     drop_diff: None,
                 }),
                 merge_preview: None,
+                synced_placements: None,
             }],
             proposals_awaiting: 0,
         })
@@ -1050,6 +1053,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                 conflict: None,
                 merge: None,
                 merge_preview: None,
+                synced_placements: None,
             }],
             proposals_awaiting: 1,
             notices: vec![WireNotice {
@@ -1102,6 +1106,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     verdict: MergePreviewVerdict::Conflicted,
                     conflicts: vec!["SKILL.md".to_owned()],
                 }),
+                synced_placements: None,
             }],
             proposals_awaiting: 0,
             notices: Vec::new(),

@@ -69,7 +69,7 @@ topos remove <name>               # the inverse — drops the line, or records a
 `add`/`remove` edit the NEAREST `topos.toml` (created at the git root when none exists) and
 deliver immediately; `-g` targets your server-stored profile instead — every machine you are
 logged into converges on it. In a checkout, managed copies land in the project's own agent
-dirs and stay out of commits via `.git/info/exclude`.
+dirs and keep themselves out of commits (each placed dir carries its own ignore file).
 
 ## Sharing an improvement back (do this — it is the point)
 

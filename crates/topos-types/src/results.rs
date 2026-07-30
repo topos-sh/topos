@@ -80,6 +80,10 @@ pub struct PullSkill {
     /// diverged row, or the merge base is not locally renderable). **INFERRED** (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_preview: Option<MergePreview>,
+    /// How many OTHER agent folders a settled local draft was copied onto this run (a
+    /// `draft_synced` row's count). Absent when the run synced nothing. **INFERRED** (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synced_placements: Option<u32>,
 }
 
 /// The predicted verdict of a three-way merge that has NOT been run against the placements — a pure
@@ -127,6 +131,10 @@ pub enum PullAction {
     /// State ④ resolved with conflicts — a complete conflict tree was materialized and publish is blocked
     /// until the author resolves (or escapes).
     Conflicted,
+    /// State ③ — a SETTLED local draft (unchanged across two runs) was copied onto this bundle's
+    /// other agent folders in its scope; their recorded baselines advance to the draft, and the
+    /// draft copy itself is untouched.
+    DraftSynced,
     /// A transient local hold (e.g. a local go-back is pinned).
     Held,
     /// UPSTREAM withdrew the skill (archived, or its last delivering channel dropped it): the agent
@@ -1309,6 +1317,7 @@ mod tests {
                 conflict: None,
                 merge: None,
                 merge_preview: None,
+                synced_placements: None,
             }],
             proposals_awaiting: 0,
             notices: Vec::new(),

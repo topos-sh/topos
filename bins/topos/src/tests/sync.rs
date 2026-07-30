@@ -2565,3 +2565,187 @@ fn revert_over_identical_bytes_is_a_no_op_under_differing_commit_ids() {
     );
     assert_eq!(posts.get(), 0, "a no-op POSTs nothing on either path");
 }
+
+// ---------------------------------------------------------------------------------------------
+// The settled-draft fan-out: one bundle, one scope, several agent folders. A draft that is
+// UNCHANGED across two runs is copied onto the bundle's other placements (their recorded
+// baselines advance with it); a mid-edit file never spreads; true competitors still freeze.
+// ---------------------------------------------------------------------------------------------
+
+/// Append a REPLICA placement row (holding the current lock's bytes) to a tracked skill's map —
+/// the multi-folder shape the fan-out serves. The dir is created from `files`.
+fn add_replica(rig: &Rig, id: &str, dir: &Path, files: &[(&str, FileMode, &[u8])]) {
+    use topos_types::persisted::{PlacementKind, PlacementState, SwapCapability};
+    write_tree(dir, files);
+    let sp = rig.layout().published(&sid(id));
+    let lock: topos_types::persisted::Lock = doc::read_doc(&rig.fs, &sp.lock).unwrap().unwrap();
+    let mut map = doc::read_map(&rig.fs, &sp.map).unwrap().unwrap();
+    map.placements.push(dir.display().to_string());
+    map.placement_state.push(PlacementState {
+        kind: PlacementKind::Native,
+        agent: None,
+        materialized_sha: Some(lock.bundle_digest),
+        pre_existing_sha: None,
+        swap_capability: SwapCapability::Unsupported,
+    });
+    doc::write_map(&rig.fs, &sp.map, &map).unwrap();
+}
+
+/// The standard fan-out rig: a followed skill fast-forwarded to v1 with a byte-identical replica
+/// folder beside the primary placement.
+fn fanout_rig(tag: &str) -> (Rig, String, FixturePlane, FixtureFollow, PathBuf) {
+    let rig = Rig::new(tag);
+    let (id, _name, genesis) = rig.adopt(BASE);
+    let v1 = mk_version(&[genesis], V1, "d_pub", "v1");
+    let mut plane = FixturePlane::default();
+    plane.add_version(&id, &v1);
+    plane.set_current(&id, served(WS, &id, v1.id, 1));
+    let foll = follow(&id, FollowMode::Auto);
+    {
+        let ctx = rig.ctx(&plane, &foll);
+        assert_eq!(
+            only(&pull_data(&ctx, ops::PullScope::AllFollowed).unwrap()).action,
+            PullAction::FastForwarded
+        );
+    }
+    let replica = rig.work.0.join("replica");
+    add_replica(&rig, &id, &replica, V1);
+    (rig, id, plane, foll, replica)
+}
+
+#[test]
+fn a_settled_draft_spreads_and_advances_the_sibling_baselines() {
+    let (rig, id, plane, foll, replica) = fanout_rig("spread");
+    let ctx = rig.ctx(&plane, &foll);
+
+    // THE draft: edit the primary copy.
+    std::fs::write(rig.placement().join("SKILL.md"), b"# my draft\n").unwrap();
+
+    // Sweep 1: the observation only — a first sighting never spreads.
+    let data = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
+    assert_eq!(only(&data).action, PullAction::UpToDate);
+    assert_eq!(
+        snapshot(&replica),
+        Some(expect(V1)),
+        "no spread on the first sighting"
+    );
+    let d_hex = to_hex(&crate::scan::scan(&rig.placement()).unwrap().bundle_digest);
+    assert_eq!(
+        rig.read_sync(&id).draft_observed.as_deref(),
+        Some(d_hex.as_str()),
+        "the observation is durable"
+    );
+
+    // Sweep 2: SETTLED — the draft lands on the replica, disclosed on the warning channel.
+    let out = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    let row = only(&out.data);
+    assert_eq!(row.action, PullAction::DraftSynced);
+    assert_eq!(row.synced_placements, Some(1));
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.starts_with("DRAFT_SYNCED") && w.contains("1 other agent folder")),
+        "{:?}",
+        out.warnings
+    );
+    assert_eq!(
+        std::fs::read(replica.join("SKILL.md")).unwrap(),
+        b"# my draft\n"
+    );
+    // The draft copy is untouched; the LOCK still names the pristine v1 (the draft detector's
+    // reference did not move); the replica's recorded baseline is the DRAFT digest now.
+    assert_eq!(
+        std::fs::read(rig.placement().join("SKILL.md")).unwrap(),
+        b"# my draft\n"
+    );
+    let sp = rig.layout().published(&sid(&id));
+    let map = doc::read_map(&rig.fs, &sp.map).unwrap().unwrap();
+    assert_eq!(
+        map.placement_state[1].materialized_sha.as_deref(),
+        Some(d_hex.as_str()),
+        "the synced folder's baseline advances to the draft"
+    );
+    // A changed sweep for the hook: the fan-out counts as moved bytes.
+    assert!(ops::sweep_changed_bytes(&out.data));
+
+    // Sweep 3: a stable fixpoint — everything already carries the draft.
+    assert_eq!(
+        only(&pull_data(&ctx, ops::PullScope::AllFollowed).unwrap()).action,
+        PullAction::UpToDate
+    );
+
+    // A LATER edit at the SYNCED replica is a fresh draft against its advanced baseline — the
+    // primary (still holding the old draft) is stale behind it, never a competitor: no freeze.
+    std::fs::write(replica.join("SKILL.md"), b"# my draft, refined\n").unwrap();
+    let out = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert_eq!(only(&out.data).action, PullAction::UpToDate);
+    assert_eq!(
+        std::fs::read(rig.placement().join("SKILL.md")).unwrap(),
+        b"# my draft\n",
+        "the stale copy is untouched until the refined draft settles"
+    );
+}
+
+#[test]
+fn an_unsettled_draft_never_spreads() {
+    let (rig, id, plane, foll, replica) = fanout_rig("unsettled");
+    let ctx = rig.ctx(&plane, &foll);
+
+    std::fs::write(rig.placement().join("SKILL.md"), b"# edit one\n").unwrap();
+    pull_data(&ctx, ops::PullScope::AllFollowed).unwrap(); // observes edit one
+
+    // The file MOVES between sweeps: only the observation updates — nothing spreads.
+    std::fs::write(rig.placement().join("SKILL.md"), b"# edit two\n").unwrap();
+    let data = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
+    assert_eq!(only(&data).action, PullAction::UpToDate);
+    assert_eq!(
+        snapshot(&replica),
+        Some(expect(V1)),
+        "a mid-edit file never spreads"
+    );
+    let d2 = to_hex(&crate::scan::scan(&rig.placement()).unwrap().bundle_digest);
+    assert_eq!(
+        rig.read_sync(&id).draft_observed.as_deref(),
+        Some(d2.as_str())
+    );
+
+    // Once it settles, the NEXT sweep spreads exactly the settled bytes.
+    let data = pull_data(&ctx, ops::PullScope::AllFollowed).unwrap();
+    assert_eq!(only(&data).action, PullAction::DraftSynced);
+    assert_eq!(
+        std::fs::read(replica.join("SKILL.md")).unwrap(),
+        b"# edit two\n"
+    );
+}
+
+#[test]
+fn true_competitors_freeze_and_the_fanout_never_runs() {
+    let (rig, id, plane, foll, replica) = fanout_rig("compete");
+    let ctx = rig.ctx(&plane, &foll);
+
+    std::fs::write(rig.placement().join("SKILL.md"), b"# primary edit\n").unwrap();
+    pull_data(&ctx, ops::PullScope::AllFollowed).unwrap(); // observes the primary draft
+
+    // A DIFFERENT edit lands in the replica: two contents, neither at the other's baseline —
+    // true competitors. The sweep freezes the skill (typed, isolated) and syncs NOTHING.
+    std::fs::write(replica.join("SKILL.md"), b"# replica edit\n").unwrap();
+    let out = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.starts_with("PLACEMENTS_DIVERGED")),
+        "{:?}",
+        out.warnings
+    );
+    assert!(out.data.skills.is_empty(), "{:?}", out.data.skills);
+    assert_eq!(
+        std::fs::read(rig.placement().join("SKILL.md")).unwrap(),
+        b"# primary edit\n"
+    );
+    assert_eq!(
+        std::fs::read(replica.join("SKILL.md")).unwrap(),
+        b"# replica edit\n"
+    );
+    let _ = id;
+}

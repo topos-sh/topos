@@ -352,26 +352,28 @@ pub(crate) fn escape_recorded(
     cs: &ConflictState,
 ) -> Result<PullSkill, ClientError> {
     let _ = witness; // the structural gate; the private `escape` below needs no token
-    // The working tree to commit: the ONE edited copy when one exists, else the first clean copy
-    // (the materialized conflict tree matches its recorded sha, so it reads as clean). Several
-    // DISTINCT edited copies are the typed freeze — reconcile first, escape after.
+    // The working tree to commit: the resolved edited copy when one exists, else the first clean
+    // copy (the materialized conflict tree matches its recorded sha, so it reads as clean). TRUE
+    // competitors are the typed freeze — reconcile first, escape after (a copy sitting at a
+    // sibling's recorded baseline is stale behind it, never a competitor). Carry the digest + dir —
+    // a clean copy is digest-only (the stat cache may have spared the read), so its bytes are
+    // re-scanned below.
     let scans = placement::scan_placements(ctx, map)?;
-    let modified = placement::distinct_modified(&scans);
-    // The working copy to commit: the ONE edited copy, else the first clean copy (the materialized
-    // conflict tree reads clean against its recorded sha). Carry its digest + dir — a clean copy is
-    // digest-only (the stat cache may have spared the read), so its bytes are re-scanned below.
-    let chosen: Option<(String, std::path::PathBuf)> = match modified.as_slice() {
-        [] => scans.iter().find_map(|s| match &s.status {
+    let chosen: Option<(String, std::path::PathBuf)> = match placement::classify_draft(&scans, map)
+    {
+        placement::DraftVerdict::NoDraft => scans.iter().find_map(|s| match &s.status {
             ScanStatus::Clean { digest } => Some((to_hex(digest), s.dir.clone())),
             _ => None,
         }),
-        [(idx, _)] => match &scans[*idx].status {
+        placement::DraftVerdict::One { idx, .. } => match &scans[idx].status {
             ScanStatus::Modified { scanned } => {
-                Some((to_hex(&scanned.bundle_digest), scans[*idx].dir.clone()))
+                Some((to_hex(&scanned.bundle_digest), scans[idx].dir.clone()))
             }
             _ => None,
         },
-        _ => return Err(placement::placements_diverged(&lock.name, &scans)),
+        placement::DraftVerdict::Competitors(indices) => {
+            return Err(placement::placements_diverged(&lock.name, &scans, &indices));
+        }
     };
     let Some((digest_hex, work_dir)) = chosen else {
         // Every placement is gone / unreadable — there is nothing to commit, so the conflict is moot;
@@ -387,6 +389,7 @@ pub(crate) fn escape_recorded(
             conflict: None,
             merge: None,
             merge_preview: None,
+            synced_placements: None,
         });
     };
     let store = Store::open(&sp.store)?;
@@ -784,6 +787,8 @@ fn place_draft_on_current(
             sp,
             snapshot: Some(&|s: &ScannedBundle| snapshot_draft(ctx, sp, lock, s).map(|_| ())),
             takeover: None,
+            self_ignore: ctx.layout.is_project_scope(),
+            expected: None,
         },
     )?;
     Ok(())
@@ -996,6 +1001,7 @@ fn merged_row(
             drop_diff,
         }),
         merge_preview: None,
+        synced_placements: None,
     }
 }
 
@@ -1028,6 +1034,7 @@ fn conflicted_row(
             drop_diff,
         }),
         merge_preview: None,
+        synced_placements: None,
     }
 }
 
