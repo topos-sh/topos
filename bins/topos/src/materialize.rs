@@ -87,6 +87,19 @@ pub(crate) struct MaterializeReq<'a> {
     /// including an adopted dir whose occupant raced to change (the consent was for an IDENTICAL
     /// copy).
     pub takeover: Option<TakeoverFn<'a>>,
+    /// Whether each staged tree carries the SELF-IGNORE sentinel (project-scope placements are
+    /// local, never committed — the placed dir ignores itself; see [`crate::scan::IGNORE_SENTINEL`]).
+    /// Injected only when the bundle ships no root ignore file of its own (a bundle's `.gitignore`
+    /// is content); a dir healed in place gets no write at all, so a user's file at that path is
+    /// never overwritten.
+    pub self_ignore: bool,
+    /// Per-target EXPECTED on-disk state — the opportunistic-fanout arm (the settled-draft sync):
+    /// `(target index, Some(digest) | None-for-absent)` as the caller's scan observed it. When set,
+    /// the pre-swap re-scan compares against it and a target whose bytes MOVED in the window (or
+    /// cannot be read) is SKIPPED — recorded nothing, never refused, never frozen; the next sweep
+    /// reconciles. A target already holding the bundle's bytes still heals in place. `None` (the
+    /// default) keeps the strict arms: refuse/heal exactly as documented above.
+    pub expected: Option<&'a [(usize, Option<String>)]>,
 }
 
 /// What the materializer actually did (so the engine can log / record the effective capability).
@@ -171,10 +184,25 @@ pub(crate) fn materialize(
     let target_hex = to_hex(&req.bundle.bundle_digest);
 
     for &i in req.target_indices {
+        // The expected-state row for this target, when the opportunistic arm is armed. A target
+        // the caller did not describe is skipped outright.
+        let expectation: Option<&Option<String>> = match req.expected {
+            None => None,
+            Some(rows) => match rows.iter().find(|(idx, _)| *idx == i) {
+                Some((_, exp)) => Some(exp),
+                None => continue,
+            },
+        };
         let placement_dir = PathBuf::from(&map.placements[i]);
         let kind = fs.path_kind(&placement_dir)?;
         let target = resolve_target(fs, &placement_dir, kind)?;
         let parent = target.parent.clone();
+
+        // A dir the caller expected PRESENT that has since vanished: bytes moved in the window —
+        // skip, never guess (the next sweep reconciles from a fresh scan).
+        if !target.dir_was_present && matches!(expectation, Some(Some(_))) {
+            continue;
+        }
 
         // Clear any leftover litter from a prior crashed apply of THIS skill (under the caller's flock).
         cleanup_litter(fs, &parent, req.skill_id)?;
@@ -198,6 +226,14 @@ pub(crate) fn materialize(
                         doc::write_map(fs, &sp_map(req), &map)?;
                         continue;
                     }
+                    // The opportunistic arm's re-stat: the dir must still hold exactly what the
+                    // caller's scan observed — anything else means bytes moved in the window, and
+                    // the target is SKIPPED (never overwritten, never refused).
+                    if let Some(exp) = expectation
+                        && exp.as_deref() != Some(on_disk.as_str())
+                    {
+                        continue;
+                    }
                     // The never-clobber backstop: a target the record NEVER materialized is not
                     // ours to replace — a first install must never overwrite an occupant (the
                     // naming discipline avoids occupied dirs, and an adopted dir whose bytes raced
@@ -206,6 +242,9 @@ pub(crate) fn materialize(
                     // exception is the caller's disclosed takeover, re-proven against the LIVE dir.
                     let recorded = map.placement_state[i].materialized_sha.as_deref();
                     if recorded.is_none() && !req.takeover.is_some_and(|t| t(&target.dir)) {
+                        if expectation.is_some() {
+                            continue; // the fanout arm skips what it may not claim
+                        }
                         return Err(ClientError::PlacementUnsupported {
                             reason: format!(
                                 "the placement {} is occupied by content topos never placed; \
@@ -221,6 +260,9 @@ pub(crate) fn materialize(
                     }
                 }
                 Err(_) => {
+                    if expectation.is_some() {
+                        continue; // unreadable now = moved in the window — skip, never freeze
+                    }
                     return Err(ClientError::PlacementUnsupported {
                         reason: format!(
                             "the placement {} cannot be read; refusing to overwrite it",
@@ -239,7 +281,7 @@ pub(crate) fn materialize(
 
         // Build + fsync the staging dir (a same-filesystem sibling of the placement).
         let staging = staging_path(&parent, req.skill_id);
-        build_staging(fs, &staging, req.bundle)?;
+        build_staging(fs, &staging, req.bundle, req.self_ignore)?;
 
         // Place the bytes.
         if target.dir_was_present {
@@ -407,15 +449,23 @@ fn do_dance(
 }
 
 /// Build a fresh staging dir holding the bundle's exact bytes, fsync every file AND every staging dir.
+/// With `self_ignore`, the staged tree additionally carries the root self-ignore sentinel — UNLESS
+/// the bundle ships its own root ignore file (a bundle's `.gitignore` is content, never overlaid).
 fn build_staging(
     fs: &dyn FsOps,
     staging: &Path,
     bundle: &RenderedBundle,
+    self_ignore: bool,
 ) -> Result<(), ClientError> {
     fs.remove_dir_all(staging)?;
     fs.create_dir_all(staging)?;
     let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
     dirs.insert(staging.to_path_buf());
+    if self_ignore && !bundle.files.iter().any(|f| f.path == scan::IGNORE_FILE) {
+        let dest = staging.join(scan::IGNORE_FILE);
+        fs.write_staged(&dest, scan::IGNORE_SENTINEL, false)?;
+        fs.fsync_file(&dest)?;
+    }
     for f in &bundle.files {
         let dest = staging.join(&f.path);
         if let Some(file_parent) = dest.parent() {
@@ -644,6 +694,7 @@ mod tests {
             base_commit: base.to_owned(),
             work_hash: work.to_owned(),
             held: false,
+            draft_observed: None,
         }
     }
 
@@ -730,6 +781,8 @@ mod tests {
             sp,
             snapshot: None,
             takeover: None,
+            self_ignore: false,
+            expected: None,
         }
     }
 
@@ -902,6 +955,115 @@ mod tests {
             m.placement_state[0].materialized_sha.as_deref(),
             Some(digest_hex(NEW).as_str()),
             "the heal advanced the record with no swap"
+        );
+    }
+
+    /// A self-ignoring apply stages the sentinel beside the bundle — a first install lands it, the
+    /// scanner treats it as metadata (the placed dir reads clean), and a bundle shipping its OWN
+    /// root ignore file is placed verbatim (never overlaid).
+    #[test]
+    fn self_ignore_stages_the_sentinel_unless_the_bundle_ships_one() {
+        let parent = Scratch::new("selfig");
+        let home = Scratch::new("selfig-home");
+        let placement = parent.0.join("demo");
+        let bundle = rendered(NEW);
+        let lock = lock_of("topos_sig", NEW, &"1".repeat(64));
+        let sync = sync_at(1, 1, &"1".repeat(64), &digest_hex(NEW));
+        let mut prior = prior_map(&[&placement], &"0".repeat(64), SwapCapability::Unsupported);
+        prior.placement_state[0].materialized_sha = None;
+        let d = docs_under(&home.0, "topos_sig");
+        let mut r = req("topos_sig", &[0], &bundle, &prior, &lock, &sync, &d.sp);
+        r.self_ignore = true;
+        materialize(&RealFs, &r).unwrap();
+        assert_eq!(
+            std::fs::read(placement.join(crate::scan::IGNORE_FILE)).unwrap(),
+            crate::scan::IGNORE_SENTINEL,
+            "the placed project dir self-ignores"
+        );
+        // The scanner reads the placed dir as EXACTLY the bundle (the sentinel is metadata).
+        assert_eq!(
+            scan::scan(&placement).unwrap().bundle_digest,
+            bundle.bundle_digest
+        );
+
+        // A bundle carrying its own root ignore file keeps it byte-exact — no overlay.
+        let own: &[(&str, FileMode, &[u8])] = &[
+            (".gitignore", FileMode::Regular, b"*.log\n"),
+            ("SKILL.md", FileMode::Regular, b"# own\n"),
+        ];
+        let placement2 = parent.0.join("own");
+        let bundle2 = rendered(own);
+        let lock2 = lock_of("topos_sig2", own, &"1".repeat(64));
+        let sync2 = sync_at(1, 1, &"1".repeat(64), &digest_hex(own));
+        let mut prior2 = prior_map(&[&placement2], &"0".repeat(64), SwapCapability::Unsupported);
+        prior2.placement_state[0].materialized_sha = None;
+        let d2 = docs_under(&home.0, "topos_sig2");
+        let mut r2 = req(
+            "topos_sig2",
+            &[0],
+            &bundle2,
+            &prior2,
+            &lock2,
+            &sync2,
+            &d2.sp,
+        );
+        r2.self_ignore = true;
+        materialize(&RealFs, &r2).unwrap();
+        assert_eq!(
+            std::fs::read(placement2.join(".gitignore")).unwrap(),
+            b"*.log\n",
+            "the bundle's own ignore file is content, never replaced by the sentinel"
+        );
+    }
+
+    /// The opportunistic arm: a target whose bytes moved between the caller's scan and the swap is
+    /// SKIPPED (nothing recorded, nothing overwritten, no error), while a target still holding the
+    /// expected bytes lands.
+    #[test]
+    fn an_expected_mismatch_skips_the_target_instead_of_refusing() {
+        let parent = Scratch::new("expect");
+        let home = Scratch::new("expect-home");
+        if !swap_supported(&parent.0) {
+            eprintln!("skipping: temp FS lacks atomic dir exchange");
+            return;
+        }
+        let steady = parent.0.join("steady").join("demo");
+        let moved = parent.0.join("moved").join("demo");
+        install_old(&steady);
+        install_old(&moved);
+        // The caller observed OLD in both; then "moved" changes in the window.
+        std::fs::write(moved.join("SKILL.md"), b"# raced edit\n").unwrap();
+        let bundle = rendered(NEW);
+        let lock = lock_of("topos_exp", NEW, &"1".repeat(64));
+        let sync = sync_at(2, 2, &"1".repeat(64), &digest_hex(NEW));
+        let prior = prior_map(
+            &[&steady, &moved],
+            &digest_hex(OLD),
+            SwapCapability::AtomicExchange,
+        );
+        let d = docs_under(&home.0, "topos_exp");
+        let exp_rows = vec![
+            (0usize, Some(digest_hex(OLD))),
+            (1usize, Some(digest_hex(OLD))),
+        ];
+        let mut r = req("topos_exp", &[0, 1], &bundle, &prior, &lock, &sync, &d.sp);
+        r.expected = Some(&exp_rows);
+        materialize(&RealFs, &r).unwrap();
+        assert_eq!(dir_snapshot(&steady), Some(expected(NEW)));
+        assert_eq!(
+            std::fs::read(moved.join("SKILL.md")).unwrap(),
+            b"# raced edit\n",
+            "the raced dir is skipped, its bytes untouched"
+        );
+        let m = crate::doc::read_map(&RealFs, &d.sp.map).unwrap().unwrap();
+        assert_eq!(
+            m.placement_state[0].materialized_sha.as_deref(),
+            Some(digest_hex(NEW).as_str())
+        );
+        assert_eq!(
+            m.placement_state[1].materialized_sha.as_deref(),
+            Some(digest_hex(OLD).as_str()),
+            "the skipped target's record is untouched"
         );
     }
 

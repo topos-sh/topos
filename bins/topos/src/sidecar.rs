@@ -12,10 +12,24 @@ use crate::id::SkillId;
 /// The prefix marking a transient staging directory (`skills/.staging-<id>/`) being assembled by `add`.
 const STAGING_PREFIX: &str = ".staging-";
 
-/// Resolves every `~/.topos/` path from the home directory (injected, so tests get an isolated home).
+/// The directory a PROJECT's own engine store lives under: `<project>/.topos/`. Self-ignoring (its
+/// own `.gitignore` holds `*`, the venv model), so nothing under it ever enters the checkout's
+/// commits.
+pub(crate) const PROJECT_STORE_DIR: &str = ".topos";
+/// The project store's own ignore file bytes — everything under `.topos/` is machine-local state.
+const PROJECT_STORE_IGNORE: &[u8] = b"*\n";
+
+/// Resolves every store path from a base directory (injected, so tests get an isolated home). ONE
+/// shape serves BOTH scopes: the person scope's `~/.topos/`, and a project's own store at
+/// `<project>/.topos/state/<user>/` — so the whole engine (locks, WAL recovery, doc IO, the sync
+/// machine) runs unchanged against either.
 #[derive(Debug, Clone)]
 pub(crate) struct Layout {
     home: PathBuf,
+    /// The project checkout this layout is the store OF, when it is a project store (`None` = the
+    /// person scope). Scope-dependent behavior (the placement self-ignore) keys off this — the
+    /// layout IS the scope.
+    project_root: Option<PathBuf>,
 }
 
 /// The per-skill paths under a base directory (a published `skills/<id>/` or a staging dir).
@@ -51,11 +65,18 @@ impl Layout {
     pub(crate) fn new(home: &Path) -> Self {
         Self {
             home: home.to_path_buf(),
+            project_root: None,
         }
     }
 
     pub(crate) fn home(&self) -> &Path {
         &self.home
+    }
+
+    /// Whether this layout is a PROJECT's store (its placements land inside a checkout and
+    /// self-ignore) rather than the person scope's home store.
+    pub(crate) fn is_project_scope(&self) -> bool {
+        self.project_root.is_some()
     }
 
     pub(crate) fn skills_dir(&self) -> PathBuf {
@@ -206,6 +227,57 @@ impl Layout {
     pub(crate) fn op_path(&self, op_id: &str) -> PathBuf {
         self.ops_dir().join(format!("{op_id}.json"))
     }
+}
+
+/// The per-user segment of a project store (`state/<user>/`) — per-user because checkouts can be
+/// shared between accounts. The OS username (`$USER`), sanitized with the same charset discipline
+/// placement dir names use; `default` when unset or nothing survives sanitizing.
+fn store_user() -> String {
+    std::env::var("USER")
+        .ok()
+        .and_then(|u| topos_harness::sanitize_skill_dir(&u))
+        .unwrap_or_else(|| "default".to_owned())
+}
+
+/// The [`Layout`] of a project's own engine store: `<project>/.topos/state/<user>/`, laid out
+/// exactly like the home store so the whole engine runs against it unchanged. Pure paths — nothing
+/// is created (see [`ensure_project_store`]).
+pub(crate) fn project_store_layout(project_dir: &Path) -> Layout {
+    Layout {
+        home: project_dir
+            .join(PROJECT_STORE_DIR)
+            .join("state")
+            .join(store_user()),
+        project_root: Some(project_dir.to_path_buf()),
+    }
+}
+
+/// The project's store layout when its state tree already EXISTS on disk (this user's), else
+/// `None` — the read-side probe (recovery, cleaning) that must never mint a store.
+pub(crate) fn existing_project_store(fs: &dyn FsOps, project_dir: &Path) -> Option<Layout> {
+    let layout = project_store_layout(project_dir);
+    fs.exists(layout.home()).then_some(layout)
+}
+
+/// Create a project's store on first write — `<project>/.topos/` with its own self-ignore file
+/// (exactly `*`, exclusive-create: never overwrite a file already at that path) and this user's
+/// `state/<user>/` tree — and return its [`Layout`]. Idempotent.
+///
+/// # Errors
+/// The [`FsOps`] failure creating the tree or writing the ignore file.
+pub(crate) fn ensure_project_store(
+    fs: &dyn FsOps,
+    project_dir: &Path,
+) -> Result<Layout, ClientError> {
+    let layout = project_store_layout(project_dir);
+    let store_dir = project_dir.join(PROJECT_STORE_DIR);
+    fs.create_dir_all(&store_dir)?;
+    let ignore = store_dir.join(crate::scan::IGNORE_FILE);
+    if !fs.exists(&ignore) {
+        crate::atomic::atomic_write(fs, &ignore, PROJECT_STORE_IGNORE)?;
+    }
+    fs.create_dir_all(layout.home())?;
+    Ok(layout)
 }
 
 /// Acquire the per-skill writer lock (blocking), held across snapshot → docs → publish. The lock file

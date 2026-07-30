@@ -92,6 +92,7 @@ fn sample_sync(tag: u8) -> SyncState {
         base_commit: hex(tag),
         work_hash: hex(tag),
         held: false,
+        draft_observed: None,
     }
 }
 

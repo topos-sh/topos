@@ -57,7 +57,8 @@ What a folder's agents should have is its `topos.toml` **manifest** — `add`/`r
 which every machine you are logged into converges on. Login arms a session-start hook that runs
 `topos update`, so updates the team publishes land byte-exact at the start of each session — verified
 byte-for-byte against the plane's `current` pointer, and never over your local edits. In a checkout, managed
-copies land in the project's own agent dirs and stay out of commits via `.git/info/exclude`.
+copies land in the project's own agent dirs and keep themselves out of commits (each placed dir
+carries its own ignore file — the node_modules model).
 
 **Propose a change back:**
 

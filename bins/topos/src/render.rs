@@ -2096,6 +2096,15 @@ fn pull_row(s: &PullSkill) -> (String, Vec<String>) {
                 extra,
             )
         }
+        PullAction::DraftSynced => {
+            let n = s.synced_placements.unwrap_or(0);
+            let folders = if n == 1 {
+                "1 other agent folder".to_owned()
+            } else {
+                format!("{n} other agent folders")
+            };
+            (format!("synced your edits to {folders}"), Vec::new())
+        }
         PullAction::Held => (
             format!(
                 "held — pinned at a local go-back; run `topos update {name}` to resume following current"
@@ -2179,6 +2188,7 @@ mod tests {
             conflict: None,
             merge: None,
             merge_preview: None,
+            synced_placements: None,
         }
     }
 

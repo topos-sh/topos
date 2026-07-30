@@ -215,6 +215,50 @@ fn resolve_skill_in_workspace(
     resolve_skill_scoped(ctx, name, workspace, false)
 }
 
+/// Resolve a NAME across the PER-SCOPE stores: the home store first, then each project store in
+/// the cwd's manifest chain (nearest first) — a project-delivered bundle keeps its engine state in
+/// the checkout's own store (`<project>/.topos/state/<user>/`), and a write verb run from inside
+/// the checkout must still find it. Returns the OWNING store's layout beside the hit (the caller
+/// runs the per-skill doc/store work against it); a miss everywhere keeps the home resolver's
+/// error shape.
+fn resolve_skill_stored(
+    ctx: &Ctx<'_>,
+    name: &str,
+    workspace: Option<&str>,
+) -> Result<(crate::sidecar::Layout, SkillId, Lock), ClientError> {
+    let home_miss = match resolve_skill_in_workspace(ctx, name, workspace) {
+        Ok((id, lock)) => return Ok((ctx.layout.clone(), id, lock)),
+        Err(e @ ClientError::NoSuchSkill { .. }) => e,
+        Err(e) => return Err(e),
+    };
+    if let Some(roots) = &ctx.roots
+        && let Some(cwd) = roots.cwd.as_deref()
+        && let Ok(layers) = crate::manifest::walk::project_layers(ctx.fs, cwd, Some(&roots.home))
+    {
+        for layer in &layers {
+            let Some(playout) = crate::sidecar::existing_project_store(ctx.fs, &layer.dir) else {
+                continue;
+            };
+            let pctx = pull::ctx_with_layout(ctx, &playout);
+            if let Ok((id, lock)) = resolve_skill_in_workspace(&pctx, name, workspace) {
+                return Ok((playout, id, lock));
+            }
+        }
+    }
+    Err(home_miss)
+}
+
+/// The NAME a cwd-chain PROJECT store tracks for `source` when the home store does not — the
+/// publish auto-add's pre-check, so a project-delivered bundle is never re-adopted as a brand-new
+/// skill. `None` for a home-tracked name, a path, or any miss (the caller's own resolution and
+/// error shapes stand).
+fn project_tracked_name(ctx: &Ctx<'_>, source: &str) -> Option<String> {
+    match resolve_skill_stored(ctx, source, None) {
+        Ok((store, _, lock)) if store.is_project_scope() => Some(lock.name),
+        _ => None,
+    }
+}
+
 /// The STRICT resolver `review` / `revert` use: like [`resolve_skill_in_workspace`], but a candidate with
 /// NO follow entry (a purely local / genesis skill that merely SHARES the name) is dropped BEFORE the
 /// ambiguity count. Those verbs only ever act on a FOLLOWED skill, so a local skill named the same as a

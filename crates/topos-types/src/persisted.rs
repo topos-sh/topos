@@ -39,6 +39,15 @@ pub struct SyncState {
     pub work_hash: String,
     /// A transient local pin (a `pull <skill>@<hash>` go-back) suppressing one auto fast-forward.
     pub held: bool,
+    /// The draft work-tree digest the previous run OBSERVED for this bundle+scope (sha256 hex of
+    /// the one edited copy's bytes), or absent when no draft was standing. The settled-draft
+    /// fan-out compares the current draft against it: unchanged across two runs means SETTLED, and
+    /// only a settled draft is copied onto the bundle's other placements in its scope — a mid-edit
+    /// file never spreads. **Additive optional** (absent in older documents; cleared when the
+    /// draft resolves).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "contract-derives", schemars(extend("pattern" = "^[0-9a-f]{64}$")))]
+    pub draft_observed: Option<String>,
 }
 
 /// `skills/<id>/lock.json` — the pinned skill identity + the byte-exact file list. **Pinned** (the
@@ -352,6 +361,7 @@ mod tests {
             base_commit: "a".repeat(64),
             work_hash: "b".repeat(64),
             held: false,
+            draft_observed: None,
         };
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["observed"], 7);

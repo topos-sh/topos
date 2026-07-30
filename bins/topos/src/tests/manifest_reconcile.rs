@@ -1,6 +1,6 @@
 //! The MANIFEST reconcile over fakes (no HTTP): profile items land in the home dirs silently
 //! (login was the acceptance — no offer step), project `topos.toml` refs land INSIDE the checkout
-//! (+ `.git/info/exclude`), nearest-wins routes a name to the project scope, a manifest pin
+//! (self-ignoring, with state in the project's own store), nearest-wins routes a name to the project scope, a manifest pin
 //! overrides the served version, an ended session freezes-and-prints-once, and a profile drop
 //! cleans the person-scope placements while the sidecar keeps every byte.
 
@@ -209,6 +209,27 @@ fn mk_version(files: &[(&str, FileMode, &[u8])]) -> Version {
                 .collect(),
         },
     }
+}
+
+/// Every file under a dir as sorted `(rel-path, bytes)` rows — the byte-destruction witness.
+fn snapshot_dir(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    fn walk(base: &std::path::Path, d: &std::path::Path, out: &mut Vec<(String, Vec<u8>)>) {
+        for e in std::fs::read_dir(d).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(base, &p, out);
+            } else {
+                out.push((
+                    p.strip_prefix(base).unwrap().to_string_lossy().into_owned(),
+                    std::fs::read(&p).unwrap(),
+                ));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
 }
 
 type CallLog = Arc<Mutex<Vec<String>>>;
@@ -553,7 +574,7 @@ fn profile_items_install_silently_and_the_cache_records_the_session() {
 }
 
 #[test]
-fn a_project_manifest_lands_in_the_checkout_with_a_git_exclude() {
+fn a_project_manifest_lands_in_the_checkout_self_ignoring() {
     let rig = Rig::new("project");
     rig.seed_session();
     let proj = Scratch::new("proj");
@@ -585,21 +606,265 @@ fn a_project_manifest_lands_in_the_checkout_with_a_git_exclude() {
         .unwrap();
     assert_eq!(row.action, PullAction::FastForwarded, "{:?}", out.warnings);
     // The bytes live INSIDE the checkout (claude-code's project dir), not the home-scope dirs.
-    assert!(proj.0.join(".claude/skills/deploy/SKILL.md").exists());
+    let placed = proj.0.join(".claude/skills/deploy");
+    assert!(placed.join("SKILL.md").exists());
     assert!(!rig.work.0.join("skills/deploy").exists());
-    // …and stay out of commits: one `.git/info/exclude` line, idempotent across runs.
-    let exclude = std::fs::read_to_string(proj.0.join(".git/info/exclude")).unwrap();
-    assert!(exclude.contains("/.claude/skills/deploy/"), "{exclude}");
-    let before = exclude.clone();
-    let _ = ops::manifest_update(
+    // The placed dir SELF-IGNORES (the node_modules model): the exact sentinel at its root, and
+    // NOTHING written under `.git/` — the repository-bookkeeping era is over.
+    assert_eq!(
+        std::fs::read(placed.join(".gitignore")).unwrap(),
+        crate::scan::IGNORE_SENTINEL
+    );
+    assert!(
+        std::fs::read_dir(proj.0.join(".git"))
+            .unwrap()
+            .next()
+            .is_none(),
+        "nothing under .git/ was written"
+    );
+    // The engine state lives in the PROJECT's own store, not the home sidecar — and the store
+    // ignores itself whole (venv-style).
+    let sid = crate::id::SkillId::parse("s_deploy").unwrap();
+    assert!(!rig.layout().skill_dir(&sid).exists());
+    let playout =
+        crate::sidecar::existing_project_store(&rig.fs, &proj.0).expect("the project store");
+    assert!(playout.skill_dir(&sid).exists());
+    assert_eq!(
+        std::fs::read(proj.0.join(".topos/.gitignore")).unwrap(),
+        b"*\n"
+    );
+    // A second sweep is a clean no-op: the sentinel never reads as an edit, nothing re-swaps.
+    let out2 = ops::manifest_update(
         &ctx,
         &connect(&plane, &dir),
         None,
         &ops::ManifestUpdateOpts::default(),
     )
     .unwrap();
-    let after = std::fs::read_to_string(proj.0.join(".git/info/exclude")).unwrap();
-    assert_eq!(before, after, "the exclude write is idempotent");
+    assert!(out2.warnings.is_empty(), "{:?}", out2.warnings);
+    let row2 = out2
+        .data
+        .skills
+        .iter()
+        .find(|s| s.skill == "deploy")
+        .unwrap();
+    assert_eq!(row2.action, PullAction::UpToDate, "{:?}", out2.data.skills);
+}
+
+#[test]
+fn the_same_bundle_at_both_scopes_keeps_independent_state() {
+    let rig = Rig::new("twoscope");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serve(DeliverySnapshot {
+        skills: vec![delivered("s_deploy", "deploy", &v)],
+        ..empty_snapshot()
+    });
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+
+    // Person scope first (swept OUTSIDE any project): the home store + the home-scope placement.
+    let ctx_home = rig.ctx_at(Some(&rig.work.0));
+    ops::manifest_update(
+        &ctx_home,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    let person_copy = rig.work.0.join("skills/deploy");
+    assert!(person_copy.join("SKILL.md").exists());
+
+    // The same bundle demanded by a PROJECT manifest: its own store, its own placement.
+    let proj = Scratch::new("proj-two");
+    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    std::fs::write(
+        proj.0.join("topos.toml"),
+        format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+    )
+    .unwrap();
+    let ctx_proj = rig.ctx_at(Some(&proj.0));
+    let out = ops::manifest_update(
+        &ctx_proj,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    let project_copy = proj.0.join(".claude/skills/deploy");
+    assert!(project_copy.join("SKILL.md").exists());
+
+    // TWO state trees: the home store and the project store each hold the bundle, and each map
+    // records ONLY its own scope's placements.
+    let sid = crate::id::SkillId::parse("s_deploy").unwrap();
+    let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0).unwrap();
+    assert!(rig.layout().skill_dir(&sid).exists());
+    assert!(playout.skill_dir(&sid).exists());
+    let home_map = crate::doc::read_map(&rig.fs, &rig.layout().published(&sid).map)
+        .unwrap()
+        .unwrap();
+    assert!(
+        home_map
+            .placements
+            .iter()
+            .all(|p| !std::path::Path::new(p).starts_with(&proj.0)),
+        "home maps record only home placements: {:?}",
+        home_map.placements
+    );
+    let proj_map = crate::doc::read_map(&rig.fs, &playout.published(&sid).map)
+        .unwrap()
+        .unwrap();
+    assert!(
+        proj_map
+            .placements
+            .iter()
+            .all(|p| std::path::Path::new(p).starts_with(&proj.0)),
+        "project maps record only that project's placements: {:?}",
+        proj_map.placements
+    );
+
+    // A draft in the PROJECT copy stays that scope's business: the person copy is untouched by
+    // the project sweep, and the project draft survives it (drafts are per bundle+scope).
+    std::fs::write(project_copy.join("SKILL.md"), b"# project edit\n").unwrap();
+    let out = ops::manifest_update(
+        &ctx_proj,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert_eq!(
+        std::fs::read(project_copy.join("SKILL.md")).unwrap(),
+        b"# project edit\n",
+        "the project draft survives its sweep"
+    );
+    assert_eq!(
+        std::fs::read(person_copy.join("SKILL.md")).unwrap(),
+        b"# deploy\n",
+        "the person copy never sees the project draft"
+    );
+}
+
+/// Reproduce the OLD blended layout (one home map carrying a project placement), then prove the
+/// handover: the home row is dropped, the home state dir retires (project-only), and the project
+/// pass ADOPTS the byte-identical copy in place — no second copy, no byte moved.
+#[test]
+fn legacy_home_rows_hand_over_to_the_project_store() {
+    let rig = Rig::new("handover");
+    rig.seed_session();
+    let proj = Scratch::new("proj-ho");
+    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    std::fs::write(
+        proj.0.join("topos.toml"),
+        format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+    )
+    .unwrap();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let ctx = rig.ctx_at(Some(&proj.0));
+    ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+
+    // Transplant the project store's state into the HOME store — exactly the old world's shape:
+    // a home map whose placement rows point INTO the checkout.
+    let sid = crate::id::SkillId::parse("s_deploy").unwrap();
+    let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0).unwrap();
+    std::fs::create_dir_all(rig.layout().skills_dir()).unwrap();
+    std::fs::rename(playout.skill_dir(&sid), rig.layout().skill_dir(&sid)).unwrap();
+    std::fs::remove_dir_all(proj.0.join(".topos")).unwrap();
+
+    let placed = proj.0.join(".claude/skills/deploy");
+    let before = std::fs::read(placed.join("SKILL.md")).unwrap();
+
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    // The home store retired the project-only entry; the project store owns the scope again.
+    assert!(!rig.layout().skill_dir(&sid).exists());
+    let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0).unwrap();
+    assert!(playout.skill_dir(&sid).exists());
+    // The SAME dir was adopted in place — byte-identical, and no namespaced sibling appeared.
+    assert_eq!(std::fs::read(placed.join("SKILL.md")).unwrap(), before);
+    assert!(!proj.0.join(".claude/skills/deploy-eng").exists());
+    let map = crate::doc::read_map(&rig.fs, &playout.published(&sid).map)
+        .unwrap()
+        .unwrap();
+    assert_eq!(map.placements, vec![placed.display().to_string()]);
+}
+
+/// The handover with a DIVERGENT legacy occupant: the edited dir is never clobbered (byte-for-byte
+/// intact), the delivery lands NAMESPACED beside it, and the sweep says so.
+#[test]
+fn a_divergent_legacy_occupant_is_never_clobbered_and_lands_namespaced() {
+    let rig = Rig::new("handover-edit");
+    rig.seed_session();
+    let proj = Scratch::new("proj-hoe");
+    std::fs::create_dir_all(proj.0.join(".git")).unwrap();
+    std::fs::write(
+        proj.0.join("topos.toml"),
+        format!("[skills]\n\"{HOST}/{WS_NAME}/deploy\" = \"*\"\n"),
+    )
+    .unwrap();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = mk_version(&[("SKILL.md", FileMode::Regular, b"# deploy\n" as &[u8])]);
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let ctx = rig.ctx_at(Some(&proj.0));
+    ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+
+    let sid = crate::id::SkillId::parse("s_deploy").unwrap();
+    let playout = crate::sidecar::existing_project_store(&rig.fs, &proj.0).unwrap();
+    std::fs::create_dir_all(rig.layout().skills_dir()).unwrap();
+    std::fs::rename(playout.skill_dir(&sid), rig.layout().skill_dir(&sid)).unwrap();
+    std::fs::remove_dir_all(proj.0.join(".topos")).unwrap();
+
+    // The legacy occupant carries LOCAL EDITS — not the served bytes.
+    let placed = proj.0.join(".claude/skills/deploy");
+    std::fs::write(placed.join("SKILL.md"), b"# my edits\n").unwrap();
+    let edited = snapshot_dir(&placed);
+
+    let out = ops::manifest_update(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &ops::ManifestUpdateOpts::default(),
+    )
+    .unwrap();
+    // The edited dir is byte-for-byte intact — never clobbered, never adopted.
+    assert_eq!(snapshot_dir(&placed), edited);
+    // The delivery landed beside it, namespaced by the workspace slug, and the sweep disclosed it.
+    let beside = proj.0.join(".claude/skills/deploy-eng");
+    assert!(
+        beside.join("SKILL.md").exists(),
+        "the delivery lands namespaced: {:?}",
+        out.warnings
+    );
+    assert!(
+        out.warnings.iter().any(|w| w.starts_with("NAMESPACED")),
+        "{:?}",
+        out.warnings
+    );
 }
 
 #[test]

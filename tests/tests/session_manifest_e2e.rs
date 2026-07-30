@@ -1,6 +1,6 @@
 //! The composed SESSION + MANIFEST hero loop, over real HTTP against the real web app: login
 //! (the browser-approval flow at `/verify`), the governance-transferring genesis publish, the
-//! project-manifest reference landing INSIDE a checkout (with the `.git/info/exclude` line),
+//! project-manifest reference landing INSIDE a checkout (self-ignoring, state in the checkout's own store),
 //! fast-forward on `update`, the protection downgrade → review → approve loop, the `-g`
 //! server-stored profile lane, and the OWNER-side session end (the CLI's next sweep prints the
 //! one typed line and freezes — bytes stay).
@@ -141,7 +141,9 @@ fn the_session_manifest_hero_loop() {
         "the add names the manifest it edited: {added:?}"
     );
 
-    // The bytes live INSIDE the checkout — and the delivery happened on the add itself.
+    // The bytes live INSIDE the checkout — and the delivery happened on the add itself. The
+    // placed dir SELF-IGNORES: its root carries the exact sentinel ignore file beside the
+    // byte-exact bundle (exec bit included).
     let placed = proj.join(".claude").join("skills").join("deploy");
     let files = SessionInstall::dir_files(&placed);
     assert_eq!(
@@ -151,20 +153,32 @@ fn the_session_manifest_hero_loop() {
             .collect::<Vec<_>>(),
         vec![
             (
+                ".gitignore",
+                false,
+                b"# topos: delivered bytes, not committed\n*\n" as &[u8]
+            ),
+            (
                 "SKILL.md",
                 false,
                 b"# deploy\nDeploy the service.\n" as &[u8]
             ),
             ("run.sh", true, b"#!/bin/sh\necho deploying\n" as &[u8]),
         ],
-        "the checkout placement is byte-exact (exec bit included)"
+        "the checkout placement is byte-exact plus the self-ignore sentinel"
     );
-    // …and stays out of commits: the `.git/info/exclude` line.
-    let exclude =
-        std::fs::read_to_string(proj.join(".git").join("info").join("exclude")).expect("exclude");
+    // …and NOTHING was written under `.git/` (the placement keeps itself out of commits; the
+    // engine state lives in the project's own self-ignoring `.topos/` store).
     assert!(
-        exclude.contains("/.claude/skills/deploy/"),
-        "the managed placement is git-excluded: {exclude}"
+        std::fs::read_dir(proj.join(".git"))
+            .expect("the checkout's .git dir")
+            .next()
+            .is_none(),
+        "nothing under .git/ was written"
+    );
+    assert_eq!(
+        std::fs::read(proj.join(".topos").join(".gitignore")).expect("the store ignore"),
+        b"*\n",
+        "the project store ignores itself whole"
     );
 
     // ── v2 fast-forwards silently (login was the acceptance — no offer step) ────────────────────

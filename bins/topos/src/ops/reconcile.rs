@@ -8,7 +8,9 @@
 //!   demand with entitlement and expanded channels) and land in the HOME harness dirs;
 //! - **project items** (a folder's `topos.toml`) resolve through the session the reference's
 //!   host/workspace names — the catalog read supplies the current pointer — and materialize
-//!   INSIDE the project (its harness dirs, kept out of commits via `.git/info/exclude`);
+//!   INSIDE the project (its harness dirs, each landed dir carrying the self-ignore sentinel so
+//!   delivered bytes stay out of commits), with their engine state in the project's OWN store
+//!   (`<project>/.topos/state/<user>/` — per-scope independence: two scopes, two state trees);
 //! - **external GitHub refs** install at their PINNED commit (lockfile logic — no governance rail
 //!   behind them); **local path refs** are adopt-in-place facts (presence is the delivery).
 //!
@@ -474,6 +476,27 @@ pub(crate) fn manifest_update(
     {
         layers.push(Layer::personal(personal));
     }
+
+    // Recovery is LAZY for project stores, mirroring manifest discovery: a store is swept exactly
+    // when a run visits its project (no machine-wide registry). The home store's own recovery
+    // already ran at command start.
+    let now_millis = i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX);
+    for pd in &project_dirs {
+        if let Some(playout) = sidecar::existing_project_store(ctx.fs, pd)
+            && let Err(e) = sidecar::recover(ctx.fs, &playout, now_millis)
+        {
+            warnings.push(format!(
+                "STORE_RECOVERY_FAILED {}: {}",
+                pd.display(),
+                e.detail()
+            ));
+        }
+    }
+    // Pre-1.0 handover: HOME-store map rows that point into a project this run processes are the
+    // OLD blended model's leftovers — dropped here (bytes stay in place) so the project-scope pass
+    // below adopts what it finds through the ordinary byte-identical adopt-in-place.
+    handover_legacy_project_rows(ctx, &project_dirs, &mut warnings);
+
     let resolution = resolve_layers(&layers);
     for issue in &resolution.issues {
         warnings.push(format!(
@@ -838,6 +861,10 @@ fn reconcile_item(
                         ) {
                             Ok(mut row) => {
                                 row.workspace_id = Some(run.session.workspace_id.clone());
+                                if row.action == PullAction::DraftSynced {
+                                    warnings
+                                        .push(draft_synced_line(&item.name, row.synced_placements));
+                                }
                                 synced_ids.insert(skill_id);
                                 rows.push(row);
                             }
@@ -1073,6 +1100,7 @@ fn reconcile_item(
                     conflict: None,
                     merge: None,
                     merge_preview: None,
+                    synced_placements: None,
                 });
             } else {
                 warnings.push(format!(
@@ -1156,12 +1184,30 @@ fn sync_workspace_skill(
         agents: Vec::new(),
         excluded_agents: Vec::new(),
     };
-    // The scope decides the placement plan: person → the home engine; project → in-checkout dirs.
+    // The scope decides BOTH the placement plan and the STORE the engine runs against: person →
+    // the home layout + home engine; project → the project's own store
+    // (`<project>/.topos/state/<user>/`) + in-checkout dirs. Per-scope state is the independence
+    // guarantee — the same bundle followed at both scopes has two state trees, two drafts, two
+    // baselines, with no cross-scope anything.
     let project_dir = match scope {
         ResolvedScope::Project { dir } => Some(dir.clone()),
         ResolvedScope::Person => None,
     };
+    let store_layout = match &project_dir {
+        Some(dir) => match sidecar::ensure_project_store(ctx.fs, dir) {
+            Ok(layout) => layout,
+            Err(e) => {
+                note_item_failure(ctx, warnings, &target.name, &e);
+                return;
+            }
+        },
+        None => ctx.layout.clone(),
+    };
     let naming_slug = run.session.workspace_name.clone();
+    // The incoming version's digest arms adopt-in-place: a by-name project dir already holding a
+    // byte-identical copy (the handed-over old-world placement, a teammate's committed copy)
+    // BECOMES the placement instead of a namespaced sibling.
+    let adopt_digest = target.bundle_digest;
     let plan_fn =
         |ctx: &Ctx<'_>, skill_id: &str, lock: &Lock, map: &PlacementMap| match &project_dir {
             Some(dir) => placement::project_plan(
@@ -1174,12 +1220,16 @@ fn sync_workspace_skill(
                 },
                 override_dir.as_deref(),
                 Some(map),
-                None,
+                adopt_digest,
             ),
             None => placement::plan_for_skill(ctx, skill_id, lock, map),
         };
+    // Every engine step below runs against the SCOPE's store: same fs/clock/ids, the scope's
+    // layout, and this session's plane + the run's follow seam.
+    let run_ctx =
+        super::pull::ctx_with_store(ctx, &store_layout, run.transports.plane.as_plane(), follow);
     // A brand-new arrival lays the never-received baseline first (scope-planned).
-    if !ctx.fs.exists(&ctx.layout.skill_dir(&sid)) {
+    if !run_ctx.fs.exists(&run_ctx.layout.skill_dir(&sid)) {
         let baseline_lock = Lock {
             schema_version: topos_types::PERSISTED_SCHEMA_VERSION,
             skill_id: target.skill_id.clone(),
@@ -1200,9 +1250,9 @@ fn sync_workspace_skill(
             harness_layer: None,
             harness_slug: None,
         };
-        let plan = plan_fn(ctx, &target.skill_id, &baseline_lock, &empty);
+        let plan = plan_fn(&run_ctx, &target.skill_id, &baseline_lock, &empty);
         if let Err(e) = lay_baseline_with_plan(
-            ctx,
+            &run_ctx,
             &sid,
             target.name.clone(),
             &plan,
@@ -1216,8 +1266,6 @@ fn sync_workspace_skill(
         .plane
         .as_delivery()
         .bind_skill(&run.session.workspace_id, &target.skill_id);
-    let run_ctx =
-        super::pull::ctx_with_plane_and_follow(ctx, run.transports.plane.as_plane(), follow);
     match sync_engine::sync_one_planned(
         &run_ctx,
         &sid,
@@ -1228,13 +1276,64 @@ fn sync_workspace_skill(
     ) {
         Ok(mut row) => {
             row.workspace_id = Some(run.session.workspace_id.clone());
-            // Project placements stay out of commits: one `.git/info/exclude` line per landed dir.
-            if let ResolvedScope::Project { dir } = scope {
-                exclude_project_placements(ctx, dir, &sid, warnings);
+            // The settled-draft fan-out's receipt line rides the warning channel — quiet, factual.
+            if row.action == PullAction::DraftSynced {
+                warnings.push(draft_synced_line(&target.name, row.synced_placements));
+            }
+            // Disclose a delivery the naming ladder had to place BESIDE a same-named occupant the
+            // record does not own (the never-clobber outcome, e.g. a divergent pre-existing copy).
+            if let ResolvedScope::Project { .. } = scope {
+                disclose_namespaced(&run_ctx, &sid, &target.name, warnings);
             }
             rows.push(row);
         }
         Err(e) => note_item_failure(ctx, warnings, &target.name, &e),
+    }
+}
+
+/// The one receipt line a settled-draft fan-out earns (the sweep stays otherwise silent about it).
+fn draft_synced_line(name: &str, synced: Option<u32>) -> String {
+    let n = synced.unwrap_or(0);
+    let folders = if n == 1 {
+        "1 other agent folder".to_owned()
+    } else {
+        format!("{n} other agent folders")
+    };
+    format!("DRAFT_SYNCED {name}: synced your edits of {name} to {folders}")
+}
+
+/// Warn when a skill's placement had to land under a NAMESPACED dir because the by-name dir is
+/// occupied by content the record does not own (never clobbered — the occupant keeps its bytes).
+fn disclose_namespaced(ctx: &Ctx<'_>, sid: &SkillId, name: &str, warnings: &mut Vec<String>) {
+    let Some(sanitized) = topos_harness::sanitize_skill_dir(name) else {
+        return;
+    };
+    let Ok(Some(map)) = doc::read_map(ctx.fs, &ctx.layout.published(sid).map) else {
+        return;
+    };
+    for p in &map.placements {
+        let placed = Path::new(p);
+        let Some(base) = placed.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if base == sanitized {
+            continue;
+        }
+        let Some(sibling) = placed.parent().map(|d| d.join(&sanitized)) else {
+            continue;
+        };
+        // Only an UNOWNED occupant is worth a line: a sibling this skill's own record (or another
+        // tracked skill's, in this store) names is an ordinary collision, not an anomaly.
+        if ctx.fs.exists(&sibling)
+            && !map.placements.iter().any(|q| Path::new(q) == sibling)
+            && !placement::recorded_by_another_skill(ctx, sid.as_str(), &sibling)
+        {
+            warnings.push(format!(
+                "NAMESPACED {name}: {} holds different content topos never placed; delivered \
+                 beside it as {base}",
+                sibling.display()
+            ));
+        }
     }
 }
 
@@ -1273,6 +1372,7 @@ fn reconcile_github(
                     conflict: None,
                     merge: None,
                     merge_preview: None,
+                    synced_placements: None,
                 });
                 return;
             }
@@ -1327,6 +1427,7 @@ fn reconcile_github(
                     conflict: None,
                     merge: None,
                     merge_preview: None,
+                    synced_placements: None,
                 }),
                 Err(e) => note_item_failure(ctx, warnings, &item.name, &e),
             }
@@ -1484,6 +1585,7 @@ fn refresh_github(
         conflict: None,
         merge: None,
         merge_preview: None,
+        synced_placements: None,
     })
 }
 
@@ -1581,120 +1683,93 @@ fn placement_override(
     }
 }
 
-/// Keep a project-scope skill's landed dirs out of commits: one `.git/info/exclude` line per
-/// placement under the project root (committed ignore files are NEVER touched). Best-effort — a
-/// project without `.git` simply has nothing to exclude from.
-fn exclude_project_placements(
+/// Pre-1.0 old-state handover (no compatibility machinery): before per-scope stores, ONE home map
+/// blended home and project placements. A home-store row that points INTO a project directory this
+/// run processes is legacy — dropped from the home map with its BYTES LEFT IN PLACE, so the
+/// project-scope pass adopts what it finds (byte-identical copies adopt in place; a divergent
+/// occupant is never clobbered and the delivery lands namespaced beside it, disclosed). Two kinds
+/// of rows are NOT handed over:
+///
+/// - agent-less native rows (kind `native`, no agent) — the user's own chosen locations (an
+///   adopt-in-place working copy, an explicit placement pin), which the person-scope record keeps
+///   managing;
+/// - rows of a skill imported from an external origin (`origin.json` present) — external refs keep
+///   their home-store custody for now.
+///
+/// A skill whose home map ends EMPTY after the drop was project-only: its home state dir is
+/// retired whole (the same delete the tracked remove runs) — the project store carries the scope's
+/// state from here on.
+fn handover_legacy_project_rows(
     ctx: &Ctx<'_>,
-    project_dir: &Path,
-    sid: &SkillId,
+    project_dirs: &[PathBuf],
     warnings: &mut Vec<String>,
 ) {
-    let sp = ctx.layout.published(sid);
-    let Ok(Some(map)) = doc::read_map(ctx.fs, &sp.map) else {
-        return;
-    };
-    let rels: Vec<String> = map
-        .placements
-        .iter()
-        .filter_map(|p| {
-            Path::new(p)
-                .strip_prefix(project_dir)
-                .ok()
-                .map(|rel| format!("/{}/", rel.display()))
-        })
-        .collect();
-    if rels.is_empty() {
+    use topos_types::persisted::PlacementKind;
+    if project_dirs.is_empty() {
         return;
     }
-    if let Err(e) = ensure_git_exclude(ctx, project_dir, &rels) {
-        warnings.push(format!(
-            "GIT_EXCLUDE_FAILED {}: {}",
-            project_dir.display(),
-            e.detail()
-        ));
-    }
-}
-
-/// Append missing lines to the repo's `.git/info/exclude` (creating it if needed). Resolves a
-/// worktree/submodule `.git` FILE through its `gitdir:` pointer (and a worktree's `commondir`),
-/// so the exclude lands where git actually reads it. Idempotent.
-pub(crate) fn ensure_git_exclude(
-    ctx: &Ctx<'_>,
-    project_dir: &Path,
-    lines: &[String],
-) -> Result<(), ClientError> {
-    let Some(git_dir) = resolve_git_dir(ctx, project_dir) else {
-        return Ok(()); // not a git repo — nothing travels, nothing to exclude
+    let Ok(entries) = ctx.fs.read_dir(&ctx.layout.skills_dir()) else {
+        return;
     };
-    let exclude = git_dir.join("info/exclude");
-    let existing = ctx
-        .fs
-        .read_opt(&exclude)?
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
-        .unwrap_or_default();
-    let present: HashSet<&str> = existing.lines().map(str::trim).collect();
-    let missing: Vec<&String> = lines
-        .iter()
-        .filter(|l| !present.contains(l.trim()))
-        .collect();
-    if missing.is_empty() {
-        return Ok(());
-    }
-    let mut next = existing;
-    if !next.is_empty() && !next.ends_with('\n') {
-        next.push('\n');
-    }
-    if !next.contains("# topos-managed skills") {
-        next.push_str("# topos-managed skills (placed by `topos update`; not committed)\n");
-    }
-    for l in missing {
-        next.push_str(l);
-        next.push('\n');
-    }
-    ctx.fs.create_dir_all(&git_dir.join("info"))?;
-    crate::atomic::atomic_write(ctx.fs, &exclude, next.as_bytes())
-}
-
-/// The git dir whose `info/exclude` covers `project_dir`: `.git` as a dir directly; a `.git` FILE
-/// (worktree / submodule) through `gitdir:`, then a worktree's `commondir` indirection.
-fn resolve_git_dir(ctx: &Ctx<'_>, project_dir: &Path) -> Option<PathBuf> {
-    let dot_git = project_dir.join(".git");
-    match ctx.fs.path_kind(&dot_git).ok()? {
-        Some(crate::fs_seam::PathKind::Dir) => Some(dot_git),
-        Some(_) => {
-            let content = ctx.fs.read_opt(&dot_git).ok()??;
-            let text = String::from_utf8_lossy(&content);
-            let gitdir = text
-                .lines()
-                .find_map(|l| l.trim().strip_prefix("gitdir:"))?
-                .trim();
-            let gitdir = if Path::new(gitdir).is_absolute() {
-                PathBuf::from(gitdir)
-            } else {
-                project_dir.join(gitdir)
-            };
-            // A linked worktree's exclude lives in the COMMON dir.
-            if let Ok(Some(common)) = ctx.fs.read_opt(&gitdir.join("commondir")) {
-                let common = String::from_utf8_lossy(&common).trim().to_owned();
-                let common_path = if Path::new(&common).is_absolute() {
-                    PathBuf::from(common)
-                } else {
-                    gitdir.join(common)
-                };
-                return Some(common_path);
-            }
-            Some(gitdir)
+    for entry in entries {
+        let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Ok(sid) = SkillId::parse(id) else {
+            continue;
+        };
+        let sp = ctx.layout.published(&sid);
+        if matches!(ctx.fs.read_opt(&sp.origin), Ok(Some(_))) {
+            continue; // an external import keeps its home custody
         }
-        None => None,
+        let Ok(_guard) = crate::sidecar::lock_skill(ctx.fs, &ctx.layout, &sid) else {
+            continue;
+        };
+        let Ok(Some(map)) = doc::read_map(ctx.fs, &sp.map) else {
+            continue;
+        };
+        let legacy: Vec<usize> = map
+            .placements
+            .iter()
+            .zip(&map.placement_state)
+            .enumerate()
+            .filter(|(_, (p, st))| {
+                (st.agent.is_some() || st.kind == PlacementKind::Shared)
+                    && project_dirs.iter().any(|pd| Path::new(p).starts_with(pd))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if legacy.is_empty() {
+            continue;
+        }
+        let mut next = map.clone();
+        let keep: Vec<bool> = (0..map.placements.len())
+            .map(|i| !legacy.contains(&i))
+            .collect();
+        let mut it = keep.iter();
+        next.placements.retain(|_| *it.next().unwrap_or(&true));
+        let mut it = keep.iter();
+        next.placement_state.retain(|_| *it.next().unwrap_or(&true));
+        let done = if next.placements.is_empty() {
+            // Project-only: the home state dir is retired whole; the project store owns the scope.
+            ctx.fs
+                .remove_dir_all(&ctx.layout.skill_dir(&sid))
+                .map_err(ClientError::from)
+        } else {
+            crate::materialize::mirror_first_placement(&mut next);
+            doc::write_map(ctx.fs, &sp.map, &next)
+        };
+        if let Err(e) = done {
+            warnings.push(format!("STATE_HANDOVER_FAILED {id}: {}", e.detail()));
+        }
     }
 }
 
 /// Clean what nothing demands any more:
 /// - a PROFILE-dropped skill (in the prior cache, absent from today's delivery, resolved by no
 ///   manifest): snapshot any draft, clean its NON-project placements, reset to never-received;
-/// - a PROJECT-dropped skill (placements under this cwd's project chain that today's resolution
-///   did not manage): snapshot-first clean of exactly those dirs — EXCEPT under a project dir
+/// - a PROJECT-dropped skill (rows in a visited project's OWN store that today's resolution did
+///   not manage there): snapshot-first clean of exactly those dirs — EXCEPT under a project dir
 ///   whose channel item failed to expand this run (`unexpanded`): the member set is unknowable
 ///   there, so an offline sweep, an ended session, or a transient index failure freezes instead
 ///   of deleting.
@@ -1760,6 +1835,7 @@ fn clean_undemanded(
                     conflict: None,
                     merge: None,
                     merge_preview: None,
+                    synced_placements: None,
                 }),
                 Ok(None) => {}
                 Err(e) => note_item_failure(ctx, warnings, skill_id, &e),
@@ -1799,13 +1875,15 @@ fn clean_undemanded(
                     conflict: None,
                     merge: None,
                     merge_preview: None,
+                    synced_placements: None,
                 }),
                 Err(e) => note_item_failure(ctx, warnings, skill_id, &e),
             }
         }
     }
 
-    // Project-dropped: recorded placements under this cwd's chain the resolution didn't manage.
+    // Project-dropped: each visited project's OWN store is read for placements today's resolution
+    // did not manage there (per-scope stores — the home map no longer records project placements).
     if project_dirs.is_empty() {
         return;
     }
@@ -1817,52 +1895,57 @@ fn clean_undemanded(
             ResolvedScope::Person => None,
         })
         .collect();
-    let Ok(entries) = ctx.fs.read_dir(&ctx.layout.skills_dir()) else {
-        return;
-    };
-    for entry in entries {
-        let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
+    for pd in project_dirs {
+        // A project without a store has nothing recorded to clean; the probe never mints one.
+        let Some(playout) = sidecar::existing_project_store(ctx.fs, pd) else {
             continue;
         };
-        // A skill THIS run reconciled is demanded by construction (incl. the channel-expanded
-        // items, which carry the channel's name in the resolution, not their own).
-        if synced_ids.contains(id) {
-            continue;
-        }
-        let Ok(sid) = SkillId::parse(id) else {
+        let pctx = super::pull::ctx_with_layout(ctx, &playout);
+        let Ok(entries) = pctx.fs.read_dir(&playout.skills_dir()) else {
             continue;
         };
-        let sp = ctx.layout.published(&sid);
-        let Ok(Some(lock)) = doc::read_doc::<Lock>(ctx.fs, &sp.lock) else {
-            continue;
-        };
-        let Ok(Some(map)) = doc::read_map(ctx.fs, &sp.map) else {
-            continue;
-        };
-        let stale: Vec<usize> = map
-            .placements
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| {
-                // A failed channel expansion freezes everything under its project dir — a
-                // member's dir must survive the sweep that could not see the member list.
-                if unexpanded.iter().any(|sd| Path::new(p).starts_with(sd)) {
-                    return false;
-                }
-                project_dirs.iter().any(|pd| {
+        for entry in entries {
+            let Some(id) = entry.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            // A skill THIS run reconciled is demanded by construction (incl. the channel-expanded
+            // items, which carry the channel's name in the resolution, not their own).
+            if synced_ids.contains(id) {
+                continue;
+            }
+            let Ok(sid) = SkillId::parse(id) else {
+                continue;
+            };
+            let sp = playout.published(&sid);
+            let Ok(Some(lock)) = doc::read_doc::<Lock>(pctx.fs, &sp.lock) else {
+                continue;
+            };
+            let Ok(Some(map)) = doc::read_map(pctx.fs, &sp.map) else {
+                continue;
+            };
+            let stale: Vec<usize> = map
+                .placements
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| {
+                    // A failed channel expansion freezes everything under its project dir — a
+                    // member's dir must survive the sweep that could not see the member list.
+                    if unexpanded.iter().any(|sd| Path::new(p).starts_with(sd)) {
+                        return false;
+                    }
                     Path::new(p).starts_with(pd)
                         && !resolved_project_names.contains(&(pd.as_path(), lock.name.as_str()))
                 })
-            })
-            .map(|(i, _)| i)
-            .collect();
-        if stale.is_empty() {
-            continue;
-        }
-        let cleaned = crate::sidecar::lock_skill(ctx.fs, &ctx.layout, &sid)
-            .and_then(|_guard| clean_placements(ctx, &sid, &lock, &map, &stale));
-        if let Err(e) = cleaned {
-            note_item_failure(ctx, warnings, &lock.name, &e);
+                .map(|(i, _)| i)
+                .collect();
+            if stale.is_empty() {
+                continue;
+            }
+            let cleaned = crate::sidecar::lock_skill(pctx.fs, &pctx.layout, &sid)
+                .and_then(|_guard| clean_placements(&pctx, &sid, &lock, &map, &stale));
+            if let Err(e) = cleaned {
+                note_item_failure(ctx, warnings, &lock.name, &e);
+            }
         }
     }
 }
@@ -2118,6 +2201,7 @@ pub(crate) fn lay_baseline_with_plan(
             base_commit: ZERO_HEX.to_owned(),
             work_hash: ZERO_HEX.to_owned(),
             held: false,
+            draft_observed: None,
         },
     )?;
     let baseline = PlacementMap {

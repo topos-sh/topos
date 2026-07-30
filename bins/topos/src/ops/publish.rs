@@ -25,7 +25,7 @@ use super::contribute::{self, ContributeConnect, PUBLISH_MESSAGE};
 use super::sync_engine;
 use super::{
     DiscoveryRoots, add, add_with_name, parse_hex32, resolve_add_target, resolve_skill,
-    resolve_skill_in_workspace, split_target, tracked_skill_at,
+    split_target, tracked_skill_at,
 };
 use crate::ctx::Ctx;
 use crate::error::ClientError;
@@ -114,7 +114,12 @@ pub(crate) fn publish(
 
     // Auto-add: adopt an untracked LOCAL source before publishing, and learn the tracked skill name the
     // rest of the flow resolves. `added` is `Some` iff THIS invocation performed the adoption (disclosure).
-    let (skill_name, added) = ensure_tracked(ctx, roots, &source_str)?;
+    // A name a cwd-chain PROJECT store tracks is already tracked (per-scope stores) — the auto-add
+    // must not re-adopt the placed dir as a brand-new skill.
+    let (skill_name, added) = match super::project_tracked_name(ctx, &source_str) {
+        Some(name) => (name, None),
+        None => ensure_tracked(ctx, roots, &source_str)?,
+    };
 
     let outcome = enrolled_publish(
         ctx,
@@ -236,8 +241,10 @@ pub(crate) fn publish_describe(
     // an UNTRACKED source is NOT adopted here — adopting mints a sidecar and arms the session-start hook,
     // a durable change the human has not confirmed. The apply (`--yes`) does the adoption and discloses
     // it; the describe points the user at that.
-    let skill_name = match resolve_skill(ctx, &source_str) {
-        Ok((_, lock)) => lock.name,
+    // The resolver spans the per-scope stores (home first, then the cwd chain's project stores) —
+    // a project-delivered bundle's draft is described against the checkout's own store.
+    let skill_name = match super::resolve_skill_stored(ctx, &source_str, None) {
+        Ok((_, _, lock)) => lock.name,
         // Tracked ambiguously (2+ under this exact name) — the `--workspace`-filtered resolve below picks.
         Err(ClientError::AmbiguousName { .. }) => source_str.clone(),
         Err(ClientError::NoSuchSkill { .. }) => {
@@ -250,7 +257,7 @@ pub(crate) fn publish_describe(
         Err(e) => return Err(e),
     };
 
-    let (id, lock) = resolve_skill_in_workspace(ctx, &skill_name, workspace)?;
+    let (store, id, lock) = super::resolve_skill_stored(ctx, &skill_name, workspace)?;
     let lane = match session {
         Some(sc) => super::resolve_session_lane(ctx, sc, workspace, Some(id.as_str()))?,
         None => None,
@@ -268,7 +275,8 @@ pub(crate) fn publish_describe(
     let lane_ctx;
     let ctx = match (&lane, &cache_follow) {
         (Some(l), Some(cf)) => {
-            lane_ctx = super::pull::ctx_with_plane_and_follow(ctx, &*l.transports.plane, cf);
+            // The lane's transports + the cache follow seam + the skill's OWNING store.
+            lane_ctx = super::pull::ctx_with_store(ctx, &store, &*l.transports.plane, cf);
             &lane_ctx
         }
         _ => ctx,
@@ -689,8 +697,10 @@ fn enrolled_publish(
 ) -> Result<PublishOutcome, ClientError> {
     // The `--workspace` filter disambiguates a name shared across workspaces. A DELIVERED skill signs in
     // its OWN workspace (the pointer scope); a brand-new local skill (a genesis publish, no delivery)
-    // is AMBIENT — the single session/membership or the `--workspace`-selected one.
-    let (id, lock) = resolve_skill_in_workspace(ctx, skill_name, workspace)?;
+    // is AMBIENT — the single session/membership or the `--workspace`-selected one. The resolver
+    // spans the per-scope stores: a project-delivered bundle's state lives in the checkout's own
+    // store, and its per-skill work below runs against that store.
+    let (store, id, lock) = super::resolve_skill_stored(ctx, skill_name, workspace)?;
     // The SESSION lane (the manifest model): the workspace + transports resolve from the
     // logged-in sessions; the legacy device enrollment keeps its instance.json path below.
     let lane = match session {
@@ -722,7 +732,9 @@ fn enrolled_publish(
     let lane_ctx;
     let ctx = match (&lane, &cache_follow) {
         (Some(l), Some(cf)) => {
-            lane_ctx = super::pull::ctx_with_plane_and_follow(ctx, &*l.transports.plane, cf);
+            // The lane's transports + the cache follow seam + the skill's OWNING store (home, or
+            // the project store the resolver located) — the per-skill work below runs there.
+            lane_ctx = super::pull::ctx_with_store(ctx, &store, &*l.transports.plane, cf);
             &lane_ctx
         }
         _ => ctx,

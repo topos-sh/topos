@@ -246,6 +246,27 @@ pub(crate) fn sync_one_planned(
         // (or a scope change) gets its bytes without waiting for the next served version.
         sync::SyncStatus::Current | sync::SyncStatus::Draft => {
             converge_placements(ctx, &sp, skill_id, &lock, &sync, &map, &managed, &work)?;
+            // The SETTLED-DRAFT fan-out: a draft whose content is unchanged since the previous
+            // run's observation is copied onto the bundle's other placements in this scope (their
+            // baselines advance with it); an unsettled draft only updates the observation — a
+            // mid-edit file never spreads. Runs only here — no pending remote update, no freeze
+            // (true competitors already errored in compute_work).
+            if let WorkState::Draft { scanned } = &work.state {
+                let synced = settle_or_spread(
+                    ctx, &sp, skill_id, &lock, &sync, &map, &managed, &work, scanned,
+                )?;
+                if synced > 0 {
+                    return Ok(synced_row(&name, &sync, synced));
+                }
+            } else if sync.draft_observed.is_some() {
+                // The draft resolved outside an apply (reverted by hand): the stale observation
+                // must not let a FUTURE identical edit spread on its first sighting.
+                let cleared = SyncState {
+                    draft_observed: None,
+                    ..sync.clone()
+                };
+                doc::write_doc(ctx.fs, &sp.sync, &cleared)?;
+            }
             return Ok(state_row(&name, &sync, PullAction::UpToDate));
         }
         // ② BEHIND / ④ DIVERGED — an update is pending; fall through to fetch + apply.
@@ -479,6 +500,7 @@ pub(crate) fn go_back(
         base_commit: target_hex.clone(),
         work_hash: target_digest_hex.clone(),
         held: true,
+        draft_observed: None,
     };
     let next_lock = lock_from_bundle(&lock, target, &bundle);
     let report = materialize::materialize(
@@ -498,6 +520,8 @@ pub(crate) fn go_back(
                 snapshot_draft(ctx, &sp, &lock, scanned).map(|_| ())
             }),
             takeover: None,
+            self_ignore: ctx.layout.is_project_scope(),
+            expected: None,
         },
     )?;
     log_apply(ctx, skill_id, "pull-goback", target, &report);
@@ -513,6 +537,7 @@ pub(crate) fn go_back(
         conflict: None,
         merge: None,
         merge_preview: None,
+        synced_placements: None,
     })
 }
 
@@ -564,6 +589,7 @@ pub(crate) fn reset_to_base(
         base_commit: lock.base_commit.clone(),
         work_hash: base_digest_hex.clone(),
         held: false,
+        draft_observed: None,
     };
     let report = materialize::materialize(
         ctx.fs,
@@ -579,6 +605,8 @@ pub(crate) fn reset_to_base(
                 snapshot_draft(ctx, &sp, &lock, scanned).map(|_| ())
             }),
             takeover: None,
+            self_ignore: ctx.layout.is_project_scope(),
+            expected: None,
         },
     )?;
     // A recorded merge conflict describes the divergence this reset just DISCARDED — clear the
@@ -689,6 +717,8 @@ fn apply_forward(
                 snapshot_draft(ctx, sp, lock, scanned).map(|_| ())
             }),
             takeover: None,
+            self_ignore: ctx.layout.is_project_scope(),
+            expected: None,
         },
     )?;
     log_apply(ctx, skill_id, "pull", t.commit, &report);
@@ -757,10 +787,142 @@ fn converge_placements(
                 snapshot_draft(ctx, sp, lock, scanned).map(|_| ())
             }),
             takeover: None,
+            self_ignore: ctx.layout.is_project_scope(),
+            expected: None,
         },
     )?;
     log_apply(ctx, skill_id, "converge", base, &report);
     Ok(())
+}
+
+/// The settled-draft fan-out. Compares the draft's digest against the durable observation
+/// (`sync.draft_observed`):
+///
+/// - UNSETTLED (first sighting, or the content moved since): only the observation is updated —
+///   a mid-edit file never spreads. Returns 0.
+/// - SETTLED (byte-identical across two runs): the draft's bytes are copied onto the bundle's
+///   OTHER placements in this scope — each stale/clean sibling by an ordinary atomic swap staged
+///   from the draft content, each landing recorded as that placement's NEW baseline
+///   (`materialized_sha` = the draft digest), so a later edit there is a fresh draft against it,
+///   never a false competitor. The draft copy itself is untouched; the lock (the pristine version)
+///   and `observed`/`applied` do not move. Snapshot-on-touch stays armed, and the swap re-stats
+///   each target immediately before exchanging — bytes that moved in the window are SKIPPED
+///   (never frozen); the next sweep reconciles. Returns how many placements actually landed.
+#[allow(clippy::too_many_arguments)]
+fn settle_or_spread(
+    ctx: &Ctx<'_>,
+    sp: &sidecar::SkillPaths,
+    skill_id: &str,
+    lock: &Lock,
+    sync: &SyncState,
+    map: &PlacementMap,
+    managed: &[usize],
+    work: &WorkTree,
+    scanned: &ScannedBundle,
+) -> Result<u32, ClientError> {
+    let d_hex = to_hex(&scanned.bundle_digest);
+    if sync.draft_observed.as_deref() != Some(d_hex.as_str()) {
+        let observed = SyncState {
+            draft_observed: Some(d_hex),
+            ..sync.clone()
+        };
+        doc::write_doc(ctx.fs, &sp.sync, &observed)?;
+        return Ok(0);
+    }
+    // Settled. The targets: every OTHER managed placement that is a sync target — a clean copy at
+    // any other content, an edited copy the classifier proved STALE BEHIND this draft (or a
+    // byte-identical twin, whose baseline merely advances in place), or an absent dir. Foreign and
+    // unscannable dirs are never touched.
+    let mut targets: Vec<usize> = Vec::new();
+    let mut expected: Vec<(usize, Option<String>)> = Vec::new();
+    for &i in managed {
+        if work.draft_idx == Some(i) {
+            continue;
+        }
+        let Some(s) = work.scans.get(i) else { continue };
+        match &s.status {
+            ScanStatus::Clean { digest } => {
+                let hex = to_hex(digest);
+                if hex != d_hex {
+                    targets.push(i);
+                    expected.push((i, Some(hex)));
+                }
+            }
+            ScanStatus::Modified { scanned: other } => {
+                targets.push(i);
+                expected.push((i, Some(to_hex(&other.bundle_digest))));
+            }
+            ScanStatus::Absent => {
+                targets.push(i);
+                expected.push((i, None));
+            }
+            ScanStatus::Foreign | ScanStatus::Unscannable => {}
+        }
+    }
+    if targets.is_empty() {
+        return Ok(0);
+    }
+    // The draft's bytes get a store identity FIRST (idempotent), so the recorded baselines below
+    // always name recoverable content.
+    snapshot_draft(ctx, sp, lock, scanned)?;
+    let bundle = rendered_from_scanned(scanned);
+    let next_sync = SyncState {
+        draft_observed: Some(d_hex.clone()),
+        ..sync.clone()
+    };
+    // The lock and the map-level applied version DO NOT move — the pristine version is unchanged;
+    // only the landed placements' per-placement baselines advance (the materializer records them).
+    materialize::materialize(
+        ctx.fs,
+        &MaterializeReq {
+            skill_id,
+            target_indices: &targets,
+            bundle: &bundle,
+            next_map: map.clone(),
+            next_lock: lock,
+            next_sync: &next_sync,
+            sp,
+            snapshot: Some(&|s: &ScannedBundle| snapshot_draft(ctx, sp, lock, s).map(|_| ())),
+            takeover: None,
+            self_ignore: ctx.layout.is_project_scope(),
+            expected: Some(&expected),
+        },
+    )?;
+    // Count what actually landed (the skip arm may have left some targets put): a target whose
+    // recorded baseline NOW names the draft and did not before.
+    let after = read_map_required(ctx, sp)?;
+    let landed = targets
+        .iter()
+        .filter(|&&i| {
+            after
+                .placement_state
+                .get(i)
+                .is_some_and(|st| st.materialized_sha.as_deref() == Some(d_hex.as_str()))
+                && map
+                    .placement_state
+                    .get(i)
+                    .is_none_or(|st| st.materialized_sha.as_deref() != Some(d_hex.as_str()))
+        })
+        .count();
+    Ok(u32::try_from(landed).unwrap_or(u32::MAX))
+}
+
+/// A scanned working tree as a [`topos_gitstore::RenderedBundle`] (the spread stages the draft's
+/// exact bytes).
+fn rendered_from_scanned(b: &ScannedBundle) -> topos_gitstore::RenderedBundle {
+    topos_gitstore::RenderedBundle {
+        files: b
+            .files
+            .iter()
+            .map(|f| topos_gitstore::RenderedFile {
+                path: f.path.clone(),
+                mode: f.mode,
+                bytes: f.bytes.clone(),
+                content_sha256: digest::sha256(&f.bytes),
+            })
+            .collect(),
+        bundle_digest: b.bundle_digest,
+    }
 }
 
 /// Snapshot EVERY distinct edited copy into the sidecar store (the explicit-overwrite verbs' rail:
@@ -875,6 +1037,8 @@ pub(crate) fn forwarded_sync(
         base_commit: to_hex(&target),
         work_hash: target_digest_hex.to_owned(),
         held: false,
+        // A forward apply/heal lands the pristine target everywhere — no standing draft remains.
+        draft_observed: None,
     }
 }
 
@@ -1098,15 +1262,21 @@ pub(crate) enum WorkState {
 pub(crate) struct WorkTree {
     pub scans: Vec<placement::PlacementScan>,
     pub state: WorkState,
+    /// The placement index the [`WorkState::Draft`] bytes were read from (the advanced copy), so
+    /// the settled-draft fan-out knows which copy is THE draft. `None` for every other state.
+    pub draft_idx: Option<usize>,
 }
 
-/// Classify the placements into ONE work tree — draft-anywhere:
+/// Classify the placements into ONE work tree — draft-anywhere, with the two detectors SPLIT:
 ///
-/// - Each copy is scanned against ITS OWN recorded per-placement sha. Exactly one distinct EDITED
-///   copy ⇒ that copy is THE work tree (the draft may live in the shared dir or any native copy);
-///   MORE than one (with differing bytes) ⇒ the typed [`ClientError::PlacementsDiverged`] freeze —
-///   nothing is overwritten, every edited path is disclosed, and `update --reset` (or
-///   hand-reconciling) is the named way out.
+/// - The DRAFT detector reads each copy against ITS OWN recorded per-placement sha; one distinct
+///   edited content per bundle+scope is THE work tree (the draft may live in the shared dir or any
+///   native copy).
+/// - The CONFLICT detector reads the edited copies against EACH OTHER: two copies are competitors
+///   ONLY when neither's bytes equal the other's RECORDED BASELINE. A copy sitting at a sibling's
+///   baseline is merely STALE BEHIND that sibling's draft — the draft resolves to the advanced
+///   copy, and only TRUE competitors raise the typed [`ClientError::PlacementsDiverged`] freeze
+///   (nothing overwritten, each competing path disclosed, `update --reset` the named way out).
 /// - With NO edited copy, the work tree is the FIRST placement's copy (the canonical one — the exact
 ///   single-placement behavior), falling back to the first present copy. Its digest vs the LOCK
 ///   decides clean-vs-draft for the kernel: a copy that matches its recorded sha but not the lock is
@@ -1127,22 +1297,23 @@ pub(crate) fn compute_work(
         return Ok(WorkTree {
             scans,
             state: WorkState::Unscannable,
+            draft_idx: None,
         });
     }
-    let modified = placement::distinct_modified(&scans);
-    if modified.len() > 1 {
-        return Err(placement::placements_diverged(skill_name, &scans));
-    }
-    // The work tree: the single edited copy when one exists, else the first (canonical) present copy.
-    let chosen: Option<&placement::PlacementScan> = match modified.first() {
-        Some((idx, _)) => Some(&scans[*idx]),
-        None => scans.iter().find(|s| {
+    // The work tree: the resolved draft when one exists, else the first (canonical) present copy.
+    let chosen: Option<&placement::PlacementScan> = match placement::classify_draft(&scans, map) {
+        placement::DraftVerdict::Competitors(indices) => {
+            return Err(placement::placements_diverged(skill_name, &scans, &indices));
+        }
+        placement::DraftVerdict::One { idx, .. } => Some(&scans[idx]),
+        placement::DraftVerdict::NoDraft => scans.iter().find(|s| {
             matches!(
                 s.status,
                 ScanStatus::Clean { .. } | ScanStatus::Modified { .. }
             )
         }),
     };
+    let mut draft_idx = None;
     let state = match chosen {
         None => WorkState::Absent,
         Some(s) => {
@@ -1162,11 +1333,16 @@ pub(crate) fn compute_work(
                     ScanStatus::Clean { .. } => crate::scan::scan(&s.dir)?,
                     _ => unreachable!("chosen is always a scanned copy"),
                 };
+                draft_idx = Some(s.idx);
                 WorkState::Draft { scanned }
             }
         }
     };
-    Ok(WorkTree { scans, state })
+    Ok(WorkTree {
+        scans,
+        state,
+        draft_idx,
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1321,6 +1497,7 @@ fn state_row(name: &str, sync: &SyncState, action: PullAction) -> PullSkill {
         conflict: None,
         merge: None,
         merge_preview: None,
+        synced_placements: None,
     }
 }
 
@@ -1336,6 +1513,23 @@ fn applied_row(name: &str, sync: &SyncState, _target: [u8; 32]) -> PullSkill {
         conflict: None,
         merge: None,
         merge_preview: None,
+        synced_placements: None,
+    }
+}
+
+/// The settled-draft fan-out's receipt row: `n` other agent folders now carry the draft.
+fn synced_row(name: &str, sync: &SyncState, n: u32) -> PullSkill {
+    PullSkill {
+        skill: name.to_owned(),
+        workspace_id: None,
+        observed: sync.observed,
+        applied: sync.applied,
+        action: PullAction::DraftSynced,
+        offer: None,
+        conflict: None,
+        merge: None,
+        merge_preview: None,
+        synced_placements: Some(n),
     }
 }
 
@@ -1353,6 +1547,7 @@ fn offer_row(name: &str, sync: &SyncState, target: [u8; 32], target_digest_hex: 
         conflict: None,
         merge: None,
         merge_preview: None,
+        synced_placements: None,
     }
 }
 
@@ -1376,5 +1571,6 @@ fn diverged_row(
         }),
         merge: None,
         merge_preview,
+        synced_placements: None,
     }
 }
