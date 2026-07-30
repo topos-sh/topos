@@ -177,6 +177,8 @@ export interface ChannelDetail {
   audienceCount: number;
   /** Whether the set is assigned to THIS member — by name, or to everyone. */
   viewerIncluded: boolean;
+  /** Whether a workspace-wide assignment carries the set — the curator arm's own state. */
+  everyoneAssigned: boolean;
 }
 
 /**
@@ -232,15 +234,42 @@ export async function channelDetail(
     createdBy: row.createdBy,
     createdAt: row.createdAt,
     skills: skills.map((s) => ({ ...s, status: s.status as ChannelSkillRef["status"] })),
-    audienceCount: audience,
+    audienceCount: audience.count,
     viewerIncluded: stanceRows.length > 0,
+    everyoneAssigned: audience.everyone,
   };
+}
+
+/**
+ * Every channel that carries a bundle today — the skill page's "who delivers this" line. It is
+ * the set's own contents read backwards, so it answers for every member identically: what a
+ * given PERSON receives is a separate question the feed decides.
+ */
+export async function channelsCarrying(
+  actor: MemberActor,
+  bundleId: string,
+): Promise<{ channelId: string; name: string; isDefault: boolean }[]> {
+  return await getDb()
+    .select({ channelId: channel.id, name: channel.name, isDefault: channel.isDefault })
+    .from(channelBundle)
+    .innerJoin(
+      channel,
+      and(eq(channel.id, channelBundle.channelId), eq(channel.workspaceId, actor.workspaceId)),
+    )
+    .where(
+      and(eq(channelBundle.workspaceId, actor.workspaceId), eq(channelBundle.bundleId, bundleId)),
+    )
+    .orderBy(asc(channel.name));
 }
 
 /** One channel's audience: the whole roster when it is assigned to everyone, else the people
  * a row names. The default channel takes the same path — its everyone-row is what makes it the
- * baseline, so nothing here special-cases it. */
-async function channelAudienceCount(ws: string, channelId: string): Promise<number> {
+ * baseline, so nothing here special-cases it. The everyone FACT rides back out: the curator
+ * arm on the channel page is a toggle over exactly that row. */
+async function channelAudienceCount(
+  ws: string,
+  channelId: string,
+): Promise<{ count: number; everyone: boolean }> {
   const [everyoneRows, personRows] = await Promise.all([
     getDb()
       .select({ channelId: assignment.channelId })
@@ -264,7 +293,8 @@ async function channelAudienceCount(ws: string, channelId: string): Promise<numb
         ),
       ),
   ]);
-  return everyoneRows.length > 0 ? await seatCount(ws) : (personRows[0]?.n ?? 0);
+  const everyone = everyoneRows.length > 0;
+  return { count: everyone ? await seatCount(ws) : (personRows[0]?.n ?? 0), everyone };
 }
 
 // ── Existence admin (create / rename / delete) ──────────────────────────────────────────────

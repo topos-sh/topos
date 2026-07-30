@@ -1,23 +1,29 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { data, redirect, useLoaderData } from "react-router";
+import { data, Form, Link, redirect, useLoaderData, useNavigation } from "react-router";
 import { VersionFiles } from "@/components/browse/version-files";
+import { ConfirmButton } from "@/components/confirm";
+import { relativeTime } from "@/components/format";
 import { SkillHeader } from "@/components/skill/skill-header";
 import { SkillInviteAffordance } from "@/components/skill/skill-invite";
 import { SkillTabs } from "@/components/skill/skill-tabs";
-import { Card } from "@/components/ui";
+import { Card, Chip, SectionHeading, ShortId } from "@/components/ui";
 import {
   actorFromSession,
   type MemberActor,
   memberInScope,
   notFound,
   requireMemberInScope,
+  requireWorkspaceOwner,
   type ScopedWorkspace,
 } from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
 import { loadVersionFilesData } from "@/lib/browse/version-files.server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
+import { channelsCarrying } from "@/lib/db/queries.channels.server";
+import { assignBundle, assignedToEveryone, unassign } from "@/lib/db/queries.feed.server";
 import { createInvitations, foldInviteEmail } from "@/lib/db/queries.roster.server";
 import { skillIndexRow } from "@/lib/db/queries.server";
+import { type AppliedOnSession, yourSessionsApplying } from "@/lib/db/queries.sessions.server";
 import { resolveSkillName } from "@/lib/db/resolve.server";
 import { sendInviteEmail } from "@/lib/mail/invite-mail.server";
 import { mailDelivery } from "@/lib/mail/transport.server";
@@ -62,21 +68,31 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     notFound();
   }
 
-  const versionFiles =
+  const [versionFiles, channels, yourSessions, everyoneAssigned] = await Promise.all([
     row.versionId !== null
-      ? await loadVersionFilesData(memberActor, row.skillId, row.versionId)
-      : null;
+      ? loadVersionFilesData(memberActor, row.skillId, row.versionId)
+      : Promise.resolve(null),
+    // Where the bundle goes and where it landed — the two halves of "who has this", read
+    // read-only: the channels are a workspace fact, the sessions are the VIEWER'S OWN machines.
+    channelsCarrying(memberActor, row.skillId),
+    yourSessionsApplying(memberActor, row.skillId),
+    assignedToEveryone(memberActor, { bundleId: row.skillId }),
+  ]);
 
   return {
     face: "page" as const,
     wsName: workspace.name,
     skill,
+    skillId: row.skillId,
     currentShort: row.versionId !== null ? row.versionId.slice(0, 12) : "—",
     displayName: row.displayName,
     kind: row.kind,
     openProposals: row.openProposals,
     versionId: row.versionId,
     versionFiles,
+    channels,
+    yourSessions,
+    everyoneAssigned,
     // The invite affordance's gates, resolved once here and never re-read client-side: armed mail
     // is the invitation's identity rung, and inviting is owner-only — the same two facts the
     // members page surfaces.
@@ -86,13 +102,13 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 }
 
 /**
- * The skill face's action — ONE intent today, `invite`: minting an invitation whose FIRST
- * destination is THIS skill (the affordance below). It RE-GUARDS from scratch — a loader's gate
- * never carries into an action — with the member scope the face itself requires (an anonymous
- * request bounces to the constant /login before any skill read; a non-member and an unknown slug
- * land the same uniform 404). Member scope is the FLOOR; the invite branch re-reads the
- * owner gate against the actor's role itself. An unmatched intent is a 400 that only a member
- * can ever reach.
+ * The skill face's action. It RE-GUARDS from scratch — a loader's gate never carries into an
+ * action — with the member scope the face itself requires (an anonymous request bounces to the
+ * constant /login before any skill read; a non-member and an unknown slug land the same uniform
+ * 404). Member scope is the FLOOR; each branch re-reads its own gate: `invite` runs the owner
+ * check inside createInvitations, and the two ASSIGNMENT arms take requireWorkspaceOwner, whose
+ * refusal is the same uniform 404 every other owner-only act answers with. An unmatched intent
+ * is a 400 that only a member can ever reach.
  */
 export async function action({ request, params }: ActionFunctionArgs) {
   const { workspace, actor } = await requireMemberInScope(request, params);
@@ -101,7 +117,40 @@ export async function action({ request, params }: ActionFunctionArgs) {
   if (intent === "invite") {
     return inviteToSkillIntent(request, workspace, actor, params.skill as string, formData);
   }
+  if (intent === "assign-everyone" || intent === "unassign-everyone") {
+    return assignEveryoneIntent(request, workspace.id, intent, formData);
+  }
   return data({ intent: "unknown" as const, status: "error" as const }, { status: 400 });
+}
+
+/**
+ * The curator arm: put this skill in EVERY member's feed, or withdraw that offer. Owner-only —
+ * an assignment reaches people, so the gate is the roster's, not the channel-curation one. The
+ * bundle is named by its immutable id (a hidden field the page loaded with), never by the URL's
+ * mutable name. Withdrawing takes back the offer alone: a machine that already has the bytes
+ * keeps them until it reconciles, and anyone who added the skill themselves still has it.
+ */
+async function assignEveryoneIntent(
+  request: Request,
+  ws: string,
+  intent: "assign-everyone" | "unassign-everyone",
+  formData: FormData,
+) {
+  const owner = await requireWorkspaceOwner(request, ws);
+  const bundleId = String(formData.get("skill_id") ?? "");
+  try {
+    const outcome =
+      intent === "assign-everyone"
+        ? await assignBundle(owner, bundleId, { everyone: true })
+        : await unassign(owner, { bundleId }, { everyone: true });
+    return data(
+      { intent, status: outcome },
+      outcome === "assigned" || outcome === "unassigned" ? undefined : { status: 400 },
+    );
+  } catch {
+    await recordAdminEvent(owner, { kind: "assigned", subject: bundleId, outcome: "error" });
+    return data({ intent, status: "error" as const }, { status: 500 });
+  }
 }
 
 /**
@@ -175,12 +224,16 @@ export default function SkillCurrentPage() {
 function SkillCurrentContent({
   wsName,
   skill,
+  skillId,
   currentShort,
   displayName,
   kind,
   openProposals,
   versionId,
   versionFiles,
+  channels,
+  yourSessions,
+  everyoneAssigned,
   mailArmed,
   isOwner,
 }: Extract<Awaited<ReturnType<typeof loader>>, { face: "page" }>) {
@@ -210,7 +263,121 @@ function SkillCurrentContent({
           </p>
         </Card>
       )}
+      <DeliverySection
+        skillId={skillId}
+        channels={channels}
+        yourSessions={yourSessions}
+        everyoneAssigned={everyoneAssigned}
+        isOwner={isOwner}
+      />
       <SkillInviteAffordance mailArmed={mailArmed} isOwner={isOwner} />
+    </div>
+  );
+}
+
+/**
+ * Where this skill goes and where it landed — read-only and quiet. The channels are a workspace
+ * fact (which sets carry the reference); the sessions are the READER'S OWN machines and nobody
+ * else's, because a skill page answers "do I have this, and at which version" — the
+ * workspace-wide answer is the Sessions page, which has its own role scoping.
+ */
+function DeliverySection({
+  skillId,
+  channels,
+  yourSessions,
+  everyoneAssigned,
+  isOwner,
+}: {
+  skillId: string;
+  channels: { channelId: string; name: string; isDefault: boolean }[];
+  yourSessions: AppliedOnSession[];
+  everyoneAssigned: boolean;
+  isOwner: boolean;
+}) {
+  const wsPath = useWsPath();
+  return (
+    <section aria-labelledby="skill-delivery-heading" className="space-y-3">
+      <SectionHeading>
+        <span id="skill-delivery-heading">Delivery</span>
+      </SectionHeading>
+      <Card className="space-y-4 px-4 py-3">
+        <div data-testid="skill-channels" className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="text-dim text-sm">
+            {channels.length === 0 ? "In no channel." : "Carried by"}
+          </span>
+          {channels.map((channel) => (
+            <Link
+              key={channel.channelId}
+              to={wsPath(`channels/${channel.name}`)}
+              className="text-ink text-sm underline decoration-hairline"
+            >
+              {channel.name}
+            </Link>
+          ))}
+          {everyoneAssigned && <Chip tone="accent">assigned to everyone</Chip>}
+        </div>
+        <div data-testid="skill-your-sessions" className="space-y-1.5">
+          {yourSessions.length === 0 ? (
+            <p className="text-faint text-sm">
+              None of your machines has reported holding this skill.
+            </p>
+          ) : (
+            <>
+              <p className="text-dim text-sm">On your machines</p>
+              <ul className="space-y-1">
+                {yourSessions.map((session) => (
+                  <li
+                    key={session.sessionId}
+                    className="flex flex-wrap items-center gap-x-2 gap-y-1"
+                  >
+                    <span className="min-w-0 truncate text-ink text-sm">{session.displayName}</span>
+                    <ShortId value={session.appliedVersionId} />
+                    <Chip tone={session.current ? "verified" : "pending"}>
+                      {session.current ? "current" : "behind"}
+                    </Chip>
+                    <span className="text-faint text-xs">
+                      reported {relativeTime(new Date(session.reportedAtMs))}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
+        {isOwner && <EveryoneArm skillId={skillId} assigned={everyoneAssigned} />}
+      </Card>
+    </section>
+  );
+}
+
+/**
+ * The owner's one assignment arm on a skill: give it to everyone here, or withdraw that. It
+ * reaches people, so it wears the in-place two-step confirm every people-affecting act wears —
+ * arming performs nothing, and only the armed submit posts.
+ */
+function EveryoneArm({ skillId, assigned }: { skillId: string; assigned: boolean }) {
+  const navigation = useNavigation();
+  const intent = assigned ? "unassign-everyone" : "assign-everyone";
+  const pending = navigation.state !== "idle" && navigation.formData?.get("intent") === intent;
+  return (
+    <div
+      data-testid="skill-everyone-arm"
+      className="flex flex-wrap items-center gap-x-3 gap-y-2 border-line-soft border-t pt-3"
+    >
+      <span className="text-faint text-xs">
+        {assigned
+          ? "Every member of this workspace is assigned this skill. Withdrawing takes back the offer; copies already on a machine stay until it updates."
+          : "Assigning to everyone puts this skill in every member's feed. Each person can still turn it off for themselves."}
+      </span>
+      <Form method="post" className="ml-auto">
+        <input type="hidden" name="intent" value={intent} />
+        <input type="hidden" name="skill_id" value={skillId} />
+        <ConfirmButton
+          label={assigned ? "Remove from everyone" : "Assign to everyone"}
+          tone="quiet"
+          pending={pending}
+        />
+      </Form>
     </div>
   );
 }

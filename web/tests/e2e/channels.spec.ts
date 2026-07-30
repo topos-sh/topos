@@ -182,6 +182,51 @@ test("a NAMED channel carries by assignment: add it, then take it back", async (
   expect(dropped[0]?.n).toBe("0");
 });
 
+/** The count of workspace-wide assignment rows on one channel, by name. */
+async function everyoneRows(name: string): Promise<string> {
+  const rows = await adminQuery<{ n: string }>(
+    `select count(*)::text as n from web.assignment a
+     join web.channel c on c.id = a.channel_id
+     where c.name = $1 and a.user_id is null`,
+    [name],
+  );
+  return rows[0]?.n as string;
+}
+
+test("an OWNER assigns the set to everyone in two steps, then withdraws it", async ({ page }) => {
+  await theWorkspace();
+  await gotoSettled(page, `/channels/${GUILD}`);
+  const arm = page.getByTestId("channel-everyone");
+  await expect(arm.getByText("Assigning to everyone puts this set in every")).toBeVisible();
+
+  // An assignment reaches people, so the arm is a two-step in-place confirm: arming writes
+  // nothing at all.
+  await arm.getByRole("button", { name: "Assign to everyone" }).click();
+  await expect(arm.getByRole("button", { name: "Assign to everyone — confirm?" })).toBeVisible();
+  expect(await everyoneRows(GUILD)).toBe("0");
+
+  await arm.getByRole("button", { name: "Assign to everyone — confirm?" }).click();
+  await expect(arm.getByRole("button", { name: "Remove from everyone" })).toBeVisible();
+  expect(await everyoneRows(GUILD)).toBe("1");
+
+  // Withdrawing takes back the OFFER: the row goes, and the page says the bytes do not.
+  await arm.getByRole("button", { name: "Remove from everyone" }).click();
+  await arm.getByRole("button", { name: "Remove from everyone — confirm?" }).click();
+  await expect(arm.getByRole("button", { name: "Assign to everyone" })).toBeVisible();
+  expect(await everyoneRows(GUILD)).toBe("0");
+});
+
+test("the baseline states its everyone-assignment and offers no arm to undo it", async ({
+  page,
+}) => {
+  await theWorkspace();
+  await gotoSettled(page, `/channels/everyone`);
+  const arm = page.getByTestId("channel-everyone");
+  await expect(arm.getByText("this is the workspace baseline")).toBeVisible();
+  await expect(arm.getByRole("button", { name: "Remove from everyone" })).toHaveCount(0);
+  expect(await everyoneRows("everyone")).toBe("1");
+});
+
 test("rename on the Settings tab is an in-place confirm: it lands the new URL, id unchanged", async ({
   page,
 }) => {

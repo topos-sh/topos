@@ -187,6 +187,7 @@ function SessionsMeta({ view }: { view: WorkspaceSessions }) {
 }
 
 function IntroCopy({ wholeWorkspace }: { wholeWorkspace: boolean }) {
+  const wsPath = useWsPath();
   return (
     <p className="text-dim text-sm leading-relaxed">
       {wholeWorkspace ? (
@@ -200,7 +201,11 @@ function IntroCopy({ wholeWorkspace }: { wholeWorkspace: boolean }) {
           These are your own sessions in this workspace and the version each one last reported.
           Reviewers and owners see everyone&apos;s.
         </>
-      )}
+      )}{" "}
+      <Link to={wsPath("visibility")} className="text-ink underline decoration-hairline">
+        What the team can and cannot see
+      </Link>
+      .
     </p>
   );
 }
@@ -489,45 +494,63 @@ function SessionCard({
             </>
           )}
         </div>
-        <SkillStates skills={session.skills} />
-        {session.declinedButApplied.length > 0 && (
-          <p data-testid="sessions-declined-note" className="text-faint text-xs">
-            Turned off on the web but still on this machine: {session.declinedButApplied.join(", ")}{" "}
-            — it clears on the next update.
-          </p>
-        )}
+        <SkillStates skills={session.skills} declined={session.declinedButApplied} />
       </div>
     </Card>
   );
 }
 
-function SkillStates({ skills }: { skills: SessionSkillState[] }) {
+/**
+ * The per-copy state of one session. The declined-but-still-present disclosure rides the SKILL
+ * ROW, in the same chip idiom as every other status here: it is a fact about a copy of an
+ * artifact, not a note about the person holding it, and it belongs beside the version it
+ * describes rather than in a footnote under the card.
+ */
+function SkillStates({ skills, declined }: { skills: SessionSkillState[]; declined: string[] }) {
   if (skills.length === 0) {
     return <p className="text-faint text-xs">No skills reported for this session.</p>;
   }
+  // The disclosure query names catalog names (unique per workspace among active bundles).
+  const declinedNames = new Set(declined);
   return (
     <ul className="space-y-1.5">
-      {skills.map((skill) => (
-        <li
-          key={skill.skillId}
-          className="flex flex-wrap items-center gap-x-2 gap-y-1 border-line-soft border-t pt-1.5 first:border-t-0 first:pt-0"
-        >
-          <span className="min-w-0 truncate text-ink text-sm">
-            {skill.skillName ?? skill.skillId}
-          </span>
-          <SkillStatusChip status={skill.status} />
-          <ShortId value={skill.appliedVersionId} />
-          <span className="text-faint text-xs">
-            reported {relativeTime(new Date(skill.reportedAtMs))}
-          </span>
-          {skill.status === "behind" && skill.currentVersionId !== null && (
-            <span className="text-faint text-xs">
-              current is <ShortId value={skill.currentVersionId} />
+      {skills.map((skill) => {
+        const turnedOff = skill.skillName !== null && declinedNames.has(skill.skillName);
+        return (
+          <li
+            key={skill.skillId}
+            data-testid={turnedOff ? "sessions-declined-note" : undefined}
+            className="flex flex-wrap items-center gap-x-2 gap-y-1 border-line-soft border-t pt-1.5 first:border-t-0 first:pt-0"
+          >
+            <span className="min-w-0 truncate text-ink text-sm">
+              {skill.skillName ?? skill.skillId}
             </span>
-          )}
-        </li>
-      ))}
+            <SkillStatusChip status={skill.status} />
+            {turnedOff && <TurnedOffChip />}
+            <ShortId value={skill.appliedVersionId} />
+            <span className="text-faint text-xs">
+              reported {relativeTime(new Date(skill.reportedAtMs))}
+            </span>
+            {skill.status === "behind" && skill.currentVersionId !== null && (
+              <span className="text-faint text-xs">
+                current is <ShortId value={skill.currentVersionId} />
+              </span>
+            )}
+          </li>
+        );
+      })}
     </ul>
+  );
+}
+
+/** Turned off on the web, still present locally — the honest gap between a decision and a disk. */
+function TurnedOffChip() {
+  return (
+    <StatusChip
+      tone="neutral"
+      text="turned off"
+      tip="Turned off on the web, still present on this machine. Bytes already delivered stay put until the machine reconciles, which clears this copy on its next update."
+    />
   );
 }
 

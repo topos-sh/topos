@@ -1,9 +1,18 @@
 import { Check, ChevronsUpDown, Package, Plus } from "lucide-react";
 import { useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { data, Link, useFetcher, useLoaderData } from "react-router";
+import {
+  data,
+  Form,
+  Link,
+  useActionData,
+  useFetcher,
+  useLoaderData,
+  useNavigation,
+} from "react-router";
 import { ChannelHeader } from "@/components/channel/channel-header";
 import { ChannelTabs } from "@/components/channel/channel-tabs";
+import { ConfirmButton } from "@/components/confirm";
 import { buttonClasses, Card, Chip, SectionHeading } from "@/components/ui";
 import {
   DropdownMenu,
@@ -12,7 +21,13 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { actorFromSession, memberInScope, notFound, requireMember } from "@/lib/auth/guards.server";
+import {
+  actorFromSession,
+  memberInScope,
+  notFound,
+  requireMember,
+  requireWorkspaceOwner,
+} from "@/lib/auth/guards.server";
 import { getAuth } from "@/lib/auth/server";
 import { recordAdminEvent } from "@/lib/db/audit.server";
 import {
@@ -23,7 +38,12 @@ import {
   placeBundleInChannel,
   unplaceBundleFromChannel,
 } from "@/lib/db/queries.channels.server";
-import { assignChannelToSelf, unassignChannelFromSelf } from "@/lib/db/queries.feed.server";
+import {
+  assignChannel,
+  assignChannelToSelf,
+  unassign,
+  unassignChannelFromSelf,
+} from "@/lib/db/queries.feed.server";
 import { skillIndexOf } from "@/lib/db/queries.server";
 import { useWsPath } from "@/lib/ws-path";
 
@@ -76,7 +96,13 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         .filter((row) => !placed.has(row.skillId))
         .map((row) => ({ skillId: row.skillId, name: row.name, displayName: row.displayName }))
     : [];
-  return { face: "page" as const, detail, addable, canCurate };
+  return {
+    face: "page" as const,
+    detail,
+    addable,
+    canCurate,
+    isOwner: memberActor.role === "owner",
+  };
 }
 
 /** The typed reply each curation fetcher reads back — empty error string on a landed act. */
@@ -84,6 +110,7 @@ type SkillCurationActionData =
   | { form: "add"; error: string }
   | { form: "remove"; error: string }
   | { form: "stance"; error: string }
+  | { form: "everyone"; error: string }
   | { form: "unknown"; error: string };
 
 /**
@@ -152,6 +179,37 @@ export async function action({ request, params }: ActionFunctionArgs) {
     } catch {
       return data<SkillCurationActionData>(
         { form: "stance", error: "That didn't go through. Try again." },
+        { status: 500 },
+      );
+    }
+  }
+  // The CURATOR arm: aim this set at everyone in the workspace, or withdraw that. Owner-only —
+  // an assignment reaches people, so it takes the roster's gate, not the curation one, and its
+  // refusal is the same uniform 404 every other owner-only act answers with.
+  if (intent === "assign-everyone" || intent === "unassign-everyone") {
+    const owner = await requireWorkspaceOwner(request, ws);
+    try {
+      const outcome =
+        intent === "assign-everyone"
+          ? await assignChannel(owner, channelId, { everyone: true })
+          : await unassign(owner, { channelId }, { everyone: true });
+      if (outcome === "assigned" || outcome === "unassigned") {
+        return data<SkillCurationActionData>({ form: "everyone", error: "" });
+      }
+      return data<SkillCurationActionData>(
+        {
+          form: "everyone",
+          error:
+            outcome === "not_assigned"
+              ? "This channel is not assigned to everyone."
+              : "This channel no longer exists.",
+        },
+        { status: 400 },
+      );
+    } catch {
+      await recordAdminEvent(owner, { kind: "assigned", subject: channelId, outcome: "error" });
+      return data<SkillCurationActionData>(
+        { form: "everyone", error: "That didn't go through. Try again." },
         { status: 500 },
       );
     }
@@ -238,7 +296,12 @@ async function removeSkillIntent(request: Request, ws: string, channelId: string
 export default function ChannelDetail() {
   const data = useLoaderData<typeof loader>();
   return (
-    <ChannelSkillsPage detail={data.detail} addable={data.addable} canCurate={data.canCurate} />
+    <ChannelSkillsPage
+      detail={data.detail}
+      addable={data.addable}
+      canCurate={data.canCurate}
+      isOwner={data.isOwner}
+    />
   );
 }
 
@@ -246,10 +309,12 @@ function ChannelSkillsPage({
   detail,
   addable,
   canCurate,
+  isOwner,
 }: {
   detail: ChannelDetailData;
   addable: AddableSkill[];
   canCurate: boolean;
+  isOwner: boolean;
 }) {
   const wsPath = useWsPath();
   return (
@@ -257,7 +322,64 @@ function ChannelSkillsPage({
       <ChannelHeader name={detail.name} mode={detail.mode} isDefault={detail.isDefault} />
       <ChannelTabs basePath={wsPath(`channels/${detail.name}`)} active="skills" />
       <StanceSection detail={detail} />
+      {isOwner && <EveryoneSection detail={detail} />}
       <SkillsSection detail={detail} addable={addable} canCurate={canCurate} />
+    </div>
+  );
+}
+
+/**
+ * The owner's one assignment arm on a set: give it to everyone here, or withdraw that. It
+ * reaches people, so it wears the in-place two-step confirm every people-affecting act wears.
+ * The BASELINE is stated, never armed — the default channel's everyone-assignment is what makes
+ * the workspace deliver at all, and one click should not be able to empty every feed in it.
+ */
+function EveryoneSection({ detail }: { detail: ChannelDetailData }) {
+  const navigation = useNavigation();
+  const actionData = useActionData<SkillCurationActionData>();
+  const intent = detail.everyoneAssigned ? "unassign-everyone" : "assign-everyone";
+  const pending = navigation.state !== "idle" && navigation.formData?.get("intent") === intent;
+  const error =
+    actionData?.form === "everyone" && actionData.error.length > 0 ? actionData.error : undefined;
+  return (
+    <div
+      data-testid="channel-everyone"
+      className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-line-soft bg-panel px-4 py-3"
+    >
+      <span className="text-dim text-sm">
+        {detail.isDefault ? (
+          <>
+            Assigned to everyone — this is the workspace baseline, and it stays that way. People
+            turn individual skills off for themselves on Your skills.
+          </>
+        ) : detail.everyoneAssigned ? (
+          <>
+            Assigned to everyone in this workspace. Withdrawing takes back the offer; copies already
+            on a machine stay until it updates.
+          </>
+        ) : (
+          <>
+            Assigning to everyone puts this set in every member&apos;s feed. Each person can still
+            turn individual skills off for themselves.
+          </>
+        )}
+      </span>
+      {!detail.isDefault && (
+        <Form method="post" className="ml-auto">
+          <input type="hidden" name="intent" value={intent} />
+          <input type="hidden" name="channel_id" value={detail.channelId} />
+          <ConfirmButton
+            label={detail.everyoneAssigned ? "Remove from everyone" : "Assign to everyone"}
+            tone="quiet"
+            pending={pending}
+          />
+        </Form>
+      )}
+      {error !== undefined && (
+        <p role="alert" className="w-full text-red-700 text-xs">
+          {error}
+        </p>
+      )}
     </div>
   );
 }
