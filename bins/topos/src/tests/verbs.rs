@@ -403,6 +403,136 @@ fn add_remote_refuses_a_destination_filled_in_the_instant_before_the_park() {
     );
 }
 
+/// A FAILED adopt after the landing rename must not delete the destination blind: an edit landing
+/// the instant the rename completes is a byte the cleanup would destroy. The error path now PARKS
+/// the destination (journaled), drops it only when it still holds exactly what this run staged,
+/// and recovery restores anything preserved back to the destination — visible, never lost.
+#[test]
+fn a_failed_adopt_preserves_an_edit_that_landed_after_the_rename() {
+    // The reserved name `topos` makes `add_with_name` fail AFTER the staged tree was renamed
+    // into the harness dir — the exact window the finding names.
+    let targz = build_repo_tarball(
+        "o-r-abc1234",
+        &[("skills/topos/SKILL.md", b"# imported\n", 0o644)],
+    );
+    let git = FakeGit(targz);
+    let spec = github_spec("o", "r", None);
+    let h = Harness::new("failed-adopt");
+    let project = Scratch::new("failed-adopt-proj");
+    let dest = project.0.join(".claude/skills/topos");
+    // The RACE: the edit lands between the rename and the adopt's failure (the adopt's own
+    // create of the home dir is the first seam op after the rename).
+    let racer = crate::fs_seam::HookFs::before_nth_create_dir_all(&h.home.0, 2, || {
+        std::fs::write(dest.join("EXTRA.md"), b"# landed after the rename\n").unwrap();
+    });
+    let ctx = Ctx {
+        fs: &racer,
+        ..h.ctx()
+    };
+    let roots = ops::DiscoveryRoots {
+        home: h.home.0.clone(),
+        cwd: Some(project.0.clone()),
+    };
+    let opts = ops::AddRemoteOpts {
+        skill: Some("topos".into()),
+        harness: None,
+        global: false,
+    };
+    let err = ops::add_remote(&ctx, &git, &spec, &roots, &opts).unwrap_err();
+    assert_eq!(err.code(), "INVALID_ARGUMENT", "{err:?}");
+    // The destination was PARKED, not deleted: the raced edit sits whole under the park name,
+    // with its journal entry standing.
+    let park = project.0.join(".claude/skills/.topos-import-failed-topos");
+    assert_eq!(
+        std::fs::read(park.join("EXTRA.md")).unwrap(),
+        b"# landed after the rename\n"
+    );
+    assert!(!dest.exists(), "the destination name was left free");
+    // Recovery reads the journal and RESTORES the park to the destination — the edit surfaces
+    // where the person put it (an untracked dir), never invisibly.
+    crate::sidecar::recover(&RealFs, &Layout::new(&h.home.0), 1).unwrap();
+    assert_eq!(
+        std::fs::read(dest.join("EXTRA.md")).unwrap(),
+        b"# landed after the rename\n"
+    );
+    assert!(!park.exists(), "the restored park left its name behind");
+}
+
+/// The benign half of the same cleanup: a destination still holding EXACTLY what this run staged
+/// drops silently — no park, no journal residue, no litter.
+#[test]
+fn a_failed_adopt_with_an_untouched_destination_cleans_without_residue() {
+    let targz = build_repo_tarball(
+        "o-r-abc1234",
+        &[("skills/topos/SKILL.md", b"# imported\n", 0o644)],
+    );
+    let git = FakeGit(targz);
+    let spec = github_spec("o", "r", None);
+    let h = Harness::new("failed-adopt-clean");
+    let project = Scratch::new("failed-adopt-clean-proj");
+    let roots = ops::DiscoveryRoots {
+        home: h.home.0.clone(),
+        cwd: Some(project.0.clone()),
+    };
+    let opts = ops::AddRemoteOpts {
+        skill: Some("topos".into()),
+        harness: None,
+        global: false,
+    };
+    let err = ops::add_remote(&h.ctx(), &git, &spec, &roots, &opts).unwrap_err();
+    assert_eq!(err.code(), "INVALID_ARGUMENT", "{err:?}");
+    let skills = project.0.join(".claude/skills");
+    let names: Vec<String> = std::fs::read_dir(&skills)
+        .map(|rd| {
+            rd.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(names.is_empty(), "no park, no litter: {names:?}");
+    // Nothing left standing in the journal either (the entry settled with the drop).
+    let journal: Option<crate::sidecar::ParkJournal> =
+        crate::doc::read_doc(&RealFs, &Layout::new(&h.home.0).park_journal_path()).unwrap();
+    assert!(
+        journal.map(|j| j.parks.is_empty()).unwrap_or(true),
+        "the journal settled"
+    );
+}
+
+/// The import-destination containment rail (project scope): a pre-existing `.claude` symlink out
+/// of the checkout aims the registry path exactly like a committed `path = "../.."` — the
+/// import refuses at the write boundary, before any byte lands through the link.
+#[test]
+fn add_remote_refuses_a_project_destination_that_escapes_the_checkout() {
+    let targz = build_repo_tarball(
+        "o-r-abc1234",
+        &[("skills/alpha/SKILL.md", b"# alpha\n", 0o644)],
+    );
+    let git = FakeGit(targz);
+    let spec = github_spec("o", "r", None);
+    let h = Harness::new("escape-import");
+    let project = Scratch::new("escape-import-proj");
+    let outside = Scratch::new("escape-import-outside");
+    std::os::unix::fs::symlink(&outside.0, project.0.join(".claude")).unwrap();
+    let roots = ops::DiscoveryRoots {
+        home: h.home.0.clone(),
+        cwd: Some(project.0.clone()),
+    };
+    let opts = ops::AddRemoteOpts {
+        skill: Some("alpha".into()),
+        harness: None,
+        global: false,
+    };
+    let err = ops::add_remote(&h.ctx(), &git, &spec, &roots, &opts).unwrap_err();
+    assert!(
+        err.to_string().contains("PLACEMENT_ESCAPES_PROJECT"),
+        "{err}"
+    );
+    assert!(
+        !outside.0.join("skills").exists(),
+        "nothing was created through the symlink"
+    );
+}
+
 #[test]
 fn add_remote_ambiguous_multi_skill_repo_lists_choices() {
     let targz = build_repo_tarball(

@@ -2556,6 +2556,13 @@
             ],
             "description": "The proposal OPENED but the local governance-transfer rewrite did NOT (a manifest\nread/write fault): the manifest still spells the local-path line; the next `update` (or a\nre-run) converges the rewrite idempotently. **INFERRED** (additive-only)."
           },
+          "rewrite_skipped": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The manifest's local-path line was REMOVED while this propose ran (a concurrent\n`topos remove`): NO workspace row was written — a completed removal is never silently\nundone. **INFERRED** (additive-only)."
+          },
           "title": {
             "type": "string"
           }
@@ -2714,6 +2721,13 @@
               "null"
             ],
             "description": "The publish LANDED but the local governance-transfer rewrite did NOT (a manifest\nread/write fault): the truthful receipt half — the manifest still spells the local-path\nline, and the next `update` (or a re-run of this publish, which resolves no-change)\nconverges the rewrite idempotently. **INFERRED** (additive-only)."
+          },
+          "rewrite_skipped": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The manifest's local-path line was REMOVED while this publish ran (a concurrent\n`topos remove` completed between the describe and the locked rewrite): NO workspace row\nwas written — a completed removal is never silently undone. The publish stands\ncatalog-side; `topos add <reference>` records the demand deliberately. **INFERRED**\n(additive-only)."
           },
           "skill_id": {
             "type": "string"

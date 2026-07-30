@@ -847,6 +847,7 @@ pub(crate) fn remove_global(
     ctx: &Ctx<'_>,
     connect: &SessionConnect<'_>,
     tokens: &[String],
+    via: Option<&str>,
     yes: bool,
 ) -> Result<RemoveOutcome, ClientError> {
     let target = global_target(ctx);
@@ -856,7 +857,7 @@ pub(crate) fn remove_global(
     // different documents: the second writer would rebuild the set line from members the first
     // writer had already re-homed, and silently drop that row.
     let _guard = lock_manifest(ctx, &target.path)?;
-    let arms = resolve_arms(ctx, connect, &target, tokens)?;
+    let arms = resolve_arms(ctx, connect, &target, tokens, via)?;
     let mut resolved = Vec::with_capacity(tokens.len());
     for (token, arm) in tokens.iter().zip(arms) {
         match arm {
@@ -864,7 +865,7 @@ pub(crate) fn remove_global(
             None => return Err(miss(ctx, token, true)?),
         }
     }
-    apply_arms(ctx, &target, tokens, resolved, yes, true)
+    apply_arms(ctx, &target, tokens, resolved, via, yes, true)
 }
 
 /// `topos remove <token>…` — edit THIS FOLDER's manifest. `Ok(None)` when no token names a
@@ -877,6 +878,7 @@ pub(crate) fn remove_project(
     ctx: &Ctx<'_>,
     connect: &SessionConnect<'_>,
     tokens: &[String],
+    via: Option<&str>,
     yes: bool,
 ) -> Result<Option<RemoveOutcome>, ClientError> {
     let Some(target) = project_target(ctx)? else {
@@ -884,7 +886,7 @@ pub(crate) fn remove_project(
     };
     // Held across the resolve AND the apply — see [`remove_global`].
     let _guard = lock_manifest(ctx, &target.path)?;
-    let arms = resolve_arms(ctx, connect, &target, tokens)?;
+    let arms = resolve_arms(ctx, connect, &target, tokens, via)?;
     if target.scope == ManifestScope::Global && arms.iter().all(Option::is_none) {
         // The home-routing guard sent this edit to the global file — a bare `remove` there is
         // still a file edit, but it must not silently claim a token the classic removal owns.
@@ -908,7 +910,7 @@ pub(crate) fn remove_project(
         ));
     }
     let resolved: Vec<Arm> = arms.into_iter().flatten().collect();
-    apply_arms(ctx, &target, tokens, resolved, yes, false).map(Some)
+    apply_arms(ctx, &target, tokens, resolved, via, yes, false).map(Some)
 }
 
 /// Resolve every token against the target scope (all-or-none is the caller's discipline).
@@ -917,12 +919,34 @@ fn resolve_arms(
     connect: &SessionConnect<'_>,
     target: &EditTarget,
     tokens: &[String],
+    via: Option<&str>,
 ) -> Result<Vec<Option<Arm>>, ClientError> {
     if tokens.is_empty() {
         return Ok(Vec::new());
     }
     let plan = plan_for(ctx, target)?;
     let host = default_host(ctx);
+    // `--via` names WHICH set line a member removal rewrites — validated once, canonically: it
+    // must be a channel or repo reference (the only shapes that ARE lines with members).
+    let via_ref: Option<String> = match via {
+        None => None,
+        Some(v) => {
+            let canonical = keys::parse_input(v, host.as_deref())
+                .map_err(|e| ClientError::InvalidArgument(e.message))?
+                .shape
+                .canonical();
+            if !matches!(
+                keys::classify_key(&canonical),
+                Ok(KeyShape::Channel { .. } | KeyShape::RepoSet { .. })
+            ) {
+                return Err(ClientError::InvalidArgument(format!(
+                    "--via must name a channel or repo line (`@ws/channels/<name>`, \
+                     `owner/repo`) — `{v}` is neither"
+                )));
+            }
+            Some(canonical)
+        }
+    };
     // The feed + set expansions are read ONCE per invocation (each may dial).
     let mut feeds: Option<Vec<FeedItem>> = None;
     let mut sets: Option<Vec<(PlanRow, Vec<String>)>> = None;
@@ -938,6 +962,7 @@ fn resolve_arms(
             &plan,
             token,
             canonical.as_deref(),
+            via_ref.as_deref(),
             &mut feeds,
             &mut sets,
         )?);
@@ -964,7 +989,9 @@ fn resolve_arms(
 ///
 /// An EXACT spelling is always an answer, never an ambiguity: a token that literally is a row's
 /// reference names that row, even when a set line also carries the bundle. That is what keeps the
-/// refusal actionable — the candidates it lists can be typed back.
+/// refusal actionable — the candidates it lists can be typed back. And where two SET lines both
+/// carry the bundle, no bare spelling can pick one — `--via <channel-ref>` names the line, so the
+/// set-versus-set refusal lists the exact `--via` invocations that each resolve.
 #[allow(clippy::too_many_arguments)]
 fn resolve_one(
     ctx: &Ctx<'_>,
@@ -973,9 +1000,16 @@ fn resolve_one(
     plan: &ScopePlan,
     token: &str,
     canonical: Option<&str>,
+    via: Option<&str>,
     feeds: &mut Option<Vec<FeedItem>>,
     sets: &mut Option<Vec<(PlanRow, Vec<String>)>>,
 ) -> Result<Option<Arm>, ClientError> {
+    // `--via` narrows the resolution to ONE set line's member rewrite — the person named the
+    // line, so nothing else (a row, the feed, another set) competes, and a miss is a typed
+    // refusal rather than a fall-through to arms the flag does not select.
+    if let Some(via_ref) = via {
+        return resolve_via(ctx, connect, target, plan, token, canonical, via_ref, sets);
+    }
     let mut found: Vec<Candidate> = Vec::new();
     let is_exact = |reference: &str| reference == token || canonical == Some(reference);
 
@@ -1069,7 +1103,9 @@ fn resolve_one(
         let member_ref =
             member_reference(row, member).unwrap_or_else(|| format!("{}/{member}", row.reference));
         found.push(Candidate {
-            spelling: format!("{member_ref} (via {})", row.reference),
+            // The EXACT invocation that selects this line's rewrite — what the ambiguity
+            // refusal lists, paste-ready (`--via` names the set line the split targets).
+            spelling: format!("{member_ref} --via {}", row.reference),
             // A set member is never spelled in the file — the token cannot BE it.
             exact: false,
             arm: Arm::SetSplit {
@@ -1107,6 +1143,60 @@ struct Candidate {
     spelling: String,
     exact: bool,
     arm: Arm,
+}
+
+/// The `--via <set-ref>` resolution: exactly ONE set line's member-minus-one rewrite. The person
+/// named the line, so this is a selection, never a search — the line must exist in this file and
+/// the token must be one of its current members; each miss is its own typed refusal (the flag
+/// must not fall through to arms it does not select).
+#[allow(clippy::too_many_arguments)]
+fn resolve_via(
+    ctx: &Ctx<'_>,
+    connect: &SessionConnect<'_>,
+    target: &EditTarget,
+    plan: &ScopePlan,
+    token: &str,
+    canonical: Option<&str>,
+    via_ref: &str,
+    sets: &mut Option<Vec<(PlanRow, Vec<String>)>>,
+) -> Result<Option<Arm>, ClientError> {
+    let expansions = sets.get_or_insert_with(|| expand_sets(ctx, connect, target, plan));
+    let Some((row, members)) = expansions.iter().find(|(row, _)| row.reference == via_ref) else {
+        return Err(ClientError::InvalidArgument(format!(
+            "--via {via_ref} names no channel/repo line in this file — `topos status` lists what \
+             each file asks for"
+        )));
+    };
+    let want = member_of(row, canonical);
+    let Some(member) = members
+        .iter()
+        .find(|m| m.as_str() == token || Some(m.as_str()) == want.as_deref())
+    else {
+        return Err(ClientError::InvalidArgument(format!(
+            "'{token}' does not come from the line `{via_ref}`{}",
+            if members.is_empty() {
+                String::new()
+            } else {
+                format!(" (its current members: {})", members.join(", "))
+            }
+        )));
+    };
+    let rows = all_rows(plan);
+    // Explicit beats set — identical to the bare resolution's split arm.
+    let keeps_own: Vec<String> = members
+        .iter()
+        .filter(|m| m.as_str() != member.as_str())
+        .filter(|m| {
+            member_reference(row, m).is_some_and(|r| rows.iter().any(|pr| pr.reference == r))
+        })
+        .cloned()
+        .collect();
+    Ok(Some(Arm::SetSplit {
+        set: row.clone(),
+        names: vec![member.clone()],
+        members: members.clone(),
+        keeps_own,
+    }))
 }
 
 /// The typed refusal for a token this file answers more than once — the paste-ready qualified
@@ -1363,6 +1453,7 @@ fn apply_arms(
     target: &EditTarget,
     tokens: &[String],
     arms: Vec<Arm>,
+    via: Option<&str>,
     yes: bool,
     global: bool,
 ) -> Result<RemoveOutcome, ClientError> {
@@ -1535,6 +1626,10 @@ fn apply_arms(
             yes_argv.push("-g".to_owned());
         }
         yes_argv.extend(tokens.iter().cloned());
+        if let Some(v) = via {
+            yes_argv.push("--via".to_owned());
+            yes_argv.push(v.to_owned());
+        }
         yes_argv.push("--yes".to_owned());
         return Ok(RemoveOutcome::Described {
             data: RemoveData {
@@ -1552,8 +1647,21 @@ fn apply_arms(
     // matches the one they were read from refuses rather than writing a plan built from bytes
     // that are gone — most sharply for a set split, whose survivor rows would otherwise be
     // rebuilt from a member list that predates someone else's row.
-    prove_unchanged(ctx, target, &arms)?;
-    let Opened { mut editor, born } = open_for_edit(ctx, target)?;
+    //
+    // ONE READ serves both the proof and the editor: proving against one read and editing a
+    // second would leave a window between them where an external edit is proven against but not
+    // edited (or edited but not proven against) — the reproof must hold for the EXACT document
+    // instance the write below emits, so that instance is read once, proven, and then opened.
+    let text = read_text(ctx, &target.path)?;
+    prove_unchanged(target, &arms, text.as_deref())?;
+    let Opened { mut editor, born } = match &text {
+        Some(t) => Opened {
+            editor: ManifestEditor::open(t, target.scope).map_err(|e| corrupt(&target.path, &e))?,
+            born: None,
+        },
+        // A file that does not exist yet is BORN by the edit — nothing to prove against.
+        None => open_for_edit(ctx, target)?,
+    };
     for arm in &arms {
         match arm {
             Arm::RowDrop { row, .. } => {
@@ -1612,7 +1720,9 @@ fn apply_arms(
     }))
 }
 
-/// Re-prove every arm against the file as it stands RIGHT NOW, immediately before the write.
+/// Re-prove every arm against the EXACT document instance about to be edited — the caller reads
+/// the file once and hands that one text to both this proof and the editor, so there is no
+/// second read an external edit could slip between.
 ///
 /// The arms carry decisions the file decided: which row to drop, at which value, and — for a set
 /// split — which survivors already have their own row and which need one written. Each of those is
@@ -1621,15 +1731,21 @@ fn apply_arms(
 /// re-run reads the file as it is.
 ///
 /// # Errors
-/// [`ClientError::ManifestChanged`] when any arm no longer describes the file; a read failure, or
-/// a manifest the grammar now refuses.
-fn prove_unchanged(ctx: &Ctx<'_>, target: &EditTarget, arms: &[Arm]) -> Result<(), ClientError> {
+/// [`ClientError::ManifestChanged`] when any arm no longer describes the document; a manifest the
+/// grammar now refuses.
+fn prove_unchanged(
+    target: &EditTarget,
+    arms: &[Arm],
+    text: Option<&str>,
+) -> Result<(), ClientError> {
     // A file that does not exist yet is about to be BORN by this call — there is nothing to have
     // changed, and the birth is part of the edit.
-    if read_text(ctx, &target.path)?.is_none() {
+    let Some(text) = text else {
         return Ok(());
-    }
-    let plan = plan_for(ctx, target)?;
+    };
+    let doc = crate::manifest::document::parse_manifest(text, target.scope)
+        .map_err(|e| corrupt(&target.path, &e))?;
+    let plan = ScopePlan::from_doc(&doc, Some(target.path.clone()));
     let rows = all_rows(&plan);
     let holds = |arm: &Arm| -> bool {
         match arm {

@@ -790,6 +790,7 @@ fn place_draft_on_current(
             takeover: None,
             self_ignore: ctx.layout.is_project_scope(),
             expected: None,
+            project_root: ctx.layout.project_root(),
         },
     )?;
     Ok(())

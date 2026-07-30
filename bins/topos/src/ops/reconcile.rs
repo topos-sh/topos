@@ -617,10 +617,17 @@ pub(crate) fn manifest_update(
             ));
         }
     }
-    // Pre-1.0 handover: HOME-store map rows that point into a project this run processes are the
-    // OLD blended model's leftovers — dropped here (bytes stay in place) so the project-scope pass
-    // adopts what it finds through the ordinary byte-identical adopt-in-place.
-    handover_legacy_project_rows(ctx, &manifest_dirs, &mut sweep.warnings);
+    // Pre-1.0 handover: HOME-store map rows that point into the ACTIVE project are the OLD
+    // blended model's leftovers — dropped (bytes stay in place) only once the project store has
+    // verifiably adopted the skill. ONLY the nearest, parsed manifest's dir participates: a
+    // parse failure froze the scope (a typo must keep state, never retire it), and an ancestor a
+    // nearer file shadows gets no project pass this run, so nothing may retire toward it.
+    let handover_dirs: Vec<PathBuf> = if project_frozen {
+        Vec::new()
+    } else {
+        project.iter().map(|(dir, _)| dir.clone()).collect()
+    };
+    handover_legacy_project_rows(ctx, &handover_dirs, &mut sweep.warnings);
 
     // The follow seam for this run: current deliveries first, the cache behind them.
     let mut follow = CacheFollow::load(ctx.fs, &ctx.layout);
@@ -1521,7 +1528,7 @@ fn converge_pending_governance(env: &Env<'_>, dir: &Path, sweep: &mut Sweep) -> 
         &run.session.workspace_name,
         std::slice::from_ref(&canonical),
     ) {
-        Ok(Some(rw)) => {
+        Ok(super::GovernedOutcome::Rewritten(rw)) => {
             sweep.warnings.push(format!(
                 "GOVERNANCE_CONVERGED {}: {} — the \"{}\" line is now \"{}\" (a landed publish's \
                  pending transfer)",
@@ -1529,7 +1536,8 @@ fn converge_pending_governance(env: &Env<'_>, dir: &Path, sweep: &mut Sweep) -> 
             ));
             true
         }
-        Ok(None) => false,
+        // The row was removed while this converge ran — a completed removal is never re-added.
+        Ok(super::GovernedOutcome::RowRemoved { .. } | super::GovernedOutcome::None) => false,
         Err(e) => {
             note_item_failure(ctx, &mut sweep.warnings, &lock.name, &e);
             false
@@ -2221,29 +2229,43 @@ fn refresh_repo_skill(
         )?;
     }
     // Clean re-import: STASH the recorded placements (clean copies of the OLD commit) and the
-    // sidecar record aside — sibling renames, same filesystem — then adopt afresh. The install can
-    // still fail past the prefetch (an occupied destination, an io fault); a failure RESTORES the
-    // stashes, so the valid old import is never lost to a refused new one. External sources carry no
-    // local history worth preserving past their commit (bytes follow the source), so a SUCCESSFUL
-    // swap deletes the stashes.
-    let mut stashed: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let restore = |fs: &dyn crate::fs_seam::FsOps, stashed: &[(PathBuf, PathBuf)]| {
-        // Best-effort, newest-first; a restore failure leaves the stash sibling on disk rather than
-        // deleting anything.
-        for (orig, stash) in stashed.iter().rev() {
-            if !fs.exists(orig) {
-                let _ = fs.rename(stash, orig);
+    // sidecar record aside — sibling renames, same filesystem, each JOURNALED before its rename
+    // (a crash mid-refresh must leave a record the next run's recovery restores from: the stash
+    // names are unique, so no name-keyed sweep would ever find them) — then adopt afresh. The
+    // install can still fail past the prefetch (an occupied destination, an io fault); a failure
+    // RESTORES the stashes, so the valid old import is never lost to a refused new one. External
+    // sources carry no local history worth preserving past their commit (bytes follow the
+    // source), so a SUCCESSFUL swap deletes the stashes — each re-proven still-clean immediately
+    // before its drop (a rename cannot revoke an already-open fd).
+    let mut stashed: Vec<(PathBuf, PathBuf, Option<[u8; 32]>)> = Vec::new();
+    let restore = |fs: &dyn crate::fs_seam::FsOps,
+                   stashed: &[(PathBuf, PathBuf, Option<[u8; 32]>)]| {
+        // Best-effort, newest-first; a restore failure leaves the stash sibling on disk (its
+        // journal entry stands, so recovery retries) rather than deleting anything.
+        for (orig, stash, _) in stashed.iter().rev() {
+            if !fs.exists(orig) && fs.rename(stash, orig).is_ok() {
+                crate::sidecar::settle_park_journal(fs, &ctx.layout, stash);
             }
         }
     };
     let stash_dir = |fs: &dyn crate::fs_seam::FsOps,
                      from: &Path,
-                     stashed: &mut Vec<(PathBuf, PathBuf)>|
+                     digest: Option<[u8; 32]>,
+                     stashed: &mut Vec<(PathBuf, PathBuf, Option<[u8; 32]>)>|
      -> Result<PathBuf, ClientError> {
         // A UNIQUE stash name — an existing sibling (a prior failed refresh's backup) is never
-        // deleted to make room; the ladder suffixes past it.
-        let to = crate::materialize::park_aside(fs, from, "refresh-old")?;
-        stashed.push((from.to_path_buf(), to.clone()));
+        // deleted to make room; the ladder suffixes past it. A placement stash (digest known)
+        // auto-restores on crash recovery; the sidecar record does NOT (`restore = false`) — the
+        // new record may already have landed, and a restored old one would double-track the dir,
+        // so recovery preserves + discloses it instead.
+        let to = crate::materialize::park_aside_journaled(
+            fs,
+            &ctx.layout,
+            from,
+            "refresh-old",
+            digest.is_some(),
+        )?;
+        stashed.push((from.to_path_buf(), to.clone(), digest));
         Ok(to)
     };
     let mut stash_all = || -> Result<(), ClientError> {
@@ -2254,12 +2276,12 @@ fn refresh_repo_skill(
             if !ctx.fs.exists(&scan.dir) {
                 continue;
             }
-            let parked = stash_dir(ctx.fs, &scan.dir, &mut stashed)?;
+            let parked = stash_dir(ctx.fs, &scan.dir, Some(*digest), &mut stashed)?;
             // PARK-THEN-VERIFY: the classification above rode a scan taken before the archive
             // fetch and the extract, so "clean" is a claim about a directory anyone could have
-            // edited since. Re-read the PARKED tree — nothing can be writing it now — and treat a
-            // difference exactly as an up-front local edit: refuse, restoring every stash. An
-            // import never overwrites work it did not put there, whenever that work arrived.
+            // edited since. Re-read the PARKED tree — nothing can reach it by path now — and
+            // treat a difference exactly as an up-front local edit: refuse, restoring every
+            // stash. An import never overwrites work it did not put there, whenever it arrived.
             let still_clean =
                 crate::scan::scan(&parked).is_ok_and(|fresh| fresh.bundle_digest == *digest);
             if !still_clean {
@@ -2272,7 +2294,9 @@ fn refresh_repo_skill(
         }
         let sidecar_dir = ctx.layout.skill_dir(sid);
         if ctx.fs.exists(&sidecar_dir) {
-            stash_dir(ctx.fs, &sidecar_dir, &mut stashed)?;
+            // The sidecar record: topos's own engine state, mutated only under the skill lock
+            // this fn holds — no content digest to re-prove (`None`).
+            stash_dir(ctx.fs, &sidecar_dir, None, &mut stashed)?;
         }
         Ok(())
     };
@@ -2283,8 +2307,29 @@ fn refresh_repo_skill(
     }
     match super::add_remote_fetched(ctx, targz, spec, roots, opts) {
         Ok(d) => {
-            for (_, stash) in &stashed {
-                let _ = ctx.fs.remove_dir_all(stash);
+            for (_, stash, expect) in &stashed {
+                // Re-prove immediately before each drop: a placement stash must STILL hold its
+                // recorded clean digest across two consecutive reads (an fd-write that landed
+                // after the park would otherwise die unexamined). A stash that moved, or cannot
+                // be read, is PRESERVED — its journal entry stands, and recovery discloses it.
+                let disposable = match expect {
+                    None => true, // the sidecar record — engine state under the held lock
+                    Some(d) => {
+                        let mut agreed = false;
+                        let mut seen = 0u8;
+                        while seen < 2 {
+                            match crate::scan::scan(stash) {
+                                Ok(fresh) if fresh.bundle_digest == *d => seen += 1,
+                                _ => break,
+                            }
+                            agreed = seen == 2;
+                        }
+                        agreed
+                    }
+                };
+                if disposable && ctx.fs.remove_dir_all(stash).is_ok() {
+                    crate::sidecar::settle_park_journal(ctx.fs, &ctx.layout, stash);
+                }
             }
             Ok(d.name)
         }
@@ -2831,42 +2876,89 @@ fn clean_placements(
         }
         let p = &scans[i].dir;
         if ctx.fs.exists(p) {
-            // PARK FIRST. After this rename the tree is unreachable by its old path, so the read
-            // below sees exactly the bytes about to be dropped — not a snapshot of a moving
-            // target. An edit racing this instant either landed before the rename (and is parked,
-            // and is read) or lands in a directory this run has already let go of.
-            let parked = crate::materialize::park_aside(ctx.fs, p, "retiring")?;
-            match crate::scan::scan(&parked) {
-                Ok(fresh) => {
-                    // Already captured by the pass above (same bytes), or equal to this
-                    // placement's own recorded baseline (nothing of the user's to lose) —
-                    // otherwise these exact bytes are snapshotted now, before they go.
-                    let captured = matches!(
-                        &scans[i].status,
-                        placement::ScanStatus::Modified { scanned }
-                            if scanned.bundle_digest == fresh.bundle_digest
-                    );
-                    let now_hex = topos_core::digest::to_hex(&fresh.bundle_digest);
-                    let at_baseline = map
-                        .placement_state
-                        .get(i)
-                        .and_then(|s| s.materialized_sha.as_deref())
-                        == Some(now_hex.as_str());
-                    if !captured && !at_baseline {
-                        sync_engine::snapshot_draft(ctx, &ctx.layout.published(sid), lock, &fresh)?;
+            // PARK FIRST — journaled: after this rename the tree is unreachable by its old path,
+            // and the journal entry means a crash anywhere before the drop concludes leaves a
+            // record recovery restores from (a park under a unique name is otherwise invisible
+            // to every sweep). The read below then sees exactly the bytes about to be dropped —
+            // not a snapshot of a moving target.
+            let parked =
+                crate::materialize::park_aside_journaled(ctx.fs, &ctx.layout, p, "retiring", true)?;
+            // The SETTLE rail: a rename cannot revoke an already-open file descriptor, so the
+            // drop is authorized only by TWO CONSECUTIVE AGREEING READS — every distinct content
+            // seen along the way snapshotted before it could die. A tree that keeps moving, or
+            // becomes unreadable, is put back and the clean refuses.
+            let mut prev: Option<String> = None;
+            let mut absorbed: Vec<String> = Vec::new();
+            let mut settled = false;
+            let mut fault: Option<ClientError> = None;
+            for _ in 0..4 {
+                let fresh = match crate::scan::scan(&parked) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        fault = Some(ClientError::PlacementUnsupported {
+                            reason: format!(
+                                "{} changed while it was being retired and can no longer be read \
+                                 ({e}); refusing to remove it — inspect or move the directory by \
+                                 hand",
+                                p.display()
+                            ),
+                        });
+                        break;
                     }
-                    ctx.fs.remove_dir_all(&parked)?;
+                };
+                // Already captured by the pass above (same bytes), or equal to this placement's
+                // own recorded baseline (nothing of the user's to lose), or absorbed by an
+                // earlier loop pass — otherwise these exact bytes are snapshotted now.
+                let captured = matches!(
+                    &scans[i].status,
+                    placement::ScanStatus::Modified { scanned }
+                        if scanned.bundle_digest == fresh.bundle_digest
+                );
+                let now_hex = topos_core::digest::to_hex(&fresh.bundle_digest);
+                let at_baseline = map
+                    .placement_state
+                    .get(i)
+                    .and_then(|s| s.materialized_sha.as_deref())
+                    == Some(now_hex.as_str());
+                if !captured && !at_baseline && !absorbed.contains(&now_hex) {
+                    if let Err(e) =
+                        sync_engine::snapshot_draft(ctx, &ctx.layout.published(sid), lock, &fresh)
+                    {
+                        fault = Some(e);
+                        break;
+                    }
+                    absorbed.push(now_hex.clone());
                 }
-                Err(e) => {
-                    // Unreadable: put it back and refuse. Bytes this run cannot account for are
-                    // never dropped — and if the original path has since been taken, the park
-                    // keeps them under its own name rather than clobbering the newcomer.
-                    let restored = crate::materialize::restore_parked(ctx.fs, &parked, p);
-                    return Err(ClientError::PlacementUnsupported {
+                if prev.as_deref() == Some(now_hex.as_str()) {
+                    settled = true;
+                    break;
+                }
+                prev = Some(now_hex);
+            }
+            if settled {
+                // A failed remove leaves the park + its journal entry — recovery restores it.
+                ctx.fs.remove_dir_all(&parked)?;
+                crate::sidecar::settle_park_journal(ctx.fs, &ctx.layout, &parked);
+            } else {
+                // Put it back and refuse. Bytes this run cannot account for are never dropped —
+                // and if the original path has since been taken, the park keeps them under its
+                // own name (the journal entry stands; recovery discloses it).
+                let restored = crate::materialize::restore_parked(ctx.fs, &parked, p);
+                if restored {
+                    crate::sidecar::settle_park_journal(ctx.fs, &ctx.layout, &parked);
+                }
+                return Err(match fault {
+                    Some(e) if restored => e,
+                    Some(e) => ClientError::PlacementUnsupported {
                         reason: format!(
-                            "{} changed while it was being retired and can no longer be read \
-                             ({e}); refusing to remove it — inspect or move the directory by \
-                             hand{}",
+                            "{} (its bytes are parked at {})",
+                            crate::render::safe_message(&e),
+                            parked.display()
+                        ),
+                    },
+                    None => ClientError::PlacementUnsupported {
+                        reason: format!(
+                            "{} kept changing while it was being retired; refusing to remove it{}",
                             p.display(),
                             if restored {
                                 String::new()
@@ -2874,8 +2966,8 @@ fn clean_placements(
                                 format!(" (its bytes are parked at {})", parked.display())
                             }
                         ),
-                    });
-                }
+                    },
+                });
             }
         }
         removed.insert(i);
@@ -3013,11 +3105,14 @@ fn note_item_failure(ctx: &Ctx<'_>, warnings: &mut Vec<String>, name: &str, e: &
 }
 
 /// Pre-1.0 old-state handover (no compatibility machinery): before per-scope stores, ONE home map
-/// blended home and project placements. A home-store row that points INTO a project directory this
-/// run processes is legacy — dropped from the home map with its BYTES LEFT IN PLACE, so the
-/// project-scope pass adopts what it finds (byte-identical copies adopt in place; a divergent
-/// occupant is never clobbered and the delivery lands namespaced beside it, disclosed). Two kinds of
-/// rows are NOT handed over:
+/// blended home and project placements. A home-store row that points INTO the ACTIVE project
+/// directory is legacy — dropped from the home map with its BYTES LEFT IN PLACE — but ONLY once
+/// the project store has VERIFIABLY ADOPTED the skill (a project-store skill records that exact
+/// placement path): custody must be established before the old record lets go, so an empty or
+/// not-yet-reconciled project manifest hands nothing over (the next sweep, after the project pass
+/// adopts, does). The caller passes ONLY the active project plan's dir — never an ancestor a
+/// nearer manifest shadows, and nothing at all when the nearest manifest failed to parse (a typo
+/// must keep state, never retire it). Two kinds of rows are additionally NOT handed over:
 ///
 /// - agent-less native rows (kind `native`, no agent) — the user's own chosen locations (an
 ///   adopt-in-place working copy, an explicit placement pin), which the person-scope record keeps
@@ -3025,9 +3120,12 @@ fn note_item_failure(ctx: &Ctx<'_>, warnings: &mut Vec<String>, name: &str, e: &
 /// - rows of a skill imported from an external source (`origin.json` present) — those keep their home
 ///   custody for now.
 ///
-/// A skill whose home map ends EMPTY after the drop was project-only: its home state dir is retired
-/// whole — the project store carries the scope's state from here on.
-fn handover_legacy_project_rows(
+/// A skill whose home map ends EMPTY after the drop was project-only. Its home state dir is
+/// retired by PARKING, never deleting: the embedded history and draft snapshots in it were not
+/// carried into the project store's fresh baseline, so the dir is renamed to a
+/// `.topos-handover-*` sibling (outside every sweep's reach), disclosed with a warning line, and
+/// journaled in the log — a person can delete it deliberately; topos does not.
+pub(crate) fn handover_legacy_project_rows(
     ctx: &Ctx<'_>,
     project_dirs: &[PathBuf],
     warnings: &mut Vec<String>,
@@ -3063,7 +3161,12 @@ fn handover_legacy_project_rows(
             .enumerate()
             .filter(|(_, (p, st))| {
                 (st.agent.is_some() || st.kind == PlacementKind::Shared)
-                    && project_dirs.iter().any(|pd| Path::new(p).starts_with(pd))
+                    && project_dirs.iter().any(|pd| {
+                        Path::new(p).starts_with(pd)
+                            // The adoption witness: retire the home row only once the project
+                            // store's own record covers this exact path — custody first.
+                            && project_store_tracks(ctx, pd, Path::new(p))
+                    })
             })
             .map(|(i, _)| i)
             .collect();
@@ -3079,10 +3182,31 @@ fn handover_legacy_project_rows(
         let mut it = keep.iter();
         next.placement_state.retain(|_| *it.next().unwrap_or(&true));
         let done = if next.placements.is_empty() {
-            // Project-only: the home state dir is retired whole; the project store owns the scope.
-            ctx.fs
-                .remove_dir_all(&ctx.layout.skill_dir(&sid))
-                .map_err(ClientError::from)
+            // Project-only: the project store owns the scope now, but the home dir still holds
+            // embedded history + draft snapshots no adoption carried over — PARK it (rename to a
+            // `.topos-handover-*` sibling no sweep touches), disclose, and log; never delete.
+            match crate::materialize::park_aside(ctx.fs, &ctx.layout.skill_dir(&sid), "handover") {
+                Ok(parked) => {
+                    warnings.push(format!(
+                        "STATE_HANDOVER {id}: the project store now tracks it; the old home-side \
+                         state (history + draft snapshots) is preserved at {} — delete it \
+                         deliberately when you no longer want it",
+                        parked.display()
+                    ));
+                    let _ = crate::logfile::append_event(
+                        ctx.fs,
+                        &ctx.layout.log_path(),
+                        &serde_json::json!({
+                            "action": "handover_store_parked",
+                            "skill_id": id,
+                            "kept_at": parked.to_string_lossy(),
+                            "at": ctx.clock.now_unix_millis(),
+                        }),
+                    );
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
         } else {
             crate::materialize::mirror_first_placement(&mut next);
             doc::write_map(ctx.fs, &sp.map, &next)
@@ -3091,6 +3215,21 @@ fn handover_legacy_project_rows(
             warnings.push(format!("STATE_HANDOVER_FAILED {id}: {}", e.detail()));
         }
     }
+}
+
+/// Whether the project store at `pd` verifiably tracks a skill whose recorded placements cover
+/// `path` (canonical compare — the same predicate `add`'s already-tracked guard uses). `false`
+/// when the store does not exist, the path no longer resolves, or nothing records it — every
+/// one of which means custody is NOT established and the home row must stay.
+fn project_store_tracks(ctx: &Ctx<'_>, pd: &Path, path: &Path) -> bool {
+    let Some(playout) = sidecar::existing_project_store(ctx.fs, pd) else {
+        return false;
+    };
+    let Ok(canonical) = path.canonicalize() else {
+        return false;
+    };
+    let pctx = super::pull::ctx_with_layout(ctx, &playout);
+    matches!(super::add::tracked_skill_at(&pctx, &canonical), Ok(Some(_)))
 }
 
 /// Upcast helpers — `Box<dyn ReconcileTransport>` to its two supertrait views.

@@ -297,7 +297,7 @@ impl SessionInstall {
         self.with_ctx(cwd, |ctx| {
             let connect = connect_session();
             let owned: Vec<String> = targets.iter().map(|t| (*t).to_owned()).collect();
-            ops::remove_project(ctx, &connect, &owned, true)
+            ops::remove_project(ctx, &connect, &owned, None, true)
                 .map(|r| r.is_some())
                 .map_err(err_str)
         })
@@ -307,7 +307,7 @@ impl SessionInstall {
     pub fn remove_global(&self, reference: &str) -> Result<(String, Option<String>), String> {
         self.with_ctx(None, |ctx| {
             let connect = connect_session();
-            match ops::remove_global(ctx, &connect, &[reference.to_owned()], true)
+            match ops::remove_global(ctx, &connect, &[reference.to_owned()], None, true)
                 .map_err(err_str)?
             {
                 ops::RemoveOutcome::Applied(d) => {

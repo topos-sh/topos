@@ -410,6 +410,7 @@ fn ensure_inner(
                 .then_some(&is_downloaded_copy as &dyn Fn(&std::path::Path) -> bool),
             self_ignore: ctx.layout.is_project_scope(),
             expected: None,
+            project_root: ctx.layout.project_root(),
         },
     )?;
     Ok(BuiltinSync { changed: true })

@@ -120,6 +120,7 @@ topos remove [OPTIONS] [SKILL]...
 |---|---|
 | `[SKILL]...` | The skill(s) to remove — or `@<workspace>` with `-g` to stop adopting its feed here |
 | `-g, --global` | Edit your machine-wide file (`~/.topos/topos.toml`) instead of this folder's |
+| `--via <REF>` | When more than one channel/repo line carries the skill, name WHICH line's rewrite you mean (its reference, e.g. `@acme/channels/backend`) — the ambiguity refusal lists the exact `--via` invocations |
 | `--yes` | Confirm a removal that loses local work (unshared edits, or a local-only skill whose delete is permanent) |
 
 

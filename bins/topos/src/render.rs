@@ -1850,6 +1850,10 @@ pub(crate) fn publish_tty(data: &PublishData) -> String {
     if let Some(note) = &data.rewrite_pending {
         out.push_str(&format!("\nnote: {note}"));
     }
+    // The concurrent-removal truth: the row was removed while the publish ran; nothing re-added it.
+    if let Some(note) = &data.rewrite_skipped {
+        out.push_str(&format!("\nnote: {note}"));
+    }
     if let Some(note) = &data.origin_note {
         out.push_str(&format!("\nnote: {note}"));
     }
@@ -1896,6 +1900,9 @@ pub(crate) fn propose_tty(data: &ProposeData) -> String {
         ));
     }
     if let Some(note) = &data.rewrite_pending {
+        out.push_str(&format!("\nnote: {note}"));
+    }
+    if let Some(note) = &data.rewrite_skipped {
         out.push_str(&format!("\nnote: {note}"));
     }
     out
@@ -2375,6 +2382,7 @@ mod tests {
             invite_line: None,
             origin_note: None,
             rewrite_pending: None,
+            rewrite_skipped: None,
         });
         assert!(line.starts_with("Published smoke-notes@"), "{line}");
         assert!(
@@ -2400,6 +2408,7 @@ mod tests {
             invite_line: None,
             origin_note: None,
             rewrite_pending: None,
+            rewrite_skipped: None,
         });
         assert!(line.starts_with("Published smoke-notes@"), "{line}");
         assert!(
@@ -2433,6 +2442,7 @@ mod tests {
             invite_line: Some(invite.to_owned()),
             origin_note: None,
             rewrite_pending: None,
+            rewrite_skipped: None,
         });
         assert!(line.starts_with("Published smoke-notes@"), "{line}");
         let handoff = format!("\nbring a teammate: {invite}");

@@ -717,6 +717,12 @@ export interface components {
              *     re-run) converges the rewrite idempotently. **INFERRED** (additive-only).
              */
             rewrite_pending?: string | null;
+            /**
+             * @description The manifest's local-path line was REMOVED while this propose ran (a concurrent
+             *     `topos remove`): NO workspace row was written — a completed removal is never silently
+             *     undone. **INFERRED** (additive-only).
+             */
+            rewrite_skipped?: string | null;
             title: string;
         };
         /**
@@ -834,6 +840,14 @@ export interface components {
              *     converges the rewrite idempotently. **INFERRED** (additive-only).
              */
             rewrite_pending?: string | null;
+            /**
+             * @description The manifest's local-path line was REMOVED while this publish ran (a concurrent
+             *     `topos remove` completed between the describe and the locked rewrite): NO workspace row
+             *     was written — a completed removal is never silently undone. The publish stands
+             *     catalog-side; `topos add <reference>` records the demand deliberately. **INFERRED**
+             *     (additive-only).
+             */
+            rewrite_skipped?: string | null;
             skill_id: string;
             /** @description The new commit (the shipped `version_id`). */
             version_id: string;

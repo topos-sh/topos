@@ -95,9 +95,14 @@ pub(crate) use reconcile::{
     CacheFollow, ManifestUpdateOpts, SessionRoutedPlane, SessionTransports, forge_imports,
     manifest_update,
 };
+// The handover is driven by the reconcile; the direct re-export serves the custody-first
+// regression tests (retire only after verifiable project adoption; park, never delete).
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use reconcile::handover_legacy_project_rows;
 pub(crate) use reference::{
-    AddManyOutcome, AddRefOutcome, WriteLane, add_forge_selected, add_reference, find_path_line,
-    resolve_session_lane, rewrite_to_governed,
+    AddManyOutcome, AddRefOutcome, GovernedOutcome, WriteLane, add_forge_selected, add_reference,
+    find_path_line, resolve_session_lane, rewrite_to_governed,
 };
 // The withdrawal/exclusion clean is driven through `remove`/the reconcile; the direct re-export
 // serves the placement-breadth suite's foreign-preservation regression.

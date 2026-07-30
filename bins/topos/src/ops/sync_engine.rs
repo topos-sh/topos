@@ -525,6 +525,7 @@ pub(crate) fn go_back(
             takeover: None,
             self_ignore: ctx.layout.is_project_scope(),
             expected: None,
+            project_root: ctx.layout.project_root(),
         },
     )?;
     log_apply(ctx, skill_id, "pull-goback", target, &report);
@@ -611,6 +612,7 @@ pub(crate) fn reset_to_base(
             takeover: None,
             self_ignore: ctx.layout.is_project_scope(),
             expected: None,
+            project_root: ctx.layout.project_root(),
         },
     )?;
     // A recorded merge conflict describes the divergence this reset just DISCARDED — clear the
@@ -723,6 +725,7 @@ fn apply_forward(
             takeover: None,
             self_ignore: ctx.layout.is_project_scope(),
             expected: None,
+            project_root: ctx.layout.project_root(),
         },
     )?;
     log_apply(ctx, skill_id, "pull", t.commit, &report);
@@ -798,6 +801,7 @@ fn converge_placements(
             takeover: None,
             self_ignore: ctx.layout.is_project_scope(),
             expected: None,
+            project_root: ctx.layout.project_root(),
         },
     )?;
     log_apply(ctx, skill_id, "converge", base, &report);
@@ -897,6 +901,7 @@ fn settle_or_spread(
             takeover: None,
             self_ignore: ctx.layout.is_project_scope(),
             expected: Some(&expected),
+            project_root: ctx.layout.project_root(),
         },
     )?;
     // Count what actually landed (the skip arm may have left some targets put): a target whose

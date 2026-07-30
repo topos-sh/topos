@@ -86,6 +86,13 @@
         "null"
       ]
     },
+    "rewrite_skipped": {
+      "description": "The manifest's local-path line was REMOVED while this publish ran (a concurrent\n`topos remove` completed between the describe and the locked rewrite): NO workspace row\nwas written — a completed removal is never silently undone. The publish stands\ncatalog-side; `topos add <reference>` records the demand deliberately. **INFERRED**\n(additive-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "skill_id": {
       "type": "string"
     },
