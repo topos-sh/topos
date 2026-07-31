@@ -315,7 +315,14 @@ impl PlaneSource for SessionRoutedPlane {
 #[derive(Default)]
 struct Sweep {
     rows: Vec<PullSkill>,
+    /// FAILURES only — the isolated per-skill faults the receipt counts and the renderer calls
+    /// failed. A line that describes something that WORKED belongs in `disclosures`, or a clean
+    /// run reports itself as broken.
     warnings: Vec<String>,
+    /// Successful facts worth stating — the settled-draft fan-out, a cross-scope version split.
+    /// They ride the same `--json` `warnings` array (one stable machine channel) but are never
+    /// counted as failures.
+    disclosures: Vec<String>,
     /// `(scope label, bundle identity)` already reconciled — the ONE dedupe key. Scopes are
     /// unblended, so the same identity may appear once per scope.
     synced: HashSet<(String, String)>,
@@ -757,7 +764,7 @@ pub(crate) fn manifest_update(
                 // The wire carries ONE row per (session, bundle); a bundle held at different
                 // versions in different stores says so here, where the pick was made — a local
                 // fact, disclosed whether or not the report reaches the plane.
-                sweep.warnings.extend(snapshot.splits.iter().cloned());
+                sweep.disclosures.extend(snapshot.splits.iter().cloned());
                 match run
                     .transports
                     .plane
@@ -900,6 +907,7 @@ pub(crate) fn manifest_update(
             sync,
         },
         warnings: sweep.warnings,
+        disclosures: sweep.disclosures,
         access_gone,
         unreachable,
     })
@@ -1218,7 +1226,7 @@ fn reconcile_feed<'a>(
                         row.scope = Some(sc.label.clone());
                         if row.action == PullAction::DraftSynced {
                             sweep
-                                .warnings
+                                .disclosures
                                 .push(draft_synced_line(&ds.name, row.synced_placements));
                         }
                         sweep.push(row);
@@ -1437,10 +1445,11 @@ fn sync_workspace_skill<'a>(
         Ok(mut row) => {
             row.workspace_id = Some(run.session.workspace_id.clone());
             row.scope = Some(sc.label.clone());
-            // The settled-draft fan-out's receipt line rides the warning channel — quiet, factual.
+            // The settled-draft fan-out's receipt line is a DISCLOSURE — the fan-out succeeded, so
+            // it must never land in the channel the summary counts as failures.
             if row.action == PullAction::DraftSynced {
                 sweep
-                    .warnings
+                    .disclosures
                     .push(draft_synced_line(&target.name, row.synced_placements));
             }
             // Disclose a delivery the naming ladder had to place BESIDE a same-named occupant the
@@ -1713,6 +1722,15 @@ fn reconcile_repo_set(
     // live in the project's own store, so two checkouts of one repo row never share state.
     let store_layout = forge_store_layout(env.ctx, &sc.scope);
     let sctx = super::pull::ctx_with_layout(env.ctx, &store_layout);
+    // THE ROW IS DEMAND, and it is demand BEFORE any gate below can return: the members this
+    // scope already tracks for the origin are mentioned first, so the undemanded clean can never
+    // read a refusal as a drop. A first-trust refusal says "nothing is fetched or installed" —
+    // and a run that installs nothing must destroy nothing either; the same reason a transient
+    // fetch failure never retires a tracked member (the mention is what protects both).
+    let tracked = tracked_repo_members(&sctx, &origin);
+    for import in &tracked {
+        sweep.mention(&sc.label, &import.lock.name);
+    }
     // FIRST TRUST is the MACHINE registry (the home sidecar), consulted in EVERY scope — never
     // store contents: a checkout can commit a valid-looking `.topos/` store, and per-checkout
     // files are demand, not consent. The reconcile never first-installs an ungranted origin;
@@ -1720,10 +1738,6 @@ fn reconcile_repo_set(
     if !crate::forge_trust::is_trusted(env.ctx, &origin) {
         sweep.warnings.push(first_trust_line(sc, &row.reference));
         return;
-    }
-    let tracked = tracked_repo_members(&sctx, &origin);
-    for import in &tracked {
-        sweep.mention(&sc.label, &import.lock.name);
     }
     let pin = row.pin();
     // The row's own placement decision (`harness = [...]`, written by a `-a` selector import):
@@ -1833,8 +1847,10 @@ fn reconcile_repo_set(
         }
         return;
     }
+    // The commit motion an explicit update just landed — a DISCLOSURE of what worked, beside the
+    // rows that carry the members. It must not ride the channel the summary counts as failures.
     if !recorded.is_empty() && !resolved.is_empty() && !commit_matches(&recorded, &resolved) {
-        sweep.warnings.push(git_updated_line(
+        sweep.disclosures.push(git_updated_line(
             &origin,
             &recorded,
             &resolved,
@@ -1982,7 +1998,9 @@ fn reconcile_repo_skill(
             return;
         }
         if !recorded.is_empty() && !resolved.is_empty() && !commit_matches(&recorded, &resolved) {
-            sweep.warnings.push(format!(
+            // The single-skill row's twin of the set arm's motion line — a disclosure, not a
+            // failure (see the set arm above).
+            sweep.disclosures.push(format!(
                 "GIT_UPDATED {origin}: {} -> {}; skills: ~{}",
                 short_commit(&recorded),
                 short_commit(&resolved),

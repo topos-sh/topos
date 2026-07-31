@@ -575,6 +575,22 @@ fn run_command(json: bool, workspace: Option<String>, command: Command, bare: bo
                 crate::source::SourceSpec::LocalPath(ref p) if p.exists()
             );
             let reference_arm = no_selectors && !looks_local;
+            // The `"off"` switch's EXACT INVERSE, at the spelling that wrote it. `remove -g
+            // <name>` takes a bare name and writes the switch under the canonical reference; the
+            // reference grammar does not own bare names, so a bare `add -g <name>` would fall past
+            // this match into the local adopt ladder and answer about re-forking or an
+            // already-tracked directory instead of the switch it was asked to lift. Resolving the
+            // name to its off row here — and only when one actually stands — hands the reference
+            // arm below the spelling it understands; every other bare name is untouched.
+            let source = if global && reference_arm && !source.contains('/') {
+                match ops::off_row_for(&ctx, &source) {
+                    Ok(Some(reference)) => reference,
+                    Ok(None) => source,
+                    Err(e) => return finish(json, cmd_name, Err(e), render::add_tty, &diag),
+                }
+            } else {
+                source
+            };
             match crate::manifest::keys::parse_input(&source, ops::manifest_host(&ctx).as_deref()) {
                 Ok(parsed)
                     if reference_arm
@@ -1473,11 +1489,14 @@ fn finish_pull(
                 }
                 let value = serde_json::to_value(&out.data).unwrap_or_default();
                 let mut envelope = render::ok_envelope(command, value);
+                // ONE stable machine channel: failures first, then the disclosures. The split is
+                // the receipt's (a disclosure must not be counted as a failure), not the wire's.
                 envelope.warnings = out.warnings;
+                envelope.warnings.extend(out.disclosures.iter().cloned());
                 envelope.next_actions = next_actions;
                 println!("{}", render::to_json(&envelope));
             } else {
-                let mut text = render::pull_tty(&out.data, &out.warnings);
+                let mut text = render::pull_tty(&out.data, &out.warnings, &out.disclosures);
                 if !out.access_gone.is_empty() {
                     text.push_str(&format!(
                         "\nnote: the session{} for {} ended — every skill it delivered stays in \

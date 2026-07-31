@@ -46,6 +46,12 @@ impl Scratch {
         let dir = std::env::temp_dir().join(format!("topos-mrec-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        // CANONICAL, deliberately: macOS's `$TMPDIR` lives behind the `/var` -> `/private/var`
+        // symlink, so a raw temp path and the path the engine RECORDS (which resolves it) differ
+        // in spelling — and every reconcile rule that compares a recorded placement against its
+        // project dir would silently never match here. A rig that cannot match is a rig that
+        // proves nothing; the canonical spelling is also what an ordinary checkout has.
+        let dir = dir.canonicalize().unwrap_or(dir);
         Self(dir)
     }
 }
@@ -1204,10 +1210,10 @@ fn a_star_repo_row_moves_only_on_an_explicit_update() {
     )
     .unwrap();
     let line = out
-        .warnings
+        .disclosures
         .iter()
         .find(|w| w.starts_with("GIT_UPDATED"))
-        .unwrap_or_else(|| panic!("the moved-source line: {:?}", out.warnings));
+        .unwrap_or_else(|| panic!("the moved-source line: {:?}", out.disclosures));
     assert!(line.contains("github.com/o/r"), "{line}");
     assert!(
         line.contains("aaaaaaaaaaaa"),
@@ -2114,7 +2120,7 @@ fn a_member_gone_from_the_archive_is_cleaned_snapshot_first() {
     )
     .unwrap();
     let line = out
-        .warnings
+        .disclosures
         .iter()
         .find(|w| w.starts_with("GIT_UPDATED"))
         .expect("the moved-source line");
@@ -4131,10 +4137,10 @@ fn a_bundle_held_at_two_versions_reports_the_person_copy_and_discloses_the_split
     assert_eq!(row.1, topos_core::digest::to_hex(&v2.id), "{reported:?}");
     // And the split the single row cannot carry is said out loud.
     let line = out
-        .warnings
+        .disclosures
         .iter()
         .find(|w| w.starts_with("VERSION_SPLIT"))
-        .unwrap_or_else(|| panic!("the split is disclosed: {:?}", out.warnings));
+        .unwrap_or_else(|| panic!("the split is disclosed: {:?}", out.disclosures));
     assert!(line.contains("s_deploy"), "{line}");
     assert!(
         line.contains(&v1_hex[..12]),
@@ -5324,9 +5330,14 @@ fn a_selector_imports_harness_choice_rides_the_row_into_the_next_update() {
     )
     .unwrap();
     assert!(
-        out.warnings.iter().all(|w| w.starts_with("GIT_UPDATED")),
-        "the moved source is disclosed and nothing else: {:?}",
+        out.warnings.is_empty(),
+        "a landed refresh fails nothing: {:?}",
         out.warnings
+    );
+    assert!(
+        out.disclosures.iter().all(|w| w.starts_with("GIT_UPDATED")),
+        "the moved source is disclosed and nothing else: {:?}",
+        out.disclosures
     );
     assert_eq!(
         std::fs::read(chosen.join("SKILL.md")).unwrap(),

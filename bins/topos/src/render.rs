@@ -340,7 +340,10 @@ pub(crate) fn session_login_tty(data: &topos_types::results::LoginData) -> Strin
             Some(0) => s.push_str(" — nothing is assigned to you here yet."),
             Some(n) => {
                 // Name what the acceptance brings (a long list stays readable: first five + a
-                // remainder count).
+                // remainder count). FUTURE TENSE, deliberately: login persists the session and
+                // arms the trigger, but it moves NO bytes — the delivery snapshot it just read is
+                // the count, not a landing. Saying "delivered here" sent an agent looking for
+                // files the next sweep had not written yet.
                 let mut names = data.delivered_names.join(", ");
                 if data.delivered_names.len() > 5 {
                     names = format!(
@@ -351,15 +354,17 @@ pub(crate) fn session_login_tty(data: &topos_types::results::LoginData) -> Strin
                 }
                 if names.is_empty() {
                     s.push_str(&format!(
-                        " — it gives you {n} skill{}, delivered here; updates arrive silently \
-                         (`topos update` any time).",
-                        if n == 1 { "" } else { "s" }
+                        " — it gives you {n} skill{}; `topos update` delivers {} here, and \
+                         updates arrive silently from then on.",
+                        if n == 1 { "" } else { "s" },
+                        if n == 1 { "it" } else { "them" }
                     ));
                 } else {
                     s.push_str(&format!(
-                        " — it gives you {n} skill{} ({names}), delivered here; updates arrive \
-                         silently (`topos update` any time).",
-                        if n == 1 { "" } else { "s" }
+                        " — it gives you {n} skill{} ({names}); `topos update` delivers {} here, \
+                         and updates arrive silently from then on.",
+                        if n == 1 { "" } else { "s" },
+                        if n == 1 { "it" } else { "them" }
                     ));
                 }
             }
@@ -2057,8 +2062,13 @@ pub(crate) fn review_tty(data: &ReviewData) -> String {
 /// isolated per-skill failures (`warnings` — the same stable lines the `--json` envelope carries)
 /// rendered visibly, and the awaiting-review trailer. The `--quiet` hook path never reaches this
 /// renderer (it stays byte-silent).
-pub(crate) fn pull_tty(data: &PullData, warnings: &[String]) -> String {
-    if data.skills.is_empty() && warnings.is_empty() {
+///
+/// `disclosures` are the OTHER half of that stable line channel: facts about what WORKED (a
+/// settled-draft fan-out, a cross-scope version split). They print as `note:` — the same word
+/// every other receipt in this CLI uses for a disclosure — and they are counted separately,
+/// because the summary below says "failed" and a successful run must never claim one.
+pub(crate) fn pull_tty(data: &PullData, warnings: &[String], disclosures: &[String]) -> String {
+    if data.skills.is_empty() && warnings.is_empty() && disclosures.is_empty() {
         return append_proposals_trailer(
             "Nothing to update here — no manifest or profile demands anything in this directory."
                 .to_owned(),
@@ -2089,6 +2099,9 @@ pub(crate) fn pull_tty(data: &PullData, warnings: &[String]) -> String {
     }
     for w in warnings {
         out.push_str(&format!("warning: {w}\n"));
+    }
+    for d in disclosures {
+        out.push_str(&format!("note: {d}\n"));
     }
 
     // The delivered notices (verdicts first) — an interactive `update` MARKED these read server-side,
@@ -2535,7 +2548,7 @@ mod tests {
             notices: Vec::new(),
             sync: Vec::new(),
         };
-        let out = pull_tty(&data, &[]);
+        let out = pull_tty(&data, &[], &[]);
 
         // Offered: the short hash + the accept command.
         assert!(out.contains("docs"), "{out}");
@@ -2597,7 +2610,7 @@ mod tests {
             sync: Vec::new(),
         };
         assert_eq!(
-            pull_tty(&clean, &[]),
+            pull_tty(&clean, &[], &[]),
             "Checked 2 managed skill(s) — all up to date."
         );
         // Nothing followed at all.
@@ -2608,12 +2621,12 @@ mod tests {
             sync: Vec::new(),
         };
         assert_eq!(
-            pull_tty(&empty, &[]),
+            pull_tty(&empty, &[], &[]),
             "Nothing to update here — no manifest or profile demands anything in this directory."
         );
         // A failed skill renders visibly and is counted (even when every synced row was current).
         let warnings = vec!["IO_ERROR s_docs: a filesystem operation failed".to_owned()];
-        let out = pull_tty(&clean, &warnings);
+        let out = pull_tty(&clean, &warnings, &[]);
         assert!(
             out.contains("warning: IO_ERROR s_docs: a filesystem operation failed"),
             "{out}"
@@ -2651,7 +2664,7 @@ mod tests {
             ],
             sync: Vec::new(),
         };
-        let out = pull_tty(&data, &[]);
+        let out = pull_tty(&data, &[], &[]);
         // The verdict shows its outcome + reason, and sorts before the closure.
         let v = out.find("was rejected").expect("the verdict is shown");
         assert!(

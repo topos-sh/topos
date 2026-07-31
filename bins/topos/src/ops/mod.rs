@@ -74,8 +74,8 @@ pub(crate) use login::{
     Handoff, LoginConnectors, login as session_login, logout as session_logout,
 };
 pub(crate) use manifest_edit::{
-    manifest_host, note_added_path, note_added_remote, reference_shaped, remove_global,
-    remove_project,
+    manifest_host, note_added_path, note_added_remote, off_row_for, reference_shaped,
+    remove_global, remove_project,
 };
 // The TTY-only enrollment row types are constructed in `list` and rendered by field access; the named
 // re-export exists for the renderer's tests, which build them by hand.
