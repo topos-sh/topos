@@ -658,15 +658,26 @@ impl Stack {
         )
     }
 
-    /// Approve a pending device flow AS the sessioned person: the `/verify` ceremony's approve arm.
-    /// This is a PLAIN signed-in accept — a live session plus the explicit approve click is the whole
-    /// ceremony (no re-authentication; the admin ceremonies confirm in proportion to their reach, but
-    /// none re-authenticate).
+    /// Approve a pending device flow AS the sessioned person: the `/verify` ceremony's approve arm,
+    /// picking the boot workspace's seat. This is a PLAIN signed-in accept — a live session plus the
+    /// explicit approve click is the whole ceremony (no re-authentication; the admin ceremonies
+    /// confirm in proportion to their reach, but none re-authenticate).
     pub(crate) fn approve_device(&self, session: &Session, user_code: &str) {
-        let answer = session.post_form("/verify", &[("intent", "approve"), ("code", user_code)]);
+        self.approve_device_in(session, user_code, WS_NAME);
+    }
+
+    /// [`approve_device`](Self::approve_device) picking a NAMED workspace seat — the chooser's
+    /// posted choice (`pick=seat:<slug>`). Approval records consent + the choice; the session
+    /// mints at the CLI's next poll (the exchange), so the confirmation speaks of that poll.
+    pub(crate) fn approve_device_in(&self, session: &Session, user_code: &str, workspace: &str) {
+        let pick = format!("seat:{workspace}");
+        let answer = session.post_form(
+            "/verify",
+            &[("intent", "approve"), ("code", user_code), ("pick", &pick)],
+        );
         assert_eq!(answer.status, 200, "the approve lands: {}", answer.body);
         assert!(
-            answer.body.to_lowercase().contains("logged in"),
+            answer.body.to_lowercase().contains("approved"),
             "the approve confirmation renders: {}",
             answer.body
         );
@@ -725,7 +736,7 @@ impl Stack {
         let start = self.device_post_json(
             None,
             "/v1/login/authorize",
-            &serde_json::json!({ "requested_name": requested_name, "workspace": workspace }),
+            &serde_json::json!({ "requested_name": requested_name, "preselect": workspace }),
         );
         assert_eq!(start.status, 200, "login authorize: {}", start.body);
         let start: serde_json::Value =
@@ -735,7 +746,7 @@ impl Stack {
             .expect("device_code")
             .to_owned();
         let user_code = start["user_code"].as_str().expect("user_code").to_owned();
-        self.approve_device(approver, &user_code);
+        self.approve_device_in(approver, &user_code, workspace);
         let poll = self.device_post_json(
             None,
             "/v1/login/token",

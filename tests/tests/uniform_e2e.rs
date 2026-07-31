@@ -70,6 +70,82 @@ fn every_miss_is_the_one_uniform_404() {
 }
 
 #[test]
+fn the_connect_lane_mints_browser_free_and_misses_uniformly() {
+    let stack = start_stack("connect");
+    let owner = stack.claim_owner(OWNER_EMAIL);
+    let grant = stack.mint_session(&owner, "first CLI");
+
+    // The lane-side second connect: an already-credentialed machine mints a further session with
+    // no browser round-trip — seat standing is the trust basis, and the answer carries a FRESH
+    // secret (the acting credential never widens its own scope).
+    let ok = stack.device_post_json(
+        Some(&grant.credential),
+        "/v1/login/connect",
+        &serde_json::json!({ "workspace": common::WS_NAME, "requested_name": "second CLI" }),
+    );
+    assert_eq!(ok.status, 200, "the connect mints: {}", ok.body);
+    let ok: serde_json::Value = serde_json::from_str(&ok.body).expect("connect JSON");
+    assert_eq!(ok["session_status"], "active");
+    assert_eq!(ok["workspace"]["name"], common::WS_NAME);
+    let fresh = ok["credential"].as_str().expect("credential").to_owned();
+    assert_ne!(
+        fresh, grant.credential,
+        "a fresh secret, never the acting one"
+    );
+    let ws = ok["workspace"]["workspace_id"]
+        .as_str()
+        .expect("workspace_id");
+    let live = stack.device_get(&fresh, &format!("/v1/workspaces/{ws}/delivery"));
+    assert_eq!(
+        live.status, 200,
+        "the fresh session's lane answers: {}",
+        live.body
+    );
+
+    // The unauthenticated start stays a non-oracle: a preselect naming NOTHING still mints a
+    // flow (the browser approval is where reality is disclosed, behind a signed-in session).
+    let start = stack.device_post_json(
+        None,
+        "/v1/login/authorize",
+        &serde_json::json!({ "requested_name": "probe", "preselect": "never-existed" }),
+    );
+    assert_eq!(start.status, 200, "the start never oracles: {}", start.body);
+
+    // Connect misses — a garbage bearer, a missing bearer, a slug this install does not address —
+    // all the ONE byte-identical uniform 404.
+    let misses = [
+        stack.device_post_json(
+            Some("not-a-credential"),
+            "/v1/login/connect",
+            &serde_json::json!({ "workspace": common::WS_NAME, "requested_name": "x" }),
+        ),
+        stack.device_post_json(
+            None,
+            "/v1/login/connect",
+            &serde_json::json!({ "workspace": common::WS_NAME, "requested_name": "x" }),
+        ),
+        stack.device_post_json(
+            Some(&grant.credential),
+            "/v1/login/connect",
+            &serde_json::json!({ "workspace": "never-existed", "requested_name": "x" }),
+        ),
+    ];
+    let reference = &misses[0];
+    assert_eq!(reference.status, 404);
+    for (i, miss) in misses.iter().enumerate() {
+        assert_eq!(
+            miss.status, 404,
+            "connect miss #{i} is a 404: {}",
+            miss.body
+        );
+        assert_eq!(
+            miss.body, reference.body,
+            "connect miss #{i} is byte-identical to every other miss"
+        );
+    }
+}
+
+#[test]
 fn a_pending_session_gets_exactly_two_typed_answers_until_the_owner_approves() {
     let stack = start_stack("pending");
     let owner = stack.claim_owner(OWNER_EMAIL);

@@ -174,31 +174,35 @@ provenance line ("Distilled by <agent> while <what was solved>").
 ## Sessions (logging in)
 
 ```
-topos login <server>/<workspace>  # one browser approval mints this machine's session
+topos login                       # topos.sh; the human picks or creates the workspace in the browser
+topos login <workspace>           # go straight to that workspace (browser-free once logged in to the server)
+topos login <server>[/<workspace>]  # a self-hosted server
 topos login <invite-url>          # the invitation mail's terminal line, verbatim
 topos logout [<workspace>|--all]  # end it — skills, drafts, and manifests stay
 ```
 
-Login IS the acceptance: from then on everything that workspace gives this person arrives
-silently, and the receipt names what landed. Further workspaces are further logins; each session
-is approved in the browser by the human. People ops (roster, roles, assigning, leaving) live in
-the workspace web app; `topos invite <email>` is the one roster verb here.
+The workspace is chosen — or created — in the browser approval, where the human's workspaces
+are known; one click connects. Login IS the acceptance: from then on everything that workspace
+gives this person arrives silently, and the receipt names what landed. Further workspaces are
+further logins — and once this machine is logged in to a server, `topos login <workspace>`
+toward another workspace they already belong to connects immediately, no browser. People ops
+(roster, roles, assigning, leaving) live in the workspace web app; `topos invite <email>` is
+the one roster verb here.
 
 ## Setting up topos for a team (no workspace yet)
 
-When your human says "set up topos for our team", run the whole path — it is four steps, and
+When your human says "set up topos for our team", run the whole path — it is three steps, and
 the only browser moments are theirs:
 
-1. Create the workspace at <https://topos.sh/new> (they sign up and pick a name in the
-   browser), or self-host per `INSTALL.md`. The address — `topos.sh/<name>` — is the
-   workspace's one handle: login, invites, and every publish receipt all speak it.
-2. Log THIS machine in: `topos login <address>`. Show your human the printed approval URL —
-   they open it in a browser and approve; never approve in their place. Piped runs print the
+1. Log THIS machine in: `topos login` (self-hosting: `topos login <server>` — see
+   `INSTALL.md`). Show your human the printed approval URL — they sign in there, name the new
+   workspace (or pick one), and approve; never approve in their place. Piped runs print the
    approval URL and return; re-invoke `topos login` to poll, `--wait <seconds>` to block with
-   a cap.
-3. Seat teammates: `topos invite <email>` per person (bare describes, `--yes` sends). Add
+   a cap. The workspace's address — `topos.sh/<name>` — is its one handle: login, invites,
+   and every publish receipt all speak it.
+2. Seat teammates: `topos invite <email>` per person (bare describes, `--yes` sends). Add
    `--skill <name>` or `--channel <name>` to set someone up from their first day.
-4. Hand each teammate the join line for their own agent — an invite seats them, but only this
+3. Hand each teammate the join line for their own agent — an invite seats them, but only this
    line brings their machine in:
 
    Ask your agent: "Set up Topos for us: fetch <server-origin>/agent and follow it. Our workspace: <address>"
