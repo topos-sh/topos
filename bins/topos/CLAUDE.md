@@ -28,12 +28,16 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   mode-preserving staged write, and a **namespace-atomic directory swap** (`RENAME_EXCHANGE` on Linux /
   `RENAME_SWAP` on macOS) — the primitive a byte-writing *update* uses to overwrite a harness dir. A
   test-only `FaultFs` fails the Nth op for the crash gate. The **no-follow write boundary**: every
-  file open in the seam carries `O_NOFOLLOW`, `create_dir_nofollow` builds directories one
-  `lstat`-checked component at a time below a proven base, and a held **`DirHandle`** (dev+ino
-  captured at proof time, re-verified immediately before each op) anchors the landing
-  renames/exchanges (`rename_at`/`rename_at_noreplace`/`exchange_at`, `renameat` against the held
-  fd) — so a containment proof survives to the write it authorizes (residuals named in the module
-  doc). The **private-file primitives** (`write_private`
+  file open in the seam carries `O_NOFOLLOW` (with the forced mode applied through the already-open
+  fd — `fchmod`, never a path chmod), `create_dir_nofollow` builds directories at DIRECTORY HANDLES
+  below a proven base (each component `openat`/`mkdirat` from its parent's held fd — no path-based
+  syscall below the base — returning the final held handle), persisted-doc reads are `O_NOFOLLOW`
+  too (a symlinked `lock.json` reads as unreadable, never absent), and a held **`DirHandle`**
+  (dev+ino captured at proof time, re-verified immediately before each op) anchors the landing
+  renames/exchanges AND the litter/probe removals
+  (`rename_at`/`rename_at_noreplace`/`exchange_at`/`remove_dir_all_at`/`create_dir_at`/
+  `write_new_at`, all `*at` against the held fd) — so a containment proof survives to the write it
+  authorizes (residuals named in the module doc). The **private-file primitives** (`write_private`
   0600-from-creation, `private_perms_ok`, `atomic_write_private`, the `read_doc_private`/`write_doc_private`
   pair) carry every secret: `identity/sessions.json` and the login WAL.
 - **Crash-safe docs** (`atomic`, `doc`) — atomic write (temp → fsync → rename → fsync-dir; never in
@@ -103,6 +107,10 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   immediately before writing: a document that moved under a prepared edit (a person's editor, a
   `sed` — topos's own writers serialize on the lock) earns the typed `MANIFEST_CHANGED` refusal
   with nothing written, never a set line rebuilt from a member list that predates someone else's row.
+  The editor's write itself is a COMPARE-AND-SWAP: immediately before its atomic rename the file is
+  re-read and byte-compared against the exact text the editor was built from, and any drift refuses
+  `MANIFEST_CHANGED` with the staged document discarded (the compare-to-rename syscall pair is the
+  accepted residual, documented in `ops/manifest_edit`'s module doc); `fmt` rides the same CAS.
 - **SESSIONS** (`sessions`, `ops/login`, `enroll`) — `topos login <address>` runs against
   `/v1/login/authorize|token` (the constant protocol card re-roots onto the declared API base,
   same-security only; the `0600` WAL holds the flow; re-invoking IS the resume). TWO SHAPES,

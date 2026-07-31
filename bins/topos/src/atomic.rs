@@ -46,6 +46,50 @@ pub(crate) fn atomic_write(fs: &dyn FsOps, target: &Path, bytes: &[u8]) -> Resul
     Ok(atomic_write_at(fs, target, &temp_path(target), bytes)?)
 }
 
+/// What [`atomic_write_cas`] concluded.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CasOutcome {
+    /// The compare held and the staged document was renamed into place.
+    Written,
+    /// `target` no longer matched `expected` — the staged temp was DISCARDED and `target` was
+    /// left byte-for-byte as the outside writer left it. The caller owns the typed refusal.
+    Changed,
+}
+
+/// [`atomic_write`]'s COMPARE-AND-SWAP rung: stage + fsync the temp, then RE-READ `target` and
+/// byte-compare it against `expected` (`None` = the file is expected ABSENT) IMMEDIATELY before
+/// the rename. A mismatch — an outside writer landed since the caller's read — discards the
+/// staged temp and overwrites NOTHING. The syscall pair between that final compare and the
+/// rename is the accepted residual; the caller documents it where its lock discipline lives.
+///
+/// # Errors
+/// Propagates the underlying [`FsOps`] failure (which the crash gate injects).
+pub(crate) fn atomic_write_cas(
+    fs: &dyn FsOps,
+    target: &Path,
+    bytes: &[u8],
+    expected: Option<&[u8]>,
+) -> Result<CasOutcome, ClientError> {
+    let tmp = temp_path(target);
+    fs.write_temp(&tmp, bytes)?;
+    fs.fsync_file(&tmp)?;
+    let now = fs.read_opt(target)?;
+    let unchanged = match (&expected, &now) {
+        (None, None) => true,
+        (Some(e), Some(n)) => *e == n.as_slice(),
+        _ => false,
+    };
+    if !unchanged {
+        fs.remove_file(&tmp)?;
+        return Ok(CasOutcome::Changed);
+    }
+    fs.rename(&tmp, target)?;
+    if let Some(dir) = target.parent() {
+        fs.fsync_dir(dir)?;
+    }
+    Ok(CasOutcome::Written)
+}
+
 /// The crash-safe write for a **SECRET**: the same temp → fsync → rename → fsync-dir dance as
 /// [`atomic_write_at`], but the temp is created **0600 from creation** ([`FsOps::write_private`]), so the
 /// secret never has a world-readable window at any instant — not even mid-write or post-fault (the temp,

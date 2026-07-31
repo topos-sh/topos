@@ -2067,14 +2067,6 @@ impl FsOps for RecordingFs {
         self.record("write_private", path);
         self.inner.write_private(path, bytes)
     }
-    fn exchange_dir(&self, a: &Path, b: &Path) -> std::io::Result<()> {
-        self.record("exchange_dir", b);
-        self.inner.exchange_dir(a, b)
-    }
-    fn write_new(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-        self.record("write_new", path);
-        self.inner.write_new(path, bytes)
-    }
     fn open_dir_handle(&self, dir: &Path) -> std::io::Result<crate::fs_seam::DirHandle> {
         self.inner.open_dir_handle(dir)
     }
@@ -2100,12 +2092,36 @@ impl FsOps for RecordingFs {
         self.record("exchange_at", &h.path().join(b));
         self.inner.exchange_at(h, a, b)
     }
-    fn create_dir_nofollow(&self, base: &Path, dir: &Path) -> std::io::Result<()> {
+    fn create_dir_nofollow(
+        &self,
+        base: &Path,
+        dir: &Path,
+    ) -> std::io::Result<crate::fs_seam::DirHandle> {
         self.record("create_dir_nofollow", dir);
         self.inner.create_dir_nofollow(base, dir)
     }
+    fn remove_dir_all_at(&self, h: &crate::fs_seam::DirHandle, leaf: &str) -> std::io::Result<()> {
+        self.record("remove_dir_all_at", &h.path().join(leaf));
+        self.inner.remove_dir_all_at(h, leaf)
+    }
+    fn create_dir_at(&self, h: &crate::fs_seam::DirHandle, leaf: &str) -> std::io::Result<()> {
+        self.record("create_dir_at", &h.path().join(leaf));
+        self.inner.create_dir_at(h, leaf)
+    }
+    fn write_new_at(
+        &self,
+        h: &crate::fs_seam::DirHandle,
+        leaf: &str,
+        bytes: &[u8],
+    ) -> std::io::Result<()> {
+        self.record("write_new_at", &h.path().join(leaf));
+        self.inner.write_new_at(h, leaf, bytes)
+    }
     fn read_opt(&self, path: &Path) -> std::io::Result<Option<Vec<u8>>> {
         self.inner.read_opt(path)
+    }
+    fn read_opt_nofollow(&self, path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+        self.inner.read_opt_nofollow(path)
     }
     fn read_dir(&self, dir: &Path) -> std::io::Result<Vec<PathBuf>> {
         self.inner.read_dir(dir)

@@ -423,7 +423,7 @@ pub(crate) fn add_remote_fetched(
             .map_err(|e| ClientError::Io(format!("clear import staging: {e}")))?;
         ctx.fs.remove_dir_all(&stage_dir)?;
     }
-    // The staging dir itself: one lstat-checked level below the proven root.
+    // The staging dir itself: one fd-walked (`openat`/`mkdirat`) level below the proven root.
     ctx.fs
         .create_dir_nofollow(&dest_root, &stage_dir)
         .map_err(|e| ClientError::Io(format!("create import staging: {e}")))?;
@@ -459,11 +459,16 @@ pub(crate) fn add_remote_fetched(
     // tree takes real time — anything that appeared at `dest_dir` since then was validated by
     // nobody. Re-checking and then deleting only narrows the window; moving the directory aside
     // first CLOSES it: after the rename nothing can land in the tree we are about to judge, and
-    // the judgment therefore covers exactly the bytes at stake.
-    if let Err(e) = park_and_verify_destination(ctx, &dest_dir, &stage_dir) {
-        let _ = ctx.fs.remove_dir_all(&stage_dir);
-        return Err(e);
-    }
+    // the judgment therefore covers exactly the bytes at stake. A disposable park is NOT dropped
+    // here — it survives, journaled, until the WHOLE adopt succeeds (settled below), so any later
+    // failure still has the prior occupant to put back.
+    let dest_park = match park_and_verify_destination(ctx, &dest_dir, &stage_dir) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = ctx.fs.remove_dir_all(&stage_dir);
+            return Err(e);
+        }
+    };
     // What THIS run staged, by digest — the only content the failed-adopt cleanup below may ever
     // account a destination tree against.
     let staged_digest = scan::scan(&stage_dir).ok().map(|s| s.bundle_digest);
@@ -473,6 +478,9 @@ pub(crate) fn add_remote_fetched(
     // a swap in the beat after this proof cannot re-aim it.)
     if let Err(e) = prove_import_containment(scope, roots, &dest_dir) {
         let _ = ctx.fs.remove_dir_all(&stage_dir);
+        if let Some(park) = &dest_park {
+            restore_import_park(ctx, park, &dest_dir);
+        }
         return Err(e);
     }
     let (stage_leaf, dest_leaf) = match (
@@ -482,6 +490,9 @@ pub(crate) fn add_remote_fetched(
         (Some(s), Some(d)) => (s, d),
         _ => {
             let _ = ctx.fs.remove_dir_all(&stage_dir);
+            if let Some(park) = &dest_park {
+                restore_import_park(ctx, park, &dest_dir);
+            }
             return Err(ClientError::Io(format!(
                 "place import at {}: no usable final component",
                 dest_dir.display()
@@ -495,6 +506,9 @@ pub(crate) fn add_remote_fetched(
         if dest_handle.verify_unmoved().is_ok() {
             let _ = ctx.fs.remove_dir_all(&stage_dir);
         }
+        if let Some(park) = &dest_park {
+            restore_import_park(ctx, park, &dest_dir);
+        }
         return Err(ClientError::Io(format!(
             "place import at {}: {e}",
             dest_dir.display()
@@ -506,8 +520,14 @@ pub(crate) fn add_remote_fetched(
             // The staged tree is LIVE at `dest_dir` now, and an edit can land there the instant
             // the rename completes — so the error path never deletes the destination blind: it
             // parks the dir (journaled), drops it only when it still holds exactly what this run
-            // staged, and preserves anything else for recovery to restore.
+            // staged, and preserves anything else for recovery to restore. Then the PRE-LANDING
+            // park goes back where it was: in the concurrent-identical-import case this is the
+            // winner's landed copy, and restoring it is what keeps the winner's map pointing at
+            // a present directory.
             preserve_failed_adopt(ctx, &dest_dir, staged_digest);
+            if let Some(park) = &dest_park {
+                restore_import_park(ctx, park, &dest_dir);
+            }
             return Err(e);
         }
     };
@@ -549,6 +569,11 @@ pub(crate) fn add_remote_fetched(
              {} is visible to git; commit or ignore it deliberately",
             dest_dir.display()
         ));
+    }
+    // The WHOLE adopt succeeded — only now is the pre-landing park concluded (re-judged at the
+    // drop; preserved instead if it no longer reads disposable).
+    if let Some(park) = &dest_park {
+        settle_import_park(ctx, park, staged_digest);
     }
     Ok(data)
 }
@@ -916,25 +941,33 @@ fn check_destination(ctx: &Ctx<'_>, dest: &Path) -> Result<(), ClientError> {
 /// then deleting leaves a window between the two; the rename here has none — after it, `dest` is
 /// free for the caller's no-replace rename and the parked tree is a still photograph.
 ///
-/// Two benign cases drop the park: an EMPTY directory (what [`check_destination`] already
-/// allowed), and content BYTE-IDENTICAL to what this call is about to place (a concurrent run of
-/// the same import that landed first — replacing it changes nothing observable). Everything else
-/// — a foreign occupant, a now-tracked dir, an unreadable one — is PUT BACK and the typed refusal
-/// stands: never delete bytes this run cannot account for. A destination that has been re-created
-/// while the park was out keeps the parked bytes under the park's own name, and the refusal says
-/// where.
+/// Two benign cases mark the park DROPPABLE: an EMPTY directory (what [`check_destination`]
+/// already allowed), and content BYTE-IDENTICAL to what this call is about to place (a concurrent
+/// run of the same import that landed first). Marking is ALL this judgment does — the park
+/// (journaled) survives until the WHOLE adopt has succeeded, because a park dropped here has
+/// nothing left to restore when a LATER step fails: the landing rename can refuse, and the adopt
+/// itself can conclude `ALREADY_TRACKED` (exactly the concurrent-identical-import case, whose
+/// winner's map must keep pointing at a present directory). The caller settles it on success
+/// ([`settle_import_park`]) and restores it on any later failure ([`restore_import_park`]).
+/// Everything else — a foreign occupant, a now-tracked dir, an unreadable one — is PUT BACK here
+/// and the typed refusal stands: never delete bytes this run cannot account for. A destination
+/// that has been re-created while the park was out keeps the parked bytes under the park's own
+/// name, and the refusal says where.
 ///
-/// The park is JOURNALED before the rename (and the entry settled when it is dropped or
-/// restored): a crash mid-judgment would otherwise strand the prior occupant under a
-/// `.topos-import-old-*` name no sweep recognizes — the journal is what makes the next run's
-/// recovery restore (or preserve + disclose) it.
+/// The park is JOURNALED before the rename (one critical section — see
+/// [`crate::materialize::park_aside_journaled`]), and the entry is settled only when the park is
+/// finally dropped or restored: a crash anywhere in between leaves the journal to make the next
+/// run's recovery restore (or preserve + disclose) the prior occupant.
+///
+/// Returns the park's path when a directory was parked (still on disk, journaled), `None` when
+/// the destination was absent.
 fn park_and_verify_destination(
     ctx: &Ctx<'_>,
     dest: &Path,
     staged: &Path,
-) -> Result<(), ClientError> {
+) -> Result<Option<PathBuf>, ClientError> {
     if !ctx.fs.exists(dest) {
-        return Ok(());
+        return Ok(None);
     }
     let parked = crate::materialize::park_aside_journaled(
         ctx.fs,
@@ -945,44 +978,12 @@ fn park_and_verify_destination(
         None,
     )?;
     // Judged with the settle rail: a rename takes the tree out of every path but not away from an
-    // already-open fd, so the drop is authorized only by TWO CONSECUTIVE AGREEING READS of a
-    // disposable state — empty, or byte-identical to what this call is about to place — the
-    // second immediately before the removal. Anything else (including a tree that keeps moving)
-    // is put back whole.
+    // already-open fd, so the disposable verdict needs TWO CONSECUTIVE AGREEING READS of a
+    // disposable state — empty, or byte-identical to what this call is about to place. Anything
+    // else (including a tree that keeps moving) is put back whole.
     let staged_digest = scan::scan(staged).ok().map(|s| s.bundle_digest);
-    let mut prev: Option<Option<[u8; 32]>> = None; // inner None = an empty directory
-    let mut disposable = false;
-    for _ in 0..4 {
-        let state: Option<[u8; 32]> = if ctx
-            .fs
-            .read_dir(&parked)
-            .map(|v| v.is_empty())
-            .unwrap_or(false)
-        {
-            None
-        } else {
-            match scan::scan(&parked) {
-                Ok(s) => Some(s.bundle_digest),
-                Err(_) => break, // unreadable = not ours to delete
-            }
-        };
-        let benign = match state {
-            None => true,
-            Some(d) => staged_digest == Some(d),
-        };
-        if !benign {
-            break;
-        }
-        if prev == Some(state) {
-            disposable = true;
-            break;
-        }
-        prev = Some(state);
-    }
-    if disposable {
-        ctx.fs.remove_dir_all(&parked)?;
-        crate::sidecar::settle_park_journal(ctx.fs, &ctx.layout, &parked);
-        return Ok(());
+    if import_park_disposable(ctx, &parked, staged_digest) {
+        return Ok(Some(parked));
     }
     let restored = crate::materialize::restore_parked(ctx.fs, &parked, dest);
     if restored {
@@ -999,6 +1000,102 @@ fn park_and_verify_destination(
             )
         },
     })
+}
+
+/// The settle-rail loop behind the import park's DISPOSABLE verdict: two consecutive agreeing
+/// reads of an empty tree, or of bytes identical to `staged_digest`. Run once to mark the park
+/// droppable and AGAIN immediately before the final drop (the park sat on disk across the whole
+/// adopt, and a pre-park fd can have written into it in between).
+fn import_park_disposable(ctx: &Ctx<'_>, parked: &Path, staged_digest: Option<[u8; 32]>) -> bool {
+    let mut prev: Option<Option<[u8; 32]>> = None; // inner None = an empty directory
+    for _ in 0..4 {
+        let state: Option<[u8; 32]> = if ctx
+            .fs
+            .read_dir(parked)
+            .map(|v| v.is_empty())
+            .unwrap_or(false)
+        {
+            None
+        } else {
+            match scan::scan(parked) {
+                Ok(s) => Some(s.bundle_digest),
+                Err(_) => return false, // unreadable = not ours to delete
+            }
+        };
+        let benign = match state {
+            None => true,
+            Some(d) => staged_digest == Some(d),
+        };
+        if !benign {
+            return false;
+        }
+        if prev == Some(state) {
+            return true;
+        }
+        prev = Some(state);
+    }
+    false
+}
+
+/// Conclude a droppable pre-landing park after the WHOLE adopt succeeded: re-judge it with the
+/// same settle rail (time passed — a pre-park fd can have written into it during the adopt) and
+/// drop + settle, or preserve it as a `.topos-kept-*` sibling (+ settle + log) when it no longer
+/// judges disposable. Never a blind delete, never a lost entry.
+fn settle_import_park(ctx: &Ctx<'_>, parked: &Path, staged_digest: Option<[u8; 32]>) {
+    if !ctx.fs.exists(parked) {
+        // Concluded by a concurrent recovery (restored or preserved elsewhere) — the journal
+        // entry, if any survives, resolves harmlessly on the next sweep.
+        crate::sidecar::settle_park_journal(ctx.fs, &ctx.layout, parked);
+        return;
+    }
+    if import_park_disposable(ctx, parked, staged_digest) && ctx.fs.remove_dir_all(parked).is_ok() {
+        crate::sidecar::settle_park_journal(ctx.fs, &ctx.layout, parked);
+        return;
+    }
+    match crate::materialize::preserve_park(ctx.fs, parked, None) {
+        Some(kept) => {
+            crate::sidecar::settle_park_journal(ctx.fs, &ctx.layout, parked);
+            let _ = logfile::append_event(
+                ctx.fs,
+                &ctx.layout.log_path(),
+                &serde_json::json!({
+                    "action": "park_preserved",
+                    "park": parked.to_string_lossy(),
+                    "kept_at": kept.to_string_lossy(),
+                    "at": ctx.clock.now_unix_millis(),
+                }),
+            );
+        }
+        None => {
+            // Stuck under its own name: leave the journal entry — recovery preserves + discloses.
+        }
+    }
+}
+
+/// Restore the pre-landing park after a LATER failure of the adopt (the landing refused, or the
+/// adopt itself failed after landing and [`preserve_failed_adopt`] freed the destination): the
+/// prior occupant goes back where it was. A destination that is still occupied (or a failing
+/// rename) leaves the park journaled — the next run's recovery restores or preserves + discloses
+/// it — and logs where the bytes sit.
+fn restore_import_park(ctx: &Ctx<'_>, parked: &Path, dest: &Path) {
+    if !ctx.fs.exists(parked) {
+        crate::sidecar::settle_park_journal(ctx.fs, &ctx.layout, parked);
+        return;
+    }
+    if crate::materialize::restore_parked(ctx.fs, parked, dest) {
+        crate::sidecar::settle_park_journal(ctx.fs, &ctx.layout, parked);
+    } else {
+        let _ = logfile::append_event(
+            ctx.fs,
+            &ctx.layout.log_path(),
+            &serde_json::json!({
+                "action": "import_old_park",
+                "destination": dest.to_string_lossy(),
+                "park": parked.to_string_lossy(),
+                "at": ctx.clock.now_unix_millis(),
+            }),
+        );
+    }
 }
 
 /// Write a selected skill's byte-exact files into `dest`, preserving the executable bit (part of the

@@ -4,7 +4,7 @@
 //! mixed, or half-written tree.
 //!
 //! `atomic.rs` (the single-*file* crash-safe write) is unchanged; this module owns the crash-safe
-//! *sequence* for whole directories. The raw swap syscall is the [`FsOps::exchange_dir`] seam op.
+//! *sequence* for whole directories. The raw swap syscall is the [`FsOps::exchange_at`] seam op.
 //!
 //! ## The order is the safety
 //!
@@ -58,10 +58,15 @@
 //! ([`crate::fs_seam::DirHandle`] — `(dev, ino)` captured at proof time, re-checked against the
 //! path immediately before the namespace op, the op itself `renameat` against the held fd). A
 //! swap between the proof and the landing is therefore met as itself and refused, never followed.
+//! The litter sweep and the capability probes ride the SAME handle: their removals, creates, and
+//! exchanges are fd-anchored (`remove_dir_all_at` / `create_dir_at` / `exchange_at`, each
+//! identity-verified), and the settle rail's content scans — path reads by nature — re-verify
+//! the handle immediately before every pass.
 //! Named residuals (also in `fs_seam`): a whole REAL directory relocated after the proof keeps
 //! its identity — the held fd then lands bytes inside that same (moved) directory object, never
-//! through the swapped path; recursive removals of parks stay path-based behind the settle rail;
-//! a non-unix port would fall back to path-based checks and must revisit this boundary.
+//! through the swapped path; the settle rail's content scans and the staging build's tree walk
+//! are path reads/creates between handle verifies (never deletions); a non-unix port would fall
+//! back to path-based checks and must revisit this boundary.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -262,9 +267,12 @@ pub(crate) fn materialize(
         // a crash after the swap but before `verify_parked_old` concluded strands the OLD tree
         // (raced edits included) there — so they are JUDGED with the same park-then-verify rail,
         // never deleted on their name alone; only the probe dirs (throwaway empties this
-        // materializer mints itself) are cleared blind.
+        // materializer mints itself) are cleared blind. The whole sweep runs AT the held parent
+        // handle (verified per op), so it comes AFTER the pin above by construction — a parent
+        // moved-and-replaced by an outward symlink cannot aim these removals outside the proof.
         cleanup_litter(
             fs,
+            &parent_handle,
             &parent,
             req.skill_id,
             &target_hex,
@@ -350,10 +358,15 @@ pub(crate) fn materialize(
         // Trust the cached per-placement capability; probe only a genesis `Unsupported` placeholder.
         let mut cap = map.placement_state[i].swap_capability;
         if cap == SwapCapability::Unsupported {
-            cap = probe_capability(fs, &parent, req.skill_id)?;
+            cap = probe_capability(fs, &parent_handle, &parent, req.skill_id)?;
         }
 
-        // Build + fsync the staging dir (a same-filesystem sibling of the placement).
+        // Build + fsync the staging dir (a same-filesystem sibling of the placement). The build's
+        // walk roots at the parent PATH (its files are new bytes, not deletions), so the handle
+        // is verified immediately before it — the closest a non-fd-anchored op can come.
+        parent_handle
+            .verify_unmoved()
+            .map_err(|e| ClientError::Io(format!("staging parent check: {e}")))?;
         let staging = staging_path(&parent, req.skill_id);
         build_staging(fs, &staging, req.bundle, req.self_ignore)?;
 
@@ -423,7 +436,7 @@ pub(crate) fn materialize(
                 cap,
             )?;
             cap = next_cap;
-            // The old tree is parked, not gone: judge it, then drop it.
+            // The old tree is parked, not gone: judge it, then drop it (at the held handle).
             verify_parked_old(
                 fs,
                 &parked,
@@ -431,6 +444,7 @@ pub(crate) fn materialize(
                 baseline.as_deref(),
                 captured.as_deref(),
                 req.snapshot,
+                Some(&parent_handle),
             )?;
         } else {
             // First install: an atomic create — no prior bytes to mix.
@@ -520,14 +534,18 @@ fn leaf_name(path: &Path) -> Result<&str, ClientError> {
 /// [`FsOps::create_dir_nofollow`] under a PROVEN root, absorbing the one spelling wrinkle
 /// [`contained_in`] names: a path recorded canonically under a root held raw (macOS `/var` vs
 /// `/private/var`) strips against the CANONICAL root instead. Nothing is weakened — whichever
-/// base matches, every component below it is `lstat`-walked and created one level at a time.
+/// base matches, every component below it is fd-walked (`openat`/`mkdirat` from the parent's
+/// held descriptor) one level at a time.
 pub(crate) fn create_dir_contained(fs: &dyn FsOps, root: &Path, dir: &Path) -> std::io::Result<()> {
     if dir.strip_prefix(root).is_ok() {
-        return fs.create_dir_nofollow(root, dir);
+        return fs.create_dir_nofollow(root, dir).map(|_| ());
     }
     match root.canonicalize() {
-        Ok(canon) if dir.strip_prefix(&canon).is_ok() => fs.create_dir_nofollow(&canon, dir),
-        _ => fs.create_dir_nofollow(root, dir), // fails with the not-under-base refusal
+        Ok(canon) if dir.strip_prefix(&canon).is_ok() => {
+            fs.create_dir_nofollow(&canon, dir).map(|_| ())
+        }
+        // fails with the not-under-base refusal
+        _ => fs.create_dir_nofollow(root, dir).map(|_| ()),
     }
 }
 
@@ -653,11 +671,11 @@ fn do_dance(
     skill_id: &str,
 ) -> Result<PathBuf, ClientError> {
     let graveyard = graveyard_path(parent, skill_id);
-    // The graveyard clear rides the handle's identity check too — a leftover was already judged
-    // by the litter rail this run; this only clears what that judgment left droppable.
-    h.verify_unmoved()
-        .map_err(|e| ClientError::Io(format!("rename-dance parent check: {e}")))?;
-    fs.remove_dir_all(&graveyard)?;
+    // The graveyard clear runs AT the held handle (identity-verified inside the op) — a leftover
+    // was already judged by the litter rail this run; this only clears what that judgment left
+    // droppable.
+    fs.remove_dir_all_at(h, leaf_name(&graveyard)?)
+        .map_err(|e| ClientError::Io(format!("rename-dance graveyard clear: {e}")))?;
     let (dir_leaf, grave_leaf, staging_leaf) =
         (leaf_name(dir)?, leaf_name(&graveyard)?, leaf_name(staging)?);
     fs.rename_at(h, dir_leaf, grave_leaf)
@@ -700,11 +718,18 @@ pub(crate) enum ParkFate {
 ///   is preserved (renamed to a `.topos-kept-*` sibling), never deleted;
 /// - a park that VANISHED mid-judgment was concluded by a concurrent command — nothing left to
 ///   account for.
+///
+/// `anchor` — the HELD handle of the park's parent, where the caller has one: every pass
+/// re-verifies the handle before its (path-based) content scan, the removal runs fd-anchored at
+/// it ([`FsOps::remove_dir_all_at`]), and a preserve rename rides [`FsOps::rename_at`] — so a
+/// parent whose path is swapped mid-judgment REFUSES (typed, nothing deleted through the
+/// swapped spelling) instead of re-aiming the scan or the removal.
 pub(crate) fn settle_park_among(
     fs: &dyn FsOps,
     parked: &Path,
     accounted: &[String],
     snapshot: Option<SnapshotFn<'_>>,
+    anchor: Option<&crate::fs_seam::DirHandle>,
 ) -> Result<ParkFate, ClientError> {
     /// Two agreeing reads authorize the drop; a tree still moving after this many passes is
     /// preserved instead (an fd-writer that active never settles inside one command).
@@ -712,12 +737,18 @@ pub(crate) fn settle_park_among(
     let mut prev: Option<String> = None;
     let mut absorbed: Vec<String> = Vec::new();
     for _ in 0..SETTLE_PASSES {
+        // The scan below is a PATH read — with a held anchor, prove the parent still is the
+        // proven object immediately before it (the ops that mutate re-verify again themselves).
+        if let Some(h) = anchor {
+            h.verify_unmoved()
+                .map_err(|e| ClientError::Io(format!("settle park parent check: {e}")))?;
+        }
         if !fs.exists(parked) {
             return Ok(ParkFate::Dropped);
         }
         let Ok(scanned) = scan::scan(parked) else {
             // An unreadable park is not a park we may delete.
-            return keep_parked(fs, parked);
+            return keep_parked(fs, parked, anchor);
         };
         let hex = to_hex(&scanned.bundle_digest);
         let is_accounted =
@@ -728,16 +759,21 @@ pub(crate) fn settle_park_among(
                     snapshot(&scanned)?;
                     absorbed.push(hex.clone());
                 }
-                None => return keep_parked(fs, parked),
+                None => return keep_parked(fs, parked, anchor),
             }
         }
         if prev.as_deref() == Some(hex.as_str()) {
-            fs.remove_dir_all(parked)?;
+            match anchor {
+                Some(h) => fs
+                    .remove_dir_all_at(h, leaf_name(parked)?)
+                    .map_err(|e| ClientError::Io(format!("drop settled park: {e}")))?,
+                None => fs.remove_dir_all(parked)?,
+            }
             return Ok(ParkFate::Dropped);
         }
         prev = Some(hex);
     }
-    keep_parked(fs, parked)
+    keep_parked(fs, parked, anchor)
 }
 
 /// [`settle_park_among`] with the apply path's accounted shape: the target bytes, this
@@ -749,11 +785,12 @@ fn settle_park(
     baseline: Option<&str>,
     captured: Option<&str>,
     snapshot: Option<SnapshotFn<'_>>,
+    anchor: Option<&crate::fs_seam::DirHandle>,
 ) -> Result<ParkFate, ClientError> {
     let mut accounted: Vec<String> = vec![target_hex.to_owned()];
     accounted.extend(baseline.map(str::to_owned));
     accounted.extend(captured.map(str::to_owned));
-    settle_park_among(fs, parked, &accounted, snapshot)
+    settle_park_among(fs, parked, &accounted, snapshot, anchor)
 }
 
 /// [`settle_park`] at the swap's own call site: whatever the fate, the apply proceeds — a Kept or
@@ -766,16 +803,21 @@ fn verify_parked_old(
     baseline: Option<&str>,
     captured: Option<&str>,
     snapshot: Option<SnapshotFn<'_>>,
+    anchor: Option<&crate::fs_seam::DirHandle>,
 ) -> Result<(), ClientError> {
-    settle_park(fs, parked, target_hex, baseline, captured, snapshot).map(|_| ())
+    settle_park(fs, parked, target_hex, baseline, captured, snapshot, anchor).map(|_| ())
 }
 
 /// Move a park out of every sweep's reach and leave it — the "we could not account for these
 /// bytes" arm. The kept name ladders past existing siblings (a prior kept park is never deleted
 /// to make room); a park that cannot be renamed at all stays where it is (still not deleted) and
 /// the caller learns it via [`ParkFate::Stuck`].
-fn keep_parked(fs: &dyn FsOps, parked: &Path) -> Result<ParkFate, ClientError> {
-    Ok(match preserve_park(fs, parked) {
+fn keep_parked(
+    fs: &dyn FsOps,
+    parked: &Path,
+    anchor: Option<&crate::fs_seam::DirHandle>,
+) -> Result<ParkFate, ClientError> {
+    Ok(match preserve_park(fs, parked, anchor) {
         Some(kept) => ParkFate::Kept(kept),
         None => ParkFate::Stuck,
     })
@@ -784,8 +826,14 @@ fn keep_parked(fs: &dyn FsOps, parked: &Path) -> Result<ParkFate, ClientError> {
 /// Rename a park to a `.topos-kept-*` sibling no sweep touches, laddering past existing kept
 /// siblings, and return the new path — `None` when it could not be moved (the park stays under
 /// its own name; NOTHING is deleted either way). The shared preserve primitive recovery and the
-/// litter judge use for bytes they cannot account for.
-pub(crate) fn preserve_park(fs: &dyn FsOps, parked: &Path) -> Option<PathBuf> {
+/// litter judge use for bytes they cannot account for. With a held `anchor` (the park's parent)
+/// the rename runs fd-anchored ([`FsOps::rename_at`]); recovery's journal arm, which meets
+/// parks at arbitrary recorded paths, passes `None`.
+pub(crate) fn preserve_park(
+    fs: &dyn FsOps,
+    parked: &Path,
+    anchor: Option<&crate::fs_seam::DirHandle>,
+) -> Option<PathBuf> {
     let name = parked
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -799,7 +847,13 @@ pub(crate) fn preserve_park(fs: &dyn FsOps, parked: &Path) -> Option<PathBuf> {
         }
         kept = parked.with_file_name(format!(".topos-kept-{name}.{n}"));
     }
-    fs.rename(parked, &kept).ok().map(|()| kept)
+    match anchor {
+        Some(h) => {
+            let (from, to) = (leaf_name(parked).ok()?, leaf_name(&kept).ok()?);
+            fs.rename_at(h, from, to).ok().map(|()| kept)
+        }
+        None => fs.rename(parked, &kept).ok().map(|()| kept),
+    }
 }
 
 /// The write-boundary containment proof (see [`MaterializeReq::project_root`]): a project-scope
@@ -863,9 +917,9 @@ fn build_staging(
         });
     }
     // NO-FOLLOW creates throughout the staged tree (see the module doc's proof-to-write
-    // boundary): the staging dir is one lstat-checked level below the canonical parent, and every
-    // file-parent below it is walked component-wise — a symlink swapped in mid-build is met as
-    // itself and refused, never traversed.
+    // boundary): the staging dir is one fd-walked level below the canonical parent, and every
+    // file-parent below it is reached from its own parent's held fd — a symlink swapped in
+    // mid-build is met as itself and refused, never traversed.
     let staging_parent = staging
         .parent()
         .ok_or_else(|| ClientError::PlacementUnsupported {
@@ -966,11 +1020,26 @@ pub(crate) fn park_aside_journaled(
     owner: Option<&crate::id::SkillId>,
 ) -> Result<PathBuf, ClientError> {
     let to = park_name(fs, dir, tag)?;
-    crate::sidecar::journal_park(fs, layout, dir, &to, restore, owner)?;
-    match fs.rename(dir, &to) {
-        Ok(()) => Ok(to),
+    // ONE critical section: the entry-write AND the rename run under the journal lock. Recovery
+    // takes the same lock for its whole read→act→rewrite, so the in-between state — an entry
+    // whose park does not exist yet — is unobservable: without this, a concurrent recovery
+    // landing in that beat reads the entry, finds no park on disk, concludes "absent =
+    // concluded", drops the entry, and the rename that then follows strands the tree's only
+    // bytes with no journal anywhere (sharpest for OWNERLESS parks, which no per-skill liveness
+    // fence protects). Lock ORDER is unchanged (see `Layout::park_journal_lock_file`):
+    // operations hold their per-skill lock and then this one; recovery holds this one and takes
+    // per-skill locks only via TRY-lock — no cycle.
+    let guard = fs.lock_exclusive(&layout.park_journal_lock_file())?;
+    crate::sidecar::journal_park_locked(fs, layout, dir, &to, restore, owner)?;
+    let renamed = fs.rename(dir, &to);
+    match renamed {
+        Ok(()) => {
+            drop(guard);
+            Ok(to)
+        }
         Err(e) => {
-            crate::sidecar::settle_park_journal(fs, layout, &to);
+            crate::sidecar::settle_park_journal_locked(fs, layout, &to);
+            drop(guard);
             Err(ClientError::Io(format!("park {}: {e}", dir.display())))
         }
     }
@@ -991,8 +1060,14 @@ pub(crate) fn restore_parked(fs: &dyn FsOps, parked: &Path, orig: &Path) -> bool
 /// accounted bytes drop, novel bytes are snapshotted (or the park is preserved as a
 /// `.topos-kept-*` sibling), and a park that can neither be accounted for nor moved aside REFUSES
 /// this placement rather than being deleted for occupying a name we need.
+///
+/// Every removal and preserve-rename runs AT the caller's HELD parent handle
+/// ([`FsOps::remove_dir_all_at`] / [`FsOps::rename_at`]), and each content scan re-verifies it —
+/// a proven parent whose pathname is swapped for an outward symlink before this sweep can no
+/// longer aim a matching-name deletion outside the checkout: the handle check refuses instead.
 fn cleanup_litter(
     fs: &dyn FsOps,
+    h: &crate::fs_seam::DirHandle,
     parent: &Path,
     skill_id: &str,
     target_hex: &str,
@@ -1006,7 +1081,7 @@ fn cleanup_litter(
         if !fs.exists(&park) {
             continue;
         }
-        match settle_park(fs, &park, target_hex, baseline, None, snapshot)? {
+        match settle_park(fs, &park, target_hex, baseline, None, snapshot, Some(h))? {
             ParkFate::Dropped | ParkFate::Kept(_) => {}
             ParkFate::Stuck => {
                 return Err(ClientError::PlacementUnsupported {
@@ -1020,28 +1095,35 @@ fn cleanup_litter(
             }
         }
     }
-    fs.remove_dir_all(&probe_path(parent, skill_id, 'a'))?;
-    fs.remove_dir_all(&probe_path(parent, skill_id, 'b'))?;
+    fs.remove_dir_all_at(h, leaf_name(&probe_path(parent, skill_id, 'a'))?)
+        .map_err(|e| ClientError::Io(format!("clear probe dir: {e}")))?;
+    fs.remove_dir_all_at(h, leaf_name(&probe_path(parent, skill_id, 'b'))?)
+        .map_err(|e| ClientError::Io(format!("clear probe dir: {e}")))?;
     Ok(())
 }
 
 /// Probe the placement's filesystem ONCE for an atomic directory swap, by exchanging two throwaway
-/// sibling directories. Any failure (the syscall is unsupported, or anything else) means "no atomic swap"
-/// → degrade to the rename-dance. Self-cleaning.
+/// sibling directories. Any failure of the EXCHANGE itself (the syscall is unsupported, or
+/// anything else) means "no atomic swap" → degrade to the rename-dance. Self-cleaning. Every
+/// create/remove/exchange runs AT the caller's held parent handle, so a parent path swapped after
+/// the containment proof refuses (typed) instead of minting or deleting probe dirs through the
+/// swapped spelling.
 fn probe_capability(
     fs: &dyn FsOps,
+    h: &crate::fs_seam::DirHandle,
     parent: &Path,
     skill_id: &str,
 ) -> Result<SwapCapability, ClientError> {
     let a = probe_path(parent, skill_id, 'a');
     let b = probe_path(parent, skill_id, 'b');
-    fs.remove_dir_all(&a)?;
-    fs.remove_dir_all(&b)?;
-    fs.create_dir_all(&a)?;
-    fs.create_dir_all(&b)?;
-    let supported = fs.exchange_dir(&a, &b).is_ok();
-    fs.remove_dir_all(&a)?;
-    fs.remove_dir_all(&b)?;
+    let (la, lb) = (leaf_name(&a)?.to_owned(), leaf_name(&b)?.to_owned());
+    fs.remove_dir_all_at(h, &la)?;
+    fs.remove_dir_all_at(h, &lb)?;
+    fs.create_dir_at(h, &la)?;
+    fs.create_dir_at(h, &lb)?;
+    let supported = fs.exchange_at(h, &la, &lb).is_ok();
+    fs.remove_dir_all_at(h, &la)?;
+    fs.remove_dir_all_at(h, &lb)?;
     Ok(if supported {
         SwapCapability::AtomicExchange
     } else {
@@ -1254,7 +1336,10 @@ mod tests {
         let b = parent.join(".swcheck-b");
         let _ = std::fs::create_dir_all(&a);
         let _ = std::fs::create_dir_all(&b);
-        let ok = RealFs.exchange_dir(&a, &b).is_ok();
+        let ok = RealFs
+            .open_dir_handle(parent)
+            .and_then(|h| RealFs.exchange_at(&h, ".swcheck-a", ".swcheck-b"))
+            .is_ok();
         let _ = std::fs::remove_dir_all(&a);
         let _ = std::fs::remove_dir_all(&b);
         ok
@@ -2060,6 +2145,7 @@ mod tests {
             Some(&"0".repeat(64)),
             None,
             Some(&snap),
+            None,
         )
         .unwrap();
         assert!(!parked.exists(), "the settled park was dropped in the end");
@@ -2095,6 +2181,75 @@ mod tests {
         );
     }
 
+    /// P1: the held parent handle governs the LITTER SWEEP and the CAPABILITY PROBES, not just
+    /// the final landing move. The swap lands at the EXACT boundary the finding names —
+    /// immediately AFTER the handle is pinned, BEFORE `cleanup_litter`/`probe_capability` run —
+    /// replacing the proven parent's pathname with an outward symlink whose target carries
+    /// matching-name litter and probe dirs. Every scan/removal in that sweep must refuse at the
+    /// handle check rather than resolve through the swapped path: the victim's dirs survive.
+    #[test]
+    fn a_parent_swapped_after_the_pin_cannot_aim_the_litter_sweep_or_probes_outside() {
+        let parent = Scratch::new("pin-swap");
+        let victim = Scratch::new("pin-swap-victim");
+        let home = Scratch::new("pin-swap-home");
+        let placement = parent.0.join("demo");
+        install_old(&placement);
+        let parent_canon = parent.0.canonicalize().unwrap();
+        let placement_canon = parent_canon.join("demo");
+        // Look-alike litter OUTSIDE the proven parent, under the exact names the sweep acts on.
+        let v_staging = victim.0.join(".topos-staging-topos_pinswap1");
+        let v_grave = victim.0.join(".topos-old-topos_pinswap1");
+        let v_probe_a = victim.0.join(".topos-probe-topos_pinswap1-a");
+        let v_probe_b = victim.0.join(".topos-probe-topos_pinswap1-b");
+        for d in [&v_staging, &v_grave, &v_probe_a, &v_probe_b] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("KEEP.md"), b"# not topos's to delete\n").unwrap();
+        }
+
+        let bundle = rendered(NEW);
+        let d = docs_under(&home.0, "topos_pinswap1");
+        let lock = lock_of("topos_pinswap1", NEW, &"1".repeat(64));
+        let sync = sync_at(2, 2, &"1".repeat(64), &digest_hex(NEW));
+        // Capability deliberately Unsupported so the probe arm WOULD run — were the sweep not
+        // refused at the handle first.
+        let prior = prior_map(
+            &[&placement_canon],
+            &digest_hex(OLD),
+            SwapCapability::Unsupported,
+        );
+        let moved = parent_canon.with_file_name(format!(
+            "{}-moved",
+            parent_canon.file_name().unwrap().to_string_lossy()
+        ));
+        let (pc, mv, vic) = (parent_canon.clone(), moved.clone(), victim.0.clone());
+        let fs = crate::fs_seam::HookFs::after_dir_handle_open(&parent_canon, move || {
+            std::fs::rename(&pc, &mv).unwrap();
+            std::os::unix::fs::symlink(&vic, &pc).unwrap();
+        });
+
+        let err = materialize(
+            &fs,
+            &req("topos_pinswap1", &[0], &bundle, &prior, &lock, &sync, &d.sp),
+        );
+        assert!(err.is_err(), "the swapped parent refuses the apply");
+        // NOTHING outside the proven parent was scanned into a deletion: every victim dir and
+        // its bytes survive.
+        for dir in [&v_staging, &v_grave, &v_probe_a, &v_probe_b] {
+            assert_eq!(
+                std::fs::read(dir.join("KEEP.md")).unwrap(),
+                b"# not topos's to delete\n",
+                "{} was touched",
+                dir.display()
+            );
+        }
+        // And the real (moved) parent still holds the placement, bytes intact.
+        assert_eq!(
+            std::fs::read(moved.join("demo").join("SKILL.md")).unwrap(),
+            b"# old\n"
+        );
+        let _ = std::fs::remove_dir_all(&moved);
+    }
+
     /// With NO snapshotter, unaccountable bytes are PRESERVED — the park is renamed to a
     /// `.topos-kept-*` sibling no sweep touches, never deleted.
     #[test]
@@ -2102,7 +2257,7 @@ mod tests {
         let parent = Scratch::new("keep");
         let parked = parent.0.join(".topos-old-demo");
         install_old(&parked);
-        verify_parked_old(&RealFs, &parked, &digest_hex(NEW), None, None, None).unwrap();
+        verify_parked_old(&RealFs, &parked, &digest_hex(NEW), None, None, None, None).unwrap();
         assert!(!parked.exists(), "the park left its original name");
         let kept = parent.0.join(".topos-kept-.topos-old-demo");
         assert_eq!(

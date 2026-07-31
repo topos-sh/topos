@@ -757,6 +757,11 @@ pub(crate) struct ManifestEditor {
     /// Every section path present at open — `remove_row` prunes only tables THIS editor minted,
     /// so a hand-authored grouping header always survives.
     preexisting: HashSet<Vec<String>>,
+    /// The EXACT text this editor was built from (`None` = a fresh document; the file is
+    /// expected absent). [`Self::write`]'s compare-and-swap re-reads the file immediately before
+    /// its rename and refuses on any drift — an outside editor's bytes are never overwritten by
+    /// a document prepared from an older reading.
+    opened_from: Option<String>,
 }
 
 impl ManifestEditor {
@@ -773,6 +778,7 @@ impl ManifestEditor {
             doc,
             scope,
             preexisting,
+            opened_from: Some(text.to_owned()),
         })
     }
 
@@ -782,6 +788,7 @@ impl ManifestEditor {
             doc: DocumentMut::new(),
             scope,
             preexisting: HashSet::new(),
+            opened_from: None,
         }
     }
 
@@ -930,12 +937,26 @@ impl ManifestEditor {
         self.doc.to_string()
     }
 
-    /// Persist atomically through the one crash-safe write.
+    /// Persist atomically through the one crash-safe write — as a COMPARE-AND-SWAP against the
+    /// text this editor was opened from (absence, for a fresh document). The manifest lock
+    /// serializes topos's own writers, but it cannot fence a person's editor or a `sed`: the
+    /// file is re-read immediately before the atomic rename and byte-compared; any drift refuses
+    /// with the typed [`ClientError::ManifestChanged`] — staged document discarded, the outside
+    /// writer's bytes untouched, the re-run reads the file as it now is. The syscall pair
+    /// between that final compare and the rename is the accepted residual (documented in
+    /// `crate::ops::manifest_edit`'s module doc).
     ///
     /// # Errors
-    /// Propagates the underlying filesystem failure.
+    /// [`ClientError::ManifestChanged`] on the compare mismatch; otherwise the underlying
+    /// filesystem failure.
     pub(crate) fn write(&self, fs: &dyn FsOps, path: &Path) -> Result<(), ClientError> {
-        crate::atomic::atomic_write(fs, path, self.rendered().as_bytes())
+        let expected = self.opened_from.as_ref().map(|t| t.as_bytes());
+        match crate::atomic::atomic_write_cas(fs, path, self.rendered().as_bytes(), expected)? {
+            crate::atomic::CasOutcome::Written => Ok(()),
+            crate::atomic::CasOutcome::Changed => Err(ClientError::ManifestChanged {
+                path: path.display().to_string(),
+            }),
+        }
     }
 
     fn bundles(&self) -> Option<&Table> {

@@ -17,6 +17,23 @@
 //! `remove` is the strict inverse: it edits FILES ONLY (machine facts). What a workspace GIVES a
 //! person is a server fact, managed on the web — the CLI's one machine-local negative is the
 //! `"off"` row in the global file.
+//!
+//! ## The outside-writer window (the manifest CAS + its accepted residual)
+//!
+//! Every manifest mutation is a read-modify-write under the file's writer lock — which fences
+//! topos's OWN writers and nothing else. A person's editor or a `sed` can land between the read
+//! an edit was built from and the rename that would apply it, and a document written from the
+//! older reading silently erases theirs. Two rails close that window from both sides: the arms
+//! are RE-PROVEN against a fresh read before the editor opens (`prove_unchanged`), and the
+//! editor's write itself is a COMPARE-AND-SWAP — immediately before its atomic rename the file
+//! is re-read and byte-compared against the exact text the editor was built from, and any drift
+//! refuses typed (`MANIFEST_CHANGED`, staged document discarded, nothing overwritten; the
+//! re-run reads the file as it now is). The accepted residual is the syscall PAIR between that
+//! final compare and the rename: an outside write landing inside those two syscalls is still
+//! overwritten — no sequence of path syscalls closes it, and unlike the byte-landing side there
+//! is no directory-handle primitive for "rename unless the file changed". It is the manifest
+//! twin of the materializer's fd-window note, and it is why the lock stays load-bearing for
+//! every writer topos controls.
 
 use std::path::{Path, PathBuf};
 
@@ -1652,6 +1669,12 @@ fn apply_arms(
     // second would leave a window between them where an external edit is proven against but not
     // edited (or edited but not proven against) — the reproof must hold for the EXACT document
     // instance the write below emits, so that instance is read once, proven, and then opened.
+    //
+    // The reproof alone is NOT a compare-and-swap — an edit landing after this read and before
+    // the write's rename would still be overwritten — so the editor's write closes that half
+    // too: it re-reads the file immediately before its atomic rename and byte-compares against
+    // this very text, refusing typed on any drift (see the module doc's outside-writer note for
+    // the accepted compare-to-rename residual).
     let text = read_text(ctx, &target.path)?;
     prove_unchanged(target, &arms, text.as_deref())?;
     let Opened { mut editor, born } = match &text {

@@ -458,6 +458,152 @@ fn a_failed_adopt_preserves_an_edit_that_landed_after_the_rename() {
     assert!(!park.exists(), "the restored park left its name behind");
 }
 
+/// P2: THE PRE-LANDING PARK SURVIVES UNTIL THE WHOLE ADOPT CONCLUDES — the concurrent identical
+/// import, end to end. The hook lands at the exact boundary the finding names: after this run's
+/// destination check, before its staging — where a COMPETING identical import runs to completion
+/// (lands + adopts the same skill). This run then parks the winner's landed copy, judges it
+/// byte-identical (DROPPABLE — but not dropped), lands its own stage, and fails the adopt with
+/// `ALREADY_TRACKED`. Restore-on-failure puts the winner's copy back: the destination holds the
+/// bytes, the winner's map points at a directory that EXISTS, and no park or journal entry is
+/// left behind. (Before the fix, the park was deleted + settled at the judgment, and the
+/// failed-adopt cleanup then removed the winner's replacement too — an absent dir under a live
+/// map row.)
+#[test]
+fn a_losing_concurrent_identical_import_leaves_the_winner_whole_and_consistent() {
+    let targz = build_repo_tarball(
+        "o-r-abc1234",
+        &[("skills/alpha/SKILL.md", b"# alpha\n", 0o644)],
+    );
+    let git = FakeGit(targz.clone());
+    let spec = github_spec("o", "r", None);
+    let h = Harness::new("concurrent-import");
+    let project = Scratch::new("concurrent-import-proj");
+    let dest = project.0.join(".claude/skills/alpha");
+    let stage = project.0.join(".claude/skills/.topos-import-alpha");
+    let winner_id = std::cell::RefCell::new(None::<String>);
+    let racer_git = FakeGit(targz);
+    // The first probe of the STAGE name is the first seam op after the destination check — the
+    // competing import runs whole in that beat (over the real fs, so nothing re-fires).
+    let racer = crate::fs_seam::HookFs::before_nth_exists(&stage, 1, || {
+        let roots = ops::DiscoveryRoots {
+            home: h.home.0.clone(),
+            cwd: Some(project.0.clone()),
+        };
+        let opts = ops::AddRemoteOpts {
+            skill: Some("alpha".into()),
+            harness: None,
+            global: false,
+        };
+        let data = ops::add_remote(
+            &h.ctx(),
+            &racer_git,
+            &github_spec("o", "r", None),
+            &roots,
+            &opts,
+        )
+        .expect("the concurrent import lands first and wins");
+        *winner_id.borrow_mut() = Some(data.skill_id.clone());
+    });
+    let ctx = Ctx {
+        fs: &racer,
+        ..h.ctx()
+    };
+    let roots = ops::DiscoveryRoots {
+        home: h.home.0.clone(),
+        cwd: Some(project.0.clone()),
+    };
+    let opts = ops::AddRemoteOpts {
+        skill: Some("alpha".into()),
+        harness: None,
+        global: false,
+    };
+    let err = ops::add_remote(&ctx, &git, &spec, &roots, &opts).unwrap_err();
+    assert_eq!(err.code(), "ALREADY_TRACKED", "{err:?}");
+    // The winner's landed copy is BACK at the destination, byte-exact…
+    assert_eq!(std::fs::read(dest.join("SKILL.md")).unwrap(), b"# alpha\n");
+    // …and the winner's map points only at directories that EXIST.
+    let id = sid(&winner_id.borrow().clone().expect("the winner adopted"));
+    let map = doc::read_map(&RealFs, &Layout::new(&h.home.0).published(&id).map)
+        .unwrap()
+        .expect("the winner's map survives");
+    assert!(!map.placements.is_empty());
+    for p in &map.placements {
+        assert!(
+            Path::new(p).is_dir(),
+            "the winner's map points at an absent dir: {p}"
+        );
+    }
+    // Both parks concluded (dropped or restored): no sibling left, no journal entry left.
+    let siblings: Vec<String> = std::fs::read_dir(project.0.join(".claude/skills"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(siblings, vec!["alpha".to_owned()], "{siblings:?}");
+    let journal: Option<crate::sidecar::ParkJournal> =
+        doc::read_doc(&RealFs, &Layout::new(&h.home.0).park_journal_path()).unwrap();
+    assert!(
+        journal.as_ref().is_none_or(|j| j.parks.is_empty()),
+        "{journal:?}"
+    );
+}
+
+/// P2, the success half: a destination parked as DISPOSABLE (here: an empty dir) is not dropped
+/// at the judgment — it is still on disk, journaled, while the adopt runs (witnessed at the
+/// first seam op after the landing rename) — and only the SUCCESSFUL conclusion settles it.
+#[test]
+fn a_droppable_pre_landing_park_survives_the_adopt_and_settles_on_success() {
+    let targz = build_repo_tarball(
+        "o-r-abc1234",
+        &[("skills/alpha/SKILL.md", b"# alpha\n", 0o644)],
+    );
+    let git = FakeGit(targz);
+    let spec = github_spec("o", "r", None);
+    let h = Harness::new("park-settle");
+    let project = Scratch::new("park-settle-proj");
+    let dest = project.0.join(".claude/skills/alpha");
+    std::fs::create_dir_all(&dest).unwrap(); // empty: passes the check, gets parked droppable
+    let park = project.0.join(".claude/skills/.topos-import-old-alpha");
+    let journal_path = Layout::new(&h.home.0).park_journal_path();
+    let park_alive_mid_adopt = std::cell::Cell::new(false);
+    let journaled_mid_adopt = std::cell::Cell::new(false);
+    // The adopt's own create of the home dir is the first seam op after the landing rename —
+    // the same boundary the failed-adopt test pins.
+    let fs = crate::fs_seam::HookFs::before_nth_create_dir_all(&h.home.0, 2, || {
+        park_alive_mid_adopt.set(park.exists());
+        let j: Option<crate::sidecar::ParkJournal> = doc::read_doc(&RealFs, &journal_path).unwrap();
+        journaled_mid_adopt
+            .set(j.is_some_and(|j| j.parks.iter().any(|e| Path::new(&e.park) == park.as_path())));
+    });
+    let ctx = Ctx { fs: &fs, ..h.ctx() };
+    let roots = ops::DiscoveryRoots {
+        home: h.home.0.clone(),
+        cwd: Some(project.0.clone()),
+    };
+    let opts = ops::AddRemoteOpts {
+        skill: Some("alpha".into()),
+        harness: None,
+        global: false,
+    };
+    ops::add_remote(&ctx, &git, &spec, &roots, &opts).expect("the import lands");
+    assert!(
+        park_alive_mid_adopt.get(),
+        "the droppable park must still be on disk while the adopt runs"
+    );
+    assert!(
+        journaled_mid_adopt.get(),
+        "…and journaled, so a crash mid-adopt still restores it"
+    );
+    // The successful conclusion settled it: park gone, journal clean, the import landed.
+    assert!(!park.exists());
+    assert_eq!(std::fs::read(dest.join("SKILL.md")).unwrap(), b"# alpha\n");
+    let journal: Option<crate::sidecar::ParkJournal> =
+        doc::read_doc(&RealFs, &journal_path).unwrap();
+    assert!(
+        journal.as_ref().is_none_or(|j| j.parks.is_empty()),
+        "{journal:?}"
+    );
+}
+
 /// The benign half of the same cleanup: a destination still holding EXACTLY what this run staged
 /// drops silently — no park, no journal residue, no litter.
 #[test]

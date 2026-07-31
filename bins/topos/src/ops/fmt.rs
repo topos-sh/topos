@@ -65,7 +65,22 @@ pub(crate) fn fmt_manifest(ctx: &Ctx<'_>, global: bool) -> Result<FmtData, Clien
         .map_err(|e| ClientError::Corrupt(format!("{}: {e}", path.display())))?;
     let changed = formatted != text;
     if changed {
-        crate::atomic::atomic_write(ctx.fs, &path, formatted.as_bytes())?;
+        // The same compare-and-swap every editor write rides: the lock fences topos's own
+        // writers, and the pre-rename re-read refuses an outside editor's bytes rather than
+        // normalizing over them.
+        match crate::atomic::atomic_write_cas(
+            ctx.fs,
+            &path,
+            formatted.as_bytes(),
+            Some(text.as_bytes()),
+        )? {
+            crate::atomic::CasOutcome::Written => {}
+            crate::atomic::CasOutcome::Changed => {
+                return Err(ClientError::ManifestChanged {
+                    path: path.display().to_string(),
+                });
+            }
+        }
     }
     Ok(FmtData {
         manifest: path.display().to_string(),

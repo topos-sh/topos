@@ -1167,7 +1167,17 @@ pub(crate) fn rewrite_to_governed(
                 .set_row(&canonical, &EntryValue::Star)
                 .map_err(|e| ClientError::InvalidArgument(e.message))?;
         }
-        editor.write(ctx.fs, &path)?;
+        match editor.write(ctx.fs, &path) {
+            Ok(()) => {}
+            // The editor's compare-and-swap saw an OUTSIDE write land in the beat before its
+            // rename (topos's own writers hold the lock — this is a person's editor or a
+            // `sed`). Nothing was written; retry the whole re-resolve, bounded, and fall out to
+            // the pending transfer if the file will not hold still (the next update converges it
+            // idempotently) — a landed publish must not turn into a hard error over a rewrite
+            // it can retry later.
+            Err(ClientError::ManifestChanged { .. }) => continue,
+            Err(e) => return Err(e),
+        }
         return Ok(GovernedOutcome::Rewritten(GovernedRewrite {
             manifest: path.display().to_string(),
             canonical,
