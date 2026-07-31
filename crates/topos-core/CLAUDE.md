@@ -1,42 +1,30 @@
 # `topos-core` — the pure trust kernel
 
-Deterministic FUNCTIONS over EXPLICIT VALUES, over this crate's OWN validated domain newtypes (`Commit`,
-the state-transition types). A constructed `topos-core` value is, by construction,
-well-formed — the kernel cannot represent an invalid state (parse-don't-validate). The app libs convert
-wire DTOs → these types at the edge, so **`topos-core` does NOT depend on `topos-types`**.
+Deterministic FUNCTIONS over EXPLICIT VALUES, over this crate's OWN validated domain newtypes. A
+constructed value is well-formed by construction (parse-don't-validate); the app libs convert wire
+DTOs → these types at the edge, so **`topos-core` does NOT depend on `topos-types`**.
 
-## Owns (the single implementation of each)
+## Owns (the single implementation of each; each behind a known-answer / truth-table test)
 
-Implemented (each behind a known-answer / truth-table test):
-- ✅ the byte-exact sha256 **bundle digest** + the canonical-manifest **reject rules** (`digest`);
-- ✅ the **consent-satisfier truth-table**, as a pure fn (`consent`);
-- ✅ the frozen **content-addressed identity derivation** (`identity`) — the canonical `commit_id`
-  construction (the human-facing `version_id`, a length-prefixed binary frame). No keys, no
-  signatures — written once here so every component that re-derives an id agrees on the bytes by
-  construction.
-- ✅ the **client sync transition** (`sync`) — the four sync states from `work==base?`×`applied==observed?`,
-  and the post-fetch heal that distinguishes a crash-after-swap from a real divergence; all pure, behind
-  a truth-table test. No floor, no alarm: the served pointer is the sync target, its integrity the
-  content-addressed version id re-verified by digest on apply.
-- ✅ the **author-merge policy** (`merge`) — the three-way file-set **reconciliation** over
-  `(path, mode, content_sha256)` metadata → a per-path `MergePlan`; the `MergeOutcome` **decision** over
-  the plan + the byte-merge verdicts; and the **publish guard** (`publish_blocked`, presence-based over a
-  durable conflict fact — never a marker scan). Metadata only: emits a *plan*, never bytes; the byte-level
-  diff3 *execution* is `topos-gitstore`'s. Behind a per-row truth-table test.
-
-Planned (land behind a golden vector as their wire encoding / mechanics freeze):
-- the generation compare-and-set *decision*; first-parent + same-bundle lineage assertions.
+- the byte-exact sha256 **bundle digest** + the canonical-manifest reject rules (`digest`);
+- the **consent-satisfier truth table** (`consent`);
+- the frozen **content-addressed identity derivation** (`identity`) — the canonical `commit_id`
+  (the human-facing `version_id`, a length-prefixed binary frame). No keys, no signatures.
+- the **client sync transition** (`sync`) — four states from `work==base?`×`applied==observed?` +
+  the post-fetch heal. The served pointer is the sync target; integrity is the content-addressed
+  id re-verified by digest on apply.
+- the **author-merge policy** (`merge`) — the three-way file-set reconciliation over
+  `(path, mode, content_sha256)` → a per-path `MergePlan`, the `MergeOutcome` decision, and the
+  publish guard. Metadata only — the byte-level diff3 execution is `topos-gitstore`'s.
 
 ## Hard constraints
 
-- **`#![cfg_attr(not(test), no_std)]` + `alloc`** — purity is enforced by the compiler: a `std::fs` /
-  `SystemTime::now` / RNG call would fail to BUILD in a production build, not just fail review.
+- **`#![cfg_attr(not(test), no_std)]` + `alloc`** — purity enforced by the compiler.
 - **No I/O. No traits. No `tokio` / `sqlx` / `axum` / `gix` / `std::fs`.**
 - **No ambient clock or RNG** — time is a `now` parameter; keys/signatures are byte parameters.
-- **Every core invariant is a unit or seeded generative test in this crate** (the generative tests use
-  a deterministic in-repo xorshift generator — no proptest/RNG dependency).
-- Depends on nothing in the workspace, and only on hashing + canonical-form primitives (`cargo xtask
-  check-arch` enforces it).
+- Every core invariant is a unit or seeded generative test in this crate (deterministic in-repo
+  xorshift generator — no proptest/RNG dependency).
+- Depends on nothing in the workspace (`cargo xtask check-arch` enforces it).
 
-Dependencies: `sha2` + `unicode-normalization` (the NFC path-collision fold in `digest`). Nothing else —
-no crypto, no keys.
+Dependencies: `sha2` + `unicode-normalization` (the NFC path-collision fold in `digest`). Nothing
+else — no crypto, no keys.
