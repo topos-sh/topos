@@ -3,413 +3,257 @@
 [![CI](https://github.com/topos-sh/topos/actions/workflows/ci.yml/badge.svg)](https://github.com/topos-sh/topos/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-A layer for AI agents to **share their behaviors** across a team — so every agent stays current with the
-same company processes and everyone gets a consistent experience. A *behavior* (a "skill") is a bundle of
-files (`SKILL.md` + scripts + reference docs); the **whole bundle** is the unit of trust.
+Topos keeps every AI agent on your team up to date. Publish a skill once (the deploy checklist,
+the code-review standard, the release process) and every teammate's agent has it at the start of
+its next session — Claude Code, Cursor, Codex, and [70+ more](https://topos.sh/docs/harnesses).
+When someone improves a skill while working, the improvement comes back to the team as a
+reviewable change instead of dying on their machine.
 
-Three programs in one Apache-2.0 repository:
+A skill is a plain folder with a `SKILL.md` — the same open format the
+[skills.sh](https://skills.sh) ecosystem already uses. Underneath is a git repo: every version
+is kept, any update can be rolled back, and you can take everything and leave at any time.
 
-- **`topos`** — the local CLI an agent drives to add, publish, and update behaviors.
-- **`topos-plane`** — the self-hostable sharing server (a library + a thin binary).
-- **`@topos/web`** — the product web app (the one public surface when self-hosting): sign-in, the
-  dashboard, the review UI, and the session API the CLI dials.
-
-The two Rust programs share one trust kernel, `topos-core`: the single, auditable implementation of the
-byte-exact digest, consent, content-addressed identity, and sync algorithm.
-
-📚 **Documentation: [topos.sh/docs](https://topos.sh/docs)** — quickstart, a guide per motion, driving
-Topos from an agent, self-hosting, and the generated CLI reference. Source in [`docs/`](docs/); every
-page is also plain markdown at its URL + `.md`, indexed at [`/docs/llms.txt`](https://topos.sh/docs/llms.txt).
+Use it with [Topos Cloud](https://topos.sh) or [self-host](#self-hosting) the whole product
+from this repository.
 
 ## Quickstart
 
-Install the CLI:
+**1. Create a workspace** — your team's shared home for skills. Sign up at
+[topos.sh](https://topos.sh) and pick a name; your team's address is `https://topos.sh/<name>`.
+Already invited? The address is in the invitation mail — skip to step 2.
+
+**2. Set up.** Paste this to the agent you already use — it installs the CLI and logs in, and
+the one browser approval stays yours:
+
+```text
+Set up Topos for us: fetch https://topos.sh/agent and follow it. Our workspace: https://topos.sh/acme
+```
+
+Or by hand, with your workspace address (macOS and Linux, WSL2 on Windows; no sudo):
 
 ```sh
 curl -fsSL https://topos.sh/install | sh
+topos login https://topos.sh/acme
 ```
 
-**Share a skill with your team** — from a machine that has the skill locally:
+That is the whole setup: this machine receives everything the workspace has for you, and
+updates apply silently at the start of each agent session.
+
+**3. Share a skill.** Point `publish` at any skill folder you already have — here, a Claude
+Code one. A bare run is a preview — it prints what would happen and changes nothing; `--yes`
+applies it:
 
 ```sh
-topos add ~/.claude/skills/pr-describe   # adopt it (offline; no account)
-topos login https://topos.sh/acme        # log this machine in; approve in the browser
-topos publish pr-describe                # move `current` to your draft; prints the share line
+topos publish ~/.claude/skills/pr-describe
+topos publish pr-describe --yes
 ```
 
-Create your workspace in the browser (at [topos.sh](https://topos.sh), or self-host — see below), then
-`topos login <address>` logs this machine in (approve in the browser; re-run to finish). `publish` needs a
-session — logged out, it refuses and tells you to `login` with your workspace address first. Each publish
-prints the workspace **address** (`https://topos.sh/<name>`) teammates log in with, and a landed publish of
-a local folder moves its governance to the workspace: your manifest line becomes the workspace reference.
-To pin the exact bytes being shipped, add a `@<digest>` suffix (`topos publish pr-describe@<digest>`, where
-`topos list --json` prints each digest) — the publish then refuses on any mismatch.
+The skill is now the team's: one name, one history, one version everyone gets. Every teammate's
+machine picks it up on its own — they run nothing.
 
-**Use your team's skills** — from a teammate's machine:
+**4. Bring the team in.**
 
 ```sh
-topos login https://topos.sh/acme    # your workspace address; approve in the browser, re-run to finish
-topos add pr-describe                # record it in this folder's manifest; delivered immediately
+topos invite dana@acme.com --yes
 ```
 
-You do not have to `add` what the team already gave you: logging in adopts everything the workspace
-assigns you — its shared baseline, any channel you carry, anything aimed at you — and keeps taking it.
-`add` is for the rest. What a folder's agents should have is its `topos.toml` **manifest** —
-`add`/`remove` edit the nearest one (created at the git root when none exists) and deliver immediately;
-`-g` edits this machine's own `~/.topos/topos.toml`, which takes explicit control of what follows you
-here. Login arms a session-start hook that runs
-`topos update`, so updates the team publishes land byte-exact at the start of each session — verified
-byte-for-byte against the plane's `current` pointer, and never over your local edits. In a checkout, managed
-copies land in the project's own agent dirs and keep themselves out of commits (each placed dir
-carries its own ignore file — the node_modules model).
+The invitation mail carries everything they need, including a line to paste to their agent.
+(Owners only. Self-hosted installs need SMTP configured first.)
 
-**Propose a change back:**
+## Everyday use
+
+The CLI is built for agents to drive, not for hands — using it directly works, but can be
+frustrating. Agents already know it: the built-in `topos` skill lands in their skills
+directories at setup. So tell your agent what you want and let it run the commands. The goal is
+for Topos to be invisible: all of this happens while everyone just works. In the flows below,
+`# Ask your agent:` lines are the natural-language version of the commands beneath them.
+
+### Steer a non-technical teammate's agent
+
+Dana in sales never opens a terminal, but her agent could be doing her CRM follow-ups. Your
+team's `sales` channel carries the CRM skills (channels are created in the browser). Invite
+her — from the workspace's Members page in the browser, or:
 
 ```sh
-topos publish pr-describe --propose         # open a PR-like proposal
-topos review pr-describe@<hash> --approve   # a reviewer lands it
+# Ask your agent: "Invite dana@acme.com and set her up with our sales skills."
+topos invite dana@acme.com --channel sales --yes
 ```
 
-## Install
+The mail she receives carries one line for her agent, and she pastes it:
+
+```text
+Set up Topos for us: fetch https://topos.sh/agent and follow it. Our invite: https://topos.sh/acme/invite/…
+```
+
+Her agent installs the CLI, joins the workspace, and subscribes her to `sales` — one browser
+visit is hers: create her account, then approve the machine. The channel's skills are on her
+machine before her next session.
+
+Later the CRM changes, so you update the skill in the channel:
+
+```sh
+# Ask your agent: "The CRM adds a discount field — update crm-follow-up."
+topos publish crm-follow-up -m "Fill the new discount field" --yes
+```
+
+At Dana's next session her agent already works the new way — she did nothing, and you never
+touched her machine. Protect the skill, and her agent's improvements come back as proposals
+you approve.
+
+### Pin a project's skills
+
+A backend team wants every agent working in its repo — teammates' and CI's — on the same
+skills:
+
+```sh
+# Ask your agent: "Set this repo up with our code-review standard, our
+# db-migrations skill, and find-skills from vercel-labs."
+topos add code-review
+topos add db-migrations
+topos add vercel-labs/skills/find-skills --yes
+```
+
+The `--yes` confirms a GitHub source this machine has not used before. The commands install the
+skills and write `topos.toml` at the repo root — commit it, and every machine in the checkout
+converges on the same set. The entries it adds:
+
+```toml
+[bundles]
+"topos.sh/acme/code-review" = "*"                      # the team's current version
+"topos.sh/acme/db-migrations" = "*"
+"github.com/vercel-labs/skills/find-skills" = "*"      # tracks the repo; moves on `topos update`
+```
+
+One command refreshes every skill on the machine — agents with hooks run it themselves at
+session start ([which agents](https://topos.sh/docs/harnesses)):
+
+```sh
+topos update
+```
+
+### Roll out an internal tool change company-wide
+
+The internal customer-lookup service ships v2 — new endpoints, token auth. One publish updates
+every agent that carries the skill:
+
+```sh
+# Ask your agent: "Our customer-lookup API moved to v2 — update the skill and roll it out."
+topos publish customer-lookup -m "v2 endpoints, token auth" --yes
+```
+
+Next session, Support, Sales, and Engineering agents call v2. On a protected skill the publish
+lands as a proposal, and a reviewer approves it:
+
+```sh
+topos review customer-lookup@<version> --approve
+```
+
+If v2 misbehaves, one command moves everyone back:
+
+```sh
+topos revert customer-lookup --to <version> --yes
+```
+
+### Keep a cloud agent current
+
+A scheduled agent triages new support tickets every night — labels them, routes escalations —
+with no human at the keyboard. Enroll it once, somewhere `~/.topos` persists (the login is one
+browser approval):
 
 ```sh
 curl -fsSL https://topos.sh/install | sh
+topos login https://topos.sh/acme
 ```
 
-Installs the `topos` binary to `~/.local/bin` (no sudo). Platforms: macOS (Apple Silicon and Intel) and
-Linux (x86_64 and arm64 — static musl, any distro, no runtime deps). On Windows, run it inside
-[WSL2](https://learn.microsoft.com/windows/wsl/install).
-
-No CLI yet? `npx skills add topos-sh/topos` installs just the built-in
-[`topos` skill](#the-built-in-topos-skill) (docs, no binary) into your agent's skills directory — its
-`INSTALL.md` walks the agent to the full install above.
-
-The installer verifies a SHA-256 checksum downloaded over TLS and refuses to install on a mismatch (this
-proves transit integrity and cannot be disabled). For origin integrity, verify the Sigstore build-provenance
-attestation:
+Still on that machine, provision it with its skill and a dedicated channel — anything the team
+later places in that channel reaches this agent too:
 
 ```sh
-gh attestation verify topos-<target>.tar.gz --repo topos-sh/topos
+# Ask your agent: "Set this machine up with ticket-triage and the triage-bot channel."
+topos add -g ticket-triage
+topos add -g @acme/channels/triage-bot
 ```
 
-Knobs (env var or flag): `TOPOS_VERSION` / `--version <tag>` pin a release; `TOPOS_INSTALL_DIR` / `--to <dir>`
-set the install directory; `TOPOS_INSTALL_BASE_URL` points at a mirror or air-gapped proxy.
+Every run then starts with a refresh:
 
-## Commands
+```sh
+topos update
+```
 
-The agent usually drives these non-interactively — `--json` emits a machine envelope and never prompts — but
-the same verbs work by hand. One rule covers the gate: a verb that **reaches other people, discards local
-work, or trusts a new source** is two-phase — a bare invocation *describes* what would change (nothing is
-written) and `--yes` applies it. Everything else applies immediately and prints the command that undoes it.
-The full, always-current reference — every flag, generated straight from the CLI — is in
-[`docs/cli.md`](docs/cli.md).
+From here its behavior is steered from anywhere, live at the next run — no redeploy. One way:
+update a skill it carries:
 
-| Command | What it does |
-|---|---|
-| `login <address>` · `logout` | Log this machine into a workspace (one browser approval) · end the session. |
-| `init` | Create this folder's `topos.toml` manifest. |
-| `add <name>` / `add @<ws>/<name>` | Record a catalog skill in the nearest manifest (`-g`: this machine's own `~/.topos/topos.toml`); delivered immediately. `@<ws>/channels/<name>` adds a channel, `@<ws>` adopts a whole workspace's set, `owner/repo` imports from GitHub (gated once on first trust), `<dir>` adopts a local folder. |
-| `remove <name>` | The exact inverse — drop the same row; with `-g`, switch one skill off on this machine when the workspace still gives it to you. |
-| `update [<skill>]` | Reconcile this folder's manifest and everything your workspaces give you. The session-start hook runs this for you. (`pull` is a hidden alias.) |
-| `fmt` | Tidy a `topos.toml` into the standard layout — comments kept, meaning unchanged. |
-| `publish <skill>[@<digest>]` | Move `current` to your draft (or genesis-create a skill); a landed publish of a local folder transfers its governance to the workspace. The optional `@<digest>` pins the exact bytes. |
-| `publish --propose <skill>` | Open a proposal (a PR) without moving `current`. |
-| `review [<skill>@<hash> --approve\|--reject]` | The review inbox, or resolve a proposal. |
-| `revert <skill> --to <hash>` | Move the team to older bytes — a forward, invertible move. |
-| `protect <target> [<level>]` | Set a skill's or channel's protection level. |
-| `invite <emails…>` | Seat teammates as members (they join by the workspace address). |
-| `status` · `list` · `diff` · `log` | Sessions + this folder's manifests · inventory · show a change · show a skill's history. |
-| `auth status` · `self-update` | Probe each session's access health · update the `topos` binary. |
+```sh
+# Ask your agent: "Triage keeps missing escalations — fix the ticket-triage skill."
+topos publish ticket-triage -m "Escalate anything from enterprise accounts" --yes
+```
 
-Consent is explicit end to end: a `<skill>@<digest>` pin binds the exact bytes, nothing lands that wasn't
-disclosed and pinned, and a diverged local draft is surfaced — never overwritten.
+The other: give it a new capability by publishing into its channel:
 
-### The built-in `topos` skill
+```sh
+# Ask your agent: "Write a skill for duplicate-ticket detection and publish it to triage-bot."
+topos publish dedupe-tickets --to triage-bot --yes
+```
 
-Agents shouldn't need this README — so topos teaches them itself, with its own mechanism. A **built-in
-skill named `topos`** ships inside the binary and lands in your agents' skill directories the moment
-topos wires into a harness: what topos is, how to check what's managed (`topos list`), how updates
-arrive, and how to share an improvement back (`publish` / `publish --propose`) — plus the complete
-generated verb reference (the same bytes as `docs/cli.md`, rendered from the CLI itself so it can
-never drift). It re-syncs with the binary on every update sweep; hand edits are overwritten (your
-*other* skills' drafts are sacred — this one documents the binary). Don't want it?
-`topos remove topos --yes` opts the machine out durably; `topos add topos` brings it back. The name
-`topos` is reserved everywhere, so no workspace skill can ever shadow it.
+One rule across all commands: anything that reaches other people, throws away local work, or
+adds from a GitHub repository you have not used before previews first — a bare run prints what
+would change and changes nothing, and `--yes` applies it. Everything else applies immediately
+and prints an undo command. Agents use the same commands with `--json`, which never prompts.
 
-The skill's source lives at the top of this repo — [`skills/topos/`](skills/topos/) — so it also
-works as a plain downloadable skill with no topos installed: `npx skills add topos-sh/topos` places
-the same three files (`SKILL.md`, the generated `reference.md`, and `INSTALL.md`, which covers
-installing the CLI). If you later install topos, one explicit `topos add topos` hands the
-downloaded copy to it — recognized by its provenance marker, its bytes snapshotted first, kept
-current from then on. Nothing takes over a pre-existing directory silently.
+## Docs
 
-## For agents
+**[topos.sh/docs](https://topos.sh/docs)** — quickstart, getting skills, publishing, review,
+running a team, self-hosting, and the full
+[CLI reference](https://topos.sh/docs/cli). Written for humans and agents alike:
+every page is also plain markdown at its URL + `.md`, [topos.sh/agent](https://topos.sh/agent)
+is the setup walkthrough an agent can follow on its own, and
+[topos.sh/docs/agents](https://topos.sh/docs/agents) covers the JSON output and consent rules.
 
-Reading this as an agent? Fetch [topos.sh/agent](https://topos.sh/agent) (or `/agent` on any
-self-hosted origin) — the setup walkthrough written for you. Teams: paste this into your repo's
-`AGENTS.md` so every agent knows where the shared skills live:
+Agents on an enrolled machine need none of this: the built-in `topos` skill in their skills
+directories already covers what Topos is, the commands, and when to offer sharing something
+back. If your repo has an `AGENTS.md`, one line routing agents to that skill is enough:
 
 ```md
-## Team skills
-
-This team shares agent skills through topos. Check `topos list` to see what is managed here, and
-prefer those skills for team processes. If you improve one — or work out something reusable —
-offer to share it back (`topos publish`, or `publish --propose` where review is required). No
-`topos` on this machine yet? Follow https://topos.sh/agent to set it up.
+Team skills here are managed by topos — read the `topos` skill before working with them (not installed? https://topos.sh/agent).
 ```
-
-## Skill discovery across harnesses
-
-`topos list` scans the skills directory of every agent harness it knows about — not just the ones it fully
-drives — so it surfaces *untracked* skills sitting in any harness's folder, ready to `topos add` (adopt the
-bytes; offline, no account). Support comes in three tiers:
-
-- **auto-update** — topos installs an update trigger inside the harness itself (a session-start hook, or a
-  scheduled job where that is what the harness offers), so managed skills refresh silently and are current
-  before the agent uses them. Where marked *, the harness asks its own one-time confirmation before it will
-  run the trigger; until you grant it, that harness behaves like the **delivery** tier.
-- **delivery** — topos installs no trigger inside that harness, but every managed skill is still placed
-  into its skills dir whenever the harness is detected (one shared `~/.agents/skills` copy where the harness
-  reads that dir, a native copy otherwise) and refreshed by every update sweep on the machine — whether a
-  hook in an auto-update harness, a scheduled job, or a manual `topos update` ran it. The harness picks up
-  changes on its own scan (many rescan at session start).
-- **discover + add** — project-scoped conventions with no user-level dir: topos finds and adopts skills
-  there, but has no machine-wide place to deliver into.
-
-The directory conventions below are sourced from [`vercel-labs/skills`](https://github.com/vercel-labs/skills)
-(MIT). User-scope dirs resolve under `$HOME`; project-scope dirs are relative to the directory you run in.
-
-| Harness | Slug | User-scope dir | Project-scope dir | topos support |
-|---|---|---|---|---|
-| Claude Code | `claude-code` | `~/.claude/skills` † | `.claude/skills` | auto-update |
-| OpenClaw | `openclaw` | `~/.openclaw/skills` ‡ | `skills` | auto-update |
-| Hermes Agent | `hermes-agent` | `~/.hermes/skills` † | `.hermes/skills` | auto-update |
-| AdaL | `adal` | `~/.adal/skills` | `.adal/skills` | delivery |
-| AiderDesk | `aider-desk` | `~/.aider-desk/skills` | `.aider-desk/skills` | delivery |
-| Amp | `amp` | `~/.config/agents/skills` † | `.agents/skills` | auto-update |
-| Antigravity | `antigravity` | `~/.gemini/antigravity/skills` | `.agents/skills` | delivery |
-| Antigravity CLI | `antigravity-cli` | `~/.gemini/antigravity-cli/skills` | `.agents/skills` | delivery |
-| AstrBot | `astrbot` | `~/.astrbot/data/skills` | `data/skills` | delivery |
-| Augment | `augment` | `~/.augment/skills` | `.augment/skills` | delivery |
-| Autohand Code CLI | `autohand-code` | `~/.autohand/skills` † | `.autohand/skills` | delivery |
-| Cline | `cline` | `~/.agents/skills` | `.agents/skills` | auto-update |
-| CodeArts Agent | `codearts-agent` | `~/.codeartsdoer/skills` | `.codeartsdoer/skills` | delivery |
-| CodeBuddy | `codebuddy` | `~/.codebuddy/skills` | `.codebuddy/skills` | delivery |
-| Codemaker | `codemaker` | `~/.codemaker/skills` | `.codemaker/skills` | delivery |
-| Code Studio | `codestudio` | `~/.codestudio/skills` | `.codestudio/skills` | delivery |
-| Codex | `codex` | `~/.codex/skills` † | `.agents/skills` | auto-update * |
-| Command Code | `command-code` | `~/.commandcode/skills` | `.commandcode/skills` | delivery |
-| Continue | `continue` | `~/.continue/skills` | `.continue/skills` | delivery |
-| Cortex Code | `cortex` | `~/.snowflake/cortex/skills` | `.cortex/skills` | delivery |
-| Crush | `crush` | `~/.config/crush/skills` | `.crush/skills` | delivery |
-| Cursor | `cursor` | `~/.cursor/skills` | `.agents/skills` | auto-update |
-| Deep Agents | `deepagents` | `~/.deepagents/agent/skills` | `.agents/skills` | delivery |
-| Devin for Terminal | `devin` | `~/.config/devin/skills` † | `.devin/skills` | delivery |
-| Dexto | `dexto` | `~/.agents/skills` | `.agents/skills` | delivery |
-| Droid | `droid` | `~/.factory/skills` | `.factory/skills` | auto-update |
-| Eve | `eve` | — (project-only) | `agent/skills` | discover + add |
-| Firebender | `firebender` | `~/.firebender/skills` | `.agents/skills` | delivery |
-| ForgeCode | `forgecode` | `~/.forge/skills` | `.forge/skills` | delivery |
-| Gemini CLI | `gemini-cli` | `~/.gemini/skills` | `.agents/skills` | auto-update * |
-| GitHub Copilot | `github-copilot` | `~/.copilot/skills` | `.agents/skills` | auto-update |
-| Goose | `goose` | `~/.config/goose/skills` † | `.goose/skills` | auto-update * |
-| IBM Bob | `bob` | `~/.bob/skills` | `.bob/skills` | delivery |
-| iFlow CLI | `iflow-cli` | `~/.iflow/skills` | `.iflow/skills` | delivery |
-| inference.sh | `inference-sh` | `~/.inferencesh/skills` | `.inferencesh/skills` | delivery |
-| Jazz | `jazz` | `~/.jazz/skills` | `.jazz/skills` | delivery |
-| Junie | `junie` | `~/.junie/skills` | `.junie/skills` | delivery |
-| Kilo Code | `kilo` | `~/.kilocode/skills` | `.kilocode/skills` | delivery |
-| Kimi Code CLI | `kimi-code-cli` | `~/.agents/skills` | `.agents/skills` | delivery |
-| Kiro CLI | `kiro-cli` | `~/.kiro/skills` | `.kiro/skills` | delivery |
-| Kode | `kode` | `~/.kode/skills` | `.kode/skills` | delivery |
-| Lingma | `lingma` | `~/.lingma/skills` | `.lingma/skills` | delivery |
-| Loaf | `loaf` | `~/.agents/skills` | `.agents/skills` | delivery |
-| MCPJam | `mcpjam` | `~/.mcpjam/skills` | `.mcpjam/skills` | delivery |
-| Mistral Vibe | `mistral-vibe` | `~/.vibe/skills` † | `.vibe/skills` | delivery |
-| Moxby | `moxby` | `~/.moxby/skills` | `.moxby/skills` | delivery |
-| Mux | `mux` | `~/.mux/skills` | `.mux/skills` | delivery |
-| Neovate | `neovate` | `~/.neovate/skills` | `.neovate/skills` | delivery |
-| Ona | `ona` | `~/.ona/skills` | `.ona/skills` | delivery |
-| OpenCode | `opencode` | `~/.config/opencode/skills` † | `.agents/skills` | auto-update |
-| OpenHands | `openhands` | `~/.openhands/skills` | `.openhands/skills` | delivery |
-| Pi | `pi` | `~/.pi/agent/skills` | `.pi/skills` | delivery |
-| Pochi | `pochi` | `~/.pochi/skills` | `.pochi/skills` | delivery |
-| PromptScript | `promptscript` | — (project-only) | `.agents/skills` | discover + add |
-| Qoder | `qoder` | `~/.qoder/skills` | `.qoder/skills` | delivery |
-| Qoder CN | `qoder-cn` | `~/.qoder-cn/skills` | `.qoder/skills` | delivery |
-| Qwen Code | `qwen-code` | `~/.qwen/skills` | `.qwen/skills` | delivery |
-| Reasonix | `reasonix` | `~/.reasonix/skills` | `.reasonix/skills` | delivery |
-| Replit | `replit` | `~/.config/agents/skills` † | `.agents/skills` | delivery |
-| Roo Code | `roo` | `~/.roo/skills` | `.roo/skills` | delivery |
-| Rovo Dev | `rovodev` | `~/.rovodev/skills` | `.rovodev/skills` | delivery |
-| Tabnine CLI | `tabnine-cli` | `~/.tabnine/agent/skills` | `.tabnine/agent/skills` | delivery |
-| Terramind | `terramind` | `~/.terramind/skills` | `.terramind/skills` | delivery |
-| Tinycloud | `tinycloud` | `~/.tinycloud/skills` | `.tinycloud/skills` | delivery |
-| Trae | `trae` | `~/.trae/skills` | `.trae/skills` | delivery |
-| Trae CN | `trae-cn` | `~/.trae-cn/skills` | `.trae/skills` | delivery |
-| Universal | `universal` | `~/.config/agents/skills` † | `.agents/skills` | — (the shared dir itself) |
-| Warp | `warp` | `~/.agents/skills` | `.agents/skills` | delivery |
-| Windsurf | `windsurf` | `~/.codeium/windsurf/skills` | `.windsurf/skills` | delivery |
-| Zed | `zed` | `~/.agents/skills` | `.agents/skills` | delivery |
-| ZCode | `zcode` | `~/.zcode/skills` | `.zcode/skills` | delivery |
-| Zencoder | `zencoder` | `~/.zencoder/skills` | `.zencoder/skills` | delivery |
-| Zenflow | `zenflow` | `~/.zencoder/skills` | `.zencoder/skills` | delivery |
-
-† The dir's root is env-overridable (the default shown applies when the variable is unset):
-`$CLAUDE_CONFIG_DIR` (Claude Code), `$HERMES_HOME` (Hermes Agent), `$CODEX_HOME` (Codex), `$VIBE_HOME`
-(Mistral Vibe), `$AUTOHAND_HOME` (Autohand Code CLI), and `$XDG_CONFIG_HOME` for the `~/.config`-based
-harnesses (Amp, Devin for Terminal, Goose, OpenCode, Replit, Universal).
-‡ OpenClaw also probes `~/.clawdbot/skills` and `~/.moltbot/skills`.
-* The trigger is installed, but this harness requires its own one-time approval before running it
-(Codex trusts hooks in-app via `/hooks`; Gemini CLI confirms new hooks; Goose enables plugins itself).
-topos reports the trigger honestly as not-yet-active until then.
-
-## Trust & security
-
-A behavior you receive is code and prose that runs inside your agent, so integrity and consent are the whole
-point of the tool. A bundle's identity is a **byte-exact sha256** over every file (different bytes are never
-"the same"); a version you pin **is** that hash, so what you pin is exactly what you get; and **nothing lands
-that was not disclosed and pinned**. Trust sits at the level a team already extends to its git host and CI:
-every request is authenticated (a signed-in person or a logged-in session), every mutation of shared state is
-attributed and audit-logged, and access is database policy — a revocation takes effect immediately. Assurance is **visibility** — a fleet
-dashboard and one-command revert — rather than client-side cryptography (there is no pointer signing or key
-pinning; optional signing can layer on later without a redesign). What Topos does *not* do is judge whether
-an approved behavior is safe to run — it guarantees disclosure and integrity, not a sandbox or a second
-permission system.
-
-The design behind this — trust boundaries, the consent + sync model — is in
-[`ARCHITECTURE.md`](ARCHITECTURE.md); to run it safely, see [Self-hosting](#self-hosting). To
-report a vulnerability, see [`SECURITY.md`](SECURITY.md).
 
 ## Self-hosting
 
-The bundled compose file runs the WHOLE product — the web app (the one public surface), the vault (the
-Rust plane, internal-network only, no published port), and Postgres:
+The whole product runs from one compose file, and your workspace address is simply your
+origin.
 
 ```sh
-docker compose up --build     # the app on http://localhost:3000; the vault stays internal
+git clone https://github.com/topos-sh/topos && cd topos
+printf 'TOPOS_WEB_AUTH_SECRET=%s\nTOPOS_INTERNAL_TOKEN=%s\n' \
+  "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
+docker compose up -d --build
 ```
 
-The app serves everything a team touches: sign-in and the dashboard, the review UI, the admin surfaces,
-the shareable workspace addresses, and the session API itself (`/api/v1/…` — agents and the `topos` CLI dial
-the app). The app owns identity and the whole directory in its own database schema; only the byte and
-pointer operations of a publish forward to the vault over an internal network lane. Nothing else needs to
-be reachable from outside.
-
-### First run: claim the workspace
-
-The first boot mints your workspace and prints **one** setup link to the app logs:
-
-```
-→ Finish setup: http://localhost:3000/claim?code=…
-```
-
-Open it in a browser and create the first account (email + password) — that seats you as the workspace
-**owner**. (In CI or an automated deploy, preset the code with `TOPOS_SETUP_CODE` to skip reading the logs;
-`TOPOS_SETUP_LINK_FILE` also mirrors the line to a file.) The link dies on first use, and the code is only
-ever stored as its hash.
-
-From there you `publish` (after `topos login <your-address>` mints this machine's session) and grow the team:
-
-- **Invite teammates** once SMTP is armed (see below): `topos invite <emails…>`, or the roster page. Each
-  person signs up through the invite mail, then runs `topos login <workspace-address>` and approves the new
-  session at `<origin>/verify` (a plain signed-in accept). Approval mints that machine's workspace-scoped
-  credential; updates then land at session start.
-- **No SMTP?** Registration stays closed by design — the claim owner is the only account. Flip
-  `registration = 'open'` on the workspace policy page to let anyone with the address sign up (off by
-  default), or arm SMTP to invite.
-
-### Configuration
-
-`docker compose up` works out of the box for a local try-out. For a real (non-localhost) deployment, set:
-
-- `TOPOS_PUBLIC_URL` — the public `https://…` origin (behind your reverse proxy). The workspace addresses,
-  the sign-in/verification pages, the printed setup link, and the API base the protocol card teaches clients
-  all ride it.
-- `TOPOS_WEB_AUTH_SECRET` and `TOPOS_INTERNAL_TOKEN` — the app's session-signing secret (≥ 32 chars) and
-  the app↔vault internal bearer. The compose file ships loud `change-me` defaults; replace both.
-- `TOPOS_PLANE_DB_PASSWORD` / `TOPOS_WEB_DB_PASSWORD` — the two database roles' passwords. There is one role
-  per application, each owning its own schema: the vault owns `plane` (byte custody), the app owns `web`
-  (identity + the directory) and reads `plane` read-only.
-- `TOPOS_WORKSPACE_NAME` — the first workspace's address slug (renameable later in the product; defaults to
-  `team`). `TOPOS_SETUP_CODE` presets the claim code for CI/IaC; `TOPOS_SETUP_LINK_FILE` mirrors the printed
-  setup line to a file.
-- `TOPOS_MAIL_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` / `_FROM` *(optional)* — bring your own SMTP relay,
-  all five or none. Armed, outbound mail turns on: invites really send (and the invited sign-up verifies
-  through the mailbox before its seat binds), and password-reset mail works. Unset, mail is off and the core
-  loop still works — sign-in, publishing, and the claim ceremony need no mail. A mail-less solo owner who
-  forgets their password runs the one-shot `web/scripts/mint-recovery-code.mjs` in the container to print a
-  recovery code.
-
-The bundled `docker-compose.yml` is an annotated starting point (common vars with defaults; optional
-features commented out). For the vault's full reference run `topos-plane --help`; the app's variables are
-documented in [`web/CLAUDE.md`](web/CLAUDE.md).
-
-Client-side: `TOPOS_DEBUG=1` prints each error's full source chain to stderr (the chain always lands in
-`~/.topos/log.jsonl`); `TOPOS_HOME` overrides the `~/.topos` root.
-
-### Backups
-
-Two volumes hold all durable state, and the **database is the source of truth for everything except bytes**:
-
-- **The Postgres volume** carries identity, the directory, policy, proposals, receipts, and audit — back it
-  up with `pg_dump` (or a volume snapshot). This is the one to guard.
-- **The vault's `plane-data` volume** is only the git object store and the large-object store — the
-  content-addressed bytes of every version. Snapshot it too, ideally **before** the database so no pointer
-  can name a byte the snapshot missed.
-
-Nothing else lives on disk — there are no secret files to back up beside the volumes.
-
-The one at-rest secret is client-side: each installation's workspace-scoped session credentials live on
-that machine (`~/.topos/identity/sessions.json`, `0600`) — losing them just means logging in again. Disk or
-volume encryption on the server is the operator's responsibility.
-
-### Bring your own Postgres
-
-To point at a managed/external database instead of the bundled `db`, first create the two roles, the two
-schemas, the search paths, and the cross-lane grants — `scripts/compose-init-db.sh` is the exact recipe,
-runnable once against your server. Then set each service's `DATABASE_URL` (the vault connects as
-`topos_plane`, the app as `topos_web`) and start with `--no-deps` so the bundled `db` stays down. A
-networked Postgres should append `?sslmode=require`. Each application migrates its own schema on startup.
-
-### TLS
-
-The app serves plain HTTP and is designed to sit behind a TLS-terminating reverse proxy (Caddy, nginx,
-Traefik, or your platform's load balancer). Point the proxy at `http://web:3000` (the app is the only public
-service), set `TOPOS_PUBLIC_URL` to your public `https://…` origin, and let the proxy own certificates. The
-vault never needs a public route.
-
-## Build & contribute
+The two secrets are required even for a laptop try-out. Open `http://localhost:3000` in a
+browser — the first browser visit creates the workspace and prints a one-time setup link to the
+logs:
 
 ```sh
-cargo build
-cargo xtask ci     # the full non-DB gate: fmt, clippy, doc, the drift gates, check-arch
-cargo test         # requires a Postgres via DATABASE_URL
+docker compose logs web | grep 'Finish setup:'
 ```
 
-`cargo xtask ci` is the pre-push loop and matches CI's gate exactly. Compilation is offline (the
-compile-time-checked queries read the committed `.sqlx` metadata) — only the tests need a database, which
-the suite provisions per test:
+Open that link and create the first account — it makes you the owner. Then connect a machine
+and use it exactly like the quickstart above:
 
 ```sh
-export DATABASE_URL="postgres://topos:topos@localhost:5432/topos"
-docker run --rm -e POSTGRES_USER=topos -e POSTGRES_PASSWORD=topos \
-  -e POSTGRES_DB=topos -p 5432:5432 postgres:18
+topos login http://localhost:3000
 ```
 
-The web app is a separate TypeScript workspace under [`web/`](web/) (React Router, bun):
+That is a complete single-team install. For a real deployment — reverse proxy and TLS, mail for
+invitations, upgrades, backups, your own Postgres — follow the guide:
+[topos.sh/docs/self-host](https://topos.sh/docs/self-host).
 
-```sh
-cd web && bun install
-bun run check      # biome + typecheck + the boundary/email/token/contract gates
-bun run test       # vitest (needs a Postgres; see web/CLAUDE.md — not `bun test`, bun's own runner)
-bun run test:e2e   # playwright
-```
+## Contributing
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) to propose changes and [`ARCHITECTURE.md`](ARCHITECTURE.md) for the
-design.
+Build and test instructions are in [`CONTRIBUTING.md`](CONTRIBUTING.md); the design is in
+[`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## License
 
-Apache-2.0 — see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE). Copyright 2026 The Topos Authors.
-Contributions are inbound = outbound, no CLA (see [`CONTRIBUTING.md`](CONTRIBUTING.md)).
+Apache-2.0 — see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE). No CLA; contributions are under
+the same license.
