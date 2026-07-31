@@ -676,8 +676,13 @@ pub struct LoginData {
     /// The logged-into workspace's id (empty while the login is still pending approval).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub workspace_id: String,
-    /// The workspace's ADDRESS name (the slug typed at `login`).
+    /// The workspace's ADDRESS name (the slug the browser approval recorded; empty while a bare
+    /// login still awaits it).
     pub name: String,
+    /// The SERVER host the session lives on (`topos.sh`, `topos.example.com:3000`) — the manifest
+    /// grammar's host half, and the `<host>/<name>` address a receipt names. **Additive.**
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub host: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     /// The API base this installation dials (from the protocol card).

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoginConnectRequest",
+  "description": "`POST /v1/login/connect` body — the LANE-SIDE second connect: an already-credentialed machine\n(any live session on this server) asks for a further workspace's session with no browser\nround-trip. Seat standing is the trust basis — the server mints only where the acting user\nalready holds a seat; anything else is the uniform miss.",
+  "type": "object",
+  "properties": {
+    "requested_name": {
+      "description": "A human-readable machine name kept as the new session's display name (the same field the\nbrowser flow's start carries).",
+      "type": "string"
+    },
+    "workspace": {
+      "description": "The target workspace's ADDRESS slug.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "workspace",
+    "requested_name"
+  ]
+}

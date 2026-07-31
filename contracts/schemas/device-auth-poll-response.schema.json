@@ -11,13 +11,6 @@
         "null"
       ]
     },
-    "device_id": {
-      "description": "The RETIRED device wire's grant id — parse-only fallback for a producer predating\n[`Self::session_id`]; never served by the session wire.",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
     "hint": {
       "description": "The invitation's first-destination hint — present only on a `granted` poll whose flow\ncarried an invite token naming one.",
       "anyOf": [
@@ -29,22 +22,15 @@
         }
       ]
     },
-    "link_status": {
-      "description": "The RETIRED device-link spelling of [`Self::session_status`] — parse-only fallback for a\nproducer predating the session wire. Absent ⇒ treat as `\"active\"`.",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
     "session_id": {
-      "description": "The minted SESSION's id — the session-model login wire's grant half (a session = user ×\nworkspace × installation; the credential is workspace-scoped). Present ONLY when `status`\nis `granted` on a session-serving producer. **Additive.**",
+      "description": "The minted SESSION's id (a session = user × workspace × installation; the credential is\nworkspace-scoped). Present ONLY when `status` is `granted`.",
       "type": [
         "string",
         "null"
       ]
     },
     "session_status": {
-      "description": "The session's born status — `\"active\"`, or `\"pending\"` while the workspace's\nsession-approval knob holds it. Absent ⇒ treat as active. **Additive.**",
+      "description": "The session's born status — `\"active\"`, or `\"pending\"` while the workspace's\nsession-approval knob holds it. Absent ⇒ treat as active.",
       "type": [
         "string",
         "null"
@@ -55,7 +41,7 @@
       "$ref": "#/$defs/DeviceAuthPollStatus"
     },
     "workspace": {
-      "description": "The joined workspace — present ONLY when `status` is `granted`.",
+      "description": "The CHOSEN workspace — present ONLY when `status` is `granted`. This is what the browser\napproval recorded (a seat picked, an invitation accepted, or a workspace created there).",
       "anyOf": [
         {
           "$ref": "#/$defs/DeviceAuthWorkspace"
@@ -107,14 +93,9 @@
           "const": "expired"
         },
         {
-          "description": "Approved — `credential`, `session_id`, and `workspace` are present.",
+          "description": "Approved and EXCHANGED — this poll minted (or re-reads) the session; `credential`,\n`session_id`, and `workspace` are present.",
           "type": "string",
           "const": "granted"
-        },
-        {
-          "description": "A LOOPBACK flow a human already approved, polled WITHOUT its authorization code. The\nceremony is done and the credential exists; this caller simply has not proved it is the\nmachine that asked. The client's answer is to re-open the local hand-off, never to keep\nwaiting on an approval that already happened.",
-          "type": "string",
-          "const": "awaiting_redirect"
         }
       ]
     },

@@ -11,13 +11,13 @@ use utoipa::OpenApi;
 use topos_types::requests::{
     DeviceAuthHint, DeviceAuthPollRequest, DeviceAuthPollResponse, DeviceAuthPollStatus,
     DeviceAuthStartRequest, DeviceAuthStartResponse, DeviceAuthWorkspace, InvitationData,
-    InvitationRequest, NoticeAckRequest, ProposeRequest, ProtectionSetRequest, PublishRequest,
-    RevertRequest, ReviewRequest, WireAppliedReport, WireAppliedSkill, WireCandidate,
-    WireChannelEntry, WireChannelIndex, WireChannelSkill, WireDelivery, WireDeliverySkill,
-    WireFile, WireFileMode, WireLogProposal, WireLogVersion, WireMe, WireNotice, WireOpenProposal,
-    WireProposalEntry, WireProposalIndex, WireProposalList, WireProtocolCard, WireReach,
-    WireSkillIndex, WireSkillIndexEntry, WireSkillLog, WireUpstream, WireVersionFile,
-    WireVersionMeta, WireVia,
+    InvitationRequest, LoginConnectRequest, LoginConnectResponse, NoticeAckRequest, ProposeRequest,
+    ProtectionSetRequest, PublishRequest, RevertRequest, ReviewRequest, WireAppliedReport,
+    WireAppliedSkill, WireCandidate, WireChannelEntry, WireChannelIndex, WireChannelSkill,
+    WireDelivery, WireDeliverySkill, WireFile, WireFileMode, WireLogProposal, WireLogVersion,
+    WireMe, WireNotice, WireOpenProposal, WireProposalEntry, WireProposalIndex, WireProposalList,
+    WireProtocolCard, WireReach, WireSkillIndex, WireSkillIndexEntry, WireSkillLog, WireUpstream,
+    WireVersionFile, WireVersionMeta, WireVia,
 };
 use topos_types::results::{ProposeData, PublishData, RevertData, ReviewData, ReviewDecision};
 use topos_types::{
@@ -29,7 +29,7 @@ use topos_types::{
 #[openapi(
     info(
         title = "Topos product API (device lane)",
-        description = "The session lane the product app serves: the RFC-8628-shaped login flow (start/poll — approval promotes the flow code to the SESSION's workspace-scoped bearer credential), the session self-end, the publish/propose/revert/review writes, the current/version/object/catalog/proposals reads, the delivery + applied-state report, the describe reads, and the row ops (channel curation / protection / notices-ack / invitations). Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
+        description = "The session lane the product app serves: the RFC-8628-shaped login flow (start/poll — the workspace is chosen at the browser approval and the poll's exchange mints the SESSION's workspace-scoped bearer credential), the lane-side second connect, the session self-end, the publish/propose/revert/review writes, the current/version/object/catalog/proposals reads, the delivery + applied-state report, the describe reads, and the row ops (channel curation / protection / notices-ack / invitations). Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
         version = "0.0.0",
         license(name = "Apache-2.0"),
     ),
@@ -63,6 +63,7 @@ use topos_types::{
         // wire).
         crate::routes::door::login_authorize,
         crate::routes::door::login_token,
+        crate::routes::door::login_connect,
         crate::routes::door::end_session,
     ),
     components(schemas(
@@ -126,7 +127,7 @@ use topos_types::{
         RevertData,
         ReviewData,
         ReviewDecision,
-        // The login flow (session minting).
+        // The login flow (session minting) + the lane-side second connect.
         DeviceAuthStartRequest,
         DeviceAuthStartResponse,
         DeviceAuthPollRequest,
@@ -134,13 +135,15 @@ use topos_types::{
         DeviceAuthPollStatus,
         DeviceAuthWorkspace,
         DeviceAuthHint,
+        LoginConnectRequest,
+        LoginConnectResponse,
         // The publish provenance adjunct (a GitHub-imported bundle's origin).
         WireUpstream,
     )),
     tags(
         (name = "writes", description = "Session-credential writes (publish / propose / revert / review) and the member-lane row ops (channel curation / protection / notices-ack)."),
         (name = "reads", description = "Session-credential reads (current / bundles / versions / proposals / catalog / delivery / me / channels / log / reach) plus the body-light applied-state report."),
-        (name = "enrollment", description = "The RFC-8628-shaped login flow (start / poll; approval promotes the flow code to the SESSION's workspace-scoped bearer credential) and the session self-end."),
+        (name = "enrollment", description = "The RFC-8628-shaped login flow (start / poll; the workspace is chosen at the browser approval, and the poll's exchange mints the SESSION and promotes the flow code to its workspace-scoped bearer credential), the lane-side second connect for an already-credentialed machine, and the session self-end."),
         (name = "governance", description = "The member-lane invitation (a roster write)."),
     ),
 )]
