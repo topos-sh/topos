@@ -141,154 +141,51 @@ describe("the claim consume", () => {
   });
 });
 
+/** The single-tenant seat pick — the slug is ignored there (the install IS its workspace). */
+const SEAT = { kind: "seat" as const, workspace: "" };
+
 describe("the login flow", () => {
-  it("a LOOPBACK flow will not grant to a poll that lacks the redirect-borne code", async () => {
-    // THE PHISHING FIX, at the layer that enforces it. A stranger can start a flow and get a
-    // signed-in member to approve it — that is the device grant's unfixable weakness. What they
-    // cannot do is COLLECT: a loopback flow's authorization code leaves the server only by
-    // redirecting the approver's browser to 127.0.0.1, which is the approver's own machine.
+  it("start records consent nothing; approval records the choice; THE POLL mints", async () => {
     const identity = await import("@/lib/db/identity.server");
     const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
       ?.user_id as string;
-    const sessionsBefore = (await q(`SELECT count(*)::int AS n FROM web.cli_session`))[0]
-      ?.n as number;
-    const flow = await identity.startLoginFlow("attacker-cli", "", undefined, "loopback");
-    const approved = await identity.approveLoginFlow(
-      flow.userCode,
-      {
-        userId: owner,
-        display: "Owner",
-      },
-      true,
-    );
-    // The approval really happened — this is consent recorded, not a refusal.
-    expect(approved).not.toBeNull();
-    expect(approved?.sessionId).toBeNull();
-    const authCode = approved?.authCode ?? undefined;
-    expect(typeof authCode).toBe("string");
-
-    // THE PROPERTY THAT MATTERS, and the one an earlier draft of this change got wrong: the
-    // bearer credential IS the device code, so if the approval minted a session, the phisher —
-    // who holds that code — could skip the poll entirely and just call the API with it. Nothing
-    // is minted until the exchange, so there is no credential to hold.
-    expect(await identity.sessionActor(wsId, flow.flowCode)).toBeNull();
-    const before = await q(`SELECT count(*)::int AS n FROM web.cli_session`);
-    expect(before[0]?.n).toBe(sessionsBefore);
-
-    // The device code ALONE — everything a phisher holds — buys nothing but an honest "the
-    // human is done, the hand-off is not".
-    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("awaiting_redirect");
-    // A guessed code is no better, and still mints nothing.
-    expect((await identity.pollLoginFlow(flow.flowCode, "not-the-code")).status).toBe(
-      "awaiting_redirect",
-    );
-    expect(await identity.sessionActor(wsId, flow.flowCode)).toBeNull();
-    // Both halves together redeem — and the credential is still the device code, which never
-    // rode a URL.
-    const granted = await identity.pollLoginFlow(flow.flowCode, authCode);
-    expect(granted.status).toBe("granted");
-    // NON-CONSUMING: presenting the pair again re-grants, so a crash between exchange and
-    // persist resumes instead of stranding a minted session.
-    expect((await identity.pollLoginFlow(flow.flowCode, authCode)).status).toBe("granted");
-    expect(await identity.sessionActor(wsId, flow.flowCode)).not.toBeNull();
-  });
-
-  it("refuses a loopback approval that has nowhere to hand the code back", async () => {
-    // The guard exists because approving from a page with no return coordinates would record
-    // consent and mint a code that goes nowhere, leaving the asking terminal waiting out the TTL.
-    const identity = await import("@/lib/db/identity.server");
-    const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
-      ?.user_id as string;
-    const flow = await identity.startLoginFlow("laptop", "", undefined, "loopback");
-    const refused = await identity.approveLoginFlow(
-      flow.userCode,
-      { userId: owner, display: "Owner" },
-      false,
-    );
-    expect(refused).toBeNull();
-    // NOTHING was consumed: the flow is still pending, so finishing it on the machine that
-    // started it still works.
-    expect(await identity.pendingLoginFlow(flow.userCode)).not.toBeNull();
-    const ok = await identity.approveLoginFlow(
-      flow.userCode,
-      { userId: owner, display: "Owner" },
-      true,
-    );
-    expect(ok?.authCode).toBeTruthy();
-  });
-
-  it("a lapsed, never-exchanged loopback flow reads expired, not awaiting forever", async () => {
-    const identity = await import("@/lib/db/identity.server");
-    const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
-      ?.user_id as string;
-    const flow = await identity.startLoginFlow("laptop", "", undefined, "loopback");
-    await identity.approveLoginFlow(flow.userCode, { userId: owner, display: "Owner" }, true);
-    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("awaiting_redirect");
-    await q(`UPDATE web.login_flow SET expires_at = now() - interval '1 minute'`);
-    // Its code went with a redirect that never arrived; nothing was minted and nothing can be.
-    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("expired");
-  });
-
-  it("a DEVICE flow is unchanged: no code minted, the poll alone grants", async () => {
-    const identity = await import("@/lib/db/identity.server");
-    const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
-      ?.user_id as string;
-    const flow = await identity.startLoginFlow("headless-box", "");
-    const approved = await identity.approveLoginFlow(
-      flow.userCode,
-      {
-        userId: owner,
-        display: "Owner",
-      },
-      true,
-    );
-    expect(approved?.authCode).toBeNull();
-    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("granted");
-  });
-
-  it("the challenge lookup resolves a LOOPBACK flow and refuses a DEVICE one", async () => {
-    // The /verify pre-arm gate, in SQL. The challenge is derivable by whoever started the flow,
-    // so only the binding can make pre-resolution safe.
-    const identity = await import("@/lib/db/identity.server");
-    const { createHash } = await import("node:crypto");
-    const hex = (code: string) => createHash("sha256").update(code, "utf8").digest("hex");
-    const device = await identity.startLoginFlow("box", "");
-    const loop = await identity.startLoginFlow("laptop", "", undefined, "loopback");
-    expect(await identity.pendingLoginFlowByChallenge(hex(device.flowCode))).toBeNull();
-    expect(await identity.pendingLoginFlowByChallenge(hex(loop.flowCode))).not.toBeNull();
-  });
-
-  it("start → approve → poll grants IDEMPOTENTLY (re-poll after a crash still gets the grant)", async () => {
-    const identity = await import("@/lib/db/identity.server");
-    const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
-      ?.user_id as string;
-    // The single-tenant resolve ignores the recorded slug ('' is the origin-addressed form).
-    const flow = await identity.startLoginFlow("laptop", "");
+    const flow = await identity.startLoginFlow("laptop", null);
     expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("pending");
-    expect(await identity.pendingLoginFlow(flow.userCode)).toEqual({
+    expect(await identity.pendingLoginFlow(flow.userCode, owner)).toEqual({
       requestedName: "laptop",
-      requestedWorkspace: "",
       userCode: flow.userCode,
-      inviteWorkspace: null,
-      // The card carries its binding: the page refuses to approve a loopback flow from a
-      // browser that has no way to hand the code back.
+      // The card carries its binding: only a loopback flow may pre-arm from the URL challenge.
       binding: "device",
+      preselect: null,
+      invite: null,
     });
     const approved = await identity.approveLoginFlow(
       flow.userCode,
-      {
-        userId: owner,
-        display: "Owner",
-      },
-      true,
+      { userId: owner, display: "Owner" },
+      SEAT,
     );
-    expect(approved?.requestedName).toBe("laptop");
-    // An owner's login is its own approval: born active whatever the knob.
-    expect(approved?.sessionStatus).toBe("active");
+    expect(approved?.outcome).toBe("approved");
+    expect(approved?.outcome === "approved" && approved.requestedName).toBe("laptop");
+
+    // NO SESSION EXISTS YET — consent is recorded and nothing more. The bearer credential IS
+    // the flow code, so a mint at approval would hand the flow's starter a live credential the
+    // instant a human clicked; the exchange (the poll) is where it comes into existence.
+    expect(await identity.sessionActor(wsId, flow.flowCode)).toBeNull();
+    const flowRow = await q(
+      `SELECT session_id, approved_workspace_id FROM web.login_flow
+                             WHERE user_code = $1`,
+      [flow.userCode],
+    );
+    expect(flowRow[0]?.session_id).toBeNull();
+    expect(flowRow[0]?.approved_workspace_id).toBe(wsId);
+
+    // THE EXCHANGE: the first poll mints — an owner's login is born active whatever the knob.
     const granted = await identity.pollLoginFlow(flow.flowCode);
     expect(granted.status).toBe("granted");
+    expect(granted.status === "granted" && granted.sessionStatus).toBe("active");
     // The grant REPEATS: the CLI's crash-recovery is to re-poll, so a client that received the
-    // grant but crashed before persisting its credential must get the same grant again.
+    // grant but crashed before persisting its credential must get the same grant again — the
+    // repeat poll finds session_id set and re-reads instead of minting a second.
     const reAfterCrash = await identity.pollLoginFlow(flow.flowCode);
     expect(reAfterCrash.status).toBe("granted");
     expect(reAfterCrash.status === "granted" && reAfterCrash.sessionId).toBe(
@@ -301,46 +198,151 @@ describe("the login flow", () => {
     expect(await identity.sessionActor("w_other", flow.flowCode)).toBeNull();
   });
 
+  it("a LOOPBACK flow completes identically: approval anywhere, the poll mints", async () => {
+    // The retired auth-code exchange is GONE: the binding decides only whether the /verify card
+    // may pre-arm from the URL challenge. Approval from any browser records consent, and the
+    // machine holding the flow code collects on its next poll — no third status exists between
+    // pending and granted.
+    const identity = await import("@/lib/db/identity.server");
+    const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
+      ?.user_id as string;
+    const flow = await identity.startLoginFlow("laptop-loop", null, undefined, "loopback");
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("pending");
+    const approved = await identity.approveLoginFlow(
+      flow.userCode,
+      { userId: owner, display: "Owner" },
+      SEAT,
+    );
+    expect(approved?.outcome).toBe("approved");
+    expect(await identity.sessionActor(wsId, flow.flowCode)).toBeNull();
+    const granted = await identity.pollLoginFlow(flow.flowCode);
+    expect(granted.status).toBe("granted");
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("granted");
+    expect(await identity.sessionActor(wsId, flow.flowCode)).not.toBeNull();
+  });
+
+  it("an approved flow never polled mints nothing: past the TTL it answers expired", async () => {
+    const identity = await import("@/lib/db/identity.server");
+    const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
+      ?.user_id as string;
+    const sessionsBefore = (await q(`SELECT count(*)::int AS n FROM web.cli_session`))[0]
+      ?.n as number;
+    const flow = await identity.startLoginFlow("abandoned-box", null);
+    await identity.approveLoginFlow(flow.userCode, { userId: owner, display: "Owner" }, SEAT);
+    await q(`UPDATE web.login_flow SET expires_at = now() - interval '1 minute'`);
+    // Consent that was never collected lapses with the flow — nothing was minted, nothing will
+    // be, and the poll says so terminally instead of minting a credential nobody is waiting on.
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("expired");
+    expect(await identity.sessionActor(wsId, flow.flowCode)).toBeNull();
+    const after = await q(`SELECT count(*)::int AS n FROM web.cli_session`);
+    expect(after[0]?.n).toBe(sessionsBefore);
+  });
+
+  it("the exchange re-reads standing: a seat removed between consent and collection mints nothing", async () => {
+    const identity = await import("@/lib/db/identity.server");
+    await seedUser("u_gone", "Goner", "goner@example.com");
+    await seatUser("u_gone", "member");
+    const flow = await identity.startLoginFlow("gone-box", null);
+    expect(
+      (await identity.approveLoginFlow(flow.userCode, { userId: "u_gone", display: "G" }, SEAT))
+        ?.outcome,
+    ).toBe("approved");
+    await q(`DELETE FROM web.seat WHERE user_id = 'u_gone'`);
+    // Revocation is a row delete, effective immediately — the collection lands on the side the
+    // rows say NOW, so there is nothing to mint and the honest answer is terminal.
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("expired");
+  });
+
+  it("the exchange re-reads the knob: a flip between consent and collection births pending", async () => {
+    const identity = await import("@/lib/db/identity.server");
+    await seedUser("u_flip", "Flipped", "flip@example.com");
+    await seatUser("u_flip", "member");
+    const flow = await identity.startLoginFlow("flip-box", null);
+    await identity.approveLoginFlow(flow.userCode, { userId: "u_flip", display: "F" }, SEAT);
+    await q(`UPDATE web.workspace SET session_approval = 'on' WHERE id = $1`, [wsId]);
+    const granted = await identity.pollLoginFlow(flow.flowCode);
+    expect(granted.status === "granted" && granted.sessionStatus).toBe("pending");
+    await q(`UPDATE web.workspace SET session_approval = 'off' WHERE id = $1`, [wsId]);
+    await q(`DELETE FROM web.seat WHERE user_id = 'u_flip'`);
+  });
+
+  it("the challenge lookup resolves a LOOPBACK flow and refuses a DEVICE one", async () => {
+    // The /verify pre-arm gate, in SQL. The challenge is derivable by whoever started the flow,
+    // so only the binding can make pre-resolution safe.
+    const identity = await import("@/lib/db/identity.server");
+    const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
+      ?.user_id as string;
+    const { createHash } = await import("node:crypto");
+    const hex = (code: string) => createHash("sha256").update(code, "utf8").digest("hex");
+    const device = await identity.startLoginFlow("box", null);
+    const loop = await identity.startLoginFlow("laptop", null, undefined, "loopback");
+    expect(await identity.pendingLoginFlowByChallenge(hex(device.flowCode), owner)).toBeNull();
+    expect(await identity.pendingLoginFlowByChallenge(hex(loop.flowCode), owner)).not.toBeNull();
+  });
+
+  it("the preselect rides the card, display-only", async () => {
+    const identity = await import("@/lib/db/identity.server");
+    const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
+      ?.user_id as string;
+    const flow = await identity.startLoginFlow("hinted-box", "acme");
+    expect((await identity.pendingLoginFlow(flow.userCode, owner))?.preselect).toBe("acme");
+  });
+
   it("deny repeats until the sweep; a re-approve of the same code misses", async () => {
     const identity = await import("@/lib/db/identity.server");
     const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
       ?.user_id as string;
-    const flow = await identity.startLoginFlow("stolen-box", "");
+    const flow = await identity.startLoginFlow("stolen-box", null);
     expect(await identity.denyLoginFlow(flow.userCode, { userId: owner, display: "O" })).toBe(true);
     expect(
-      await identity.approveLoginFlow(flow.userCode, { userId: owner, display: "O" }, true),
+      await identity.approveLoginFlow(flow.userCode, { userId: owner, display: "O" }, SEAT),
     ).toBeNull();
     expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("denied");
     expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("denied");
   });
 
-  it("a SEATLESS approver gets null (and cannot deny); a seated one then completes the flow", async () => {
+  it("deny takes NO seat — the flow is workspace-less; the audit row is server-scoped", async () => {
+    const identity = await import("@/lib/db/identity.server");
+    await seedUser("u_denier", "Denier", "denier@example.com");
+    const flow = await identity.startLoginFlow("killed-box", null);
+    // Any signed-in code-holder can kill a request to act as them — no seat exists to require.
+    expect(await identity.denyLoginFlow(flow.userCode, { userId: "u_denier", display: "D" })).toBe(
+      true,
+    );
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("denied");
+    const audits = await q(
+      `SELECT workspace_id FROM web.audit_event
+       WHERE kind = 'login_denied' AND subject = 'killed-box'`,
+    );
+    expect(audits).toEqual([{ workspace_id: null }]);
+  });
+
+  it("a SEATLESS approver's seat pick is refused; a seated one then completes the flow", async () => {
     const identity = await import("@/lib/db/identity.server");
     const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
       ?.user_id as string;
     await seedUser("u_seatless", "Seatless", "seatless@example.com");
-    const flow = await identity.startLoginFlow("drifter-box", "");
-    // Approval requires a seat in the flow's workspace — a seatless person's approve AND deny
-    // both land the same uniform refusal, and neither consumes the pending flow.
+    const flow = await identity.startLoginFlow("drifter-box", null);
+    // The chosen standing is validated INSIDE the fence — a seatless person's pick lands the
+    // same uniform refusal an expired code gets, and consumes nothing.
     expect(
-      await identity.approveLoginFlow(flow.userCode, { userId: "u_seatless", display: "S" }, true),
+      await identity.approveLoginFlow(flow.userCode, { userId: "u_seatless", display: "S" }, SEAT),
     ).toBeNull();
-    expect(
-      await identity.denyLoginFlow(flow.userCode, { userId: "u_seatless", display: "S" }),
-    ).toBe(false);
     expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("pending");
     expect(
-      await identity.approveLoginFlow(flow.userCode, { userId: owner, display: "O" }, true),
+      await identity.approveLoginFlow(flow.userCode, { userId: owner, display: "O" }, SEAT),
     ).not.toBeNull();
   });
 
   it("an expired pending flow reports expired; the sweep reaps past-TTL rows", async () => {
     const identity = await import("@/lib/db/identity.server");
-    const flow = await identity.startLoginFlow("slow-machine", "");
+    const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
+      ?.user_id as string;
+    const flow = await identity.startLoginFlow("slow-machine", null);
     await q(`UPDATE web.login_flow SET expires_at = now() - interval '1 minute'`);
     expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("expired");
     // The row lingers until a sweep (read does not delete); the sweep then reaps it.
-    expect(await identity.pendingLoginFlow(flow.userCode)).toBeNull();
+    expect(await identity.pendingLoginFlow(flow.userCode, owner)).toBeNull();
     expect(await identity.sweepExpiredLoginFlows()).toBeGreaterThanOrEqual(1);
     expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("expired");
   });
@@ -351,8 +353,8 @@ describe("session revocation", () => {
     const identity = await import("@/lib/db/identity.server");
     const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
       ?.user_id as string;
-    const flow = await identity.startLoginFlow("short-lived", "");
-    await identity.approveLoginFlow(flow.userCode, { userId: owner, display: "O" }, true);
+    const flow = await identity.startLoginFlow("short-lived", null);
+    await identity.approveLoginFlow(flow.userCode, { userId: owner, display: "O" }, SEAT);
     const granted = await identity.pollLoginFlow(flow.flowCode);
     expect(granted.status).toBe("granted");
     const sessionId = granted.status === "granted" ? granted.sessionId : "";
@@ -375,8 +377,11 @@ describe("session revocation", () => {
     const identity = await import("@/lib/db/identity.server");
     const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
       ?.user_id as string;
-    const flow = await identity.startLoginFlow("logout-box", "");
-    await identity.approveLoginFlow(flow.userCode, { userId: owner, display: "O" }, true);
+    const flow = await identity.startLoginFlow("logout-box", null);
+    await identity.approveLoginFlow(flow.userCode, { userId: owner, display: "O" }, SEAT);
+    // The poll is what mints — before it, there is no session for the credential to name.
+    expect(await identity.revokeSessionByCredential(flow.flowCode)).toBe(false);
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("granted");
     expect(await identity.revokeSessionByCredential(flow.flowCode)).toBe(true);
     expect(await identity.revokeSessionByCredential(flow.flowCode)).toBe(false);
   });
@@ -385,14 +390,16 @@ describe("session revocation", () => {
     const identity = await import("@/lib/db/identity.server");
     const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
       ?.user_id as string;
-    // An active session and a pending one, both minted now.
-    const active = await identity.startLoginFlow("expiry-box", "");
-    await identity.approveLoginFlow(active.userCode, { userId: owner, display: "O" }, true);
+    // An active session and a pending one, both minted now (the poll is the mint).
+    const active = await identity.startLoginFlow("expiry-box", null);
+    await identity.approveLoginFlow(active.userCode, { userId: owner, display: "O" }, SEAT);
+    expect((await identity.pollLoginFlow(active.flowCode)).status).toBe("granted");
     await seedUser("u_expiry", "Expiring", "expiry@example.com");
     await seatUser("u_expiry", "member");
     await q(`UPDATE web.workspace SET session_approval = 'on' WHERE id = $1`, [wsId]);
-    const pend = await identity.startLoginFlow("expiry-pending-box", "");
-    await identity.approveLoginFlow(pend.userCode, { userId: "u_expiry", display: "E" }, true);
+    const pend = await identity.startLoginFlow("expiry-pending-box", null);
+    await identity.approveLoginFlow(pend.userCode, { userId: "u_expiry", display: "E" }, SEAT);
+    expect((await identity.pollLoginFlow(pend.flowCode)).status).toBe("granted");
     await q(`UPDATE web.workspace SET session_approval = 'off' WHERE id = $1`, [wsId]);
     const pendingId = (
       await q(`SELECT id FROM web.cli_session WHERE status = 'pending' ORDER BY created_at DESC`)
@@ -431,17 +438,11 @@ describe("the session-approval knob", () => {
     await seedUser("u_knob", "Knobbed", "knob@example.com");
     await seatUser("u_knob", "member");
     await q(`UPDATE web.workspace SET session_approval = 'on' WHERE id = $1`, [wsId]);
-    const flow = await identity.startLoginFlow("held-box", "");
-    const approved = await identity.approveLoginFlow(
-      flow.userCode,
-      {
-        userId: "u_knob",
-        display: "K",
-      },
-      true,
-    );
-    expect(approved?.sessionStatus).toBe("pending");
-    const sessionId = approved?.sessionId ?? "";
+    const flow = await identity.startLoginFlow("held-box", null);
+    await identity.approveLoginFlow(flow.userCode, { userId: "u_knob", display: "K" }, SEAT);
+    const minted = await identity.pollLoginFlow(flow.flowCode);
+    expect(minted.status === "granted" && minted.sessionStatus).toBe("pending");
+    const sessionId = minted.status === "granted" ? minted.sessionId : "";
     // A pending session resolves only via allowPending; delivery is the shape-complete EMPTY.
     const row = await identity.sessionActor(wsId, flow.flowCode);
     expect(row?.sessionStatus).toBe("pending");
@@ -464,16 +465,10 @@ describe("the session-approval knob", () => {
     );
     expect((await identity.sessionActor(wsId, flow.flowCode))?.sessionStatus).toBe("active");
     // An owner's OWN login stays born active under the knob.
-    const ownerFlow = await identity.startLoginFlow("owner-box", "");
-    const ownerApproved = await identity.approveLoginFlow(
-      ownerFlow.userCode,
-      {
-        userId: owner,
-        display: "O",
-      },
-      true,
-    );
-    expect(ownerApproved?.sessionStatus).toBe("active");
+    const ownerFlow = await identity.startLoginFlow("owner-box", null);
+    await identity.approveLoginFlow(ownerFlow.userCode, { userId: owner, display: "O" }, SEAT);
+    const ownerMinted = await identity.pollLoginFlow(ownerFlow.flowCode);
+    expect(ownerMinted.status === "granted" && ownerMinted.sessionStatus).toBe("active");
     await q(`UPDATE web.workspace SET session_approval = 'off' WHERE id = $1`, [wsId]);
   });
 
@@ -482,40 +477,28 @@ describe("the session-approval knob", () => {
     const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
       ?.user_id as string;
     await q(`UPDATE web.workspace SET session_approval = 'on' WHERE id = $1`, [wsId]);
-    const flow = await identity.startLoginFlow("rejected-box", "");
-    const approved = await identity.approveLoginFlow(
-      flow.userCode,
-      {
-        userId: "u_knob",
-        display: "K",
-      },
-      true,
-    );
+    const flow = await identity.startLoginFlow("rejected-box", null);
+    await identity.approveLoginFlow(flow.userCode, { userId: "u_knob", display: "K" }, SEAT);
+    const minted = await identity.pollLoginFlow(flow.flowCode);
     expect(
       await identity.rejectSession(
         { userId: owner, display: "O" },
         wsId,
-        approved?.sessionId ?? "",
+        minted.status === "granted" ? minted.sessionId : "",
       ),
     ).toBe("rejected");
     expect(await identity.sessionActor(wsId, flow.flowCode)).toBeNull();
     await q(`UPDATE web.workspace SET session_approval = 'off' WHERE id = $1`, [wsId]);
 
-    const flow2 = await identity.startLoginFlow("removed-box", "");
-    const approved2 = await identity.approveLoginFlow(
-      flow2.userCode,
-      {
-        userId: "u_knob",
-        display: "K",
-      },
-      true,
-    );
-    expect(approved2?.sessionStatus).toBe("active");
+    const flow2 = await identity.startLoginFlow("removed-box", null);
+    await identity.approveLoginFlow(flow2.userCode, { userId: "u_knob", display: "K" }, SEAT);
+    const minted2 = await identity.pollLoginFlow(flow2.flowCode);
+    expect(minted2.status === "granted" && minted2.sessionStatus).toBe("active");
     expect(
       await identity.ownerRemoveSession(
         { userId: owner, display: "O" },
         wsId,
-        approved2?.sessionId ?? "",
+        minted2.status === "granted" ? minted2.sessionId : "",
       ),
     ).toBe("removed");
     expect(await identity.sessionActor(wsId, flow2.flowCode)).toBeNull();
@@ -527,8 +510,9 @@ describe("the session expiry policy", () => {
     const identity = await import("@/lib/db/identity.server");
     const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
       ?.user_id as string;
-    const flow = await identity.startLoginFlow("aging-box", "");
-    await identity.approveLoginFlow(flow.userCode, { userId: owner, display: "O" }, true);
+    const flow = await identity.startLoginFlow("aging-box", null);
+    await identity.approveLoginFlow(flow.userCode, { userId: owner, display: "O" }, SEAT);
+    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("granted");
     expect(await identity.sessionActor(wsId, flow.flowCode)).not.toBeNull();
     // The owner sets a max age; a session older than it stops resolving.
     await q(`UPDATE web.workspace SET session_max_age_ms = 3600000 WHERE id = $1`, [wsId]);
@@ -576,8 +560,8 @@ describe("the feed (assignments − declines) + delivery", () => {
     const lane = await import("@/lib/db/queries.lane.server");
     await seedUser("u_ent", "Entitled", "entitled@example.com");
     await seatUser("u_ent", "member");
-    const flow = await identity.startLoginFlow("ent-box", "");
-    await identity.approveLoginFlow(flow.userCode, { userId: "u_ent", display: "E" }, true);
+    const flow = await identity.startLoginFlow("ent-box", null);
+    await identity.approveLoginFlow(flow.userCode, { userId: "u_ent", display: "E" }, SEAT);
     const granted = await identity.pollLoginFlow(flow.flowCode);
     const sessionId = granted.status === "granted" ? granted.sessionId : "";
     const actor = sessionActorFor("u_ent", sessionId, "member");

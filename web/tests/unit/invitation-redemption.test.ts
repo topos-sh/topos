@@ -340,59 +340,59 @@ describe("the device-flow weave", () => {
     const identity = await import("@/lib/db/identity.server");
     // LOOPBACK-bound, the shape a `topos login <invite-url>` takes on a machine with a browser:
     // the CLI opens the page itself, so the card may pre-arm and the challenge lookup applies.
-    const flow = await identity.startLoginFlow("weave laptop", "", token, "loopback");
-    // The pending views disclose the invitation's workspace to the code/challenge holder.
-    const pending = await identity.pendingLoginFlow(flow.userCode);
-    expect(pending?.inviteWorkspace?.name).toBeDefined();
+    const flow = await identity.startLoginFlow("weave laptop", null, token, "loopback");
+    // The pending view resolves the invitation AGAINST THE VIEWER: the addressee sees the
+    // live pre-bind, workspace named.
+    const pending = await identity.pendingLoginFlow(flow.userCode, "u_weave");
+    expect(pending?.invite?.state).toBe("live");
+    expect(pending?.invite?.state === "live" && pending.invite.workspaceName).toBeDefined();
     // The challenge lookup resolves the same flow with zero typing.
     const challenge = await db.q(
       `SELECT encode(flow_code_sha256, 'hex') AS hex FROM web.login_flow
        WHERE user_code = $1`,
       [flow.userCode],
     );
-    const byChallenge = await identity.pendingLoginFlowByChallenge(challenge[0]?.hex as string);
+    const byChallenge = await identity.pendingLoginFlowByChallenge(
+      challenge[0]?.hex as string,
+      "u_weave",
+    );
     expect(byChallenge?.userCode).toBe(flow.userCode);
-    // The SEATLESS invited person approves: the weave accepts the invitation first, so the
-    // seat requirement passes in the same transaction.
+    // The SEATLESS invited person approves: the token PRE-BINDS the workspace and the weave
+    // accepts the invitation inside the fence — no posted choice is consulted.
     const approved = await identity.approveLoginFlow(
       flow.userCode,
-      {
-        userId: "u_weave",
-        display: "W",
-      },
-      true,
+      { userId: "u_weave", display: "W" },
+      null,
     );
-    expect(approved).not.toBeNull();
+    expect(approved?.outcome).toBe("approved");
     const seat = await db.q(
       `SELECT 1 FROM web.seat WHERE workspace_id = $1 AND user_id = 'u_weave'`,
       [ws],
     );
     expect(seat.length).toBe(1);
-    // The granted poll decorates the hint the invitation named — and, this flow being
-    // loopback-bound, only once the redirect's authorization code is presented alongside the
-    // device code. Without it the honest answer is that the hand-off has not happened yet.
-    expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("awaiting_redirect");
-    const poll = await identity.pollLoginFlow(flow.flowCode, approved?.authCode ?? undefined);
+    // THE POLL MINTS (approval recorded consent only) and decorates the hint the invitation
+    // named — idempotently on the re-poll.
+    const poll = await identity.pollLoginFlow(flow.flowCode);
     expect(poll.status).toBe("granted");
     if (poll.status === "granted") {
       expect(poll.hint).toEqual({ kind: "skill", name: "deploy" });
     }
+    const rePoll = await identity.pollLoginFlow(flow.flowCode);
+    expect(rePoll.status).toBe("granted");
   });
 
   it("a wrong-account approver gains nothing from a token-carrying flow", async () => {
     const token = await invite("weave2@x.test");
     await verifiedUser("u_notmine", "other2@x.test");
     const identity = await import("@/lib/db/identity.server");
-    const flow = await identity.startLoginFlow("laptop", "", token);
-    // Seatless AND not the addressee: the weave refuses the accept, the seat check refuses the
-    // approval — the same uniform null an expired code gets. The invitation stays live.
+    const flow = await identity.startLoginFlow("laptop", null, token);
+    // Not the addressee AND no standing of their own posted: the weave's accept refuses, the
+    // fall-through finds no choice — the same uniform null an expired code gets. The
+    // invitation stays live.
     const approved = await identity.approveLoginFlow(
       flow.userCode,
-      {
-        userId: "u_notmine",
-        display: "N",
-      },
-      true,
+      { userId: "u_notmine", display: "N" },
+      null,
     );
     expect(approved).toBeNull();
     expect(await identity.invitationByToken(token)).not.toBeNull();
@@ -405,7 +405,7 @@ describe("the device-flow weave", () => {
     const token = await invite("rollback@x.test");
     await verifiedUser("u_rollback", "rollback@x.test");
     const identity = await import("@/lib/db/identity.server");
-    const flow = await identity.startLoginFlow("laptop", "", token);
+    const flow = await identity.startLoginFlow("laptop", null, token);
     // Expire the flow after minting (the FOR-UPDATE liveness gate then finds no live row → the
     // whole approval — accept included — rolls back).
     await db.q(
@@ -415,11 +415,8 @@ describe("the device-flow weave", () => {
     );
     const approved = await identity.approveLoginFlow(
       flow.userCode,
-      {
-        userId: "u_rollback",
-        display: "R",
-      },
-      true,
+      { userId: "u_rollback", display: "R" },
+      null,
     );
     expect(approved).toBeNull();
     // The invitation is STILL pending (never consumed) and no seat was written.

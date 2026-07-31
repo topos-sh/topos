@@ -120,6 +120,8 @@ export function ossRoutes(options: OssRoutesOptions = {}): RouteConfigEntry[] {
     // both tenancy modes. Static segments outrank the splat, which answers the uniform wire 404.
     route("api/v1/login/authorize", file("api.v1.login-authorize.ts")),
     route("api/v1/login/token", file("api.v1.login-token.ts")),
+    // The lane-side second connect: a further workspace's session over an existing credential.
+    route("api/v1/login/connect", file("api.v1.login-connect.ts")),
     // The session self-revoke (`topos logout`): the presented credential names its OWN session.
     route("api/v1/session", file("api.v1.session.ts")),
     route("api/v1/publish", file("api.v1.publish.ts")),

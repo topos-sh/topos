@@ -186,10 +186,12 @@ export const cliSession = webSchema.table(
 );
 
 /**
- * The gh-style login flow (browser approval); approval mints the session row atomically (the
- * FOR UPDATE-fenced approve+mint in the data layer). 'expired' is NOT a status — expiry is
- * expires_at, one source of truth. Flow state dies with its session (CASCADE): these are
- * short-TTL ceremony rows, not history (audit_event holds the record).
+ * The gh-style login flow (browser approval). The flow starts WORKSPACE-LESS: the workspace is
+ * chosen (or created) at the browser approval, where the approver's seats are known, and the
+ * SESSION is minted at the CLI's exchange — the first poll that finds the flow approved.
+ * 'expired' is NOT a status — expiry is expires_at, one source of truth. Flow state dies with
+ * its session (CASCADE): these are short-TTL ceremony rows, not history (audit_event holds the
+ * record).
  */
 export const loginFlow = webSchema.table(
   "login_flow",
@@ -200,14 +202,15 @@ export const loginFlow = webSchema.table(
     flowCodeSha256: bytea("flow_code_sha256").notNull().unique(),
     requestedName: text("requested_name").notNull(),
     /**
-     * The workspace ADDRESS SLUG the authorize call named ('' only as the single-tenant
-     * origin-addressed form). Stored, never resolved at mint time: the flow's workspace is
-     * looked up — and the approver's seat in it required — at approval, under the same lock.
+     * The workspace ADDRESS SLUG a `login <workspace>` shortcut named — a PRESELECTION for the
+     * browser chooser, recorded shape-checked but UNRESOLVED (the unauthenticated start is
+     * never an existence oracle) and display-only: the approval records the workspace the
+     * human actually chose, never this hint.
      */
-    requestedWorkspace: text("requested_workspace").default("").notNull(),
+    preselectWorkspace: text("preselect_workspace"),
     /**
-     * The RESOLVED workspace id, persisted by the approval inside its fence — the granted
-     * poll's `workspace` decoration reads THIS immutable id, never a re-resolution of the
+     * The CHOSEN workspace id, persisted by the approval inside its fence — the granted
+     * poll's `workspace` decoration reads THIS immutable id, never a re-resolution of any
      * mutable slug (a rename or delete+recreate inside the TTL must not re-point the flow).
      */
     approvedWorkspaceId: text("approved_workspace_id"),
@@ -218,31 +221,28 @@ export const loginFlow = webSchema.table(
      */
     inviteTokenSha256: bytea("invite_token_sha256"),
     /**
-     * HOW the credential may be collected — decided by the CLI at the unauthenticated start and
-     * WRITE-ONCE thereafter, because it is the flow's whole trust posture:
+     * HOW the approval outcome is ACCELERATED back — decided by the CLI at the unauthenticated
+     * start and WRITE-ONCE thereafter:
      *
-     *  - `device` (RFC 8628): the classic device grant. The short code is typed at /verify, and
-     *    whoever holds the device code polls for the credential. The typing IS the control — it
-     *    is what binds the approving human to the machine that asked, and without it a stranger
-     *    can have their own flow approved by someone they mailed a link to.
+     *  - `device` (RFC 8628): the classic device grant. The short code is typed at /verify —
+     *    the typing binds the approving human to the machine that asked — and the CLI's poll
+     *    collects the outcome.
      *  - `loopback` (RFC 8252): the CLI has a browser on THIS machine and a listener on
-     *    127.0.0.1. Approval mints a one-time authorization code delivered ONLY by redirecting
-     *    the approver's browser to that listener, and the credential exchange demands it. A
-     *    phished approver redirects to their OWN loopback, so the sender never receives it.
+     *    127.0.0.1. The approval redirect wakes that listener (state + outcome only — it
+     *    carries no secret), so the waiting poll fires immediately instead of at its interval.
      *
-     * Never re-read from a later request: a binding that could change after the start would be
-     * a downgrade lever back onto the pollable path.
+     * Either way THE POLL IS THE ONE COMPLETION MECHANISM; the binding decides only whether
+     * the /verify card may pre-arm from the URL-borne challenge (loopback) or demands the
+     * typed code (device).
      */
     binding: text("binding").default("device").notNull(),
-    /**
-     * The one-time authorization code's digest — loopback flows only, minted at approval. Rides
-     * the redirect to the CLI's listener and is required (WITH the device code, which has never
-     * been in a URL) to redeem. Deliberately NOT consumed on presentation: the same pair may be
-     * re-exchanged until the flow lapses, so a crash between exchange and persist still resumes.
-     */
-    authCodeSha256: bytea("auth_code_sha256"),
     status: text("status").default("pending").notNull(),
     approvedBy: text("approved_by").references(() => user.id, { onDelete: "set null" }),
+    /**
+     * The minted session — set at the EXCHANGE (the first poll after approval), not at the
+     * approve: an approved row with a NULL session is consent recorded and nothing more, and
+     * an approved flow never polled past its TTL mints nothing.
+     */
     sessionId: text("session_id").references(() => cliSession.id, { onDelete: "cascade" }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
@@ -257,25 +257,6 @@ export const loginFlow = webSchema.table(
     ),
     check("login_flow_status_check", sql`${table.status} in ('pending', 'approved', 'denied')`),
     check("login_flow_binding_check", sql`${table.binding} in ('device', 'loopback')`),
-    check(
-      "login_flow_auth_code_sha256_check",
-      sql`${table.authCodeSha256} is null or octet_length(${table.authCodeSha256}) = 32`,
-    ),
-    // A device-bound flow never carries an authorization code: the pollable path and the
-    // redirect-delivered path are mutually exclusive by construction, not by convention.
-    check(
-      "login_flow_auth_code_binding_check",
-      sql`${table.authCodeSha256} is null or ${table.binding} = 'loopback'`,
-    ),
-    // A DEVICE flow mints its session at approval, so an approved row must name one. A LOOPBACK
-    // flow deliberately does NOT: its session is minted at the exchange, once the authorization
-    // code proves the redeemer is the machine that asked. Until then an approved row is consent
-    // recorded and nothing more — which is the point, because a credential that exists before
-    // that proof is a credential the approval's phisher already holds.
-    check(
-      "login_flow_approved_check",
-      sql`${table.status} <> 'approved' or ${table.sessionId} is not null or ${table.binding} = 'loopback'`,
-    ),
   ],
 );
 
@@ -820,13 +801,15 @@ export const proposalComment = webSchema.table(
  * survives workspace/user deletion (no FK on workspace_id; actor FKs SET NULL, actor_display
  * keeps history readable after renames/deletes). Every mutating data-layer op emits its row
  * in the same transaction. actor_session_id records WHICH installation acted when the act
- * came over the session lane; the row outlives the session (SET NULL).
+ * came over the session lane; the row outlives the session (SET NULL). workspace_id is
+ * NULLABLE for the few SERVER-scoped events (a login deny lands before any workspace is
+ * chosen); workspace-scoped readers query by equality, so a NULL row never surfaces there.
  */
 export const auditEvent = webSchema.table(
   "audit_event",
   {
     id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-    workspaceId: text("workspace_id").notNull(),
+    workspaceId: text("workspace_id"),
     actorUserId: text("actor_user_id").references(() => user.id, { onDelete: "set null" }),
     actorSessionId: text("actor_session_id").references(() => cliSession.id, {
       onDelete: "set null",

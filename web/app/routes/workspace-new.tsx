@@ -20,6 +20,12 @@ import { createWorkspace, workspaceNameAvailable } from "@/lib/db/workspace-crea
 import { destinationPathname } from "@/lib/destination-path";
 import { useSubmittingIntent } from "@/lib/pending";
 import { followBase } from "@/lib/plane/follow-base.server";
+import {
+  ADDRESS_TAKEN,
+  CREATE_RATE_LIMITED,
+  NAME_REQUIRED,
+  SLUG_SHAPE,
+} from "@/lib/workspace-create-copy";
 import { isWorkspaceNameShape, toWorkspaceSlug, WORKSPACE_NAME_MAX } from "@/lib/workspace-name";
 import { wsPathServer } from "@/lib/ws-url.server";
 
@@ -36,13 +42,6 @@ export const meta: MetaFunction = () => [{ title: "Create your workspace · Topo
  * returns `{ name, available }` (the form's debounced fetcher reads it), where a RESERVED slug and
  * a TAKEN one are both simply `false` — indistinguishable, so the reserved list never leaks.
  */
-
-const ADDRESS_TAKEN = "That address is taken — try another.";
-const CREATE_RATE_LIMITED =
-  "You’ve created several workspaces recently — wait a while before creating another.";
-const NAME_REQUIRED = "Enter a name for your workspace (1–100 characters).";
-const SLUG_SHAPE =
-  "The address uses lowercase letters, numbers, and hyphens (up to 100 characters).";
 
 /** The create form's typed reply on a NON-redirect (a landed create redirects away). */
 interface ActionData {

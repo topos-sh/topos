@@ -13,18 +13,22 @@ import {
   seat,
   workspace,
 } from "./schema.app";
+// A deliberate module CYCLE with workspace-create.server.ts (it imports this module's audit +
+// id mints): both sides bind at call time only, and the birth has exactly one spelling — the
+// approve weave must run the identical transaction body /new runs, not a copy.
+import { createWorkspaceTx } from "./workspace-create.server";
 
 /**
  * The identity ceremonies' data layer: first-boot setup, the claim-code consume, the
- * gh-style LOGIN flow (approve + session mint), and the last-owner-fenced seat mutations.
- * These are the concurrency-critical writes of the identity model — each fence is ONE
- * transaction, FOR UPDATE-locked or single-statement-atomic, with its audit row emitted
- * inside the same transaction.
+ * gh-style LOGIN flow (browser approve, then the mint at the CLI's exchange), and the
+ * last-owner-fenced seat mutations. These are the concurrency-critical writes of the identity
+ * model — each fence is ONE transaction, FOR UPDATE-locked or single-statement-atomic, with
+ * its audit row emitted inside the same transaction.
  *
- * A SESSION is user × workspace × installation: minted by `topos login <workspace-address>`
- * through the browser approval, carrying ONE workspace-scoped bearer credential. Sessions are
- * revocable from BOTH sides and DELETED, never tombstoned — history is the cause-tagged
- * audit trail.
+ * A SESSION is user × workspace × installation: born of `topos login` — the browser approval
+ * chooses (or creates) the workspace, the CLI's poll mints — carrying ONE workspace-scoped
+ * bearer credential. Sessions are revocable from BOTH sides and DELETED, never tombstoned —
+ * history is the cause-tagged audit trail.
  *
  * Secrets are HASH-STORED, and the hashing happens IN Postgres (the built-in SHA-256 over the
  * UTF-8 bytes) — this tier generates randomness but never computes a digest itself. A
@@ -89,11 +93,14 @@ export interface AuditActor {
   display: string;
 }
 
-/** Emit an audit row INSIDE the caller's transaction (append-only by code discipline). */
+/** Emit an audit row INSIDE the caller's transaction (append-only by code discipline).
+ * `workspaceId` is null for the few SERVER-scoped events (a login deny lands before any
+ * workspace is chosen); workspace-scoped readers query by equality, so a NULL row never
+ * surfaces there. */
 export async function auditInTx(
   tx: Tx,
   args: {
-    workspaceId: string;
+    workspaceId: string | null;
     actor: AuditActor;
     kind: string;
     subject?: string;
@@ -516,27 +523,28 @@ export const LOGIN_FLOW_EXPIRES_IN_SECS = LOGIN_FLOW_TTL_MS / 1000;
 
 /**
  * Start a login flow: mint the pair of codes and park the pending row. The flow_code is the
- * CLI's polling secret — and, on approval, it is PROMOTED to the session's one bearer
- * credential (same plaintext, same stored hash shape), which is what lets the hash-only store
- * still "deliver" the credential on the poll: the poller already holds it. The short
- * user_code is what a human types at /verify; the partial unique index keeps it unambiguous
- * among PENDING rows, so minting retries on that one conflict.
+ * CLI's polling secret — and, once the flow is approved, the EXCHANGE promotes it to the
+ * session's one bearer credential (same plaintext, same stored hash shape), which is what lets
+ * the hash-only store still "deliver" the credential on the poll: the poller already holds it.
+ * The short user_code is what a human types at /verify; the partial unique index keeps it
+ * unambiguous among PENDING rows, so minting retries on that one conflict.
  *
- * `requestedWorkspace` is the workspace ADDRESS SLUG the login named — recorded, not
- * resolved: the flow's workspace is looked up (and the approver's seat in it required) at
- * approval time, inside the approve/deny fence. A login mints ONE workspace's session;
- * further workspaces are further logins.
+ * The flow starts WORKSPACE-LESS: the workspace is chosen (or created) at the browser
+ * approval, where the approver's seats are known. `preselect` is the ADDRESS SLUG a
+ * `login <workspace>` shortcut named — recorded shape-checked but UNRESOLVED, display-only
+ * (it preselects the chooser's matching option and nothing more). A login mints ONE
+ * workspace's session; further workspaces are further logins.
  */
 export async function startLoginFlow(
   requestedName: string,
-  requestedWorkspace: string,
+  preselect: string | null,
   /** The invite-link token a `topos login <invite-url>` carries — hashed and RECORDED, never
    * validated here (the unauthenticated start must not be a token oracle); the approval
    * resolves it under its own fence. */
   inviteToken?: string,
-  /** How the credential may be collected. WRITE-ONCE: the CLI declares it here, having just
-   * bound its own 127.0.0.1 listener, and nothing downstream may change it — a mutable binding
-   * would be a downgrade lever back onto the pollable path. Absent ⇒ `device`, so a client
+  /** How the approval outcome is ACCELERATED back. WRITE-ONCE: the CLI declares it here,
+   * having just bound its own 127.0.0.1 listener, and nothing downstream may change it —
+   * the binding is what gates the /verify card's URL pre-arm. Absent ⇒ `device`, so a client
    * that predates this field keeps the classic flow byte-for-byte. */
   binding: LoginBinding = "device",
 ): Promise<{ flowCode: string; userCode: string; expiresInSecs: number }> {
@@ -555,7 +563,7 @@ export async function startLoginFlow(
         userCode,
         flowCodeSha256: sql`${sha256OfText(flowCode)}` as never,
         requestedName,
-        requestedWorkspace,
+        preselectWorkspace: preselect,
         binding,
         ...(inviteToken === undefined
           ? {}
@@ -584,18 +592,12 @@ export type LoginPollResult =
   | { status: "pending" }
   | { status: "denied" }
   | { status: "expired" }
-  /** A LOOPBACK flow that a human approved, polled by a caller that has not presented the
-   * authorization code. Distinct from `pending` on purpose: the human is done, so the CLI
-   * should re-open the hand-off rather than keep waiting on an approval that already happened
-   * — and distinct from `granted` because this caller has proved nothing about being the
-   * machine that asked. */
-  | { status: "awaiting_redirect" }
   | {
       status: "granted";
       sessionId: string;
       /** The session's born status — 'pending' delivers nothing until an owner approves. */
       sessionStatus: SessionStatus;
-      /** The workspace id the APPROVAL resolved (persisted inside its fence) — the token
+      /** The workspace id the APPROVAL chose (persisted inside its fence) — the token
        * route's `workspace` decoration reads this immutable id, so a slug rename or a
        * delete+recreate inside the TTL can never re-point a granted flow. */
       approvedWorkspaceId: string | null;
@@ -604,39 +606,37 @@ export type LoginPollResult =
     };
 
 /**
- * The CLI's poll, keyed by the flow_code hash. IDEMPOTENT by design: a terminal answer
- * (granted / denied) repeats on every poll until the row is swept, because the client's
- * crash-recovery is to re-poll — a CLI that received `granted` but crashed before persisting
- * its credential re-polls the same code and must get the same `granted` again (the credential
- * is the presented flow_code, echoed by the route, so re-delivery costs nothing). Terminal
- * rows are reaped by [`sweepExpiredLoginFlows`], not on read, so the grant survives its whole
- * TTL. A missing row (already swept, or never existed) reads as expired.
- */
-/**
- * Mint a LOOPBACK flow's session at its exchange — the moment both secrets are present.
+ * Mint an approved flow's session at its EXCHANGE — the first poll that finds the flow
+ * approved, for BOTH bindings. The approval recorded consent + the chosen workspace and
+ * nothing more; the credential comes into existence only when the machine that holds the flow
+ * code collects it.
  *
- * The born status is recomputed here rather than carried from the approval: the seat's role and
- * the workspace's approval knob are re-read, so a demotion or a knob flip between consent and
- * collection lands on the side the rows say now. Fenced on the flow row, and idempotent — a
- * concurrent exchange finds the session already there and reads it back.
+ * ACCEPTED TRADE, documented where the mint happens: the retired auth-code exchange proved the
+ * redeemer was the machine the approver's browser could reach, which made a phished approval
+ * uncollectable. Approval-anywhere (the mailed magic link finishing a login from any browser,
+ * any device) is worth more than that proof, so the flow code alone now redeems once a human
+ * has approved — the industry-standard device-grant posture. The remaining mitigations are the
+ * card naming the asking machine, the glance-check code read off the operator's own terminal,
+ * and the per-user rate belt on the /verify lookup.
+ *
+ * The born status is computed HERE rather than at the approval: the approver's seat and the
+ * workspace's session-approval knob are re-read inside this fence, so a demotion or a knob
+ * flip between consent and collection lands on the side the rows say now. Fenced on the flow
+ * row, and idempotent — a concurrent or repeated poll finds the session already there and
+ * reads it back.
  */
-async function mintLoopbackSession(
-  flowCode: string,
-  authCode: string,
-): Promise<LoginPollResult | null> {
+async function mintSessionAtExchange(flowCode: string): Promise<LoginPollResult | null> {
   return await getDb().transaction(async (tx) => {
-    // BOTH secrets are re-verified HERE, inside the fence that does the writing — not merely by
-    // the caller. The whole defect this design corrects was an authorization decision sitting one
-    // layer above the write it protected; a function that mints a credential has to be safe on
-    // its own terms, so that a future second call site cannot reopen the hole silently.
+    // The flow code is re-verified HERE, inside the fence that does the writing — not merely by
+    // the caller. A function that mints a credential has to be safe on its own terms, so that a
+    // future second call site cannot reopen a hole silently. An approved flow past its TTL
+    // matches nothing: consent that was never collected expires with the flow.
     const rows = await tx.execute(
       sql`SELECT id, requested_name, approved_by, approved_workspace_id, session_id,
                  flow_code_sha256, invite_token_sha256
           FROM ${loginFlow}
           WHERE flow_code_sha256 = ${sha256OfText(flowCode)} AND status = 'approved'
-            AND binding = 'loopback' AND expires_at > now()
-            AND auth_code_sha256 IS NOT NULL
-            AND auth_code_sha256 = ${sha256OfText(authCode)}
+            AND expires_at > now()
           FOR UPDATE`,
     );
     const row = rows.rows[0] as
@@ -669,7 +669,7 @@ async function mintLoopbackSession(
             hint:
               row.invite_token_sha256 === null
                 ? null
-                : await inviteHintByHash(row.invite_token_sha256),
+                : await inviteHintByHash(row.invite_token_sha256, row.approved_workspace_id),
           };
     }
     const seatRows = await tx.execute(
@@ -718,27 +718,28 @@ async function mintLoopbackSession(
       sessionStatus: born,
       approvedWorkspaceId: row.approved_workspace_id,
       hint:
-        row.invite_token_sha256 === null ? null : await inviteHintByHash(row.invite_token_sha256),
+        row.invite_token_sha256 === null
+          ? null
+          : await inviteHintByHash(row.invite_token_sha256, row.approved_workspace_id),
     };
   });
 }
 
-export async function pollLoginFlow(
-  flowCode: string,
-  /** The redirect-borne authorization code, when the caller has one. A loopback flow will not
-   * grant without it — see the binding check below. */
-  authCode?: string,
-): Promise<LoginPollResult> {
-  // Built conditionally rather than inline: with no code presented there is nothing to compare,
-  // and a bare NULL parameter beside a bytea column has no type Postgres can infer.
-  const authCodeOk =
-    authCode === undefined
-      ? sql`false`
-      : sql`f.auth_code_sha256 IS NOT NULL AND f.auth_code_sha256 = ${sha256OfText(authCode)}`;
+/**
+ * The CLI's poll, keyed by the flow_code hash — THE completion mechanism for both bindings
+ * (a loopback flow's 127.0.0.1 redirect only wakes the waiting client; it decides nothing).
+ * The first poll that finds the flow approved runs the mint-at-exchange fence; after that a
+ * terminal answer (granted / denied) repeats on every poll until the row is swept, because the
+ * client's crash-recovery is to re-poll — a CLI that received `granted` but crashed before
+ * persisting its credential re-polls the same code and must get the same `granted` again (the
+ * credential is the presented flow_code, echoed by the route, so re-delivery costs nothing).
+ * Terminal rows are reaped by [`sweepExpiredLoginFlows`], not on read, so the grant survives
+ * its whole TTL. A missing row (already swept, or never existed) reads as expired.
+ */
+export async function pollLoginFlow(flowCode: string): Promise<LoginPollResult> {
   const rows = await getDb().execute(
     sql`SELECT f.status, f.session_id, f.approved_workspace_id, f.invite_token_sha256,
-               f.expires_at < now() AS expired, s.status AS session_status, f.binding,
-               (${authCodeOk}) AS auth_code_ok
+               f.expires_at < now() AS expired, s.status AS session_status
         FROM ${loginFlow} f
         LEFT JOIN web.cli_session s ON s.id = f.session_id
         WHERE f.flow_code_sha256 = ${sha256OfText(flowCode)}`,
@@ -751,8 +752,6 @@ export async function pollLoginFlow(
         invite_token_sha256: Buffer | null;
         expired: boolean;
         session_status: SessionStatus | null;
-        binding: LoginBinding;
-        auth_code_ok: boolean | null;
       }
     | undefined;
   if (!row) {
@@ -761,43 +760,11 @@ export async function pollLoginFlow(
   if (row.status === "denied") {
     return { status: "denied" };
   }
-  // THE ENFORCEMENT POINT. A loopback flow's device code is not, by itself, a claim on anything:
-  // no session exists until the authorization code comes back, and that code left the server
-  // only by redirecting the approver's browser to their own 127.0.0.1 listener. Someone who
-  // started a flow and got a stranger to approve it holds the device code and nothing else, so
-  // they land here — an honest "approved, still waiting for the local hand-off". Matching is a
-  // digest comparison in Postgres, like every other secret in this system.
-  // A lapsed loopback flow that was never exchanged minted nothing and never will: its code is
-  // gone with the redirect that carried it. Say `expired` — the honest terminal answer — rather
-  // than `awaiting_redirect`, which would keep a client waiting on a hand-off that cannot come.
-  // (An approved DEVICE flow past its TTL still grants: its session exists and outlives the row.)
-  if (
-    row.status === "approved" &&
-    row.binding === "loopback" &&
-    row.session_id === null &&
-    row.expired
-  ) {
-    return { status: "expired" };
-  }
-  if (row.status === "approved" && row.binding === "loopback" && row.auth_code_ok !== true) {
-    return { status: "awaiting_redirect" };
-  }
-  // The EXCHANGE mints. Both secrets are in hand, so the caller has proved it is the machine
-  // that asked; only now does a credential come into existence. Idempotent — a session already
-  // minted falls through to the ordinary granted read, so a crash between exchange and persist
-  // re-exchanges instead of stranding the login.
-  if (row.status === "approved" && row.binding === "loopback" && row.session_id === null) {
-    const minted = await mintLoopbackSession(flowCode, authCode as string);
-    if (minted === null) {
-      return { status: "expired" };
-    }
-    return minted;
-  }
-  if (row.status === "approved") {
-    // A granted flow stays granted while its SESSION lives (the approve minted it). A session
-    // ended between approval and this poll (owner reject, revocation) reads as expired — the
+  if (row.status === "approved" && row.session_id !== null) {
+    // Already exchanged. The grant stays granted while its SESSION lives; a session ended
+    // between exchange and this poll (owner reject, revocation) reads as expired — the
     // credential is dead, so "start over" is the honest answer.
-    if (row.session_id === null || row.session_status === null) {
+    if (row.session_status === null) {
       return { status: "expired" };
     }
     return {
@@ -806,8 +773,21 @@ export async function pollLoginFlow(
       sessionStatus: row.session_status,
       approvedWorkspaceId: row.approved_workspace_id,
       hint:
-        row.invite_token_sha256 === null ? null : await inviteHintByHash(row.invite_token_sha256),
+        row.invite_token_sha256 === null || row.approved_workspace_id === null
+          ? null
+          : await inviteHintByHash(row.invite_token_sha256, row.approved_workspace_id),
     };
+  }
+  if (row.status === "approved") {
+    // Approved, never collected. Past the TTL the consent lapses with the flow — an approval
+    // nobody polled mints nothing, ever (say `expired`, the honest terminal answer). Inside it,
+    // THE EXCHANGE MINTS: the first poll to arrive here runs the fenced mint; a null answer
+    // means the world moved between consent and collection (seat gone, flow lapsed mid-flight).
+    if (row.expired) {
+      return { status: "expired" };
+    }
+    const minted = await mintSessionAtExchange(flowCode);
+    return minted ?? { status: "expired" };
   }
   // pending — expired pending is terminal (the human never approved in time).
   return row.expired ? { status: "expired" } : { status: "pending" };
@@ -816,16 +796,21 @@ export async function pollLoginFlow(
 /**
  * The first-destination hint of the invitation a token hash names — ANY status (a granted
  * flow's invitation was consumed by its own approval), the hinted thing resolved to its
- * display name, active bundles only. The token hash is retained on the row for exactly this
+ * display name, active bundles only, and only when the invitation belongs to the workspace
+ * the approval actually chose (a flow whose token went unaccepted must not decorate a hint
+ * into a workspace it never named). The token hash is retained on the row for exactly this
  * read.
  */
-async function inviteHintByHash(tokenSha256: Buffer): Promise<LoginGrantHint | null> {
+async function inviteHintByHash(
+  tokenSha256: Buffer,
+  approvedWorkspaceId: string,
+): Promise<LoginGrantHint | null> {
   const rows = await getDb().execute(
     sql`SELECT b.kind AS bundle_kind, b.name AS bundle_name, c.name AS channel_name
         FROM web.invitation i
         LEFT JOIN web.bundle b ON b.id = i.hint_bundle_id AND b.status = 'active'
         LEFT JOIN web.channel c ON c.id = i.hint_channel_id
-        WHERE i.token_sha256 = ${tokenSha256}`,
+        WHERE i.token_sha256 = ${tokenSha256} AND i.workspace_id = ${approvedWorkspaceId}`,
   );
   const row = rows.rows[0] as
     | { bundle_kind: string | null; bundle_name: string | null; channel_name: string | null }
@@ -854,32 +839,29 @@ export async function sweepExpiredLoginFlows(): Promise<number> {
 }
 
 /**
- * Resolve a locked flow's workspace AND the acting person's seat in it, inside the caller's
- * approve/deny transaction. The tenancy grammar decides the lookup: single-tenant flows
- * resolve to the install's one workspace whatever slug they recorded; multi-tenant flows
- * resolve the recorded slug by name — which may have been created AFTER the flow started
- * (a CLI-first person creates the workspace mid-flow and returns to approve). A missing
- * workspace or a seatless actor both resolve to null, and the caller answers the same
- * uniform refusal — a non-member learns nothing, not even that the workspace exists.
+ * Resolve a CHOSEN workspace slug AND the acting person's seat in it, inside the caller's
+ * approve transaction. The tenancy grammar decides the lookup: single-tenant approvals
+ * resolve to the install's one workspace whatever slug was posted; multi-tenant approvals
+ * resolve the posted slug by name. A missing workspace or a seatless actor both resolve to
+ * null, and the caller answers the same uniform refusal — a non-member learns nothing, not
+ * even that the workspace exists.
  */
 async function seatedFlowWorkspaceTx(
   tx: Tx,
-  requestedWorkspace: string,
+  chosenSlug: string,
   actorUserId: string,
 ): Promise<{ workspaceId: string; role: "owner" | "reviewer" | "member" } | null> {
   const rows =
     composition.tenancy === "multi"
-      ? await tx.execute(
-          sql`SELECT id FROM ${workspace} WHERE name = ${requestedWorkspace} LIMIT 1`,
-        )
+      ? await tx.execute(sql`SELECT id FROM ${workspace} WHERE name = ${chosenSlug} LIMIT 1`)
       : await tx.execute(sql`SELECT id FROM ${workspace} LIMIT 1`);
   const ws = rows.rows[0] as { id: string } | undefined;
   if (!ws) {
     return null;
   }
   // FOR UPDATE: the seat is the authorization — lock it so a concurrent seat removal
-  // serializes with this ceremony instead of racing it (no approve/deny commits on a seat
-  // whose delete already committed).
+  // serializes with this ceremony instead of racing it (no approve commits on a seat whose
+  // delete already committed).
   const seats = await tx.execute(
     sql`SELECT role FROM ${seat} WHERE workspace_id = ${ws.id} AND user_id = ${actorUserId}
         FOR UPDATE`,
@@ -891,70 +873,86 @@ async function seatedFlowWorkspaceTx(
   return { workspaceId: ws.id, role: seatRow.role };
 }
 
-/**
- * FENCE 2 — the login-flow approve + session mint, one FOR UPDATE transaction: lock the
- * pending row by user_code, re-check liveness under the lock, resolve the flow's workspace
- * (by the recorded slug under the tenancy grammar) and require the approver's SEAT in it,
- * mint the SESSION row (user × workspace × installation; credential hash = the flow_code
- * hash; born per the ONE rule), and flip the row to approved. An unresolvable workspace or a
- * seatless approver returns null — the same answer an expired code gets, so the ceremony is
- * no existence or membership oracle. The approver's browser-session gate runs in the ROUTE
- * before this is called — approval mints a credential that acts as you, in this ONE
- * workspace.
- */
-/** The in-transaction abort sentinel: an approval that cannot complete must ROLL BACK any
- * invitation accept it already made (a bare `return null` from a Drizzle transaction COMMITS —
- * only a throw rolls back). Thrown inside the fence, caught at the boundary → the uniform null.
- */
-const APPROVE_ABORT = Symbol("login-approve-abort");
+/** The approver's workspace pick, posted by the /verify chooser. `null` when the page posted
+ * no ordinary pick (the invite-token pre-bound arm) — valid only while the token binds. */
+export type LoginApproveChoice =
+  /** A workspace the approver already holds a seat in, by ADDRESS slug (single tenancy
+   * ignores the slug — the install IS its one workspace). */
+  | { kind: "seat"; workspace: string }
+  /** A pending invitation of the approver's, by row id — accepted inside the approve fence. */
+  | { kind: "invitation"; id: string }
+  /** A brand-new workspace, born inside the approve fence; the approver becomes its owner. */
+  | { kind: "create"; displayName: string; slug: string };
 
+export type LoginApproveOutcome =
+  /** Consent + the chosen workspace are recorded; the page copy names the join. NO session
+   * exists yet — the CLI's next poll runs the exchange that mints it. */
+  | {
+      outcome: "approved";
+      requestedName: string;
+      workspaceName: string;
+      workspaceDisplay: string;
+    }
+  /** The create arm's typed refusal: the slug is reserved or taken (indistinguishable, like
+   * /new); the whole transaction rolled back and the flow stays pending for a retry. */
+  | { outcome: "taken" };
+
+/** The in-transaction abort sentinel: an approval that cannot complete must ROLL BACK any
+ * invitation accept or workspace birth it already made (a bare `return null` from a Drizzle
+ * transaction COMMITS — only a throw rolls back). Thrown inside the fence, caught at the
+ * boundary → the uniform null. */
+const APPROVE_ABORT = Symbol("login-approve-abort");
+/** The create arm's typed rollback: same discipline, surfaced as `taken` instead of null. */
+const APPROVE_TAKEN = Symbol("login-approve-taken");
+
+/**
+ * FENCE 2 — the login-flow approve, one FOR UPDATE transaction: lock the pending row by
+ * user_code, re-check liveness under the lock, resolve THE CHOSEN WORKSPACE (a seat pick, an
+ * invitation accept, or a workspace birth — validated inside this same fence), and record
+ * consent: `status='approved'`, approved_by, approved_workspace_id. NO SESSION IS MINTED
+ * HERE — for either binding. The credential comes into existence at the CLI's exchange (the
+ * first poll that finds the flow approved), which re-reads seat + knob at collection time.
+ *
+ * A flow-carried invite token PRE-BINDS the workspace: when it still resolves to a live
+ * invitation this approver's accept fences admit, the accept runs inside this fence and the
+ * posted choice is IGNORED (a crafted flow cannot aim an invitation at A while connecting B).
+ * A token that no longer binds — dead, or addressed to an account the fences refuse — wrote
+ * nothing, and the posted choice decides like any ordinary flow (the page's chooser fell
+ * through with the honest line).
+ *
+ * A refusal returns null — the same answer an expired code gets, so the ceremony is no
+ * existence or membership oracle — EXCEPT the create arm's typed `taken`. The approver's
+ * browser-session gate runs in the ROUTE before this is called — approval records consent
+ * for a credential that acts as you, in this ONE workspace.
+ */
 export async function approveLoginFlow(
   userCode: string,
   approver: { userId: string; display: string },
-  /** Whether THIS request carries the local return coordinates. A loopback flow's authorization
-   * code has exactly one way out — the redirect to the asking machine's listener — so approving
-   * one from a page that cannot redirect would mint a code with nowhere to go and leave the
-   * waiting CLI stuck. Refused instead, with copy that says where to finish. REQUIRED: a default
-   * here would be the permissive value, handed silently to every future caller that forgets it. */
-  hasLocalReturn: boolean,
-): Promise<{
-  /** `null` for a LOOPBACK flow — nothing is minted until the exchange. */
-  sessionId: string | null;
-  requestedName: string;
-  sessionStatus: SessionStatus | null;
-  /** The one-time authorization code — loopback flows only, `null` for a device flow. The
-   * caller's ONLY job with it is to put it on the redirect to the approver's own listener. */
-  authCode: string | null;
-} | null> {
+  choice: LoginApproveChoice | null,
+): Promise<LoginApproveOutcome | null> {
   try {
     return await getDb().transaction(async (tx) => {
       const rows = await tx.execute(
-        sql`SELECT id, requested_name, requested_workspace, flow_code_sha256,
-                   invite_token_sha256, binding
+        sql`SELECT id, requested_name, invite_token_sha256
             FROM ${loginFlow}
             WHERE user_code = ${userCode} AND status = 'pending' AND expires_at > now()
             FOR UPDATE`,
       );
       const row = rows.rows[0] as
-        | {
-            id: string;
-            requested_name: string;
-            requested_workspace: string;
-            flow_code_sha256: Buffer;
-            invite_token_sha256: Buffer | null;
-            binding: LoginBinding;
-          }
+        | { id: string; requested_name: string; invite_token_sha256: Buffer | null }
         | undefined;
       if (!row) {
         return null;
       }
+
+      let chosenWorkspaceId: string | null = null;
+      let via: "seat" | "invitation" | "create" | "invite-token" | null = null;
+
       // The invitation weave: a flow that carries an invite token accepts the invitation INSIDE
-      // this same fence when the approver is its rightful addressee — so a typed-code approval
-      // (never having visited the invitation page) still lands sign-in → accept → approve as one
-      // act, and the seat requirement below then finds the seat the accept just wrote. A token
-      // that resolves to nothing, or an approver the accept fences refuse (wrong account,
-      // unverified mailbox), seats nothing.
-      let acceptedWorkspaceId: string | null = null;
+      // this same fence when the approver is its rightful addressee — sign-in → accept →
+      // approve is one act even for a brand-new invitee, and the accept's seat is the standing
+      // the exchange later re-reads. The fences answer wrong_account/unverified BEFORE any
+      // write, so falling through to the posted choice commits nothing of the invitation.
       if (row.invite_token_sha256 !== null) {
         const inv = await lockPendingInvitationTx(
           tx,
@@ -965,109 +963,102 @@ export async function approveLoginFlow(
             mailboxProven: false,
           });
           if (outcome.outcome === "accepted") {
-            acceptedWorkspaceId = outcome.workspaceId;
+            chosenWorkspaceId = outcome.workspaceId;
+            via = "invite-token";
           }
         }
       }
-      const resolved = await seatedFlowWorkspaceTx(tx, row.requested_workspace, approver.userId);
-      // The seat is the sole authority — a seatless approver's approval cannot complete. But an
-      // invite-weave accept may have already seated + consumed inside this tx, so a bare return
-      // would COMMIT that while the poll reports refused: throw to roll it back instead.
-      if (resolved === null) {
-        throw APPROVE_ABORT;
+
+      if (chosenWorkspaceId === null) {
+        // No live token bound the workspace — the posted choice decides, each arm validated
+        // under this same lock (standing is rows, read now, never page state).
+        if (choice === null) {
+          throw APPROVE_ABORT;
+        }
+        if (choice.kind === "seat") {
+          const resolved = await seatedFlowWorkspaceTx(tx, choice.workspace, approver.userId);
+          if (resolved === null) {
+            throw APPROVE_ABORT;
+          }
+          chosenWorkspaceId = resolved.workspaceId;
+          via = "seat";
+        } else if (choice.kind === "invitation") {
+          // The approver's OWN pending invitation, by id — the same accept fences as the token
+          // weave (addressee + verified mailbox), so a guessed id buys nothing.
+          const inv = await lockPendingInvitationTx(tx, sql`i.id = ${choice.id}`);
+          if (inv === null) {
+            throw APPROVE_ABORT;
+          }
+          const outcome = await acceptInvitationTx(tx, inv, await sessionAccountTx(tx, approver), {
+            mailboxProven: false,
+          });
+          if (outcome.outcome !== "accepted") {
+            throw APPROVE_ABORT;
+          }
+          chosenWorkspaceId = outcome.workspaceId;
+          via = "invitation";
+        } else {
+          // The workspace birth runs INSIDE this fence — the identical one-transaction birth
+          // /new runs (the shared tx body). The route ran the policy pre-checks (entitlement
+          // gate + the per-person floor) before calling; a reserved slug answers the typed
+          // rollback here, and a create-race unique violation surfaces at the boundary below.
+          const born = await createWorkspaceTx(
+            tx,
+            approver,
+            { name: choice.slug, displayName: choice.displayName },
+            { via: "login" },
+          );
+          if (born.outcome === "taken") {
+            throw APPROVE_TAKEN;
+          }
+          chosenWorkspaceId = born.workspaceId;
+          via = "create";
+        }
       }
-      // Consistency: an accepted invitation must be for the SAME workspace this approval
-      // resolves to — otherwise the accept seated + consumed in a workspace the session is not
-      // being minted toward (a crafted flow: invite for A, requested_workspace naming B).
-      // Roll the whole thing back rather than commit a split-brain login.
-      if (acceptedWorkspaceId !== null && acceptedWorkspaceId !== resolved.workspaceId) {
-        throw APPROVE_ABORT;
-      }
-      // A LOOPBACK flow mints NOTHING here. Its authorization code leaves the server only by
-      // redirecting this approver's browser to their own 127.0.0.1 listener, and the session is
-      // minted when that code comes back — so a stranger who talked someone into approving their
-      // flow ends up with a recorded consent and no credential. Minting at approval would defeat
-      // the whole mechanism: the bearer IS the device code, which the starter of the flow always
-      // holds, so the session would be usable the instant the victim clicked.
-      if (row.binding === "loopback" && !hasLocalReturn) {
-        // The transaction rolls back, so nothing is consumed — including an invitation this
-        // ceremony may already have accepted above — and the flow stays pending, still finishable
-        // on the machine that started it. The page pre-checks this and says exactly that;
-        // reaching here means a race, which gets the uniform refusal every dead-end gets.
-        throw APPROVE_ABORT;
-      }
-      if (row.binding === "loopback") {
-        const authCode = mintSecret();
-        await tx.execute(
-          sql`UPDATE ${loginFlow}
-              SET status = 'approved', approved_by = ${approver.userId},
-                  approved_workspace_id = ${resolved.workspaceId},
-                  auth_code_sha256 = ${sha256OfText(authCode)}
-              WHERE id = ${row.id}`,
-        );
-        await auditInTx(tx, {
-          workspaceId: resolved.workspaceId,
-          actor: { userId: approver.userId, display: approver.display },
-          kind: "login_approved",
-          subject: row.requested_name,
-          outcome: "ok",
-          details: { requestedName: row.requested_name },
-        });
-        return {
-          sessionId: null,
-          requestedName: row.requested_name,
-          sessionStatus: null,
-          authCode,
-        };
-      }
-      const sessionId = mintSessionId();
-      const born = sessionBornStatus(
-        resolved.role,
-        await sessionApprovalKnobTx(tx, resolved.workspaceId),
-      );
-      await tx.insert(cliSession).values({
-        id: sessionId,
-        workspaceId: resolved.workspaceId,
-        userId: approver.userId,
-        displayName: row.requested_name,
-        credentialSha256: row.flow_code_sha256,
-        status: born,
-      });
+
       await tx.execute(
         sql`UPDATE ${loginFlow}
-            SET status = 'approved', approved_by = ${approver.userId}, session_id = ${sessionId},
-                approved_workspace_id = ${resolved.workspaceId}
+            SET status = 'approved', approved_by = ${approver.userId},
+                approved_workspace_id = ${chosenWorkspaceId}
             WHERE id = ${row.id}`,
       );
       await auditInTx(tx, {
-        workspaceId: resolved.workspaceId,
+        workspaceId: chosenWorkspaceId,
         actor: { userId: approver.userId, display: approver.display },
-        kind: "session_created",
-        subject: sessionId,
+        kind: "login_approved",
+        subject: row.requested_name,
         outcome: "ok",
-        details: { requestedName: row.requested_name, status: born },
+        details: { requestedName: row.requested_name, via },
       });
+      const ws = await tx.execute(
+        sql`SELECT name, display_name FROM ${workspace} WHERE id = ${chosenWorkspaceId}`,
+      );
+      const wsRow = ws.rows[0] as { name: string; display_name: string } | undefined;
       return {
-        sessionId,
+        outcome: "approved" as const,
         requestedName: row.requested_name,
-        sessionStatus: born,
-        authCode: null,
+        workspaceName: wsRow?.name ?? "",
+        workspaceDisplay: wsRow?.display_name ?? wsRow?.name ?? "",
       };
     });
   } catch (error) {
-    // The clean-refusal rollback surfaces as the uniform null (the same answer an expired code
-    // gets); any other error is a real fault and propagates.
+    // The clean-refusal rollbacks surface typed (the uniform null, or the create arm's taken —
+    // a name race lands there too); any other error is a real fault and propagates.
     if (error === APPROVE_ABORT) {
       return null;
+    }
+    if (error === APPROVE_TAKEN || (choice?.kind === "create" && isUniqueViolation(error))) {
+      return { outcome: "taken" };
     }
     throw error;
   }
 }
 
 /**
- * The verify page's deny arm — same lock discipline AND the same workspace + seat
- * requirement as the approve (a person who cannot approve a flow cannot destroy it either;
- * an unresolvable flow dies by its TTL), terminal 'denied'.
+ * The verify page's deny arm — the flow is workspace-less, so denying takes NO seat: any
+ * signed-in holder of the code can kill a request to act as them (the same lock discipline,
+ * terminal 'denied'). The audit row is SERVER-scoped (null workspace — no workspace was ever
+ * chosen); workspace-scoped audit readers query by equality, so it surfaces nowhere but here.
  */
 export async function denyLoginFlow(
   userCode: string,
@@ -1075,23 +1066,17 @@ export async function denyLoginFlow(
 ): Promise<boolean> {
   return await getDb().transaction(async (tx) => {
     const rows = await tx.execute(
-      sql`SELECT id, requested_name, requested_workspace FROM ${loginFlow}
+      sql`SELECT id, requested_name FROM ${loginFlow}
           WHERE user_code = ${userCode} AND status = 'pending' AND expires_at > now()
           FOR UPDATE`,
     );
-    const row = rows.rows[0] as
-      | { id: string; requested_name: string; requested_workspace: string }
-      | undefined;
+    const row = rows.rows[0] as { id: string; requested_name: string } | undefined;
     if (!row) {
-      return false;
-    }
-    const resolved = await seatedFlowWorkspaceTx(tx, row.requested_workspace, denier.userId);
-    if (resolved === null) {
       return false;
     }
     await tx.execute(sql`UPDATE ${loginFlow} SET status = 'denied' WHERE id = ${row.id}`);
     await auditInTx(tx, {
-      workspaceId: resolved.workspaceId,
+      workspaceId: null,
       actor: { userId: denier.userId, display: denier.display },
       kind: "login_denied",
       subject: row.requested_name,
@@ -1101,24 +1086,48 @@ export async function denyLoginFlow(
   });
 }
 
-/** The verify page's resolved request: what is asking, the code for the glance-check, and —
- * when the flow carries an invite token that still resolves — the workspace the invitation
- * would join (disclosed to the code-holder, who is the token-holder's own terminal). The
- * invitation's role rides along so the approval copy can say honestly whether the session
- * will await an owner. */
+/** The flow-carried invitation, resolved against THE VIEWER — decided in this module so the
+ * addressing predicate (an email comparison, the invitation design's one sanctioned kind)
+ * never leaves it. `live` pre-binds the card; every other state falls through to the
+ * ordinary chooser with one honest line. Null when the flow carries no token. */
+export type FlowInvite =
+  | {
+      state: "live";
+      workspaceName: string;
+      workspaceDisplay: string;
+      role: string;
+      /** The invitation's role against the workspace's knob — the card's static disclosure. */
+      awaitsApproval: boolean;
+    }
+  /** Addressed to a DIFFERENT account — the emailed invitation link owns account switching. */
+  | { state: "other"; workspaceName: string; workspaceDisplay: string }
+  /** Addressed to the viewer's account, but the mailbox was never proven — the emailed link
+   * (whose delivery IS the proof) is the way through. */
+  | { state: "unverified"; workspaceName: string; workspaceDisplay: string }
+  /** The token no longer resolves (expired, consumed, revoked). */
+  | { state: "dead" }
+  | null;
+
+/** The verify page's resolved request: what is asking, the code for the glance-check, the
+ * `login <workspace>` shortcut's preselect hint (display-only), and the flow-carried
+ * invitation resolved against the viewing account. */
 export interface PendingLoginFlowView {
   requestedName: string;
-  requestedWorkspace: string;
   userCode: string;
-  inviteWorkspace: { name: string; displayName: string; role: string } | null;
-  /** How this flow hands its credential back — the page refuses to approve a `loopback` one
-   * from a browser that carries no return coordinates, since the code would go nowhere. */
+  /** Loopback flows may pre-arm the card from the URL challenge; device flows demand typing. */
   binding: LoginBinding;
+  /** The shortcut's preselect slug — preselects a matching chooser option, nothing more. */
+  preselect: string | null;
+  invite: FlowInvite;
 }
 
-/** The verify page's lookup: the pending request a typed user_code names (display only). */
-export async function pendingLoginFlow(userCode: string): Promise<PendingLoginFlowView | null> {
-  return pendingLoginFlowWhere(sql`user_code = ${userCode}`);
+/** The verify page's lookup: the pending request a typed user_code names (display only),
+ * with the flow-carried invitation resolved against the viewing account. */
+export async function pendingLoginFlow(
+  userCode: string,
+  viewerId: string,
+): Promise<PendingLoginFlowView | null> {
+  return pendingLoginFlowWhere(sql`user_code = ${userCode}`, viewerId);
 }
 
 /**
@@ -1129,30 +1138,32 @@ export async function pendingLoginFlow(userCode: string): Promise<PendingLoginFl
  */
 export async function pendingLoginFlowByChallenge(
   challengeHex: string,
+  viewerId: string,
 ): Promise<PendingLoginFlowView | null> {
   if (!/^[0-9a-f]{64}$/.test(challengeHex)) {
     return null;
   }
-  // LOOPBACK FLOWS ONLY — this is the line that keeps a URL-resolved card safe.
-  //
-  // The challenge is the device code's own hash, so whoever STARTED a flow can compute it, and
-  // starting one takes no credential. Resolving a DEVICE-bound flow from it would hand a
-  // stranger a one-click approve card for a credential they then collect by polling. A
-  // loopback-bound flow has no such collection path: approval delivers its authorization code
-  // by redirecting the approver's browser to 127.0.0.1, which reaches the approver's OWN
-  // machine and nobody else's.
+  // LOOPBACK FLOWS ONLY — the line that keeps a URL-resolved card honest. The challenge is the
+  // device code's own hash, so whoever STARTED a flow can compute it, and starting one takes no
+  // credential: pre-arming a card from it must stay a convenience for the machine's own
+  // operator, not a mailed one-click approve for a stranger's flow. A device-bound flow
+  // resolves only through the typed code — the typing is what binds approver to asker.
   return pendingLoginFlowWhere(
     sql`flow_code_sha256 = decode(${challengeHex}, 'hex') AND binding = 'loopback'`,
+    viewerId,
   );
 }
 
 async function pendingLoginFlowWhere(
   cond: ReturnType<typeof sql>,
+  viewerId: string,
 ): Promise<PendingLoginFlowView | null> {
   const rows = await getDb().execute(
-    sql`SELECT f.requested_name, f.requested_workspace, f.user_code, f.binding,
+    sql`SELECT f.requested_name, f.preselect_workspace, f.user_code, f.binding,
+               f.invite_token_sha256 IS NOT NULL AS invite_carried,
+               i.email AS invite_email, i.role AS invite_role,
                w.name AS invite_ws_name, w.display_name AS invite_ws_display,
-               i.role AS invite_role
+               w.session_approval AS invite_ws_knob
         FROM ${loginFlow} f
         LEFT JOIN web.invitation i ON i.token_sha256 = f.invite_token_sha256
           AND i.status = 'pending' AND (i.expires_at IS NULL OR i.expires_at > now())
@@ -1162,31 +1173,273 @@ async function pendingLoginFlowWhere(
   const row = rows.rows[0] as
     | {
         requested_name: string;
-        requested_workspace: string;
+        preselect_workspace: string | null;
         user_code: string;
         binding: LoginBinding;
+        invite_carried: boolean;
+        invite_email: string | null;
+        invite_role: string | null;
         invite_ws_name: string | null;
         invite_ws_display: string | null;
-        invite_role: string | null;
+        invite_ws_knob: "off" | "on" | null;
       }
     | undefined;
   if (!row) {
     return null;
   }
+  let invite: FlowInvite = null;
+  if (row.invite_carried) {
+    if (row.invite_email === null || row.invite_ws_name === null) {
+      invite = { state: "dead" };
+    } else {
+      const viewer = await getDb().execute(
+        sql`SELECT email, email_verified FROM web."user" WHERE id = ${viewerId}`,
+      );
+      const account = viewer.rows[0] as { email: string; email_verified: boolean } | undefined;
+      const workspaceName = row.invite_ws_name;
+      const workspaceDisplay = row.invite_ws_display ?? row.invite_ws_name;
+      // The SAME addressing predicate acceptInvitationTx fences on — display only here; the
+      // approve fence re-decides under its own lock.
+      if (account === undefined || account.email.trim().toLowerCase() !== row.invite_email) {
+        invite = { state: "other", workspaceName, workspaceDisplay };
+      } else if (!account.email_verified) {
+        invite = { state: "unverified", workspaceName, workspaceDisplay };
+      } else {
+        const role = row.invite_role ?? "member";
+        invite = {
+          state: "live",
+          workspaceName,
+          workspaceDisplay,
+          role,
+          awaitsApproval:
+            sessionBornStatus(
+              role as Parameters<typeof sessionBornStatus>[0],
+              row.invite_ws_knob ?? "off",
+            ) === "pending",
+        };
+      }
+    }
+  }
   return {
     requestedName: row.requested_name,
-    requestedWorkspace: row.requested_workspace,
     userCode: row.user_code,
     binding: row.binding,
-    inviteWorkspace:
-      row.invite_ws_name === null
-        ? null
-        : {
-            name: row.invite_ws_name,
-            displayName: row.invite_ws_display ?? row.invite_ws_name,
-            role: row.invite_role ?? "member",
-          },
+    preselect: row.preselect_workspace,
+    invite,
   };
+}
+
+// ── The /verify chooser's reads (display only — the approve fence re-validates) ─────────────
+
+/** One workspace the viewer already holds a seat in — a chooser radio row. */
+export interface SeatChoice {
+  workspaceId: string;
+  name: string;
+  displayName: string;
+  role: "owner" | "reviewer" | "member";
+  /** The static per-option disclosure: a session this person mints there is born pending. */
+  awaitsApproval: boolean;
+}
+
+/** The viewer's seats with each workspace's session-approval posture, oldest seat first. */
+export async function seatChoicesFor(userId: string): Promise<SeatChoice[]> {
+  const rows = await getDb().execute(
+    sql`SELECT w.id, w.name, w.display_name, s.role, w.session_approval
+        FROM ${seat} s JOIN ${workspace} w ON w.id = s.workspace_id
+        WHERE s.user_id = ${userId}
+        ORDER BY s.created_at, w.id`,
+  );
+  return (
+    rows.rows as {
+      id: string;
+      name: string;
+      display_name: string;
+      role: "owner" | "reviewer" | "member";
+      session_approval: "off" | "on" | null;
+    }[]
+  ).map((r) => ({
+    workspaceId: r.id,
+    name: r.name,
+    displayName: r.display_name,
+    role: r.role,
+    awaitsApproval: sessionBornStatus(r.role, r.session_approval ?? "off") === "pending",
+  }));
+}
+
+/** One pending invitation of the viewer's — a chooser row whose accept runs in the approve
+ * fence. */
+export interface PendingInvitationChoice {
+  id: string;
+  workspaceName: string;
+  workspaceDisplay: string;
+  role: string;
+  /** The invitation's role against the workspace's knob — the same static disclosure. */
+  awaitsApproval: boolean;
+  hint: LoginGrantHint | null;
+}
+
+/**
+ * The signed-in viewer's pending, unexpired invitations by their VERIFIED email — display
+ * only; the accept act re-validates inside the approve fence. An unverified mailbox yields an
+ * EMPTY list (possession of the account is not possession of the mailbox), with
+ * `heldUnverified` saying honestly that invitations exist and the emailed link — whose
+ * delivery proves the mailbox — is the way through.
+ */
+export async function pendingInvitationsFor(
+  userId: string,
+): Promise<{ invitations: PendingInvitationChoice[]; heldUnverified: boolean }> {
+  const viewer = await getDb().execute(
+    sql`SELECT email, email_verified FROM web."user" WHERE id = ${userId}`,
+  );
+  const account = viewer.rows[0] as { email: string; email_verified: boolean } | undefined;
+  if (account === undefined) {
+    return { invitations: [], heldUnverified: false };
+  }
+  const lowered = account.email.trim().toLowerCase();
+  const rows = await getDb().execute(
+    sql`SELECT i.id, i.role, w.name, w.display_name, w.session_approval,
+               b.kind AS bundle_kind, b.name AS bundle_name, c.name AS channel_name
+        FROM web.invitation i
+        JOIN ${workspace} w ON w.id = i.workspace_id
+        LEFT JOIN web.bundle b ON b.id = i.hint_bundle_id AND b.status = 'active'
+        LEFT JOIN web.channel c ON c.id = i.hint_channel_id
+        WHERE i.email = ${lowered} AND i.status = 'pending'
+          AND (i.expires_at IS NULL OR i.expires_at > now())
+        ORDER BY i.created_at, i.id`,
+  );
+  if (!account.email_verified) {
+    return { invitations: [], heldUnverified: rows.rows.length > 0 };
+  }
+  return {
+    heldUnverified: false,
+    invitations: (
+      rows.rows as {
+        id: string;
+        role: string;
+        name: string;
+        display_name: string;
+        session_approval: "off" | "on" | null;
+        bundle_kind: string | null;
+        bundle_name: string | null;
+        channel_name: string | null;
+      }[]
+    ).map((r) => ({
+      id: r.id,
+      workspaceName: r.name,
+      workspaceDisplay: r.display_name,
+      role: r.role,
+      awaitsApproval:
+        sessionBornStatus(
+          r.role as Parameters<typeof sessionBornStatus>[0],
+          r.session_approval ?? "off",
+        ) === "pending",
+      hint:
+        r.bundle_name !== null
+          ? { kind: r.bundle_kind ?? "skill", name: r.bundle_name }
+          : r.channel_name !== null
+            ? { kind: "channel", name: r.channel_name }
+            : null,
+    })),
+  };
+}
+
+// ── The lane-side second connect (`POST /api/v1/login/connect`) ─────────────────────────────
+
+/**
+ * Resolve a presented bearer credential to ITS PERSON, workspace-blind: any live, ACTIVE,
+ * unexpired session on this server proves who is asking (the connect route's authorization —
+ * the acting session's own workspace is irrelevant; seat standing in the TARGET workspace is
+ * what the transaction below requires). The same fail-closed discipline as the lane guard:
+ * hash computed in Postgres, every miss null.
+ */
+export async function sessionUserByCredential(
+  credential: string,
+): Promise<{ userId: string; display: string } | null> {
+  const rows = await getDb().execute(
+    sql`SELECT s.user_id, COALESCE(NULLIF(btrim(u.name), ''), u.email) AS display
+        FROM web.cli_session s
+        JOIN web."user" u ON u.id = s.user_id
+        JOIN ${workspace} w ON w.id = s.workspace_id
+        WHERE s.credential_sha256 = ${sha256OfText(credential)}
+          AND s.status = 'active'
+          AND ${sessionUnexpiredSql("s", "w")}`,
+  );
+  const row = rows.rows[0] as { user_id: string; display: string } | undefined;
+  return row === undefined ? null : { userId: row.user_id, display: row.display };
+}
+
+/**
+ * The browser-free second connect: an already-credentialed person's machine asks for a
+ * FURTHER workspace's session. ONE transaction: resolve the target workspace under the
+ * tenancy grammar (multi: by slug; single: the install's one workspace — a slug naming
+ * anything else is the uniform miss), lock the acting person's SEAT there FOR UPDATE (seat
+ * standing is the trust basis — this endpoint is never an existence oracle), mint a FRESH
+ * secret, insert the session born per the ONE rule, audit. The plaintext credential returns
+ * exactly once over the authenticated exchange, like the flow start returning its code.
+ */
+export async function connectSession(
+  actor: { userId: string; display: string },
+  workspaceSlug: string,
+  requestedName: string,
+): Promise<{
+  credential: string;
+  sessionId: string;
+  sessionStatus: SessionStatus;
+  workspace: { workspaceId: string; name: string; displayName: string };
+} | null> {
+  return await getDb().transaction(async (tx) => {
+    const rows =
+      composition.tenancy === "multi"
+        ? await tx.execute(
+            sql`SELECT id, name, display_name FROM ${workspace}
+                WHERE name = ${workspaceSlug} LIMIT 1`,
+          )
+        : await tx.execute(sql`SELECT id, name, display_name FROM ${workspace} LIMIT 1`);
+    const ws = rows.rows[0] as { id: string; name: string; display_name: string } | undefined;
+    if (ws === undefined) {
+      return null;
+    }
+    // Single tenancy: an empty slug addresses the origin's own workspace (the authorize
+    // route's grammar); any OTHER name is the uniform miss.
+    if (composition.tenancy !== "multi" && workspaceSlug !== "" && ws.name !== workspaceSlug) {
+      return null;
+    }
+    // FOR UPDATE: the seat is the authorization — a concurrent removal serializes with this
+    // mint instead of racing it.
+    const seats = await tx.execute(
+      sql`SELECT role FROM ${seat} WHERE workspace_id = ${ws.id} AND user_id = ${actor.userId}
+          FOR UPDATE`,
+    );
+    const seatRow = seats.rows[0] as { role: "owner" | "reviewer" | "member" } | undefined;
+    if (seatRow === undefined) {
+      return null;
+    }
+    const born = sessionBornStatus(seatRow.role, await sessionApprovalKnobTx(tx, ws.id));
+    const credential = mintSecret();
+    const sessionId = mintSessionId();
+    await tx.insert(cliSession).values({
+      id: sessionId,
+      workspaceId: ws.id,
+      userId: actor.userId,
+      displayName: requestedName,
+      credentialSha256: sql`${sha256OfText(credential)}` as never,
+      status: born,
+    });
+    await auditInTx(tx, {
+      workspaceId: ws.id,
+      actor: { userId: actor.userId, display: actor.display },
+      kind: "session_created",
+      subject: sessionId,
+      outcome: "ok",
+      details: { requestedName, status: born, via: "connect" },
+    });
+    return {
+      credential,
+      sessionId,
+      sessionStatus: born,
+      workspace: { workspaceId: ws.id, name: ws.name, displayName: ws.display_name },
+    };
+  });
 }
 
 // ── The session lane's actor resolve ────────────────────────────────────────────────────────

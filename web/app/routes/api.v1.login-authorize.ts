@@ -1,40 +1,32 @@
 import type { ActionFunctionArgs } from "react-router";
-import { composition } from "@/composition.server";
 import { checkBelt } from "@/lib/api/belt.server";
 import { badRequest, readCappedBody, uniformNotFound } from "@/lib/api/wire.server";
 import {
   LOGIN_FLOW_POLL_INTERVAL_SECS,
   type LoginBinding,
   startLoginFlow,
-  theWorkspace,
 } from "@/lib/db/identity.server";
 import { followBase } from "@/lib/plane/follow-base.server";
 import { isWorkspaceNameShape } from "@/lib/workspace-name";
 
 /**
- * `POST /api/v1/login/authorize` — begin the gh-style login flow toward ONE workspace named
- * by its address slug (`LoginStartRequest` → `LoginStartResponse`). A login mints ONE
- * workspace-scoped session; further workspaces are further logins.
+ * `POST /api/v1/login/authorize` — begin the gh-style login flow toward THIS SERVER
+ * (`DeviceAuthStartRequest` → `DeviceAuthStartResponse`). The flow starts WORKSPACE-LESS: the
+ * workspace is chosen (or created) at the browser approval, where the signed-in approver's
+ * seats are known — so this route mints the flow row on BOTH tenancies, always, with no
+ * workspace read at all. Deliberate and load-bearing: the start is unauthenticated, so it must
+ * disclose NOTHING about workspaces or accounts, and every refusal is constant.
  *
- * SINGLE tenancy: an EMPTY `workspace` names "the workspace this origin itself addresses" (the
- * origin IS its one workspace); a non-empty name must equal this install's workspace, and any
- * other name answers the uniform 404 — the same body a wrong path gets. The flow row records
- * the install's workspace name as the slug it targets.
- *
- * MULTI tenancy: there is no origin-scoped default, so an empty name stays the uniform miss. A
- * non-empty name is validated for SHAPE ONLY (the workspace-name rule) — a shape-invalid name
- * answers the uniform 404 (such a name can never exist), and a shape-valid one MINTS the flow
- * with the slug recorded, WITHOUT any existence check. Deliberate and load-bearing: this start
- * is unauthenticated, so it must not be a workspace-existence oracle — and a CLI-first stranger
- * must be able to start a login toward a workspace they will create mid-flow (the /verify
- * weave routes a seatless approver through workspace creation and back). Resolution and
- * authorization happen at APPROVAL, behind a browser session: the approve locks the flow,
- * resolves the recorded slug, and requires the approver's seat in the resolved workspace.
+ * `preselect` is the ADDRESS SLUG a `login <workspace>` shortcut named — recorded
+ * shape-checked but UNRESOLVED (never an existence check), display-only: it preselects the
+ * chooser's matching option and decides nothing. A shape-invalid value is the uniform 404
+ * (such a name can never exist). A login mints ONE workspace-scoped session; further
+ * workspaces are further logins (or the lane-side `login/connect`).
  *
  * No credential yet: this is the flow's unauthenticated start (the belt is its only gate).
  * The response's `device_code` (the RFC 8628 field name — the gh-proven device-authorization
- * grant shape) is the polling secret — and, on approval, the session's ONE bearer credential
- * (promoted server-side; the poll echoes it back from the field the client already holds).
+ * grant shape) is the polling secret — and, once approved, the session's ONE bearer credential
+ * (promoted at the exchange; the poll echoes it back from the field the client already holds).
  */
 const BODY_CAP = 8 * 1024;
 const MAX_REQUESTED_NAME = 200;
@@ -60,7 +52,7 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   }
   const body = parsed as {
     requested_name?: unknown;
-    workspace?: unknown;
+    preselect?: unknown;
     invite_token?: unknown;
     redirect?: unknown;
   };
@@ -69,10 +61,18 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
     parsed === null ||
     typeof body.requested_name !== "string" ||
     body.requested_name.trim().length === 0 ||
-    body.requested_name.length > MAX_REQUESTED_NAME ||
-    typeof body.workspace !== "string"
+    body.requested_name.length > MAX_REQUESTED_NAME
   ) {
     return badRequest("malformed login authorize body");
+  }
+  // The optional preselect: a wrong TYPE is a malformed body; a well-typed slug that can never
+  // exist (shape-invalid per the one workspace-name rule) is the uniform 404 — the same answer
+  // any impossible name gets, existence never consulted.
+  if (body.preselect !== undefined && typeof body.preselect !== "string") {
+    return badRequest("malformed login authorize body: preselect");
+  }
+  if (body.preselect !== undefined && !isWorkspaceNameShape(body.preselect)) {
+    return uniformNotFound();
   }
   // The optional invitation token a `topos login <invite-url>` carries: recorded (as its
   // hash) UNVALIDATED — this start is unauthenticated and must not be a token oracle. The
@@ -85,45 +85,20 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   ) {
     return badRequest("malformed login authorize body: invite_token");
   }
-  // How this flow's credential may be collected — the CLI's own declaration, made because it
+  // How the approval outcome is ACCELERATED back — the CLI's own declaration, made because it
   // has just bound a 127.0.0.1 listener and can open a browser on this machine. WRITE-ONCE
-  // from here: nothing downstream re-reads it from a request, so there is no lever to downgrade
-  // a loopback flow onto the pollable path. Absent ⇒ `device`, which is exactly today's flow,
-  // so a client that predates this field is unaffected.
-  //
-  // Declaring `loopback` buys the caller a pre-armed approve card — real leverage, since it
-  // removes the typing a device flow demands. What pays for it is that the flow then mints
-  // NOTHING at approval: the session comes into existence only when the authorization code
-  // returns from the approver's own machine. So a caller who declares it and phishes an approval
-  // has traded a credential they could have polled for one they can never collect.
+  // from here: the binding is what gates the /verify card's URL pre-arm, so nothing downstream
+  // may re-read it from a request. Absent ⇒ `device`, which is exactly the classic flow, so a
+  // client that predates this field is unaffected. Either way the POLL is the one completion
+  // mechanism; a loopback redirect carries state + outcome only, never a secret.
   if (body.redirect !== undefined && body.redirect !== "loopback" && body.redirect !== "device") {
     return badRequest("malformed login authorize body: redirect");
   }
   const binding: LoginBinding = body.redirect === "loopback" ? "loopback" : "device";
 
-  let requestedWorkspace: string;
-  if (composition.tenancy === "multi") {
-    // Shape only — existence is deliberately NOT checked here (see the doc comment above).
-    if (body.workspace.length === 0 || !isWorkspaceNameShape(body.workspace)) {
-      return uniformNotFound();
-    }
-    requestedWorkspace = body.workspace;
-  } else {
-    const ws = await theWorkspace();
-    if (ws === null) {
-      return uniformNotFound();
-    }
-    // An empty workspace addresses "the origin's own workspace" — single-tenant only. A
-    // non-empty name must equal this install's workspace.
-    if (body.workspace !== "" && ws.name !== body.workspace) {
-      return uniformNotFound();
-    }
-    requestedWorkspace = ws.name;
-  }
-
   const flow = await startLoginFlow(
     body.requested_name.trim(),
-    requestedWorkspace,
+    (body.preselect as string | undefined) ?? null,
     body.invite_token as string | undefined,
     binding,
   );

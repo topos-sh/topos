@@ -29,6 +29,7 @@ const TYPES_OUT = join(WEB_ROOT, "app", "lib", "plane", "contract", "schema.d.ts
  */
 const PUBLIC_ROUTES = [
   { method: "post", path: "/v1/login/authorize" },
+  { method: "post", path: "/v1/login/connect" },
   { method: "post", path: "/v1/login/token" },
   { method: "delete", path: "/v1/session" },
   { method: "post", path: "/v1/proposals" },
