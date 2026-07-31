@@ -4,16 +4,14 @@ description: Publish to your workspace — preview first, apply with --yes, plac
 sidebar_label: Share a skill
 ---
 
-`topos publish` puts a skill in your workspace — a new one, or a new version of one already
-shared. It always previews first:
-
 ```bash
-topos publish pr-describe        # preview — changes nothing
-topos publish pr-describe --yes  # apply
+topos publish pr-describe
+topos publish pr-describe --yes
 ```
 
-The preview names the channel the skill lands in, whether review is required, and the exact
-apply command. The target can be:
+The bare run is a preview — it names the channel the skill lands in, whether review is required,
+and the exact apply command, and changes nothing. `--yes` applies it, as a new skill or as a new
+version of one already shared. What you point it at:
 
 | Target | Meaning |
 |---|---|
@@ -27,14 +25,14 @@ apply command. The target can be:
 topos publish ~/.claude/skills/pr-describe --yes
 ```
 
-That is all a brand-new workspace needs. The skill gets one identity, one version history,
-and a page at `https://topos.sh/acme/skills/pr-describe`; teammates' machines receive it
-through the `everyone` channel automatically.
+That is all a brand-new workspace needs. The skill gets one identity, one version history, and a
+page at `https://topos.sh/acme/skills/pr-describe`; teammates' machines receive it through the
+`everyone` channel automatically.
 
-Publishing also flips who leads: the workspace's current version now decides what everyone
-gets — including you. Your local copy stays where it is and updates with the team; your
-future edits are drafts you can publish again. (One exception: a skill imported from GitHub
-keeps following its pinned source — the receipt says so.)
+Publishing also flips who leads: the workspace's current version now decides what everyone gets —
+including you. Your local copy stays where it is and updates with the team; your future edits are
+drafts you can publish again. (One exception: a skill imported from GitHub keeps following its
+pinned source — the receipt says so.)
 
 ## Say what changed
 
@@ -42,20 +40,19 @@ keeps following its pinned source — the receipt says so.)
 topos publish pr-describe -m "Cover stacked PRs" --yes
 ```
 
-`-m` becomes the version's history line — what a reviewer reads first, and what a teammate's
-agent can narrate when the update arrives. A diff without intent is hard to review; write
-one.
+`-m` becomes the version's history line — what a reviewer reads first, and what a teammate's agent
+can narrate when the update arrives. A diff without intent is hard to review; write one.
 
 ## Pick a channel
 
 ```bash
-topos publish deploy --to backend --yes
+topos publish db-migrations --to backend --yes
 ```
 
-A new skill with no `--to` lands in **`everyone`** and reaches the whole team. `--to` places
-it into a narrower channel instead — the channel must already exist (create channels in the
-browser). Under a **curated** channel your publish lands in the catalog and a curator places
-it; the receipt says so.
+A new skill with no `--to` lands in **`everyone`** and reaches the whole team. `--to` places it
+into a narrower channel instead — the channel must already exist (create channels in the browser).
+Under a **curated** channel your publish lands in the catalog and a curator places it; the receipt
+says so.
 
 ## When review is on
 
@@ -65,9 +62,9 @@ it; the receipt says so.
 | `reviewed` | Opens a **proposal** — nothing changes until a reviewer approves |
 
 You are never blocked for publishing to a `reviewed` skill — it becomes a proposal, and the
-receipt hands you the review command to pass along. Reviewers and owners ship directly even
-there; add `--propose` to ask for review anyway. The very first version of a new skill
-always ships directly — there is nothing to compare it against yet.
+receipt hands you the review command to pass along. Reviewers and owners ship directly even there;
+add `--propose` to ask for review anyway. The very first version of a new skill always ships
+directly — there is nothing to compare it against yet.
 
 The other half of the loop: [Review, protect, roll back](/docs/review).
 

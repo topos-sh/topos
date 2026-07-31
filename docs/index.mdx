@@ -4,66 +4,53 @@ description: Shared skills for every AI agent on your team — publish once, and
 sidebar_label: What is Topos
 ---
 
-**Topos keeps every AI agent on your team working the same way.** One person publishes how
-the team does something — the deploy checklist, the code-review standard, the release
-process — and every teammate's agent has it at the start of its next session, along with
-every update after that. Nobody sends a link, nobody re-explains the process.
-
-And it goes both ways: when someone sharpens the process while working, the improvement
-comes back to the team as a reviewable change instead of dying on their machine.
-
-## The fastest way in
-
 Paste this to the agent you already use — Claude Code, Cursor, Codex, any of them:
 
 ```text title="Paste to your agent"
 Set up Topos for us: fetch https://topos.sh/agent and follow it.
 ```
 
-The agent installs the CLI and walks you through login; the one browser approval is always
-yours to click. Prefer the terminal? Two commands:
+It installs the CLI and walks you through login; the one browser approval is always yours to
+click. By hand, with your team's address:
 
 ```bash
 curl -fsSL https://topos.sh/install | sh
-topos login https://topos.sh/<your-workspace>
+topos login https://topos.sh/acme
 ```
+
+That machine now has everything the team gave you, and picks up every later change on its own.
 
 ## What using it looks like
 
-<Steps>
-  <Step title="Someone shares a skill">
-    `topos publish pr-describe --yes` puts a skill folder in the workspace — one name, one
-    version history, one current version for the team.
-  </Step>
-  <Step title="Everyone's agents receive it">
-    A new skill goes to the whole team, so every machine logged into the workspace gets it
-    automatically. Nothing for teammates to run, nothing to configure.
-  </Step>
-  <Step title="It stays current by itself">
-    At the start of each agent session, the machine silently picks up whatever changed —
-    verified byte-for-byte, and never written over anyone's local edits.
-  </Step>
-  <Step title="Improvements come back">
-    Someone sharpens the skill while working and publishes again — directly, or as a
-    proposal a teammate reviews first.
-  </Step>
-</Steps>
+One person publishes how the team does something — the deploy checklist, the code-review
+standard, the release process. The commands are built for agents to drive, so tell yours what
+you want or run them yourself:
+
+```bash
+# Ask your agent: "Share our code-review skill with the team."
+topos publish code-review --yes
+```
+
+The skill is the team's now: one name, one version history, one current version. Every
+teammate's agent has it at the start of its next session — nobody sends a link, nobody
+re-explains the process. Updates never overwrite local edits, so when someone sharpens the
+skill while working they publish again and the improvement comes back to the team — directly,
+or as a proposal a teammate reviews first.
 
 ## Works with the skills you already have
 
-A skill is a plain folder with a `SKILL.md` — the same open format Claude Code, Cursor, and
-the [skills.sh](https://skills.sh) ecosystem already use. Nothing to convert: share the
-folders you have, and import public skill repos directly:
+A skill is a plain folder with a `SKILL.md` — the same open format Claude Code, Cursor, and the
+[skills.sh](https://skills.sh) ecosystem already use. Nothing to convert: share the folders you
+have, and import public skill repos directly:
 
 ```bash
 topos add vercel-labs/skills/find-skills
 ```
 
-What Topos adds on top is **declarative**: a short `topos.toml` states what everyone working in a
-project should have, and every machine converges on it — a lockfile for agent skills, kept current
-automatically. For what follows a *person* around, connecting is the whole statement: everything
-the team gave you arrives, and a page in the browser shows what you have, why, and an off switch
-for anything you don't want.
+Applying that records a line in [`topos.toml`](/docs/topos-toml) — a short file stating what everyone
+working in a project should have, which every machine then converges on. For what follows a
+*person* around there is no file to write: connecting is the whole statement, and a page in the
+browser shows what you have, why, and an off switch for anything you don't want.
 
 ## Cloud or self-hosted
 

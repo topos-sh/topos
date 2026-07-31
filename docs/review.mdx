@@ -4,37 +4,38 @@ description: Proposals and verdicts, requiring review, team-wide rollback, and w
 sidebar_label: Review & roll back
 ---
 
-Improvements come back to the team as reviewable changes instead of drifting into private
-forks. This page is that loop, plus the safety valves around it.
-
-Worth knowing once: a **version** is named by the hash of its exact contents —
-`deploy@<version>` means those files and no others. Each skill has one **current** version,
-and moving it never deletes anything, so every move can be undone.
-
 ```bash
-topos log deploy            # history: versions, messages, ids
-topos diff deploy           # your local edits vs the team version
-topos diff deploy <a>..<b>  # any two versions
+topos log customer-lookup
+topos diff customer-lookup
+topos diff customer-lookup <a>..<b>
 ```
+
+The history with its versions, messages and ids; your local edits against the team's version; any
+two versions. A **version** is named by the hash of its exact contents — `customer-lookup@<version>`
+means those files and no others — and each skill has one **current** version. Moving it never
+deletes anything, so every move can be undone.
 
 ## Propose a change
 
 ```bash
-topos publish deploy --propose -m "Cover stacked PRs" --yes
+topos publish customer-lookup --propose -m "Cover the v2 endpoints" --yes
 ```
 
-On a `reviewed` skill you don't even need `--propose` — a member's publish becomes a
-proposal by itself.
+On a `reviewed` skill you don't even need `--propose` — a member's publish becomes a proposal by
+itself.
 
 ## Review it
 
 ```bash
-topos review                    # your inbox
-topos review deploy@<version>   # read one proposal
-topos review deploy@<version> --approve
-topos review deploy@<version> --reject -m "needs a test"
-topos review deploy@<version> --withdraw
+topos review
+topos review customer-lookup@<version>
+topos review customer-lookup@<version> --approve
+topos review customer-lookup@<version> --reject -m "needs a test"
+topos review customer-lookup@<version> --withdraw
 ```
+
+Your inbox, then one proposal read in full. The verdict flag *is* the apply — there is no `--yes`
+here.
 
 | Verdict | Who | Effect |
 |---|---|---|
@@ -42,78 +43,71 @@ topos review deploy@<version> --withdraw
 | `--reject` | reviewer or owner | Declines it; the `-m` reason goes back to the author |
 | `--withdraw` | the author | Retracts your own open proposal |
 
-Approval is trustworthy by construction: what ships is exactly what you reviewed (if the
-skill moved meanwhile, the approval refuses and you look again); the content hash is
-re-checked end to end; and on a `reviewed` skill you can never approve your own proposal — a
-second person must.
-
-The same review lives in the browser: each skill's **Proposals** tab has rendered diffs,
-comments, and Approve/Reject.
+Approval is trustworthy by construction: what ships is exactly what you reviewed (if the skill
+moved meanwhile, the approval refuses and you look again); the content hash is re-checked end to
+end; and on a `reviewed` skill you can never approve your own proposal — a second person must. The
+same review lives in the browser, on each skill's **Proposals** tab: rendered diffs, comments,
+Approve/Reject.
 
 ## Require review
 
 ```bash
-topos protect deploy --yes       # this skill now needs review
-topos protect deploy open --yes  # back to direct publishing (owners)
+topos protect customer-lookup --yes
+topos protect customer-lookup open --yes
 ```
 
-There is also a workspace-wide default: the **Review gate** switch on Settings → General.
-Protect the skills many people rely on; a two-person utility usually doesn't need it.
+Review required, then back to direct publishing (owners). There is also a workspace-wide default:
+the **Review gate** switch on Settings → General. Protect the skills many people rely on; a
+two-person utility usually doesn't need it.
 
 ## Roll back
 
-Two rollbacks, with deliberately different reach:
-
 ```bash
-topos revert deploy --to <version> --yes  # for the TEAM
-topos update deploy@<version>             # just this machine
+topos revert customer-lookup --to <version> --yes
+topos update customer-lookup@<version>
 ```
+
+The first moves the **team** back, the second only this machine.
 
 <Warning>
   `--to` names the version you are going back **to** — the good one, not the bad one. Find
-  it with `topos log deploy`; a unique prefix of 8+ characters works.
+  it with `topos log customer-lookup`; a unique prefix of 8+ characters works.
 </Warning>
 
-A revert records a new version whose contents are the old one's — history stays complete,
-and a revert can itself be reverted. It takes a reviewer or owner. In the browser: **Roll
-back** on the skill's History tab.
+A revert records a new version whose contents are the old one's — history stays complete, and a
+revert can itself be reverted. It takes a reviewer or owner; a member's revert is refused, not
+turned into a proposal. In the browser: **Roll back** on the skill's History tab.
 
 ## Your edits are safe
 
 Editing a delivered skill creates a **draft**: updates merge around your changes and never
 overwrite them.
 
-If the same skill sits in several of your agents' directories, you only have to edit **one** of
-them. Once your edit has settled — unchanged since the previous check — the next update copies it
-onto the skill's other copies in the same scope and says so on the receipt. Agents that read
-different folders end up looking at the same work.
+If the same skill sits in several of your agents' directories, edit **one** of them. Once your edit
+has settled — unchanged since the previous check — the next update copies it onto the skill's other
+copies in the same scope and says so on the receipt.
 
 When the team's changes and yours genuinely collide, the copy is frozen with conflict markers and
 the ways out are named right there:
 
 ```bash
-topos diff deploy                   # see your side
-topos update deploy                 # merge your draft onto the latest
-topos update deploy --reset --yes   # drop YOUR edits, take the team's
-topos update deploy --onto-current  # keep YOUR files, skip the merge
+topos diff customer-lookup
+topos update customer-lookup
+topos update customer-lookup --reset --yes
+topos update customer-lookup --onto-current
 ```
+
+See your side; merge your draft onto the latest; drop **your** edits and take the team's; or keep
+**your** files and skip the merge.
 
 ## Leaked a secret?
 
 A revert doesn't help — old versions remain fetchable from history. In order:
 
-<Steps>
-  <Step title="Publish a scrubbed version">
-    Every machine replaces the leaked files at its next update — the fastest-acting step.
-  </Step>
-  <Step title="Rotate the credential">
-    The real security action. Assume the secret escaped.
-  </Step>
-  <Step title="Watch Settings → Sessions">
-    It lists exactly which machines still hold old versions — chase the stragglers by hand.
-  </Step>
-  <Step title="Purge the poisoned versions">
-    Owner-only, in the browser: the contents are dropped from history. Machines that already
-    fetched them are listed, never silently forgotten.
-  </Step>
-</Steps>
+1. **Publish a scrubbed version.** Every machine replaces the leaked files at its next update —
+   the fastest-acting step.
+2. **Rotate the credential.** The real security action. Assume the secret escaped.
+3. **Watch Settings → Sessions.** It lists exactly which machines still hold old versions — chase
+   the stragglers by hand.
+4. **Purge the poisoned versions.** Owner-only, in the browser: the contents are dropped from
+   history. Machines that already fetched them are listed, never silently forgotten.

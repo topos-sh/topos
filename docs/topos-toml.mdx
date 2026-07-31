@@ -1,0 +1,202 @@
+---
+title: The topos.toml file
+description: What a topos.toml can say, which commands write which lines into it, and how a project's file differs from your own.
+sidebar_label: topos.toml
+---
+
+Commit this at the root of a repo and everyone who works in it gets the same set, in the folders
+their agents already read.
+
+```toml title="topos.toml — committed at the repo root"
+[bundles]
+"topos.sh/acme/channels/backend" = "*"                   # every skill in the backend channel
+"topos.sh/acme/db-migrations" = "*"                      # one skill, tracking current
+"topos.sh/acme/code-review" = "4c9f0b21…"                # one skill, frozen at one version
+"github.com/vercel-labs/skills/find-skills" = "e173b8c"  # one skill from GitHub, at a commit
+"./tools/release-checklist" = "*"                        # a folder in this repo
+```
+
+The CLI writes it. The first three lines above came from:
+
+```bash
+topos add @acme/channels/backend
+topos add db-migrations
+topos add @acme/code-review@<version>
+```
+
+## Your machine's own file
+
+`~/.topos/topos.toml` is the same format, asking on your behalf rather than the repo's.
+
+```toml title="~/.topos/topos.toml — yours, never committed"
+[bundles]
+"topos.sh/acme" = "*"                  # everything Acme gives you, live
+"topos.sh/acme/ticket-triage" = "off"  # …except this one, on this machine
+"github.com/vercel-labs/skills" = "*"  # every skill that repo holds
+```
+
+Most people never have this file. While it is absent, the machine behaves exactly as if it held one
+`"<host>/<workspace>" = "*"` line per workspace you are logged into. The first `-g` command writes
+those lines out in full before making your edit, so you can see what you already had. From then on
+the file is the complete list: what it names is what you get.
+
+Two spellings are legal only here. `"topos.sh/acme"` — a two-segment key — is the whole
+workspace, live, so a skill assigned to you tomorrow arrives with no file edit. `"off"` subtracts
+exactly one workspace skill on this machine. A project file refuses both and names the spelling it
+wanted: a committed file is a repo fact, identical for every contributor.
+
+## What a key can name
+
+An entry's key is a reference. Its shape alone decides what it names.
+
+| Key | Names | Legal in |
+|---|---|---|
+| `topos.sh/acme/code-review` | one skill in the `acme` workspace | both files |
+| `topos.sh/acme/channels/sales` | every skill in the `sales` channel | both files |
+| `topos.sh/acme` | everything that workspace gives you | `~/.topos/topos.toml` only |
+| `github.com/vercel-labs/skills` | every skill the repo holds | both files |
+| `github.com/vercel-labs/skills/find-skills` | one skill in that repo | both files |
+| `./tools/my-skill`, `~/dev/notes`, `/abs/path` | a folder on disk | both files |
+
+`bitbucket.org` takes the same two repo shapes as `github.com`; `gitlab.com` refuses plainly.
+`channels` is reserved in third position, so `topos.sh/acme/channels` can never read as a skill
+named `channels`.
+
+A key path is joined with `/`, so these three spell the same entry and `topos fmt` moves freely
+between them:
+
+```toml
+[bundles]
+"topos.sh/acme/code-review" = "*"
+
+[bundles."topos.sh"]
+"acme/code-review" = "*"
+
+[bundles."topos.sh/acme"]
+code-review = "*"
+```
+
+## What a value can say
+
+| Value | Means |
+|---|---|
+| `"*"` | track whatever the reference serves right now |
+| 64 hex characters | one exact version of a workspace skill — those bytes and no others |
+| 7–40 hex characters | one commit of a GitHub source |
+| `"off"` | stop delivering this workspace skill here (`~/.topos/topos.toml`, workspace skills only) |
+| an inline table | a version plus fields, below |
+
+A channel line and a whole-workspace line take no version: they are sets, and they serve their
+curator's current members. Two things deliberately never move on their own — a pinned line, and a
+GitHub line, which advances only when you run `topos update` yourself. The session-start sweep
+never contacts GitHub.
+
+The table form carries the same version alongside a few placement fields:
+
+```toml
+[bundles]
+"topos.sh/acme/code-review" = { version = "*", path = ".agents/skills" }
+"topos.sh/acme/db-migrations" = { version = "*", name = "acme-db-migrations" }
+"github.com/acme/monorepo/deploy" = { version = "*", subdir = "tools/skills/deploy" }
+
+[defaults.skill]
+path = { default = ".agents/skills", claude-code = ".claude/skills" }
+```
+
+| Field | Legal on | Effect |
+|---|---|---|
+| `version` | a workspace skill, a GitHub skill, a local folder | exactly the plain-string form |
+| `path` | those three, and a channel | where the files land in this checkout |
+| `name` | a workspace skill, a GitHub skill, a local folder | renames the delivered folder |
+| `subdir` | a GitHub skill | the literal directory inside the repo |
+| `harness` | every shape except a whole-workspace line | which agents get the copy, by slug |
+
+`path` is a directory string, or a table keyed by agent slug with an optional `default`. It applies
+to project delivery only, must be relative, and must stay inside the checkout — a committed file
+can never aim managed bytes elsewhere on a contributor's disk. A value that breaks that is ignored
+with a warning and the default placement runs. `[defaults.skill]` sets the same thing for every
+skill the file asks for; a line's own `path` beats it, and within each the agent-named key beats
+`default`. `harness` is what `topos add -a <slug>` records on a GitHub line, so a copy aimed at one
+agent's folder stays there across updates.
+
+Anything a shape does not accept refuses by naming what it does accept, so a typo cannot silently
+drop a skill you thought you had.
+
+## Which commands write which lines
+
+| Command | What it does to the file |
+|---|---|
+| `topos add <ref>` | adds one line to the nearest project file |
+| `topos add <ref> -g` | adds one line to `~/.topos/topos.toml` |
+| `topos add ./folder` | adds `"./folder" = "*"`; a folder outside the checkout goes to the global file, absolute |
+| `topos add -g @acme` | adds `"topos.sh/acme" = "*"` |
+| `topos add -g <skill>` when an `"off"` line stands | deletes the `"off"` line |
+| `topos remove <skill>` | drops that line — or splits the channel/repo line carrying it |
+| `topos remove -g <skill>` | drops the line, or writes `"off"` when the workspace delivers it |
+| `topos remove -g @acme` | drops the whole-workspace line |
+| `topos publish ./folder --yes` | rewrites the `./folder` line to the workspace reference |
+| `topos init` | creates the file in this folder, from a comment-only template |
+| `topos fmt` | rewrites the layout; never the meaning |
+| `topos update` | nothing — except finishing a landed publish's rewrite, below |
+
+`add` and `remove` are exact inverses, and every receipt names the file it edited plus the command
+that undoes it. A `-g` add of a skill the workspace already delivers writes nothing and says so —
+there is no point stacking a line on a line that already delivers. Adding it *with* a pin does
+write: that is a real conversion to machine-local control.
+
+Starting from the committed file at the top of this page, `topos add crm-follow-up` adds one line
+and delivers it in the same command:
+
+```toml
+"topos.sh/acme/crm-follow-up" = "*"
+```
+
+`topos remove db-migrations` deletes its line. Two removals describe first instead of applying: one
+that would lose unshared local edits, and one aimed at a skill a set line carries. If
+`ticket-triage` arrives through `"topos.sh/acme/channels/backend"`, removing it replaces that one
+line with its current members minus `ticket-triage` — after which later additions by whoever
+curates the channel stop arriving through this file. Read the description, then apply with `--yes`.
+When two lines carry the same skill, name one:
+
+```bash
+topos remove ticket-triage --via @acme/channels/triage-bot
+```
+
+Publishing a local folder transfers governance in the same act: once the publish lands,
+`"./tools/release-checklist" = "*"` becomes `"topos.sh/acme/release-checklist" = "*"`, and the
+local copy is now a managed copy of the workspace skill. If that one rewrite cannot land at the
+time, a later `topos update` finishes it — the only line `update` ever writes.
+
+## Editing it by hand
+
+Hand-edits are supported — the file is plain TOML, and comments are yours to keep. `topos fmt`
+(or `topos fmt -g`) rewrites a file into the standard layout: whole-workspace lines, then local
+folders, then GitHub lines, then one `[bundles."topos.sh/acme"]` section per workspace, then
+`[defaults.<kind>]`. Each group sorted, empty sections pruned, comments carried with what they
+annotate. It validates the whole file first, so it can never tidy a broken one into a clean one,
+and it leaves an already-normal file untouched.
+
+<Note>
+  One layout carve-out comes from TOML itself: a value and a section cannot share a key path, so a
+  workspace that carries its whole-workspace line keeps its other lines flat under `[bundles]`
+  rather than in a `[bundles."topos.sh/acme"]` section.
+</Note>
+
+## Which file governs
+
+The project file is the **nearest** `topos.toml` walking up from your working directory, and it
+governs that checkout whole — no merging with an ancestor's file, and no arithmetic against what
+you get personally. `topos add` with none in reach creates one at the enclosing git root, so the
+file travels with the repo; `topos init` creates one in the folder you run it in.
+
+The two lists never blend. They answer different questions — "what should anyone working here
+have?" and "what should follow me around?" — so a skill named by both is delivered twice, once
+into the project's agent folders and once into your home ones. They update independently.
+
+```bash
+topos status
+topos status code-review
+```
+
+Everything here with its version and what asked for it; then one skill, down to the exact file and
+line behind each copy. Both work offline and change nothing.

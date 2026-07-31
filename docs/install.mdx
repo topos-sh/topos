@@ -10,14 +10,10 @@ Two ways in, same result.
   <Tab title="Run it yourself">
     ```bash
     curl -fsSL https://topos.sh/install | sh
-    ```
-
-    Installs the `topos` binary to `~/.local/bin` — no sudo, no runtime dependencies. Check
-    it:
-
-    ```bash
     topos --version
     ```
+
+    The `topos` binary lands in `~/.local/bin` — no sudo, no runtime dependencies.
   </Tab>
   <Tab title="Ask your agent">
     ```text title="Paste to your agent"
@@ -45,12 +41,12 @@ Two ways in, same result.
 
 ## What the installer does
 
-- Detects your OS and architecture, downloads the release over TLS, and **verifies its
-  sha-256** — a mismatch always refuses, never skippable.
+- Downloads the release for your OS and architecture over TLS and **verifies its sha-256** — a
+  mismatch always refuses, never skippable.
 - Verifies the release signature when the `minisign` tool is present (skipping is announced
   loudly, never silent).
-- Stages the binary and swaps it into place atomically — a bad download can never replace a
-  working install.
+- Swaps the staged binary into place atomically — a bad download can never replace a working
+  install.
 - Never edits your shell configuration; it prints a PATH hint instead.
 
 | Env var | Flag | Effect |
@@ -69,18 +65,19 @@ minisign -Vm topos-<target>.tar.gz \
 gh attestation verify topos-<target>.tar.gz --repo topos-sh/topos
 ```
 
-Each signature is bound to one release and file, so an old signature cannot be replayed
-against a newer tag.
+Each signature is bound to one release and file, so an old signature cannot be replayed against
+a newer tag.
 
 ## Keep the binary current
 
 ```bash
-topos self-update          # replace the running binary
-topos self-update --check  # only check for a newer release
+topos self-update
+topos self-update --check
 ```
 
-`self-update` verifies the signature and checksum — both mandatory — and touches no skills,
-no workspace, no account.
+The first replaces the running binary, the second only reports whether a newer release exists.
+`self-update` verifies the signature and checksum — both mandatory — and touches no skills, no
+workspace, no account.
 
 <Warning>
   `topos upgrade` is deliberately ambiguous and refuses, naming both fixes: **`topos
@@ -100,26 +97,24 @@ no workspace, no account.
 
 ## Docs first, binary later
 
-The `topos` skill is downloadable as plain documentation, no binary required:
-
 ```bash
 npx skills add topos-sh/topos
 ```
 
-That places a `SKILL.md`, the command reference, and an `INSTALL.md` that walks your agent
-through the real install. Later, `topos add topos` hands the downloaded copy to the CLI to
-keep current.
+That places the `topos` skill as plain documentation — a `SKILL.md`, the command reference, and
+an `INSTALL.md` that walks your agent through the real install. Later, `topos add topos` hands
+the downloaded copy to the CLI to keep current.
 
 ## Uninstall
 
 ```bash
-topos uninstall          # preview what would go
-topos uninstall --yes    # apply
+topos uninstall
+topos uninstall --yes
 ```
 
-Removes the auto-update hooks and `~/.topos/`. It **never deletes a skill file** — everything
-in your agent directories stays. The binary's own path is printed so you can remove it with
-whatever installed it.
+The bare run previews. Applying removes the auto-update hooks and `~/.topos/`; it **never
+deletes a skill file** — everything in your agent directories stays. The binary's own path is
+printed so you can remove it with whatever installed it.
 
 ## Next
 

@@ -4,8 +4,8 @@ description: Create a workspace, share a skill, and watch it reach your whole te
 sidebar_label: Quickstart
 ---
 
-Five steps. At the end, your team has a shared workspace, one skill in it, and machines that
-keep themselves current — no one runs anything to receive updates.
+Five steps. At the end your team has a shared workspace, one skill in it, and machines that keep
+themselves current — no one runs anything to receive updates.
 
 <Steps>
   <Step title="Create a workspace">
@@ -43,22 +43,16 @@ keep themselves current — no one runs anything to receive updates.
     ```
 
     Your browser opens — click **Approve**. That one click is the whole setup: connecting adopts
-    everything the workspace has given you, and from now on updates apply silently at the start of
-    each agent session. There is no per-skill step to accept — your workspace's **Your skills**
-    page always shows what you have and why, with an off switch on every row.
+    everything the workspace has given you, and updates apply silently at the start of each agent
+    session. There is no per-skill step to accept — your workspace's **Your skills** page always
+    shows what you have and why, with an off switch on every row.
   </Step>
   <Step title="Share a skill">
-    Point `publish` at any skill folder you already have — for example one in your agent's
-    skills directory:
+    Point `publish` at any skill folder you already have — here, one in your agent's skills
+    directory. A bare run is a preview: it prints exactly what would happen and changes nothing.
 
     ```bash
     topos publish ~/.claude/skills/pr-describe
-    ```
-
-    A bare `publish` is a preview: it prints exactly what would happen and changes nothing.
-    Read it, then apply:
-
-    ```bash
     topos publish pr-describe --yes
     ```
 
@@ -74,8 +68,7 @@ keep themselves current — no one runs anything to receive updates.
     topos invite dana@acme.com --yes
     ```
 
-    The invitation mail carries everything they need, including a line to paste to their
-    agent.
+    The invitation mail carries everything they need, including a line to paste to their agent.
   </Step>
 </Steps>
 
@@ -83,12 +76,12 @@ keep themselves current — no one runs anything to receive updates.
 
 - **Edit freely.** Updates never overwrite your local edits. Share an improvement back with
   `topos publish pr-describe -m "Cover stacked PRs" --yes`.
-- **Pin skills to a repo.** `topos add pr-describe` inside a checkout writes `topos.toml`;
-  commit it and everyone working in that repo gets the same set.
+- **Pin skills to a repo.** `topos add pr-describe` inside a checkout writes
+  [`topos.toml`](/docs/topos-toml); commit it and everyone working in that repo gets the same set.
 - **Take one you weren't given.** **Your skills → Library** browses the whole catalog; **Add to
   mine** puts a skill in your own set on every machine you log in.
-- **Check any time.** `topos status` — offline — lists every skill on this machine, its
-  version, and where it comes from.
+- **Check any time.** `topos status` — offline — lists every skill on this machine, its version,
+  and where it comes from.
 
 <CardGrid>
   <Card title="Get skills" href="/docs/add">

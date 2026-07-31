@@ -4,21 +4,8 @@ description: The machine surface — entry points, the JSON envelope, exit codes
 sidebar_label: For agents
 ---
 
-Topos is built to be driven by agents. Every command is non-interactive, `--json` prints
-exactly one machine-readable object and never prompts, and every refusal names its own fix.
-This page is the contract — written to be read by an agent directly.
-
-## Entry points
-
-| Surface | What it is |
-|---|---|
-| `<origin>/agent` | A plain-text setup walkthrough for agents — install, login, first commands. Humans bootstrap you with: `Set up Topos for us: fetch https://topos.sh/agent and follow it.` |
-| The protocol card | Fetch **any** path on a Topos server with `Accept: application/json` and you get `{"schema_version":1,"card":"topos-protocol-card","api_base_url":"…"}` — byte-identical on every path. This is API-base discovery, and how you confirm an address is a Topos server at all |
-| The built-in `topos` skill | Lands in your skills directories when Topos wires into a harness: a `SKILL.md`, an `INSTALL.md`, and the command reference — so a fresh agent learns Topos from inside its own context |
-| These docs | Append `.md` to any page URL for plain markdown; `/docs/llms.txt` is the index |
-| `npx skills add topos-sh/topos` | The same skill with no binary — its `INSTALL.md` walks you through the real install |
-
-## Four rules cover almost everything
+Every command is non-interactive, `--json` prints exactly one machine-readable object and never
+prompts, and every refusal names its own fix. Four rules cover almost everything:
 
 1. **Use `--json` on every command** and read the envelope rather than parsing prose.
 2. **Follow `next_actions`** — each carries a complete `argv`.
@@ -26,6 +13,16 @@ This page is the contract — written to be read by an agent directly.
    with `--yes` immediately — repeating a preview is never progress.
 4. **Never route around a refusal** by hand-editing files or `~/.topos/` internals. Read the
    error, run the named fix, retry once.
+
+## Entry points
+
+| Surface | What it is |
+|---|---|
+| `<origin>/agent` | A plain-text setup walkthrough for agents — install, login, first commands. Humans bootstrap you with: `Set up Topos for us: fetch https://topos.sh/agent and follow it.` |
+| The protocol card | Fetch **any** path on a Topos server with `Accept: application/json` and you get `{"schema_version":1,"card":"topos-protocol-card","api_base_url":"…"}` — byte-identical on every path. This is API-base discovery, and how you confirm an address is a Topos server at all |
+| The built-in `topos` skill | Lands in your skills directories when Topos wires into an agent: a `SKILL.md`, an `INSTALL.md`, and the command reference — so a fresh agent learns Topos from inside its own context |
+| These docs | Append `.md` to any page URL for plain markdown; `/docs/llms.txt` is the index |
+| `npx skills add topos-sh/topos` | The same skill with no binary — its `INSTALL.md` walks you through the real install |
 
 ## The envelope
 
@@ -90,8 +87,8 @@ the error's:
 - Every error whose prose names a concrete command carries that command structurally in
   `next_actions`, so you never parse English to find the fix.
 
-The full JSON Schemas live in the repository under `contracts/schemas/`, with golden
-examples under `contracts/fixtures/json/`.
+The full JSON Schemas live in the repository under `contracts/schemas/`, with golden examples
+under `contracts/fixtures/json/`.
 
 ## Exit codes
 
@@ -108,10 +105,10 @@ examples under `contracts/fixtures/json/`.
 
 ## Consent: when Topos asks first
 
-Topos asks first only when an act **reaches the team, loses local work, or trusts something
-new**. Those commands are two-phase: a bare run previews and writes nothing, handing you the
-exact `--yes` argv. Everything else — self-scoped and reversible — applies immediately and
-prints an undo-led receipt; read the undo, and tell the person what changed.
+Topos asks first only when an act **reaches the team, loses local work, or trusts something new**.
+Those commands are two-phase: a bare run previews, writes nothing, and hands you the exact `--yes`
+argv. Everything else — self-scoped and reversible — applies immediately and prints an undo-led
+receipt; read the undo, and tell the person what changed.
 
 | Command | Behavior |
 |---|---|
@@ -124,13 +121,13 @@ prints an undo-led receipt; read the undo, and tell the person what changed.
 
 The CLI's gate is the floor, not the ceiling. Two rules sit above it for you:
 
-- Anything **org-bound** (`publish`, with or without `--propose`) needs the human's explicit
-  yes *from this session*. "Improve our team skill" asks for the edit — a local draft, free
-  and reversible — not for shipping it.
-- **You cannot approve a login.** `topos login` prints an approval URL; show it to the
-  human. A piped or `--json` login never blocks and never opens a browser: it prints the
-  URL, polls once, and exits `0` — that is success, not failure. Re-run `topos login --json`
-  to poll again, or use `--wait <seconds>` to block deliberately, always capped.
+- Anything **org-bound** (`publish`, with or without `--propose`) needs the human's explicit yes
+  *from this session*. "Improve our team skill" asks for the edit — a local draft, free and
+  reversible — not for shipping it.
+- **You cannot approve a login.** `topos login` prints an approval URL; show it to the human. A
+  piped or `--json` login never blocks and never opens a browser: it prints the URL, polls once,
+  and exits `0` — that is success, not failure. Re-run `topos login --json` to poll again, or use
+  `--wait <seconds>` to block deliberately, always capped.
 
 ## What the CLI can and cannot change
 
@@ -139,14 +136,11 @@ divides the requests you can act on from the ones you hand back to the human.
 
 | The human asks | Do this |
 |---|---|
-| "get us the team's deploy skill here" | `topos add deploy` — a line in this repo's `topos.toml` |
-| "keep that on my laptop wherever I work" | `topos add deploy -g` — a line in `~/.topos/topos.toml` |
-| "stop that one on this box" | `topos remove deploy -g` — writes an `off` line here only |
+| "get us the team's code-review skill here" | `topos add code-review` — a line in this repo's `topos.toml` |
+| "keep that on my laptop wherever I work" | `topos add code-review -g` — a line in `~/.topos/topos.toml` |
+| "stop that one on this box" | `topos remove code-review -g` — writes an `off` line here only |
 | "turn that off for me everywhere" | Not a CLI act. Point them at **Your skills** in the browser, where the off switch covers every machine they log in |
 | "give this to the team" / "give it to Dana" | Not a CLI act either — assigning is a browser act. `topos publish` shares the bytes; `topos invite --skill`/`--channel` is the one exception, and only for someone being invited |
-
-So a request to change what a *person* or the *team* is given ends in a link, not a command. A
-request to change what *this machine or this repo* takes ends in a command.
 
 ## Budgets and pagination
 
@@ -159,49 +153,46 @@ request to change what *this machine or this repo* takes ends in a command.
 `0` means no cap. Diffs truncate at file boundaries with `patch_omitted` marks and a
 `FETCH_FULL_DIFF` next action; row caps emit a truncation marker and `NEXT_PAGE`.
 
-Also worth knowing: `topos status` is offline and read-only; `update --quiet` overrides
-`--json` and exits `0` on a network blip (it is what the session-start hook runs); redacted
-errors carry the safe message in `error.context.message`, and the full source chain always
-lands in `~/.topos/log.jsonl` (`TOPOS_DEBUG=1` prints it to stderr).
+Also worth knowing: `topos status` is offline and read-only; `update --quiet` overrides `--json`
+and exits `0` on a network blip (it is what the session-start hook runs); redacted errors carry the
+safe message in `error.context.message`, and the full source chain always lands in
+`~/.topos/log.jsonl` (`TOPOS_DEBUG=1` prints it to stderr).
 
 ## Before you touch a skill directory
 
 ```bash
 topos list --json
-topos status <skill> --json   # one skill in depth
+topos status <skill> --json
 ```
 
 `list` rows carry a **source** (a workspace address means team-managed; `built-in`; an origin
-host; `local`) and a **status** (`current` / `behind` / `draft`). Check before treating a skill
-directory as hand-authored — editing a team-managed skill creates a draft, not a private fork.
-Drafts are safe: updates merge around them and never overwrite them.
+host; `local`) and a **status** (`current` / `behind` / `draft`) — check before treating a skill
+directory as hand-authored. Editing a team-managed skill creates a draft, not a private fork, and
+drafts are safe: updates merge around them and never overwrite them.
 
-`status <skill>` is the deeper answer when you need to know *why* a copy is there: which file and
-line asked for it — or which workspace's set — and where its files sit. A skill can legitimately
-have two independent copies, one for the project and one for the person, with separate drafts;
-publish from inside the checkout you edited.
+`status <skill>` answers *why* a copy is there: which file and line asked for it — or which
+workspace's set — and where its files sit. A skill can legitimately have two independent copies,
+one for the project and one for the person, with separate drafts; publish from inside the checkout
+you edited.
 
 ## Offering to share back
 
-The contribute loop is the point of Topos — and the offer is yours to make well. The bar,
-all of which must hold:
+The contribute loop is the point of Topos, and the offer is yours to make well. The bar — all of
+it must hold:
 
-- It was born from **this session's own work** — a hard-won fix, a dead end turned into a
-  working path, a correction from the user, a reusable workflow. A draft merely sitting on
-  disk is not a trigger; it was kept local on purpose.
-- It saves a teammate roughly five minutes or more, is not obvious, and is not a one-time
-  fix.
+- It was born from **this session's own work**: a hard-won fix, a dead end turned into a working
+  path, a correction from the user, a reusable workflow. A draft merely sitting on disk is not a
+  trigger — it was kept local on purpose.
+- It saves a teammate roughly five minutes or more, is not obvious, and is not a one-time fix.
 - It distills **what the user did, asked for, or confirmed**.
 
-Offer **at most once per session**, at a natural pause, never interrupting active work.
+Offer **at most once per session**, at a natural pause, never interrupting active work. Then:
 
-The procedure:
-
-1. **Survey first**: `topos list --json` and `topos list --remote --json`. Prefer deepening
-   an existing skill with a minimal edit over minting a new one.
+1. **Survey first**: `topos list --json` and `topos list --remote --json`. Prefer deepening an
+   existing skill with a minimal edit over minting a new one.
 2. **Draft freely** — editing is local, reversible, and needs no permission.
-3. **Scan for secrets** before anything org-bound: tokens, credentials, internal hostnames.
-   Strip them or stop.
+3. **Scan for secrets** before anything org-bound: tokens, credentials, internal hostnames. Strip
+   them or stop.
 4. **Preview, then get an explicit yes** from this session, then `--yes`.
 5. **Carry provenance** in `-m`: one honest line, e.g.
    `-m "Distilled by <agent> while <what was solved>"`.
