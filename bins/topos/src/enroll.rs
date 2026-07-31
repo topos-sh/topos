@@ -41,8 +41,14 @@ pub(crate) struct PendingEnrollment {
     /// The workspace ADDRESS slug a `login <workspace>` shortcut PRESELECTED for the browser
     /// chooser (empty = none: the human picks or creates the workspace at the approval). Whether
     /// it exists is never disclosed pre-approval; the granted poll carries the authoritative
-    /// workspace. Serde-defaulted, so a WAL written before the field reads as no preselection.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    /// workspace. Serde-defaulted, and it still reads the pre-rename `workspace_name` spelling:
+    /// a WAL written by the previous binary carries the SAME fact, and losing it across an
+    /// upgrade would read as a target mismatch and restart the flow the person is mid-approval on.
+    #[serde(
+        default,
+        alias = "workspace_name",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub preselect: String,
     /// Which verb owns the resume (and, for a follow, the intent to continue into).
     pub intent: EnrollIntentDoc,
@@ -153,4 +159,48 @@ pub(crate) fn sweep_expired_wal(
         delete_wal(fs, layout)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use topos_types::PERSISTED_SCHEMA_VERSION;
+
+    use super::*;
+    use crate::fs_seam::RealFs;
+    use crate::sidecar::Layout;
+
+    /// A WAL written by the PREVIOUS binary still reads whole. The preselection was spelled
+    /// `workspace_name` then: losing it across an upgrade would read as a target mismatch and
+    /// restart a flow the person may be standing in front of, mid-approval. The retired
+    /// `auth_code` field simply falls away.
+    #[test]
+    fn a_pre_rename_wal_keeps_its_preselection() {
+        let fs = RealFs;
+        let dir = std::env::temp_dir().join(format!("topos-wal-alias-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let layout = Layout::new(&dir);
+        fs.create_dir_all(&layout.identity_dir()).unwrap();
+        let doc = format!(
+            r#"{{"schema_version":{PERSISTED_SCHEMA_VERSION},"base_url":"https://topos.sh/api",
+               "host":"topos.sh","workspace_name":"acme","intent":{{"kind":"session"}},
+               "device_code":"dc_secret","user_code":"AB12-CD34",
+               "verification_uri":"https://topos.sh/verify","interval_secs":5,
+               "expires_at_millis":9000,"loopback":true,"auth_code":"ac_secret"}}"#
+        );
+        // 0600 — `read_doc_private` refuses a permissive secret before parsing a byte.
+        crate::atomic::atomic_write_private(&fs, &layout.enrollment_path(), doc.as_bytes())
+            .unwrap();
+
+        let wal = read_wal(&fs, &layout).unwrap().unwrap();
+        assert_eq!(
+            wal.preselect, "acme",
+            "the old spelling still names the same fact"
+        );
+        assert_eq!(wal.host, "topos.sh");
+        assert!(wal.loopback);
+        assert_eq!(wal.device_code, "dc_secret");
+        assert!(matches!(wal.intent, EnrollIntentDoc::Session));
+        // The secret never surfaces in a Debug dump, on any vintage of the document.
+        assert!(!format!("{wal:?}").contains("dc_secret"), "{wal:?}");
+    }
 }

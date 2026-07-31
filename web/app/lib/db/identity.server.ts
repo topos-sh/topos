@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { eq, sql } from "drizzle-orm";
@@ -672,9 +673,14 @@ async function mintSessionAtExchange(flowCode: string): Promise<LoginPollResult 
                 : await inviteHintByHash(row.invite_token_sha256, row.approved_workspace_id),
           };
     }
+    // FOR UPDATE: the seat is the standing this mint rides — lock it so a concurrent seat
+    // removal serializes with the exchange instead of racing it (an unlocked read past a
+    // committing delete would carry into the insert below and fail its composite FK as a
+    // 500 to the poller; the approve fence runs the same discipline).
     const seatRows = await tx.execute(
       sql`SELECT role FROM ${seat}
-          WHERE workspace_id = ${row.approved_workspace_id} AND user_id = ${row.approved_by}`,
+          WHERE workspace_id = ${row.approved_workspace_id} AND user_id = ${row.approved_by}
+          FOR UPDATE`,
     );
     const role = (seatRows.rows[0] as { role: string } | undefined)?.role;
     if (role === undefined) {
@@ -892,6 +898,11 @@ export type LoginApproveOutcome =
       requestedName: string;
       workspaceName: string;
       workspaceDisplay: string;
+      /** The flow's own challenge (hex of its code hash) when the flow is LOOPBACK-bound —
+       * the page fires the listener's wake-up redirect only for EXACTLY this flow, never for
+       * another card approved from the same loopback-armed URL. Non-secret (derivable by
+       * whoever started the flow); null for a device flow, which has nothing to wake. */
+      flowChallenge: string | null;
     }
   /** The create arm's typed refusal: the slug is reserved or taken (indistinguishable, like
    * /new); the whole transaction rolled back and the flow stays pending for a retry. */
@@ -933,13 +944,19 @@ export async function approveLoginFlow(
   try {
     return await getDb().transaction(async (tx) => {
       const rows = await tx.execute(
-        sql`SELECT id, requested_name, invite_token_sha256
+        sql`SELECT id, requested_name, invite_token_sha256, flow_code_sha256, binding
             FROM ${loginFlow}
             WHERE user_code = ${userCode} AND status = 'pending' AND expires_at > now()
             FOR UPDATE`,
       );
       const row = rows.rows[0] as
-        | { id: string; requested_name: string; invite_token_sha256: Buffer | null }
+        | {
+            id: string;
+            requested_name: string;
+            invite_token_sha256: Buffer | null;
+            flow_code_sha256: Buffer;
+            binding: LoginBinding;
+          }
         | undefined;
       if (!row) {
         return null;
@@ -998,6 +1015,12 @@ export async function approveLoginFlow(
           chosenWorkspaceId = outcome.workspaceId;
           via = "invitation";
         } else {
+          // The birth is a MULTI surface, refused HERE too, not only in the route's precheck:
+          // the fence must be safe on its own terms, and a second workspace row on single
+          // tenancy would break every LIMIT-1 resolution of the install's one workspace.
+          if (composition.tenancy !== "multi") {
+            throw APPROVE_ABORT;
+          }
           // The workspace birth runs INSIDE this fence — the identical one-transaction birth
           // /new runs (the shared tx body). The route ran the policy pre-checks (entitlement
           // gate + the per-person floor) before calling; a reserved slug answers the typed
@@ -1039,6 +1062,8 @@ export async function approveLoginFlow(
         requestedName: row.requested_name,
         workspaceName: wsRow?.name ?? "",
         workspaceDisplay: wsRow?.display_name ?? wsRow?.name ?? "",
+        flowChallenge:
+          row.binding === "loopback" ? Buffer.from(row.flow_code_sha256).toString("hex") : null,
       };
     });
   } catch (error) {
@@ -1063,16 +1088,22 @@ export async function approveLoginFlow(
 export async function denyLoginFlow(
   userCode: string,
   denier: { userId: string; display: string },
-): Promise<boolean> {
+): Promise<{
+  /** The denied flow's challenge when LOOPBACK-bound (see the approve outcome's twin) — the
+   * page wakes the listener only for exactly the flow the CLI armed. */
+  flowChallenge: string | null;
+} | null> {
   return await getDb().transaction(async (tx) => {
     const rows = await tx.execute(
-      sql`SELECT id, requested_name FROM ${loginFlow}
+      sql`SELECT id, requested_name, flow_code_sha256, binding FROM ${loginFlow}
           WHERE user_code = ${userCode} AND status = 'pending' AND expires_at > now()
           FOR UPDATE`,
     );
-    const row = rows.rows[0] as { id: string; requested_name: string } | undefined;
+    const row = rows.rows[0] as
+      | { id: string; requested_name: string; flow_code_sha256: Buffer; binding: LoginBinding }
+      | undefined;
     if (!row) {
-      return false;
+      return null;
     }
     await tx.execute(sql`UPDATE ${loginFlow} SET status = 'denied' WHERE id = ${row.id}`);
     await auditInTx(tx, {
@@ -1082,7 +1113,10 @@ export async function denyLoginFlow(
       subject: row.requested_name,
       outcome: "ok",
     });
-    return true;
+    return {
+      flowChallenge:
+        row.binding === "loopback" ? Buffer.from(row.flow_code_sha256).toString("hex") : null,
+    };
   });
 }
 
@@ -1346,39 +1380,20 @@ export async function pendingInvitationsFor(
 // ── The lane-side second connect (`POST /api/v1/login/connect`) ─────────────────────────────
 
 /**
- * Resolve a presented bearer credential to ITS PERSON, workspace-blind: any live, ACTIVE,
- * unexpired session on this server proves who is asking (the connect route's authorization —
- * the acting session's own workspace is irrelevant; seat standing in the TARGET workspace is
- * what the transaction below requires). The same fail-closed discipline as the lane guard:
- * hash computed in Postgres, every miss null.
- */
-export async function sessionUserByCredential(
-  credential: string,
-): Promise<{ userId: string; display: string } | null> {
-  const rows = await getDb().execute(
-    sql`SELECT s.user_id, COALESCE(NULLIF(btrim(u.name), ''), u.email) AS display
-        FROM web.cli_session s
-        JOIN web."user" u ON u.id = s.user_id
-        JOIN ${workspace} w ON w.id = s.workspace_id
-        WHERE s.credential_sha256 = ${sha256OfText(credential)}
-          AND s.status = 'active'
-          AND ${sessionUnexpiredSql("s", "w")}`,
-  );
-  const row = rows.rows[0] as { user_id: string; display: string } | undefined;
-  return row === undefined ? null : { userId: row.user_id, display: row.display };
-}
-
-/**
  * The browser-free second connect: an already-credentialed person's machine asks for a
- * FURTHER workspace's session. ONE transaction: resolve the target workspace under the
- * tenancy grammar (multi: by slug; single: the install's one workspace — a slug naming
- * anything else is the uniform miss), lock the acting person's SEAT there FOR UPDATE (seat
- * standing is the trust basis — this endpoint is never an existence oracle), mint a FRESH
- * secret, insert the session born per the ONE rule, audit. The plaintext credential returns
+ * FURTHER workspace's session. ONE transaction, authorization resolved INSIDE it: lock the
+ * ACTING session row the presented bearer names (live, ACTIVE, unexpired — workspace-blind;
+ * the acting session's own workspace is irrelevant, the resolved PERSON is what matters) FOR
+ * UPDATE, so a revocation racing this mint serializes with it instead of leaving a window
+ * between resolve and insert; resolve the target workspace under the tenancy grammar (multi:
+ * by slug; single: the install's one workspace — a slug naming anything else is the uniform
+ * miss); lock the acting person's SEAT there FOR UPDATE (seat standing is the trust basis —
+ * this endpoint is never an existence oracle); mint a FRESH secret, insert the session born
+ * per the ONE rule, audit. Every miss is the same null. The plaintext credential returns
  * exactly once over the authenticated exchange, like the flow start returning its code.
  */
 export async function connectSession(
-  actor: { userId: string; display: string },
+  credential: string,
   workspaceSlug: string,
   requestedName: string,
 ): Promise<{
@@ -1388,6 +1403,23 @@ export async function connectSession(
   workspace: { workspaceId: string; name: string; displayName: string };
 } | null> {
   return await getDb().transaction(async (tx) => {
+    // The bearer resolves HERE, under lock — the same fail-closed discipline as the lane
+    // guard (hash computed in Postgres), but fenced: a session ended after this lock commits
+    // finds the mint already done; one ended before it answers the uniform miss.
+    const acting = await tx.execute(
+      sql`SELECT s.user_id, COALESCE(NULLIF(btrim(u.name), ''), u.email) AS display
+          FROM web.cli_session s
+          JOIN web."user" u ON u.id = s.user_id
+          JOIN ${workspace} w ON w.id = s.workspace_id
+          WHERE s.credential_sha256 = ${sha256OfText(credential)}
+            AND s.status = 'active'
+            AND ${sessionUnexpiredSql("s", "w")}
+          FOR UPDATE OF s`,
+    );
+    const actor = acting.rows[0] as { user_id: string; display: string } | undefined;
+    if (actor === undefined) {
+      return null;
+    }
     const rows =
       composition.tenancy === "multi"
         ? await tx.execute(
@@ -1407,7 +1439,7 @@ export async function connectSession(
     // FOR UPDATE: the seat is the authorization — a concurrent removal serializes with this
     // mint instead of racing it.
     const seats = await tx.execute(
-      sql`SELECT role FROM ${seat} WHERE workspace_id = ${ws.id} AND user_id = ${actor.userId}
+      sql`SELECT role FROM ${seat} WHERE workspace_id = ${ws.id} AND user_id = ${actor.user_id}
           FOR UPDATE`,
     );
     const seatRow = seats.rows[0] as { role: "owner" | "reviewer" | "member" } | undefined;
@@ -1415,26 +1447,26 @@ export async function connectSession(
       return null;
     }
     const born = sessionBornStatus(seatRow.role, await sessionApprovalKnobTx(tx, ws.id));
-    const credential = mintSecret();
+    const minted = mintSecret();
     const sessionId = mintSessionId();
     await tx.insert(cliSession).values({
       id: sessionId,
       workspaceId: ws.id,
-      userId: actor.userId,
+      userId: actor.user_id,
       displayName: requestedName,
-      credentialSha256: sql`${sha256OfText(credential)}` as never,
+      credentialSha256: sql`${sha256OfText(minted)}` as never,
       status: born,
     });
     await auditInTx(tx, {
       workspaceId: ws.id,
-      actor: { userId: actor.userId, display: actor.display },
+      actor: { userId: actor.user_id, display: actor.display },
       kind: "session_created",
       subject: sessionId,
       outcome: "ok",
       details: { requestedName, status: born, via: "connect" },
     });
     return {
-      credential,
+      credential: minted,
       sessionId,
       sessionStatus: born,
       workspace: { workspaceId: ws.id, name: ws.name, displayName: ws.display_name },

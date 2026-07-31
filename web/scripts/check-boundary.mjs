@@ -292,8 +292,9 @@ const SESSIONLESS_ROUTES = new Set([
   "api.v1.login-authorize",
   "api.v1.login-token",
   // The lane-side second connect: its bearer is ANY live active session on this server, so the
-  // workspace-scoped guard family cannot front it — the route resolves the credential itself
-  // (sessionUserByCredential, the same fail-closed discipline) and every miss is the uniform 404.
+  // workspace-scoped guard family cannot front it — the ceremony resolves the credential INSIDE
+  // its mint transaction (connectSession, the same fail-closed discipline, revocation-fenced)
+  // and every miss is the uniform 404.
   "api.v1.login-connect",
   // The logout: the presented credential IS the session it ends (possession is the
   // authorization); a dead credential answers the uniform 404.

@@ -1317,6 +1317,18 @@ describe("login connect (the lane-side second connect)", () => {
     await expectUniform404(res);
   });
 
+  it("a REVOKED session's credential is the uniform 404 — resolved inside the mint fence", async () => {
+    const res = await drive(
+      loginConnectAction,
+      req("POST", "/api/v1/login/connect", {
+        cred: CREDS.revoked,
+        body: { workspace: "team", requested_name: "zombie-box" },
+      }),
+      {},
+    );
+    await expectUniform404(res);
+  });
+
   it("a PENDING session's credential is refused — only an ACTIVE session connects onward", async () => {
     await seedSession(db, "sn_conn_pending", wsId, "u_mem", "pending");
     const res = await drive(

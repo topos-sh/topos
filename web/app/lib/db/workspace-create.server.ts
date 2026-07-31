@@ -58,11 +58,18 @@ export async function workspaceNameAvailable(name: string): Promise<boolean> {
 /**
  * The policy pre-checks `createWorkspace` runs BEFORE its transaction — exported so the
  * /verify approval's create arm can run the SAME gate + floor before entering its own fence
- * (byte-identical policy, one spelling). `ok` clears both.
+ * (byte-identical policy, one spelling). `ok` clears every gate.
  */
 export async function createWorkspacePrecheck(
   actor: UserActor,
 ): Promise<"ok" | "off" | "rate-limited"> {
+  // Self-serve creation is a MULTI surface, whatever the entitlements say: single tenancy IS
+  // its one boot-minted workspace, and a second row would break every LIMIT-1 resolution of
+  // it. `/new` never mounts there, but a crafted POST reaches the shared ceremony — so the
+  // surface reads OFF here, once, for every caller.
+  if (composition.tenancy !== "multi") {
+    return "off";
+  }
   // The composition may switch self-serve creation off entirely (OSS default: allow-all).
   const entitlements = await composition.entitlements.forWorkspace(null);
   if (!entitlements.allows("workspace-create")) {

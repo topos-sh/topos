@@ -171,7 +171,10 @@ export async function action({ request }: ActionFunctionArgs) {
   }
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");
-  const { loopback } = loopbackFrom(form);
+  // `device` rides the challenge-resolved card's forms: the wake-up redirect below fires only
+  // when the decided flow IS that exact loopback-bound flow (server-compared) — a typed-code
+  // card approved from a loopback-armed URL must not spend the listener's one wake.
+  const { device, loopback } = loopbackFrom(form);
 
   // ONE belt over all three arms: `approve` and `deny` resolve a flow by the same typed code
   // `lookup` does, so leaving them unbelted would just move an enumeration loop one intent to
@@ -212,18 +215,19 @@ export async function action({ request }: ActionFunctionArgs) {
       throw data(null, { status: 400 });
     }
     if (choice !== null && choice.kind === "create") {
-      // The create arm's field validation + the SAME policy pre-checks /new runs (entitlement
-      // gate + the per-person floor) — byte-identical refusal strings, then the fence.
+      // The SAME policy pre-checks /new runs (tenancy + entitlement gate + the per-person
+      // floor), then the field validation — byte-identical refusal strings, then the fence.
+      // Existence FIRST: on single tenancy (or creation switched off) the option does not
+      // exist, so a crafted POST answers the house 404 whatever its fields say.
+      const precheck = await createWorkspacePrecheck(actor);
+      if (precheck === "off") {
+        notFound();
+      }
       if (choice.displayName.length < 1 || choice.displayName.length > 100) {
         return await createRefused(userCode, actor, NAME_REQUIRED, choice, 400);
       }
       if (!isWorkspaceNameShape(choice.slug)) {
         return await createRefused(userCode, actor, SLUG_SHAPE, choice, 400);
-      }
-      const precheck = await createWorkspacePrecheck(actor);
-      if (precheck === "off") {
-        // The composition switched self-serve creation off — the option does not exist.
-        notFound();
       }
       if (precheck === "rate-limited") {
         return await createRefused(userCode, actor, CREATE_RATE_LIMITED, choice, 429);
@@ -243,9 +247,12 @@ export async function action({ request }: ActionFunctionArgs) {
       const choiceCreate = choice as Extract<LoginApproveChoice, { kind: "create" }>;
       return await createRefused(userCode, actor, ADDRESS_TAKEN, choiceCreate, 400);
     }
-    if (loopback !== null) {
+    if (loopback !== null && device !== null && approved.flowChallenge === device) {
       // The state-bound localhost hand-off — a pure accelerator that wakes the waiting CLI;
-      // its poll (the one completion mechanism) then runs the exchange that mints.
+      // its poll (the one completion mechanism) then runs the exchange that mints. Fired
+      // ONLY when the flow just approved is the exact loopback flow this page arrived armed
+      // for (its challenge, server-compared) — deciding any other card from the same URL
+      // shows the plain success and leaves the listener's one wake unspent.
       throw redirect(loopbackReturn(loopback, "approved"));
     }
     return {
@@ -259,10 +266,10 @@ export async function action({ request }: ActionFunctionArgs) {
     userId: actor.userId,
     display: actor.display,
   });
-  if (!denied) {
+  if (denied === null) {
     return data({ kind: "refused" as const, error: REQUEST_GONE }, { status: 400 });
   }
-  if (loopback !== null) {
+  if (loopback !== null && device !== null && denied.flowChallenge === device) {
     throw redirect(loopbackReturn(loopback, "denied"));
   }
   return { kind: "denied" as const };
@@ -361,6 +368,15 @@ export default function VerifyPage() {
         ? actionData.pending
         : (("resolved" in loaderData ? loaderData.resolved : null) ?? null);
 
+  // The listener pass-through rides ONLY the challenge-resolved flow's own card: a typed-code
+  // lookup of a DIFFERENT request on a loopback-armed URL renders without it, so deciding that
+  // card can never spend the waiting listener's one wake (the action re-verifies server-side —
+  // this is the honest client half of the same rule).
+  const resolvedFromLoader = ("resolved" in loaderData ? loaderData.resolved : null) ?? null;
+  const challenge = ("device" in loaderData ? loaderData.device : null) ?? null;
+  const fromChallenge =
+    resolvedFromLoader !== null && card !== null && card.userCode === resolvedFromLoader.userCode;
+
   return (
     <Shell>
       <div className="flex flex-col gap-6">
@@ -390,7 +406,8 @@ export default function VerifyPage() {
         {card !== null ? (
           <PendingRequest
             card={card}
-            loopback={loopback}
+            loopback={fromChallenge ? loopback : null}
+            challenge={fromChallenge ? challenge : null}
             chooser={chooser}
             multi={multi}
             origin={origin}
@@ -469,6 +486,7 @@ function initialPick(card: PendingLoginFlowView, chooser: ChooserData): Pick | n
 function PendingRequest({
   card,
   loopback,
+  challenge,
   chooser,
   multi,
   origin,
@@ -476,6 +494,9 @@ function PendingRequest({
 }: {
   card: PendingLoginFlowView;
   loopback: Loopback | null;
+  /** The flow's device-code-hash hex, present ONLY on the challenge-resolved flow's own card —
+   * the action fires the listener wake-up exactly when the decided flow matches it. */
+  challenge: string | null;
   chooser: ChooserData;
   multi: boolean;
   origin: string;
@@ -502,6 +523,7 @@ function PendingRequest({
           <input type="hidden" name="state" value={loopback.state} />
         </>
       )}
+      {challenge !== null && <input type="hidden" name="device" value={challenge} />}
     </>
   );
 

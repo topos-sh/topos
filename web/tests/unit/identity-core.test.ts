@@ -214,6 +214,12 @@ describe("the login flow", () => {
       SEAT,
     );
     expect(approved?.outcome).toBe("approved");
+    // A loopback approval carries the flow's OWN challenge (hex of its code hash — non-secret),
+    // so the page wakes the listener for exactly this flow and no other card.
+    const { createHash } = await import("node:crypto");
+    expect(approved?.outcome === "approved" && approved.flowChallenge).toBe(
+      createHash("sha256").update(flow.flowCode, "utf8").digest("hex"),
+    );
     expect(await identity.sessionActor(wsId, flow.flowCode)).toBeNull();
     const granted = await identity.pollLoginFlow(flow.flowCode);
     expect(granted.status).toBe("granted");
@@ -266,6 +272,32 @@ describe("the login flow", () => {
     await q(`DELETE FROM web.seat WHERE user_id = 'u_flip'`);
   });
 
+  it("a seat delete RACING the exchange serializes on the seat lock — expired, never a fault", async () => {
+    // The exchange locks the seat FOR UPDATE before minting. Without the lock, a delete
+    // committing between the seat read and the cli_session insert would fail the composite FK
+    // — a 500 to the poller. With it, the exchange blocks on the rival's lock and, once the
+    // delete commits, re-reads no seat: the honest terminal answer.
+    const identity = await import("@/lib/db/identity.server");
+    await seedUser("u_race", "Racer", "race@example.com");
+    await seatUser("u_race", "member");
+    const flow = await identity.startLoginFlow("race-box", null);
+    await identity.approveLoginFlow(flow.userCode, { userId: "u_race", display: "R" }, SEAT);
+    const rival = new Client({ connectionString: scratchUrl() });
+    await rival.connect();
+    try {
+      await rival.query("BEGIN");
+      await rival.query(`SELECT 1 FROM web.seat WHERE user_id = 'u_race' FOR UPDATE`);
+      const poll = identity.pollLoginFlow(flow.flowCode);
+      // Let the exchange reach the seat lock and block there before the rival deletes.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await rival.query(`DELETE FROM web.seat WHERE user_id = 'u_race'`);
+      await rival.query("COMMIT");
+      expect((await poll).status).toBe("expired");
+    } finally {
+      await rival.end();
+    }
+  });
+
   it("the challenge lookup resolves a LOOPBACK flow and refuses a DEVICE one", async () => {
     // The /verify pre-arm gate, in SQL. The challenge is derivable by whoever started the flow,
     // so only the binding can make pre-resolution safe.
@@ -293,7 +325,9 @@ describe("the login flow", () => {
     const owner = (await q(`SELECT user_id FROM web.seat WHERE role = 'owner'`))[0]
       ?.user_id as string;
     const flow = await identity.startLoginFlow("stolen-box", null);
-    expect(await identity.denyLoginFlow(flow.userCode, { userId: owner, display: "O" })).toBe(true);
+    expect(
+      await identity.denyLoginFlow(flow.userCode, { userId: owner, display: "O" }),
+    ).not.toBeNull();
     expect(
       await identity.approveLoginFlow(flow.userCode, { userId: owner, display: "O" }, SEAT),
     ).toBeNull();
@@ -306,9 +340,10 @@ describe("the login flow", () => {
     await seedUser("u_denier", "Denier", "denier@example.com");
     const flow = await identity.startLoginFlow("killed-box", null);
     // Any signed-in code-holder can kill a request to act as them — no seat exists to require.
-    expect(await identity.denyLoginFlow(flow.userCode, { userId: "u_denier", display: "D" })).toBe(
-      true,
-    );
+    // A device-bound flow answers with NO challenge: there is no listener to wake.
+    expect(
+      await identity.denyLoginFlow(flow.userCode, { userId: "u_denier", display: "D" }),
+    ).toEqual({ flowChallenge: null });
     expect((await identity.pollLoginFlow(flow.flowCode)).status).toBe("denied");
     const audits = await q(
       `SELECT workspace_id FROM web.audit_event
