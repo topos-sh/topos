@@ -39,18 +39,20 @@ Make sure \`~/.local/bin\` is on PATH before the next step.
 
 ## 2. Log in
 
-    topos login <workspace-address>
+    topos login
 
-This starts a browser approval: it prints an approval URL and a short code. Show
-that URL to your human — they open it, sign in, check the code matches, and approve the
-login. You cannot complete the approval yourself. The code expires after 15 minutes;
-re-running the command resumes or restarts the ceremony, and \`--wait\` blocks in one command
-until the approval settles.
+This starts a browser approval: it prints an approval URL and a short code. Show that URL to
+your human — they open it, sign in, choose (or create) the workspace right there, check the
+code matches, and approve the login. You cannot complete the approval yourself. The code
+expires after 15 minutes; re-running the command resumes or restarts the ceremony, and
+\`--wait\` blocks in one command until the approval settles. A known destination can ride the
+command: \`topos login <workspace>\` preselects it, \`topos login <server>\` targets a
+self-hosted origin, and an invitation link works verbatim.
 
-Approval mints a SESSION — this machine logged into that ONE workspace (another workspace is
-another \`topos login\`). The login states what connecting delivers; your profile's skills
-then land and stay current automatically — a session-start trigger runs
-\`topos update --quiet\` wherever you work.
+Approval logs this machine into that ONE workspace (another workspace is another
+\`topos login\` — browser-free when your human already belongs to it on this server). The
+login states what connecting delivers; your profile's skills then land and stay current
+automatically — a session-start trigger runs \`topos update --quiet\` wherever you work.
 
 ## 3. Verify
 
