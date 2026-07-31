@@ -27,13 +27,22 @@
 //!   descend, `mkdirat` when absent, re-`openat` after a create), so no path-based syscall runs
 //!   below the base and `mkdir -p` through a swapped ancestor is structurally impossible — the
 //!   held fd keeps naming the directory object that was proven or created, wherever its path now
-//!   points (the caller's post-create re-proof still backstops the final SPELLING);
+//!   points (the caller's post-create re-proof still backstops the final SPELLING); where the
+//!   base is itself an already-HELD handle, [`FsOps::create_dir_nofollow_at`] descends from that
+//!   fd directly — the base PATH is never re-opened, so a staging root swapped for an outward
+//!   symlink after its creation cannot re-aim the walk (the path-based variant remains only
+//!   where no handle is yet held);
 //! - [`DirHandle`] pins a PROVEN parent directory open across the window: the landing
 //!   rename/exchange runs *at the held fd* ([`FsOps::rename_at`] / [`FsOps::exchange_at`], safe
 //!   `rustix` `renameat`), after an `lstat`-vs-fd identity check, so even a swap in the final
 //!   beat moves bytes inside the directory object that was proven — never through the swapped
 //!   path — and the litter/probe removals beside it ride the same handle
-//!   ([`FsOps::remove_dir_all_at`]: `openat` + fd-anchored iteration + `unlinkat`).
+//!   ([`FsOps::remove_dir_all_at`]: `openat` + fd-anchored iteration + `unlinkat`). Where the
+//!   SOURCE of a landing move is a staged tree built under a held handle, the `_src` landings
+//!   ([`FsOps::exchange_at_src`] / [`FsOps::rename_at_noreplace_src`]) additionally re-open the
+//!   source leaf from the parent's fd and prove it `(dev, ino)`-identical to that staging handle
+//!   ([`DirHandle::verify_leaf_is`]) immediately before the namespace op — a completed stage
+//!   moved aside and SUBSTITUTED at its predictable name refuses instead of landing.
 //!
 //! Named residuals: `O_NOFOLLOW` guards only the final component (the directory walk + handle
 //! anchoring cover the ancestors); a whole REAL directory relocated after the proof keeps its
@@ -70,8 +79,8 @@ pub(crate) struct DirHandle {
 }
 
 impl DirHandle {
-    /// The path this handle was opened at (the test seam's trigger matching + recording).
-    #[cfg(test)]
+    /// The path this handle was opened at (leaf derivation for the `*_at` ops; the test seam's
+    /// trigger matching + recording).
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -91,6 +100,32 @@ impl DirHandle {
                 "{} no longer names the directory it was proven as (replaced since the \
                  containment proof); refusing to write through it",
                 self.path.display()
+            )))
+        }
+    }
+
+    /// Prove the entry `leaf` names inside `parent` is the very directory object THIS handle
+    /// holds: `openat(O_NOFOLLOW | O_DIRECTORY)` from the parent's held fd (a swapped-in symlink
+    /// or non-directory is met as itself and refused), fstat what the open returned, and compare
+    /// `(dev, ino)` against the capture taken when this handle was created. The landing's
+    /// SOURCE-identity check: a completed stage moved aside and substituted at its predictable
+    /// leaf name in the final beat earns a typed refusal, never a landing.
+    pub(crate) fn verify_leaf_is(&self, parent: &DirHandle, leaf: &str) -> io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let f = openat_dir_nofollow(&parent.file, leaf).map_err(|e| {
+            io::Error::other(format!(
+                "{} no longer opens as the directory staged there ({e}); refusing to land it",
+                parent.path.join(leaf).display()
+            ))
+        })?;
+        let meta = f.metadata()?;
+        if meta.dev() == self.dev && meta.ino() == self.ino {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "{} no longer names the directory staged there (replaced since the staging was \
+                 built); refusing to land it",
+                parent.path.join(leaf).display()
             )))
         }
     }
@@ -181,6 +216,18 @@ pub(crate) trait FsOps {
     /// held directory. The check runs at the held fd (`statat`, no-follow); the caller's writer
     /// lock closes the check→rename beat against topos's own writers.
     fn rename_at_noreplace(&self, h: &DirHandle, from: &str, to: &str) -> io::Result<()>;
+    /// [`FsOps::rename_at_noreplace`] for a landing whose SOURCE `from` is a stage built under a
+    /// held handle: immediately before the rename, `from` is re-opened from the parent's fd and
+    /// proven `(dev, ino)`-identical to `src` — the staging handle captured at construction
+    /// ([`DirHandle::verify_leaf_is`]). A completed stage moved aside and SUBSTITUTED at its
+    /// predictable name in the final beat is a typed refusal — nothing lands.
+    fn rename_at_noreplace_src(
+        &self,
+        h: &DirHandle,
+        from: &str,
+        to: &str,
+        src: &DirHandle,
+    ) -> io::Result<()>;
     /// Atomically exchange two EXISTING directories by LEAF names inside the held directory —
     /// one namespace operation (`RENAME_EXCHANGE` on Linux / `RENAME_SWAP` via `renameatx_np` on
     /// macOS — safe `rustix`, no `unsafe`) run at the handle's fd, after
@@ -189,6 +236,11 @@ pub(crate) trait FsOps {
     /// torn/mixed/partial state. Errors typed (e.g. `ENOTSUP` on an FS without the syscall) so
     /// the caller's capability fallback still works.
     fn exchange_at(&self, h: &DirHandle, a: &str, b: &str) -> io::Result<()>;
+    /// [`FsOps::exchange_at`] with [`FsOps::rename_at_noreplace_src`]'s source-identity proof:
+    /// immediately before the exchange, the leaf `a` is re-opened from the parent's fd and must
+    /// still be the very directory object `src` holds ([`DirHandle::verify_leaf_is`]) — a
+    /// substituted stage refuses, never swaps live.
+    fn exchange_at_src(&self, h: &DirHandle, a: &str, b: &str, src: &DirHandle) -> io::Result<()>;
     /// [`FsOps::remove_dir_all`] by LEAF name AT the held handle: the tree is opened
     /// `openat(O_NOFOLLOW | O_DIRECTORY)` from the handle's fd (after
     /// [`DirHandle::verify_unmoved`]) and deleted by fd-anchored iteration (`rustix` `Dir` +
@@ -242,6 +294,14 @@ pub(crate) trait FsOps {
     /// directory so the caller's next write can run at the very object the walk proved
     /// ([`FsOps::write_new_at`]).
     fn create_dir_nofollow(&self, base: &Path, dir: &Path) -> io::Result<DirHandle>;
+    /// [`FsOps::create_dir_nofollow`] whose BASE is an already-HELD handle: the walk descends
+    /// from the handle's fd itself instead of re-opening the base PATH (a staging root's
+    /// pathname is predictable and mutable, and the path open carries only `O_DIRECTORY` — a
+    /// re-open would follow whatever was swapped in at it). `dir` must sit lexically under the
+    /// path the handle was opened at; every component below rides the same `openat`/`mkdirat`
+    /// discipline and the final HELD handle is returned. The staging constructors' primitive —
+    /// the path-based variant remains only where no handle is yet held.
+    fn create_dir_nofollow_at(&self, base: &DirHandle, dir: &Path) -> io::Result<DirHandle>;
 }
 
 /// The production seam: `std::fs` + `rustix` safe syscalls.
@@ -338,7 +398,35 @@ impl RealFs {
     /// created, wherever its path now points. `observe` is the test seam's beat — fired with each
     /// component's full path immediately before that component is opened-or-created.
     fn create_dir_walk(base: &Path, dir: &Path, observe: &dyn Fn(&Path)) -> io::Result<DirHandle> {
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        use std::os::unix::fs::OpenOptionsExt;
+        let base_flags = rustix::fs::OFlags::DIRECTORY.bits() as i32;
+        let cur = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(base_flags)
+            .open(base)?;
+        Self::create_dir_walk_from(cur, base, dir, observe)
+    }
+
+    /// [`RealFs::create_dir_walk`] whose base is an already-HELD handle (the
+    /// [`FsOps::create_dir_nofollow_at`] body): only the base ACQUISITION differs — the walk
+    /// starts from a dup of the held fd, so the base pathname is never re-resolved.
+    fn create_dir_walk_at(
+        base: &DirHandle,
+        dir: &Path,
+        observe: &dyn Fn(&Path),
+    ) -> io::Result<DirHandle> {
+        Self::create_dir_walk_from(base.file.try_clone()?, &base.path, dir, observe)
+    }
+
+    /// The shared component loop behind both walks: `cur` is the already-open base fd, `base`
+    /// its proof-time path (the lexical anchor `dir` must sit under).
+    fn create_dir_walk_from(
+        cur: File,
+        base: &Path,
+        dir: &Path,
+        observe: &dyn Fn(&Path),
+    ) -> io::Result<DirHandle> {
+        use std::os::unix::fs::MetadataExt;
         use std::path::Component;
         let rel = dir.strip_prefix(base).map_err(|_| {
             io::Error::other(format!(
@@ -347,11 +435,7 @@ impl RealFs {
                 base.display()
             ))
         })?;
-        let base_flags = rustix::fs::OFlags::DIRECTORY.bits() as i32;
-        let mut cur = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(base_flags)
-            .open(base)?;
+        let mut cur = cur;
         let mut cur_path = base.to_path_buf();
         for comp in rel.components() {
             let name = match comp {
@@ -675,6 +759,24 @@ impl FsOps for RealFs {
         rustix::fs::renameat(&h.file, from, &h.file, to).map_err(io::Error::from)
     }
 
+    fn rename_at_noreplace_src(
+        &self,
+        h: &DirHandle,
+        from: &str,
+        to: &str,
+        src: &DirHandle,
+    ) -> io::Result<()> {
+        // The staged SOURCE's identity, immediately before the namespace op (the op's own
+        // `verify_unmoved` then re-proves the parent in the same beat).
+        src.verify_leaf_is(h, from)?;
+        self.rename_at_noreplace(h, from, to)
+    }
+
+    fn exchange_at_src(&self, h: &DirHandle, a: &str, b: &str, src: &DirHandle) -> io::Result<()> {
+        src.verify_leaf_is(h, a)?;
+        self.exchange_at(h, a, b)
+    }
+
     fn exchange_at(&self, h: &DirHandle, a: &str, b: &str) -> io::Result<()> {
         h.verify_unmoved()?;
         #[cfg(any(
@@ -806,6 +908,10 @@ impl FsOps for RealFs {
 
     fn create_dir_nofollow(&self, base: &Path, dir: &Path) -> io::Result<DirHandle> {
         Self::create_dir_walk(base, dir, &|_| {})
+    }
+
+    fn create_dir_nofollow_at(&self, base: &DirHandle, dir: &Path) -> io::Result<DirHandle> {
+        Self::create_dir_walk_at(base, dir, &|_| {})
     }
 }
 
@@ -1298,6 +1404,22 @@ mod hook {
             );
             self.inner.rename_at_noreplace(h, from, to)
         }
+        fn rename_at_noreplace_src(
+            &self,
+            h: &DirHandle,
+            from: &str,
+            to: &str,
+            src: &DirHandle,
+        ) -> io::Result<()> {
+            // The same before-move beat as the unverified op — fired BEFORE the source-identity
+            // proof runs, so a test's substitution at this exact instant must still be refused.
+            let joined = h.path().join(from);
+            self.maybe_fire(
+                matches!(&self.trigger, Trigger::FirstMoveOf { dir } if *dir == joined),
+                1,
+            );
+            self.inner.rename_at_noreplace_src(h, from, to, src)
+        }
         fn exchange_at(&self, h: &DirHandle, a: &str, b: &str) -> io::Result<()> {
             let (ja, jb) = (h.path().join(a), h.path().join(b));
             self.maybe_fire(
@@ -1305,6 +1427,20 @@ mod hook {
                 1,
             );
             self.inner.exchange_at(h, a, b)
+        }
+        fn exchange_at_src(
+            &self,
+            h: &DirHandle,
+            a: &str,
+            b: &str,
+            src: &DirHandle,
+        ) -> io::Result<()> {
+            let (ja, jb) = (h.path().join(a), h.path().join(b));
+            self.maybe_fire(
+                matches!(&self.trigger, Trigger::FirstMoveOf { dir } if *dir == ja || *dir == jb),
+                1,
+            );
+            self.inner.exchange_at_src(h, a, b, src)
         }
         fn create_dir_nofollow(&self, base: &Path, dir: &Path) -> io::Result<DirHandle> {
             let (matched, nth) = match &self.trigger {
@@ -1323,6 +1459,25 @@ mod hook {
                 });
             }
             self.inner.create_dir_nofollow(base, dir)
+        }
+        fn create_dir_nofollow_at(&self, base: &DirHandle, dir: &Path) -> io::Result<DirHandle> {
+            // The same beats as the path-based arm: the Nth-create trigger fires BEFORE the walk
+            // (so a test can swap the base pathname there and prove the held fd ignores it), and
+            // the component trigger lands inside the walk.
+            let (matched, nth) = match &self.trigger {
+                Trigger::NthCreateDirAll { target, nth } => (target == dir, *nth),
+                _ => (false, 0),
+            };
+            self.maybe_fire(matched, nth);
+            if matches!(&self.trigger, Trigger::BeforeComponentOf { .. }) {
+                return RealFs::create_dir_walk_at(base, dir, &|cur| {
+                    self.maybe_fire(
+                        matches!(&self.trigger, Trigger::BeforeComponentOf { target } if target == cur),
+                        1,
+                    );
+                });
+            }
+            self.inner.create_dir_nofollow_at(base, dir)
         }
         fn remove_dir_all_at(&self, h: &DirHandle, leaf: &str) -> io::Result<()> {
             self.inner.remove_dir_all_at(h, leaf)
@@ -1488,13 +1643,37 @@ mod fault {
             self.tick()?;
             self.inner.rename_at_noreplace(h, from, to)
         }
+        fn rename_at_noreplace_src(
+            &self,
+            h: &DirHandle,
+            from: &str,
+            to: &str,
+            src: &DirHandle,
+        ) -> io::Result<()> {
+            self.tick()?;
+            self.inner.rename_at_noreplace_src(h, from, to, src)
+        }
         fn exchange_at(&self, h: &DirHandle, a: &str, b: &str) -> io::Result<()> {
             self.tick()?;
             self.inner.exchange_at(h, a, b)
         }
+        fn exchange_at_src(
+            &self,
+            h: &DirHandle,
+            a: &str,
+            b: &str,
+            src: &DirHandle,
+        ) -> io::Result<()> {
+            self.tick()?;
+            self.inner.exchange_at_src(h, a, b, src)
+        }
         fn create_dir_nofollow(&self, base: &Path, dir: &Path) -> io::Result<DirHandle> {
             self.tick()?;
             self.inner.create_dir_nofollow(base, dir)
+        }
+        fn create_dir_nofollow_at(&self, base: &DirHandle, dir: &Path) -> io::Result<DirHandle> {
+            self.tick()?;
+            self.inner.create_dir_nofollow_at(base, dir)
         }
         fn remove_dir_all_at(&self, h: &DirHandle, leaf: &str) -> io::Result<()> {
             self.tick()?;

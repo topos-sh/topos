@@ -2088,9 +2088,29 @@ impl FsOps for RecordingFs {
         self.record("rename_at_noreplace", &h.path().join(to));
         self.inner.rename_at_noreplace(h, from, to)
     }
+    fn rename_at_noreplace_src(
+        &self,
+        h: &crate::fs_seam::DirHandle,
+        from: &str,
+        to: &str,
+        src: &crate::fs_seam::DirHandle,
+    ) -> std::io::Result<()> {
+        self.record("rename_at_noreplace_src", &h.path().join(to));
+        self.inner.rename_at_noreplace_src(h, from, to, src)
+    }
     fn exchange_at(&self, h: &crate::fs_seam::DirHandle, a: &str, b: &str) -> std::io::Result<()> {
         self.record("exchange_at", &h.path().join(b));
         self.inner.exchange_at(h, a, b)
+    }
+    fn exchange_at_src(
+        &self,
+        h: &crate::fs_seam::DirHandle,
+        a: &str,
+        b: &str,
+        src: &crate::fs_seam::DirHandle,
+    ) -> std::io::Result<()> {
+        self.record("exchange_at_src", &h.path().join(b));
+        self.inner.exchange_at_src(h, a, b, src)
     }
     fn create_dir_nofollow(
         &self,
@@ -2099,6 +2119,14 @@ impl FsOps for RecordingFs {
     ) -> std::io::Result<crate::fs_seam::DirHandle> {
         self.record("create_dir_nofollow", dir);
         self.inner.create_dir_nofollow(base, dir)
+    }
+    fn create_dir_nofollow_at(
+        &self,
+        base: &crate::fs_seam::DirHandle,
+        dir: &Path,
+    ) -> std::io::Result<crate::fs_seam::DirHandle> {
+        self.record("create_dir_nofollow_at", dir);
+        self.inner.create_dir_nofollow_at(base, dir)
     }
     fn remove_dir_all_at(&self, h: &crate::fs_seam::DirHandle, leaf: &str) -> std::io::Result<()> {
         self.record("remove_dir_all_at", &h.path().join(leaf));

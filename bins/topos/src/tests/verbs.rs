@@ -403,6 +403,117 @@ fn add_remote_refuses_a_destination_filled_in_the_instant_before_the_park() {
     );
 }
 
+/// P1: the import's staged tree must never be re-resolved through the stage's mutable PATHNAME.
+/// The stage is swapped for an outward symlink AFTER its creation — immediately before the walk
+/// that creates a nested file-parent, BEFORE that file's staged write — where a path-based base
+/// re-open would follow the link and land archive bytes outside the proven root. The
+/// fd-descended walk keeps every create inside the directory object this run built, and the
+/// staged write's identity check refuses the import: typed refusal, zero bytes outside.
+#[test]
+fn add_remote_a_stage_swapped_for_a_symlink_mid_write_cannot_aim_bytes_outside() {
+    let targz = build_repo_tarball(
+        "o-r-abc1234",
+        &[
+            ("skills/alpha/SKILL.md", b"# alpha\n", 0o644),
+            ("skills/alpha/reference/notes.md", b"notes\n", 0o644),
+        ],
+    );
+    let git = FakeGit(targz);
+    let spec = github_spec("o", "r", None);
+    let h = Harness::new("stage-symlink");
+    let project = Scratch::new("stage-symlink-proj");
+    let victim = Scratch::new("stage-symlink-victim");
+    let skills_root = project.0.join(".claude/skills");
+    let stage = skills_root.join(".topos-import-alpha");
+    let stolen = skills_root.join("stolen-stage");
+    let (st, sto, vic) = (stage.clone(), stolen.clone(), victim.0.clone());
+    let racer =
+        crate::fs_seam::HookFs::before_nth_create_dir_all(&stage.join("reference"), 1, move || {
+            std::fs::rename(&st, &sto).unwrap();
+            std::os::unix::fs::symlink(&vic, &st).unwrap();
+        });
+    let ctx = Ctx {
+        fs: &racer,
+        ..h.ctx()
+    };
+    let roots = ops::DiscoveryRoots {
+        home: h.home.0.clone(),
+        cwd: Some(project.0.clone()),
+    };
+    let opts = ops::AddRemoteOpts {
+        skill: Some("alpha".into()),
+        harness: None,
+        global: false,
+    };
+    let err = ops::add_remote(&ctx, &git, &spec, &roots, &opts);
+    assert!(err.is_err(), "the swapped stage must refuse the import");
+    assert_eq!(
+        std::fs::read_dir(&victim.0).unwrap().count(),
+        0,
+        "zero bytes landed outside — the symlink was never followed"
+    );
+    assert!(
+        !skills_root.join("alpha").exists(),
+        "the import did not land"
+    );
+}
+
+/// P1: the landing rename verifies the STAGE leaf still names the tree this run built. The
+/// completed stage is moved aside and a substitute skill dir put at its predictable name
+/// immediately BEFORE the landing rename (inside the op, after the before-move beat): typed
+/// refusal, the prior occupant is restored, the substitute never lands, nothing is adopted.
+#[test]
+fn add_remote_refuses_a_stage_substituted_at_its_leaf_before_the_landing_rename() {
+    let targz = build_repo_tarball(
+        "o-r-abc1234",
+        &[("skills/alpha/SKILL.md", b"# alpha\n", 0o644)],
+    );
+    let git = FakeGit(targz);
+    let spec = github_spec("o", "r", None);
+    let h = Harness::new("stage-substitute");
+    let project = Scratch::new("stage-substitute-proj");
+    let skills_root = project.0.join(".claude/skills");
+    let dest = skills_root.join("alpha");
+    // An EMPTY destination passes the up-front check and is PARKED before the landing — what a
+    // refused landing must put back.
+    std::fs::create_dir_all(&dest).unwrap();
+    let stage = skills_root.join(".topos-import-alpha");
+    let stolen = skills_root.join("stolen-stage");
+    let (st, sto) = (stage.clone(), stolen.clone());
+    let racer = crate::fs_seam::HookFs::before_first_move_of(&stage, move || {
+        std::fs::rename(&st, &sto).unwrap();
+        std::fs::create_dir_all(&st).unwrap();
+        std::fs::write(st.join("SKILL.md"), b"# hijacked\n").unwrap();
+    });
+    let ctx = Ctx {
+        fs: &racer,
+        ..h.ctx()
+    };
+    let roots = ops::DiscoveryRoots {
+        home: h.home.0.clone(),
+        cwd: Some(project.0.clone()),
+    };
+    let opts = ops::AddRemoteOpts {
+        skill: Some("alpha".into()),
+        harness: None,
+        global: false,
+    };
+    let err = ops::add_remote(&ctx, &git, &spec, &roots, &opts);
+    assert!(err.is_err(), "a substituted stage must refuse the landing");
+    // The prior (empty) occupant is back where it was; the substitute's bytes never landed.
+    assert!(dest.is_dir(), "the parked destination was restored");
+    assert!(
+        !dest.join("SKILL.md").exists(),
+        "the substitute never lands"
+    );
+    // Nothing was adopted: no digest recorded, no tracked skill minted.
+    let sidecar_skills = h.home.0.join("skills");
+    let tracked = std::fs::read_dir(&sidecar_skills)
+        .map(|rd| rd.count())
+        .unwrap_or(0);
+    assert_eq!(tracked, 0, "no skill was adopted from a substituted stage");
+}
+
 /// A FAILED adopt after the landing rename must not delete the destination blind: an edit landing
 /// the instant the rename completes is a byte the cleanup would destroy. The error path now PARKS
 /// the destination (journaled), drops it only when it still holds exactly what this run staged,
