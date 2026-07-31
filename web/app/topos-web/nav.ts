@@ -36,6 +36,15 @@ export interface NavEntry {
 /** The OSS app's own entries — the base every composition starts from. */
 export const ossNav: NavEntry[] = [
   {
+    // The person's own assignments page — the primary surface for a non-technical
+    // member, so it rides the always-visible workspace section, not the account menu.
+    id: "your-skills",
+    label: "Your skills",
+    href: (ctx) => (ctx.wsBase === null ? null : `${ctx.wsBase}/profile`),
+    icon: "layers",
+    section: "workspace",
+  },
+  {
     id: "workspace-members",
     label: "Members",
     href: (ctx) => (ctx.wsBase === null ? null : `${ctx.wsBase}/members`),
