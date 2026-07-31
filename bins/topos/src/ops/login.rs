@@ -217,11 +217,10 @@ pub(crate) fn login(
                 if same {
                     return resume(ctx, connectors, &wal);
                 }
-                // `login <B>` while a flow toward A is pending: THE LATEST COMMAND WINS. Nothing
-                // is minted server-side until this client polls, so an abandoned flow can never
-                // become a session — dropping it costs nothing, and refusing would strand the
-                // person behind a ceremony they have already moved on from.
-                enroll::delete_wal(ctx.fs, &ctx.layout)?;
+                // `login <B>` while a flow toward A is pending: THE LATEST COMMAND WINS — refusing
+                // would strand the person behind a ceremony they have already moved on from. The
+                // old flow is SETTLED first, never merely dropped: it may already have minted.
+                settle_abandoned(ctx, connectors, &wal)?;
             }
             enroll::EnrollIntentDoc::Retired => {
                 return Err(ClientError::Enrollment(
@@ -438,32 +437,72 @@ fn resume(
             ))
         }
         DeviceAuthPoll::Granted(grant) => {
-            let status = match grant.link_status {
-                LinkStatus::Active => SESSION_ACTIVE,
-                LinkStatus::Pending => SESSION_PENDING,
-            };
-            // The manifest-grammar host: the address host the human typed, else (a pre-field WAL)
-            // the API base's own host.
-            let host = if wal.host.is_empty() {
-                host_of(&wal.base_url)
-            } else {
-                wal.host.clone()
-            };
-            let session = Session {
-                host,
-                base_url: wal.base_url.clone(),
-                workspace_id: grant.workspace.workspace_id,
-                workspace_name: grant.workspace.name,
-                display_name: grant.workspace.display_name,
-                session_id: grant.session_id,
-                credential: grant.credential,
-                status: status.to_owned(),
-                logged_in_at: i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX),
-            };
-            sessions::upsert_session(ctx.fs, &ctx.layout, session.clone())?;
-            enroll::delete_wal(ctx.fs, &ctx.layout)?;
+            let session = persist_grant(ctx, wal, grant)?;
             Ok(connected_receipt(ctx, connectors, &session))
         }
+    }
+}
+
+/// Persist a GRANTED flow's session and retire its WAL — the one place a grant becomes a durable
+/// session row, so the ordinary resume and the settle of an abandoned flow record it identically.
+/// The row lands BEFORE the WAL dies: the flow code in that WAL is the only handle on the minted
+/// credential, so it is discarded only once the credential is safely on disk (a crash between the
+/// two re-polls the same grant, which answers the same session).
+fn persist_grant(
+    ctx: &Ctx<'_>,
+    wal: &enroll::PendingEnrollment,
+    grant: crate::plane::EnrolledGrant,
+) -> Result<Session, ClientError> {
+    let status = match grant.link_status {
+        LinkStatus::Active => SESSION_ACTIVE,
+        LinkStatus::Pending => SESSION_PENDING,
+    };
+    // The manifest-grammar host: the address host the human typed, else (a pre-field WAL) the API
+    // base's own host.
+    let host = if wal.host.is_empty() {
+        host_of(&wal.base_url)
+    } else {
+        wal.host.clone()
+    };
+    let session = Session {
+        host,
+        base_url: wal.base_url.clone(),
+        workspace_id: grant.workspace.workspace_id,
+        workspace_name: grant.workspace.name,
+        display_name: grant.workspace.display_name,
+        session_id: grant.session_id,
+        credential: grant.credential,
+        status: status.to_owned(),
+        logged_in_at: i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX),
+    };
+    sessions::upsert_session(ctx.fs, &ctx.layout, session.clone())?;
+    enroll::delete_wal(ctx.fs, &ctx.layout)?;
+    Ok(session)
+}
+
+/// SETTLE an abandoned flow before its WAL is discarded, so `login <B>` can never throw away a
+/// session that already exists. The exchange can COMMIT server-side while its response is lost —
+/// the flow code in the WAL is then the only copy of a minted credential, and deleting it would
+/// strand a live session nobody can reach. So: one best-effort poll. Granted ⇒ keep that session
+/// through the whole granted tail, exactly as if this command had completed it (it shows up in
+/// `topos status` and its skills arrive on the next update); the receipt that prints is still the
+/// NEW login's, because the latest command is what the person asked for. Anything else — pending,
+/// denied, expired, or an unreachable server — is nothing to keep: an unpolled flow can never have
+/// minted, and a dead old server must not block the login just asked for.
+fn settle_abandoned(
+    ctx: &Ctx<'_>,
+    connectors: &LoginConnectors<'_>,
+    wal: &enroll::PendingEnrollment,
+) -> Result<(), ClientError> {
+    match (connectors.enroll)(&wal.base_url).device_auth_poll(&wal.device_code) {
+        Ok(DeviceAuthPoll::Granted(grant)) => {
+            // An io failure here propagates with the WAL intact — the next run settles it again
+            // rather than losing the credential quietly.
+            let session = persist_grant(ctx, wal, grant)?;
+            let _settled = connected_receipt(ctx, connectors, &session);
+            Ok(())
+        }
+        _ => enroll::delete_wal(ctx.fs, &ctx.layout),
     }
 }
 
@@ -824,12 +863,16 @@ mod tests {
     #[derive(Clone, Default)]
     struct FakeEnroll {
         polls: Rc<RefCell<Vec<DeviceAuthPoll>>>,
+        /// When set, every poll answers this transport fault instead of the script (an old
+        /// server gone unreachable).
+        poll_fault: Rc<RefCell<Option<String>>>,
         starts: Rc<RefCell<Vec<StartRecord>>>,
     }
     impl FakeEnroll {
         fn scripted(polls: Vec<DeviceAuthPoll>) -> Self {
             Self {
                 polls: Rc::new(RefCell::new(polls)),
+                poll_fault: Rc::default(),
                 starts: Rc::default(),
             }
         }
@@ -862,6 +905,9 @@ mod tests {
         }
         fn device_auth_poll(&self, device_code: &str) -> Result<DeviceAuthPoll, ClientError> {
             assert_eq!(device_code, "flow-secret");
+            if let Some(fault) = self.poll_fault.borrow().as_ref() {
+                return Err(ClientError::Plane(fault.clone()));
+            }
             Ok(self.polls.borrow_mut().remove(0))
         }
     }
@@ -1092,37 +1138,85 @@ mod tests {
     }
 
     #[test]
-    fn a_differently_targeted_login_restarts_the_flow() {
-        let home = scratch("restart");
+    fn a_restart_settles_a_granted_flow_before_dropping_it() {
+        let home = scratch("restart-settle");
         with_ctx(&home, |ctx| {
-            let rig = Rig::new(Vec::new());
+            // The exchange can COMMIT server-side while its answer is lost — the WAL's flow code
+            // is then the only handle on a minted credential. A restart SETTLES the old flow
+            // first; binning it would strand a live session nobody on this machine can reach.
+            let rig = Rig::new(vec![granted(LinkStatus::Active)]);
             rig.with(|connectors| {
                 login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
-                // THE LATEST COMMAND WINS: nothing is minted server-side until this client polls,
-                // so an abandoned flow can never become a session — the new target starts fresh
-                // rather than resuming a ceremony the person has moved on from.
-                let next = login(ctx, connectors, Some("topos.example.com/ops"), false).unwrap();
+                let next = login(ctx, connectors, Some("other.example.com/ops"), false).unwrap();
+                // THE LATEST COMMAND WINS: the receipt that prints is the new login's.
                 assert!(next.pending.is_some());
-                assert_eq!(next.name, "ops");
-                let wal = enroll::read_wal(ctx.fs, &ctx.layout).unwrap().unwrap();
-                assert_eq!(wal.preselect, "ops");
                 assert_eq!(
-                    rig.enroll.starts.borrow().as_slice(),
-                    &[
-                        (Some("eng".to_owned()), false),
-                        (Some("ops".to_owned()), false)
-                    ]
+                    (next.host.as_str(), next.name.as_str()),
+                    ("other.example.com", "ops")
                 );
-                // A BARE re-invoke still resumes what is pending (it names no other target).
-                rig.enroll.polls.borrow_mut().push(DeviceAuthPoll::Pending);
-                assert!(
-                    login(ctx, connectors, None, false)
-                        .unwrap()
-                        .pending
-                        .is_some()
+                let wal = enroll::read_wal(ctx.fs, &ctx.layout).unwrap().unwrap();
+                assert_eq!(
+                    (wal.host.as_str(), wal.preselect.as_str()),
+                    ("other.example.com", "ops")
                 );
             });
+            // The settled session is kept WHOLE — indistinguishable from one this command
+            // completed, which is what `topos status` and the next update will act on.
+            let all = sessions::read_sessions(ctx.fs, &ctx.layout).unwrap();
+            assert_eq!(all.sessions.len(), 1);
+            let s = &all.sessions[0];
+            assert_eq!(
+                (
+                    s.host.as_str(),
+                    s.workspace_name.as_str(),
+                    s.status.as_str()
+                ),
+                ("topos.example.com", "eng", SESSION_ACTIVE)
+            );
+            assert_eq!(s.credential, "sess-secret");
         });
+    }
+
+    #[test]
+    fn a_restart_drops_a_flow_that_settled_nothing() {
+        // Pending / denied / expired / an unreachable old server: an unpolled flow can never have
+        // minted, and a dead server must never block the login just asked for.
+        for (tag, script, fault) in [
+            ("pending", vec![DeviceAuthPoll::Pending], None),
+            ("denied", vec![DeviceAuthPoll::Denied], None),
+            ("expired", vec![DeviceAuthPoll::Expired], None),
+            ("unreachable", Vec::new(), Some("unreachable")),
+        ] {
+            let home = scratch(&format!("restart-{tag}"));
+            with_ctx(&home, |ctx| {
+                let rig = Rig::new(script);
+                *rig.enroll.poll_fault.borrow_mut() = fault.map(str::to_owned);
+                rig.with(|connectors| {
+                    login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
+                    let next =
+                        login(ctx, connectors, Some("topos.example.com/ops"), false).unwrap();
+                    assert!(next.pending.is_some(), "{tag}");
+                    assert_eq!(next.name, "ops", "{tag}");
+                    let wal = enroll::read_wal(ctx.fs, &ctx.layout).unwrap().unwrap();
+                    assert_eq!(wal.preselect, "ops", "{tag}");
+                    assert_eq!(
+                        rig.enroll.starts.borrow().as_slice(),
+                        &[
+                            (Some("eng".to_owned()), false),
+                            (Some("ops".to_owned()), false)
+                        ],
+                        "{tag}"
+                    );
+                });
+                assert!(
+                    sessions::read_sessions(ctx.fs, &ctx.layout)
+                        .unwrap()
+                        .sessions
+                        .is_empty(),
+                    "{tag}: nothing settled, so nothing is kept"
+                );
+            });
+        }
     }
 
     #[test]
