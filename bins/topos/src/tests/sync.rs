@@ -2117,6 +2117,20 @@ impl FsOps for RecordingFs {
         self.record("write_new_at", &h.path().join(leaf));
         self.inner.write_new_at(h, leaf, bytes)
     }
+    fn write_staged_at(
+        &self,
+        h: &crate::fs_seam::DirHandle,
+        leaf: &str,
+        bytes: &[u8],
+        executable: bool,
+    ) -> std::io::Result<()> {
+        self.record("write_staged_at", &h.path().join(leaf));
+        self.inner.write_staged_at(h, leaf, bytes, executable)
+    }
+    fn rename_file_noreplace(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        self.record("rename_file_noreplace", to);
+        self.inner.rename_file_noreplace(from, to)
+    }
     fn read_opt(&self, path: &Path) -> std::io::Result<Option<Vec<u8>>> {
         self.inner.read_opt(path)
     }

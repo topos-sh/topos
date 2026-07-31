@@ -29,15 +29,20 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   `RENAME_SWAP` on macOS) — the primitive a byte-writing *update* uses to overwrite a harness dir. A
   test-only `FaultFs` fails the Nth op for the crash gate. The **no-follow write boundary**: every
   file open in the seam carries `O_NOFOLLOW` (with the forced mode applied through the already-open
-  fd — `fchmod`, never a path chmod), `create_dir_nofollow` builds directories at DIRECTORY HANDLES
+  fd — `fchmod`, never a path chmod — and BEFORE any byte is written, so a pre-existing permissive
+  file never exposes freshly-written secret bytes, not even to a crash), `create_dir_nofollow`
+  builds directories at DIRECTORY HANDLES
   below a proven base (each component `openat`/`mkdirat` from its parent's held fd — no path-based
   syscall below the base — returning the final held handle), persisted-doc reads are `O_NOFOLLOW`
   too (a symlinked `lock.json` reads as unreadable, never absent), and a held **`DirHandle`**
   (dev+ino captured at proof time, re-verified immediately before each op) anchors the landing
-  renames/exchanges AND the litter/probe removals
+  renames/exchanges, the staged-tree file writes, AND the litter/probe/staging removals
   (`rename_at`/`rename_at_noreplace`/`exchange_at`/`remove_dir_all_at`/`create_dir_at`/
-  `write_new_at`, all `*at` against the held fd) — so a containment proof survives to the write it
-  authorizes (residuals named in the module doc). The **private-file primitives** (`write_private`
+  `write_new_at`/`write_staged_at`, all `*at` against the held fd) — so a containment proof
+  survives to the write it
+  authorizes (residuals named in the module doc); `rename_file_noreplace` (kernel
+  `RENAME_NOREPLACE`/`RENAME_EXCL`, else the link+unlink dance) is the exclusive file-birth
+  landing. The **private-file primitives** (`write_private`
   0600-from-creation, `private_perms_ok`, `atomic_write_private`, the `read_doc_private`/`write_doc_private`
   pair) carry every secret: `identity/sessions.json` and the login WAL.
 - **Crash-safe docs** (`atomic`, `doc`) — atomic write (temp → fsync → rename → fsync-dir; never in
@@ -96,7 +101,10 @@ no profile row op, and no device-link lane; `follow`/`unfollow`/`channel` are go
   global file) and owns FILE BIRTH: any path topos creates is written MATERIALIZED first (the global file
   gets the header plus one feed row per connected workspace, a project file the commented template), then
   the requested edit runs; a hand-written file is never materialized, and a born file STAYS even when a
-  gate refuses the act that birthed it (the receipt says so). `init` creates a file without an edit.
+  gate refuses the act that birthed it (the receipt says so). A birth LANDS by exclusive no-replace
+  create (`atomic_write_new`): a file an outside editor wrote after the absence check refuses typed
+  `MANIFEST_EXISTS` with the outside bytes standing — `init` (which creates a file without an edit)
+  answers the same race as its existing-file no-op receipt.
   Every manifest mutation is a read-modify-write, so every one of them — `add`, `remove`, `fmt`,
   `init`, login's feed-row append, publish's governance rewrite — takes the file's own WRITER LOCK
   (an `flock` in the home store's `locks/`, keyed by a stable hash of the manifest path) across

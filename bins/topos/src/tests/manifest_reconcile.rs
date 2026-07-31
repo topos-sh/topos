@@ -4894,6 +4894,53 @@ fn an_edit_landing_at_the_write_rename_boundary_is_refused_by_the_compare_and_sw
     ));
 }
 
+#[test]
+fn a_manifest_birth_racing_an_outside_writer_refuses_manifest_exists() {
+    // The BIRTH half of the outside-writer window: `add -g` on a machine with NO global file
+    // stages the materialized seed, and an outside editor lands its own file at the last
+    // catchable instant — after the absence check, immediately before the no-replace rename. A
+    // birth is a claim the file does not exist; the exclusive create refuses typed
+    // MANIFEST_EXISTS, the outside document stands byte-for-byte, and the staged seed is
+    // discarded — never an overwrite.
+    let rig = Rig::new("birth-race");
+    rig.seed_session();
+    let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+    let v = one_file(b"# deploy\n");
+    let plane = FakePlane::new(log).with_version("s_deploy", &v);
+    plane.serves(Vec::new());
+    let dir = FakeDirectory::new(vec![catalog_entry("s_deploy", "deploy", &v)], Vec::new());
+    let manifest = rig.layout().home().join(crate::manifest::MANIFEST_FILE);
+    assert!(!manifest.exists(), "the race needs a birth, not an edit");
+    let tmp = crate::atomic::temp_path(&manifest);
+    let outside = "# an outside editor's file\n[bundles]\n\"./mine\" = \"*\"\n";
+    let racing = manifest.clone();
+    let fs = crate::fs_seam::HookFs::before_first_move_of(&tmp, move || {
+        std::fs::write(&racing, outside).unwrap();
+    });
+    let ctx = Ctx {
+        fs: &fs,
+        ..rig.ctx_at(Some(&rig.work.0))
+    };
+    let err = match ops::add_reference(
+        &ctx,
+        &connect(&plane, &dir),
+        None,
+        &format!("@{WS_NAME}/deploy"),
+        true,
+        false,
+    ) {
+        Err(e) => e,
+        Ok(_) => panic!("the racing birth must refuse, never land over the outside file"),
+    };
+    assert_eq!(err.code(), "MANIFEST_EXISTS", "{err:?}");
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        outside,
+        "the outside document stands byte-for-byte"
+    );
+    assert!(!tmp.exists(), "the staged birth seed was discarded");
+}
+
 // =================================================================================================
 // The visited-store index unions under its own lock.
 // =================================================================================================

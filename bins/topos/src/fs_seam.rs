@@ -18,7 +18,10 @@
 //!   is met as itself and refused, never written through), and the mode a staged/private write
 //!   forces is applied through the ALREADY-OPEN descriptor (`fchmod`), never the path — the
 //!   `O_NOFOLLOW` protection would otherwise end at the open, and a symlink swapped in behind it
-//!   would take the chmod instead;
+//!   would take the chmod instead — and BEFORE any byte is written: a pre-existing file at the
+//!   path keeps its own (possibly permissive) mode through the open, so a secret written first
+//!   and tightened second would be world-readable in the window, and exposed for good by a crash
+//!   inside it;
 //! - [`FsOps::create_dir_nofollow`] builds directories at DIRECTORY HANDLES below a proven base:
 //!   each component is reached from its PARENT's held fd (`openat(O_NOFOLLOW | O_DIRECTORY)` to
 //!   descend, `mkdirat` when absent, re-`openat` after a create), so no path-based syscall runs
@@ -207,6 +210,28 @@ pub(crate) trait FsOps {
     /// of the held fd) — the write lands in the very directory object the walk proved, so a path
     /// swapped after the proof cannot re-aim it.
     fn write_new_at(&self, h: &DirHandle, leaf: &str, bytes: &[u8]) -> io::Result<()>;
+    /// [`FsOps::write_staged`] by LEAF name AT the held handle — the staging-construction write:
+    /// `openat(O_CREAT | O_EXCL | O_NOFOLLOW)` from the handle's fd after
+    /// [`DirHandle::verify_unmoved`] (every staged file is NEW, so an entry already at the name —
+    /// a swapped-in symlink included — is `AlreadyExists`, never truncated through), the EXACT
+    /// bundle mode forced through the open descriptor BEFORE any byte lands, then fd-fsyncs of
+    /// the file and its directory entry (a plain fsync of the held fd). No path-based syscall —
+    /// an ancestor swapped after the walk that proved the parent cannot re-aim the write.
+    fn write_staged_at(
+        &self,
+        h: &DirHandle,
+        leaf: &str,
+        bytes: &[u8],
+        executable: bool,
+    ) -> io::Result<()>;
+    /// Rename a FILE `from` → `to` refusing an EXISTING target at the KERNEL level
+    /// (`RENAME_NOREPLACE` / macOS `RENAME_EXCL`; where the filesystem cannot, the
+    /// hard-link+unlink dance — a link refuses an existing name atomically). The no-replace
+    /// landing primitive a file BIRTH uses: unlike [`FsOps::rename_dir_noreplace`]'s
+    /// check-then-rename (whose window only the caller's lock closes, against topos's own
+    /// writers), an outside writer's file that appeared in the beat is met as `AlreadyExists` —
+    /// nothing overwritten, the caller owns the typed refusal.
+    fn rename_file_noreplace(&self, from: &Path, to: &Path) -> io::Result<()>;
     /// `mkdir -p` that REFUSES to follow a symlink, walked at DIRECTORY HANDLES: `dir` must sit
     /// lexically under `base` (an already-proven directory), and each component below `base` is
     /// reached from its PARENT's held fd — `openat(O_NOFOLLOW | O_DIRECTORY)` to descend,
@@ -236,14 +261,17 @@ impl RealFs {
         }
     }
 
-    /// [`FsOps::write_staged`]'s body, with a test-only beat (`before_chmod`) fired between the
-    /// write through the opened descriptor and the `fchmod` that forces the exact mode — the seam
-    /// a chmod-follows-a-swapped-symlink race would land in. Production passes a no-op.
+    /// [`FsOps::write_staged`]'s body, with two test-only beats: `before_chmod` fires between the
+    /// (`O_NOFOLLOW`) open and the `fchmod` that forces the exact mode — the seam a
+    /// chmod-follows-a-swapped-symlink race would land in — and `before_write` fires between that
+    /// `fchmod` and the `write_all`, the beat where a crash must already find the file at its
+    /// final mode. Production passes no-ops.
     fn write_staged_hooked(
         path: &Path,
         bytes: &[u8],
         executable: bool,
         before_chmod: &dyn Fn(),
+        before_write: &dyn Fn(),
     ) -> io::Result<()> {
         use std::io::Write;
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -255,20 +283,27 @@ impl RealFs {
             .mode(mode)
             .custom_flags(nofollow_flag())
             .open(path)?;
-        f.write_all(bytes)?;
         before_chmod();
         // `create(mode)` is masked by `umask` and ignored if the file already existed, so force
         // the exact mode — the executable bit is part of the bundle digest, so the placed bytes
         // must match it. Through the ALREADY-OPEN descriptor (`fchmod`), never the path: the
         // `O_NOFOLLOW` protection ends at the open, and a symlink swapped in at the path after it
-        // would take a path-chmod onto its target instead.
+        // would take a path-chmod onto its target instead. And BEFORE the write — the mode is an
+        // invariant of the bytes, so no byte ever sits on disk at a mode that is not its own.
         f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        before_write();
+        f.write_all(bytes)?;
         Ok(())
     }
 
-    /// [`FsOps::write_private`]'s body — the same test-only beat as
+    /// [`FsOps::write_private`]'s body — the same test-only beats as
     /// [`RealFs::write_staged_hooked`], for the 0600 secret arm.
-    fn write_private_hooked(path: &Path, bytes: &[u8], before_chmod: &dyn Fn()) -> io::Result<()> {
+    fn write_private_hooked(
+        path: &Path,
+        bytes: &[u8],
+        before_chmod: &dyn Fn(),
+        before_write: &dyn Fn(),
+    ) -> io::Result<()> {
         use std::io::Write;
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         let mut f = std::fs::OpenOptions::new()
@@ -278,15 +313,18 @@ impl RealFs {
             .mode(0o600)
             .custom_flags(nofollow_flag())
             .open(path)?;
-        f.write_all(bytes)?;
         before_chmod();
         // `mode(0o600)` is masked by `umask` and ignored if the file already existed, so force
         // 0600 — a secret must never have a group/other-accessible window. Through the
         // ALREADY-OPEN descriptor (`fchmod`), never the path (same reasoning as the staged arm:
         // a path-chmod after the open can be re-aimed by a swapped-in symlink — here it would
-        // REVOKE access on an unrelated file). This only tightens a pre-existing looser file; a
-        // fresh file is already private from creation, so there is no chmod-after-write race.
+        // REVOKE access on an unrelated file). And BEFORE any secret byte lands: a pre-existing
+        // file at this (predictable) path keeps its own mode through the open, so writing first
+        // and tightening second would leave the secret world-readable in the window — and a
+        // crash inside it would leave the exposure permanent.
         f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        before_write();
+        f.write_all(bytes)?;
         Ok(())
     }
 
@@ -585,11 +623,11 @@ impl FsOps for RealFs {
     }
 
     fn write_staged(&self, path: &Path, bytes: &[u8], executable: bool) -> io::Result<()> {
-        Self::write_staged_hooked(path, bytes, executable, &|| {})
+        Self::write_staged_hooked(path, bytes, executable, &|| {}, &|| {})
     }
 
     fn write_private(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        Self::write_private_hooked(path, bytes, &|| {})
+        Self::write_private_hooked(path, bytes, &|| {}, &|| {})
     }
 
     fn private_perms_ok(&self, path: &Path) -> io::Result<bool> {
@@ -695,6 +733,77 @@ impl FsOps for RealFs {
         rustix::fs::fsync(&h.file).map_err(io::Error::from)
     }
 
+    fn write_staged_at(
+        &self,
+        h: &DirHandle,
+        leaf: &str,
+        bytes: &[u8],
+        executable: bool,
+    ) -> io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        h.verify_unmoved()?;
+        let mode: u32 = if executable { 0o755 } else { 0o644 };
+        let flags = rustix::fs::OFlags::WRONLY
+            | rustix::fs::OFlags::CREATE
+            | rustix::fs::OFlags::EXCL
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC;
+        let fd = rustix::fs::openat(
+            &h.file,
+            leaf,
+            flags,
+            // The raw-mode literal (the platform RawMode type — u16 on some libc backends); the
+            // EXACT `mode` is forced through the fd below regardless.
+            rustix::fs::Mode::from_bits_truncate(if executable { 0o755 } else { 0o644 }),
+        )
+        .map_err(io::Error::from)?;
+        let mut f = File::from(fd);
+        // The EXACT mode through the open descriptor, BEFORE any byte lands (the create mode is
+        // masked by `umask`; the executable bit is part of the consent-bound digest).
+        f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        f.write_all(bytes)?;
+        Self::fsync_handle(&f)?;
+        // The directory ENTRY, through the held fd (a plain fsync persists entries).
+        rustix::fs::fsync(&h.file).map_err(io::Error::from)
+    }
+
+    fn rename_file_noreplace(&self, from: &Path, to: &Path) -> io::Result<()> {
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "ios"
+        ))]
+        {
+            use rustix::io::Errno;
+            match rustix::fs::renameat_with(
+                rustix::fs::CWD,
+                from,
+                rustix::fs::CWD,
+                to,
+                rustix::fs::RenameFlags::NOREPLACE,
+            ) {
+                Ok(()) => return Ok(()),
+                Err(Errno::EXIST) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "target exists",
+                    ));
+                }
+                // The kernel/filesystem does not speak RENAME_NOREPLACE — fall through to the
+                // link+unlink dance, no-replace by hard-link exclusivity.
+                Err(Errno::INVAL | Errno::NOSYS | Errno::NOTSUP) => {}
+                Err(e) => return Err(io::Error::from(e)),
+            }
+        }
+        // `link(2)` refuses an existing target atomically (EEXIST); the temp name is then
+        // dropped. A crash between the two leaves both names — recovery's temp sweep clears it.
+        std::fs::hard_link(from, to)?;
+        std::fs::remove_file(from)?;
+        Ok(())
+    }
+
     fn create_dir_nofollow(&self, base: &Path, dir: &Path) -> io::Result<DirHandle> {
         Self::create_dir_walk(base, dir, &|_| {})
     }
@@ -794,6 +903,100 @@ mod tests {
         let _ = std::fs::remove_dir_all(&vdir);
     }
 
+    /// P1 (SECURITY): a secret written to a PRE-EXISTING permissive file must be private BEFORE
+    /// the first byte lands — the `mode(0o600)` on the open is ignored for an existing file, so
+    /// only the fd-chmod running ahead of the write closes the window. The hook sits between
+    /// that chmod and the `write_all` (a crash at this exact beat): the mode is already 0600 and
+    /// no secret byte is on disk yet.
+    #[test]
+    fn a_preexisting_permissive_temp_is_0600_before_the_first_secret_byte_lands() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = scratch("prechmod");
+        let target = dir.join("sessions.json.tmp");
+        // The PREDICTABLE temp already exists, world-readable (stale litter — or a plant).
+        std::fs::write(&target, b"stale, wide open").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let fired = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&fired);
+        let probe = target.clone();
+        let fs = HookFs::before_write_of(&target, move || {
+            assert_eq!(
+                mode_of(&probe),
+                0o600,
+                "the mode must already be 0600 before any secret byte lands"
+            );
+            assert_eq!(
+                std::fs::read(&probe).unwrap(),
+                b"",
+                "truncated and still empty — a crash here exposes nothing"
+            );
+            flag.store(true, Ordering::Relaxed);
+        });
+        fs.write_private(&target, b"secret").unwrap();
+        assert!(fired.load(Ordering::Relaxed), "the before-write beat ran");
+        assert_eq!(mode_of(&target), 0o600);
+        assert_eq!(std::fs::read(&target).unwrap(), b"secret");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The fd-anchored staging write: the exact mode on a fresh file, and a TRUE exclusive —
+    /// an entry already at the leaf (a swapped-in symlink included) is `AlreadyExists`, never
+    /// truncated through onto its target.
+    #[test]
+    fn write_staged_at_forces_the_exact_mode_and_refuses_an_existing_entry() {
+        let dir = scratch("staged-at");
+        let fs = RealFs;
+        let h = fs.open_dir_handle(&dir).unwrap();
+        fs.write_staged_at(&h, "run.sh", b"#!/bin/sh\n", true)
+            .unwrap();
+        assert_eq!(mode_of(&dir.join("run.sh")), 0o755);
+        assert_eq!(std::fs::read(dir.join("run.sh")).unwrap(), b"#!/bin/sh\n");
+        let vdir = scratch("staged-at-victim");
+        let victim = vdir.join("secret");
+        std::fs::write(&victim, b"private\n").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join("link.md")).unwrap();
+        let err = fs
+            .write_staged_at(&h, "link.md", b"payload\n", false)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{err:?}");
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"private\n",
+            "nothing written through the link"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&vdir);
+    }
+
+    /// The birth-landing primitive: an EXISTING target refuses `AlreadyExists` with both files
+    /// untouched; an absent one takes the rename.
+    #[test]
+    fn rename_file_noreplace_refuses_an_existing_target_and_lands_on_an_absent_one() {
+        let dir = scratch("rfn");
+        let from = dir.join("a.tmp");
+        let to = dir.join("a");
+        std::fs::write(&from, b"new").unwrap();
+        std::fs::write(&to, b"outside").unwrap();
+        let err = RealFs.rename_file_noreplace(&from, &to).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{err:?}");
+        assert_eq!(
+            std::fs::read(&to).unwrap(),
+            b"outside",
+            "nothing overwritten"
+        );
+        assert_eq!(
+            std::fs::read(&from).unwrap(),
+            b"new",
+            "the source still stands"
+        );
+        std::fs::remove_file(&to).unwrap();
+        RealFs.rename_file_noreplace(&from, &to).unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"new");
+        assert!(!from.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// P1 (the dangling-lock class at its root): a symlink at a persisted-doc path reads as an
     /// ERROR through the no-follow read — never as "absent". The dangling case is the trap: a
     /// follow-read maps the target's NotFound to `None`, and recovery deletes on `None`.
@@ -861,9 +1064,13 @@ mod hook {
         /// of the proof-to-write window, where a concurrent process swaps the proven parent's
         /// PATH out from under the held fd.
         AfterHandleOpen { target: PathBuf },
-        /// Between a staged/private write's (`O_NOFOLLOW`) open+write and the `fchmod` that
-        /// forces its mode — the beat where a path-based chmod would follow a swapped-in symlink.
+        /// Between a staged/private write's (`O_NOFOLLOW`) open and the `fchmod` that forces its
+        /// mode — the beat where a path-based chmod would follow a swapped-in symlink.
         BeforeChmodOf { target: PathBuf },
+        /// Between that `fchmod` and the `write_all` that lands the bytes — the beat where a
+        /// crash must already find the file at its final mode (a secret: 0600 before the first
+        /// secret byte exists on disk).
+        BeforeWriteOf { target: PathBuf },
         /// Immediately before a [`FsOps::create_dir_nofollow`] walk descends to ONE named
         /// component (its `openat`-or-`mkdirat`) — the mid-walk beat where an already-walked
         /// ancestor is swapped for a symlink.
@@ -956,6 +1163,15 @@ mod hook {
             )
         }
 
+        pub(crate) fn before_write_of(target: &Path, hook: impl Fn() + 'a) -> Self {
+            Self::with(
+                Trigger::BeforeWriteOf {
+                    target: target.to_path_buf(),
+                },
+                hook,
+            )
+        }
+
         pub(crate) fn before_component_of(target: &Path, hook: impl Fn() + 'a) -> Self {
             Self::with(
                 Trigger::BeforeComponentOf {
@@ -982,9 +1198,20 @@ mod hook {
         fn write_staged(&self, path: &Path, bytes: &[u8], executable: bool) -> io::Result<()> {
             self.maybe_fire(matches!(self.trigger, Trigger::FirstStagedWrite), 1);
             if matches!(&self.trigger, Trigger::BeforeChmodOf { target } if target == path) {
-                // Land the hook INSIDE the op, between the (O_NOFOLLOW) open+write and the fchmod
-                // — the exact beat a path-swapped symlink would catch a path-based chmod.
-                return RealFs::write_staged_hooked(path, bytes, executable, &|| {
+                // Land the hook INSIDE the op, between the (O_NOFOLLOW) open and the fchmod —
+                // the exact beat a path-swapped symlink would catch a path-based chmod.
+                return RealFs::write_staged_hooked(
+                    path,
+                    bytes,
+                    executable,
+                    &|| self.maybe_fire(true, 1),
+                    &|| {},
+                );
+            }
+            if matches!(&self.trigger, Trigger::BeforeWriteOf { target } if target == path) {
+                // Between the fd-chmod and the write — where a crash must already find the
+                // final mode.
+                return RealFs::write_staged_hooked(path, bytes, executable, &|| {}, &|| {
                     self.maybe_fire(true, 1);
                 });
             }
@@ -1032,7 +1259,15 @@ mod hook {
         }
         fn write_private(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
             if matches!(&self.trigger, Trigger::BeforeChmodOf { target } if target == path) {
-                return RealFs::write_private_hooked(path, bytes, &|| {
+                return RealFs::write_private_hooked(
+                    path,
+                    bytes,
+                    &|| self.maybe_fire(true, 1),
+                    &|| {},
+                );
+            }
+            if matches!(&self.trigger, Trigger::BeforeWriteOf { target } if target == path) {
+                return RealFs::write_private_hooked(path, bytes, &|| {}, &|| {
                     self.maybe_fire(true, 1);
                 });
             }
@@ -1097,6 +1332,25 @@ mod hook {
         }
         fn write_new_at(&self, h: &DirHandle, leaf: &str, bytes: &[u8]) -> io::Result<()> {
             self.inner.write_new_at(h, leaf, bytes)
+        }
+        fn write_staged_at(
+            &self,
+            h: &DirHandle,
+            leaf: &str,
+            bytes: &[u8],
+            executable: bool,
+        ) -> io::Result<()> {
+            // The staging-window trigger fires here exactly as on the path-based arm — a staged
+            // write is a staged write, whichever primitive lands it.
+            self.maybe_fire(matches!(self.trigger, Trigger::FirstStagedWrite), 1);
+            self.inner.write_staged_at(h, leaf, bytes, executable)
+        }
+        fn rename_file_noreplace(&self, from: &Path, to: &Path) -> io::Result<()> {
+            self.maybe_fire(
+                matches!(&self.trigger, Trigger::FirstMoveOf { dir } if dir == from),
+                1,
+            );
+            self.inner.rename_file_noreplace(from, to)
         }
         fn read_opt(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
             let (matched, nth) = match &self.trigger {
@@ -1253,6 +1507,20 @@ mod fault {
         fn write_new_at(&self, h: &DirHandle, leaf: &str, bytes: &[u8]) -> io::Result<()> {
             self.tick()?;
             self.inner.write_new_at(h, leaf, bytes)
+        }
+        fn write_staged_at(
+            &self,
+            h: &DirHandle,
+            leaf: &str,
+            bytes: &[u8],
+            executable: bool,
+        ) -> io::Result<()> {
+            self.tick()?;
+            self.inner.write_staged_at(h, leaf, bytes, executable)
+        }
+        fn rename_file_noreplace(&self, from: &Path, to: &Path) -> io::Result<()> {
+            self.tick()?;
+            self.inner.rename_file_noreplace(from, to)
         }
         // Reads + locks never fault — only durable mutations are crash-relevant.
         fn open_dir_handle(&self, dir: &Path) -> io::Result<DirHandle> {

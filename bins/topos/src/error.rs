@@ -323,6 +323,16 @@ pub(crate) enum ClientError {
          command to act on the file as it is now"
     )]
     ManifestChanged { path: String },
+    /// The manifest a verb was about to BIRTH appeared on disk between the absence check and the
+    /// exclusive create (an outside editor writing the same path — topos's own writers serialize
+    /// on the file's lock). A birth is a claim the file does not exist; landing it anyway would
+    /// overwrite the outside writer's document. Nothing was written — the re-run reads the file
+    /// as it now is.
+    #[error(
+        "'{path}' appeared while topos was creating it — nothing was written; re-run the command \
+         to act on the file as it is now"
+    )]
+    ManifestExists { path: String },
     /// A terminal protocol outcome the verb does not special-case (e.g. the plane's `RetryableFailure` /
     /// `Unavailable` / `PermanentFailure`), carried verbatim so the agent branches on the TRUE outcome
     /// (not a generic transport error). `retryable` selects a Retry next-action + the outcome class.
@@ -438,6 +448,8 @@ impl ClientError {
             ClientError::PlacementOccupied { .. } => "PLACEMENT_OCCUPIED",
             // A concurrent edit of the same document — the file-scoped twin of a pointer CAS loss.
             ClientError::ManifestChanged { .. } => "MANIFEST_CHANGED",
+            // A concurrent BIRTH of the same document (the file appeared after the absence check).
+            ClientError::ManifestExists { .. } => "MANIFEST_EXISTS",
             // The plane's fine code rides the Display message + context; the agent branches on `outcome`.
             ClientError::PlaneTerminal { .. } => "PLANE_TERMINAL",
             ClientError::UpgradeAmbiguous => "UPGRADE_AMBIGUOUS",
@@ -484,8 +496,11 @@ impl ClientError {
             // surfaced 1:1 so the agent branches on the same outcome it would on the wire).
             ClientError::Conflict { .. } => TerminalOutcome::Conflict,
             // A document that moved under a prepared edit is the same class: re-read, re-decide,
-            // then act — never a blind retry of the same plan.
-            ClientError::ManifestChanged { .. } => TerminalOutcome::Conflict,
+            // then act — never a blind retry of the same plan. So is a document that APPEARED
+            // under a prepared birth.
+            ClientError::ManifestChanged { .. } | ClientError::ManifestExists { .. } => {
+                TerminalOutcome::Conflict
+            }
             ClientError::Denied(_) => TerminalOutcome::Denied,
             ClientError::PublishBlocked { .. } => TerminalOutcome::Diverged,
             // Divergent per-placement edits are the same class as a diverged draft: local

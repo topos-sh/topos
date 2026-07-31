@@ -33,7 +33,11 @@
 //! overwritten — no sequence of path syscalls closes it, and unlike the byte-landing side there
 //! is no directory-handle primitive for "rename unless the file changed". It is the manifest
 //! twin of the materializer's fd-window note, and it is why the lock stays load-bearing for
-//! every writer topos controls.
+//! every writer topos controls. FILE BIRTH has no such residual: a birth is a claim the file
+//! does not exist, and it lands by EXCLUSIVE no-replace create
+//! (`crate::atomic::atomic_write_new` — kernel `RENAME_NOREPLACE` where the filesystem speaks
+//! it), so a file an outside editor wrote after the absence check refuses typed
+//! (`MANIFEST_EXISTS`) with the outside bytes standing.
 
 use std::path::{Path, PathBuf};
 
@@ -338,7 +342,18 @@ pub(super) fn open_for_edit(ctx: &Ctx<'_>, target: &EditTarget) -> Result<Opened
     if let Some(parent) = target.path.parent() {
         ctx.fs.create_dir_all(parent)?;
     }
-    crate::atomic::atomic_write(ctx.fs, &target.path, seed.as_bytes())?;
+    // The birth is a claim the file does not exist, landed as an EXCLUSIVE create: a file an
+    // outside editor wrote between the absence read above and this landing refuses typed with
+    // its bytes standing (the lock fences only topos's own writers) — never overwritten by the
+    // seed.
+    match crate::atomic::atomic_write_new(ctx.fs, &target.path, seed.as_bytes())? {
+        crate::atomic::NewOutcome::Written => {}
+        crate::atomic::NewOutcome::Exists => {
+            return Err(ClientError::ManifestExists {
+                path: target.path.display().to_string(),
+            });
+        }
+    }
     let editor =
         ManifestEditor::open(&seed, target.scope).map_err(|e| corrupt(&target.path, &e))?;
     Ok(Opened {
