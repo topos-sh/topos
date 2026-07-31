@@ -124,6 +124,18 @@ fn schemas() -> Vec<(&'static str, String)> {
             )),
         ),
         (
+            "login-connect-request",
+            emit(schemars::schema_for!(
+                topos_types::requests::LoginConnectRequest
+            )),
+        ),
+        (
+            "login-connect-response",
+            emit(schemars::schema_for!(
+                topos_types::requests::LoginConnectResponse
+            )),
+        ),
+        (
             "notice-ack-request",
             emit(schemars::schema_for!(
                 topos_types::requests::NoticeAckRequest
@@ -1279,6 +1291,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ok: true,
         data: serde_json::to_value(LoginData {
             workspace_id: String::new(),
+            host: "topos.sh".to_owned(),
             name: "acme".to_owned(),
             display_name: None,
             server: Some("https://topos.sh/api".to_owned()),
@@ -1315,6 +1328,7 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ok: true,
         data: serde_json::to_value(LoginData {
             workspace_id: "w_acme".to_owned(),
+            host: "topos.sh".to_owned(),
             name: "acme".to_owned(),
             display_name: Some("Acme".to_owned()),
             server: Some("https://topos.sh/api".to_owned()),

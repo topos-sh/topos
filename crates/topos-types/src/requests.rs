@@ -603,18 +603,20 @@ pub struct WireAppliedReport {
 // =================================================================================================
 // Login-flow request/response DTOs — the gh-style browser-approval flow the APP serves (`POST
 // /v1/login/authorize` + `POST /v1/login/token`; the field names keep their RFC-8628 spellings). An
-// installation asks to log into a workspace; a signed-in human approves it in the browser; the
-// poll then returns the SESSION's workspace-scoped bearer credential.
+// installation asks to log into THIS SERVER; the signed-in human chooses (or creates) the
+// workspace in the browser and approves; the poll then MINTS and returns the SESSION's
+// workspace-scoped bearer credential. The poll is the completion mechanism — a loopback flow's
+// 127.0.0.1 redirect only wakes the waiting client, it carries no secret.
 //
-// Design fact: on approval the `device_code` (the flow code) itself is PROMOTED to the session's
-// bearer credential server-side (the same sha256 stored twice — once as the flow row's code hash,
-// once as the session credential hash), and the poll's `credential` field carries it back — so the
-// CLI stores ONE secret from ONE field and no second mint/redeem round-trip exists.
+// Design fact: at the exchange the `device_code` (the flow code) itself is PROMOTED to the
+// session's bearer credential server-side (the same sha256 stored twice — once as the flow row's
+// code hash, once as the session credential hash), and the poll's `credential` field carries it
+// back — so the CLI stores ONE secret from ONE field and no second mint/redeem round-trip exists.
 // =================================================================================================
 
-/// `POST /v1/login/authorize` body — begin a login flow toward a workspace named by its address
-/// slug. Whether the name exists is never disclosed on this route: an unknown name runs the same
-/// flow to the same uniform denial.
+/// `POST /v1/login/authorize` body — begin a login flow toward this server. The workspace is
+/// chosen (or created) at the browser approval, where the approver's seats are known; nothing
+/// about workspaces or accounts is disclosed on this unauthenticated route.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "contract-derives",
@@ -624,21 +626,21 @@ pub struct DeviceAuthStartRequest {
     /// A human-readable machine name shown on the approval page (a confused-deputy guard, not
     /// authority) and kept as the session's display name once approved.
     pub requested_name: String,
-    /// The workspace ADDRESS slug the login targets (`topos.sh/<name>` minus the origin). An
-    /// EMPTY string names "the workspace the origin itself addresses" (single-tenant installs, where
-    /// the origin IS its one workspace); a non-empty value is the address slug as today.
-    pub workspace: String,
+    /// The workspace ADDRESS slug a `login <workspace>` shortcut named — a PRESELECTION for the
+    /// browser chooser, recorded shape-checked but unresolved (this unauthenticated start is
+    /// never an existence oracle). The approval records the workspace the human actually chose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preselect: Option<String>,
     /// The invitation-link token a `login <invite-url>` carries. Recorded on the flow (as its
     /// hash) UNVALIDATED — this unauthenticated start is never a token oracle; the approval
     /// ceremony resolves it and weaves the invitation accept into its own fence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invite_token: Option<String>,
-    /// How this flow's credential may be collected — `"loopback"` when the client has bound a
+    /// How the approval outcome is ACCELERATED back — `"loopback"` when the client has bound a
     /// 127.0.0.1 listener and can open a browser on THIS machine, otherwise absent (the classic
-    /// device grant). WRITE-ONCE on the flow: declaring `loopback` only makes the flow harder to
-    /// redeem — the approval's authorization code, delivered by redirecting the approver's own
-    /// browser to that listener, becomes required alongside this device code. Absent keeps the
-    /// pre-existing behaviour exactly, so an older client is unaffected.
+    /// device grant). WRITE-ONCE on the flow: a loopback flow's approval page resolves from the
+    /// URL-borne challenge with nothing typed, and the approval redirect wakes the listener; the
+    /// poll remains the one completion mechanism either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect: Option<String>,
 }
@@ -675,11 +677,6 @@ pub struct DeviceAuthStartResponse {
 pub struct DeviceAuthPollRequest {
     /// The SECRET flow code from `login/authorize`.
     pub device_code: String,
-    /// The one-time AUTHORIZATION CODE a loopback flow's approval delivered to this client's
-    /// 127.0.0.1 listener. Required to redeem a `loopback`-bound flow and absent otherwise: the
-    /// two secrets travel different channels, and the device code has never been in a URL.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_code: Option<String>,
 }
 
 /// A login-flow poll status (snake_case). `granted` carries the credential + the joined
@@ -697,13 +694,9 @@ pub enum DeviceAuthPollStatus {
     Denied,
     /// The flow expired before approval.
     Expired,
-    /// Approved — `credential`, `session_id`, and `workspace` are present.
+    /// Approved and EXCHANGED — this poll minted (or re-reads) the session; `credential`,
+    /// `session_id`, and `workspace` are present.
     Granted,
-    /// A LOOPBACK flow a human already approved, polled WITHOUT its authorization code. The
-    /// ceremony is done and the credential exists; this caller simply has not proved it is the
-    /// machine that asked. The client's answer is to re-open the local hand-off, never to keep
-    /// waiting on an approval that already happened.
-    AwaitingRedirect,
 }
 
 /// The first-destination HINT an accepted invitation named — decorated onto a `granted` poll (and
@@ -754,30 +747,58 @@ pub struct DeviceAuthPollResponse {
     /// Returned once per poll; the server stores only its sha256.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
-    /// The RETIRED device wire's grant id — parse-only fallback for a producer predating
-    /// [`Self::session_id`]; never served by the session wire.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub device_id: Option<String>,
-    /// The minted SESSION's id — the session-model login wire's grant half (a session = user ×
-    /// workspace × installation; the credential is workspace-scoped). Present ONLY when `status`
-    /// is `granted` on a session-serving producer. **Additive.**
+    /// The minted SESSION's id (a session = user × workspace × installation; the credential is
+    /// workspace-scoped). Present ONLY when `status` is `granted`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     /// The session's born status — `"active"`, or `"pending"` while the workspace's
-    /// session-approval knob holds it. Absent ⇒ treat as active. **Additive.**
+    /// session-approval knob holds it. Absent ⇒ treat as active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_status: Option<String>,
-    /// The joined workspace — present ONLY when `status` is `granted`.
+    /// The CHOSEN workspace — present ONLY when `status` is `granted`. This is what the browser
+    /// approval recorded (a seat picked, an invitation accepted, or a workspace created there).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<DeviceAuthWorkspace>,
     /// The invitation's first-destination hint — present only on a `granted` poll whose flow
     /// carried an invite token naming one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<DeviceAuthHint>,
-    /// The RETIRED device-link spelling of [`Self::session_status`] — parse-only fallback for a
-    /// producer predating the session wire. Absent ⇒ treat as `"active"`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub link_status: Option<String>,
+}
+
+/// `POST /v1/login/connect` body — the LANE-SIDE second connect: an already-credentialed machine
+/// (any live session on this server) asks for a further workspace's session with no browser
+/// round-trip. Seat standing is the trust basis — the server mints only where the acting user
+/// already holds a seat; anything else is the uniform miss.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct LoginConnectRequest {
+    /// The target workspace's ADDRESS slug.
+    pub workspace: String,
+    /// A human-readable machine name kept as the new session's display name (the same field the
+    /// browser flow's start carries).
+    pub requested_name: String,
+}
+
+/// `POST /v1/login/connect` response — the freshly minted session. `credential` is returned
+/// exactly once, over this authenticated exchange; the server stores only its sha256.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "contract-derives",
+    derive(schemars::JsonSchema, utoipa::ToSchema)
+)]
+pub struct LoginConnectResponse {
+    /// The new session's plaintext bearer credential (workspace-scoped).
+    pub credential: String,
+    /// The new session's id.
+    pub session_id: String,
+    /// The session's born status — `"active"`, or `"pending"` while the workspace's
+    /// session-approval knob holds it.
+    pub session_status: String,
+    /// The connected workspace.
+    pub workspace: DeviceAuthWorkspace,
 }
 
 // =================================================================================================
@@ -1227,25 +1248,21 @@ mod tests {
         let pending = DeviceAuthPollResponse {
             status: DeviceAuthPollStatus::Pending,
             credential: None,
-            device_id: None,
             session_id: None,
             session_status: None,
             workspace: None,
             hint: None,
-            link_status: None,
         };
         let v = serde_json::to_value(&pending).unwrap();
         assert_eq!(v["status"], "pending");
         assert!(v.get("credential").is_none() && v.get("workspace").is_none());
-        assert!(v.get("link_status").is_none(), "absent pre-grant");
-        // A granted poll carries the ONE credential (the promoted device code), the device id, and
-        // the joined workspace — everything the CLI stores, from one field each.
+        // A granted poll carries the ONE credential (the promoted device code), the session id,
+        // and the CHOSEN workspace — everything the CLI stores, from one field each.
         let granted = DeviceAuthPollResponse {
             status: DeviceAuthPollStatus::Granted,
             credential: Some("dc_secret".to_owned()),
-            device_id: Some("dev_1".to_owned()),
             session_id: Some("sn_1".to_owned()),
-            session_status: None,
+            session_status: Some("pending".to_owned()),
             workspace: Some(DeviceAuthWorkspace {
                 workspace_id: "w_acme".to_owned(),
                 name: "acme".to_owned(),
@@ -1255,15 +1272,14 @@ mod tests {
                 kind: "skill".to_owned(),
                 name: "deploy".to_owned(),
             }),
-            link_status: Some("pending".to_owned()),
         };
         let v = serde_json::to_value(&granted).unwrap();
         assert_eq!(v["status"], "granted");
         assert_eq!(v["credential"], "dc_secret");
-        assert_eq!(v["device_id"], "dev_1");
+        assert_eq!(v["session_id"], "sn_1");
         assert_eq!(v["workspace"]["name"], "acme");
-        // The FIRST link's born status rides the grant (approval mints registration + link together).
-        assert_eq!(v["link_status"], "pending");
+        // The session's born status rides the grant (the exchange mints per the one rule).
+        assert_eq!(v["session_status"], "pending");
         // The start pair round-trips; the poll target is the same secret the start returned.
         let start = DeviceAuthStartResponse {
             device_code: "dc_secret".to_owned(),
@@ -1275,15 +1291,48 @@ mod tests {
         let v = serde_json::to_value(&start).unwrap();
         assert_eq!(v["expires_in_secs"], 900);
         assert_eq!(v["interval_secs"], 5);
+        // A bare start names no workspace (the browser chooser decides); a `login <ws>` shortcut
+        // rides `preselect`.
         let req: DeviceAuthStartRequest = serde_json::from_value(serde_json::json!({
             "requested_name": "laptop",
-            "workspace": "acme",
         }))
         .unwrap();
-        assert_eq!(req.workspace, "acme");
+        assert_eq!(req.preselect, None);
+        let req: DeviceAuthStartRequest = serde_json::from_value(serde_json::json!({
+            "requested_name": "laptop",
+            "preselect": "acme",
+        }))
+        .unwrap();
+        assert_eq!(req.preselect.as_deref(), Some("acme"));
         let poll: DeviceAuthPollRequest =
             serde_json::from_value(serde_json::json!({ "device_code": "dc_secret" })).unwrap();
         assert_eq!(poll.device_code, "dc_secret");
+    }
+
+    #[test]
+    fn login_connect_round_trips_the_lane_side_second_connect() {
+        let req: LoginConnectRequest = serde_json::from_value(serde_json::json!({
+            "workspace": "beta",
+            "requested_name": "laptop",
+        }))
+        .unwrap();
+        assert_eq!(req.workspace, "beta");
+        assert_eq!(req.requested_name, "laptop");
+        let resp = LoginConnectResponse {
+            credential: "cs_secret".to_owned(),
+            session_id: "sn_2".to_owned(),
+            session_status: "active".to_owned(),
+            workspace: DeviceAuthWorkspace {
+                workspace_id: "w_beta".to_owned(),
+                name: "beta".to_owned(),
+                display_name: "Beta".to_owned(),
+            },
+        };
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["credential"], "cs_secret");
+        assert_eq!(v["session_id"], "sn_2");
+        assert_eq!(v["session_status"], "active");
+        assert_eq!(v["workspace"]["workspace_id"], "w_beta");
     }
 
     #[test]
@@ -1471,14 +1520,15 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(me.link_status, "active");
-        // The granted poll's absent link_status stays absent (an older producer ⇒ treat as active).
+        // The granted poll's absent session_status reads as active-equivalent (the consumer's
+        // one status read defaults it).
         let poll: DeviceAuthPollResponse = serde_json::from_value(serde_json::json!({
             "status": "granted",
             "credential": "dc",
-            "device_id": "dev_1",
+            "session_id": "sn_1",
             "workspace": { "workspace_id": "w_acme", "name": "acme", "display_name": "Acme" },
         }))
         .unwrap();
-        assert!(poll.link_status.is_none());
+        assert!(poll.session_status.is_none());
     }
 }

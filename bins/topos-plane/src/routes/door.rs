@@ -5,8 +5,9 @@
 //! artifact whichever tier serves an operation. The stub bodies never run and nothing routes to
 //! them.
 //!
-//! The lane: the RFC-8628-shaped login start/poll (on approval the flow code is promoted to the
-//! SESSION's workspace-scoped bearer credential), the session self-end, the
+//! The lane: the RFC-8628-shaped login start/poll (the workspace is chosen at the browser
+//! approval; the poll's exchange mints the SESSION and promotes the flow code to its
+//! workspace-scoped bearer credential), the lane-side second connect, the session self-end, the
 //! publish/propose/revert/review writes, the current/version/object/catalog/proposals reads, the
 //! delivery + applied-state report, the describe reads (me / channels / reach / review inbox /
 //! log), and the row ops (channel curation / protection / notices-ack
@@ -16,9 +17,10 @@
 
 use topos_types::requests::{
     DeviceAuthPollRequest, DeviceAuthPollResponse, DeviceAuthStartRequest, DeviceAuthStartResponse,
-    InvitationRequest, NoticeAckRequest, ProposeRequest, ProtectionSetRequest, PublishRequest,
-    RevertRequest, ReviewRequest, WireAppliedReport, WireChannelIndex, WireDelivery, WireMe,
-    WireProposalIndex, WireProposalList, WireReach, WireSkillIndex, WireSkillLog, WireVersionMeta,
+    InvitationRequest, LoginConnectRequest, LoginConnectResponse, NoticeAckRequest, ProposeRequest,
+    ProtectionSetRequest, PublishRequest, RevertRequest, ReviewRequest, WireAppliedReport,
+    WireChannelIndex, WireDelivery, WireMe, WireProposalIndex, WireProposalList, WireReach,
+    WireSkillIndex, WireSkillLog, WireVersionMeta,
 };
 use topos_types::{JsonEnvelope, WireCurrentRecord};
 
@@ -234,7 +236,7 @@ pub(crate) fn put_report() {}
     tag = "enrollment",
     request_body = DeviceAuthStartRequest,
     responses(
-        (status = 200, description = "The login-flow grant (RFC-8628-shaped): the secret device_code to poll with (promoted to the SESSION's workspace-scoped bearer credential on approval), the human-facing user_code, and the BARE approval URL (the code never rides a URL). An invite_token in the body is recorded on the flow unvalidated — never a token oracle.", body = DeviceAuthStartResponse),
+        (status = 200, description = "The login-flow grant (RFC-8628-shaped): the secret device_code to poll with (promoted to the SESSION's workspace-scoped bearer credential at the exchange), the human-facing user_code, and the BARE approval URL (the code never rides a URL). The flow names NO workspace — the signed-in approver chooses (or creates) it in the browser; a `preselect` slug is recorded shape-checked and unresolved, and an invite_token is recorded unvalidated — this start is never an existence or token oracle.", body = DeviceAuthStartResponse),
         (status = 400, description = "Malformed body.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Internal fault.", body = JsonEnvelope),
@@ -248,13 +250,29 @@ pub(crate) fn login_authorize() {}
     tag = "enrollment",
     request_body = DeviceAuthPollRequest,
     responses(
-        (status = 200, description = "The poll status; `granted` carries the minted SESSION's credential (the promoted flow code), the session id + status, the joined workspace, and — when the flow carried an invitation naming one — the first-destination hint.", body = DeviceAuthPollResponse),
+        (status = 200, description = "The poll status. The poll IS the exchange: the first poll that finds the flow approved MINTS the session (re-validating the approver's seat under the same fence), and `granted` carries the SESSION's credential (the promoted flow code), the session id + status, the CHOSEN workspace, and — when the flow carried an invitation naming one — the first-destination hint. A re-poll answers the same grant.", body = DeviceAuthPollResponse),
         (status = 400, description = "Malformed body.", body = JsonEnvelope),
         (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
         (status = 500, description = "Internal fault.", body = JsonEnvelope),
     ),
 )]
 pub(crate) fn login_token() {}
+
+#[utoipa::path(
+    post,
+    path = "/v1/login/connect",
+    tag = "enrollment",
+    request_body = LoginConnectRequest,
+    params(("Authorization" = String, Header, description = "`Bearer <any live session credential on this server>`.")),
+    responses(
+        (status = 200, description = "The lane-side second connect: a further workspace's freshly minted session, browser-free. Seat standing is the trust basis — the acting user must already hold a seat in the named workspace; the plaintext credential is returned exactly once.", body = LoginConnectResponse),
+        (status = 400, description = "Malformed body.", body = JsonEnvelope),
+        (status = 404, description = "Missing/blank credential, unknown/revoked one, unknown workspace, or no seat there (indistinguishable).", body = JsonEnvelope),
+        (status = 429, description = "Rate limited (Retry-After header).", body = JsonEnvelope),
+        (status = 500, description = "Internal fault.", body = JsonEnvelope),
+    ),
+)]
+pub(crate) fn login_connect() {}
 
 // ── the writes (publish / propose / revert / review) ─────────────────────────────────────────────
 

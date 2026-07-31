@@ -10,6 +10,7 @@
       "release-notes"
     ],
     "display_name": "Acme",
+    "host": "topos.sh",
     "name": "acme",
     "server": "https://topos.sh/api",
     "session_id": "sn_01hzy3",

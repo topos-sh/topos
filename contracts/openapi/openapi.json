@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Topos product API (device lane)",
-    "description": "The session lane the product app serves: the RFC-8628-shaped login flow (start/poll — approval promotes the flow code to the SESSION's workspace-scoped bearer credential), the session self-end, the publish/propose/revert/review writes, the current/version/object/catalog/proposals reads, the delivery + applied-state report, the describe reads, and the row ops (channel curation / protection / notices-ack / invitations). Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
+    "description": "The session lane the product app serves: the RFC-8628-shaped login flow (start/poll — the workspace is chosen at the browser approval and the poll's exchange mints the SESSION's workspace-scoped bearer credential), the lane-side second connect, the session self-end, the publish/propose/revert/review writes, the current/version/object/catalog/proposals reads, the delivery + applied-state report, the describe reads, and the row ops (channel curation / protection / notices-ack / invitations). Every returned protocol outcome of an op_id-carrying write rides in a 200 body (the canonical JsonEnvelope + receipt); non-2xx is reserved for transport/auth/integrity faults.",
     "license": {
       "name": "Apache-2.0"
     },
@@ -27,7 +27,7 @@
         },
         "responses": {
           "200": {
-            "description": "The login-flow grant (RFC-8628-shaped): the secret device_code to poll with (promoted to the SESSION's workspace-scoped bearer credential on approval), the human-facing user_code, and the BARE approval URL (the code never rides a URL). An invite_token in the body is recorded on the flow unvalidated — never a token oracle.",
+            "description": "The login-flow grant (RFC-8628-shaped): the secret device_code to poll with (promoted to the SESSION's workspace-scoped bearer credential at the exchange), the human-facing user_code, and the BARE approval URL (the code never rides a URL). The flow names NO workspace — the signed-in approver chooses (or creates) it in the browser; a `preselect` slug is recorded shape-checked and unresolved, and an invite_token is recorded unvalidated — this start is never an existence or token oracle.",
             "content": {
               "application/json": {
                 "schema": {
@@ -38,6 +38,87 @@
           },
           "400": {
             "description": "Malformed body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (Retry-After header).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal fault.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/login/connect": {
+      "post": {
+        "tags": [
+          "enrollment"
+        ],
+        "operationId": "login_connect",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "description": "`Bearer <any live session credential on this server>`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginConnectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The lane-side second connect: a further workspace's freshly minted session, browser-free. Seat standing is the trust basis — the acting user must already hold a seat in the named workspace; the plaintext credential is returned exactly once.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginConnectResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Missing/blank credential, unknown/revoked one, unknown workspace, or no seat there (indistinguishable).",
             "content": {
               "application/json": {
                 "schema": {
@@ -87,7 +168,7 @@
         },
         "responses": {
           "200": {
-            "description": "The poll status; `granted` carries the minted SESSION's credential (the promoted flow code), the session id + status, the joined workspace, and — when the flow carried an invitation naming one — the first-destination hint.",
+            "description": "The poll status. The poll IS the exchange: the first poll that finds the flow approved MINTS the session (re-validating the approver's seat under the same fence), and `granted` carries the SESSION's credential (the promoted flow code), the session id + status, the CHOSEN workspace, and — when the flow carried an invitation naming one — the first-destination hint. A re-poll answers the same grant.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2098,13 +2179,6 @@
           "device_code"
         ],
         "properties": {
-          "auth_code": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The one-time AUTHORIZATION CODE a loopback flow's approval delivered to this client's\n127.0.0.1 listener. Required to redeem a `loopback`-bound flow and absent otherwise: the\ntwo secrets travel different channels, and the device code has never been in a URL."
-          },
           "device_code": {
             "type": "string",
             "description": "The SECRET flow code from `login/authorize`."
@@ -2125,13 +2199,6 @@
             ],
             "description": "The session's plaintext bearer credential — present ONLY when `status` is `granted`.\nReturned once per poll; the server stores only its sha256."
           },
-          "device_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The RETIRED device wire's grant id — parse-only fallback for a producer predating\n[`Self::session_id`]; never served by the session wire."
-          },
           "hint": {
             "oneOf": [
               {
@@ -2143,26 +2210,19 @@
               }
             ]
           },
-          "link_status": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The RETIRED device-link spelling of [`Self::session_status`] — parse-only fallback for a\nproducer predating the session wire. Absent ⇒ treat as `\"active\"`."
-          },
           "session_id": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The minted SESSION's id — the session-model login wire's grant half (a session = user ×\nworkspace × installation; the credential is workspace-scoped). Present ONLY when `status`\nis `granted` on a session-serving producer. **Additive.**"
+            "description": "The minted SESSION's id (a session = user × workspace × installation; the credential is\nworkspace-scoped). Present ONLY when `status` is `granted`."
           },
           "session_status": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The session's born status — `\"active\"`, or `\"pending\"` while the workspace's\nsession-approval knob holds it. Absent ⇒ treat as active. **Additive.**"
+            "description": "The session's born status — `\"active\"`, or `\"pending\"` while the workspace's\nsession-approval knob holds it. Absent ⇒ treat as active."
           },
           "status": {
             "$ref": "#/components/schemas/DeviceAuthPollStatus",
@@ -2175,7 +2235,7 @@
               },
               {
                 "$ref": "#/components/schemas/DeviceAuthWorkspace",
-                "description": "The joined workspace — present ONLY when `status` is `granted`."
+                "description": "The CHOSEN workspace — present ONLY when `status` is `granted`. This is what the browser\napproval recorded (a seat picked, an invitation accepted, or a workspace created there)."
               }
             ]
           }
@@ -2188,16 +2248,14 @@
           "pending",
           "denied",
           "expired",
-          "granted",
-          "awaiting_redirect"
+          "granted"
         ]
       },
       "DeviceAuthStartRequest": {
         "type": "object",
-        "description": "`POST /v1/login/authorize` body — begin a login flow toward a workspace named by its address\nslug. Whether the name exists is never disclosed on this route: an unknown name runs the same\nflow to the same uniform denial.",
+        "description": "`POST /v1/login/authorize` body — begin a login flow toward this server. The workspace is\nchosen (or created) at the browser approval, where the approver's seats are known; nothing\nabout workspaces or accounts is disclosed on this unauthenticated route.",
         "required": [
-          "requested_name",
-          "workspace"
+          "requested_name"
         ],
         "properties": {
           "invite_token": {
@@ -2207,20 +2265,23 @@
             ],
             "description": "The invitation-link token a `login <invite-url>` carries. Recorded on the flow (as its\nhash) UNVALIDATED — this unauthenticated start is never a token oracle; the approval\nceremony resolves it and weaves the invitation accept into its own fence."
           },
+          "preselect": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The workspace ADDRESS slug a `login <workspace>` shortcut named — a PRESELECTION for the\nbrowser chooser, recorded shape-checked but unresolved (this unauthenticated start is\nnever an existence oracle). The approval records the workspace the human actually chose."
+          },
           "redirect": {
             "type": [
               "string",
               "null"
             ],
-            "description": "How this flow's credential may be collected — `\"loopback\"` when the client has bound a\n127.0.0.1 listener and can open a browser on THIS machine, otherwise absent (the classic\ndevice grant). WRITE-ONCE on the flow: declaring `loopback` only makes the flow harder to\nredeem — the approval's authorization code, delivered by redirecting the approver's own\nbrowser to that listener, becomes required alongside this device code. Absent keeps the\npre-existing behaviour exactly, so an older client is unaffected."
+            "description": "How the approval outcome is ACCELERATED back — `\"loopback\"` when the client has bound a\n127.0.0.1 listener and can open a browser on THIS machine, otherwise absent (the classic\ndevice grant). WRITE-ONCE on the flow: a loopback flow's approval page resolves from the\nURL-borne challenge with nothing typed, and the approval redirect wakes the listener; the\npoll remains the one completion mechanism either way."
           },
           "requested_name": {
             "type": "string",
             "description": "A human-readable machine name shown on the approval page (a confused-deputy guard, not\nauthority) and kept as the session's display name once approved."
-          },
-          "workspace": {
-            "type": "string",
-            "description": "The workspace ADDRESS slug the login targets (`topos.sh/<name>` minus the origin). An\nEMPTY string names \"the workspace the origin itself addresses\" (single-tenant installs, where\nthe origin IS its one workspace); a non-empty value is the address slug as today."
           }
         }
       },
@@ -2399,6 +2460,52 @@
             "items": {
               "type": "string"
             }
+          }
+        }
+      },
+      "LoginConnectRequest": {
+        "type": "object",
+        "description": "`POST /v1/login/connect` body — the LANE-SIDE second connect: an already-credentialed machine\n(any live session on this server) asks for a further workspace's session with no browser\nround-trip. Seat standing is the trust basis — the server mints only where the acting user\nalready holds a seat; anything else is the uniform miss.",
+        "required": [
+          "workspace",
+          "requested_name"
+        ],
+        "properties": {
+          "requested_name": {
+            "type": "string",
+            "description": "A human-readable machine name kept as the new session's display name (the same field the\nbrowser flow's start carries)."
+          },
+          "workspace": {
+            "type": "string",
+            "description": "The target workspace's ADDRESS slug."
+          }
+        }
+      },
+      "LoginConnectResponse": {
+        "type": "object",
+        "description": "`POST /v1/login/connect` response — the freshly minted session. `credential` is returned\nexactly once, over this authenticated exchange; the server stores only its sha256.",
+        "required": [
+          "credential",
+          "session_id",
+          "session_status",
+          "workspace"
+        ],
+        "properties": {
+          "credential": {
+            "type": "string",
+            "description": "The new session's plaintext bearer credential (workspace-scoped)."
+          },
+          "session_id": {
+            "type": "string",
+            "description": "The new session's id."
+          },
+          "session_status": {
+            "type": "string",
+            "description": "The session's born status — `\"active\"`, or `\"pending\"` while the workspace's\nsession-approval knob holds it."
+          },
+          "workspace": {
+            "$ref": "#/components/schemas/DeviceAuthWorkspace",
+            "description": "The connected workspace."
           }
         }
       },
@@ -4128,7 +4235,7 @@
     },
     {
       "name": "enrollment",
-      "description": "The RFC-8628-shaped login flow (start / poll; approval promotes the flow code to the SESSION's workspace-scoped bearer credential) and the session self-end."
+      "description": "The RFC-8628-shaped login flow (start / poll; the workspace is chosen at the browser approval, and the poll's exchange mints the SESSION and promotes the flow code to its workspace-scoped bearer credential), the lane-side second connect for an already-credentialed machine, and the session self-end."
     },
     {
       "name": "governance",

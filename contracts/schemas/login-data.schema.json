@@ -37,6 +37,10 @@
         "null"
       ]
     },
+    "host": {
+      "description": "The SERVER host the session lives on (`topos.sh`, `topos.example.com:3000`) — the manifest\ngrammar's host half, and the `<host>/<name>` address a receipt names. **Additive.**",
+      "type": "string"
+    },
     "manifest_note": {
       "description": "What the login did to this machine's own `topos.toml`, when one exists: the workspace's\nfeed row was appended (a file that is absent already behaves as if it held one), or the\nhonest reason it was left alone. Absent when there is no machine-wide file at all.\n**Additive.**",
       "type": [
@@ -45,7 +49,7 @@
       ]
     },
     "name": {
-      "description": "The workspace's ADDRESS name (the slug typed at `login`).",
+      "description": "The workspace's ADDRESS name (the slug the browser approval recorded; empty while a bare\nlogin still awaits it).",
       "type": "string"
     },
     "pending": {

@@ -4,13 +4,6 @@
   "description": "`POST /v1/login/token` body — poll a login flow for its outcome.",
   "type": "object",
   "properties": {
-    "auth_code": {
-      "description": "The one-time AUTHORIZATION CODE a loopback flow's approval delivered to this client's\n127.0.0.1 listener. Required to redeem a `loopback`-bound flow and absent otherwise: the\ntwo secrets travel different channels, and the device code has never been in a URL.",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
     "device_code": {
       "description": "The SECRET flow code from `login/authorize`.",
       "type": "string"

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "DeviceAuthStartRequest",
-  "description": "`POST /v1/login/authorize` body — begin a login flow toward a workspace named by its address\nslug. Whether the name exists is never disclosed on this route: an unknown name runs the same\nflow to the same uniform denial.",
+  "description": "`POST /v1/login/authorize` body — begin a login flow toward this server. The workspace is\nchosen (or created) at the browser approval, where the approver's seats are known; nothing\nabout workspaces or accounts is disclosed on this unauthenticated route.",
   "type": "object",
   "properties": {
     "invite_token": {
@@ -11,8 +11,15 @@
         "null"
       ]
     },
+    "preselect": {
+      "description": "The workspace ADDRESS slug a `login <workspace>` shortcut named — a PRESELECTION for the\nbrowser chooser, recorded shape-checked but unresolved (this unauthenticated start is\nnever an existence oracle). The approval records the workspace the human actually chose.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "redirect": {
-      "description": "How this flow's credential may be collected — `\"loopback\"` when the client has bound a\n127.0.0.1 listener and can open a browser on THIS machine, otherwise absent (the classic\ndevice grant). WRITE-ONCE on the flow: declaring `loopback` only makes the flow harder to\nredeem — the approval's authorization code, delivered by redirecting the approver's own\nbrowser to that listener, becomes required alongside this device code. Absent keeps the\npre-existing behaviour exactly, so an older client is unaffected.",
+      "description": "How the approval outcome is ACCELERATED back — `\"loopback\"` when the client has bound a\n127.0.0.1 listener and can open a browser on THIS machine, otherwise absent (the classic\ndevice grant). WRITE-ONCE on the flow: a loopback flow's approval page resolves from the\nURL-borne challenge with nothing typed, and the approval redirect wakes the listener; the\npoll remains the one completion mechanism either way.",
       "type": [
         "string",
         "null"
@@ -21,14 +28,9 @@
     "requested_name": {
       "description": "A human-readable machine name shown on the approval page (a confused-deputy guard, not\nauthority) and kept as the session's display name once approved.",
       "type": "string"
-    },
-    "workspace": {
-      "description": "The workspace ADDRESS slug the login targets (`topos.sh/<name>` minus the origin). An\nEMPTY string names \"the workspace the origin itself addresses\" (single-tenant installs, where\nthe origin IS its one workspace); a non-empty value is the address slug as today.",
-      "type": "string"
     }
   },
   "required": [
-    "requested_name",
-    "workspace"
+    "requested_name"
   ]
 }

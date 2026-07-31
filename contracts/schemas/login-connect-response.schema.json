@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoginConnectResponse",
+  "description": "`POST /v1/login/connect` response — the freshly minted session. `credential` is returned\nexactly once, over this authenticated exchange; the server stores only its sha256.",
+  "type": "object",
+  "properties": {
+    "credential": {
+      "description": "The new session's plaintext bearer credential (workspace-scoped).",
+      "type": "string"
+    },
+    "session_id": {
+      "description": "The new session's id.",
+      "type": "string"
+    },
+    "session_status": {
+      "description": "The session's born status — `\"active\"`, or `\"pending\"` while the workspace's\nsession-approval knob holds it.",
+      "type": "string"
+    },
+    "workspace": {
+      "description": "The connected workspace.",
+      "$ref": "#/$defs/DeviceAuthWorkspace"
+    }
+  },
+  "required": [
+    "credential",
+    "session_id",
+    "session_status",
+    "workspace"
+  ],
+  "$defs": {
+    "DeviceAuthWorkspace": {
+      "description": "The workspace context a `granted` poll carries — everything the CLI needs to record what it\nlogged into (the id it scopes requests by, the address slug it joined at, and a display name).",
+      "type": "object",
+      "properties": {
+        "display_name": {
+          "description": "The workspace's display name.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The workspace's ADDRESS slug (what the human typed at `login`).",
+          "type": "string"
+        },
+        "workspace_id": {
+          "description": "The workspace id (the `{ws}` path segment of every subsequent request).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_id",
+        "name",
+        "display_name"
+      ]
+    }
+  }
+}
