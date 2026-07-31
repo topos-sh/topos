@@ -90,6 +90,48 @@ pub(crate) fn atomic_write_cas(
     Ok(CasOutcome::Written)
 }
 
+/// What [`atomic_write_new`] concluded.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NewOutcome {
+    /// The target was absent and the staged document landed.
+    Written,
+    /// `target` EXISTS — it appeared after the caller's absence check (an outside writer). The
+    /// staged temp was discarded and the outside file was left byte-for-byte as written. The
+    /// caller owns the typed answer.
+    Exists,
+}
+
+/// [`atomic_write`]'s FILE-BIRTH rung: stage + fsync the temp, then land it with a NO-REPLACE
+/// rename ([`FsOps::rename_file_noreplace`] — kernel-exclusive where the filesystem can, the
+/// link+unlink dance elsewhere). A check-then-write birth silently overwrites a file an outside
+/// editor created between the absence check and the write; this one cannot — a target that
+/// exists at the landing instant answers [`NewOutcome::Exists`] with the staged temp discarded
+/// and nothing overwritten.
+///
+/// # Errors
+/// Propagates the underlying [`FsOps`] failure (which the crash gate injects).
+pub(crate) fn atomic_write_new(
+    fs: &dyn FsOps,
+    target: &Path,
+    bytes: &[u8],
+) -> Result<NewOutcome, ClientError> {
+    let tmp = temp_path(target);
+    fs.write_temp(&tmp, bytes)?;
+    fs.fsync_file(&tmp)?;
+    match fs.rename_file_noreplace(&tmp, target) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            fs.remove_file(&tmp)?;
+            return Ok(NewOutcome::Exists);
+        }
+        Err(e) => return Err(e.into()),
+    }
+    if let Some(dir) = target.parent() {
+        fs.fsync_dir(dir)?;
+    }
+    Ok(NewOutcome::Written)
+}
+
 /// The crash-safe write for a **SECRET**: the same temp → fsync → rename → fsync-dir dance as
 /// [`atomic_write_at`], but the temp is created **0600 from creation** ([`FsOps::write_private`]), so the
 /// secret never has a world-readable window at any instant — not even mid-write or post-fault (the temp,
@@ -296,5 +338,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The crash-fault arm of the fchmod-before-write invariant: the PREDICTABLE temp pre-exists
+    /// world-readable (stale litter — or a plant), and a fault at ANY step of
+    /// `atomic_write_private` must leave NO file holding the secret bytes at a permissive mode —
+    /// the temp is tightened to 0600 through the open fd before the first secret byte lands, so
+    /// there is no window a crash can freeze open.
+    #[test]
+    fn faultfs_never_leaves_secret_bytes_readable_at_a_permissive_preexisting_temp() {
+        for fail_at in 1..=4 {
+            let real = RealFs;
+            let p = scratch(&format!("awpt{fail_at}")).join("doc.json");
+            let tmp = temp_path(&p);
+            std::fs::write(&tmp, b"stale, wide open").unwrap();
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let ff = FaultFs::new(fail_at);
+            let _ = atomic_write_private(&ff, &p, b"SECRET"); // faults at step `fail_at`
+
+            // Wherever the crash landed: any file that holds the secret bytes is 0600.
+            for f in [&tmp, &p] {
+                if real.exists(f) && std::fs::read(f).unwrap() == b"SECRET" {
+                    assert_eq!(
+                        mode_of(f),
+                        0o600,
+                        "fail_at={fail_at}: secret bytes readable at a permissive mode at {f:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The birth CAS: a file the racer creates between the absence check and the landing rename
+    /// is NEVER overwritten — [`atomic_write_new`] answers `Exists`, the outside bytes stand,
+    /// and the staged temp is discarded. The injection sits at the last catchable instant
+    /// (immediately before the no-replace rename, temp already staged).
+    #[test]
+    fn atomic_write_new_refuses_a_file_that_appeared_after_the_absence_check() {
+        let dir = scratch("awn");
+        let p = dir.join("topos.toml");
+        let tmp = temp_path(&p);
+        let racing = p.clone();
+        let fs = crate::fs_seam::HookFs::before_first_move_of(&tmp, move || {
+            std::fs::write(&racing, b"outside bytes").unwrap();
+        });
+        let out = atomic_write_new(&fs, &p, b"topos bytes").unwrap();
+        assert_eq!(out, NewOutcome::Exists);
+        assert_eq!(
+            std::fs::read(&p).unwrap(),
+            b"outside bytes",
+            "the outside file stands byte-for-byte"
+        );
+        assert!(!RealFs.exists(&tmp), "the staged temp was discarded");
+        // A clean path lands.
+        let q = dir.join("fresh.toml");
+        assert_eq!(
+            atomic_write_new(&RealFs, &q, b"topos bytes").unwrap(),
+            NewOutcome::Written
+        );
+        assert_eq!(std::fs::read(&q).unwrap(), b"topos bytes");
     }
 }

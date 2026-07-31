@@ -416,19 +416,23 @@ pub(crate) fn add_remote_fetched(
         }
         Err(e) => return Err(ClientError::Io(format!("open import root: {e}"))),
     };
-    let stage_dir = dest_root.join(format!(".topos-import-{}", selected.name));
+    let stage_leaf = format!(".topos-import-{}", selected.name);
+    let stage_dir = dest_root.join(&stage_leaf);
     if ctx.fs.exists(&stage_dir) {
-        dest_handle
-            .verify_unmoved()
+        // The clear runs AT the held root handle (identity-verified inside the op) — a swapped
+        // ancestor cannot re-aim the recursive removal.
+        ctx.fs
+            .remove_dir_all_at(&dest_handle, &stage_leaf)
             .map_err(|e| ClientError::Io(format!("clear import staging: {e}")))?;
-        ctx.fs.remove_dir_all(&stage_dir)?;
     }
-    // The staging dir itself: one fd-walked (`openat`/`mkdirat`) level below the proven root.
-    ctx.fs
+    // The staging dir itself: one fd-walked (`openat`/`mkdirat`) level below the proven root —
+    // its HELD handle carries the self-ignore write below.
+    let stage_handle = ctx
+        .fs
         .create_dir_nofollow(&dest_root, &stage_dir)
         .map_err(|e| ClientError::Io(format!("create import staging: {e}")))?;
     if let Err(e) = write_skill_dir(ctx, &stage_dir, &selected.files) {
-        let _ = ctx.fs.remove_dir_all(&stage_dir);
+        let _ = ctx.fs.remove_dir_all_at(&dest_handle, &stage_leaf);
         return Err(e);
     }
     // A PROJECT-scope import self-ignores exactly like the materializer's staged trees: the
@@ -443,12 +447,14 @@ pub(crate) fn add_remote_fetched(
     if scope == SkillScope::Project {
         match shipped_root_ignore {
             None => {
-                if let Err(e) = ctx.fs.write_staged(
-                    &stage_dir.join(crate::scan::IGNORE_FILE),
+                // AT the staging dir's held handle — no path-based write below the proven root.
+                if let Err(e) = ctx.fs.write_staged_at(
+                    &stage_handle,
+                    crate::scan::IGNORE_FILE,
                     crate::scan::IGNORE_SENTINEL,
                     false,
                 ) {
-                    let _ = ctx.fs.remove_dir_all(&stage_dir);
+                    let _ = ctx.fs.remove_dir_all_at(&dest_handle, &stage_leaf);
                     return Err(ClientError::Io(format!("stage self-ignore: {e}")));
                 }
             }
@@ -465,7 +471,7 @@ pub(crate) fn add_remote_fetched(
     let dest_park = match park_and_verify_destination(ctx, &dest_dir, &stage_dir) {
         Ok(p) => p,
         Err(e) => {
-            let _ = ctx.fs.remove_dir_all(&stage_dir);
+            let _ = ctx.fs.remove_dir_all_at(&dest_handle, &stage_leaf);
             return Err(e);
         }
     };
@@ -477,19 +483,16 @@ pub(crate) fn add_remote_fetched(
     // route the rename through it. (The rename itself then runs at the held root handle, so even
     // a swap in the beat after this proof cannot re-aim it.)
     if let Err(e) = prove_import_containment(scope, roots, &dest_dir) {
-        let _ = ctx.fs.remove_dir_all(&stage_dir);
+        let _ = ctx.fs.remove_dir_all_at(&dest_handle, &stage_leaf);
         if let Some(park) = &dest_park {
             restore_import_park(ctx, park, &dest_dir);
         }
         return Err(e);
     }
-    let (stage_leaf, dest_leaf) = match (
-        stage_dir.file_name().and_then(|n| n.to_str()),
-        dest_dir.file_name().and_then(|n| n.to_str()),
-    ) {
-        (Some(s), Some(d)) => (s, d),
-        _ => {
-            let _ = ctx.fs.remove_dir_all(&stage_dir);
+    let dest_leaf = match dest_dir.file_name().and_then(|n| n.to_str()) {
+        Some(d) => d,
+        None => {
+            let _ = ctx.fs.remove_dir_all_at(&dest_handle, &stage_leaf);
             if let Some(park) = &dest_park {
                 restore_import_park(ctx, park, &dest_dir);
             }
@@ -501,11 +504,11 @@ pub(crate) fn add_remote_fetched(
     };
     if let Err(e) = ctx
         .fs
-        .rename_at_noreplace(&dest_handle, stage_leaf, dest_leaf)
+        .rename_at_noreplace(&dest_handle, &stage_leaf, dest_leaf)
     {
-        if dest_handle.verify_unmoved().is_ok() {
-            let _ = ctx.fs.remove_dir_all(&stage_dir);
-        }
+        // The staging removal runs AT the held handle (identity-verified inside the op — a
+        // failing verify preserves the tree, exactly as the old explicit guard did).
+        let _ = ctx.fs.remove_dir_all_at(&dest_handle, &stage_leaf);
         if let Some(park) = &dest_park {
             restore_import_park(ctx, park, &dest_dir);
         }
@@ -1100,22 +1103,28 @@ fn restore_import_park(ctx: &Ctx<'_>, parked: &Path, dest: &Path) {
 
 /// Write a selected skill's byte-exact files into `dest`, preserving the executable bit (part of the
 /// digest). Paths are archive-relative forward-slash and already `..`/absolute-safe (extraction rejected
-/// hazards), so the component-wise join stays inside `dest` — and the creates walk NO-FOLLOW below
-/// `dest` (with `O_NOFOLLOW` file opens), so a symlink swapped into the staged tree mid-write is
-/// met as itself and refused, never traversed.
+/// hazards), so the component-wise join stays inside `dest` — the creates walk NO-FOLLOW below
+/// `dest`, and each file write runs AT the held handle its walk returned
+/// ([`crate::fs_seam::FsOps::write_staged_at`]: openat-exclusive, fd-fsyncs), so a symlink swapped
+/// into the staged tree mid-write is met as itself and refused, never traversed — no path-based
+/// write below the proven staging root.
 fn write_skill_dir(ctx: &Ctx<'_>, dest: &Path, files: &[RepoFile]) -> Result<(), ClientError> {
     for f in files {
         let mut path = dest.to_path_buf();
         for comp in f.path.split('/') {
             path.push(comp);
         }
-        if let Some(parent) = path.parent() {
-            ctx.fs
-                .create_dir_nofollow(dest, parent)
-                .map_err(|e| ClientError::Io(format!("create {}: {e}", parent.display())))?;
-        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| ClientError::Io(format!("{}: no parent directory", path.display())))?;
+        let parent_handle = ctx
+            .fs
+            .create_dir_nofollow(dest, parent)
+            .map_err(|e| ClientError::Io(format!("create {}: {e}", parent.display())))?;
+        let leaf = f.path.rsplit('/').next().unwrap_or(&f.path);
         let executable = f.mode & 0o111 != 0;
-        ctx.fs.write_staged(&path, &f.bytes, executable)?;
+        ctx.fs
+            .write_staged_at(&parent_handle, leaf, &f.bytes, executable)?;
     }
     Ok(())
 }

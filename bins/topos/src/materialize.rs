@@ -402,9 +402,10 @@ pub(crate) fn materialize(
                     _ => {
                         // The staging removal rides the same anchor: with the parent's identity
                         // unverifiable the staged tree stays (preserved, never deleted through a
-                        // possibly-swapped path).
+                        // possibly-swapped path) — and the removal itself runs AT the held
+                        // handle, so a swap after this check cannot re-aim it either.
                         if parent_handle.verify_unmoved().is_ok() {
-                            fs.remove_dir_all(&staging)?;
+                            fs.remove_dir_all_at(&parent_handle, leaf_name(&staging)?)?;
                         }
                         continue;
                     }
@@ -418,7 +419,7 @@ pub(crate) fn materialize(
         // parent handle, so even a swap in the beat after this proof cannot re-aim it.)
         if let Err(e) = prove_containment(req.project_root, &placement_dir) {
             if parent_handle.verify_unmoved().is_ok() {
-                fs.remove_dir_all(&staging)?;
+                fs.remove_dir_all_at(&parent_handle, leaf_name(&staging)?)?;
             }
             return Err(e);
         }
@@ -917,43 +918,61 @@ fn build_staging(
         });
     }
     // NO-FOLLOW creates throughout the staged tree (see the module doc's proof-to-write
-    // boundary): the staging dir is one fd-walked level below the canonical parent, and every
+    // boundary): the staging dir is one fd-walked level below the canonical parent, every
     // file-parent below it is reached from its own parent's held fd — a symlink swapped in
-    // mid-build is met as itself and refused, never traversed.
+    // mid-build is met as itself and refused, never traversed — and every file WRITE runs AT
+    // the held handle its walk returned (`write_staged_at`: openat-exclusive, fd-fsyncs), so no
+    // path-based write survives below the proven base.
     let staging_parent = staging
         .parent()
         .ok_or_else(|| ClientError::PlacementUnsupported {
             reason: "staging path has no parent directory".into(),
         })?;
-    fs.create_dir_nofollow(staging_parent, staging)?;
+    let staging_handle = fs.create_dir_nofollow(staging_parent, staging)?;
     let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
     dirs.insert(staging.to_path_buf());
     if self_ignore && !bundle.files.iter().any(|f| f.path == scan::IGNORE_FILE) {
-        let dest = staging.join(scan::IGNORE_FILE);
-        fs.write_staged(&dest, scan::IGNORE_SENTINEL, false)?;
-        fs.fsync_file(&dest)?;
+        // The write rides the HELD handle the create walk returned (fd-fsyncs included) — no
+        // path-based write below the proven parent.
+        fs.write_staged_at(
+            &staging_handle,
+            scan::IGNORE_FILE,
+            scan::IGNORE_SENTINEL,
+            false,
+        )?;
     }
     for f in &bundle.files {
         let dest = staging.join(&f.path);
-        if let Some(file_parent) = dest.parent() {
-            fs.create_dir_nofollow(staging, file_parent)?;
-            // Collect every directory from the file's parent up to (and including) the staging root, so
-            // each directory entry is fsynced before the swap. `f.path` is kernel-validated (no `..`, no
-            // absolute), so the walk stays inside staging.
-            let mut d: &Path = file_parent;
-            loop {
-                dirs.insert(d.to_path_buf());
-                if d == staging {
-                    break;
-                }
-                match d.parent() {
-                    Some(up) if up == staging || up.starts_with(staging) => d = up,
-                    _ => break,
-                }
+        let file_parent = dest
+            .parent()
+            .ok_or_else(|| ClientError::PlacementUnsupported {
+                reason: format!("{} has no parent directory", dest.display()),
+            })?;
+        // The walk returns the file-parent's HELD handle, and the leaf write runs AT it — a
+        // staging ancestor swapped for a symlink after the walk cannot re-aim the write, because
+        // no path-based syscall runs below the proven parent.
+        let parent_handle = fs.create_dir_nofollow(staging, file_parent)?;
+        // Collect every directory from the file's parent up to (and including) the staging root, so
+        // each directory entry is fsynced before the swap. `f.path` is kernel-validated (no `..`, no
+        // absolute), so the walk stays inside staging.
+        let mut d: &Path = file_parent;
+        loop {
+            dirs.insert(d.to_path_buf());
+            if d == staging {
+                break;
+            }
+            match d.parent() {
+                Some(up) if up == staging || up.starts_with(staging) => d = up,
+                _ => break,
             }
         }
-        fs.write_staged(&dest, &f.bytes, f.mode == FileMode::Executable)?;
-        fs.fsync_file(&dest)?;
+        let leaf = leaf_name(&dest)?;
+        fs.write_staged_at(
+            &parent_handle,
+            leaf,
+            &f.bytes,
+            f.mode == FileMode::Executable,
+        )?;
     }
     for d in &dirs {
         fs.fsync_dir(d)?;

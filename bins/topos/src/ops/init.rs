@@ -55,10 +55,17 @@ pub(crate) fn init(ctx: &Ctx<'_>, global: bool) -> Result<InitData, ClientError>
             note,
         });
     }
-    crate::atomic::atomic_write(ctx.fs, &path, project_template().as_bytes())?;
+    // The lock fences topos's own writers; an OUTSIDE editor can still land the file between the
+    // check above and the write — the exclusive create meets it as an existing file (the same
+    // clean no-op receipt, the outside bytes standing), never an overwrite.
+    let created =
+        match crate::atomic::atomic_write_new(ctx.fs, &path, project_template().as_bytes())? {
+            crate::atomic::NewOutcome::Written => true,
+            crate::atomic::NewOutcome::Exists => false,
+        };
     Ok(InitData {
         manifest: path.display().to_string(),
-        created: true,
+        created,
         note,
     })
 }
@@ -98,12 +105,28 @@ fn init_global(ctx: &Ctx<'_>) -> Result<InitData, ClientError> {
         ))
     };
     ctx.fs.create_dir_all(ctx.layout.home())?;
-    crate::atomic::atomic_write(ctx.fs, &path, materialized_global(&connected).as_bytes())?;
-    Ok(InitData {
-        manifest: path.display().to_string(),
-        created: true,
-        note,
-    })
+    // Same discipline as the project arm: the exclusive create meets a file an outside writer
+    // landed after the check as an EXISTING file — the no-op receipt, never an overwrite.
+    match crate::atomic::atomic_write_new(
+        ctx.fs,
+        &path,
+        materialized_global(&connected).as_bytes(),
+    )? {
+        crate::atomic::NewOutcome::Written => Ok(InitData {
+            manifest: path.display().to_string(),
+            created: true,
+            note,
+        }),
+        crate::atomic::NewOutcome::Exists => Ok(InitData {
+            manifest: path.display().to_string(),
+            created: false,
+            note: Some(
+                "it already exists and was left untouched — `topos fmt -g` tidies it, and \
+                 `topos status` says what it currently asks for"
+                    .to_owned(),
+            ),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -204,6 +227,54 @@ mod tests {
             let err = init(ctx, false).unwrap_err();
             assert_eq!(err.code(), "INVALID_ARGUMENT");
         });
+    }
+
+    #[test]
+    fn a_file_appearing_between_the_check_and_the_land_is_never_overwritten() {
+        // The racer is an OUTSIDE editor (topos's own writers serialize on the manifest lock):
+        // it lands the file at the last catchable instant — after the absence check, with the
+        // template already staged, immediately before the no-replace rename. The exclusive
+        // create answers it as an existing file: the no-op receipt, the outside bytes standing.
+        let home = scratch("race");
+        let repo = home.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let path = repo.join(MANIFEST_FILE);
+        let tmp = crate::atomic::temp_path(&path);
+        let racing = path.clone();
+        let hook_fs = crate::fs_seam::HookFs::before_first_move_of(&tmp, move || {
+            std::fs::write(&racing, b"# an outside editor's file\n").unwrap();
+        });
+        let rfs = RealFs;
+        let ids = RealIds;
+        let clock = RealClock;
+        let plane = InertPlane;
+        let follow = InertFollow;
+        let harness = ClaudeCode::new(scratch("race-adapter"), &rfs);
+        let ctx = Ctx {
+            fs: &hook_fs,
+            ids: &ids,
+            clock: &clock,
+            device_id: String::new(),
+            layout: Layout::new(&home.join(".topos")),
+            harness: &harness,
+            plane: &plane,
+            follow: &follow,
+            roots: Some(AgentRoots {
+                home: home.clone(),
+                cwd: Some(repo.clone()),
+            }),
+        };
+        let out = init(&ctx, false).unwrap();
+        assert!(
+            !out.created,
+            "the racer's file is an existing file — the receipt is the no-op, never an overwrite"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"# an outside editor's file\n",
+            "the outside bytes stand byte-for-byte"
+        );
+        assert!(!tmp.exists(), "the staged template was discarded");
     }
 
     #[test]
