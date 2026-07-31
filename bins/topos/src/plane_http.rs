@@ -24,7 +24,8 @@ use std::time::Duration;
 use topos_core::digest::{self, FileMode, to_hex};
 use topos_types::requests::{
     DeviceAuthPollRequest, DeviceAuthPollResponse, DeviceAuthPollStatus, DeviceAuthStartRequest,
-    DeviceAuthStartResponse, InvitationData, InvitationRequest, NoticeAckRequest, ProposeRequest,
+    DeviceAuthStartResponse, DeviceAuthWorkspace, InvitationData, InvitationRequest,
+    LoginConnectRequest, LoginConnectResponse, NoticeAckRequest, ProposeRequest,
     ProtectionSetRequest, PublishRequest, RevertRequest, ReviewRequest, WireChannelIndex,
     WireFileMode, WireMe, WireProposalIndex, WireProposalList, WireProtocolCard, WireReach,
     WireSkillIndex, WireSkillLog, WireVersionMeta,
@@ -33,9 +34,10 @@ use topos_types::{JsonEnvelope, TerminalOutcome, WireCurrentRecord};
 
 use crate::error::ClientError;
 use crate::plane::{
-    CatalogSource, ContributeSource, DeviceAuthPoll, DeviceAuthStart, DirectorySource,
-    EnrollSource, EnrolledGrant, EnrolledWorkspace, FetchedFile, FetchedVersion, GovernanceSource,
-    KnownCurrent, LinkStatus, PlaneError, PlaneSource, PointerFetch, WriteReceipt,
+    CatalogSource, ConnectedSession, ContributeSource, DeviceAuthPoll, DeviceAuthStart,
+    DirectorySource, EnrollSource, EnrolledGrant, EnrolledWorkspace, FetchedFile, FetchedVersion,
+    GovernanceSource, KnownCurrent, LinkStatus, PlaneError, PlaneSource, PointerFetch,
+    WriteReceipt,
 };
 
 /// Fail fast establishing a connection (a dead plane must not hang the session-start sweep).
@@ -520,6 +522,7 @@ fn domain_mode(mode: WireFileMode) -> FileMode {
 // UreqDeviceClient — the real SESSION-LANE transport (sibling of the read-lane `UreqPlane`). One
 // client speaks every route a session drives: the UNAUTHENTICATED login flow
 // (`POST /v1/login/authorize` + `POST /v1/login/token`) and the CREDENTIALED routes — the
+// lane-side second connect (`POST /v1/login/connect`), the
 // governance invitation POST + the session self-end (`DELETE /v1/session`), the four contribute
 // writes (publish / propose / revert / review), the workspace-catalog GET (`list --remote`), the
 // profile row ops, and the member-scoped directory reads — each riding `Authorization: Bearer
@@ -672,14 +675,14 @@ impl EnrollSource for UreqDeviceClient {
 
     fn device_auth_start(
         &self,
-        workspace: &str,
         requested_name: &str,
+        preselect: Option<&str>,
         invite_token: Option<&str>,
         loopback: bool,
     ) -> Result<DeviceAuthStart, ClientError> {
         let body = serde_json::to_value(DeviceAuthStartRequest {
             requested_name: requested_name.to_owned(),
-            workspace: workspace.to_owned(),
+            preselect: preselect.map(str::to_owned),
             invite_token: invite_token.map(str::to_owned),
             redirect: loopback.then(|| "loopback".to_owned()),
         })
@@ -703,16 +706,11 @@ impl EnrollSource for UreqDeviceClient {
         })
     }
 
-    fn device_auth_poll(
-        &self,
-        device_code: &str,
-        auth_code: Option<&str>,
-    ) -> Result<DeviceAuthPoll, ClientError> {
+    fn device_auth_poll(&self, device_code: &str) -> Result<DeviceAuthPoll, ClientError> {
         // The body carries the SECRET device code — a serialize failure never echoes it, and the
         // response mapping is the pure `map_poll_response` (unit-tested without a socket).
         let body = serde_json::to_value(DeviceAuthPollRequest {
             device_code: device_code.to_owned(),
-            auth_code: auth_code.map(str::to_owned),
         })
         .map_err(|_| ClientError::Corrupt("poll body: could not serialize".to_owned()))?;
         let url = format!("{}/v1/login/token", self.base_url);
@@ -736,49 +734,66 @@ fn map_poll_response(status: u16, bytes: &[u8]) -> Result<DeviceAuthPoll, Client
         .map_err(|e| ClientError::WireInvalid(format!("poll response is malformed: {e}")))?;
     Ok(match resp.status {
         DeviceAuthPollStatus::Pending => DeviceAuthPoll::Pending,
-        // The human approved, but this caller has not presented the loopback hand-off's code —
-        // re-open the hand-off rather than wait on an approval that already happened.
-        DeviceAuthPollStatus::AwaitingRedirect => DeviceAuthPoll::AwaitingRedirect,
         DeviceAuthPollStatus::Denied => DeviceAuthPoll::Denied,
         DeviceAuthPollStatus::Expired => DeviceAuthPoll::Expired,
         DeviceAuthPollStatus::Granted => {
-            // The SESSION wire grants `session_id`/`session_status`; the retired device wire
-            // granted `device_id`/`link_status` — accept either pair (one id, one status).
-            let id = resp.session_id.clone().or(resp.device_id);
-            let (Some(credential), Some(device_id), Some(workspace)) =
-                (resp.credential, id, resp.workspace)
+            let (Some(credential), Some(session_id), Some(workspace)) =
+                (resp.credential, resp.session_id, resp.workspace)
             else {
                 // `granted` without its grant halves is a malformed response, not a silent re-poll.
                 return Err(ClientError::WireInvalid(
                     "a granted login poll carried no credential/session/workspace".into(),
                 ));
             };
-            // The wire boundary: the workspace id becomes a URL segment + a user.json key, so it must
-            // be a safe path component (a traversal id is the corrupt family's WIRE flavor).
-            crate::id::validate_workspace_id(&workspace.workspace_id)
-                .map_err(crate::id::wire_flavor)?;
             DeviceAuthPoll::Granted(EnrolledGrant {
                 credential,
-                device_id,
-                workspace: EnrolledWorkspace {
-                    workspace_id: workspace.workspace_id,
-                    name: workspace.name,
-                    display_name: workspace.display_name,
-                },
-                session_id: resp.session_id,
+                session_id,
+                workspace: wire_workspace(workspace)?,
                 hint: resp.hint.map(|h| crate::plane::GrantHint {
                     kind: h.kind,
                     name: h.name,
                 }),
-                // The session's born status (the retired link spelling accepted as a fallback);
-                // an older producer omits both (⇒ active).
-                link_status: LinkStatus::from_wire(
-                    resp.session_status
-                        .as_deref()
-                        .or(resp.link_status.as_deref()),
-                ),
+                // The session's born status; an older producer omits it (⇒ active).
+                link_status: LinkStatus::from_wire(resp.session_status.as_deref()),
             })
         }
+    })
+}
+
+/// The wire boundary for a minted session's workspace: the id becomes a URL segment + a local
+/// document key, so it must be a safe path component (a traversal id is the corrupt family's WIRE
+/// flavor). Shared by the granted poll and the lane-side connect.
+fn wire_workspace(wire: DeviceAuthWorkspace) -> Result<EnrolledWorkspace, ClientError> {
+    crate::id::validate_workspace_id(&wire.workspace_id).map_err(crate::id::wire_flavor)?;
+    Ok(EnrolledWorkspace {
+        workspace_id: wire.workspace_id,
+        name: wire.name,
+        display_name: wire.display_name,
+    })
+}
+
+/// Map a `POST /v1/login/connect` response to the typed [`ConnectedSession`]. The uniform 404 is
+/// the ONE non-fault miss (no seat there, or the acting session is itself gone) — the caller falls
+/// back to the browser on it. **Pure** (status + bytes in), like [`map_poll_response`].
+fn map_login_connect(status: u16, bytes: &[u8]) -> Result<ConnectedSession, ClientError> {
+    match classify(status) {
+        HttpClass::Ok => {}
+        HttpClass::NotFound => {
+            return Err(ClientError::TargetNotFound {
+                target: "workspace".to_owned(),
+            });
+        }
+        HttpClass::NotModified | HttpClass::Other => {
+            return Err(ClientError::Plane(format!("login connect: HTTP {status}")));
+        }
+    }
+    let resp: LoginConnectResponse = serde_json::from_slice(bytes)
+        .map_err(|e| ClientError::WireInvalid(format!("connect response is malformed: {e}")))?;
+    Ok(ConnectedSession {
+        credential: resp.credential,
+        session_id: resp.session_id,
+        workspace: wire_workspace(resp.workspace)?,
+        link_status: LinkStatus::from_wire(Some(&resp.session_status)),
     })
 }
 
@@ -805,6 +820,25 @@ impl GovernanceSource for UreqDeviceClient {
         );
         let (status, bytes) = self.post_json_auth(&url, credential, &value, "create invitation")?;
         map_invite_envelope(status, &bytes)
+    }
+
+    fn login_connect(
+        &self,
+        workspace: &str,
+        requested_name: &str,
+    ) -> Result<ConnectedSession, ClientError> {
+        // The acting session's own credential is the whole request's authority — the body names
+        // only WHICH workspace to mint into (a slug the server resolves against the caller's
+        // seats) and the machine name the new session displays under.
+        let body = serde_json::to_value(LoginConnectRequest {
+            workspace: workspace.to_owned(),
+            requested_name: requested_name.to_owned(),
+        })
+        .map_err(|_| ClientError::Corrupt("connect body: could not serialize".to_owned()))?;
+        let credential = self.credential_for(workspace)?;
+        let url = format!("{}/v1/login/connect", self.base_url);
+        let (status, bytes) = self.post_json_auth(&url, credential, &body, "login connect")?;
+        map_login_connect(status, &bytes)
     }
 
     fn revoke_session(&self) -> Result<(), ClientError> {
@@ -1966,13 +2000,13 @@ mod tests {
         );
     }
 
-    // ---- The device-auth poll mapping + the id boundary at the wire parse. ----
+    // ---- The login poll + lane-connect mappings, and the id boundary at the wire parse. ----
 
     fn poll_json(status: &str, workspace_id: Option<&str>) -> Vec<u8> {
         let mut body = serde_json::json!({ "status": status });
         if let Some(ws) = workspace_id {
             body["credential"] = serde_json::json!("devc_secret");
-            body["device_id"] = serde_json::json!("dev_1");
+            body["session_id"] = serde_json::json!("sn_1");
             body["workspace"] = serde_json::json!({
                 "workspace_id": ws,
                 "name": "acme",
@@ -2001,9 +2035,10 @@ mod tests {
             panic!("expected a granted poll");
         };
         assert_eq!(grant.credential, "devc_secret");
-        assert_eq!(grant.device_id, "dev_1");
+        assert_eq!(grant.session_id, "sn_1");
         assert_eq!(grant.workspace.workspace_id, "w_acme");
         assert_eq!(grant.workspace.name, "acme");
+        assert_eq!(grant.link_status, LinkStatus::Active, "absent ⇒ active");
         // The credential never surfaces in Debug.
         assert!(!format!("{grant:?}").contains("devc_secret"));
         // A non-200 is a transport-shaped error, never a silent pending.
@@ -2015,11 +2050,12 @@ mod tests {
 
     #[test]
     fn map_poll_response_refuses_a_bare_or_hostile_grant() {
-        // `granted` without its credential/device/workspace halves is malformed, not a re-poll.
+        // `granted` without its credential/session/workspace halves is malformed, not a re-poll.
         let err = map_poll_response(200, &poll_json("granted", None)).unwrap_err();
         assert!(matches!(err, ClientError::WireInvalid(_)), "got {err:?}");
-        // A hostile workspace id (it later keys URL splices + user.json) fails the WHOLE poll, as the
-        // WIRE flavor of the corrupt family (same CORRUPT_STATE code; the safe message names the plane).
+        // A hostile workspace id (it later keys URL splices + the session doc) fails the WHOLE poll,
+        // as the WIRE flavor of the corrupt family (same CORRUPT_STATE code; the safe message names
+        // the plane).
         for bad in ["../../x", "a/b", "A", "", ".", ".."] {
             let err = map_poll_response(200, &poll_json("granted", Some(bad))).unwrap_err();
             assert!(
@@ -2032,6 +2068,45 @@ mod tests {
                 "the plane's response failed validation"
             );
         }
+    }
+
+    #[test]
+    fn map_login_connect_mints_or_answers_the_uniform_miss() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "credential": "sess_secret",
+            "session_id": "sn_2",
+            "session_status": "pending",
+            "workspace": { "workspace_id": "w_eng", "name": "eng", "display_name": "Engineering" },
+        }))
+        .expect("serialize connect body");
+        let minted = map_login_connect(200, &body).unwrap();
+        assert_eq!(minted.credential, "sess_secret");
+        assert_eq!(minted.session_id, "sn_2");
+        assert_eq!(minted.workspace.workspace_id, "w_eng");
+        assert_eq!(minted.link_status, LinkStatus::Pending);
+        assert!(!format!("{minted:?}").contains("sess_secret"));
+        // The uniform 404 is the ONE non-fault miss — the caller falls back to the browser on it,
+        // and it must never read as a transport fault.
+        assert!(matches!(
+            map_login_connect(404, b"").unwrap_err(),
+            ClientError::TargetNotFound { .. }
+        ));
+        assert!(matches!(
+            map_login_connect(500, b"{}").unwrap_err(),
+            ClientError::Plane(_)
+        ));
+        // The same id boundary as the granted poll.
+        let hostile = serde_json::to_vec(&serde_json::json!({
+            "credential": "sess_secret",
+            "session_id": "sn_2",
+            "session_status": "active",
+            "workspace": { "workspace_id": "../x", "name": "eng", "display_name": "E" },
+        }))
+        .expect("serialize connect body");
+        assert!(matches!(
+            map_login_connect(200, &hostile).unwrap_err(),
+            ClientError::WireInvalid(_)
+        ));
     }
 
     #[test]

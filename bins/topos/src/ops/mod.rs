@@ -70,9 +70,7 @@ pub(crate) use invite::{InviteConnectors, InviteOutcome, invite};
 #[cfg(test)]
 pub(crate) use list::list;
 pub(crate) use list::{DiscoveryRoots, ListFilter, ListOutcome, RemoteScope, list_with};
-pub(crate) use login::{
-    Handoff, LoginConnectors, login as session_login, logout as session_logout,
-};
+pub(crate) use login::{LoginConnectors, login as session_login, logout as session_logout};
 pub(crate) use manifest_edit::{
     manifest_host, note_added_path, note_added_remote, off_row_for, reference_shaped,
     remove_global, remove_project,

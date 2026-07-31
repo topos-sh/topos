@@ -107,13 +107,14 @@ pub(crate) enum Command {
         #[arg(long)]
         rebuild: bool,
     },
-    /// Connect this machine to a workspace. Opens your browser for a one-click approval; from
-    /// then on, the workspace's skills arrive and stay updated by themselves. The address is
-    /// your workspace's URL — like `topos.sh/acme`, or your own server's origin when
-    /// self-hosting — or an invitation link. To connect another workspace, log in again with
-    /// its address.
+    /// Log this machine in to topos. Opens your browser for a one-click approval, where you
+    /// choose (or create) the workspace to join; from then on, that workspace's skills arrive
+    /// and stay updated by themselves. Bare `topos login` uses topos.sh; name your own server
+    /// when self-hosting, a workspace to go straight to it, or paste an invitation link. To join
+    /// another workspace, log in again — already logged in to that server, it takes no browser.
     Login {
-        /// The workspace address or invitation link. Omitted, resumes a pending login.
+        /// The server, workspace, or invitation link. Omitted, uses the default server (or
+        /// resumes a login already awaiting approval).
         address: Option<String>,
         /// Wait for the browser approval before returning. Bare `--wait` waits until the code
         /// expires; `--wait <seconds>` caps it. On a terminal, login waits by default; piped,

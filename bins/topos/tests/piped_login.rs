@@ -1,8 +1,9 @@
 //! The PIPED login default, proven over the real binary: an agent harness surfaces a command's
-//! output only when it exits, so a piped `topos login <address>` (no `--json`, no `--wait`) must
+//! output only when it exits, so a piped `topos login [<address>]` (no `--json`, no `--wait`) must
 //! NEVER sit in the human blocking wait — it prints the approval instructions, performs its
 //! invocation's one poll, and exits 0 with the WAL pending for the next re-invoke.
-//! `--wait <seconds>` stays the explicit piped opt-in, capped at its deadline.
+//! `--wait <seconds>` stays the explicit piped opt-in, capped at its deadline. A BARE `topos
+//! login` — the headline usage — runs the same way against the default server.
 //!
 //! The fixture is a real loopback HTTP server (std `TcpListener`, one thread) answering the
 //! constant protocol card, the `/v1/login/authorize` start, and an always-`pending`
@@ -200,6 +201,37 @@ fn a_piped_login_prints_the_instructions_and_exits_without_the_blocking_wait() {
         home.join("identity/enrollment.json").exists(),
         "still pending — the WAL survives"
     );
+}
+
+#[test]
+fn a_bare_login_starts_against_the_default_server() {
+    let fx = spawn_fixture();
+    let home = scratch("bare");
+
+    // No address at all: the default server (here `TOPOS_PLANE_URL`), and NOTHING preselected —
+    // the workspace is chosen in the browser, so the CLI names none.
+    let out = run_piped(&home, &fx.base, &["login"], Duration::from_secs(30));
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "bare login exits 0: {printed}");
+    assert!(
+        printed.contains("choose your workspace in the browser"),
+        "the receipt says where the workspace comes from: {printed}"
+    );
+    assert!(
+        printed.contains("Open:") && printed.contains("WXYZ-3N3X"),
+        "the approval instructions print: {printed}"
+    );
+    let wal = std::fs::read_to_string(home.join("identity/enrollment.json"))
+        .expect("the login WAL is on disk");
+    assert!(
+        !wal.contains("preselect"),
+        "a bare login preselects nothing: {wal}"
+    );
+    assert_eq!(fx.polls.load(Ordering::Relaxed), 0, "begin does not poll");
 }
 
 #[test]

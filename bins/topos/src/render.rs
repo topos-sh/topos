@@ -308,69 +308,91 @@ pub(crate) fn to_json(envelope: &JsonEnvelope) -> String {
     serde_json::to_string(envelope).unwrap_or_else(|_| "{\"ok\":false}".to_owned())
 }
 
-/// The `login` receipt — pending (the approval instructions) or the completed session, led by the
-/// acceptance disclosure (what connecting delivers; silent from here).
+/// The `login` receipt — pending (the approval instructions) or the connected session, led by the
+/// acceptance disclosure (what connecting adopts; silent from here). ONE renderer for all three
+/// connected arms: the browser grant, the browser-free lane connect, and a workspace this machine
+/// already reaches.
 pub(crate) fn session_login_tty(data: &topos_types::results::LoginData) -> String {
+    let server = if data.host.is_empty() {
+        data.server.clone().unwrap_or_default()
+    } else {
+        data.host.clone()
+    };
     if let Some(p) = &data.pending {
-        let mut s = format!(
-            "Approve this login in your browser:\n  Open: {}\n  Code: {} (the page shows the \
-             same code — confirm it matches)\nThen re-run `topos login` to finish.",
+        // A bare `topos login` has no workspace to name yet — the human picks (or creates) one at
+        // the approval, so the lead names the SERVER this login is toward.
+        let lead = if data.name.is_empty() {
+            format!("Logging in to {server} — choose your workspace in the browser.")
+        } else {
+            format!("Logging in to {}.", address_of(data, &server))
+        };
+        return format!(
+            "{lead}\nApprove this login in your browser:\n  Open: {}\n  Code: {} (the page shows \
+             the same code — confirm it matches)\nThen re-run `topos login` to finish.",
             p.verification_uri, p.user_code
         );
-        if !data.name.is_empty() {
-            s = format!("Logging into '{}'.\n{s}", data.name);
-        }
-        return s;
     }
     let label = data
         .display_name
         .clone()
         .filter(|d| !d.is_empty())
         .unwrap_or_else(|| data.name.clone());
-    let mut s = format!("Logged into {label}");
-    if !data.name.is_empty() && data.display_name.as_deref().is_some_and(|d| d != data.name) {
-        s.push_str(&format!(" ({})", data.name));
-    }
-    match data.session_status.as_str() {
-        "pending" => s.push_str(
-            " — the session awaits an owner's approval; delivery starts automatically once \
-             approved (nothing lands until then).",
-        ),
-        _ => match data.delivered {
-            Some(0) => s.push_str(" — nothing is assigned to you here yet."),
-            Some(n) => {
-                // Name what the acceptance brings (a long list stays readable: first five + a
-                // remainder count). FUTURE TENSE, deliberately: login persists the session and
-                // arms the trigger, but it moves NO bytes — the delivery snapshot it just read is
-                // the count, not a landing. Saying "delivered here" sent an agent looking for
-                // files the next sweep had not written yet.
-                let mut names = data.delivered_names.join(", ");
-                if data.delivered_names.len() > 5 {
-                    names = format!(
-                        "{}, and {} more",
-                        data.delivered_names[..5].join(", "),
-                        data.delivered_names.len() - 5
-                    );
-                }
-                if names.is_empty() {
-                    s.push_str(&format!(
-                        " — it gives you {n} skill{}; `topos update` delivers {} here, and \
-                         updates arrive silently from then on.",
-                        if n == 1 { "" } else { "s" },
-                        if n == 1 { "it" } else { "them" }
-                    ));
-                } else {
-                    s.push_str(&format!(
-                        " — it gives you {n} skill{} ({names}); `topos update` delivers {} here, \
-                         and updates arrive silently from then on.",
-                        if n == 1 { "" } else { "s" },
-                        if n == 1 { "it" } else { "them" }
-                    ));
-                }
+    let mut s = if data.session_status == "pending" {
+        format!(
+            "Connected to {} — the session awaits an owner's approval; nothing arrives until \
+             then.",
+            if data.name.is_empty() {
+                &label
+            } else {
+                &data.name
             }
-            None => s.push('.'),
-        },
-    }
+        )
+    } else {
+        // The standing promise, stated once: a session adopts whatever the workspace assigns you.
+        // The parenthetical is what that means RIGHT NOW — omitted entirely when the count could
+        // not be read, never guessed at.
+        let mut line = format!(
+            "Connected to {label} ({}) — adopts everything assigned to you{}",
+            address_of(data, &server),
+            match data.delivered {
+                Some(0) => " (currently none).".to_owned(),
+                Some(n) => format!(" (currently {n} bundle{}).", if n == 1 { "" } else { "s" }),
+                None => ".".to_owned(),
+            }
+        );
+        // Name what the acceptance brings (a long list stays readable: first five + a remainder
+        // count). FUTURE TENSE, deliberately: login persists the session and arms the trigger, but
+        // it moves NO bytes — the delivery snapshot it just read is the count, not a landing.
+        // Saying "delivered here" sent an agent looking for files the next sweep had not written.
+        if data.delivered.is_some_and(|n| n > 0) {
+            let names = if data.delivered_names.len() > 5 {
+                format!(
+                    "{}, and {} more",
+                    data.delivered_names[..5].join(", "),
+                    data.delivered_names.len() - 5
+                )
+            } else {
+                data.delivered_names.join(", ")
+            };
+            let them = if data.delivered == Some(1) {
+                "it"
+            } else {
+                "them"
+            };
+            line.push('\n');
+            if names.is_empty() {
+                line.push_str(&format!(
+                    "`topos update` delivers {them} here, and updates arrive silently from then on."
+                ));
+            } else {
+                line.push_str(&format!(
+                    "{names} — `topos update` delivers {them} here, and updates arrive silently \
+                     from then on."
+                ));
+            }
+        }
+        line
+    };
     // What the login did to this machine's own recipe (only when a file exists to change).
     if let Some(note) = &data.manifest_note {
         s.push_str(&format!("\nmanifest: {note}"));
@@ -384,6 +406,16 @@ pub(crate) fn session_login_tty(data: &topos_types::results::LoginData) -> Strin
         }
     ));
     s
+}
+
+/// The workspace's full address for a receipt — `<host>/<name>` when the host is known (it always
+/// is on a live session), else the bare name.
+fn address_of(data: &topos_types::results::LoginData, server: &str) -> String {
+    if server.is_empty() {
+        data.name.clone()
+    } else {
+        format!("{server}/{}", data.name)
+    }
 }
 
 /// The `logout` receipt — the ended sessions + the honest server-side outcome.
@@ -3314,5 +3346,106 @@ mod tests {
                 "the argv must name the blocked skill: {a:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_login_receipt_states_the_standing_promise_and_its_count() {
+        use super::session_login_tty;
+        use topos_types::results::{EnrollmentPending, LoginData};
+
+        let connected = |delivered: Option<u64>, names: &[&str]| LoginData {
+            workspace_id: "w_eng".to_owned(),
+            host: "topos.example.com".to_owned(),
+            name: "eng".to_owned(),
+            display_name: Some("Engineering".to_owned()),
+            server: Some("https://topos.example.com/api".to_owned()),
+            session_id: Some("sn_1".to_owned()),
+            session_status: "active".to_owned(),
+            delivered,
+            delivered_names: names.iter().map(|n| (*n).to_owned()).collect(),
+            pending: None,
+            currency: None,
+            triggers: Vec::new(),
+            manifest_note: None,
+        };
+
+        // The standing promise leads, the live count is the parenthetical, and the undo is the
+        // tail — the ONE shape for a browser grant, a lane connect, and an already-connected run.
+        let text = session_login_tty(&connected(Some(2), &["deploy", "code-review"]));
+        assert!(
+            text.starts_with(
+                "Connected to Engineering (topos.example.com/eng) — adopts everything assigned \
+                 to you (currently 2 bundles)."
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("\ndeploy, code-review — `topos update` delivers them here"),
+            "{text}"
+        );
+        assert!(text.ends_with("\nUndo: topos logout eng"), "{text}");
+
+        // Nothing assigned yet says so; an UNREADABLE count omits the parenthetical rather than
+        // guess a number (and never names skills it could not read).
+        let none = session_login_tty(&connected(Some(0), &[]));
+        assert!(none.contains("(currently none)."), "{none}");
+        assert!(!none.contains("topos update"), "{none}");
+        let unknown = session_login_tty(&connected(None, &[]));
+        assert!(
+            unknown.contains("adopts everything assigned to you.\nUndo:"),
+            "{unknown}"
+        );
+
+        // A pending session promises nothing until an owner acts.
+        let mut waiting = connected(None, &[]);
+        waiting.session_status = "pending".to_owned();
+        let text = session_login_tty(&waiting);
+        assert!(
+            text.starts_with("Connected to eng — the session awaits an owner's approval"),
+            "{text}"
+        );
+
+        // The awaiting-browser half: a BARE login has no workspace to name, so it leads with the
+        // server and says where the choice happens; a named one spells the address.
+        let pending = |name: &str| LoginData {
+            workspace_id: String::new(),
+            host: "topos.example.com".to_owned(),
+            name: name.to_owned(),
+            display_name: None,
+            server: Some("https://topos.example.com/api".to_owned()),
+            session_id: None,
+            session_status: "awaiting-approval".to_owned(),
+            delivered: None,
+            delivered_names: Vec::new(),
+            pending: Some(EnrollmentPending {
+                verification_uri: "https://topos.example.com/verify".to_owned(),
+                user_code: "AB12-CD34".to_owned(),
+                expires_at: None,
+                interval_secs: Some(5),
+            }),
+            currency: None,
+            triggers: Vec::new(),
+            manifest_note: None,
+        };
+        let bare = session_login_tty(&pending(""));
+        assert!(
+            bare.starts_with(
+                "Logging in to topos.example.com — choose your workspace in the browser."
+            ),
+            "{bare}"
+        );
+        assert!(
+            bare.contains("Open: https://topos.example.com/verify"),
+            "{bare}"
+        );
+        assert!(
+            bare.contains("Then re-run `topos login` to finish."),
+            "{bare}"
+        );
+        let named = session_login_tty(&pending("eng"));
+        assert!(
+            named.starts_with("Logging in to topos.example.com/eng."),
+            "{named}"
+        );
     }
 }

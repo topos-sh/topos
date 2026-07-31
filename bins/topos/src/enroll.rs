@@ -17,8 +17,8 @@ use crate::sidecar::Layout;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum EnrollIntentDoc {
-    /// A `topos login <workspace-address>` SESSION login (the grant mints ONE workspace-scoped
-    /// session into `identity/sessions.json`).
+    /// A `topos login [<address>]` SESSION login (the grant mints ONE workspace-scoped session
+    /// into `identity/sessions.json`).
     Session,
     /// RETIRED (parse-tolerated): the device-era `follow` enrollment.
     #[serde(other)]
@@ -38,9 +38,12 @@ pub(crate) struct PendingEnrollment {
     /// host).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub host: String,
-    /// The requested workspace ADDRESS slug (the `device/authorize` body's `workspace`). Whether it
-    /// exists is never disclosed pre-approval; the granted poll carries the authoritative workspace.
-    pub workspace_name: String,
+    /// The workspace ADDRESS slug a `login <workspace>` shortcut PRESELECTED for the browser
+    /// chooser (empty = none: the human picks or creates the workspace at the approval). Whether
+    /// it exists is never disclosed pre-approval; the granted poll carries the authoritative
+    /// workspace. Serde-defaulted, so a WAL written before the field reads as no preselection.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub preselect: String,
     /// Which verb owns the resume (and, for a follow, the intent to continue into).
     pub intent: EnrollIntentDoc,
     /// **SECRET** — the device code the client polls with. Redacted in `Debug`.
@@ -54,16 +57,12 @@ pub(crate) struct PendingEnrollment {
     pub interval_secs: u64,
     /// The flow expiry as epoch-millis — the recovery sweep abandons a WAL past this.
     pub expires_at_millis: i64,
-    /// This flow is LOOPBACK-bound: the server will not release its credential to a poll that
-    /// cannot present the authorization code the approval redirect hands to our listener.
-    /// ADDITIVE with a serde default — a pre-field WAL reads `false`, i.e. the classic flow.
+    /// This flow was started LOOPBACK-bound: a browser on this machine approves it and the
+    /// redirect wakes our listener. A wake-up only — the poll is the completion mechanism either
+    /// way; the flag exists so a resume knows whether the approval page pre-arms itself (and the
+    /// terminal therefore never printed the short code). ADDITIVE with a serde default.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub loopback: bool,
-    /// **SECRET** — the authorization code the local hand-off delivered, once it has. Persisted
-    /// so an interrupt AFTER the browser approval still resumes: the code is not re-derivable and
-    /// the human is already done. Redacted in `Debug`, like the device code.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_code: Option<String>,
 }
 
 // Redact the WAL's secret (the device code — the credential-to-be) so the whole document, held
@@ -74,11 +73,10 @@ impl std::fmt::Debug for PendingEnrollment {
             .field("schema_version", &self.schema_version)
             .field("base_url", &self.base_url)
             .field("host", &self.host)
-            .field("workspace_name", &self.workspace_name)
+            .field("preselect", &self.preselect)
             .field("intent", &self.intent)
             .field("device_code", &"<redacted>")
             .field("loopback", &self.loopback)
-            .field("auth_code", &self.auth_code.as_ref().map(|_| "<redacted>"))
             .field("user_code", &self.user_code)
             .field("verification_uri", &self.verification_uri)
             .field("interval_secs", &self.interval_secs)
@@ -98,22 +96,22 @@ pub(crate) fn write_wal(
 }
 
 /// Read the enrollment WAL (a `0600` secret), or `None` if absent. Fail-closed on a permissive secret
-/// AND on a persisted workspace name outside the address grammar (the WAL is a durable copy of wire
+/// AND on a persisted preselection outside the address grammar (the WAL is a durable copy of wire
 /// data; the name rides request BODIES only — never a path join — but a hand-edited traversal shape
 /// still fails the load closed, the same boundary discipline as every other persisted identifier).
-/// An EMPTY name is the legitimate ORIGIN enrollment (the workspace the origin itself addresses —
-/// single-tenant installs); the granted poll carries the authoritative workspace back.
+/// An EMPTY preselection is the ordinary bare `topos login` (the human chooses the workspace in the
+/// browser); the granted poll carries the authoritative workspace back either way.
 pub(crate) fn read_wal(
     fs: &dyn FsOps,
     layout: &Layout,
 ) -> Result<Option<PendingEnrollment>, ClientError> {
     let wal: Option<PendingEnrollment> = doc::read_doc_private(fs, &layout.enrollment_path())?;
     if let Some(w) = &wal
-        && !w.workspace_name.is_empty()
-        && !crate::resolve::is_workspace_name(&w.workspace_name)
+        && !w.preselect.is_empty()
+        && !crate::resolve::is_workspace_name(&w.preselect)
     {
         return Err(ClientError::Corrupt(
-            "the enrollment WAL's workspace name is not a valid address name".into(),
+            "the enrollment WAL's preselected workspace is not a valid address name".into(),
         ));
     }
     Ok(wal)

@@ -1,17 +1,20 @@
 //! The ZERO-TYPING loopback login, proven over the real binary on a real PTY: an interactive
 //! `topos login <address>` must START the flow loopback-bound — the write-once declaration the
 //! approval page's pre-armed card resolves on — auto-open the browser with the challenge and the
-//! listener's return coordinates, keep the short code OFF the terminal, and complete when the
-//! approval redirect hands its authorization code to the CLI's 127.0.0.1 listener. No typing
-//! anywhere. (The regression this pins: a fresh TTY login once started the flow DEVICE-bound
-//! while holding the listener and suppressing the code — the page could not pre-arm, the code
-//! was nowhere, and the wait ran out the flow's whole 15-minute TTL.)
+//! listener's return coordinates, keep the short code OFF the terminal, and finish the moment the
+//! approval redirect wakes it. No typing anywhere. (The regression this pins: a fresh TTY login
+//! once started the flow DEVICE-bound while holding the listener and suppressing the code — the
+//! page could not pre-arm, the code was nowhere, and the wait ran out the flow's whole 15-minute
+//! TTL.)
+//!
+//! The second test pins the FRAGMENTATION GUARANTEE the redirect is only an accelerator for: with
+//! no redirect at all — the human approved on their phone, or the browser hand-off was lost — the
+//! ordinary poll still completes the login. Nothing but the poll ever completes it.
 //!
 //! The TTY is real: the binary runs under `script(1)` (present on macOS and Linux both), so the
 //! interactive browser-open path is the one taken — the exact wiring the piped suite cannot
 //! reach. The browser is a PATH-shadowed stub recording the URL it was handed; the fixture is a
-//! real loopback HTTP server speaking the login wire, granting ONLY to a poll that presents the
-//! authorization code.
+//! real loopback HTTP server speaking the login wire, granting once the test has "approved".
 
 #![cfg(unix)]
 
@@ -45,13 +48,21 @@ struct Observed {
 }
 
 /// The login-wire fixture: the constant protocol card at any path, the `/v1/login/authorize`
-/// start, and a `/v1/login/token` poll that answers `pending` until the poll PRESENTS the
-/// authorization code — then `granted`. That gate is the loopback contract itself: the device
-/// code alone buys nothing.
+/// start, and a `/v1/login/token` poll that answers `pending` until the TEST approves — standing
+/// in for the human at the browser. The poll is the whole exchange; the client presents nothing
+/// but its flow code.
 struct Fixture {
     base: String,
     observed: Arc<Mutex<Observed>>,
+    approved: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
+}
+
+impl Fixture {
+    /// Play the human's part in the browser: from here the poll grants.
+    fn approve(&self) {
+        self.approved.store(true, Ordering::Relaxed);
+    }
 }
 
 fn spawn_fixture() -> Fixture {
@@ -62,13 +73,20 @@ fn spawn_fixture() -> Fixture {
     let port = listener.local_addr().expect("local addr").port();
     let base = format!("http://127.0.0.1:{port}");
     let observed = Arc::new(Mutex::new(Observed::default()));
+    let approved = Arc::new(AtomicBool::new(false));
     let stop = Arc::new(AtomicBool::new(false));
-    let (base_thread, observed_thread, stop_thread) =
-        (base.clone(), Arc::clone(&observed), Arc::clone(&stop));
+    let (base_thread, observed_thread, approved_thread, stop_thread) = (
+        base.clone(),
+        Arc::clone(&observed),
+        Arc::clone(&approved),
+        Arc::clone(&stop),
+    );
     std::thread::spawn(move || {
         while !stop_thread.load(Ordering::Relaxed) {
             match listener.accept() {
-                Ok((stream, _)) => handle(stream, &base_thread, &observed_thread),
+                Ok((stream, _)) => {
+                    handle(stream, &base_thread, &observed_thread, &approved_thread);
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(10));
                 }
@@ -79,17 +97,18 @@ fn spawn_fixture() -> Fixture {
     Fixture {
         base,
         observed,
+        approved,
         stop,
     }
 }
 
 /// Answer one login-wire request; every response closes its connection, so each accept sees one.
-fn handle(mut stream: TcpStream, base: &str, observed: &Mutex<Observed>) {
+fn handle(mut stream: TcpStream, base: &str, observed: &Mutex<Observed>, approved: &AtomicBool) {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     // Read the WHOLE request — the headers plus the Content-Length'd body. TCP may split a
     // request across reads, and a partial body here would drop the very fields the assertions
-    // branch on (the start's binding declaration; the presented authorization code).
+    // branch on (the start's binding declaration; the preselection, or its absence).
     let mut raw: Vec<u8> = Vec::new();
     let mut buf = [0u8; 8192];
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -129,13 +148,13 @@ fn handle(mut stream: TcpStream, base: &str, observed: &Mutex<Observed>) {
     let body = if line.contains("/v1/login/authorize") {
         observed.lock().unwrap().authorize_bodies.push(body_in);
         format!(
-            r#"{{"device_code":"dc_secret","user_code":"WXYZ-3N3X","verification_uri":"{base}/verify","expires_in_secs":900,"interval_secs":1}}"#
+            r#"{{"device_code":"dc_secret","user_code":"WXYZ-3N3X","verification_uri":"{base}/verify","expires_in_secs":900,"interval_secs":3}}"#
         )
     } else if line.contains("/v1/login/token") {
-        let granted = body_in.contains("ac_secret");
         observed.lock().unwrap().token_bodies.push(body_in);
-        if granted {
-            // The exchange presented BOTH secrets — the credential is released.
+        if approved.load(Ordering::Relaxed) {
+            // Approved in the browser — the poll releases the session's credential and names the
+            // workspace the human chose there.
             r#"{"status":"granted","credential":"sess-cred","session_id":"sn_1","session_status":"active","workspace":{"workspace_id":"w_1","name":"eng","display_name":"Engineering"}}"#
                 .to_owned()
         } else {
@@ -289,9 +308,10 @@ fn a_tty_login_is_codeless_end_to_end() {
         .expect("the listener port");
     let state = query.get("state").copied().expect("the ceremony state");
 
-    // THE WRITE-ONCE DECLARATION — the regression's exact seam: the start the interactive run
-    // issued must have declared the flow loopback-bound, or the approval page has nothing to
-    // pre-arm and the suppressed code strands the human.
+    // THE START — the regression's exact seam: this run must have declared the flow
+    // loopback-bound, or the approval page has nothing to pre-arm and the suppressed code strands
+    // the human. And it names a SERVER only: the workspace is chosen in the browser, so nothing
+    // about one rides this unauthenticated start.
     {
         let obs = fx.observed.lock().unwrap();
         assert_eq!(obs.authorize_bodies.len(), 1, "one flow start");
@@ -300,24 +320,29 @@ fn a_tty_login_is_codeless_end_to_end() {
             "the start declares the loopback binding: {}",
             obs.authorize_bodies[0]
         );
+        assert!(
+            !obs.authorize_bodies[0].contains("workspace")
+                && !obs.authorize_bodies[0].contains("preselect"),
+            "a bare server address preselects nothing: {}",
+            obs.authorize_bodies[0]
+        );
     }
 
-    // Play the approval page's part: the state-bound redirect hands the authorization code to
-    // the CLI's own 127.0.0.1 listener.
+    // Play the approval page's part: the human approves, and the state-bound redirect wakes the
+    // CLI's own 127.0.0.1 listener. The redirect carries NO secret — it only says "poll now".
+    fx.approve();
     let mut redirect = TcpStream::connect(("127.0.0.1", port)).expect("dial the CLI's listener");
     redirect
         .write_all(
-            format!(
-                "GET /cb?state={state}&outcome=approved&code=ac_secret HTTP/1.1\r\nhost: x\r\n\r\n"
-            )
-            .as_bytes(),
+            format!("GET /cb?state={state}&outcome=approved HTTP/1.1\r\nhost: x\r\n\r\n")
+                .as_bytes(),
         )
         .expect("write the redirect");
     let mut answer = String::new();
     let _ = redirect.read_to_string(&mut answer);
     assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
 
-    // The redirect wakes the poll; the exchange presents BOTH secrets; the login completes.
+    // The redirect wakes the poll; the poll completes the login.
     let out = collect(child, Duration::from_secs(60));
     let printed = format!(
         "{}{}",
@@ -329,23 +354,20 @@ fn a_tty_login_is_codeless_end_to_end() {
         printed.contains("Opening your browser to approve."),
         "the auto-open is disclosed: {printed}"
     );
-    // CODELESS: the short code never touches the terminal — approving happens in the browser,
-    // and printing it would invite typing it somewhere that cannot complete this flow.
+    // CODELESS: the short code never touches the terminal — approving happens in the browser this
+    // run just opened, and printing a code would invite typing one nothing asked for.
     assert!(
         !printed.contains("WXYZ-3N3X") && !printed.contains("Code:"),
         "the loopback posture keeps the code off the terminal: {printed}"
     );
-    // The exchange that won carried the authorization code alongside the device code.
+    // The poll carries the flow code and NOTHING else — the redirect brought no second secret.
     {
         let obs = fx.observed.lock().unwrap();
-        let winning = obs
-            .token_bodies
-            .iter()
-            .find(|b| b.contains("ac_secret"))
-            .expect("a poll presented the authorization code");
+        let last = obs.token_bodies.last().expect("at least one poll");
+        assert!(last.contains("dc_secret"), "the flow code travels: {last}");
         assert!(
-            winning.contains("dc_secret"),
-            "both secrets travel: {winning}"
+            !last.contains("auth_code"),
+            "no second secret rides the poll: {last}"
         );
     }
     // The session row landed: the receipt's workspace, the fixture's credential.
@@ -354,6 +376,46 @@ fn a_tty_login_is_codeless_end_to_end() {
     assert!(
         sessions.contains("sess-cred") && sessions.contains("w_1"),
         "the granted session persists: {sessions}"
+    );
+    assert!(
+        !home.join("identity/enrollment.json").exists(),
+        "the WAL dies with the grant"
+    );
+}
+
+#[test]
+fn a_login_completes_on_the_poll_when_no_redirect_ever_arrives() {
+    // The fragmentation guarantee: the redirect is an ACCELERATOR. Approve somewhere this machine
+    // cannot be redirected from — a phone, another laptop — and the ordinary poll interval still
+    // finishes the login. Nothing here dials the CLI's listener at all.
+    let fx = spawn_fixture();
+    let home = scratch("no-redirect");
+    let stub_dir = write_browser_stub(&home);
+
+    let child = spawn_interactive_login(&home, &stub_dir, &fx.base);
+    wait_for_file(
+        &home.join("opened-urls.txt"),
+        Duration::from_secs(20),
+        "the auto-opened approval URL",
+    );
+    fx.approve();
+
+    let out = collect(child, Duration::from_secs(60));
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "the login exits 0: {printed}");
+    assert!(
+        printed.contains("Connected to Engineering"),
+        "the connected receipt prints: {printed}"
+    );
+    let sessions =
+        std::fs::read_to_string(home.join("identity/sessions.json")).expect("the session doc");
+    assert!(
+        sessions.contains("sess-cred") && sessions.contains("w_1"),
+        "the poll alone persisted the session: {sessions}"
     );
     assert!(
         !home.join("identity/enrollment.json").exists(),

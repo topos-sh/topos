@@ -1,16 +1,22 @@
-//! `login <workspace-address>` / `logout [<workspace>|--all]` — SESSIONS: a session = user ×
-//! workspace × installation, minted by the gh-style browser approval and carrying ONE
-//! workspace-scoped bearer credential (`identity/sessions.json`). Further workspaces are further
-//! logins; `logout` ends exactly the named session (revocable from both sides — the web sessions
-//! pages carry the owner arms).
+//! `login [<address>]` / `logout [<workspace>|--all]` — SESSIONS: a session = user × workspace ×
+//! installation, minted against a SERVER and carrying ONE workspace-scoped bearer credential
+//! (`identity/sessions.json`). Further workspaces are further logins; `logout` ends exactly the
+//! named session (revocable from both sides — the web sessions pages carry the owner arms).
 //!
-//! **Login is the acceptance event.** The receipt states what connecting delivers (the profile's
-//! delivered count); from then on delivery is silent, npm-style — no consent layer, no per-bundle
-//! first-trust asks for workspace content. The flow is the RFC-8628 shape `follow` proved: card
-//! fetch at the address origin → re-root onto the declared API base → `POST /v1/login/authorize`
-//! toward the workspace's ADDRESS slug → a `0600` WAL carrying the flow code → poll
-//! `POST /v1/login/token`; the granted poll carries the SESSION's credential (the promoted flow
-//! code) and the login persists it as one session row. Re-invoking `login` RESUMES a pending flow.
+//! **Login is SERVER-first.** You authenticate against a server; WHICH workspace you join is
+//! chosen — or created — by the signed-in human in the browser, where their seats are known. A
+//! `login <workspace>` shortcut only PRESELECTS one for that chooser; the CLI never resolves a
+//! workspace itself and this unauthenticated flow is never an existence oracle.
+//!
+//! **Login is the acceptance event.** The receipt states what connecting adopts (the delivered
+//! count); from then on delivery is silent, npm-style — no consent layer, no per-bundle
+//! first-trust asks for workspace content. The flow is the RFC-8628 shape: card fetch at the
+//! address origin → re-root onto the declared API base → `POST /v1/login/authorize` → a `0600`
+//! WAL carrying the flow code → poll `POST /v1/login/token`; the granted poll carries the
+//! SESSION's credential (the promoted flow code) and the login persists it as one session row.
+//! Re-invoking `login` RESUMES a pending flow. A machine already logged into the same server
+//! takes the browser-free lane instead (`POST /v1/login/connect`) — seat standing is the trust
+//! basis there, so the second workspace costs no ceremony.
 
 use topos_types::PERSISTED_SCHEMA_VERSION;
 use topos_types::results::{EnrollmentPending, LoginData, LogoutData};
@@ -19,8 +25,8 @@ use crate::ctx::Ctx;
 use crate::enroll;
 use crate::error::ClientError;
 use crate::manifest::document::{EntryValue, ManifestScope};
-use crate::plane::{DeliverySource, DeviceAuthPoll, LinkStatus};
-use crate::sessions::{self, SESSION_ACTIVE, SESSION_PENDING, Session};
+use crate::plane::{DeliverySnapshot, DeliverySource, DeviceAuthPoll, LinkStatus, PlaneError};
+use crate::sessions::{self, SESSION_ACTIVE, SESSION_ENDED, SESSION_PENDING, Session};
 
 use super::connect::{EnrollConnect, machine_name, resolve_api_base};
 
@@ -29,29 +35,55 @@ use super::connect::{EnrollConnect, machine_name, resolve_api_base};
 pub(crate) type SessionDeliveryConnect<'a> =
     dyn Fn(&str, &str, &str) -> Box<dyn DeliverySource> + 'a;
 
-/// Builds a governance transport for `(base_url, credential)` — the logout self-revoke rides the
-/// SESSION's own credential (never a device-global one).
-pub(crate) type SessionRevokeConnect<'a> =
+/// Builds a CREDENTIALED session-lane transport for `(base_url, credential)` — both acts that ride
+/// a session's OWN credential (never a machine-global one): the logout self-revoke, and the
+/// lane-side second connect that mints the next workspace's session without a browser.
+pub(crate) type SessionLaneConnect<'a> =
     dyn Fn(&str, &str) -> Box<dyn crate::plane::GovernanceSource> + 'a;
 
 /// The network seams `login` needs.
 pub(crate) struct LoginConnectors<'a> {
     pub enroll: &'a EnrollConnect<'a>,
     pub delivery: &'a SessionDeliveryConnect<'a>,
-    /// The default WEB origin a bare workspace name dials (`TOPOS_PLANE_URL`, else the hosted
-    /// default).
+    /// The lane a machine already logged into this server connects the next workspace over.
+    pub lane: &'a SessionLaneConnect<'a>,
+    /// The default WEB origin a bare `login` (and a bare workspace name) dials
+    /// (`TOPOS_PLANE_URL`, else the hosted default).
     pub web_origin: String,
 }
 
 /// A parsed login address: the web origin to card-fetch, the manifest-grammar HOST half, the
-/// workspace ADDRESS slug (empty = the origin's own workspace), and an invitation token when the
-/// address was an invite URL.
+/// workspace slug PRESELECTED for the browser chooser (empty = none — the human picks or creates
+/// one there), and an invitation token when the address was an invite URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LoginTarget {
     pub origin: String,
     pub host: String,
-    pub workspace: String,
+    pub preselect: String,
     pub invite_token: Option<String>,
+}
+
+impl LoginTarget {
+    /// The bare `topos login` target: the default server, nothing preselected.
+    fn origin_only(origin: &str) -> Self {
+        let origin = origin.trim_end_matches('/').to_owned();
+        Self {
+            host: host_of(&origin),
+            origin,
+            preselect: String::new(),
+            invite_token: None,
+        }
+    }
+}
+
+/// The manifest-grammar HOST half of an origin / API base (`https://topos.sh/api` → `topos.sh`).
+fn host_of(url: &str) -> String {
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// Whether a segment reads as a HOST (dotted, or localhost, optionally with a port) rather than a
@@ -67,10 +99,11 @@ fn is_host_segment(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
 }
 
-/// Parse a `login` address by SHAPE (no network): a bare workspace name (the default server), a
-/// bare server origin ("the workspace that origin addresses" — single-tenant installs), a
+/// Parse a `login` address by SHAPE (no network): a bare SERVER (anything dotted, or
+/// `localhost[:port]`), a bare workspace name (a preselection on the default server), a
 /// `<server>/<workspace>` pair, any of those as a pasted URL, or an invitation URL
-/// (`<origin>[/<ws>]/invite/<token>` — the mail's terminal line verbatim).
+/// (`<origin>[/<ws>]/invite/<token>` — the mail's terminal line verbatim). The dot is the whole
+/// disambiguation, exactly as the reference grammar reads it.
 pub(crate) fn parse_login_address(
     raw: &str,
     default_origin: &str,
@@ -78,8 +111,9 @@ pub(crate) fn parse_login_address(
     let token = raw.trim().trim_end_matches('/');
     if token.is_empty() {
         return Err(ClientError::InvalidArgument(
-            "`topos login` needs a workspace address — `topos login <server>/<workspace>` (or a \
-             bare workspace name for the default server)"
+            "that address is empty — `topos login` takes a server (`topos.example.com`), a \
+             workspace (`acme` or `topos.sh/acme`), or an invitation link; with no address at all \
+             it logs into the default server"
                 .into(),
         ));
     }
@@ -99,14 +133,14 @@ pub(crate) fn parse_login_address(
         _ => (rest, None),
     };
     let segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
-    let (origin, host, workspace) = match segments.as_slice() {
+    let (origin, host, preselect) = match segments.as_slice() {
         [] => {
             return Err(ClientError::InvalidArgument(
                 "the address names no server or workspace".into(),
             ));
         }
         [one] if is_host_segment(one) => {
-            // A bare SERVER origin — the workspace the origin itself addresses.
+            // A bare SERVER — log into it and choose the workspace in the browser.
             (format!("{scheme}{one}"), (*one).to_owned(), String::new())
         }
         [one] => {
@@ -117,10 +151,7 @@ pub(crate) fn parse_login_address(
                 )));
             }
             let origin = default_origin.trim_end_matches('/').to_owned();
-            let host = origin
-                .trim_start_matches("https://")
-                .trim_start_matches("http://")
-                .to_owned();
+            let host = host_of(&origin);
             (origin, host, (*one).to_owned())
         }
         [server, ws] if is_host_segment(server) => {
@@ -137,8 +168,8 @@ pub(crate) fn parse_login_address(
         }
         _ => {
             return Err(ClientError::InvalidArgument(
-                "spell the address as `<server>/<workspace>` (or a bare workspace name for the \
-                 default server)"
+                "spell the address as `<server>/<workspace>` (or a bare server, or a bare \
+                 workspace name for the default server)"
                     .into(),
             ));
         }
@@ -146,90 +177,86 @@ pub(crate) fn parse_login_address(
     Ok(LoginTarget {
         origin,
         host,
-        workspace,
+        preselect,
         invite_token,
     })
 }
 
-/// `topos login [<workspace-address>]` — begin (no WAL) or resume (a pending session-login WAL)
-/// the flow. The granted poll persists ONE session row; the receipt is the acceptance disclosure.
+/// `topos login [<address>]` — the SERVER-first login, in order: resume a pending flow (or drop
+/// it when this invocation names a different target), report a workspace this machine is already
+/// connected to, mint a further workspace over the lane a live session on that server already
+/// holds, and only then open the browser. The granted poll persists ONE session row; the receipt
+/// is the acceptance disclosure.
+///
+/// `bind_loopback` is what a FRESH start declares the flow AS (write-once, server-side): this
+/// machine has a browser and a bound 127.0.0.1 listener, so the approval page pre-arms from the
+/// URL-borne challenge and its redirect wakes this process. It is an ACCELERATOR, not a second
+/// secret — the poll completes the login either way, including when the human approves on their
+/// phone.
 ///
 /// # Errors
-/// [`ClientError::InvalidArgument`] on a malformed address (or none, with no flow to resume);
-/// [`ClientError::Enrollment`] on a denied/expired flow or another verb's in-flight enrollment;
-/// transport / io failures otherwise.
-/// What the caller can do locally to complete this login.
-///
-/// Two facts that sound alike but must never be one flag (conflating them once shipped a login
-/// that started device-bound while the terminal held a listener and suppressed the code — the
-/// approval page then had nothing to pre-arm and the wait ran out the whole TTL):
-/// `bind_loopback` is what a FRESH start declares the flow AS (write-once, server-side) — this
-/// machine has a browser and a bound 127.0.0.1 listener, so the flow's credential is
-/// unredeemable without the code that redirect delivers. `listening` is whether THIS POLL may
-/// tolerate `awaiting_redirect` — true only once this invocation's own listener is armed; on the
-/// first poll of a resume it is false, because an approval that predates this process handed its
-/// code to a listener that no longer exists. `auth_code` carries the delivered code back in. A
-/// client with none of the three is the classic device grant: the human types the short code and
-/// the poll alone redeems.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct Handoff<'a> {
-    pub bind_loopback: bool,
-    pub listening: bool,
-    pub auth_code: Option<&'a str>,
-}
-
+/// [`ClientError::InvalidArgument`] on a malformed address; [`ClientError::Enrollment`] on a
+/// denied/expired flow or another verb's in-flight enrollment; transport / io failures otherwise.
 pub(crate) fn login(
     ctx: &Ctx<'_>,
     connectors: &LoginConnectors<'_>,
     address: Option<&str>,
-    handoff: Handoff<'_>,
+    bind_loopback: bool,
 ) -> Result<LoginData, ClientError> {
-    // A pending WAL first — re-invoking IS the resume; a foreign-owned flow refuses typed.
+    let named = match address {
+        Some(raw) => Some(parse_login_address(raw, &connectors.web_origin)?),
+        None => None,
+    };
+    // A pending WAL first — re-invoking IS the resume.
     if let Some(wal) = enroll::read_wal(ctx.fs, &ctx.layout)? {
-        // `login <B>` while a flow for A is pending must NOT silently resume A — refuse typed
-        // (finish or let it expire), so the receipt can never claim a workspace the person did
-        // not just name. A matching address (or a bare `login`) resumes as before.
-        if let Some(raw) = address
-            && matches!(wal.intent, enroll::EnrollIntentDoc::Session)
-        {
-            let target = parse_login_address(raw, &connectors.web_origin)?;
-            let same = target.host == wal.host
-                && (target.workspace == wal.workspace_name || target.workspace.is_empty());
-            if !same {
-                return Err(ClientError::Enrollment(format!(
-                    "a login for {}/{} is already pending — finish it (`topos login`) or let it \
-                     expire before starting one for {}/{}",
-                    wal.host, wal.workspace_name, target.host, target.workspace
-                )));
+        match wal.intent {
+            enroll::EnrollIntentDoc::Session => {
+                let same = named
+                    .as_ref()
+                    .is_none_or(|t| t.host == wal.host && t.preselect == wal.preselect);
+                if same {
+                    return resume(ctx, connectors, &wal);
+                }
+                // `login <B>` while a flow toward A is pending: THE LATEST COMMAND WINS. Nothing
+                // is minted server-side until this client polls, so an abandoned flow can never
+                // become a session — dropping it costs nothing, and refusing would strand the
+                // person behind a ceremony they have already moved on from.
+                enroll::delete_wal(ctx.fs, &ctx.layout)?;
+            }
+            enroll::EnrollIntentDoc::Retired => {
+                return Err(ClientError::Enrollment(
+                    "a retired enrollment flow is on disk — it will be swept when it expires; \
+                     start fresh with `topos login <address>`"
+                        .into(),
+                ));
             }
         }
-        return match wal.intent {
-            enroll::EnrollIntentDoc::Session => resume(ctx, connectors, &wal, handoff),
-            enroll::EnrollIntentDoc::Retired => Err(ClientError::Enrollment(
-                "a retired enrollment flow is on disk — it will be swept when it expires; start \
-                 fresh with `topos login <workspace-address>`"
-                    .into(),
-            )),
-        };
     }
-    let Some(raw) = address else {
-        return Err(ClientError::InvalidArgument(
-            "`topos login` needs a workspace address — `topos login <server>/<workspace>` (or a \
-             bare workspace name for the default server)"
-                .into(),
-        ));
-    };
-    let target = parse_login_address(raw, &connectors.web_origin)?;
+    // No address at all: the default server, nothing preselected — the headline usage.
+    let target = named.unwrap_or_else(|| LoginTarget::origin_only(&connectors.web_origin));
+
+    // A named workspace this machine already reaches needs no ceremony at all.
+    if !target.preselect.is_empty() {
+        if let Some(data) = report_or_forget_connected(ctx, connectors, &target)? {
+            return Ok(data);
+        }
+        if let Some(data) = connect_over_lane(ctx, connectors, &target)? {
+            return Ok(data);
+        }
+    }
+
     // The constant protocol card at the origin declares the API base (same-security re-root).
     let card = (connectors.enroll)(&target.origin).fetch_card(&target.origin)?;
     let base_url = resolve_api_base(&target.origin, &card.api_base_url)?;
-    // THE START IS THE DECLARATION: the flow is bound, write-once, to how its credential may be
-    // collected. `bind_loopback` — never `listening`, which is about polls — is what decides it.
+    // THE START IS THE DECLARATION: the flow records write-once how its approval is accelerated
+    // back, which is what lets the approval page pre-arm itself and keep the code off this
+    // terminal.
+    let preselect = (!target.preselect.is_empty()).then_some(target.preselect.as_str());
     let start = (connectors.enroll)(&base_url).device_auth_start(
-        &target.workspace,
         &machine_name(),
+        preselect,
         target.invite_token.as_deref(),
-        handoff.bind_loopback,
+        bind_loopback,
     )?;
     let now = i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX);
     let expires_at = now.saturating_add(
@@ -239,15 +266,14 @@ pub(crate) fn login(
         schema_version: PERSISTED_SCHEMA_VERSION,
         base_url,
         host: target.host,
-        workspace_name: target.workspace,
+        preselect: target.preselect,
         intent: enroll::EnrollIntentDoc::Session,
         device_code: start.device_code,
         user_code: start.user_code,
         verification_uri: start.verification_uri,
         interval_secs: start.interval_secs,
         expires_at_millis: expires_at,
-        loopback: handoff.bind_loopback,
-        auth_code: None,
+        loopback: bind_loopback,
     };
     enroll::write_wal(ctx.fs, &ctx.layout, &wal)?;
     Ok(pending_data(&wal))
@@ -257,7 +283,12 @@ pub(crate) fn login(
 fn pending_data(wal: &enroll::PendingEnrollment) -> LoginData {
     LoginData {
         workspace_id: String::new(),
-        name: wal.workspace_name.clone(),
+        host: if wal.host.is_empty() {
+            host_of(&wal.base_url)
+        } else {
+            wal.host.clone()
+        },
+        name: wal.preselect.clone(),
         display_name: None,
         server: Some(wal.base_url.clone()),
         session_id: None,
@@ -276,53 +307,124 @@ fn pending_data(wal: &enroll::PendingEnrollment) -> LoginData {
     }
 }
 
+/// The ALREADY-CONNECTED short-circuit: a live local session for this (host, workspace) answers
+/// with the ordinary connected receipt and a freshly read delivered count — no browser, no
+/// server-side mutation, nothing minted twice. The delivery read doubles as the liveness probe:
+/// the uniform 404 means the session is gone server-side (ended, seat removed, workspace gone), so
+/// the dead row is deleted and `None` sends the caller on to the ordinary login.
+fn report_or_forget_connected(
+    ctx: &Ctx<'_>,
+    connectors: &LoginConnectors<'_>,
+    target: &LoginTarget,
+) -> Result<Option<LoginData>, ClientError> {
+    let all = sessions::read_sessions(ctx.fs, &ctx.layout)?;
+    let Some(session) = all
+        .find_on_host(&target.host, &target.preselect)
+        .filter(|s| s.status != SESSION_ENDED)
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    let snapshot = match (connectors.delivery)(
+        &session.base_url,
+        &session.credential,
+        &session.workspace_id,
+    )
+    .fetch_delivery(&session.workspace_id)
+    {
+        Ok(snap) => Some(snap),
+        Err(PlaneError::NotFound) => {
+            sessions::remove_session(ctx.fs, &ctx.layout, &session.host, &session.workspace_id)?;
+            return Ok(None);
+        }
+        // Unreachable / unreadable: the session stands, the count does not. The receipt omits the
+        // parenthetical rather than guess a number.
+        Err(_) => None,
+    };
+    let status = match snapshot.as_ref().map(|s| s.link_status) {
+        Some(LinkStatus::Active) => SESSION_ACTIVE,
+        Some(LinkStatus::Pending) => SESSION_PENDING,
+        None => session.status.as_str(),
+    };
+    // The server just spoke: keep the local mirror honest (a pending session an owner approved
+    // stops reading as pending here too). Best-effort — a receipt never fails on it.
+    if status != session.status {
+        let _ = sessions::set_session_status(
+            ctx.fs,
+            &ctx.layout,
+            &session.host,
+            &session.workspace_id,
+            status,
+        );
+    }
+    Ok(Some(connected_data(
+        &session,
+        status,
+        snapshot.as_ref(),
+        None,
+        None,
+    )))
+}
+
+/// The LANE-SIDE second connect: with no session for the named workspace but a live one on the
+/// SAME server, the next workspace costs no browser — the acting session's credential asks the
+/// server to mint against the person's seat. `None` = there is no lane, or the server answered
+/// the uniform 404 (no seat there, or the acting session is itself gone): the browser flow then
+/// shows what is actually true — an invitation, a create, or the honest miss.
+fn connect_over_lane(
+    ctx: &Ctx<'_>,
+    connectors: &LoginConnectors<'_>,
+    target: &LoginTarget,
+) -> Result<Option<LoginData>, ClientError> {
+    let all = sessions::read_sessions(ctx.fs, &ctx.layout)?;
+    // The most recent ACTIVE session on this host is the one that acts — the freshest credential,
+    // and the only standing the server accepts (a pending session carries no authority yet).
+    let Some(actor) = all
+        .sessions
+        .iter()
+        .filter(|s| s.host == target.host && s.status == SESSION_ACTIVE)
+        .max_by_key(|s| s.logged_in_at)
+    else {
+        return Ok(None);
+    };
+    let minted = match (connectors.lane)(&actor.base_url, &actor.credential)
+        .login_connect(&target.preselect, &machine_name())
+    {
+        Ok(minted) => minted,
+        Err(ClientError::TargetNotFound { .. }) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let status = match minted.link_status {
+        LinkStatus::Active => SESSION_ACTIVE,
+        LinkStatus::Pending => SESSION_PENDING,
+    };
+    let session = Session {
+        host: target.host.clone(),
+        base_url: actor.base_url.clone(),
+        workspace_id: minted.workspace.workspace_id,
+        workspace_name: minted.workspace.name,
+        display_name: minted.workspace.display_name,
+        session_id: minted.session_id,
+        credential: minted.credential,
+        status: status.to_owned(),
+        logged_in_at: i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX),
+    };
+    sessions::upsert_session(ctx.fs, &ctx.layout, session.clone())?;
+    Ok(Some(connected_receipt(ctx, connectors, &session)))
+}
+
 /// Resume a live session-login WAL: poll once; granted ⇒ persist the SESSION row (the credential
 /// is workspace-scoped), delete the WAL, arm the auto-update trigger, and disclose what connecting
-/// delivers.
+/// adopts. The poll is the ONE completion mechanism — an approval given on another device settles
+/// here exactly like one given in this machine's own browser.
 fn resume(
     ctx: &Ctx<'_>,
     connectors: &LoginConnectors<'_>,
     wal: &enroll::PendingEnrollment,
-    handoff: Handoff<'_>,
 ) -> Result<LoginData, ClientError> {
-    // A freshly-arrived authorization code is PERSISTED before it is spent: the human has
-    // finished approving and the code is not re-derivable, so an interrupt between here and the
-    // grant must not strand the login. Presenting it does not consume it server-side, so the
-    // re-poll after a crash exchanges the same pair again.
-    let wal = match handoff.auth_code {
-        Some(code) if wal.auth_code.as_deref() != Some(code) => {
-            let updated = enroll::PendingEnrollment {
-                auth_code: Some(code.to_owned()),
-                ..wal.clone()
-            };
-            enroll::write_wal(ctx.fs, &ctx.layout, &updated)?;
-            updated
-        }
-        _ => wal.clone(),
-    };
-    let wal = &wal;
     let enroll_src = (connectors.enroll)(&wal.base_url);
-    match enroll_src.device_auth_poll(&wal.device_code, wal.auth_code.as_deref())? {
+    match enroll_src.device_auth_poll(&wal.device_code)? {
         DeviceAuthPoll::Pending => Ok(pending_data(wal)),
-        DeviceAuthPoll::AwaitingRedirect if handoff.listening => {
-            // A live listener is still open — the human has approved and the redirect is on its
-            // way. Reported as pending so the wait loop keeps its shape.
-            Ok(pending_data(wal))
-        }
-        DeviceAuthPoll::AwaitingRedirect => {
-            // No listener this time: the flow was approved, but the hand-off it needed went to a
-            // listener that is gone (the process was interrupted, or the approval happened
-            // somewhere that could not return it). The authorization code exists only in that
-            // lost redirect, so this flow can never complete — and nothing was minted for it, so
-            // there is nothing to clean up but the WAL. Clear it and say plainly to start again,
-            // rather than re-polling a flow that will only ever answer this.
-            enroll::delete_wal(ctx.fs, &ctx.layout)?;
-            Err(ClientError::Enrollment(
-                "that login was approved, but its approval could not be handed back to this \
-                 machine — nothing was connected. Run `topos login <workspace-address>` again."
-                    .into(),
-            ))
-        }
         DeviceAuthPoll::Denied => {
             enroll::delete_wal(ctx.fs, &ctx.layout)?;
             Err(ClientError::Enrollment(
@@ -332,7 +434,7 @@ fn resume(
         DeviceAuthPoll::Expired => {
             enroll::delete_wal(ctx.fs, &ctx.layout)?;
             Err(ClientError::Enrollment(
-                "the login flow expired; start over with `topos login <workspace-address>`".into(),
+                "the login flow expired; start over with `topos login`".into(),
             ))
         }
         DeviceAuthPoll::Granted(grant) => {
@@ -343,73 +445,92 @@ fn resume(
             // The manifest-grammar host: the address host the human typed, else (a pre-field WAL)
             // the API base's own host.
             let host = if wal.host.is_empty() {
-                wal.base_url
-                    .trim_start_matches("https://")
-                    .trim_start_matches("http://")
-                    .split('/')
-                    .next()
-                    .unwrap_or_default()
-                    .to_owned()
+                host_of(&wal.base_url)
             } else {
                 wal.host.clone()
             };
             let session = Session {
                 host,
                 base_url: wal.base_url.clone(),
-                workspace_id: grant.workspace.workspace_id.clone(),
-                workspace_name: grant.workspace.name.clone(),
-                display_name: grant.workspace.display_name.clone(),
-                session_id: grant
-                    .session_id
-                    .clone()
-                    .unwrap_or_else(|| grant.device_id.clone()),
-                credential: grant.credential.clone(),
+                workspace_id: grant.workspace.workspace_id,
+                workspace_name: grant.workspace.name,
+                display_name: grant.workspace.display_name,
+                session_id: grant.session_id,
+                credential: grant.credential,
                 status: status.to_owned(),
                 logged_in_at: i64::try_from(ctx.clock.now_unix_millis()).unwrap_or(i64::MAX),
             };
             sessions::upsert_session(ctx.fs, &ctx.layout, session.clone())?;
             enroll::delete_wal(ctx.fs, &ctx.layout)?;
-            // Login is the trigger-arming moment for a receiving install (the acceptance event) —
-            // best-effort, disclosed on the receipt, never a rolled-back login.
-            let currency = Some(ctx.harness.install_currency_trigger());
-            // The acceptance disclosure: what connecting delivers RIGHT NOW (best-effort; a
-            // pending session delivers nothing until an owner approves).
-            let snapshot = if status == SESSION_ACTIVE {
-                (connectors.delivery)(
-                    &session.base_url,
-                    &session.credential,
-                    &session.workspace_id,
-                )
-                .fetch_delivery(&session.workspace_id)
-                .ok()
-            } else {
-                None
-            };
-            let delivered = snapshot.as_ref().map(|s| s.skills.len() as u64);
-            let delivered_names = snapshot
-                .as_ref()
-                .map(|s| s.skills.iter().map(|d| d.name.clone()).collect())
-                .unwrap_or_default();
-            // The machine's own recipe, when it exists: this workspace's feed row joins it, so the
-            // file keeps saying the whole truth about what lands here. No file = nothing to do
-            // (an absent file already behaves as one feed row per connected workspace), and no
-            // other workspace's rows are ever touched — a feed row someone deleted stays deleted.
-            let manifest_note = record_feed_row(ctx, &session.host, &session.workspace_name);
-            Ok(LoginData {
-                workspace_id: session.workspace_id,
-                name: session.workspace_name,
-                display_name: Some(session.display_name),
-                server: Some(session.base_url),
-                session_id: Some(session.session_id),
-                session_status: status.to_owned(),
-                delivered,
-                delivered_names,
-                pending: None,
-                currency,
-                triggers: Vec::new(),
-                manifest_note,
-            })
+            Ok(connected_receipt(ctx, connectors, &session))
         }
+    }
+}
+
+/// The shared tail of a login that just MINTED a session (the browser grant and the lane-side
+/// connect alike): arm the auto-update trigger, read the acceptance disclosure, join this
+/// workspace's feed row, and build the receipt. Every step is best-effort — a login is never
+/// rolled back because a follow-up read failed; the receipt says so instead.
+fn connected_receipt(
+    ctx: &Ctx<'_>,
+    connectors: &LoginConnectors<'_>,
+    session: &Session,
+) -> LoginData {
+    // Login is the trigger-arming moment for a receiving install (the acceptance event).
+    let currency = Some(ctx.harness.install_currency_trigger());
+    // What connecting adopts RIGHT NOW (a pending session adopts nothing until an owner approves,
+    // so it is never dialed).
+    let snapshot = if session.status == SESSION_ACTIVE {
+        (connectors.delivery)(
+            &session.base_url,
+            &session.credential,
+            &session.workspace_id,
+        )
+        .fetch_delivery(&session.workspace_id)
+        .ok()
+    } else {
+        None
+    };
+    // The machine's own recipe, when it exists: this workspace's feed row joins it, so the file
+    // keeps saying the whole truth about what lands here. No file = nothing to do (an absent file
+    // already behaves as one feed row per connected workspace), and no other workspace's rows are
+    // ever touched — a feed row someone deleted stays deleted.
+    let manifest_note = record_feed_row(ctx, &session.host, &session.workspace_name);
+    connected_data(
+        session,
+        &session.status,
+        snapshot.as_ref(),
+        currency,
+        manifest_note,
+    )
+}
+
+/// The ONE connected-session payload — the browser grant, the lane-side connect, and the
+/// already-connected report all render from this shape (`currency`/`manifest_note` are the two
+/// things only a fresh mint has done).
+fn connected_data(
+    session: &Session,
+    status: &str,
+    snapshot: Option<&DeliverySnapshot>,
+    currency: Option<topos_types::TriggerReport>,
+    manifest_note: Option<String>,
+) -> LoginData {
+    LoginData {
+        workspace_id: session.workspace_id.clone(),
+        host: session.host.clone(),
+        name: session.workspace_name.clone(),
+        display_name: Some(session.display_name.clone()),
+        server: Some(session.base_url.clone()),
+        session_id: Some(session.session_id.clone()),
+        session_status: status.to_owned(),
+        delivered: snapshot.map(|s| s.skills.len() as u64),
+        delivered_names: snapshot
+            .map(|s| s.skills.iter().map(|d| d.name.clone()).collect())
+            .unwrap_or_default(),
+        pending: None,
+        currency,
+        triggers: Vec::new(),
+        manifest_note,
     }
 }
 
@@ -475,7 +596,7 @@ fn record_feed_row(ctx: &Ctx<'_>, host: &str, workspace: &str) -> Option<String>
 /// sessions exist and none is named; an io/doc failure.
 pub(crate) fn logout(
     ctx: &Ctx<'_>,
-    revoke: &SessionRevokeConnect<'_>,
+    revoke: &SessionLaneConnect<'_>,
     workspace: Option<&str>,
     all: bool,
 ) -> Result<LogoutData, ClientError> {
@@ -549,23 +670,45 @@ mod tests {
     #[test]
     fn the_address_grammar_table() {
         let d = "https://topos.sh";
-        // A bare workspace name → the default server.
+        // No address at all → the default server, nothing preselected (the headline usage).
+        assert_eq!(
+            LoginTarget::origin_only(d),
+            LoginTarget {
+                origin: "https://topos.sh".into(),
+                host: "topos.sh".into(),
+                preselect: String::new(),
+                invite_token: None
+            }
+        );
+        // One token WITHOUT a dot is a workspace on the default server — a PRESELECT shortcut.
         assert_eq!(
             parse_login_address("acme", d).unwrap(),
             LoginTarget {
                 origin: "https://topos.sh".into(),
                 host: "topos.sh".into(),
-                workspace: "acme".into(),
+                preselect: "acme".into(),
                 invite_token: None
             }
         );
-        // A bare SERVER origin (dotted) → the origin's own workspace (empty slug).
+        // One token WITH a dot (or localhost) is a SERVER — log in there, choose in the browser.
+        for spelled in ["topos.example.com", "https://topos.example.com/"] {
+            assert_eq!(
+                parse_login_address(spelled, d).unwrap(),
+                LoginTarget {
+                    origin: "https://topos.example.com".into(),
+                    host: "topos.example.com".into(),
+                    preselect: String::new(),
+                    invite_token: None
+                },
+                "{spelled}"
+            );
+        }
         assert_eq!(
-            parse_login_address("topos.example.com", d).unwrap(),
+            parse_login_address("http://localhost:3000", d).unwrap(),
             LoginTarget {
-                origin: "https://topos.example.com".into(),
-                host: "topos.example.com".into(),
-                workspace: String::new(),
+                origin: "http://localhost:3000".into(),
+                host: "localhost:3000".into(),
+                preselect: String::new(),
                 invite_token: None
             }
         );
@@ -576,7 +719,7 @@ mod tests {
                 LoginTarget {
                     origin: "https://topos.example.com".into(),
                     host: "topos.example.com".into(),
-                    workspace: "eng".into(),
+                    preselect: "eng".into(),
                     invite_token: None
                 },
                 "{spelled}"
@@ -588,7 +731,7 @@ mod tests {
             LoginTarget {
                 origin: "http://localhost:3000".into(),
                 host: "localhost:3000".into(),
-                workspace: "acme".into(),
+                preselect: "acme".into(),
                 invite_token: None
             }
         );
@@ -598,7 +741,7 @@ mod tests {
             LoginTarget {
                 origin: "https://topos.sh".into(),
                 host: "topos.sh".into(),
-                workspace: "acme".into(),
+                preselect: "acme".into(),
                 invite_token: Some("tok123".into())
             }
         );
@@ -607,7 +750,7 @@ mod tests {
             LoginTarget {
                 origin: "https://topos.example.com".into(),
                 host: "topos.example.com".into(),
-                workspace: String::new(),
+                preselect: String::new(),
                 invite_token: Some("tok9".into())
             }
         );
@@ -626,13 +769,14 @@ mod tests {
 
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
+    use std::rc::Rc;
 
     use crate::ctx::Ctx;
     use crate::fs_seam::RealFs;
     use crate::ids::{RealClock, RealIds};
     use crate::plane::{
-        DeliverySnapshot, DeviceAuthStart, EnrollSource, EnrolledGrant, EnrolledWorkspace,
-        GovernanceSource, PlaneError,
+        ConnectedSession, DeliverySkill, DeviceAuthStart, EnrollSource, EnrolledGrant,
+        EnrolledWorkspace, GovernanceSource,
     };
     use crate::sidecar::Layout;
     use topos_harness::ClaudeCode;
@@ -670,20 +814,23 @@ mod tests {
         f(&ctx)
     }
 
-    /// A fake enrollment transport: the card declares an API base; the poll answers a scripted
-    /// sequence (pending → granted); every start's BINDING declaration is recorded. State is
-    /// Rc-shared so the connector can mint a fresh box per call over ONE script.
+    /// What one `device_auth_start` declared: the preselection the browser chooser receives (or
+    /// none), and the write-once loopback binding.
+    type StartRecord = (Option<String>, bool);
+
+    /// A fake login transport: the card declares an API base; the poll answers a scripted
+    /// sequence (pending → granted); every start's declaration is recorded. State is Rc-shared so
+    /// the connector can mint a fresh box per call over ONE script.
     #[derive(Clone, Default)]
     struct FakeEnroll {
-        polls: std::rc::Rc<RefCell<Vec<DeviceAuthPoll>>>,
-        /// The `loopback` declaration each `device_auth_start` carried — the write-once binding.
-        starts: std::rc::Rc<RefCell<Vec<bool>>>,
+        polls: Rc<RefCell<Vec<DeviceAuthPoll>>>,
+        starts: Rc<RefCell<Vec<StartRecord>>>,
     }
     impl FakeEnroll {
         fn scripted(polls: Vec<DeviceAuthPoll>) -> Self {
             Self {
-                polls: std::rc::Rc::new(RefCell::new(polls)),
-                starts: std::rc::Rc::default(),
+                polls: Rc::new(RefCell::new(polls)),
+                starts: Rc::default(),
             }
         }
     }
@@ -697,13 +844,14 @@ mod tests {
         }
         fn device_auth_start(
             &self,
-            workspace: &str,
             _requested_name: &str,
+            preselect: Option<&str>,
             _invite_token: Option<&str>,
             loopback: bool,
         ) -> Result<DeviceAuthStart, ClientError> {
-            assert_eq!(workspace, "eng");
-            self.starts.borrow_mut().push(loopback);
+            self.starts
+                .borrow_mut()
+                .push((preselect.map(str::to_owned), loopback));
             Ok(DeviceAuthStart {
                 device_code: "flow-secret".to_owned(),
                 user_code: "AB12-CD34".to_owned(),
@@ -712,25 +860,51 @@ mod tests {
                 interval_secs: 5,
             })
         }
-        fn device_auth_poll(
-            &self,
-            device_code: &str,
-            _auth_code: Option<&str>,
-        ) -> Result<DeviceAuthPoll, ClientError> {
+        fn device_auth_poll(&self, device_code: &str) -> Result<DeviceAuthPoll, ClientError> {
             assert_eq!(device_code, "flow-secret");
             Ok(self.polls.borrow_mut().remove(0))
         }
     }
 
-    struct EmptyDelivery;
-    impl DeliverySource for EmptyDelivery {
+    /// A fake delivery transport: a scripted answer (a named set, or the uniform 404) and a call
+    /// count — the acceptance disclosure and the already-connected liveness probe both ride it.
+    #[derive(Clone, Default)]
+    struct FakeDelivery {
+        names: Vec<String>,
+        not_found: bool,
+        pending: bool,
+        calls: Rc<RefCell<usize>>,
+    }
+    impl DeliverySource for FakeDelivery {
         fn fetch_delivery(&self, _ws: &str) -> Result<DeliverySnapshot, PlaneError> {
+            *self.calls.borrow_mut() += 1;
+            if self.not_found {
+                return Err(PlaneError::NotFound);
+            }
             Ok(DeliverySnapshot {
-                skills: Vec::new(),
+                skills: self
+                    .names
+                    .iter()
+                    .map(|n| DeliverySkill {
+                        skill_id: format!("sk_{n}"),
+                        name: n.clone(),
+                        review_required: false,
+                        version_id: [0u8; 32],
+                        generation: 1,
+                        bundle_digest: [0u8; 32],
+                        via_channels: Vec::new(),
+                        assigned_by: None,
+                        picked: false,
+                    })
+                    .collect(),
                 proposals_awaiting: 0,
                 notices: Vec::new(),
                 staleness_window_ms: 1000,
-                link_status: LinkStatus::Active,
+                link_status: if self.pending {
+                    LinkStatus::Pending
+                } else {
+                    LinkStatus::Active
+                },
                 declined: Vec::new(),
             })
         }
@@ -743,11 +917,41 @@ mod tests {
         }
     }
 
+    /// A fake session lane: one scripted `login/connect` answer, and the `(workspace, credential)`
+    /// pairs it was asked with — the acting credential is the whole authority, so the test reads it.
+    #[derive(Clone)]
+    struct FakeLane {
+        answer: Rc<RefCell<Option<Result<ConnectedSession, ClientError>>>>,
+        calls: Rc<RefCell<Vec<(String, String)>>>,
+        credential: String,
+    }
+    impl GovernanceSource for FakeLane {
+        fn invite(
+            &self,
+            _w: &str,
+            _b: topos_types::requests::InvitationRequest,
+        ) -> Result<topos_types::requests::InvitationData, ClientError> {
+            unreachable!()
+        }
+        fn login_connect(
+            &self,
+            workspace: &str,
+            _requested_name: &str,
+        ) -> Result<ConnectedSession, ClientError> {
+            self.calls
+                .borrow_mut()
+                .push((workspace.to_owned(), self.credential.clone()));
+            self.answer
+                .borrow_mut()
+                .take()
+                .unwrap_or_else(|| panic!("the lane was dialed with no scripted answer"))
+        }
+    }
+
     fn granted(status: LinkStatus) -> DeviceAuthPoll {
         DeviceAuthPoll::Granted(EnrolledGrant {
             credential: "sess-secret".to_owned(),
-            device_id: "sn_1".to_owned(),
-            session_id: Some("sn_1".to_owned()),
+            session_id: "sn_1".to_owned(),
             workspace: EnrolledWorkspace {
                 workspace_id: "w_eng".to_owned(),
                 name: "eng".to_owned(),
@@ -758,49 +962,97 @@ mod tests {
         })
     }
 
+    /// The whole connector set over one script: the enrollment fake, one delivery answer for
+    /// every dial, and a lane that panics unless a test scripts it.
+    struct Rig {
+        enroll: FakeEnroll,
+        delivery: FakeDelivery,
+        lane_answer: Rc<RefCell<Option<Result<ConnectedSession, ClientError>>>>,
+        lane_calls: Rc<RefCell<Vec<(String, String)>>>,
+    }
+
+    impl Rig {
+        fn new(polls: Vec<DeviceAuthPoll>) -> Self {
+            Self {
+                enroll: FakeEnroll::scripted(polls),
+                delivery: FakeDelivery::default(),
+                lane_answer: Rc::default(),
+                lane_calls: Rc::default(),
+            }
+        }
+
+        fn delivering(mut self, names: &[&str]) -> Self {
+            self.delivery.names = names.iter().map(|n| (*n).to_owned()).collect();
+            self
+        }
+
+        /// Run `f` with the connectors wired over this rig's fakes.
+        fn with<R>(&self, f: impl FnOnce(&LoginConnectors<'_>) -> R) -> R {
+            let enroll = {
+                let fake = self.enroll.clone();
+                move |_base: &str| -> Box<dyn EnrollSource> { Box::new(fake.clone()) }
+            };
+            let delivery = {
+                let fake = self.delivery.clone();
+                move |_b: &str, _c: &str, _w: &str| -> Box<dyn DeliverySource> {
+                    Box::new(fake.clone())
+                }
+            };
+            let lane = {
+                let (answer, calls) = (Rc::clone(&self.lane_answer), Rc::clone(&self.lane_calls));
+                move |_b: &str, cred: &str| -> Box<dyn GovernanceSource> {
+                    Box::new(FakeLane {
+                        answer: Rc::clone(&answer),
+                        calls: Rc::clone(&calls),
+                        credential: cred.to_owned(),
+                    })
+                }
+            };
+            f(&LoginConnectors {
+                enroll: &enroll,
+                delivery: &delivery,
+                lane: &lane,
+                web_origin: "https://topos.sh".to_owned(),
+            })
+        }
+    }
+
     #[test]
     fn login_starts_pends_resumes_and_persists_the_session() {
         let home = scratch("flow");
         with_ctx(&home, |ctx| {
-            let fake =
-                FakeEnroll::scripted(vec![DeviceAuthPoll::Pending, granted(LinkStatus::Active)]);
-            // The connector mints a fresh box per call, all sharing ONE poll script.
-            let shim = {
-                let fake = fake.clone();
-                move |_base: &str| -> Box<dyn EnrollSource> { Box::new(fake.clone()) }
-            };
-            let delivery = |_b: &str, _c: &str, _w: &str| -> Box<dyn DeliverySource> {
-                Box::new(EmptyDelivery)
-            };
-            let connectors = LoginConnectors {
-                enroll: &shim,
-                delivery: &delivery,
-                web_origin: "https://topos.sh".to_owned(),
-            };
-            // START: writes the WAL, answers the pending disclosure.
-            let start = login(
-                ctx,
-                &connectors,
-                Some("topos.example.com/eng"),
-                Handoff::default(),
-            )
-            .unwrap();
-            assert!(start.pending.is_some());
-            assert_eq!(start.session_status, "awaiting-approval");
-            let wal = enroll::read_wal(ctx.fs, &ctx.layout).unwrap().unwrap();
-            assert_eq!(wal.host, "topos.example.com");
-            assert!(matches!(wal.intent, enroll::EnrollIntentDoc::Session));
-            // RESUME 1: still pending (the fake's first scripted poll).
-            let mid = login(ctx, &connectors, None, Handoff::default()).unwrap();
-            assert!(mid.pending.is_some());
-            // RESUME 2: granted — the session persists, the WAL dies, the receipt discloses.
-            let done = login(ctx, &connectors, None, Handoff::default()).unwrap();
-            assert!(done.pending.is_none());
-            assert_eq!(done.session_status, "active");
-            assert_eq!(done.workspace_id, "w_eng");
-            assert_eq!(done.delivered, Some(0));
-            assert!(done.currency.is_some(), "login arms the trigger");
-            assert!(enroll::read_wal(ctx.fs, &ctx.layout).unwrap().is_none());
+            let rig = Rig::new(vec![DeviceAuthPoll::Pending, granted(LinkStatus::Active)]);
+            rig.with(|connectors| {
+                // START: writes the WAL, answers the pending disclosure — and the named workspace
+                // rides the start as the browser chooser's PRESELECTION.
+                let start = login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
+                assert!(start.pending.is_some());
+                assert_eq!(start.session_status, "awaiting-approval");
+                assert_eq!(start.host, "topos.example.com");
+                assert_eq!(
+                    rig.enroll.starts.borrow().as_slice(),
+                    &[(Some("eng".to_owned()), false)]
+                );
+                let wal = enroll::read_wal(ctx.fs, &ctx.layout).unwrap().unwrap();
+                assert_eq!(wal.host, "topos.example.com");
+                assert_eq!(wal.preselect, "eng");
+                assert!(matches!(wal.intent, enroll::EnrollIntentDoc::Session));
+                // RESUME 1: still pending (the fake's first scripted poll).
+                let mid = login(ctx, connectors, None, false).unwrap();
+                assert!(mid.pending.is_some());
+                // RESUME 2: granted — the session persists, the WAL dies, the receipt discloses.
+                let done = login(ctx, connectors, None, false).unwrap();
+                assert!(done.pending.is_none());
+                assert_eq!(done.session_status, "active");
+                assert_eq!(done.workspace_id, "w_eng");
+                assert_eq!(
+                    (done.host.as_str(), done.name.as_str()),
+                    ("topos.example.com", "eng")
+                );
+                assert_eq!(done.delivered, Some(0));
+                assert!(done.currency.is_some(), "login arms the trigger");
+                assert!(enroll::read_wal(ctx.fs, &ctx.layout).unwrap().is_none());
+            });
             let all = sessions::read_sessions(ctx.fs, &ctx.layout).unwrap();
             assert_eq!(all.sessions.len(), 1);
             let s = &all.sessions[0];
@@ -818,144 +1070,253 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_login_runs_against_the_default_server_with_nothing_preselected() {
+        let home = scratch("bare");
+        with_ctx(&home, |ctx| {
+            let rig = Rig::new(Vec::new());
+            rig.with(|connectors| {
+                let start = login(ctx, connectors, None, false).unwrap();
+                assert!(
+                    start.pending.is_some(),
+                    "bare login is legal — no WAL needed"
+                );
+                assert_eq!(start.name, "", "no workspace is named before the browser");
+                assert_eq!(start.host, "topos.sh", "the default server");
+                // NOTHING is preselected: the chooser is the browser's, not the CLI's.
+                assert_eq!(rig.enroll.starts.borrow().as_slice(), &[(None, false)]);
+                let wal = enroll::read_wal(ctx.fs, &ctx.layout).unwrap().unwrap();
+                assert_eq!(wal.host, "topos.sh");
+                assert!(wal.preselect.is_empty());
+            });
+        });
+    }
+
+    #[test]
+    fn a_differently_targeted_login_restarts_the_flow() {
+        let home = scratch("restart");
+        with_ctx(&home, |ctx| {
+            let rig = Rig::new(Vec::new());
+            rig.with(|connectors| {
+                login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
+                // THE LATEST COMMAND WINS: nothing is minted server-side until this client polls,
+                // so an abandoned flow can never become a session — the new target starts fresh
+                // rather than resuming a ceremony the person has moved on from.
+                let next = login(ctx, connectors, Some("topos.example.com/ops"), false).unwrap();
+                assert!(next.pending.is_some());
+                assert_eq!(next.name, "ops");
+                let wal = enroll::read_wal(ctx.fs, &ctx.layout).unwrap().unwrap();
+                assert_eq!(wal.preselect, "ops");
+                assert_eq!(
+                    rig.enroll.starts.borrow().as_slice(),
+                    &[
+                        (Some("eng".to_owned()), false),
+                        (Some("ops".to_owned()), false)
+                    ]
+                );
+                // A BARE re-invoke still resumes what is pending (it names no other target).
+                rig.enroll.polls.borrow_mut().push(DeviceAuthPoll::Pending);
+                assert!(
+                    login(ctx, connectors, None, false)
+                        .unwrap()
+                        .pending
+                        .is_some()
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn an_already_connected_workspace_answers_without_a_ceremony() {
+        let home = scratch("connected");
+        with_ctx(&home, |ctx| {
+            seed_session(ctx, "w_eng", "eng");
+            let rig = Rig::new(Vec::new()).delivering(&["deploy", "code-review"]);
+            rig.with(|connectors| {
+                let out = login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
+                assert!(out.pending.is_none(), "no browser, no flow");
+                assert_eq!(out.session_status, "active");
+                assert_eq!(out.workspace_id, "w_eng");
+                // A LIVE count, read now — the receipt states what the session adopts today.
+                assert_eq!(out.delivered, Some(2));
+                assert_eq!(out.delivered_names, vec!["deploy", "code-review"]);
+                // Nothing was minted, armed, or written: reporting is not re-accepting.
+                assert!(out.currency.is_none());
+                assert!(out.manifest_note.is_none());
+                assert!(rig.enroll.starts.borrow().is_empty(), "no flow was started");
+                assert!(rig.lane_calls.borrow().is_empty(), "no lane connect either");
+            });
+        });
+    }
+
+    #[test]
+    fn a_dead_session_is_forgotten_and_the_login_runs_on() {
+        let home = scratch("dead");
+        with_ctx(&home, |ctx| {
+            seed_session(ctx, "w_eng", "eng");
+            let mut rig = Rig::new(Vec::new());
+            // The uniform 404: ended, seat removed, or the workspace is gone — indistinguishable
+            // by design, and all of them mean the local row is a lie.
+            rig.delivery.not_found = true;
+            rig.with(|connectors| {
+                let out = login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
+                assert!(out.pending.is_some(), "the ordinary login runs");
+                assert_eq!(
+                    rig.enroll.starts.borrow().as_slice(),
+                    &[(Some("eng".to_owned()), false)]
+                );
+            });
+            assert!(
+                sessions::read_sessions(ctx.fs, &ctx.layout)
+                    .unwrap()
+                    .sessions
+                    .is_empty(),
+                "the dead row is deleted, not carried"
+            );
+        });
+    }
+
+    #[test]
+    fn a_second_workspace_on_the_same_server_needs_no_browser() {
+        let home = scratch("lane");
+        with_ctx(&home, |ctx| {
+            seed_session(ctx, "w_eng", "eng");
+            let rig = Rig::new(Vec::new()).delivering(&["deploy"]);
+            *rig.lane_answer.borrow_mut() = Some(Ok(ConnectedSession {
+                credential: "sess-ops".to_owned(),
+                session_id: "sn_ops".to_owned(),
+                workspace: EnrolledWorkspace {
+                    workspace_id: "w_ops".to_owned(),
+                    name: "ops".to_owned(),
+                    display_name: "Operations".to_owned(),
+                },
+                link_status: LinkStatus::Active,
+            }));
+            rig.with(|connectors| {
+                let out = login(ctx, connectors, Some("topos.example.com/ops"), false).unwrap();
+                assert!(out.pending.is_none(), "no browser for the second workspace");
+                assert_eq!(out.workspace_id, "w_ops");
+                assert_eq!(out.session_status, "active");
+                assert_eq!(out.delivered, Some(1));
+                assert!(out.currency.is_some(), "a fresh session arms the trigger");
+                assert!(rig.enroll.starts.borrow().is_empty(), "no flow was started");
+                // The ACTING credential is the live session's own — seat standing, not a secret
+                // this machine invented.
+                assert_eq!(
+                    rig.lane_calls.borrow().as_slice(),
+                    &[("ops".to_owned(), "cred-w_eng".to_owned())]
+                );
+            });
+            let all = sessions::read_sessions(ctx.fs, &ctx.layout).unwrap();
+            assert_eq!(all.sessions.len(), 2, "both sessions stand");
+            let ops = all.find_on_host("topos.example.com", "ops").unwrap();
+            assert_eq!(ops.credential, "sess-ops");
+            assert_eq!(ops.session_id, "sn_ops");
+        });
+    }
+
+    #[test]
+    fn a_lane_miss_falls_through_to_the_browser() {
+        let home = scratch("lane-miss");
+        with_ctx(&home, |ctx| {
+            seed_session(ctx, "w_eng", "eng");
+            let rig = Rig::new(Vec::new());
+            // The uniform 404 — no seat there (or this session is itself gone). The browser shows
+            // what is actually true: an invitation, a create, or the honest miss.
+            *rig.lane_answer.borrow_mut() = Some(Err(ClientError::TargetNotFound {
+                target: "workspace".to_owned(),
+            }));
+            rig.with(|connectors| {
+                let out = login(ctx, connectors, Some("topos.example.com/ops"), false).unwrap();
+                assert!(out.pending.is_some());
+                assert_eq!(
+                    rig.enroll.starts.borrow().as_slice(),
+                    &[(Some("ops".to_owned()), false)],
+                    "the preselection still rides the browser flow"
+                );
+            });
+            assert_eq!(
+                sessions::read_sessions(ctx.fs, &ctx.layout)
+                    .unwrap()
+                    .sessions
+                    .len(),
+                1,
+                "a miss mints nothing"
+            );
+        });
+    }
+
+    #[test]
+    fn a_lane_fault_is_reported_not_swallowed() {
+        let home = scratch("lane-fault");
+        with_ctx(&home, |ctx| {
+            seed_session(ctx, "w_eng", "eng");
+            let rig = Rig::new(Vec::new());
+            *rig.lane_answer.borrow_mut() = Some(Err(ClientError::Plane("unreachable".to_owned())));
+            rig.with(|connectors| {
+                // A transport fault is NOT a miss: falling through to the browser would ask a
+                // human to approve something the lane may well have been about to do.
+                let err = login(ctx, connectors, Some("topos.example.com/ops"), false).unwrap_err();
+                assert_eq!(err.code(), "PLANE_ERROR");
+                assert!(rig.enroll.starts.borrow().is_empty(), "no flow was started");
+            });
+        });
+    }
+
+    #[test]
     fn a_pending_session_grant_persists_pending_and_skips_the_count() {
         let home = scratch("pend");
         with_ctx(&home, |ctx| {
-            let fake = FakeEnroll::scripted(vec![granted(LinkStatus::Pending)]);
-            let shim = {
-                let fake = fake.clone();
-                move |_base: &str| -> Box<dyn EnrollSource> { Box::new(fake.clone()) }
-            };
-            let delivery = |_b: &str, _c: &str, _w: &str| -> Box<dyn DeliverySource> {
-                panic!("a pending session must not dial delivery")
-            };
-            let connectors = LoginConnectors {
-                enroll: &shim,
-                delivery: &delivery,
-                web_origin: "https://topos.sh".to_owned(),
-            };
-            login(
-                ctx,
-                &connectors,
-                Some("topos.example.com/eng"),
-                Handoff::default(),
-            )
-            .unwrap();
-            let done = login(ctx, &connectors, None, Handoff::default()).unwrap();
-            assert_eq!(done.session_status, "pending");
-            assert!(done.delivered.is_none());
+            let rig = Rig::new(vec![granted(LinkStatus::Pending)]);
+            rig.with(|connectors| {
+                login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
+                let done = login(ctx, connectors, None, false).unwrap();
+                assert_eq!(done.session_status, "pending");
+                assert!(done.delivered.is_none());
+                assert_eq!(
+                    *rig.delivery.calls.borrow(),
+                    0,
+                    "a pending session must not dial delivery"
+                );
+            });
             let all = sessions::read_sessions(ctx.fs, &ctx.layout).unwrap();
             assert_eq!(all.sessions[0].status, SESSION_PENDING);
         });
     }
 
     #[test]
-    fn a_fresh_start_declares_the_binding_the_handoff_holds() {
+    fn a_fresh_start_declares_the_binding_this_invocation_holds() {
         let home = scratch("bind");
         with_ctx(&home, |ctx| {
             // With a listener held, the START must declare the flow loopback-bound — the
             // write-once fact the approval page's zero-typing card resolves on. (Declaring less
             // once shipped a device-bound flow behind a loopback terminal: the page could not
             // pre-arm, the suppressed code was nowhere, and the wait ran out the whole TTL.)
-            let fake = FakeEnroll::scripted(Vec::new());
-            let shim = {
-                let fake = fake.clone();
-                move |_base: &str| -> Box<dyn EnrollSource> { Box::new(fake.clone()) }
-            };
-            let delivery = |_b: &str, _c: &str, _w: &str| -> Box<dyn DeliverySource> {
-                Box::new(EmptyDelivery)
-            };
-            let connectors = LoginConnectors {
-                enroll: &shim,
-                delivery: &delivery,
-                web_origin: "https://topos.sh".to_owned(),
-            };
-            let start = login(
-                ctx,
-                &connectors,
-                Some("topos.example.com/eng"),
-                Handoff {
-                    bind_loopback: true,
-                    listening: false,
-                    auth_code: None,
-                },
-            )
-            .unwrap();
-            assert!(start.pending.is_some());
-            assert_eq!(fake.starts.borrow().as_slice(), &[true]);
-            let wal = enroll::read_wal(ctx.fs, &ctx.layout).unwrap().unwrap();
-            assert!(
-                wal.loopback,
-                "the WAL records the binding the start declared"
-            );
-            // Without a listener, the same start is the classic device grant.
-            enroll::delete_wal(ctx.fs, &ctx.layout).unwrap();
-            login(
-                ctx,
-                &connectors,
-                Some("topos.example.com/eng"),
-                Handoff::default(),
-            )
-            .unwrap();
-            assert_eq!(fake.starts.borrow().as_slice(), &[true, false]);
-            let wal = enroll::read_wal(ctx.fs, &ctx.layout).unwrap().unwrap();
-            assert!(!wal.loopback);
-        });
-    }
-
-    #[test]
-    fn awaiting_redirect_is_terminal_unless_this_invocation_listens() {
-        let home = scratch("redirect");
-        with_ctx(&home, |ctx| {
-            let fake = FakeEnroll::scripted(vec![
-                DeviceAuthPoll::AwaitingRedirect,
-                DeviceAuthPoll::AwaitingRedirect,
-            ]);
-            let shim = {
-                let fake = fake.clone();
-                move |_base: &str| -> Box<dyn EnrollSource> { Box::new(fake.clone()) }
-            };
-            let delivery = |_b: &str, _c: &str, _w: &str| -> Box<dyn DeliverySource> {
-                Box::new(EmptyDelivery)
-            };
-            let connectors = LoginConnectors {
-                enroll: &shim,
-                delivery: &delivery,
-                web_origin: "https://topos.sh".to_owned(),
-            };
-            login(
-                ctx,
-                &connectors,
-                Some("topos.example.com/eng"),
-                Handoff {
-                    bind_loopback: true,
-                    listening: false,
-                    auth_code: None,
-                },
-            )
-            .unwrap();
-            // A LIVE listener tolerates the wait: the human approved, the redirect is coming.
-            let mid = login(
-                ctx,
-                &connectors,
-                None,
-                Handoff {
-                    bind_loopback: true,
-                    listening: true,
-                    auth_code: None,
-                },
-            )
-            .unwrap();
-            assert!(mid.pending.is_some());
-            assert!(enroll::read_wal(ctx.fs, &ctx.layout).unwrap().is_some());
-            // Without one, the code went to a listener that is gone — terminal, WAL cleared.
-            let err = login(ctx, &connectors, None, Handoff::default()).unwrap_err();
-            assert_eq!(err.code(), "LOGIN_FAILED");
-            assert!(
-                err.to_string().contains("could not be handed back"),
-                "{err}"
-            );
-            assert!(enroll::read_wal(ctx.fs, &ctx.layout).unwrap().is_none());
+            let rig = Rig::new(Vec::new());
+            rig.with(|connectors| {
+                let start = login(ctx, connectors, Some("topos.example.com/eng"), true).unwrap();
+                assert!(start.pending.is_some());
+                assert_eq!(
+                    rig.enroll.starts.borrow().as_slice(),
+                    &[(Some("eng".to_owned()), true)]
+                );
+                let wal = enroll::read_wal(ctx.fs, &ctx.layout).unwrap().unwrap();
+                assert!(
+                    wal.loopback,
+                    "the WAL records the binding the start declared"
+                );
+                // Without a listener, the same start is the classic typed-code grant.
+                enroll::delete_wal(ctx.fs, &ctx.layout).unwrap();
+                login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
+                assert_eq!(
+                    rig.enroll.starts.borrow().as_slice(),
+                    &[
+                        (Some("eng".to_owned()), true),
+                        (Some("eng".to_owned()), false)
+                    ]
+                );
+                let wal = enroll::read_wal(ctx.fs, &ctx.layout).unwrap().unwrap();
+                assert!(!wal.loopback);
+            });
         });
     }
 

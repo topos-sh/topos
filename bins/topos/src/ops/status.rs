@@ -1456,7 +1456,7 @@ mod tests {
                 schema_version: PERSISTED_SCHEMA_VERSION,
                 host: String::new(),
                 base_url: "https://topos.sh/api".to_owned(),
-                workspace_name: "acme".to_owned(),
+                preselect: "acme".to_owned(),
                 intent: enroll::EnrollIntentDoc::Session,
                 device_code: "dc_expired".to_owned(),
                 user_code: "XXXX-YYYY".to_owned(),
@@ -1464,7 +1464,6 @@ mod tests {
                 interval_secs: 5,
                 // Long expired — recovery would reap this WAL on any ordinary command.
                 loopback: false,
-                auth_code: None,
                 expires_at_millis: 1_000,
             },
         )
