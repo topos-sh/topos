@@ -900,6 +900,38 @@ pub(crate) fn remove_global(
     apply_arms(ctx, &target, tokens, resolved, via, yes, true)
 }
 
+/// The canonical reference of a standing `"off"` row in the GLOBAL file that `token` names —
+/// `Ok(None)` when no row answers to it.
+///
+/// This is what keeps the switch's inverse spellable the way the switch was written. `remove -g
+/// <bare-name>` resolves a bare name (see [`resolve_one`]) and writes `"off"` under the canonical
+/// reference; the reference grammar does not own bare names, so without this the inverse `add -g
+/// <bare-name>` would fall through to the local adopt ladder and answer with something about
+/// re-forking or an already-tracked directory — never about the switch it was asked to lift.
+/// Resolving here hands `add`'s reference arm the spelling it understands, and the off-lift it
+/// already implements does the rest.
+///
+/// # Errors
+/// [`ClientError::AmbiguousName`] when two workspaces' rows are both switched off under that name
+/// (each qualified spelling listed — picking one on alphabetical luck would turn the wrong feed
+/// back on); a read failure, or a manifest the grammar refuses.
+pub(crate) fn off_row_for(ctx: &Ctx<'_>, token: &str) -> Result<Option<String>, ClientError> {
+    let target = global_target(ctx);
+    let plan = plan_for(ctx, &target)?;
+    let mut refs: Vec<String> = plan
+        .offs
+        .iter()
+        .filter(|row| row_matches(token, None, row))
+        .map(|row| row.reference.clone())
+        .collect();
+    refs.dedup();
+    match refs.len() {
+        0 => Ok(None),
+        1 => Ok(Some(refs.remove(0))),
+        _ => Err(ambiguous(token, refs)),
+    }
+}
+
 /// `topos remove <token>…` — edit THIS FOLDER's manifest. `Ok(None)` when no token names a
 /// manifest row (the caller falls through to the classic tracked/untracked removal).
 ///

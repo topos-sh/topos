@@ -2727,16 +2727,22 @@ fn a_settled_draft_spreads_and_advances_the_sibling_baselines() {
         "the observation is durable"
     );
 
-    // Sweep 2: SETTLED — the draft lands on the replica, disclosed on the warning channel.
+    // Sweep 2: SETTLED — the draft lands on the replica, disclosed on the DISCLOSURE channel (it
+    // worked; the warning channel is what the receipt counts as failures).
     let out = ops::pull(&ctx, ops::PullScope::AllFollowed).unwrap();
     let row = only(&out.data);
     assert_eq!(row.action, PullAction::DraftSynced);
     assert_eq!(row.synced_placements, Some(1));
     assert!(
-        out.warnings
+        out.disclosures
             .iter()
             .any(|w| w.starts_with("DRAFT_SYNCED") && w.contains("1 other agent folder")),
         "{:?}",
+        out.disclosures
+    );
+    assert!(
+        out.warnings.is_empty(),
+        "a successful fan-out reports no failure: {:?}",
         out.warnings
     );
     assert_eq!(

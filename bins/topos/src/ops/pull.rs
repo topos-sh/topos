@@ -79,7 +79,13 @@ pub(crate) enum TargetMode {
 /// as prose, but the hook must not parse prose.
 pub(crate) struct PullOutcome {
     pub data: PullData,
+    /// Isolated per-skill FAILURES — what the receipt counts and calls failed. Only
+    /// [`note_skill_failure`] and its reconcile twin write here.
     pub warnings: Vec<String>,
+    /// Facts about what WORKED that are still worth stating (the settled-draft fan-out, a
+    /// cross-scope version split). They join `warnings` in the `--json` envelope's one stable
+    /// array, but a successful run must never report itself as having failed anything.
+    pub disclosures: Vec<String>,
     /// Workspaces whose whole delivery answered the uniform 404 THIS run (removed / revoked) — every
     /// copy froze in place. Display NAMES: the freeze line and the `update` prose both just say them.
     pub access_gone: Vec<String>,
@@ -143,6 +149,7 @@ impl PullOutcome {
         Self {
             data,
             warnings,
+            disclosures: Vec::new(),
             access_gone: Vec::new(),
             unreachable: Vec::new(),
         }
@@ -168,6 +175,7 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
             let sweep_ctx = ctx_with_plane(ctx, &breaker);
             let mut skills = Vec::new();
             let mut warnings = Vec::new();
+            let mut disclosures = Vec::new();
             for (skill_id, follow) in ctx.follow.followed() {
                 if !follow.following {
                     continue;
@@ -194,10 +202,11 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                     // distinguishable in the `--json` rows.
                     Ok(mut row) => {
                         row.workspace_id = Some(follow.workspace_id.clone());
-                        // The settled-draft fan-out's one receipt line — quiet, factual.
+                        // The settled-draft fan-out's one receipt line — quiet, factual, and a
+                        // DISCLOSURE: the fan-out worked, so it never joins the failure count.
                         if row.action == topos_types::results::PullAction::DraftSynced {
                             let n = row.synced_placements.unwrap_or(0);
-                            warnings.push(format!(
+                            disclosures.push(format!(
                                 "DRAFT_SYNCED {skill}: synced your edits of {skill} to {n} other \
                                  agent folder{s}",
                                 skill = row.skill,
@@ -219,7 +228,7 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
             } else {
                 sum_open_proposals(&sweep_ctx)
             };
-            Ok(PullOutcome::plain(
+            let mut out = PullOutcome::plain(
                 PullData {
                     skills,
                     proposals_awaiting,
@@ -227,7 +236,9 @@ pub(crate) fn pull(ctx: &Ctx<'_>, scope: PullScope) -> Result<PullOutcome, Clien
                     sync: Vec::new(),
                 },
                 warnings,
-            ))
+            );
+            out.disclosures = disclosures;
+            Ok(out)
         }
         PullScope::One {
             name,

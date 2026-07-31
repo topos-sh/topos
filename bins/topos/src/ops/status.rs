@@ -337,11 +337,16 @@ fn scope_rows(
                 Some(hit) => {
                     via = hit.ds.via_channels.first().cloned();
                     attribution = attribution_of(hit.ds);
+                    // A PINNED row's target is its pin, never the served current: the pin is what
+                    // `update` delivers here, so measuring against `current` would report a row
+                    // sitting exactly where it was asked to sit as "behind — `topos update` lands
+                    // the newer version", advice the next `update` correctly refuses to take.
+                    let target = row.pin().unwrap_or_else(|| hit.ds.served_version.clone());
                     applied_for_id(
                         ctx,
                         layout,
                         hit.skill_id,
-                        &hit.ds.served_version,
+                        &target,
                         hit.entry.last_delivery_at,
                     )
                 }

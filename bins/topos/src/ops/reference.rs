@@ -184,6 +184,15 @@ fn add_workspace(
         Some(p) => EntryValue::Pin(p.clone()),
         None => EntryValue::Star,
     };
+    // A PINNED reference does not land `current` — the catalog entry above describes the version
+    // this row deliberately is NOT taking, so the receipt must not name it. The pin IS the version
+    // that lands; its digest is not knowable from the index read, and an empty digest (the shape
+    // every non-bundle arm already carries) says "not stated here" rather than stating the wrong
+    // one.
+    if let Some(p) = &pin {
+        data.version_id = p.clone();
+        data.bundle_digest = String::new();
+    }
 
     if global {
         let target = medit::global_target(ctx);

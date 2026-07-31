@@ -339,7 +339,13 @@ impl SessionInstall {
                     rebuild: false,
                 },
             )
-            .map(|out| (out.data, out.warnings))
+            // The lines a sweep emits, merged exactly as the `--json` envelope merges them:
+            // failures first, then the disclosures (a settled-draft fan-out, a version split).
+            .map(|out| {
+                let mut lines = out.warnings;
+                lines.extend(out.disclosures);
+                (out.data, lines)
+            })
             .map_err(err_str)
         })
     }
