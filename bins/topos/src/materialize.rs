@@ -52,11 +52,17 @@
 //! harder never closes the gap to the syscall that writes through it — an ancestor swapped for a
 //! symlink in that gap re-aims the same spelling at a different tree. So this module writes
 //! through the seam's no-follow boundary instead (see `fs_seam`'s module doc): staged files open
-//! `O_NOFOLLOW`, staging directories are built one `lstat`-checked component at a time
-//! ([`crate::fs_seam::FsOps::create_dir_nofollow`]), and every landing rename/exchange runs *at a
-//! held directory handle* opened on the placement's parent immediately after the proof
+//! `O_NOFOLLOW`, the staging tree is built at HELD HANDLES end to end — the staging root one
+//! fd-walked level below the held parent handle, every component below it descended from the
+//! staging handle's own fd ([`crate::fs_seam::FsOps::create_dir_nofollow_at`] — the stage's
+//! mutable pathname is never re-resolved during the build) — and every landing rename/exchange
+//! runs *at a held directory handle* opened on the placement's parent immediately after the proof
 //! ([`crate::fs_seam::DirHandle`] — `(dev, ino)` captured at proof time, re-checked against the
-//! path immediately before the namespace op, the op itself `renameat` against the held fd). A
+//! path immediately before the namespace op, the op itself `renameat` against the held fd). The
+//! landing additionally proves the SOURCE: the staging leaf is re-opened from the parent's fd
+//! and must still be the very directory object this run staged
+//! ([`crate::fs_seam::FsOps::exchange_at_src`] / `rename_at_noreplace_src`), so a completed
+//! stage moved aside and substituted at its predictable name refuses, never lands. A
 //! swap between the proof and the landing is therefore met as itself and refused, never followed.
 //! The litter sweep and the capability probes ride the SAME handle: their removals, creates, and
 //! exchanges are fd-anchored (`remove_dir_all_at` / `create_dir_at` / `exchange_at`, each
@@ -64,9 +70,9 @@
 //! the handle immediately before every pass.
 //! Named residuals (also in `fs_seam`): a whole REAL directory relocated after the proof keeps
 //! its identity — the held fd then lands bytes inside that same (moved) directory object, never
-//! through the swapped path; the settle rail's content scans and the staging build's tree walk
-//! are path reads/creates between handle verifies (never deletions); a non-unix port would fall
-//! back to path-based checks and must revisit this boundary.
+//! through the swapped path; the settle rail's content scans are path reads between handle
+//! verifies (never deletions); a non-unix port would fall back to path-based checks and must
+//! revisit this boundary.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -361,14 +367,16 @@ pub(crate) fn materialize(
             cap = probe_capability(fs, &parent_handle, &parent, req.skill_id)?;
         }
 
-        // Build + fsync the staging dir (a same-filesystem sibling of the placement). The build's
-        // walk roots at the parent PATH (its files are new bytes, not deletions), so the handle
-        // is verified immediately before it — the closest a non-fd-anchored op can come.
+        // Build + fsync the staging dir (a same-filesystem sibling of the placement), descending
+        // from the HELD parent handle — the stage and every component below it are fd-walked, so
+        // no path below the proven parent is re-resolved during the build. The verify here is
+        // the early spelled-path check (a parent already swapped refuses before any byte is
+        // staged); the landing re-proves both parent and stage identity inside the op.
         parent_handle
             .verify_unmoved()
             .map_err(|e| ClientError::Io(format!("staging parent check: {e}")))?;
         let staging = staging_path(&parent, req.skill_id);
-        build_staging(fs, &staging, req.bundle, req.self_ignore)?;
+        let staging_src = build_staging(fs, &parent_handle, &staging, req.bundle, req.self_ignore)?;
 
         // THE PRE-MUTATION RE-STAT. Everything decided above — heal, snapshot, never-clobber,
         // takeover — rode a scan taken BEFORE the capability probe and the staging build, both of
@@ -424,13 +432,14 @@ pub(crate) fn materialize(
             return Err(e);
         }
 
-        // Place the bytes — every namespace op at the held parent handle.
+        // Place the bytes — every namespace op at the held parent handle, the staged SOURCE
+        // leaf re-proven as the very directory this run built inside each op (`_src`).
         if target.dir_was_present {
             let baseline = map.placement_state[i].materialized_sha.clone();
             let (next_cap, parked) = place_update(
                 fs,
                 &parent_handle,
-                &staging,
+                &staging_src,
                 &target.dir,
                 &parent,
                 req.skill_id,
@@ -448,9 +457,10 @@ pub(crate) fn materialize(
                 Some(&parent_handle),
             )?;
         } else {
-            // First install: an atomic create — no prior bytes to mix.
+            // First install: an atomic create — no prior bytes to mix. `_src`: a stage
+            // substituted at its predictable name in the final beat refuses, never lands.
             let (from, to) = (leaf_name(&staging)?, leaf_name(&target.dir)?);
-            fs.rename_at_noreplace(&parent_handle, from, to)
+            fs.rename_at_noreplace_src(&parent_handle, from, to, &staging_src)
                 .map_err(|e| ClientError::Io(format!("first-install rename: {e}")))?;
             fs.fsync_dir(&parent)?;
         }
@@ -622,34 +632,40 @@ fn resolve_target(
 /// both swap shapes park rather than delete, so the caller inspects those bytes before they go
 /// (see [`verify_parked_old`]). Every namespace op runs at the caller's HELD parent handle
 /// (verified against the path immediately before each op), so a parent swapped after the
-/// containment proof refuses instead of re-aiming the op.
+/// containment proof refuses instead of re-aiming the op — and the staged SOURCE `src` (the
+/// handle [`build_staging`] returned) is re-proven as the very directory this run built,
+/// inside each op (`_src`): a substituted stage refuses, never lands, the staged bytes left to
+/// the litter judge's park rail.
 fn place_update(
     fs: &dyn FsOps,
     h: &crate::fs_seam::DirHandle,
-    staging: &Path,
+    src: &crate::fs_seam::DirHandle,
     dir: &Path,
     parent: &Path,
     skill_id: &str,
     cap: SwapCapability,
 ) -> Result<(SwapCapability, PathBuf), ClientError> {
+    let staging = src.path();
     let (staging_leaf, dir_leaf) = (leaf_name(staging)?, leaf_name(dir)?);
     match cap {
-        SwapCapability::AtomicExchange => match fs.exchange_at(h, staging_leaf, dir_leaf) {
-            Ok(()) => {
-                fs.fsync_dir(parent)?;
-                // The swap PARKED the old bytes at the staging path — the caller judges them.
-                Ok((SwapCapability::AtomicExchange, staging.to_path_buf()))
+        SwapCapability::AtomicExchange => {
+            match fs.exchange_at_src(h, staging_leaf, dir_leaf, src) {
+                Ok(()) => {
+                    fs.fsync_dir(parent)?;
+                    // The swap PARKED the old bytes at the staging path — the caller judges them.
+                    Ok((SwapCapability::AtomicExchange, staging.to_path_buf()))
+                }
+                Err(e) if is_unsupported(&e) => {
+                    // The cached capability is stale (the placement moved onto a swap-incapable
+                    // FS). Fall back to the rename-dance, reusing the already-built staging.
+                    let parked = do_dance(fs, h, src, dir, parent, skill_id)?;
+                    Ok((SwapCapability::RenameDance, parked))
+                }
+                Err(e) => Err(ClientError::Io(format!("atomic directory swap: {e}"))),
             }
-            Err(e) if is_unsupported(&e) => {
-                // The cached capability is stale (the placement moved onto a swap-incapable FS). Fall
-                // back to the rename-dance, reusing the already-built staging.
-                let parked = do_dance(fs, h, staging, dir, parent, skill_id)?;
-                Ok((SwapCapability::RenameDance, parked))
-            }
-            Err(e) => Err(ClientError::Io(format!("atomic directory swap: {e}"))),
-        },
+        }
         SwapCapability::RenameDance => {
-            let parked = do_dance(fs, h, staging, dir, parent, skill_id)?;
+            let parked = do_dance(fs, h, src, dir, parent, skill_id)?;
             Ok((SwapCapability::RenameDance, parked))
         }
         SwapCapability::Unsupported => Err(ClientError::PlacementUnsupported {
@@ -666,7 +682,7 @@ fn place_update(
 fn do_dance(
     fs: &dyn FsOps,
     h: &crate::fs_seam::DirHandle,
-    staging: &Path,
+    src: &crate::fs_seam::DirHandle,
     dir: &Path,
     parent: &Path,
     skill_id: &str,
@@ -677,12 +693,20 @@ fn do_dance(
     // droppable.
     fs.remove_dir_all_at(h, leaf_name(&graveyard)?)
         .map_err(|e| ClientError::Io(format!("rename-dance graveyard clear: {e}")))?;
-    let (dir_leaf, grave_leaf, staging_leaf) =
-        (leaf_name(dir)?, leaf_name(&graveyard)?, leaf_name(staging)?);
+    let (dir_leaf, grave_leaf, staging_leaf) = (
+        leaf_name(dir)?,
+        leaf_name(&graveyard)?,
+        leaf_name(src.path())?,
+    );
+    // The staged SOURCE's identity, proven BEFORE the old tree is touched — a substituted stage
+    // refuses here with the placement still in place (the install rename below re-proves it
+    // in-op).
+    src.verify_leaf_is(h, staging_leaf)
+        .map_err(|e| ClientError::Io(format!("rename-dance stage check: {e}")))?;
     fs.rename_at(h, dir_leaf, grave_leaf)
         .map_err(|e| ClientError::Io(format!("rename-dance park old: {e}")))?;
     // --- the brief ABSENT (never mixed) window is between these two atomic renames ---
-    fs.rename_at(h, staging_leaf, dir_leaf)
+    fs.rename_at_noreplace_src(h, staging_leaf, dir_leaf, src)
         .map_err(|e| ClientError::Io(format!("rename-dance install new: {e}")))?;
     fs.fsync_dir(parent)?;
     Ok(graveyard)
@@ -899,12 +923,15 @@ pub(crate) fn ignores_all(bytes: &[u8]) -> bool {
 /// Build a fresh staging dir holding the bundle's exact bytes, fsync every file AND every staging dir.
 /// With `self_ignore`, the staged tree additionally carries the root self-ignore sentinel — UNLESS
 /// the bundle ships its own root ignore file (a bundle's `.gitignore` is content, never overlaid).
+/// Returns the staging root's HELD handle: the landing re-proves the staging leaf against it
+/// (`_src`), so a stage substituted at its predictable name after this build cannot land.
 fn build_staging(
     fs: &dyn FsOps,
+    parent_h: &crate::fs_seam::DirHandle,
     staging: &Path,
     bundle: &RenderedBundle,
     self_ignore: bool,
-) -> Result<(), ClientError> {
+) -> Result<crate::fs_seam::DirHandle, ClientError> {
     // The staging name was cleared by the litter judge above (which refuses when a park occupying
     // it cannot be accounted for) — never deleted blind here: a leftover at this name is a PARK
     // from an interrupted run, and blind removal is exactly the loss the judge exists to prevent.
@@ -917,18 +944,14 @@ fn build_staging(
             ),
         });
     }
-    // NO-FOLLOW creates throughout the staged tree (see the module doc's proof-to-write
-    // boundary): the staging dir is one fd-walked level below the canonical parent, every
-    // file-parent below it is reached from its own parent's held fd — a symlink swapped in
-    // mid-build is met as itself and refused, never traversed — and every file WRITE runs AT
-    // the held handle its walk returned (`write_staged_at`: openat-exclusive, fd-fsyncs), so no
-    // path-based write survives below the proven base.
-    let staging_parent = staging
-        .parent()
-        .ok_or_else(|| ClientError::PlacementUnsupported {
-            reason: "staging path has no parent directory".into(),
-        })?;
-    let staging_handle = fs.create_dir_nofollow(staging_parent, staging)?;
+    // NO-FOLLOW, HANDLE-DESCENDED creates throughout the staged tree (see the module doc's
+    // proof-to-write boundary): the staging dir is one fd-walked level below the HELD parent
+    // handle, every file-parent below it descends from the STAGING handle's own fd — never the
+    // stage's mutable pathname, so a stage swapped for an outward symlink mid-build cannot
+    // re-aim the walk — and every file WRITE runs AT the held handle its walk returned
+    // (`write_staged_at`: openat-exclusive, fd-fsyncs), so no path-based write survives below
+    // the proven base.
+    let staging_handle = fs.create_dir_nofollow_at(parent_h, staging)?;
     let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
     dirs.insert(staging.to_path_buf());
     if self_ignore && !bundle.files.iter().any(|f| f.path == scan::IGNORE_FILE) {
@@ -948,10 +971,10 @@ fn build_staging(
             .ok_or_else(|| ClientError::PlacementUnsupported {
                 reason: format!("{} has no parent directory", dest.display()),
             })?;
-        // The walk returns the file-parent's HELD handle, and the leaf write runs AT it — a
-        // staging ancestor swapped for a symlink after the walk cannot re-aim the write, because
-        // no path-based syscall runs below the proven parent.
-        let parent_handle = fs.create_dir_nofollow(staging, file_parent)?;
+        // The walk DESCENDS FROM THE HELD STAGING HANDLE and returns the file-parent's own held
+        // handle; the leaf write runs AT it — the stage's pathname is never re-resolved, so a
+        // stage swapped for a symlink after its creation cannot re-aim the walk or the write.
+        let parent_handle = fs.create_dir_nofollow_at(&staging_handle, file_parent)?;
         // Collect every directory from the file's parent up to (and including) the staging root, so
         // each directory entry is fsynced before the swap. `f.path` is kernel-validated (no `..`, no
         // absolute), so the walk stays inside staging.
@@ -977,7 +1000,7 @@ fn build_staging(
     for d in &dirs {
         fs.fsync_dir(d)?;
     }
-    Ok(())
+    Ok(staging_handle)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2636,6 +2659,109 @@ mod tests {
             dir_snapshot(&moved.join(".topos-staging-topos_swapp1")),
             Some(expected(NEW)),
             "the staged bytes stay whole inside the moved real parent — preserved, not deleted"
+        );
+    }
+
+    /// P1: the staging BUILD must never re-resolve the stage's mutable pathname. The stage is
+    /// swapped for an outward symlink AFTER its creation — at the exact beat before the walk
+    /// that creates a nested file-parent, BEFORE the first staged write — where a path-based
+    /// `create_dir_nofollow` (its base open carries only `O_DIRECTORY`) would follow the link
+    /// and land bundle bytes outside the proven parent. The fd-descended walk keeps every
+    /// create inside the directory object this run built, and the staged write's identity check
+    /// refuses the build: typed refusal, zero bytes outside.
+    #[test]
+    fn a_stage_swapped_for_an_outward_symlink_mid_build_cannot_aim_writes_outside() {
+        let parent = Scratch::new("stage-swap");
+        let home = Scratch::new("stage-swap-home");
+        let victim = Scratch::new("stage-swap-victim");
+        let skills = parent.0.join("skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        let skills_canon = skills.canonicalize().unwrap();
+        let placement = skills.join("demo"); // absent → first install
+        const NESTED: &[(&str, FileMode, &[u8])] =
+            &[("ref/data.txt", FileMode::Regular, b"nested new\n")];
+        let bundle = rendered(NESTED);
+        let lock = lock_of("topos_stswap1", NESTED, &"1".repeat(64));
+        let sync = sync_at(1, 1, &"1".repeat(64), &digest_hex(NESTED));
+        let mut prior = prior_map(&[&placement], &"0".repeat(64), SwapCapability::RenameDance);
+        prior.placement_state[0].materialized_sha = None;
+        let d = docs_under(&home.0, "topos_stswap1");
+        let staging = skills_canon.join(".topos-staging-topos_stswap1");
+        let moved = parent.0.join("stolen-stage");
+        let (st, mv, vic) = (staging.clone(), moved.clone(), victim.0.clone());
+        // The swap lands immediately before the nested file-parent's create walk — after the
+        // stage was created, before the first staged write.
+        let fs =
+            crate::fs_seam::HookFs::before_nth_create_dir_all(&staging.join("ref"), 1, move || {
+                std::fs::rename(&st, &mv).unwrap();
+                std::os::unix::fs::symlink(&vic, &st).unwrap();
+            });
+        let err = materialize(
+            &fs,
+            &req("topos_stswap1", &[0], &bundle, &prior, &lock, &sync, &d.sp),
+        );
+        assert!(err.is_err(), "the swapped stage must refuse the build");
+        assert_eq!(
+            std::fs::read_dir(&victim.0).unwrap().count(),
+            0,
+            "zero bytes landed outside — the symlink was never followed"
+        );
+        assert!(!placement.exists(), "nothing was installed");
+    }
+
+    /// P1: the landing verifies the STAGE's leaf identity, not just the parent's. The completed
+    /// stage is moved aside and a substitute directory put at its predictable name immediately
+    /// BEFORE the landing exchange (inside the op, after the before-move beat) — the in-op
+    /// source proof refuses: the old placement is untouched, the substitute never lands, and no
+    /// digest is recorded.
+    #[test]
+    fn a_stage_substituted_at_its_leaf_before_the_exchange_refuses_and_lands_nothing() {
+        let parent = Scratch::new("leaf-sub");
+        let home = Scratch::new("leaf-sub-home");
+        if !swap_supported(&parent.0) {
+            eprintln!("skipping: temp FS lacks atomic dir exchange");
+            return;
+        }
+        let placement = parent.0.join("demo");
+        install_old(&placement);
+        let placement_canon = placement.canonicalize().unwrap();
+        let parent_canon = placement_canon.parent().unwrap().to_path_buf();
+        let bundle = rendered(NEW);
+        let lock = lock_of("topos_leafsub1", NEW, &"1".repeat(64));
+        let sync = sync_at(2, 2, &"1".repeat(64), &digest_hex(NEW));
+        let prior = prior_map(
+            &[&placement],
+            &digest_hex(OLD),
+            SwapCapability::AtomicExchange,
+        );
+        let d = docs_under(&home.0, "topos_leafsub1");
+        let staging = parent_canon.join(".topos-staging-topos_leafsub1");
+        let stolen = parent_canon.join("stolen-stage");
+        let (st, sto) = (staging.clone(), stolen.clone());
+        // The substitution lands INSIDE the landing op, immediately before the exchange syscall.
+        let fs = crate::fs_seam::HookFs::before_first_move_of(&placement_canon, move || {
+            std::fs::rename(&st, &sto).unwrap();
+            std::fs::create_dir_all(&st).unwrap();
+            std::fs::write(st.join("SKILL.md"), b"# substituted\n").unwrap();
+        });
+        let err = materialize(
+            &fs,
+            &req("topos_leafsub1", &[0], &bundle, &prior, &lock, &sync, &d.sp),
+        );
+        assert!(err.is_err(), "a substituted stage must refuse the landing");
+        assert_eq!(
+            dir_snapshot(&placement_canon),
+            Some(expected(OLD)),
+            "the old placement is untouched"
+        );
+        assert_eq!(
+            std::fs::read(staging.join("SKILL.md")).unwrap(),
+            b"# substituted\n",
+            "the substitute never landed and was not deleted"
+        );
+        assert!(
+            crate::doc::read_map(&RealFs, &d.sp.map).unwrap().is_none(),
+            "no digest was recorded for a landing that refused"
         );
     }
 }
