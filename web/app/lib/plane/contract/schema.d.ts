@@ -19,6 +19,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/login/connect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["login_connect"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/login/token": {
         parameters: {
             query?: never;
@@ -451,12 +467,6 @@ export interface components {
         };
         /** @description `POST /v1/login/token` body — poll a login flow for its outcome. */
         DeviceAuthPollRequest: {
-            /**
-             * @description The one-time AUTHORIZATION CODE a loopback flow's approval delivered to this client's
-             *     127.0.0.1 listener. Required to redeem a `loopback`-bound flow and absent otherwise: the
-             *     two secrets travel different channels, and the device code has never been in a URL.
-             */
-            auth_code?: string | null;
             /** @description The SECRET flow code from `login/authorize`. */
             device_code: string;
         };
@@ -472,26 +482,15 @@ export interface components {
              *     Returned once per poll; the server stores only its sha256.
              */
             credential?: string | null;
-            /**
-             * @description The RETIRED device wire's grant id — parse-only fallback for a producer predating
-             *     [`Self::session_id`]; never served by the session wire.
-             */
-            device_id?: string | null;
             hint?: null | components["schemas"]["DeviceAuthHint"];
             /**
-             * @description The RETIRED device-link spelling of [`Self::session_status`] — parse-only fallback for a
-             *     producer predating the session wire. Absent ⇒ treat as `"active"`.
-             */
-            link_status?: string | null;
-            /**
-             * @description The minted SESSION's id — the session-model login wire's grant half (a session = user ×
-             *     workspace × installation; the credential is workspace-scoped). Present ONLY when `status`
-             *     is `granted` on a session-serving producer. **Additive.**
+             * @description The minted SESSION's id (a session = user × workspace × installation; the credential is
+             *     workspace-scoped). Present ONLY when `status` is `granted`.
              */
             session_id?: string | null;
             /**
              * @description The session's born status — `"active"`, or `"pending"` while the workspace's
-             *     session-approval knob holds it. Absent ⇒ treat as active. **Additive.**
+             *     session-approval knob holds it. Absent ⇒ treat as active.
              */
             session_status?: string | null;
             /** @description The poll status. */
@@ -503,11 +502,11 @@ export interface components {
          *     workspace; every other status carries only itself.
          * @enum {string}
          */
-        DeviceAuthPollStatus: "pending" | "denied" | "expired" | "granted" | "awaiting_redirect";
+        DeviceAuthPollStatus: "pending" | "denied" | "expired" | "granted";
         /**
-         * @description `POST /v1/login/authorize` body — begin a login flow toward a workspace named by its address
-         *     slug. Whether the name exists is never disclosed on this route: an unknown name runs the same
-         *     flow to the same uniform denial.
+         * @description `POST /v1/login/authorize` body — begin a login flow toward this server. The workspace is
+         *     chosen (or created) at the browser approval, where the approver's seats are known; nothing
+         *     about workspaces or accounts is disclosed on this unauthenticated route.
          */
         DeviceAuthStartRequest: {
             /**
@@ -517,12 +516,17 @@ export interface components {
              */
             invite_token?: string | null;
             /**
-             * @description How this flow's credential may be collected — `"loopback"` when the client has bound a
+             * @description The workspace ADDRESS slug a `login <workspace>` shortcut named — a PRESELECTION for the
+             *     browser chooser, recorded shape-checked but unresolved (this unauthenticated start is
+             *     never an existence oracle). The approval records the workspace the human actually chose.
+             */
+            preselect?: string | null;
+            /**
+             * @description How the approval outcome is ACCELERATED back — `"loopback"` when the client has bound a
              *     127.0.0.1 listener and can open a browser on THIS machine, otherwise absent (the classic
-             *     device grant). WRITE-ONCE on the flow: declaring `loopback` only makes the flow harder to
-             *     redeem — the approval's authorization code, delivered by redirecting the approver's own
-             *     browser to that listener, becomes required alongside this device code. Absent keeps the
-             *     pre-existing behaviour exactly, so an older client is unaffected.
+             *     device grant). WRITE-ONCE on the flow: a loopback flow's approval page resolves from the
+             *     URL-borne challenge with nothing typed, and the approval redirect wakes the listener; the
+             *     poll remains the one completion mechanism either way.
              */
             redirect?: string | null;
             /**
@@ -530,12 +534,6 @@ export interface components {
              *     authority) and kept as the session's display name once approved.
              */
             requested_name: string;
-            /**
-             * @description The workspace ADDRESS slug the login targets (`topos.sh/<name>` minus the origin). An
-             *     EMPTY string names "the workspace the origin itself addresses" (single-tenant installs, where
-             *     the origin IS its one workspace); a non-empty value is the address slug as today.
-             */
-            workspace: string;
         };
         /** @description `POST /v1/login/authorize` response — the login-flow grant (RFC-8628-shaped names). */
         DeviceAuthStartResponse: {
@@ -633,6 +631,38 @@ export interface components {
              */
             schema_version: number;
             warnings?: string[];
+        };
+        /**
+         * @description `POST /v1/login/connect` body — the LANE-SIDE second connect: an already-credentialed machine
+         *     (any live session on this server) asks for a further workspace's session with no browser
+         *     round-trip. Seat standing is the trust basis — the server mints only where the acting user
+         *     already holds a seat; anything else is the uniform miss.
+         */
+        LoginConnectRequest: {
+            /**
+             * @description A human-readable machine name kept as the new session's display name (the same field the
+             *     browser flow's start carries).
+             */
+            requested_name: string;
+            /** @description The target workspace's ADDRESS slug. */
+            workspace: string;
+        };
+        /**
+         * @description `POST /v1/login/connect` response — the freshly minted session. `credential` is returned
+         *     exactly once, over this authenticated exchange; the server stores only its sha256.
+         */
+        LoginConnectResponse: {
+            /** @description The new session's plaintext bearer credential (workspace-scoped). */
+            credential: string;
+            /** @description The new session's id. */
+            session_id: string;
+            /**
+             * @description The session's born status — `"active"`, or `"pending"` while the workspace's
+             *     session-approval knob holds it.
+             */
+            session_status: string;
+            /** @description The connected workspace. */
+            workspace: components["schemas"]["DeviceAuthWorkspace"];
         };
         /**
          * @description A machine-actionable next step. The `argv` is the ready-to-exec command; `code` lets an agent
@@ -1636,7 +1666,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The login-flow grant (RFC-8628-shaped): the secret device_code to poll with (promoted to the SESSION's workspace-scoped bearer credential on approval), the human-facing user_code, and the BARE approval URL (the code never rides a URL). An invite_token in the body is recorded on the flow unvalidated — never a token oracle. */
+            /** @description The login-flow grant (RFC-8628-shaped): the secret device_code to poll with (promoted to the SESSION's workspace-scoped bearer credential at the exchange), the human-facing user_code, and the BARE approval URL (the code never rides a URL). The flow names NO workspace — the signed-in approver chooses (or creates) it in the browser; a `preselect` slug is recorded shape-checked and unresolved, and an invite_token is recorded unvalidated — this start is never an existence or token oracle. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1647,6 +1677,69 @@ export interface operations {
             };
             /** @description Malformed body. */
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Rate limited (Retry-After header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Internal fault. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+        };
+    };
+    login_connect: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description `Bearer <any live session credential on this server>`. */
+                Authorization: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LoginConnectRequest"];
+            };
+        };
+        responses: {
+            /** @description The lane-side second connect: a further workspace's freshly minted session, browser-free. Seat standing is the trust basis — the acting user must already hold a seat in the named workspace; the plaintext credential is returned exactly once. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoginConnectResponse"];
+                };
+            };
+            /** @description Malformed body. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonEnvelope"];
+                };
+            };
+            /** @description Missing/blank credential, unknown/revoked one, unknown workspace, or no seat there (indistinguishable). */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1687,7 +1780,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The poll status; `granted` carries the minted SESSION's credential (the promoted flow code), the session id + status, the joined workspace, and — when the flow carried an invitation naming one — the first-destination hint. */
+            /** @description The poll status. The poll IS the exchange: the first poll that finds the flow approved MINTS the session (re-validating the approver's seat under the same fence), and `granted` carries the SESSION's credential (the promoted flow code), the session id + status, the CHOSEN workspace, and — when the flow carried an invitation naming one — the first-destination hint. A re-poll answers the same grant. */
             200: {
                 headers: {
                     [name: string]: unknown;

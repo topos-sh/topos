@@ -8,6 +8,7 @@ import { action as curationAction } from "@/routes/api.v1.curation";
 import { loader as deliveryLoader, action as deliveryWrongMethod } from "@/routes/api.v1.delivery";
 import { action as invitationsAction } from "@/routes/api.v1.invitations";
 import { action as deviceAuthorizeAction } from "@/routes/api.v1.login-authorize";
+import { action as loginConnectAction } from "@/routes/api.v1.login-connect";
 import { action as deviceTokenAction } from "@/routes/api.v1.login-token";
 import { loader as meLoader, action as meWrongMethod } from "@/routes/api.v1.me";
 import { action as noticesAction } from "@/routes/api.v1.notices-ack";
@@ -26,6 +27,7 @@ import {
   seatUser,
   seedBundle,
   seedChannel,
+  seedSession,
   seedUser,
 } from "./helpers/scratch-db";
 
@@ -218,7 +220,8 @@ async function deliveredSkill(cred: string, skillId: string): Promise<DeliveredS
 
 // ── fixture ──────────────────────────────────────────────────────────────────────────────────
 
-/** The full login ceremony: start → approve (as `userId`) → poll; the device_code IS the credential. */
+/** The full login ceremony: start → approve (as `userId`, picking the one seat) → poll — THE
+ * POLL is the exchange that mints; the device_code IS the credential. */
 async function mintCredential(
   userId: string,
   display: string,
@@ -226,7 +229,11 @@ async function mintCredential(
 ): Promise<{ credential: string; sessionId: string }> {
   const identity = await import("@/lib/db/identity.server");
   const flow = await identity.startLoginFlow(requestedName, "team");
-  await identity.approveLoginFlow(flow.userCode, { userId, display }, true);
+  await identity.approveLoginFlow(
+    flow.userCode,
+    { userId, display },
+    { kind: "seat", workspace: "team" },
+  );
   const granted = await identity.pollLoginFlow(flow.flowCode);
   if (granted.status !== "granted") {
     throw new Error(`device mint failed: ${granted.status}`);
@@ -1126,42 +1133,42 @@ describe("report", () => {
   });
 });
 
-// ── (k) the login flow's two unauthenticated doors ───────────────────────────────────────────
+// ── (k) the login flow's two unauthenticated doors + the lane-side connect ───────────────────
 
 describe("login authorize + token", () => {
-  it("authorize: an unknown workspace name is the uniform 404 (this install serves exactly one)", async () => {
+  it("authorize: a shape-invalid preselect is the uniform 404 (such a name can never exist)", async () => {
     const res = await drive(
       deviceAuthorizeAction,
       req("POST", "/api/v1/login/authorize", {
-        body: { requested_name: "ci-box", workspace: "acme" },
+        body: { requested_name: "ci-box", preselect: "Not A Slug!" },
       }),
       {},
     );
     await expectUniform404(res);
   });
 
-  it("authorize: an EMPTY workspace names the origin's own — the flow records the install's slug", async () => {
+  it("authorize: the start is WORKSPACE-LESS — no workspace field, the flow mints regardless", async () => {
     const res = await drive(
       deviceAuthorizeAction,
       req("POST", "/api/v1/login/authorize", {
-        body: { requested_name: "origin-box", workspace: "" },
+        body: { requested_name: "origin-box" },
       }),
       {},
     );
     expect(res.status).toBe(200);
     const flow = (await res.json()) as { user_code: string };
-    const rows = await db.q<{ requested_workspace: string }>(
-      `SELECT requested_workspace FROM web.login_flow WHERE user_code = $1`,
+    const rows = await db.q<{ preselect_workspace: string | null }>(
+      `SELECT preselect_workspace FROM web.login_flow WHERE user_code = $1`,
       [flow.user_code],
     );
-    expect(rows[0]?.requested_workspace).toBe("team");
+    expect(rows[0]?.preselect_workspace).toBeNull();
   });
 
-  it("authorize → token: pending, then granted echoing the device_code as the credential", async () => {
+  it("authorize → approve → token: pending, then THE POLL MINTS, echoing the device_code as the credential", async () => {
     const started = await drive(
       deviceAuthorizeAction,
       req("POST", "/api/v1/login/authorize", {
-        body: { requested_name: "ci-box", workspace: "team" },
+        body: { requested_name: "ci-box", preselect: "team" },
       }),
       {},
     );
@@ -1186,40 +1193,44 @@ describe("login authorize + token", () => {
     );
     expect(await pending.json()).toEqual({ status: "pending" });
 
-    // The matched non-empty name is recorded on the flow row verbatim.
-    const flowRows = await db.q<{ requested_workspace: string }>(
-      `SELECT requested_workspace FROM web.login_flow WHERE user_code = $1`,
+    // The preselect is recorded on the flow row verbatim — display-only, unresolved.
+    const flowRows = await db.q<{ preselect_workspace: string }>(
+      `SELECT preselect_workspace FROM web.login_flow WHERE user_code = $1`,
       [flow.user_code as string],
     );
-    expect(flowRows[0]?.requested_workspace).toBe("team");
+    expect(flowRows[0]?.preselect_workspace).toBe("team");
 
-    // The human approves at /verify (the ceremony's data layer stands in for the page).
+    // The human approves at /verify, picking their seat (the ceremony's data layer stands in
+    // for the page). Consent + the chosen workspace land; NO session exists yet.
     const identity = await import("@/lib/db/identity.server");
     const approved = await identity.approveLoginFlow(
       flow.user_code as string,
-      {
-        userId: "u_owner",
-        display: "Owner",
-      },
-      true,
+      { userId: "u_owner", display: "Owner" },
+      { kind: "seat", workspace: "team" },
     );
-    expect(approved).not.toBeNull();
+    expect(approved?.outcome).toBe("approved");
+    expect(await db.q(`SELECT 1 FROM web.cli_session WHERE display_name = 'ci-box'`)).toHaveLength(
+      0,
+    );
 
+    // THE EXCHANGE: the first poll mints and answers granted with the chosen workspace.
     const granted = await drive(
       deviceTokenAction,
       req("POST", "/api/v1/login/token", { body: { device_code: flow.device_code } }),
       {},
     );
-    expect(await granted.json()).toEqual({
+    const grantedBody = (await granted.json()) as Record<string, unknown>;
+    const sessionId = grantedBody.session_id as string;
+    expect(grantedBody).toEqual({
       status: "granted",
       credential: flow.device_code,
-      session_id: approved?.sessionId,
+      session_id: sessionId,
       session_status: "active",
       workspace: { workspace_id: wsId, name: "team", display_name: "team" },
     });
 
     // The grant REPEATS (idempotent): a re-poll after a client crash re-delivers the same
-    // credential, since the credential IS the presented device code.
+    // credential and the SAME session, since the credential IS the presented device code.
     const again = await drive(
       deviceTokenAction,
       req("POST", "/api/v1/login/token", { body: { device_code: flow.device_code } }),
@@ -1228,7 +1239,7 @@ describe("login authorize + token", () => {
     expect(await again.json()).toEqual({
       status: "granted",
       credential: flow.device_code,
-      session_id: approved?.sessionId,
+      session_id: sessionId,
       session_status: "active",
       workspace: { workspace_id: wsId, name: "team", display_name: "team" },
     });
@@ -1238,6 +1249,99 @@ describe("login authorize + token", () => {
       { ws: wsId },
     );
     expect(me.status).toBe(200);
+  });
+});
+
+describe("login connect (the lane-side second connect)", () => {
+  it("an ACTIVE credential + a seat mints a FRESH session, returned exactly once", async () => {
+    const res = await drive(
+      loginConnectAction,
+      req("POST", "/api/v1/login/connect", {
+        cred: CREDS.mem,
+        body: { workspace: "team", requested_name: "mem-second-box" },
+      }),
+      {},
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      credential: string;
+      session_id: string;
+      session_status: string;
+      workspace: { workspace_id: string; name: string; display_name: string };
+    };
+    // A FRESH secret — never the presented one (the flow-code promotion is the browser flow's
+    // trick; the connect mints anew over an authenticated exchange).
+    expect(body.credential).not.toBe(CREDS.mem);
+    expect(body.session_status).toBe("active");
+    expect(body.workspace).toEqual({ workspace_id: wsId, name: "team", display_name: "team" });
+    // The new credential is live on the lane; the audit row carries the connect provenance.
+    const me = await drive(
+      meLoader,
+      req("GET", `/api/v1/workspaces/${wsId}/me`, { cred: body.credential }),
+      { ws: wsId },
+    );
+    expect(me.status).toBe(200);
+    const audits = await db.q<{ details: { via?: string; requestedName?: string } }>(
+      `SELECT details FROM web.audit_event
+       WHERE kind = 'session_created' AND subject = $1`,
+      [body.session_id],
+    );
+    expect(audits[0]?.details).toEqual({
+      via: "connect",
+      status: "active",
+      requestedName: "mem-second-box",
+    });
+  });
+
+  it("a slug naming anything but the install's workspace is the uniform 404", async () => {
+    const res = await drive(
+      loginConnectAction,
+      req("POST", "/api/v1/login/connect", {
+        cred: CREDS.mem,
+        body: { workspace: "acme", requested_name: "wrong-ws-box" },
+      }),
+      {},
+    );
+    await expectUniform404(res);
+  });
+
+  it("a severed person's credential (seat gone, session dead) is the uniform 404", async () => {
+    const res = await drive(
+      loginConnectAction,
+      req("POST", "/api/v1/login/connect", {
+        cred: CREDS.stranger,
+        body: { workspace: "team", requested_name: "stranger-box" },
+      }),
+      {},
+    );
+    await expectUniform404(res);
+  });
+
+  it("a PENDING session's credential is refused — only an ACTIVE session connects onward", async () => {
+    await seedSession(db, "sn_conn_pending", wsId, "u_mem", "pending");
+    const res = await drive(
+      loginConnectAction,
+      req("POST", "/api/v1/login/connect", {
+        cred: "sn_conn_pending",
+        body: { workspace: "team", requested_name: "held-box" },
+      }),
+      {},
+    );
+    await expectUniform404(res);
+    await db.q(`DELETE FROM web.cli_session WHERE id = 'sn_conn_pending'`);
+  });
+
+  it("a wrong method and a missing bearer are the uniform 404", async () => {
+    const { loader } = await import("@/routes/api.v1.login-connect");
+    await expectUniform404((loader as () => Response)());
+    const res = await drive(
+      loginConnectAction,
+      req("POST", "/api/v1/login/connect", {
+        body: { workspace: "team", requested_name: "anon-box" },
+      }),
+      {},
+    );
+    await expectUniform404(res);
   });
 });
 

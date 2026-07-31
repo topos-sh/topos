@@ -11,6 +11,7 @@ import { authClient } from "@/lib/auth/client";
 import { safeNextPath } from "@/lib/auth/guards.server";
 import { REGISTRATION_REFUSED } from "@/lib/auth/registration.server";
 import { mailDelivery } from "@/lib/mail/transport.server";
+import { rebuildVerifyNext } from "@/lib/verify-path";
 
 export const meta: MetaFunction = () => [{ title: "Sign in · Topos" }];
 
@@ -39,7 +40,13 @@ export const meta: MetaFunction = () => [{ title: "Sign in · Topos" }];
  */
 export async function loader({ request }: LoaderFunctionArgs) {
   const url = new URL(request.url);
-  const next = safeNextPath(url.searchParams.get("next") ?? undefined);
+  // A `next` that targets /verify is REBUILT server-side from its shape-validated components
+  // (the shared verify-path rule) rather than echoed: the value rides into the magic-link
+  // mail's callbackURL and every rung's post-sign-in navigation, and a login approval must
+  // resume — in any browser, fresh cookie jar included — on a path this server derived, never
+  // on a raw string a link carried. Anything else takes the ordinary same-app-path validation.
+  const rawNext = url.searchParams.get("next") ?? undefined;
+  const next = rebuildVerifyNext(rawNext) ?? safeNextPath(rawNext);
   const auth = composition.auth;
   return {
     next,

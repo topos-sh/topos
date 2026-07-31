@@ -97,3 +97,36 @@ describe("the login loader's rung flags", () => {
     expect(fallback.startsWith("//")).toBe(false);
   });
 });
+
+describe("a /verify `next` is REBUILT canonically, never echoed", () => {
+  const device = "ab".repeat(32);
+
+  it("keeps the shape-valid components, in the canonical order", async () => {
+    const raw = `/verify?state=abcdefgh&device=${device}&port=4321`;
+    expect((await call(`http://localhost/login?next=${encodeURIComponent(raw)}`)).next).toBe(
+      `/verify?device=${device}&port=4321&state=abcdefgh`,
+    );
+  });
+
+  it("drops anything off-shape or unknown — the resume target is server-derived", async () => {
+    // A junk device, an out-of-range port, a foreign param: all dropped, none echoed.
+    const raw = `/verify?device=NOT-HEX&port=80&state=!!&evil=1&device2=${device}`;
+    expect((await call(`http://localhost/login?next=${encodeURIComponent(raw)}`)).next).toBe(
+      "/verify",
+    );
+  });
+
+  it("keeps a partial set: a bare challenge without listener coordinates survives alone", async () => {
+    const raw = `/verify?device=${device}&port=99999&state=ok`;
+    expect((await call(`http://localhost/login?next=${encodeURIComponent(raw)}`)).next).toBe(
+      `/verify?device=${device}`,
+    );
+  });
+
+  it("a non-/verify path is untouched by the rebuild (the ordinary validation applies)", async () => {
+    expect((await call("http://localhost/login?next=/app")).next).toBe("/app");
+    // A path that merely STARTS with /verify is not the verify page.
+    const fallback = (await call("http://localhost/login?next=/verify-ish")).next;
+    expect(fallback).toBe("/verify-ish");
+  });
+});

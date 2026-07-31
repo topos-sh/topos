@@ -287,10 +287,14 @@ const SESSIONLESS_ROUTES = new Set([
   // The fallback: anonymous is a VALID state (the constant protocol card / house 404 — no
   // existence oracle), so the guard family cannot front it.
   "catch-all",
-  // The login flow's unauthenticated start + poll: no credential EXISTS yet (approval mints
-  // it); the belt is their gate and the flow rows are single-use, short-TTL.
+  // The login flow's unauthenticated start + poll: no credential EXISTS yet (the poll's
+  // exchange mints it); the belt is their gate and the flow rows are single-use, short-TTL.
   "api.v1.login-authorize",
   "api.v1.login-token",
+  // The lane-side second connect: its bearer is ANY live active session on this server, so the
+  // workspace-scoped guard family cannot front it — the route resolves the credential itself
+  // (sessionUserByCredential, the same fail-closed discipline) and every miss is the uniform 404.
+  "api.v1.login-connect",
   // The logout: the presented credential IS the session it ends (possession is the
   // authorization); a dead credential answers the uniform 404.
   "api.v1.session",

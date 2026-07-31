@@ -44,14 +44,20 @@ caller.
 - **Boot:** the `web` schema migrates EAGERLY at process start (top-level await in
   `entry.server.tsx`) — a virgin database serves its first request 200. **First boot** mints the
   workspace + prints the claim link (single tenancy); `claim.tsx` seats the first owner.
-- **The login flow** (`verify.tsx` + `api.v1.device-authorize|device-token`): RFC-8628-shaped;
-  `/verify` is a POST code-lookup then a resolved card; approval is a plain signed-in accept.
-  Two rungs: **device** (typed code — the typing binds approver to asker; the card never
-  pre-arms) and **loopback** (RFC 8252 — approval records consent + a one-time auth code
-  delivered only via the approver's browser redirect to the CLI's 127.0.0.1 listener; THE
-  SESSION IS MINTED AT THE EXCHANGE, which demands both codes — that ordering is load-bearing).
-  Born-status rule, written once: an owner's approval → `active`; else the workspace's
-  `session_approval` knob decides. A seatless approver on multi tenancy is woven through `/new`.
+- **The login flow** (`verify.tsx` + `api.v1.login-authorize|login-token|login-connect`):
+  RFC-8628-shaped, WORKSPACE-LESS at the start (an optional `preselect` slug rides
+  shape-checked, display-only); `/verify` is a POST code-lookup then the pick-or-create card —
+  the signed-in approver CHOOSES the workspace (a seat, a pending invitation, or — multi, when
+  creation is open — a workspace born in the same fence), and approval records consent + the
+  choice only. THE SESSION MINTS AT THE CLI'S EXCHANGE — the first `login/token` poll that
+  finds the flow approved (seat + knob re-read at collection; an approved flow never polled
+  answers `expired` past its TTL) — so approval from any browser on any device completes.
+  Two bindings: **device** (typed code — the typing binds approver to asker; the card never
+  pre-arms) and **loopback** (RFC 8252-shaped; the 127.0.0.1 redirect is a pure accelerator —
+  state + outcome only, no secret). `login/connect` is the lane-side second connect: any live
+  ACTIVE session's bearer + a seat in the target workspace mints a further session, no
+  browser. Born-status rule, written once: an owner's approval → `active`; else the
+  workspace's `session_approval` knob decides.
 - **Invitations** (`invite-redeem.tsx` + `identity.server.ts`): mailed single-use hash-stored
   token, 7-day lapse, re-invite supersedes; the accept ceremony is email-BOUND (one-click as the
   invited address · passwordless account mint born verified · switch page for the wrong account ·

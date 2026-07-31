@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useRef } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import {
   type ActionFunctionArgs,
   data,
@@ -7,6 +7,7 @@ import {
   type MetaFunction,
   redirect,
   useActionData,
+  useFetcher,
   useLoaderData,
 } from "react-router";
 import { BusyFields, buttonClasses } from "@/components/ui";
@@ -22,194 +23,144 @@ import { announceCeremony } from "@/lib/ceremony-event";
 import {
   approveLoginFlow,
   denyLoginFlow,
+  type LoginApproveChoice,
+  type PendingInvitationChoice,
   type PendingLoginFlowView,
+  pendingInvitationsFor,
   pendingLoginFlow,
   pendingLoginFlowByChallenge,
-  seatOf,
-  sessionBornStatus,
+  type SeatChoice,
+  seatChoicesFor,
   theWorkspace,
-  workspaceByName,
 } from "@/lib/db/identity.server";
-import { membershipsFor } from "@/lib/db/queries.server";
+import { createWorkspacePrecheck, workspaceNameAvailable } from "@/lib/db/workspace-create.server";
 import { useSubmittingIntent } from "@/lib/pending";
+import { followBase } from "@/lib/plane/follow-base.server";
 import { allowVerifyLookup } from "@/lib/rate-limit.server";
+import { type Loopback, loopbackFrom, verifySelfPath } from "@/lib/verify-path";
+import {
+  ADDRESS_TAKEN,
+  CREATE_RATE_LIMITED,
+  NAME_REQUIRED,
+  SLUG_SHAPE,
+} from "@/lib/workspace-create-copy";
+import { isWorkspaceNameShape, toWorkspaceSlug, WORKSPACE_NAME_MAX } from "@/lib/workspace-name";
 
 export const meta: MetaFunction = () => [{ title: "Approve a login · Topos" }];
 
 /**
- * The ONE login-approve ceremony (the gh-style device-authorization flow's browser half),
- * TWO-STATE: the code-entry form, or the resolved request card. A machine that wants to act
- * as you in ONE workspace shows a short code and points here; a SIGNED-IN person types that
- * code into a POST form — the code never enters ANY URL (no GET lookup, no code-embedding
- * link) — sees exactly what is asking and THE ONE workspace the session will reach, and
- * approves or denies. A LIVE browser session plus the explicit approve click IS the whole
- * ceremony. Denying destroys a pending request and mints nothing.
+ * The ONE login-approve ceremony — the pick-or-create-and-approve page. A machine that wants
+ * to act as you shows a short code and points here; a SIGNED-IN person types that code into a
+ * POST form — the code never enters ANY URL (no GET lookup, no code-embedding link) — sees
+ * exactly what is asking, CHOOSES THE WORKSPACE the session will reach (a seat they hold, a
+ * pending invitation of theirs, or — where creation is open — a brand-new workspace born in
+ * the same act), and approves or denies. A live browser session plus the explicit click
+ * records consent + the chosen workspace; NOTHING is minted here — the CLI's next poll runs
+ * the exchange that mints the session, so approval from ANY browser on ANY device completes
+ * the login. Denying destroys a pending request and mints nothing.
  *
  * The LOOPBACK arrival (the CLI auto-opened this page): the URL carries `device` — the hex of
  * the flow's device-code HASH — plus `port`/`state` naming the CLI's ephemeral 127.0.0.1
- * listener, so the outcome returns to the terminal via ONE state-bound localhost redirect
- * (the CLI's poll stays the source of truth). `device` does NOT pre-arm the card: it is
- * derivable by whoever started the flow, and starting one needs no credential, so a
- * pre-resolved approve button would be a one-click credential handover to a stranger who
- * mailed the link. The typed code — read off the operator's own terminal — is the out-of-band
- * proof that the approver is the asker, and it is required on every arrival.
+ * listener. The redirect back to that listener is a PURE ACCELERATOR (state + outcome only —
+ * no secret rides it): it wakes the waiting poll instead of leaving it to its interval. The
+ * challenge pre-arms the card for a LOOPBACK flow only — for a device-bound flow the typed
+ * code, read off the operator's own terminal, stays the out-of-band proof that binds approver
+ * to asker.
  *
- * A flow carrying an INVITATION token discloses the join on the card; the approval ceremony
- * itself weaves accept-the-invitation → approve-the-device into one transaction (identity
- * layer), so sign-in → accept → approve is one visit even for a brand-new invitee.
+ * A flow carrying an INVITATION token pre-binds the card to the invited workspace when the
+ * token still resolves for this account; the approval weaves accept-the-invitation →
+ * approve into one transaction (identity layer), so sign-in → accept → approve is one visit
+ * even for a brand-new invitee.
  */
-
-/** The loopback params a CLI-opened arrival carries (all non-secret), validated by shape. */
-interface Loopback {
-  port: string;
-  state: string;
-}
-
-function loopbackFrom(source: { get(name: string): string | null | FormDataEntryValue }): {
-  device: string | null;
-  loopback: Loopback | null;
-} {
-  const device = String(source.get("device") ?? "");
-  const port = String(source.get("port") ?? "");
-  const state = String(source.get("state") ?? "");
-  return {
-    device: /^[0-9a-f]{64}$/.test(device) ? device : null,
-    loopback:
-      /^\d{4,5}$/.test(port) &&
-      Number(port) >= 1024 &&
-      Number(port) <= 65535 &&
-      /^[A-Za-z0-9_-]{8,128}$/.test(state)
-        ? { port, state }
-        : null,
-  };
-}
 
 /**
- * The localhost hand-off URL. `outcome` wakes the waiting CLI; `code`, present only on an
- * approved LOOPBACK flow, is the authorization code it must present (alongside the device code
- * it already holds) to redeem. The host is a LITERAL — never `localhost`, whose resolution can
- * be hijacked, and never a client-supplied URL.
+ * The localhost hand-off URL — `state` + `outcome` ONLY. The poll is the one completion
+ * mechanism; this redirect merely wakes it. The host is a LITERAL — never `localhost`, whose
+ * resolution can be hijacked, and never a client-supplied URL.
  */
-function loopbackReturn(loopback: Loopback, outcome: string, authCode: string | null): string {
+function loopbackReturn(loopback: Loopback, outcome: string): string {
   const qs = new URLSearchParams({ state: loopback.state, outcome });
-  if (authCode !== null) {
-    qs.set("code", authCode);
-  }
   return `http://127.0.0.1:${loopback.port}/cb?${qs.toString()}`;
 }
 
-/** This page's own address, re-carrying only the validated pass-through params. */
-function selfPath(device: string | null, loopback: Loopback | null): string {
-  const qs = new URLSearchParams();
-  if (device !== null) {
-    qs.set("device", device);
-  }
-  if (loopback !== null) {
-    qs.set("port", loopback.port);
-    qs.set("state", loopback.state);
-  }
-  const search = qs.toString();
-  return `/verify${search === "" ? "" : `?${search}`}`;
+/** The chooser's server-read half: the viewer's standing options, display only. */
+interface ChooserData {
+  seats: SeatChoice[];
+  invitations: PendingInvitationChoice[];
+  /** Invitations exist for the viewer's address but the mailbox is unproven — say so. */
+  heldUnverified: boolean;
+  /** Multi tenancy with workspace creation open — the create option renders. */
+  createAllowed: boolean;
+  /** Single tenancy: the boot workspace is still unclaimed (the guidance mentions setup). */
+  bootUnclaimed: boolean;
 }
 
-/** The ONE workspace this approval logs the machine into — the resolved card's subject. */
-interface LinkTarget {
-  name: string;
-  displayName: string;
-  /** The approver holds no seat there yet (an invitation accept — or `/new` — will seat them). */
-  joining: boolean;
-  /** The session will be born pending: the session-approval knob is on and the approver (or
-   * the invitation's role) is not an owner. */
-  awaitsApproval: boolean;
-}
-
-/**
- * Resolve the flow's ONE workspace for the card — display only, outside the approve fence
- * (the ceremony re-resolves under its own lock): an invitation names its workspace; otherwise
- * the tenancy grammar decides (single → the install's one workspace, multi → the recorded
- * slug, which may not exist yet — a CLI-first person creates it mid-flow and returns owning
- * it). The approval mints THIS one workspace's session; further workspaces are further logins.
- */
-async function linkTargetOf(
-  actor: UserActor,
-  pending: PendingLoginFlowView,
-  multi: boolean,
-): Promise<LinkTarget> {
-  const ws =
-    pending.inviteWorkspace !== null
-      ? await workspaceByName(pending.inviteWorkspace.name)
-      : multi
-        ? await workspaceByName(pending.requestedWorkspace)
-        : await theWorkspace();
-  if (ws == null) {
-    // Multi tenancy, a workspace not created yet: the approver will create it through the
-    // `/new` weave and own it — a session its owner mints is born active.
-    return {
-      name: pending.requestedWorkspace,
-      displayName: pending.requestedWorkspace,
-      joining: true,
-      awaitsApproval: false,
-    };
-  }
-  const seat = await seatOf(actor.userId, ws.id);
-  const role = (seat?.role ?? pending.inviteWorkspace?.role ?? "member") as Parameters<
-    typeof sessionBornStatus
-  >[0];
-  const knob = ((ws as { sessionApproval?: string }).sessionApproval ?? "off") as "off" | "on";
-  return {
-    name: ws.name,
-    displayName: ws.displayName,
-    joining: seat === undefined,
-    awaitsApproval: sessionBornStatus(role, knob) === "pending",
-  };
+async function chooserFor(actor: UserActor): Promise<ChooserData> {
+  const multi = composition.tenancy === "multi";
+  const seats = await seatChoicesFor(actor.userId);
+  const { invitations, heldUnverified } = await pendingInvitationsFor(actor.userId);
+  const createAllowed =
+    multi && (await composition.entitlements.forWorkspace(null)).allows("workspace-create");
+  const bootUnclaimed = multi ? false : ((await theWorkspace())?.claimedAt ?? null) === null;
+  return { seats, invitations, heldUnverified, createAllowed, bootUnclaimed };
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const url = new URL(request.url);
   const { device, loopback } = loopbackFrom(url.searchParams);
-  const self = selfPath(device, loopback);
+  const self = verifySelfPath(device, loopback);
   const actor = actorFromSession(await getAuth().api.getSession({ headers: request.headers }));
   if (actor === null) {
     throw redirect(`/login?next=${encodeURIComponent(self)}`);
   }
-  const resolved = device === null ? null : await pendingLoginFlowByChallenge(device);
-  const multi = composition.tenancy === "multi";
-  const memberships = await membershipsFor(actor);
-  if (
-    multi &&
-    memberships.length === 0 &&
-    (resolved === null || resolved.inviteWorkspace === null)
-  ) {
-    // The workspace-creation weave: a seatless approver cannot approve anything, so route them
-    // through `/new` and back — unless the flow carries an invitation, whose accept will seat
-    // them right here.
-    const prefill =
-      resolved !== null && resolved.requestedWorkspace !== ""
-        ? `&name=${encodeURIComponent(resolved.requestedWorkspace)}`
-        : "";
-    throw redirect(`/new?next=${encodeURIComponent(self)}${prefill}`);
+  // The create option's live-availability probe — the same `?check=` arm /new answers, for the
+  // inline create form's debounced fetcher. Signed-in only (the bounce above ran first).
+  const check = url.searchParams.get("check");
+  if (check !== null) {
+    return { name: check, available: await workspaceNameAvailable(check) };
   }
-  // The card resolves with ZERO TYPING — but only ever for a LOOPBACK-bound flow, and that
-  // restriction IS the safety argument. `device` is the device code's own hash, so anyone who
-  // started a flow can compute it, and starting one needs no credential. What a stranger cannot
-  // do is receive the answer: a loopback approval hands its authorization code to the approver's
-  // own 127.0.0.1 listener, so a phished click completes a login on the VICTIM's machine while
-  // the sender's poll keeps reading `awaiting_redirect`. `pendingLoginFlowByChallenge` enforces
-  // the binding in SQL — a DEVICE-bound flow resolves to nothing here and falls through to the
-  // typed-code form, which stays its only door.
+  // The card resolves with ZERO TYPING — but only ever for a LOOPBACK-bound flow
+  // (`pendingLoginFlowByChallenge` enforces the binding in SQL). The challenge is the device
+  // code's own hash, so anyone who started a flow can compute it; the typed code stays the
+  // device flow's only door.
+  const resolved = device === null ? null : await pendingLoginFlowByChallenge(device, actor.userId);
   return {
-    multi,
+    multi: composition.tenancy === "multi",
     device,
     loopback,
-    resolved:
-      resolved === null
-        ? null
-        : { ...resolved, linked: await linkTargetOf(actor, resolved, multi) },
+    resolved,
+    chooser: await chooserFor(actor),
+    origin: followBase(request),
   };
 }
 
 const REQUEST_GONE =
   "That request expired or was already handled — nothing was approved. Ask the device to start again.";
+
+/** Parse the chooser's posted pick into the ceremony's choice. Null = the invite-token
+ * pre-bound arm (valid only while the flow's token binds — the fence decides). */
+function choiceFromPick(
+  pick: string,
+  form: FormData,
+): LoginApproveChoice | null | { invalid: true } {
+  if (pick === "invite-token") {
+    return null;
+  }
+  if (pick.startsWith("seat:")) {
+    return { kind: "seat", workspace: pick.slice("seat:".length) };
+  }
+  if (pick.startsWith("invitation:")) {
+    return { kind: "invitation", id: pick.slice("invitation:".length) };
+  }
+  if (pick === "create") {
+    return {
+      kind: "create",
+      displayName: String(form.get("displayName") ?? "").trim(),
+      slug: String(form.get("slug") ?? "").trim(),
+    };
+  }
+  return { invalid: true };
+}
 
 export async function action({ request }: ActionFunctionArgs) {
   // A POST has no query to preserve — the plain guard's /login bounce is right here.
@@ -238,17 +189,11 @@ export async function action({ request }: ActionFunctionArgs) {
     if (userCode === "") {
       throw data(null, { status: 400 });
     }
-    const pending = await pendingLoginFlow(userCode);
+    const pending = await pendingLoginFlow(userCode, actor.userId);
     if (pending === null) {
       return { kind: "miss" as const };
     }
-    return {
-      kind: "resolved" as const,
-      pending: {
-        ...pending,
-        linked: await linkTargetOf(actor, pending, composition.tenancy === "multi"),
-      },
-    };
+    return { kind: "resolved" as const, pending };
   }
 
   const userCode = String(form.get("code") ?? "").trim();
@@ -257,47 +202,57 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   if (intent === "approve") {
-    // No re-authentication: the live session + this explicit approve click is the whole ceremony. The
-    // ceremony itself resolves the flow's workspace and requires the approver's seat in it —
-    // accepting a carried invitation first when the approver is its addressee — and a refusal
-    // is indistinguishable from an expired code.
-    // A LOOPBACK flow's authorization code has exactly ONE way out: the redirect to the asking
-    // machine's listener. Approving one from a page that carries no return coordinates — a
-    // second browser, a phone, the bare /verify address the terminal also prints — would record
-    // consent and mint a code with nowhere to go, leaving that terminal waiting out the whole
-    // TTL. Refuse BEFORE the ceremony: nothing is consumed, the flow stays pending, and it is
-    // still finishable where it started. (The ceremony re-checks under its own lock; reaching
-    // that path means a race and gets the uniform refusal.)
-    if (loopback === null) {
-      const card = await pendingLoginFlow(userCode);
-      if (card?.binding === "loopback") {
-        return data(
-          {
-            kind: "refused" as const,
-            error:
-              "Finish this login on the machine that started it — the approval goes straight " +
-              "back to that terminal. Use the page it opened, or run `topos login` there again.",
-          },
-          { status: 400 },
-        );
+    // No re-authentication: the live session + this explicit approve click is the whole
+    // ceremony. The fence itself validates the chosen standing (seat / invitation / creation)
+    // under its own lock — an ordinary refusal is indistinguishable from an expired code; only
+    // the create arm answers typed.
+    const pick = String(form.get("pick") ?? "");
+    const choice = choiceFromPick(pick, form);
+    if (typeof choice === "object" && choice !== null && "invalid" in choice) {
+      throw data(null, { status: 400 });
+    }
+    if (choice !== null && choice.kind === "create") {
+      // The create arm's field validation + the SAME policy pre-checks /new runs (entitlement
+      // gate + the per-person floor) — byte-identical refusal strings, then the fence.
+      if (choice.displayName.length < 1 || choice.displayName.length > 100) {
+        return await createRefused(userCode, actor, NAME_REQUIRED, choice, 400);
+      }
+      if (!isWorkspaceNameShape(choice.slug)) {
+        return await createRefused(userCode, actor, SLUG_SHAPE, choice, 400);
+      }
+      const precheck = await createWorkspacePrecheck(actor);
+      if (precheck === "off") {
+        // The composition switched self-serve creation off — the option does not exist.
+        notFound();
+      }
+      if (precheck === "rate-limited") {
+        return await createRefused(userCode, actor, CREATE_RATE_LIMITED, choice, 429);
       }
     }
     const approved = await approveLoginFlow(
       userCode,
       { userId: actor.userId, display: actor.display },
-      loopback !== null,
+      choice,
     );
     if (approved === null) {
       return data({ kind: "refused" as const, error: REQUEST_GONE }, { status: 400 });
     }
-    if (loopback !== null) {
-      // The state-bound localhost hand-off. For a LOOPBACK flow this carries the AUTHORIZATION
-      // CODE — the second of the two secrets the exchange needs, and the one only this browser
-      // can deliver, because the redirect resolves on the approver's OWN machine. A phisher who
-      // mailed this link watches their victim complete a login they can never collect.
-      throw redirect(loopbackReturn(loopback, "approved", approved.authCode));
+    if (approved.outcome === "taken") {
+      // The whole transaction rolled back — the flow is still pending, so re-resolve the card
+      // and surface the typed error on the create form for the retry.
+      const choiceCreate = choice as Extract<LoginApproveChoice, { kind: "create" }>;
+      return await createRefused(userCode, actor, ADDRESS_TAKEN, choiceCreate, 400);
     }
-    return { kind: "approved" as const, name: approved.requestedName };
+    if (loopback !== null) {
+      // The state-bound localhost hand-off — a pure accelerator that wakes the waiting CLI;
+      // its poll (the one completion mechanism) then runs the exchange that mints.
+      throw redirect(loopbackReturn(loopback, "approved"));
+    }
+    return {
+      kind: "approved" as const,
+      name: approved.requestedName,
+      workspaceDisplay: approved.workspaceDisplay,
+    };
   }
 
   const denied = await denyLoginFlow(userCode, {
@@ -308,16 +263,41 @@ export async function action({ request }: ActionFunctionArgs) {
     return data({ kind: "refused" as const, error: REQUEST_GONE }, { status: 400 });
   }
   if (loopback !== null) {
-    throw redirect(loopbackReturn(loopback, "denied", null));
+    throw redirect(loopbackReturn(loopback, "denied"));
   }
   return { kind: "denied" as const };
+}
+
+/** The create arm's typed refusal: re-resolve the still-pending card so the form survives the
+ * round-trip with the error beside it (a vanished flow falls back to the uniform gone). */
+async function createRefused(
+  userCode: string,
+  actor: { userId: string },
+  error: string,
+  choice: { displayName: string; slug: string },
+  status: number,
+) {
+  const pending = await pendingLoginFlow(userCode.toUpperCase(), actor.userId);
+  if (pending === null) {
+    return data({ kind: "refused" as const, error: REQUEST_GONE }, { status: 400 });
+  }
+  return data(
+    {
+      kind: "create-refused" as const,
+      error,
+      displayName: choice.displayName,
+      slug: choice.slug,
+      pending,
+    },
+    { status },
+  );
 }
 
 const INPUT =
   "block h-11 w-full rounded-md border border-line px-3 text-sm text-ink placeholder:text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25";
 
 export default function VerifyPage() {
-  const { resolved, loopback } = useLoaderData<typeof loader>();
+  const loaderData = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
 
   // The `login_approved` ceremony announcement, fired ONCE when the approval-success state
@@ -339,11 +319,21 @@ export default function VerifyPage() {
     announceCeremony("login_approved");
   }, [approved]);
 
+  // The route component only renders for PAGE navigations — the availability probe is a
+  // fetcher.load that never re-renders it — so the page shape is guaranteed here.
+  const chooser = "chooser" in loaderData ? loaderData.chooser : undefined;
+  if (chooser === undefined) {
+    return null;
+  }
+  const loopback = ("loopback" in loaderData ? loaderData.loopback : null) ?? null;
+  const multi = ("multi" in loaderData ? loaderData.multi : false) === true;
+  const origin = ("origin" in loaderData ? loaderData.origin : "") ?? "";
+
   if (actionData !== undefined && "kind" in actionData && actionData.kind === "approved") {
     return (
       <Shell>
-        <PlainState heading="Logged in">
-          {actionData.name} is logged in — you can close this tab.
+        <PlainState heading="Approved">
+          “{actionData.name}” finishes connecting on its next poll — you can close this tab.
         </PlainState>
       </Shell>
     );
@@ -358,11 +348,18 @@ export default function VerifyPage() {
     );
   }
 
-  // The resolved card: from the loopback challenge (loader) or the typed-code lookup (action).
+  // The resolved card: from the loopback challenge (loader), the typed-code lookup (action),
+  // or a create refusal's re-resolve (the flow is still pending; the error rides beside it).
+  const createRefusal =
+    actionData !== undefined && "kind" in actionData && actionData.kind === "create-refused"
+      ? actionData
+      : null;
   const card =
-    actionData !== undefined && "kind" in actionData && actionData.kind === "resolved"
-      ? actionData.pending
-      : resolved;
+    createRefusal !== null
+      ? createRefusal.pending
+      : actionData !== undefined && "kind" in actionData && actionData.kind === "resolved"
+        ? actionData.pending
+        : (("resolved" in loaderData ? loaderData.resolved : null) ?? null);
 
   return (
     <Shell>
@@ -390,7 +387,18 @@ export default function VerifyPage() {
             your terminal and try again.
           </p>
         )}
-        {card !== null ? <PendingRequest card={card} loopback={loopback} /> : <CodeLookup />}
+        {card !== null ? (
+          <PendingRequest
+            card={card}
+            loopback={loopback}
+            chooser={chooser}
+            multi={multi}
+            origin={origin}
+            createRefusal={createRefusal}
+          />
+        ) : (
+          <CodeLookup />
+        )}
       </div>
     </Shell>
   );
@@ -423,21 +431,67 @@ function CodeLookup() {
   );
 }
 
-/** One resolved-card row shape shared by loader (challenge) and action (lookup) arrivals. */
-interface ResolvedCard extends PendingLoginFlowView {
-  linked: LinkTarget;
+/** A radio pick value: `seat:<address>` · `invitation:<id>` · `create` · `invite-token`. */
+type Pick = string;
+
+/** The default pick: the preselect hint's match first (never the create form), else the one
+ * obvious option — seats before invitations, the create form only when it leads. */
+function initialPick(card: PendingLoginFlowView, chooser: ChooserData): Pick | null {
+  if (card.preselect !== null) {
+    const seat = chooser.seats.find((s) => s.name === card.preselect);
+    if (seat !== undefined) {
+      return `seat:${seat.name}`;
+    }
+    const invitation = chooser.invitations.find((i) => i.workspaceName === card.preselect);
+    if (invitation !== undefined) {
+      return `invitation:${invitation.id}`;
+    }
+  }
+  if (chooser.seats.length > 0) {
+    return `seat:${chooser.seats[0]?.name}`;
+  }
+  if (chooser.invitations.length > 0) {
+    return `invitation:${chooser.invitations[0]?.id}`;
+  }
+  if (chooser.createAllowed) {
+    return "create";
+  }
+  return null;
 }
 
 /**
  * State two: the resolved request. What is asking, the CODE for the glance-check against the
- * terminal, THE ONE workspace being logged into (a login is one workspace's session — further
- * workspaces are further logins), and the two arms. The approve form posts the RESOLVED code
- * as a hidden field — the approval applies to exactly the request shown, never to whatever a
- * lookup input held.
+ * terminal, THE WORKSPACE CHOICE (a login is one workspace's session — further workspaces are
+ * further logins), and the two arms. The approve form posts the RESOLVED code as a hidden
+ * field — the approval applies to exactly the request shown, never to whatever a lookup input
+ * held — plus the pick; every posted standing is re-validated inside the approve fence.
  */
-function PendingRequest({ card, loopback }: { card: ResolvedCard; loopback: Loopback | null }) {
-  // WHICH arm is on the wire — both disable together (one decision per request), but only the one
-  // that was clicked names its wait. Without this the approve button read "Working…" for a deny.
+function PendingRequest({
+  card,
+  loopback,
+  chooser,
+  multi,
+  origin,
+  createRefusal,
+}: {
+  card: PendingLoginFlowView;
+  loopback: Loopback | null;
+  chooser: ChooserData;
+  multi: boolean;
+  origin: string;
+  createRefusal: { error: string; displayName: string; slug: string } | null;
+}) {
+  const liveInvite = card.invite !== null && card.invite.state === "live" ? card.invite : null;
+  const [pick, setPick] = useState<Pick | null>(() =>
+    createRefusal !== null
+      ? "create"
+      : liveInvite !== null
+        ? "invite-token"
+        : initialPick(card, chooser),
+  );
+  // WHICH arm is on the wire — both disable together (one decision per request), but only the
+  // one that was clicked names its wait. Without this the approve button read "Working…" for a
+  // deny.
   const flying = useSubmittingIntent();
   const submitting = flying !== null;
   const passThrough = (
@@ -450,63 +504,384 @@ function PendingRequest({ card, loopback }: { card: ResolvedCard; loopback: Loop
       )}
     </>
   );
+
+  const oneSeatOnly =
+    liveInvite === null && chooser.seats.length === 1 && chooser.invitations.length === 0;
+  const noStanding =
+    liveInvite === null && chooser.seats.length === 0 && chooser.invitations.length === 0;
+  const guidanceOnly = noStanding && !chooser.createAllowed;
+  const approveLabel =
+    liveInvite !== null
+      ? "Accept and connect"
+      : pick === "create"
+        ? "Create and connect"
+        : pick?.startsWith("invitation:")
+          ? "Accept and connect"
+          : "Connect and approve this device";
+
   return (
     <div className="flex flex-col gap-4 rounded-md border border-line-soft bg-ground p-4">
       <p className="text-ink text-sm">
-        <span className="font-medium">“{card.requestedName}”</span> wants to log in as you.
+        <span className="font-medium">“{card.requestedName}”</span> wants to connect as you.
       </p>
       <p className="text-dim text-sm">
         Its code is <code className="font-mono text-ink">{card.userCode}</code> — confirm it matches
         your terminal before approving.
       </p>
-      <div className="text-dim text-sm">
-        <p>
-          Approving logs it into{" "}
-          <span className="font-medium text-ink">{card.linked.displayName}</span>
-          {card.linked.joining && <span className="text-faint"> — which you join on approve</span>}.
-        </p>
-        {card.inviteWorkspace !== null && (
-          <p className="mt-2">
-            This login carries an invitation to{" "}
-            <span className="font-medium text-ink">{card.inviteWorkspace.displayName}</span> —
-            approving accepts it.
-          </p>
-        )}
-        {card.linked.awaitsApproval && (
-          <p className="mt-2">
-            Session approval is on there: the session waits until a workspace owner approves it —
-            nothing is delivered before that.
-          </p>
-        )}
-        <p className="mt-2">
-          It publishes, syncs, and reads there until you end the session — from your sessions page
-          or with topos logout. Any further workspace is its own login.
-        </p>
-      </div>
-      <Form method="post" className="flex flex-col gap-3">
+
+      <InviteFallthroughLine invite={card.invite} />
+
+      <Form method="post">
         <input type="hidden" name="intent" value="approve" />
         <input type="hidden" name="code" value={card.userCode} />
         {passThrough}
-        <button
-          type="submit"
-          disabled={submitting}
-          className={`${buttonClasses("primary")} min-h-11 w-full`}
-        >
-          {flying === "approve" ? "Approving…" : `Approve “${card.requestedName}”`}
-        </button>
+        {/* The whole choice goes inert while EITHER arm is on the wire — radios, create
+            fields, and button together (one decision per request; no dead-feeling controls). */}
+        <BusyFields busy={submitting} className="flex flex-col gap-3">
+          {liveInvite !== null ? (
+            <>
+              <input type="hidden" name="pick" value="invite-token" />
+              <div className="text-dim text-sm">
+                <p>
+                  You’re invited to{" "}
+                  <span className="font-medium text-ink">{liveInvite.workspaceDisplay}</span> —
+                  accepting connects this machine.
+                </p>
+                {liveInvite.awaitsApproval && <AwaitsApprovalNote />}
+              </div>
+            </>
+          ) : oneSeatOnly ? (
+            <>
+              <input type="hidden" name="pick" value={`seat:${chooser.seats[0]?.name}`} />
+              <div className="text-dim text-sm">
+                <p>
+                  Approving connects it to{" "}
+                  <span className="font-medium text-ink">{chooser.seats[0]?.displayName}</span>{" "}
+                  <span className="font-mono text-faint">({chooser.seats[0]?.name})</span>.
+                </p>
+                {chooser.seats[0]?.awaitsApproval && <AwaitsApprovalNote />}
+              </div>
+            </>
+          ) : guidanceOnly ? (
+            <Guidance multi={multi} chooser={chooser} />
+          ) : (
+            <WorkspaceChooser
+              chooser={chooser}
+              pick={pick}
+              setPick={setPick}
+              origin={origin}
+              createRefusal={createRefusal}
+            />
+          )}
+
+          {!guidanceOnly && (
+            <>
+              <ApprovingMeans />
+              <button
+                type="submit"
+                disabled={pick === null}
+                className={`${buttonClasses("primary")} min-h-11 w-full`}
+              >
+                {flying === "approve" ? "Connecting…" : approveLabel}
+              </button>
+            </>
+          )}
+        </BusyFields>
       </Form>
       <Form method="post">
         <input type="hidden" name="intent" value="deny" />
         <input type="hidden" name="code" value={card.userCode} />
         {passThrough}
-        <button
-          type="submit"
-          disabled={submitting}
-          className={`${buttonClasses("danger")} min-h-11 w-full`}
-        >
-          {flying === "deny" ? "Denying…" : "Deny — this isn’t me"}
-        </button>
+        <BusyFields busy={submitting}>
+          <button type="submit" className={`${buttonClasses("danger")} min-h-11 w-full`}>
+            {flying === "deny" ? "Denying…" : "Deny — this isn’t me"}
+          </button>
+        </BusyFields>
       </Form>
+    </div>
+  );
+}
+
+/** The one honest line when a flow-carried invitation cannot pre-bind the card. */
+function InviteFallthroughLine({ invite }: { invite: PendingLoginFlowView["invite"] }) {
+  if (invite === null || invite.state === "live") {
+    return null;
+  }
+  return (
+    <p className="text-dim text-sm" role="status">
+      {invite.state === "dead" &&
+        "This login carried an invitation that is no longer live — it may have been accepted already or expired."}
+      {invite.state === "other" &&
+        `This login carries an invitation to ${invite.workspaceDisplay} addressed to a different account — open the emailed invitation link, which handles switching accounts.`}
+      {invite.state === "unverified" &&
+        `This login carries an invitation to ${invite.workspaceDisplay} for your address, but your email isn’t verified — open the emailed invitation link, which proves the mailbox.`}
+    </p>
+  );
+}
+
+/** What approving means — the standing consequences copy, one workspace at a time. */
+function ApprovingMeans() {
+  return (
+    <p className="text-dim text-sm">
+      It publishes, syncs, and reads there until you end the session — from your sessions page or
+      with topos logout. Any further workspace is its own login.
+    </p>
+  );
+}
+
+function AwaitsApprovalNote() {
+  return (
+    <p className="mt-2 text-dim text-sm">
+      Session approval is on there: the session waits until a workspace owner approves it — nothing
+      is delivered before that.
+    </p>
+  );
+}
+
+/** The dead-end-free guidance when the viewer can neither pick nor create. */
+function Guidance({ multi, chooser }: { multi: boolean; chooser: ChooserData }) {
+  return (
+    <div className="flex flex-col gap-2 text-dim text-sm" role="status">
+      {chooser.heldUnverified && (
+        <p>
+          You have invitations waiting, but your email isn’t verified — open the emailed invitation
+          link, which proves the mailbox and finishes right here.
+        </p>
+      )}
+      {multi ? (
+        <p>
+          You don’t have a workspace here yet — ask a teammate for an invitation; it lands in your
+          mailbox and finishes right here.
+        </p>
+      ) : (
+        <>
+          <p>
+            You don’t have a seat in this workspace yet — ask an owner to invite you; the invitation
+            lands here.
+          </p>
+          {chooser.bootUnclaimed && (
+            <p>
+              This workspace hasn’t been claimed yet — its printed setup link creates the first
+              owner.
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+const RADIO_ROW =
+  "flex cursor-pointer items-start gap-3 rounded-md border border-line-soft bg-panel px-3 py-2.5 has-[:checked]:border-accent has-[:checked]:ring-1 has-[:checked]:ring-accent/40";
+
+/** The workspace chooser: seats, then pending invitations, then — where open — create. */
+function WorkspaceChooser({
+  chooser,
+  pick,
+  setPick,
+  origin,
+  createRefusal,
+}: {
+  chooser: ChooserData;
+  pick: Pick | null;
+  setPick: (pick: Pick) => void;
+  origin: string;
+  createRefusal: { error: string; displayName: string; slug: string } | null;
+}) {
+  // The zero-standing create lead: no radio chrome around a single obvious form.
+  const createLeads =
+    chooser.seats.length === 0 && chooser.invitations.length === 0 && chooser.createAllowed;
+  return (
+    <fieldset className="flex flex-col gap-2">
+      <legend className="mb-1 font-medium text-dim text-sm">Connect it to</legend>
+      {chooser.heldUnverified && (
+        <p className="text-dim text-sm" role="status">
+          You have invitations waiting, but your email isn’t verified — open the emailed invitation
+          link, which proves the mailbox.
+        </p>
+      )}
+      {chooser.seats.map((seat) => (
+        <label key={seat.workspaceId} className={RADIO_ROW}>
+          <input
+            type="radio"
+            name="pick"
+            value={`seat:${seat.name}`}
+            checked={pick === `seat:${seat.name}`}
+            onChange={() => setPick(`seat:${seat.name}`)}
+            className="mt-1 accent-accent"
+          />
+          <span className="flex flex-col">
+            <span className="text-ink text-sm">{seat.displayName}</span>
+            <span className="font-mono text-faint text-xs">{seat.name}</span>
+            {seat.awaitsApproval && (
+              <span className="text-faint text-xs">
+                Session approval is on — the session waits for an owner.
+              </span>
+            )}
+          </span>
+        </label>
+      ))}
+      {chooser.invitations.map((invitation) => (
+        <label key={invitation.id} className={RADIO_ROW}>
+          <input
+            type="radio"
+            name="pick"
+            value={`invitation:${invitation.id}`}
+            checked={pick === `invitation:${invitation.id}`}
+            onChange={() => setPick(`invitation:${invitation.id}`)}
+            className="mt-1 accent-accent"
+          />
+          <span className="flex flex-col">
+            <span className="text-ink text-sm">
+              You’re invited to {invitation.workspaceDisplay} — accept and connect
+            </span>
+            <span className="font-mono text-faint text-xs">{invitation.workspaceName}</span>
+            {invitation.awaitsApproval && (
+              <span className="text-faint text-xs">
+                Session approval is on — the session waits for an owner.
+              </span>
+            )}
+          </span>
+        </label>
+      ))}
+      {chooser.createAllowed &&
+        (createLeads ? (
+          <>
+            <input type="hidden" name="pick" value="create" />
+            <CreateFields origin={origin} active createRefusal={createRefusal} />
+          </>
+        ) : (
+          <>
+            <label className={RADIO_ROW}>
+              <input
+                type="radio"
+                name="pick"
+                value="create"
+                checked={pick === "create"}
+                onChange={() => setPick("create")}
+                className="mt-1 accent-accent"
+              />
+              <span className="text-ink text-sm">Create a new workspace</span>
+            </label>
+            {/* The expansion sits BESIDE the radio row, never inside its label — a label click
+                activates the labeled control, which would steal every click aimed at these
+                text inputs. */}
+            {pick === "create" && (
+              <div className="rounded-md border border-line-soft bg-panel px-3 py-3">
+                <CreateFields origin={origin} active createRefusal={createRefusal} />
+              </div>
+            )}
+          </>
+        ))}
+    </fieldset>
+  );
+}
+
+/**
+ * The inline create pair — the /new-shaped form: display name deriving an editable address
+ * slug, with the live availability probe under it (this route's own `?check=` arm).
+ */
+function CreateFields({
+  origin,
+  active,
+  createRefusal,
+}: {
+  origin: string;
+  active: boolean;
+  createRefusal: { error: string; displayName: string; slug: string } | null;
+}) {
+  const [displayName, setDisplayName] = useState(createRefusal?.displayName ?? "");
+  const [slug, setSlug] = useState(createRefusal?.slug ?? "");
+  // Once the person edits the address by hand we stop re-deriving it from the display name.
+  const [slugEdited, setSlugEdited] = useState(createRefusal !== null);
+  const check = useFetcher<{ name: string; available: boolean }>();
+  const checkLoad = check.load;
+
+  // Debounced live-availability read: one request per settled slug, and the answer carries the
+  // slug it is for (`name`) so a stale reply for an earlier keystroke is ignored.
+  useEffect(() => {
+    if (!active || !isWorkspaceNameShape(slug)) {
+      return;
+    }
+    const id = setTimeout(() => {
+      checkLoad(`/verify?check=${encodeURIComponent(slug)}`);
+    }, 300);
+    return () => clearTimeout(id);
+  }, [slug, active, checkLoad]);
+
+  const checkData = check.data && "available" in check.data ? check.data : undefined;
+  const forCurrent = checkData !== undefined && checkData.name === slug;
+
+  return (
+    <div className="flex flex-col gap-3">
+      <label className="block">
+        <span className="mb-1 block font-medium text-dim text-sm">Workspace name</span>
+        <input
+          type="text"
+          name="displayName"
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="Acme Engineering"
+          maxLength={100}
+          value={displayName}
+          onChange={(e) => {
+            setDisplayName(e.target.value);
+            if (!slugEdited) {
+              setSlug(toWorkspaceSlug(e.target.value));
+            }
+          }}
+          className={INPUT}
+        />
+      </label>
+      <label className="block">
+        <span className="mb-1 block font-medium text-dim text-sm">Address</span>
+        <input
+          type="text"
+          name="slug"
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="acme-engineering"
+          pattern="[a-z0-9][a-z0-9-]*"
+          maxLength={WORKSPACE_NAME_MAX}
+          value={slug}
+          onChange={(e) => {
+            setSlugEdited(true);
+            setSlug(toWorkspaceSlug(e.target.value));
+          }}
+          className={`${INPUT} font-mono`}
+        />
+        {slug.length > 0 && (
+          <div className="mt-1 space-y-1">
+            <p className="text-faint text-xs">
+              <span className="font-mono">
+                {origin}/{slug}
+              </span>
+            </p>
+            {!isWorkspaceNameShape(slug) ? (
+              <p className="text-faint text-xs">
+                Use lowercase letters, numbers, and hyphens for the address.
+              </p>
+            ) : check.state !== "idle" ? (
+              <p className="text-faint text-xs" role="status">
+                Checking availability…
+              </p>
+            ) : forCurrent && checkData?.available === true ? (
+              <p className="text-green-700 text-xs" role="status">
+                Available.
+              </p>
+            ) : forCurrent && checkData?.available === false ? (
+              <p className="text-red-600 text-xs" role="status">
+                {ADDRESS_TAKEN}
+              </p>
+            ) : null}
+          </div>
+        )}
+      </label>
+      {createRefusal !== null && (
+        <p className="text-red-600 text-sm" role="alert">
+          {createRefusal.error}
+        </p>
+      )}
     </div>
   );
 }
