@@ -417,7 +417,10 @@ pub(crate) fn add_remote_fetched(
         Err(e) => return Err(ClientError::Io(format!("open import root: {e}"))),
     };
     let stage_leaf = format!(".topos-import-{}", selected.name);
-    let stage_dir = dest_root.join(&stage_leaf);
+    // The staging path is spelled from the HANDLE's own path, not `dest_root`: a symlinked
+    // person-scope root resolved to its canonical spelling above, and the fd-walk below anchors
+    // its lexical containment check on the handle's path — the symlink spelling would fail it.
+    let stage_dir = dest_handle.path().join(&stage_leaf);
     if ctx.fs.exists(&stage_dir) {
         // The clear runs AT the held root handle (identity-verified inside the op) — a swapped
         // ancestor cannot re-aim the recursive removal.
@@ -432,7 +435,7 @@ pub(crate) fn add_remote_fetched(
         .fs
         .create_dir_nofollow_at(&dest_handle, &stage_dir)
         .map_err(|e| ClientError::Io(format!("create import staging: {e}")))?;
-    if let Err(e) = write_skill_dir(ctx, &stage_handle, &stage_dir, &selected.files) {
+    if let Err(e) = write_skill_dir(ctx, &stage_handle, &selected.files) {
         let _ = ctx.fs.remove_dir_all_at(&dest_handle, &stage_leaf);
         return Err(e);
     }
@@ -1106,23 +1109,24 @@ fn restore_import_park(ctx: &Ctx<'_>, parked: &Path, dest: &Path) {
 }
 
 /// Write a selected skill's byte-exact files into the staging tree under its HELD handle
-/// `dest_h` (opened at `dest`), preserving the executable bit (part of the digest). Paths are
-/// archive-relative forward-slash and already `..`/absolute-safe (extraction rejected hazards),
-/// so the component-wise join stays inside `dest` — the creates DESCEND FROM THE HELD STAGING
-/// HANDLE'S fd ([`crate::fs_seam::FsOps::create_dir_nofollow_at`]: the stage's mutable pathname
-/// is never re-resolved, so a stage swapped for an outward symlink after its creation cannot
-/// re-aim the walk), and each file write runs AT the held handle its walk returned
+/// `dest_h`, preserving the executable bit (part of the digest). Paths are archive-relative
+/// forward-slash and already `..`/absolute-safe (extraction rejected hazards), and every nested
+/// path is spelled from THE HANDLE'S OWN path (the fd-walk's lexical anchor — a caller-supplied
+/// spelling could diverge from it through a symlinked root), so the component-wise join stays
+/// inside the stage — the creates DESCEND FROM THE HELD STAGING HANDLE'S fd
+/// ([`crate::fs_seam::FsOps::create_dir_nofollow_at`]: the stage's mutable pathname is never
+/// re-resolved, so a stage swapped for an outward symlink after its creation cannot re-aim the
+/// walk), and each file write runs AT the held handle its walk returned
 /// ([`crate::fs_seam::FsOps::write_staged_at`]: openat-exclusive, fd-fsyncs), so a symlink
 /// swapped into the staged tree mid-write is met as itself and refused, never traversed — no
 /// path-based write below the proven staging root.
 fn write_skill_dir(
     ctx: &Ctx<'_>,
     dest_h: &crate::fs_seam::DirHandle,
-    dest: &Path,
     files: &[RepoFile],
 ) -> Result<(), ClientError> {
     for f in files {
-        let mut path = dest.to_path_buf();
+        let mut path = dest_h.path().to_path_buf();
         for comp in f.path.split('/') {
             path.push(comp);
         }
