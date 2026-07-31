@@ -295,6 +295,80 @@ fn add_remote_imports_a_repo_skill_places_bytes_and_records_origin() {
     assert_eq!(err.code(), "ALREADY_TRACKED");
 }
 
+/// P2 (a previously supported dotfiles setup): a USER-scope skills root that IS a symlink must
+/// stage, land, and adopt end to end. The held root handle resolves the link ONCE and pins the
+/// real directory, and every staging path is spelled from that handle's canonical path — so the
+/// fd-walk's lexical containment check cannot trip over the link spelling. The recorded
+/// placement is the canonical path (the convention `add` has always applied by canonicalizing
+/// the adopted source).
+#[test]
+fn add_remote_lands_and_adopts_through_a_symlinked_user_scope_skills_root() {
+    let targz = build_repo_tarball(
+        "o-r-abc1234",
+        &[
+            ("skills/alpha/SKILL.md", b"# alpha\n", 0o644),
+            ("skills/alpha/reference/notes.md", b"notes\n", 0o644),
+        ],
+    );
+    let git = FakeGit(targz);
+    let spec = github_spec("o", "r", None);
+    let h = Harness::new("symlink-root");
+    // The dotfiles shape: a user home whose ~/.claude/skills is a symlink to a real dir kept
+    // elsewhere (a separate scratch from the sidecar home — a source may never overlap it).
+    let userhome = Scratch::new("symlink-root-home");
+    let real_root = userhome.0.join("dotfiles/claude-skills");
+    std::fs::create_dir_all(&real_root).unwrap();
+    std::fs::create_dir_all(userhome.0.join(".claude")).unwrap();
+    std::os::unix::fs::symlink(&real_root, userhome.0.join(".claude/skills")).unwrap();
+    let roots = ops::DiscoveryRoots {
+        home: userhome.0.clone(),
+        cwd: None,
+    };
+    let opts = ops::AddRemoteOpts {
+        skill: Some("alpha".into()),
+        harness: None,
+        global: true, // user scope → the symlinked ~/.claude/skills
+    };
+    let data = ops::add_remote(&h.ctx(), &git, &spec, &roots, &opts)
+        .expect("a symlinked user-scope root stages, lands, and adopts");
+    assert_eq!(data.name, "alpha");
+    // One directory object: the bytes are reachable through both spellings, byte-exact.
+    let real_dest = real_root.join("alpha");
+    assert_eq!(
+        std::fs::read(real_dest.join("SKILL.md")).unwrap(),
+        b"# alpha\n"
+    );
+    assert!(
+        userhome
+            .0
+            .join(".claude/skills/alpha/reference/notes.md")
+            .is_file()
+    );
+    // No staging sibling (or park) is left behind under the real root.
+    assert_eq!(
+        std::fs::read_dir(&real_root).unwrap().count(),
+        1,
+        "only the landed skill remains under the real root"
+    );
+    // The recorded placement is the CANONICAL spelling — the pre-existing convention (`add`
+    // canonicalizes the adopted source before recording it).
+    let sp = Layout::new(&h.home.0).published(&sid(&data.skill_id));
+    let map = doc::read_map(&h.fs, &sp.map)
+        .expect("map reads")
+        .expect("map exists");
+    assert_eq!(
+        map.placements,
+        vec![
+            real_dest
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        ],
+        "the placement records the canonical path"
+    );
+}
+
 /// The staging window is not a licence to delete. A destination validated as EMPTY before the
 /// staged tree is built, then filled by someone else while it is being built, must NOT be
 /// recursively removed by the landing rename: the import refuses typed and the foreign bytes stay.

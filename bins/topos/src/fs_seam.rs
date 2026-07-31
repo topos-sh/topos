@@ -41,13 +41,19 @@
 //!   SOURCE of a landing move is a staged tree built under a held handle, the `_src` landings
 //!   ([`FsOps::exchange_at_src`] / [`FsOps::rename_at_noreplace_src`]) additionally re-open the
 //!   source leaf from the parent's fd and prove it `(dev, ino)`-identical to that staging handle
-//!   ([`DirHandle::verify_leaf_is`]) immediately before the namespace op — a completed stage
-//!   moved aside and SUBSTITUTED at its predictable name refuses instead of landing.
+//!   ([`DirHandle::verify_leaf_is`]) as the LAST operation before the namespace op — the parent
+//!   re-proof and any no-replace probe run FIRST, so nothing sits between the leaf proof and the
+//!   `renameat` — and a completed stage moved aside and SUBSTITUTED at its predictable name
+//!   refuses instead of landing.
 //!
 //! Named residuals: `O_NOFOLLOW` guards only the final component (the directory walk + handle
 //! anchoring cover the ancestors); a whole REAL directory relocated after the proof keeps its
 //! identity and the held fd writes into it wherever it now sits (an attacker placing bytes in a
-//! tree they could already write — not a redirect into a victim path); content READS of parked
+//! tree they could already write — not a redirect into a victim path); the `_src` landings'
+//! source-identity proof and the rename/exchange it authorizes are still two SYSCALLS — the
+//! proof runs last, with nothing between it and the namespace op, so a substitution can land
+//! only inside that single syscall-pair window (irreducible from user space; every check that
+//! can run earlier does); content READS of parked
 //! trees (the settle rail's scans) and the park-journal restores of arbitrary paths stay
 //! path-based — each destructive conclusion they feed is preceded by a handle identity check
 //! where one is held, and the trees they act on are settle-rail-judged. On non-unix targets
@@ -215,12 +221,17 @@ pub(crate) trait FsOps {
     /// [`FsOps::rename_at`] refusing an existing target (no-replace), by leaf names inside the
     /// held directory. The check runs at the held fd (`statat`, no-follow); the caller's writer
     /// lock closes the check→rename beat against topos's own writers.
+    #[allow(dead_code)] // Every current landing has a staged source and rides the `_src` variant
+    // (which inlines these exact beats so the leaf proof runs last); this unverified arm stays
+    // as the seam's no-replace primitive for a landing with no staging handle to prove.
     fn rename_at_noreplace(&self, h: &DirHandle, from: &str, to: &str) -> io::Result<()>;
     /// [`FsOps::rename_at_noreplace`] for a landing whose SOURCE `from` is a stage built under a
-    /// held handle: immediately before the rename, `from` is re-opened from the parent's fd and
-    /// proven `(dev, ino)`-identical to `src` — the staging handle captured at construction
-    /// ([`DirHandle::verify_leaf_is`]). A completed stage moved aside and SUBSTITUTED at its
-    /// predictable name in the final beat is a typed refusal — nothing lands.
+    /// held handle: the parent re-proof and the no-replace probe run FIRST, then `from` is
+    /// re-opened from the parent's fd and proven `(dev, ino)`-identical to `src` — the staging
+    /// handle captured at construction ([`DirHandle::verify_leaf_is`]) — as the LAST operation
+    /// before the rename syscall, with nothing between them. A completed stage moved aside and
+    /// SUBSTITUTED at its predictable name in the final beat is a typed refusal — nothing lands
+    /// (the remaining proof-to-rename syscall pair is the module doc's named residual).
     fn rename_at_noreplace_src(
         &self,
         h: &DirHandle,
@@ -236,9 +247,10 @@ pub(crate) trait FsOps {
     /// torn/mixed/partial state. Errors typed (e.g. `ENOTSUP` on an FS without the syscall) so
     /// the caller's capability fallback still works.
     fn exchange_at(&self, h: &DirHandle, a: &str, b: &str) -> io::Result<()>;
-    /// [`FsOps::exchange_at`] with [`FsOps::rename_at_noreplace_src`]'s source-identity proof:
-    /// immediately before the exchange, the leaf `a` is re-opened from the parent's fd and must
-    /// still be the very directory object `src` holds ([`DirHandle::verify_leaf_is`]) — a
+    /// [`FsOps::exchange_at`] with [`FsOps::rename_at_noreplace_src`]'s source-identity proof
+    /// and its ordering: the parent re-proof runs first, then the leaf `a` is re-opened from the
+    /// parent's fd and must still be the very directory object `src` holds
+    /// ([`DirHandle::verify_leaf_is`]) — the LAST operation before the exchange syscall — so a
     /// substituted stage refuses, never swaps live.
     fn exchange_at_src(&self, h: &DirHandle, a: &str, b: &str, src: &DirHandle) -> io::Result<()>;
     /// [`FsOps::remove_dir_all`] by LEAF name AT the held handle: the tree is opened
@@ -482,6 +494,81 @@ impl RealFs {
             dev: meta.dev(),
             ino: meta.ino(),
         })
+    }
+
+    /// The fd-anchored no-replace probe the rename landings run: an entry already at `to`
+    /// (`statat` at the held fd, no-follow) refuses `AlreadyExists`; only a clean NOENT proceeds.
+    fn probe_no_replace(h: &DirHandle, to: &str) -> io::Result<()> {
+        match rustix::fs::statat(&h.file, to, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "target exists",
+            )),
+            Err(rustix::io::Errno::NOENT) => Ok(()),
+            Err(e) => Err(io::Error::from(e)),
+        }
+    }
+
+    /// The bare exchange syscall (`RENAME_EXCHANGE` on Linux / `RENAME_SWAP` via `renameatx_np`
+    /// on macOS) at the held fd — the one cfg-gated body both exchange ops end on, with no check
+    /// between the caller's last proof and the syscall itself.
+    fn exchange_raw(h: &DirHandle, a: &str, b: &str) -> io::Result<()> {
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "ios"
+        ))]
+        {
+            rustix::fs::renameat_with(&h.file, a, &h.file, b, rustix::fs::RenameFlags::EXCHANGE)
+                .map_err(io::Error::from)
+        }
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "ios"
+        )))]
+        {
+            let _ = (h, a, b);
+            Err(io::Error::from(rustix::io::Errno::NOSYS))
+        }
+    }
+
+    /// [`FsOps::rename_at_noreplace_src`]'s body, ordered so the LEAF-identity proof is the last
+    /// operation before the rename syscall: the parent re-proof and the no-replace probe run
+    /// FIRST, `before_leaf_verify` (a test-only beat; production passes a no-op) fires between
+    /// them and [`DirHandle::verify_leaf_is`], and nothing runs between that proof and the
+    /// `renameat` — the remaining proof-to-rename syscall pair is the module doc's named
+    /// residual.
+    fn rename_at_noreplace_src_hooked(
+        h: &DirHandle,
+        from: &str,
+        to: &str,
+        src: &DirHandle,
+        before_leaf_verify: &dyn Fn(),
+    ) -> io::Result<()> {
+        h.verify_unmoved()?;
+        Self::probe_no_replace(h, to)?;
+        before_leaf_verify();
+        src.verify_leaf_is(h, from)?;
+        rustix::fs::renameat(&h.file, from, &h.file, to).map_err(io::Error::from)
+    }
+
+    /// [`FsOps::exchange_at_src`]'s body — the same ordering discipline as
+    /// [`RealFs::rename_at_noreplace_src_hooked`]: the parent re-proof first, the test-only
+    /// beat, then the leaf-identity proof immediately followed by the exchange syscall.
+    fn exchange_at_src_hooked(
+        h: &DirHandle,
+        a: &str,
+        b: &str,
+        src: &DirHandle,
+        before_leaf_verify: &dyn Fn(),
+    ) -> io::Result<()> {
+        h.verify_unmoved()?;
+        before_leaf_verify();
+        src.verify_leaf_is(h, a)?;
+        Self::exchange_raw(h, a, b)
     }
 }
 
@@ -746,16 +833,7 @@ impl FsOps for RealFs {
         // No-replace by an fd-anchored no-follow probe; the caller's writer lock closes the
         // check→rename beat for topos's own writers (the same contract `rename_dir_noreplace`
         // documents).
-        match rustix::fs::statat(&h.file, to, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "target exists",
-                ));
-            }
-            Err(rustix::io::Errno::NOENT) => {}
-            Err(e) => return Err(io::Error::from(e)),
-        }
+        Self::probe_no_replace(h, to)?;
         rustix::fs::renameat(&h.file, from, &h.file, to).map_err(io::Error::from)
     }
 
@@ -766,39 +844,20 @@ impl FsOps for RealFs {
         to: &str,
         src: &DirHandle,
     ) -> io::Result<()> {
-        // The staged SOURCE's identity, immediately before the namespace op (the op's own
-        // `verify_unmoved` then re-proves the parent in the same beat).
-        src.verify_leaf_is(h, from)?;
-        self.rename_at_noreplace(h, from, to)
+        // Parent re-proof + no-replace probe FIRST; the staged SOURCE's identity is the LAST
+        // operation before the rename syscall (the hooked body; production passes no beat).
+        Self::rename_at_noreplace_src_hooked(h, from, to, src, &|| {})
     }
 
     fn exchange_at_src(&self, h: &DirHandle, a: &str, b: &str, src: &DirHandle) -> io::Result<()> {
-        src.verify_leaf_is(h, a)?;
-        self.exchange_at(h, a, b)
+        // Parent re-proof FIRST; the staged SOURCE's identity is the LAST operation before the
+        // exchange syscall (the hooked body; production passes no beat).
+        Self::exchange_at_src_hooked(h, a, b, src, &|| {})
     }
 
     fn exchange_at(&self, h: &DirHandle, a: &str, b: &str) -> io::Result<()> {
         h.verify_unmoved()?;
-        #[cfg(any(
-            target_os = "linux",
-            target_os = "android",
-            target_os = "macos",
-            target_os = "ios"
-        ))]
-        {
-            rustix::fs::renameat_with(&h.file, a, &h.file, b, rustix::fs::RenameFlags::EXCHANGE)
-                .map_err(io::Error::from)
-        }
-        #[cfg(not(any(
-            target_os = "linux",
-            target_os = "android",
-            target_os = "macos",
-            target_os = "ios"
-        )))]
-        {
-            let _ = (a, b);
-            Err(io::Error::from(rustix::io::Errno::NOSYS))
-        }
+        Self::exchange_raw(h, a, b)
     }
 
     fn remove_dir_all_at(&self, h: &DirHandle, leaf: &str) -> io::Result<()> {
@@ -1134,6 +1193,112 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// P1: the `_src` rename's LEAF-identity proof is the LAST operation before the syscall. The
+    /// substitution lands at the in-op beat BETWEEN the parent-side checks and that proof — the
+    /// practically reachable instant (everything later is a single syscall-pair residual) — and
+    /// the proof refuses it: a typed leaf refusal, nothing landed at the target.
+    #[test]
+    fn a_stage_substituted_after_the_parent_checks_refuses_the_src_rename() {
+        let dir = scratch("src-rename-sub");
+        let stage = dir.join("stage");
+        std::fs::create_dir(&stage).unwrap();
+        std::fs::write(stage.join("SKILL.md"), b"# staged\n").unwrap();
+        let h = RealFs.open_dir_handle(&dir).unwrap();
+        let src = RealFs.open_dir_handle(&stage).unwrap();
+        let (st, aside) = (stage.clone(), dir.join("stolen"));
+        let fs = HookFs::before_leaf_verify_of(&stage, move || {
+            std::fs::rename(&st, &aside).unwrap();
+            std::fs::create_dir(&st).unwrap();
+            std::fs::write(st.join("SKILL.md"), b"# substituted\n").unwrap();
+        });
+        let err = fs
+            .rename_at_noreplace_src(&h, "stage", "dest", &src)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("refusing to land it"),
+            "the LEAF proof (running after the beat) refused: {err}"
+        );
+        assert!(!dir.join("dest").exists(), "nothing landed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other half of the beat's placement: it fires AFTER the parent re-proof. A parent PATH
+    /// swapped at the beat can no longer refuse (that proof already ran), and the fd-anchored
+    /// rename lands inside the REAL directory object wherever it now sits — never through the
+    /// swapped-in path (the module doc's relocated-real-directory residual). Together with the
+    /// test above this pins the beat between the parent verify and the leaf verify.
+    #[test]
+    fn the_leaf_verify_beat_fires_after_the_parent_reproof() {
+        let outer = scratch("src-rename-beat");
+        let parent = outer.join("parent");
+        std::fs::create_dir(&parent).unwrap();
+        let stage = parent.join("stage");
+        std::fs::create_dir(&stage).unwrap();
+        std::fs::write(stage.join("SKILL.md"), b"# staged\n").unwrap();
+        let h = RealFs.open_dir_handle(&parent).unwrap();
+        let src = RealFs.open_dir_handle(&stage).unwrap();
+        let moved = outer.join("moved");
+        let (p, m) = (parent.clone(), moved.clone());
+        let fs = HookFs::before_leaf_verify_of(&stage, move || {
+            std::fs::rename(&p, &m).unwrap();
+            std::fs::create_dir(&p).unwrap();
+        });
+        fs.rename_at_noreplace_src(&h, "stage", "dest", &src)
+            .expect("the parent re-proof ran before the beat; the held fd lands the rename");
+        assert_eq!(
+            std::fs::read(moved.join("dest/SKILL.md")).unwrap(),
+            b"# staged\n",
+            "landed inside the real (moved) directory object"
+        );
+        assert_eq!(
+            std::fs::read_dir(&parent).unwrap().count(),
+            0,
+            "nothing landed through the swapped-in path"
+        );
+        let _ = std::fs::remove_dir_all(&outer);
+    }
+
+    /// The exchange landing rides the same beat discipline: a substitution at the in-op beat is
+    /// refused by the LAST-instant leaf proof, and the live target keeps its bytes.
+    #[test]
+    fn a_stage_substituted_after_the_parent_checks_refuses_the_src_exchange() {
+        let dir = scratch("src-exchange-sub");
+        // Probe first: not every temp FS speaks RENAME_EXCHANGE.
+        std::fs::create_dir(dir.join("pa")).unwrap();
+        std::fs::create_dir(dir.join("pb")).unwrap();
+        let probe_h = RealFs.open_dir_handle(&dir).unwrap();
+        if RealFs.exchange_at(&probe_h, "pa", "pb").is_err() {
+            eprintln!("skipping: temp FS lacks atomic dir exchange");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let stage = dir.join("stage");
+        let live = dir.join("live");
+        std::fs::create_dir(&stage).unwrap();
+        std::fs::write(stage.join("SKILL.md"), b"# staged\n").unwrap();
+        std::fs::create_dir(&live).unwrap();
+        std::fs::write(live.join("SKILL.md"), b"# live\n").unwrap();
+        let h = RealFs.open_dir_handle(&dir).unwrap();
+        let src = RealFs.open_dir_handle(&stage).unwrap();
+        let (st, aside) = (stage.clone(), dir.join("stolen"));
+        let fs = HookFs::before_leaf_verify_of(&stage, move || {
+            std::fs::rename(&st, &aside).unwrap();
+            std::fs::create_dir(&st).unwrap();
+            std::fs::write(st.join("SKILL.md"), b"# substituted\n").unwrap();
+        });
+        let err = fs.exchange_at_src(&h, "stage", "live", &src).unwrap_err();
+        assert!(
+            err.to_string().contains("refusing to land it"),
+            "the LEAF proof (running after the beat) refused: {err}"
+        );
+        assert_eq!(
+            std::fs::read(live.join("SKILL.md")).unwrap(),
+            b"# live\n",
+            "the live target never swapped"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// A test-only seam that lets a test act BETWEEN two of an operation's syscalls — the way a
@@ -1170,6 +1335,13 @@ mod hook {
         /// of the proof-to-write window, where a concurrent process swaps the proven parent's
         /// PATH out from under the held fd.
         AfterHandleOpen { target: PathBuf },
+        /// Inside a `_src` landing ([`FsOps::rename_at_noreplace_src`] /
+        /// [`FsOps::exchange_at_src`]) of ONE named source dir: between the parent-side checks
+        /// (the parent re-proof + any no-replace probe) and the LAST-instant leaf-identity
+        /// proof — the sharpest reachable beat before the landing, where a substituted stage
+        /// must still be refused by the proof that follows (the beat AFTER that proof is the
+        /// module doc's named syscall-pair residual, deliberately hook-free).
+        BeforeLeafVerifyOf { dir: PathBuf },
         /// Between a staged/private write's (`O_NOFOLLOW`) open and the `fchmod` that forces its
         /// mode — the beat where a path-based chmod would follow a swapped-in symlink.
         BeforeChmodOf { target: PathBuf },
@@ -1255,6 +1427,15 @@ mod hook {
             Self::with(
                 Trigger::AfterHandleOpen {
                     target: target.to_path_buf(),
+                },
+                hook,
+            )
+        }
+
+        pub(crate) fn before_leaf_verify_of(dir: &Path, hook: impl Fn() + 'a) -> Self {
+            Self::with(
+                Trigger::BeforeLeafVerifyOf {
+                    dir: dir.to_path_buf(),
                 },
                 hook,
             )
@@ -1411,13 +1592,21 @@ mod hook {
             to: &str,
             src: &DirHandle,
         ) -> io::Result<()> {
-            // The same before-move beat as the unverified op — fired BEFORE the source-identity
-            // proof runs, so a test's substitution at this exact instant must still be refused.
+            // The same before-move beat as the unverified op — fired BEFORE any of the op's
+            // checks run, so a test's substitution at this exact instant must still be refused.
             let joined = h.path().join(from);
             self.maybe_fire(
                 matches!(&self.trigger, Trigger::FirstMoveOf { dir } if *dir == joined),
                 1,
             );
+            if matches!(&self.trigger, Trigger::BeforeLeafVerifyOf { dir } if *dir == joined) {
+                // Land the hook INSIDE the op, between the parent-side checks and the
+                // LAST-instant leaf-identity proof — the sharpest reachable beat before the
+                // landing rename.
+                return RealFs::rename_at_noreplace_src_hooked(h, from, to, src, &|| {
+                    self.maybe_fire(true, 1);
+                });
+            }
             self.inner.rename_at_noreplace_src(h, from, to, src)
         }
         fn exchange_at(&self, h: &DirHandle, a: &str, b: &str) -> io::Result<()> {
@@ -1440,6 +1629,14 @@ mod hook {
                 matches!(&self.trigger, Trigger::FirstMoveOf { dir } if *dir == ja || *dir == jb),
                 1,
             );
+            if matches!(&self.trigger, Trigger::BeforeLeafVerifyOf { dir } if *dir == ja || *dir == jb)
+            {
+                // Between the parent re-proof and the LAST-instant leaf-identity proof — the
+                // sharpest reachable beat before the exchange.
+                return RealFs::exchange_at_src_hooked(h, a, b, src, &|| {
+                    self.maybe_fire(true, 1);
+                });
+            }
             self.inner.exchange_at_src(h, a, b, src)
         }
         fn create_dir_nofollow(&self, base: &Path, dir: &Path) -> io::Result<DirHandle> {
