@@ -1188,6 +1188,24 @@ export async function pendingLoginFlowByChallenge(
   );
 }
 
+/**
+ * The /login page's quiet hint probe: whether a LIVE pending LOOPBACK flow stands behind a
+ * challenge — a bare EXISTENCE bit, deliberately nothing more (no name, no code, no view; the
+ * page runs pre-auth, so this must open no new disclosure surface beyond what the challenge
+ * holder — the flow's own starter — already knows). Loopback-fenced like the card pre-arm.
+ */
+export async function pendingLoopbackFlowExists(challengeHex: string): Promise<boolean> {
+  if (!/^[0-9a-f]{64}$/.test(challengeHex)) {
+    return false;
+  }
+  const rows = await getDb().execute(
+    sql`SELECT 1 FROM ${loginFlow}
+        WHERE flow_code_sha256 = decode(${challengeHex}, 'hex') AND binding = 'loopback'
+          AND status = 'pending' AND expires_at > now()`,
+  );
+  return rows.rows.length > 0;
+}
+
 async function pendingLoginFlowWhere(
   cond: ReturnType<typeof sql>,
   viewerId: string,
@@ -1381,16 +1399,24 @@ export async function pendingInvitationsFor(
 
 /**
  * The browser-free second connect: an already-credentialed person's machine asks for a
- * FURTHER workspace's session. ONE transaction, authorization resolved INSIDE it: lock the
- * ACTING session row the presented bearer names (live, ACTIVE, unexpired — workspace-blind;
- * the acting session's own workspace is irrelevant, the resolved PERSON is what matters) FOR
- * UPDATE, so a revocation racing this mint serializes with it instead of leaving a window
- * between resolve and insert; resolve the target workspace under the tenancy grammar (multi:
- * by slug; single: the install's one workspace — a slug naming anything else is the uniform
- * miss); lock the acting person's SEAT there FOR UPDATE (seat standing is the trust basis —
- * this endpoint is never an existence oracle); mint a FRESH secret, insert the session born
- * per the ONE rule, audit. Every miss is the same null. The plaintext credential returns
- * exactly once over the authenticated exchange, like the flow start returning its code.
+ * FURTHER workspace's session. ONE transaction, authorization resolved INSIDE it, in the
+ * SHARED LOCK ORDER (seat before session — `removeSeat` locks the target seat and then
+ * deletes that person's session rows, so a connect that locked its acting session first
+ * would deadlock a same-workspace offboarding):
+ *
+ *  1. a plain UNLOCKED read of the acting session by credential hash (active + unexpired) —
+ *     identity only, nothing decided on it;
+ *  2. resolve the target workspace under the tenancy grammar (multi: by slug; single: the
+ *     install's one workspace — a slug naming anything else is the uniform miss) and lock
+ *     the acting person's SEAT there FOR UPDATE (seat standing is the trust basis — this
+ *     endpoint is never an existence oracle);
+ *  3. re-select + lock the acting session FOR UPDATE and REVALIDATE active + unexpired —
+ *     the round-1 security property lives HERE: a revocation between the plain read and
+ *     this lock reads as gone, so no resolve-to-insert window reopens;
+ *  4. mint a FRESH secret, insert the session born per the ONE rule, audit.
+ *
+ * Every miss is the same null. The plaintext credential returns exactly once over the
+ * authenticated exchange, like the flow start returning its code.
  */
 export async function connectSession(
   credential: string,
@@ -1403,23 +1429,23 @@ export async function connectSession(
   workspace: { workspaceId: string; name: string; displayName: string };
 } | null> {
   return await getDb().transaction(async (tx) => {
-    // The bearer resolves HERE, under lock — the same fail-closed discipline as the lane
-    // guard (hash computed in Postgres), but fenced: a session ended after this lock commits
-    // finds the mint already done; one ended before it answers the uniform miss.
-    const acting = await tx.execute(
-      sql`SELECT s.user_id, COALESCE(NULLIF(btrim(u.name), ''), u.email) AS display
+    // (1) Identity probe, deliberately lock-free — the same fail-closed predicate as the lane
+    // guard (hash computed in Postgres); the authoritative re-check runs under lock at (3).
+    const probe = await tx.execute(
+      sql`SELECT s.id, s.user_id, COALESCE(NULLIF(btrim(u.name), ''), u.email) AS display
           FROM web.cli_session s
           JOIN web."user" u ON u.id = s.user_id
           JOIN ${workspace} w ON w.id = s.workspace_id
           WHERE s.credential_sha256 = ${sha256OfText(credential)}
             AND s.status = 'active'
-            AND ${sessionUnexpiredSql("s", "w")}
-          FOR UPDATE OF s`,
+            AND ${sessionUnexpiredSql("s", "w")}`,
     );
-    const actor = acting.rows[0] as { user_id: string; display: string } | undefined;
+    const actor = probe.rows[0] as { id: string; user_id: string; display: string } | undefined;
     if (actor === undefined) {
       return null;
     }
+    // (2) The target workspace + the SEAT lock — the shared order's first lock, matching
+    // removeSeat; a concurrent removal serializes with this mint instead of racing it.
     const rows =
       composition.tenancy === "multi"
         ? await tx.execute(
@@ -1436,14 +1462,23 @@ export async function connectSession(
     if (composition.tenancy !== "multi" && workspaceSlug !== "" && ws.name !== workspaceSlug) {
       return null;
     }
-    // FOR UPDATE: the seat is the authorization — a concurrent removal serializes with this
-    // mint instead of racing it.
     const seats = await tx.execute(
       sql`SELECT role FROM ${seat} WHERE workspace_id = ${ws.id} AND user_id = ${actor.user_id}
           FOR UPDATE`,
     );
     const seatRow = seats.rows[0] as { role: "owner" | "reviewer" | "member" } | undefined;
     if (seatRow === undefined) {
+      return null;
+    }
+    // (3) NOW the acting session, locked + revalidated — seat before session everywhere, and
+    // a revocation that won the race reads as gone rather than being minted past.
+    const held = await tx.execute(
+      sql`SELECT 1 FROM web.cli_session s
+          JOIN ${workspace} w ON w.id = s.workspace_id
+          WHERE s.id = ${actor.id} AND s.status = 'active' AND ${sessionUnexpiredSql("s", "w")}
+          FOR UPDATE OF s`,
+    );
+    if (held.rows.length === 0) {
       return null;
     }
     const born = sessionBornStatus(seatRow.role, await sessionApprovalKnobTx(tx, ws.id));

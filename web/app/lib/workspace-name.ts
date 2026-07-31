@@ -20,10 +20,20 @@ export function isWorkspaceNameShape(name: string): boolean {
  * the person may still edit it.
  */
 export function toWorkspaceSlug(input: string): string {
+  return toWorkspaceSlugDraft(input).replace(/^-+|-+$/g, "");
+}
+
+/**
+ * The KEYSTROKE form of the same rule — everything above EXCEPT the edge-hyphen trim. An
+ * address field that canonicalizes per keystroke eats the hyphen the person just typed
+ * ("stranger-" → "stranger", so "stranger-team" lands as "strangerteam"); the draft keeps the
+ * trailing hyphen while typing, and the FULL rule applies on blur and at submit (the server
+ * validates either way). One spelling for every slug field.
+ */
+export function toWorkspaceSlugDraft(input: string): string {
   return input
     .toLowerCase()
     .replace(/[\s_]+/g, "-")
     .replace(/[^a-z0-9-]/g, "")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "");
+    .replace(/-+/g, "-");
 }

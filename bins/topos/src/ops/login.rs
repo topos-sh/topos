@@ -481,14 +481,20 @@ fn persist_grant(
 }
 
 /// SETTLE an abandoned flow before its WAL is discarded, so `login <B>` can never throw away a
-/// session that already exists. The exchange can COMMIT server-side while its response is lost —
-/// the flow code in the WAL is then the only copy of a minted credential, and deleting it would
-/// strand a live session nobody can reach. So: one best-effort poll. Granted ⇒ keep that session
-/// through the whole granted tail, exactly as if this command had completed it (it shows up in
-/// `topos status` and its skills arrive on the next update); the receipt that prints is still the
-/// NEW login's, because the latest command is what the person asked for. Anything else — pending,
-/// denied, expired, or an unreachable server — is nothing to keep: an unpolled flow can never have
-/// minted, and a dead old server must not block the login just asked for.
+/// session that already exists. The poll IS the exchange: it can COMMIT server-side while its
+/// answer is lost, and the flow code in the WAL is then the only copy of a minted credential.
+///
+/// Only a PARSED answer is proof of anything. Granted ⇒ keep that session through the whole
+/// granted tail, exactly as if this command had completed it (it shows up in `topos status` and
+/// its skills arrive on the next update); the receipt that prints is still the NEW login's,
+/// because the latest command is what the person asked for. Pending / denied / expired ⇒ nothing
+/// was minted and nothing can be: drop the WAL and carry on.
+///
+/// An INDETERMINATE poll — any transport or parse fault — proves nothing either way, so the WAL
+/// is PRESERVED and the new login refuses. Discarding there is exactly the failure this settle
+/// exists to prevent. The refusal is bounded and says so: the flow's own expiry (minutes) sweeps
+/// the WAL on any later command, and a finished `topos login` clears it immediately. Deliberately
+/// no settlement queue — a wait that cannot be seen is worse than a refusal that can.
 fn settle_abandoned(
     ctx: &Ctx<'_>,
     connectors: &LoginConnectors<'_>,
@@ -502,7 +508,21 @@ fn settle_abandoned(
             let _settled = connected_receipt(ctx, connectors, &session);
             Ok(())
         }
-        _ => enroll::delete_wal(ctx.fs, &ctx.layout),
+        Ok(_) => enroll::delete_wal(ctx.fs, &ctx.layout),
+        Err(e) => {
+            let target = if wal.preselect.is_empty() {
+                wal.host.clone()
+            } else {
+                format!("{}/{}", wal.host, wal.preselect)
+            };
+            Err(ClientError::Enrollment(format!(
+                "a login toward {target} is still pending and could not be settled ({}) — nothing \
+                 was discarded. Finish it with `topos login`, or it expires by {} and a fresh \
+                 login can start.",
+                e.detail(),
+                super::connect::fmt_rfc3339_millis(wal.expires_at_millis)
+            )))
+        }
     }
 }
 
@@ -1179,18 +1199,16 @@ mod tests {
 
     #[test]
     fn a_restart_drops_a_flow_that_settled_nothing() {
-        // Pending / denied / expired / an unreachable old server: an unpolled flow can never have
-        // minted, and a dead server must never block the login just asked for.
-        for (tag, script, fault) in [
-            ("pending", vec![DeviceAuthPoll::Pending], None),
-            ("denied", vec![DeviceAuthPoll::Denied], None),
-            ("expired", vec![DeviceAuthPoll::Expired], None),
-            ("unreachable", Vec::new(), Some("unreachable")),
+        // A PARSED pending / denied / expired is proof: nothing was minted and nothing can be, so
+        // the old WAL goes and the new target starts fresh.
+        for (tag, script) in [
+            ("pending", vec![DeviceAuthPoll::Pending]),
+            ("denied", vec![DeviceAuthPoll::Denied]),
+            ("expired", vec![DeviceAuthPoll::Expired]),
         ] {
             let home = scratch(&format!("restart-{tag}"));
             with_ctx(&home, |ctx| {
                 let rig = Rig::new(script);
-                *rig.enroll.poll_fault.borrow_mut() = fault.map(str::to_owned);
                 rig.with(|connectors| {
                     login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
                     let next =
@@ -1217,6 +1235,55 @@ mod tests {
                 );
             });
         }
+    }
+
+    #[test]
+    fn an_unsettleable_flow_refuses_the_restart_and_keeps_its_wal() {
+        let home = scratch("restart-indeterminate");
+        with_ctx(&home, |ctx| {
+            // The poll IS the exchange: a lost answer proves NOTHING. The mint may have committed,
+            // and this WAL's flow code would be the only copy of its credential — so the new login
+            // refuses rather than discard it.
+            let rig = Rig::new(Vec::new());
+            *rig.enroll.poll_fault.borrow_mut() = Some("connection reset".to_owned());
+            rig.with(|connectors| {
+                login(ctx, connectors, Some("topos.example.com/eng"), false).unwrap();
+                let err = login(ctx, connectors, Some("topos.example.com/ops"), false).unwrap_err();
+                assert_eq!(err.code(), "LOGIN_FAILED");
+                let msg = err.to_string();
+                for expected in [
+                    "topos.example.com/eng",
+                    "could not be settled",
+                    "nothing was discarded",
+                    "`topos login`",
+                    "expires by",
+                ] {
+                    assert!(msg.contains(expected), "{expected:?} missing from {msg}");
+                }
+                // The old flow stands, untouched; no new one was started behind the refusal.
+                let wal = enroll::read_wal(ctx.fs, &ctx.layout).unwrap().unwrap();
+                assert_eq!(wal.preselect, "eng");
+                assert_eq!(
+                    rig.enroll.starts.borrow().as_slice(),
+                    &[(Some("eng".to_owned()), false)]
+                );
+
+                // The refusal is BOUNDED by the flow's own expiry: the ordinary start-of-command
+                // sweep reaps the WAL, and the next login proceeds — even with that old server
+                // still unreachable, because with no WAL there is nothing left to settle.
+                enroll::sweep_expired_wal(ctx.fs, &ctx.layout, i64::MAX).unwrap();
+                assert!(enroll::read_wal(ctx.fs, &ctx.layout).unwrap().is_none());
+                let next = login(ctx, connectors, Some("topos.example.com/ops"), false).unwrap();
+                assert!(next.pending.is_some());
+                assert_eq!(next.name, "ops");
+            });
+            assert!(
+                sessions::read_sessions(ctx.fs, &ctx.layout)
+                    .unwrap()
+                    .sessions
+                    .is_empty()
+            );
+        });
     }
 
     #[test]

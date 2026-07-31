@@ -27,10 +27,26 @@ vi.mock("@/composition.server", () => ({
   },
 }));
 
+// The loader's device-waiting probe + guards.server's transitive imports, mocked (this suite
+// runs DB-free; identity-core owns the probe's SQL).
+const pendingLoopbackFlowExists = vi.fn<(hex: string) => Promise<boolean>>();
+vi.mock("@/lib/db/identity.server", () => ({
+  pendingLoopbackFlowExists: (hex: string) => pendingLoopbackFlowExists(hex),
+  sessionActor: vi.fn(),
+  seatOf: vi.fn(),
+  theWorkspace: vi.fn(),
+  workspaceByName: vi.fn(),
+}));
+
+vi.mock("@/lib/auth/server", () => ({
+  getAuth: () => ({ api: {} }),
+}));
+
 let loader: typeof import("@/routes/login").loader;
 
 beforeAll(async () => {
   installTestEnv();
+  pendingLoopbackFlowExists.mockResolvedValue(false);
   ({ loader } = await import("@/routes/login"));
 });
 
@@ -128,5 +144,30 @@ describe("a /verify `next` is REBUILT canonically, never echoed", () => {
     // A path that merely STARTS with /verify is not the verify page.
     const fallback = (await call("http://localhost/login?next=/verify-ish")).next;
     expect(fallback).toBe("/verify-ish");
+  });
+});
+
+describe("the machine-is-waiting hint", () => {
+  const device = "cd".repeat(32);
+
+  it("rides when the rebuilt verify next carries a challenge that RESOLVES", async () => {
+    pendingLoopbackFlowExists.mockResolvedValueOnce(true);
+    const raw = encodeURIComponent(`/verify?device=${device}`);
+    const result = await call(`http://localhost/login?next=${raw}`);
+    expect(pendingLoopbackFlowExists).toHaveBeenCalledWith(device);
+    expect(result.deviceWaiting).toBe(true);
+  });
+
+  it("says nothing when the challenge resolves to no live flow", async () => {
+    pendingLoopbackFlowExists.mockResolvedValueOnce(false);
+    const raw = encodeURIComponent(`/verify?device=${device}`);
+    expect((await call(`http://localhost/login?next=${raw}`)).deviceWaiting).toBe(false);
+  });
+
+  it("never probes for a next that is not the verify page (or carries no challenge)", async () => {
+    pendingLoopbackFlowExists.mockClear();
+    expect((await call("http://localhost/login?next=/app")).deviceWaiting).toBe(false);
+    expect((await call("http://localhost/login?next=%2Fverify")).deviceWaiting).toBe(false);
+    expect(pendingLoopbackFlowExists).not.toHaveBeenCalled();
   });
 });

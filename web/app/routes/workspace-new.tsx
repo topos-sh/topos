@@ -26,7 +26,12 @@ import {
   NAME_REQUIRED,
   SLUG_SHAPE,
 } from "@/lib/workspace-create-copy";
-import { isWorkspaceNameShape, toWorkspaceSlug, WORKSPACE_NAME_MAX } from "@/lib/workspace-name";
+import {
+  isWorkspaceNameShape,
+  toWorkspaceSlug,
+  toWorkspaceSlugDraft,
+  WORKSPACE_NAME_MAX,
+} from "@/lib/workspace-name";
 import { wsPathServer } from "@/lib/ws-url.server";
 
 export const meta: MetaFunction = () => [{ title: "Create your workspace · Topos" }];
@@ -85,7 +90,9 @@ export async function action({ request }: ActionFunctionArgs) {
   }
   const form = await request.formData();
   const displayName = String(form.get("displayName") ?? "").trim();
-  const slug = String(form.get("slug") ?? "").trim();
+  // The FULL slug rule applies at submit — the field holds the keystroke-tolerant draft (a
+  // trailing hyphen mid-typing survives there), the canonical spelling is what lands.
+  const slug = toWorkspaceSlug(String(form.get("slug") ?? ""));
   const nextRaw = form.get("next");
   const next = typeof nextRaw === "string" && nextRaw.length > 0 ? safeNextPath(nextRaw) : null;
 
@@ -247,7 +254,9 @@ function CreateForm({
 
   function onSlugChange(value: string) {
     setSlugEdited(true);
-    setSlug(toWorkspaceSlug(value));
+    // The DRAFT rule per keystroke — full canonicalization here would eat the hyphen just
+    // typed; the full rule applies on blur and at submit (the action canonicalizes).
+    setSlug(toWorkspaceSlugDraft(value));
   }
 
   return (
@@ -296,6 +305,7 @@ function CreateForm({
                   maxLength={WORKSPACE_NAME_MAX}
                   value={slug}
                   onChange={(e) => onSlugChange(e.target.value)}
+                  onBlur={() => setSlug(toWorkspaceSlug(slug))}
                   className={`${INPUT} font-mono`}
                 />
                 <AddressStatus
